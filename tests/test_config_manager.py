@@ -38,10 +38,7 @@ class WindowConfigMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
             config_path.write_text(json.dumps(saved_state), encoding="utf-8")
-            with (
-                patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)),
-                patch.object(ConfigManager, "_migrate_old_config"),
-            ):
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
                 config = ConfigManager()
                 window = QMainWindow()
                 restored = QMainWindow()
@@ -74,10 +71,7 @@ class WatchHistoryIdentityTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
-            with (
-                patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)),
-                patch.object(ConfigManager, "_migrate_old_config"),
-            ):
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
                 config = ConfigManager()
                 watch = WatchState(config)
                 ep1 = {"id": "7", "name": "Show", "season": "1", "series": "1"}
@@ -91,6 +85,33 @@ class WatchHistoryIdentityTests(unittest.TestCase):
                 self.assertEqual([h["link"] for h in history], ["d", "b", "a"])
                 self.assertEqual(history[1]["content_id"], "P:7:s1:e2")
                 self.assertEqual(history[0]["content_id"], "P:9")
+
+
+class NewConfigTests(unittest.TestCase):
+    """A new config.json is written as 2.1 wrote it (the fixture, which ends in a newline as
+    the repository's files do), and an older config gains the settings it lacks."""
+
+    FRESH = Path(__file__).parent / "fixtures" / "fresh_config.json"
+
+    def config_at(self, directory, saved=None):
+        config_path = Path(directory) / "config.json"
+        if saved is not None:
+            config_path.write_text(json.dumps(saved), encoding="utf-8")
+        with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
+            ConfigManager()
+        return config_path.read_bytes()
+
+    def test_a_new_config_is_the_same_byte_for_byte(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(self.config_at(directory) + b"\n", self.FRESH.read_bytes())
+
+    def test_an_older_config_gains_each_setting_it_lacks(self):
+        fresh = json.loads(self.FRESH.read_bytes())
+        older = {key: fresh[key] for key in ("data", "window_positions", "channel_epg")}
+        older.update(selected_provider_name="Mine", tv_defaults_version=2)
+        with tempfile.TemporaryDirectory() as directory:
+            patched = json.loads(self.config_at(directory, older))
+        self.assertEqual(patched, {**fresh, "selected_provider_name": "Mine"})
 
 
 if __name__ == "__main__":

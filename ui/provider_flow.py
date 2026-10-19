@@ -14,6 +14,9 @@ heading). A last channel whose provider has not listed its channels yet waits fo
 of a provider other than the one browsed does), never opening the drawer meanwhile; one whose
 provider's setup failed is not waited for (that would sign it in again).
 
+A failure it says (a setup, the live section, a last channel's provider) is followed by
+`explain`, which asks that provider's account why (TVController._explain).
+
 TVController owns the links, the zapping and the player, and hands this unit callbacks.
 """
 
@@ -25,6 +28,8 @@ from typing import Callable, Optional
 from PySide6.QtCore import QObject, QTimer
 
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
+from services.failure_reasons import shown_message
+from services.i18n import tr, translate
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, payloads
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, provider_of, with_provider
 from services.zapping import ZapContext
@@ -54,8 +59,11 @@ class ProviderFlow(QObject):
         error: Callable[[str], None],
         drop_autoplay: Callable[[], None],
         autoplay_hint: Callable[[], Optional[str]],
+        explain: Callable[[str, str], None] = lambda provider, title: None,
         parent: Optional[QObject] = None,
     ) -> None:
+        """`explain(provider, title)` asks why the failure just said happened at `provider`
+        (TVController._explain)."""
         super().__init__(parent)
         self.catalog = catalog
         self.nav = nav
@@ -70,6 +78,7 @@ class ProviderFlow(QObject):
         self._error = error
         self._drop_autoplay = drop_autoplay
         self._autoplay_hint = autoplay_hint
+        self._explain = explain
         self._await_live = False  # after providerReady: the first live section decides
         self._loading = False  # the "Loading <provider>…" hint is up
         self._autotune: Optional[tuple[dict, str]] = None
@@ -200,9 +209,9 @@ class ProviderFlow(QObject):
 
     def _setup_name(self, name: Optional[str]) -> str:
         """The provider a setup for `name` loads, as ProviderManager picks it (every provider
-        for ALL_PROVIDERS, or for None while the page shows them all)."""
+        for ALL_PROVIDERS, or for None while the page shows them all), as the hint names it."""
         if name == ALL_PROVIDERS or (name is None and self._mixed()):
-            return ALL_PROVIDERS_TITLE
+            return translate(ALL_PROVIDERS_TITLE)
         names = self.catalog.provider_names()
         wanted = name if name is not None else getattr(self.config, "selected_provider_name", None)
         if wanted in names:
@@ -214,7 +223,8 @@ class ProviderFlow(QObject):
         self._drop_autoplay()  # a provider setup: and the hint is the setup's
         self.overlays.welcome.dismiss()  # a provider exists now
         self._loading = True
-        self.overlays.toast.set_hint(f"Loading {name}…" if name else "Loading…")
+        # i18n: a hint while a provider's channels load; name is the provider's
+        self.overlays.toast.set_hint(tr("Loading {name}…", name=name) if name else tr("Loading…"))
 
     def _end_loading(self) -> None:
         if self._loading:
@@ -355,7 +365,8 @@ class ProviderFlow(QObject):
         if section != "live" or self._foreign is None or self._foreign[0] != owner:
             return  # not the wait of this owner (a later wait ignores an old failure)
         if not self._closed():
-            self._error(f"{owner}: {message}")
+            self._error(tr("{name}: {message}", name=owner, message=shown_message(message)))
+            self._explain(owner, owner)
         self._give_up_foreign()
 
     def _on_foreign_timeout(self) -> None:
@@ -374,7 +385,9 @@ class ProviderFlow(QObject):
         if self._closed():
             return
         self._end_loading()
-        self._error(f"{name}: {message}" if name else message)
+        shown = shown_message(message)
+        self._error(f"{name}: {shown}" if name else shown)
+        self._explain(name, name)
         if name != ALL_PROVIDERS and self._mixed():
             # One provider of All: its saved channels stay listed (its error under its heading
             # when it has none), and the list stays on All providers. A last channel waiting
@@ -389,9 +402,9 @@ class ProviderFlow(QObject):
         self.overlays.drawer.open_drawer(focus_side="left")
 
     def _on_provider_requested(self, name: str) -> None:
-        """A source chosen in the drawer started a setup."""
+        """A source chosen in the drawer started a setup (`name`: its title)."""
         if not self._closed():
-            self._show_loading(name)
+            self._show_loading(translate(name) if name == ALL_PROVIDERS_TITLE else name)
 
     def _on_section_ready(self, section: str) -> None:
         if self._closed() or section != "live":
@@ -422,7 +435,9 @@ class ProviderFlow(QObject):
         self._await_live = False
         self._autotune = None
         self._end_loading()
-        self._error(f"Live TV: {message}")
+        # i18n: a toast: the live channels failed to load, and why
+        self._error(tr("Live TV: {message}", message=shown_message(message)))
+        self._explain(self.catalog.current_provider_name(), tr("Live TV"))
         self._open_drawer_if_idle()  # it shows the retry row
 
     def _open_drawer_if_idle(self) -> None:

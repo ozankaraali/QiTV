@@ -2,6 +2,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -112,6 +113,41 @@ class PlaybackSessionTests(unittest.TestCase):
         self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)
         self.session._tick()
         elapse(200)
+
+    def test_the_sound_delay_reaches_each_media_libvlc_opens(self):
+        # Measured with 3.0.20: audio_set_delay without an input is dropped (-1), and a new
+        # media starts at zero; set right after play(), the new input keeps it.
+        self.session.set_audio_delay(150)
+        self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)
+        self.assertTrue(wait_for(lambda: self.session.state() is PlaybackState.PLAYING))
+        self.assertEqual(self.session._player.audio_get_delay(), 150_000)
+        self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)  # opened again
+        self.assertTrue(wait_for(lambda: self.session.state() is PlaybackState.PLAYING))
+        self.assertEqual(self.session._player.audio_get_delay(), 150_000)
+        self.session.set_audio_delay(-100)
+        self.assertEqual(self.session._player.audio_get_delay(), -100_000)
+
+    def test_a_subtitle_file_shows_named_after_itself_and_comes_back_on_a_reopen(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        srt = Path(directory.name) / "Lighthouse.en.srt"
+        srt.write_text("1\n00:00:00,000 --> 00:00:30,000\nHello\n", encoding="utf-8")
+        session = self.session
+        session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)
+        self.assertTrue(wait_for(lambda: session.state() is PlaybackState.PLAYING))
+        self.assertTrue(session.add_subtitle_file(str(srt)))
+
+        def shown():
+            names = dict(session.subtitle_tracks())
+            return names.get(session.subtitle_track()) == "Lighthouse.en.srt"
+
+        self.assertTrue(wait_for(shown))
+        session.set_subtitle_delay(-200)
+        self.assertEqual(session._player.video_get_spu_delay(), -200_000)
+        session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)  # opened again
+        self.assertTrue(wait_for(lambda: session.state() is PlaybackState.PLAYING))
+        self.assertTrue(wait_for(shown))
+        self.assertEqual(session._player.video_get_spu_delay(), -200_000)
 
     def test_seekable_false_when_media_is_replaced(self):
         flags = []
@@ -384,6 +420,11 @@ class _FakePlayer:
     def audio_get_track(self):
         self._call("audio_get_track")
         return 1
+
+    def audio_set_delay(self, us):
+        # libVLC sets it on the input: none, and it is dropped (-1), as with 3.0.20.
+        self._call("audio_set_delay", us)
+        return 0 if self.has_input else -1
 
     def video_get_spu_description(self):
         self._call("video_get_spu_description")
@@ -699,6 +740,245 @@ class PlayerJobTests(unittest.TestCase):
         self.assertEqual(self.opened(), [A])
         self.runner.finish()
         self.assertEqual(self.opened(), [A, A])
+
+
+class SoundDelayTests(unittest.TestCase):
+    """The sound's sync (2.2) lives on libVLC's input, which each media starts at zero: the
+    session sets it after each play() and keeps it for the next media."""
+
+    setUpClass = PlayerJobTests.setUpClass
+    setUp = PlayerJobTests.setUp
+    play = PlayerJobTests.play
+    opened = PlayerJobTests.opened
+
+    def delays(self):
+        return [call for call in self.player.calls if call[0] == "audio_set_delay"]
+
+    def test_a_delay_set_before_anything_plays_comes_with_the_first_media(self):
+        self.session.set_audio_delay(150)
+        self.assertEqual(self.player.calls, [])  # no input: libVLC would drop it
+        self.play(A)
+        self.assertEqual(
+            self.player.calls, [("set_media", A), ("play",), ("audio_set_delay", 150_000)]
+        )
+        self.assertEqual(self.session.audio_delay(), 150)
+
+    def test_a_delay_set_while_it_plays_applies_at_once(self):
+        self.play(A)
+        self.session.set_audio_delay(-200)
+        self.assertEqual(self.delays(), [("audio_set_delay", -200_000)])
+
+    def test_every_media_the_player_opens_after_it_takes_it_again(self):
+        self.session.set_audio_delay(100)
+        self.play(A)
+        self.play(B)  # a zap, a reopen of the same channel (a seek, a reconnect) alike
+        self.session.set_audio_delay(250)  # the old input is being joined: nothing now
+        self.runner.finish()
+        self.assertEqual(
+            self.delays(), [("audio_set_delay", 100_000), ("audio_set_delay", 250_000)]
+        )
+        self.assertEqual(self.opened(), [A, B])
+
+    def test_in_sync_sets_nothing_on_a_new_media(self):
+        self.play(A)
+        self.assertEqual(self.delays(), [])
+        self.assertEqual(self.session.audio_delay(), 0)
+
+    def test_after_release_nothing_reaches_libvlc(self):
+        self.session.release()
+        self.session.set_audio_delay(50)
+        self.assertEqual((self.delays(), self.session.audio_delay()), ([], 0))
+
+
+class _SubtitlePlayer(_FakePlayer):
+    """libVLC's subtitles as measured with 3.0.20: a slave added to the input shows as a new
+    track named "Track N" once the input has read it (`read`), chosen when it was added so;
+    a new media starts with the media's own tracks only, and without a delay."""
+
+    def __init__(self, own=()):
+        super().__init__()
+        self.own = [(-1, b"Disable"), *own]
+        self.spus = list(self.own)
+        self.spu = -1
+        self.spu_delay = 0
+        self.slaves = []  # (uri, select) as added, waiting to be read
+
+    def set_media(self, media):
+        super().set_media(media)
+        self.spus, self.spu, self.spu_delay = list(self.own), -1, 0
+
+    def get_state(self):
+        self._call("get_state")
+        return vlc.State.Playing
+
+    def video_get_spu_description(self):
+        self._call("video_get_spu_description")
+        return list(self.spus)
+
+    def video_get_spu(self):
+        self._call("video_get_spu")
+        return self.spu
+
+    def video_set_spu(self, track):
+        self._call("video_set_spu", track)
+        self.spu = track
+
+    def video_set_spu_delay(self, us):
+        self._call("video_set_spu_delay", us)
+        if not self.has_input:
+            return -1
+        self.spu_delay = us
+        return 0
+
+    def add_slave(self, kind, uri, select):
+        self._call("add_slave", uri, select)
+        self.slaves.append((uri, select))
+        return 0
+
+    def read(self, track):
+        """The input read the oldest slave added: its track shows."""
+        _uri, select = self.slaves.pop(0)
+        self.spus.append((track, f"Track {len(self.spus)}".encode()))
+        if select:
+            self.spu = track
+
+
+@unittest.skipIf(vlc is None, "python-vlc's states are needed to poll the player")
+class SubtitleFileTests(unittest.TestCase):
+    """A subtitle file shows with what plays (2.2), named after the file, and stays with the
+    playback through each reopen; its delay works as the sound's."""
+
+    setUpClass = PlayerJobTests.setUpClass
+
+    def setUp(self):
+        self.player = _SubtitlePlayer(own=[(3, b"English")])
+        self.runner = _HeldRunner(self.player)
+        self.session = PlaybackSession(
+            _FakeInstance(self.player), runner=self.runner, poll_ms=60_000
+        )
+        self.addCleanup(self.session.release)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.film = Path(directory.name) / "Lighthouse.en.srt"
+        self.film.write_text("1\n00:00:01,000 --> 00:00:04,000\nHello\n", encoding="utf-8")
+
+    def play(self):
+        self.session.play(A, kind=PlayKind.VOD_FILE)
+
+    def reopen(self):
+        """The same media again (a time-shift seek, a reconnect), then it plays."""
+        self.play()
+        self.runner.finish()
+        self.session._tick()
+
+    def slaves(self):
+        return [call[1:] for call in self.player.calls if call[0] == "add_slave"]
+
+    def test_nothing_playing_takes_no_file(self):
+        self.assertFalse(self.session.add_subtitle_file(str(self.film)))
+        self.assertEqual(self.slaves(), [])
+
+    def test_the_files_track_takes_its_name_and_is_chosen(self):
+        self.play()
+        self.assertTrue(self.session.add_subtitle_file(str(self.film)))
+        self.assertEqual(self.slaves(), [(self.film.as_uri(), True)])
+        self.assertEqual(self.session.subtitle_tracks(), [(-1, "Disable"), (3, "English")])
+        self.player.read(4)
+        self.session._tick()
+        self.assertEqual(
+            self.session.subtitle_tracks(),
+            [(-1, "Disable"), (3, "English"), (4, "Lighthouse.en.srt")],
+        )
+        self.assertEqual(self.session.subtitle_track(), 4)
+
+    def test_a_reopen_adds_the_files_again_once_it_plays_with_the_delay(self):
+        self.play()
+        self.session.add_subtitle_file(str(self.film))
+        self.player.read(4)
+        self.session.set_subtitle_delay(-200)
+        self.assertEqual(self.player.spu_delay, -200_000)
+        self.reopen()
+        self.assertEqual(self.player.spu_delay, -200_000)  # right after play()
+        self.assertEqual(self.slaves()[-1], (self.film.as_uri(), True))
+        self.player.read(7)
+        self.assertEqual(self.session.subtitle_tracks()[-1], (7, "Lighthouse.en.srt"))
+        self.assertEqual(self.session.subtitle_track(), 7)
+
+    def test_a_file_not_chosen_comes_back_not_chosen(self):
+        self.play()
+        self.session.add_subtitle_file(str(self.film))
+        self.player.read(4)
+        self.session.subtitle_tracks()
+        self.session.set_subtitle_track(3)  # the media's own
+        self.reopen()
+        self.assertEqual(self.slaves()[-1], (self.film.as_uri(), False))
+
+    def test_another_title_starts_without_them(self):
+        self.play()
+        self.session.add_subtitle_file(str(self.film))
+        self.session.set_subtitle_delay(300)
+        self.session.clear_subtitles()
+        self.reopen()
+        self.assertEqual(len(self.slaves()), 1)
+        self.assertEqual((self.session.subtitle_delay(), self.player.spu_delay), (0, 0))
+
+    def test_a_track_that_never_comes_keeps_libvlcs_name(self):
+        self.play()
+        self.session.add_subtitle_file(str(self.film))
+        with mock.patch("services.playback._SUBTITLE_NAME_WAIT_MS", -1):
+            self.session._tick()
+        self.player.read(9)  # far too late: maybe the media's own
+        self.assertEqual(self.session.subtitle_tracks()[-1], (9, "Track 2"))
+
+    def test_a_file_that_cannot_be_read_is_refused(self):
+        self.play()
+        self.assertFalse(self.session.add_subtitle_file(str(self.film.with_name("gone.srt"))))
+        self.assertFalse(self.session.add_subtitle_file(str(self.film.parent)))  # a folder
+        self.assertEqual(self.slaves(), [])
+
+    def test_a_file_added_while_a_reopen_waits_to_play_is_added_once(self):
+        self.play()
+        self.session.add_subtitle_file(str(self.film))
+        self.player.read(4)
+        other = self.film.with_name("Lighthouse.fr.srt")
+        other.write_text("1\n00:00:01,000 --> 00:00:04,000\nBonjour\n", encoding="utf-8")
+        self.play()  # reopened: the files go to it once it plays
+        self.runner.finish()
+        self.assertTrue(self.session.add_subtitle_file(str(other)))  # before it plays
+        self.session._tick()
+        self.assertEqual(
+            self.slaves(),
+            [(self.film.as_uri(), True), (other.as_uri(), True), (self.film.as_uri(), False)],
+        )
+
+    def test_a_file_this_media_has_is_chosen_again_not_added_twice(self):
+        self.play()
+        self.session.add_subtitle_file(str(self.film))
+        self.player.read(4)
+        self.session.subtitle_tracks()
+        self.session.set_subtitle_track(-1)
+        self.assertTrue(self.session.add_subtitle_file(str(self.film)))
+        self.assertEqual(len(self.slaves()), 1)
+        self.assertEqual(self.session.subtitle_track(), 4)
+
+    def test_a_file_gone_before_a_reopen_is_forgotten(self):
+        self.play()
+        self.session.add_subtitle_file(str(self.film))
+        self.film.unlink()
+        with self.assertLogs("services.playback", "INFO"):
+            self.reopen()
+        self.assertEqual(len(self.slaves()), 1)
+        self.reopen()  # nothing to add any more
+        self.assertEqual(len(self.slaves()), 1)
+
+    def test_the_gui_never_waits_on_the_player_for_them(self):
+        self.play()
+        self.play()  # a job joins the old input
+        self.assertFalse(self.session.add_subtitle_file(str(self.film)))
+        self.session.set_subtitle_delay(100)  # kept for the media that opens next
+        self.assertEqual(self.session.subtitle_track(), -1)
+        self.runner.finish()
+        self.assertEqual(self.player.spu_delay, 100_000)
 
 
 class _AudioPlayer(_FakePlayer):

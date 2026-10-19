@@ -948,7 +948,7 @@ wheels = [
 
 [[package]]
 name = "qitv"
-version = "2.1.0"
+version = "2.2.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp", extra = ["speedups"] },
@@ -963,7 +963,6 @@ dependencies = [
     { name = "requests" },
     { name = "tzlocal" },
     { name = "urllib3" },
-    { name = "urlobject" },
 ]
 
 [package.dev-dependencies]
@@ -990,7 +989,6 @@ requires-dist = [
     { name = "requests", specifier = ">=2.34.2" },
     { name = "tzlocal", specifier = ">=5.4.4" },
     { name = "urllib3", specifier = ">=2.8.0" },
-    { name = "urlobject", specifier = ">=3.0.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -1088,15 +1086,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e3/05/b17359e1cefb4f909b5e40b1b90a496d987258916dbbf88e842c729f510e/urllib3-2.8.0.tar.gz", hash = "sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63", size = 458972, upload-time = "2026-09-15T19:29:36.253Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl", hash = "sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3", size = 135717, upload-time = "2026-09-15T19:29:34.577Z" },
-]
-
-[[package]]
-name = "urlobject"
-version = "3.0.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/2a/fd/163e6b835b9fabf9c3999f71c5f224daa9d68a38012cccd7ab2a2f861af9/urlobject-3.0.0.tar.gz", hash = "sha256:bfdfe70746d92a039a33e964959bb12cecd9807a434fdb7fef5f38e70a295818", size = 28237, upload-time = "2025-07-11T17:53:22.877Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ee/38/18c4bbe751a7357b3f6a33352e3af3305ad78f3e72ab7e3d667de4663ed9/urlobject-3.0.0-py3-none-any.whl", hash = "sha256:fd2465520d0a8c5ed983aa47518a2c5bcde0c276a4fd0eb28b0de5dcefd93b1e", size = 16261, upload-time = "2025-07-11T17:53:21.989Z" },
 ]
 
 [[package]]

@@ -17,6 +17,8 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from services import i18n
+from services.i18n import N_, tr, tr_n, translate
 from services.library import Details, LibraryModel
 from services.provider_ids import with_provider
 from services.search import MIN_CHARS, Hit, SearchWorker
@@ -27,10 +29,16 @@ from ui.library.poster_grid import poster_url
 logger = logging.getLogger(__name__)
 
 DEBOUNCE_MS = 250
-SEARCH_PROMPT = "Type to search every provider's movies, series and channels"
-SEARCHING_TEXT = "Searching…"
-FAILED_TEXT = "Couldn't search — type to try again"
-SECTION_LABELS = {"live": "Live TV", "movies": "Movies", "series": "Series"}
+# What the grid shows instead of hits: shown with translate().
+SEARCH_PROMPT = N_("Type to search every provider's movies, series and channels")
+SEARCHING_TEXT = N_("Searching…")
+FAILED_TEXT = N_("Couldn't search — type to try again")
+# The sections' names (the Library's tabs too), shown with translate().
+SECTION_LABELS = {
+    "live": N_("Live TV"),  # i18n: the TV section (channels); a Library tab
+    "movies": N_("Movies"),  # i18n: the films section; a Library tab
+    "series": N_("Series"),  # i18n: the series section (plural); a Library tab
+}
 
 
 def searchable(text: str) -> bool:
@@ -98,19 +106,24 @@ class SearchSession(QObject):
     def message(self) -> Optional[str]:
         """What the grid shows instead of hits, else None."""
         if self._failed:
-            return FAILED_TEXT
+            return translate(FAILED_TEXT)
         if self._hits is None:
             searching = self._running and searchable(self._query)
-            return SEARCHING_TEXT if searching else SEARCH_PROMPT
+            return translate(SEARCHING_TEXT if searching else SEARCH_PROMPT)
         if not self._hits:
-            return f"Nothing matches “{self._query.strip()}”"
+            # i18n: the Library's search found nothing for what was typed
+            return tr("Nothing matches “{query}”", query=self._query.strip())
         return None
 
     def count_text(self) -> str:
         if self._hits is None or self._failed:
             return ""
         n = len(self._flat)
-        return "No results" if not n else f"{n:,} result" + ("" if n == 1 else "s")
+        if not n:
+            return tr("No results")  # i18n: beside the Library's search field
+        return tr_n(
+            "{n} result", "{n} results", n, n=i18n.number(n)
+        )  # i18n: beside the search field
 
     # ---- queries ------------------------------------------------------------------------------
 
@@ -210,8 +223,10 @@ class SearchSession(QObject):
             hits or [], key=lambda h: (h.provider, h.section)
         ):
             found = list(group)
-            label = SECTION_LABELS.get(section, section)
-            sections.append((f"{provider} · {label} ({len(found):,})", [h.item for h in found]))
+            label = translate(SECTION_LABELS.get(section, section))
+            sections.append(
+                (f"{provider} · {label} ({i18n.number(len(found))})", [h.item for h in found])
+            )
             flat.extend(found)
         self._sections = sections
         self._flat = flat

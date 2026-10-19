@@ -1,9 +1,15 @@
-"""Top-centre message pill: transient messages over an optional persistent hint."""
+"""Top-centre message pill: transient messages over an optional persistent hint.
+
+A message or hint shows in the active language: an English text kept in a constant (marked
+with services.i18n.N_) is translated here; any other text (already translated, or a name)
+shows as it is.
+"""
 
 from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
 from PySide6.QtGui import QFont, QFontMetrics, QPainter, QPaintEvent
 from PySide6.QtWidgets import QWidget
 
+from services.i18n import translate
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units
 from ui.theme import PALETTE, qcolor
@@ -47,7 +53,7 @@ class Toast(Overlay):
             self.hide()
 
     def text(self) -> str:
-        """The message or hint shown last."""
+        """The message or hint shown last (as shown: in the active language)."""
         return self._text
 
     def _message_ended(self) -> None:
@@ -57,7 +63,7 @@ class Toast(Overlay):
             self.hide()
 
     def _show(self, text: str, kind: str) -> None:
-        self._text = text
+        self._text = translate(text)
         self._kind = kind
         self._layout()
         self.show()

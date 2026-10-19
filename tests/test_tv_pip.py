@@ -9,7 +9,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, QPoint, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QRect, Qt, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMenu
 
@@ -89,6 +89,20 @@ class FakeFrame(QObject):
         self.calls.append(("set_large", name))
         self.large = name
 
+    def set_roles(self, large, small):  # the multiview leaves: these are the PiP's roles
+        self.calls.append(("set_roles", large, small))
+        self.large = large
+
+    def suspend(self):  # the multiview lays the surfaces out meanwhile
+        self.calls.append(("suspend",))
+        self.shown = False
+
+    def resume(self):
+        self.calls.append(("resume",))
+
+    def small_rect(self):
+        return QRect(900, 500, 320, 180) if self.shown else QRect()
+
 
 class FakePipLabel(FakeOverlay):
     closeRequested = Signal()
@@ -142,6 +156,7 @@ class PagesForTest(TVPages):
         self._window = window
         self._return_to_library = False
         self._second_click = mock.Mock()
+        self._keys_level = None
         self.library_controller = mock.Mock()
 
 
@@ -460,7 +475,7 @@ class PipTests(PipCase):
         self.assertIs(self.controller.session, self.pip_session)
         self.assertEqual(self.frame.calls[-2:], [("set_large", "pip"), ("hide_pip",)])
         self.live.released.emit()
-        self.assertEqual(self.budget.holders("Home"), ["main"])  # Five's, as the large one
+        self.assertEqual(self.budget.holders("Home"), ["pip"])  # Five's: its player's name
         self.controller.handle(Action.CH_NEXT)  # zapping goes on in Five's group
         self.assertEqual(self.requested()[-1], "Six")
 
@@ -948,8 +963,9 @@ class LibraryPlayTests(PipCase):
         self.start_large(0)  # Home, two streams
         self.play_from_library({**MOVIE, "_provider": "Harbor IPTV"})
         self.assertTrue(self.sessions.pip_open())
-        self.assertEqual(self.budget.holders("Home"), ["pip"])
-        self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])
+        # Each stream carries its player's name: the channel stays the main player's, small.
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["pip"])
 
     def test_swapping_twice_keeps_the_movies_resume_point_and_controls(self):
         # Final review I1: S, then S again, while a film from the Library plays large.

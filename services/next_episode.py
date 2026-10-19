@@ -8,7 +8,9 @@ genre_items. Next and autoplay follow it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional, Union
+from typing import Any, Callable, Iterable, Optional, Union
+
+from services.i18n import tr
 
 Key = Callable[[dict], str]
 
@@ -128,11 +130,22 @@ def following(
     return None if after is None else NextUp(None, after)
 
 
-def episode_label(season: Optional[dict], episode: dict) -> str:
-    """The Next card's "S2 · E1": the season's number (else the episode's) and the episode's."""
+def season_and_episode(season: Optional[dict], episode: dict) -> tuple[Any, Any]:
+    """An episode's season number (the season's, else the episode's own) and its number, as
+    the catalog has them (None when it has none)."""
     number = (season or {}).get("number") or episode.get("season")
     position = episode.get("number") or episode.get("episode_num") or episode.get("series")
-    parts = [f"{tag}{value}" for tag, value in (("S", number), ("E", position)) if value]
+    return number, position
+
+
+def episode_label(season: Optional[dict], episode: dict) -> str:
+    """The Next card's "S2 · E1": the season's number (else the episode's) and the episode's."""
+    number, position = season_and_episode(season, episode)
+    parts: list[str] = []
+    if number:
+        parts.append(tr("S{n}", n=number))  # i18n: season number, abbreviated ("S2"); short
+    if position:
+        parts.append(tr("E{n}", n=position))  # i18n: episode number, abbreviated ("E1"); short
     return " · ".join(parts)
 
 

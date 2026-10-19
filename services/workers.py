@@ -1,43 +1,57 @@
 """Provider workers: catalog loads, provider setup, EPG and STB links, for CatalogService."""
 
+from functools import partial
 import logging
 import re
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, Qt, Signal
 
+from services.catchup import (
+    Answer,
+    overall,
+    probe,
+    xtream_archive_fields,
+    xtream_zone_fields,
+)
+from services.failure_reasons import (
+    DEVICE_MESSAGE,
+    UNEXPECTED_ANSWER_MESSAGE,
+    UNREACHABLE_MESSAGE,
+)
+from services.i18n import N_
 from services.lazy_import import lazy_module
 from services.m3u import decode_playlist, parse_m3u
 from services.provider_api import (
     CLIENT_HEADERS,
     base_from_url,
     https_fallback_candidates,
+    remember_xtream_root,
     stb_create_link_url,
     stb_portal_base,
     stb_request_url,
+    xtream_base,
     xtream_choose_resolved_base,
+    xtream_elsewhere,
     xtream_player_api_url,
+    xtream_sign_in_bases,
+    xtream_stream_url,
 )
 from services.provider_manager import HANDSHAKE_UNEXPECTED, HANDSHAKE_UNREACHABLE
 from services.redact import safe_exc, safe_traceback
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
-urlobject = lazy_module("urlobject")
 
-NO_PORTAL_DATA_MESSAGE = "The portal returned no data"
-STB_DEVICE_REJECTED_MESSAGE = (
-    "The provider rejected this device (check the MAC address or subscription)"
-)
+# Sent from the worker's thread in English (a catalog message), shown with translate().
+NO_PORTAL_DATA_MESSAGE = N_("The portal returned no data")
+STB_DEVICE_REJECTED_MESSAGE = DEVICE_MESSAGE
 
 
 def _resolve_xtream_base(server_info: dict, base_url: str, prefer_https: bool) -> str:
     """Pick the panel-advertised base, falling back to the user's URL when there is none."""
     resolved_base = xtream_choose_resolved_base(server_info, base_url, prefer_https=prefer_https)
-    if resolved_base:
-        return resolved_base
-    url_obj = urlobject.URLObject(base_url)
-    return f"{url_obj.scheme or 'http'}://{url_obj.netloc or url_obj}".rstrip("/")
+    return resolved_base or xtream_base(base_url)
 
 
 # --- Roman numeral helpers (conservative matching) ---
@@ -124,6 +138,93 @@ _XTREAM_CATALOG_ACTIONS = {
 }
 
 
+# The Xtream workers' helpers take the worker for its account: base_url, username, password,
+# verify_ssl and prefer_https. `get` is requests' or a session's, sending CLIENT_HEADERS.
+
+
+def _xtream_sign_in(get: Callable[..., Any], worker: Any) -> Tuple[Any, str, Any]:
+    """Sign in to an Xtream panel (the Player API without an action): the reply's user_info,
+    the base its API and streams are at, and its server_info (its time zone: catch-up). An
+    address with a path whose panel is not there (a 404 or a page, not the API's JSON) is asked
+    once more at its server's root, which is used from then on when it answers (a stray path
+    2.2.0 and older cut off)."""
+    bases = xtream_sign_in_bases(worker.base_url)
+    for at, server in enumerate(bases):
+        url = xtream_player_api_url(server, worker.username, worker.password)
+        response = get(url, timeout=10, verify=worker.verify_ssl)
+        if at + 1 < len(bases) and xtream_elsewhere(response):
+            continue  # the next is the root: no further one
+        response.raise_for_status()
+        body = response.json() if response.content else {}
+        if not isinstance(body, dict):
+            body = {}
+        if at:
+            remember_xtream_root(worker.base_url, server)
+        server_info = body.get("server_info", {})
+        resolved = _resolve_xtream_base(server_info, server, worker.prefer_https)
+        return body.get("user_info", {}), resolved, server_info
+    raise AssertionError("unreachable: the last base always answers or raises")
+
+
+def _xtream_categories(
+    get: Callable[..., Any], worker: Any, base: str, action: str
+) -> List[Dict[str, str]]:
+    """A catalog's categories, "All" first: only it when the panel lists none or fails."""
+    # The loaders' labels stay English in the lists (catalog.shown_label shows them).
+    categories = [{"id": "*", "title": N_("All")}]
+    url = xtream_player_api_url(base, worker.username, worker.password, action=action)
+    try:
+        response = get(url, timeout=10, verify=worker.verify_ssl)
+        if response.ok and response.content:
+            for c in response.json() or []:
+                name = c.get("category_name") or N_("Unknown")
+                categories.append({"id": str(c.get("category_id")), "title": name})
+    except Exception as e:
+        logger.warning("Failed to fetch categories: %s", safe_exc(e))
+    return categories
+
+
+def _xtream_item(
+    stream: Dict[str, Any], content_type: str, address: Callable[[Any, str], str], ext: str, n: int
+) -> Optional[Dict[str, Any]]:
+    """A catalog item of a Player API stream (number `n` when it has none); None without an
+    id. `address(id, ext)` is its stream's: a channel plays as `ext`, a film as its own
+    container; a series has none (its episodes do, once its info is fetched)."""
+    stream_id = stream.get("stream_id") or stream.get("series_id")
+    if not stream_id:
+        return None
+    category_ids = stream.get("category_ids")
+    if isinstance(category_ids, list) and category_ids:
+        cid = str(category_ids[0])
+    else:
+        cid = str(stream.get("category_id") or "None")
+    item = {
+        "id": stream_id,
+        "number": str(stream.get("num") or n),
+        "name": stream.get("name") or f"Stream {stream_id}",
+        "logo": stream.get("stream_icon") or stream.get("cover") or "",
+        "tv_genre_id": cid,  # STB's field name
+        "cmd": "",
+    }
+    if content_type == "itv":
+        item["cmd"] = address(stream_id, ext)
+        item["xmltv_id"] = stream.get("epg_channel_id") or ""
+        item.update(xtream_archive_fields(stream))  # only on a channel with an archive
+    elif content_type == "vod":
+        ext = stream.get("container_extension") or ext
+        item["cmd"] = address(stream_id, ext)
+        item["director"] = stream.get("director") or ""
+        item["description"] = stream.get("plot") or ""
+        item["rating"] = stream.get("rating") or ""
+        item["year"] = stream.get("releasedate") or ""
+        item["container_extension"] = ext
+    elif content_type == "series":
+        item["plot"] = stream.get("plot") or ""
+        item["rating"] = stream.get("rating") or ""
+        item["year"] = stream.get("year") or ""
+    return item
+
+
 def _max_connections(user_info) -> Optional[int]:
     """Xtream reports the account's concurrent stream limit as a string or int."""
     try:
@@ -163,18 +264,10 @@ class XtreamLoaderWorker(QObject):
         session = requests.Session()
         session.headers.update(CLIENT_HEADERS)
         try:
-            # Step 1: Authenticate and resolve proper base + formats
-            auth_url = xtream_player_api_url(self.base_url, self.username, self.password)
-            auth_resp = session.get(auth_url, timeout=10, verify=self.verify_ssl)
-            auth_resp.raise_for_status()
-            auth_body = auth_resp.json() if auth_resp.content else {}
-            server_info = auth_body.get("server_info", {}) if isinstance(auth_body, dict) else {}
-            user_info = auth_body.get("user_info", {}) if isinstance(auth_body, dict) else {}
-            allowed_formats = user_info.get("allowed_output_formats", []) or []
-            resolved_base = _resolve_xtream_base(server_info, self.base_url, self.prefer_https)
-
+            user_info, resolved_base, server_info = _xtream_sign_in(session.get, self)
             # Select from provider metadata only. Opening a media URL here consumes
             # a playback connection before the user has selected anything.
+            allowed_formats = user_info.get("allowed_output_formats", []) or []
             if not allowed_formats or "ts" in allowed_formats:
                 stream_ext = "ts"
             elif "m3u8" in allowed_formats:
@@ -182,34 +275,12 @@ class XtreamLoaderWorker(QObject):
             else:
                 stream_ext = allowed_formats[0]
 
-            # Step 2: Determine API actions based on content type
             actions = _XTREAM_CATALOG_ACTIONS.get(self.content_type)
             if actions is None:
                 raise ValueError(f"Unknown content type: {self.content_type}")
-            cat_action, streams_action, url_prefix = actions
+            cat_action, streams_action, kind = actions
+            categories = _xtream_categories(session.get, self, resolved_base, cat_action)
 
-            # Step 3: Fetch categories
-            cat_url = xtream_player_api_url(
-                resolved_base, self.username, self.password, action=cat_action
-            )
-            categories = []
-            categories_map = {}
-            try:
-                cat_resp = session.get(cat_url, timeout=10, verify=self.verify_ssl)
-                if cat_resp.ok and cat_resp.content:
-                    cats_data = cat_resp.json() or []
-                    for c in cats_data:
-                        cid = str(c.get("category_id"))
-                        cname = c.get("category_name") or "Unknown"
-                        categories_map[cid] = cname
-                        categories.append({"id": cid, "title": cname})
-            except Exception as e:
-                logger.warning("Failed to fetch categories: %s", safe_exc(e))
-
-            # Add "All" category
-            categories.insert(0, {"id": "*", "title": "All"})
-
-            # Step 4: Fetch all content
             streams_url = xtream_player_api_url(
                 resolved_base, self.username, self.password, action=streams_action
             )
@@ -217,69 +288,18 @@ class XtreamLoaderWorker(QObject):
             streams_resp.raise_for_status()
             streams = streams_resp.json() or []
 
-            # Step 5: Build items list with category mapping
+            address = partial(xtream_stream_url, resolved_base, kind, self.username, self.password)
             items: List[Dict] = []
             sorted_channels: Dict[str, List[int]] = {}
-
             for s in streams:
                 try:
-                    stream_id = s.get("stream_id") or s.get("series_id")
-                    if not stream_id:
-                        continue
-
-                    num = s.get("num") or len(items) + 1
-                    name = s.get("name") or f"Stream {stream_id}"
-                    logo = s.get("stream_icon") or s.get("cover") or ""
-
-                    # Get category ID
-                    if isinstance(s.get("category_ids"), list) and s.get("category_ids"):
-                        cid = str(s.get("category_ids")[0])
-                    else:
-                        cid = str(s.get("category_id") or "None")
-
-                    # Build URL based on content type
-                    if self.content_type == "series":
-                        # Series don't have direct playback URLs; store series_id for later fetching
-                        cmd = ""  # Will be populated when episodes are fetched
-                    elif self.content_type == "vod":
-                        # For VOD, use container_extension from stream data
-                        container_ext = s.get("container_extension") or stream_ext
-                        cmd = f"{resolved_base}/{url_prefix}/{self.username}/{self.password}/{stream_id}.{container_ext}"
-                    else:
-                        # For live streams, prefer TS when the provider supports it.
-                        cmd = f"{resolved_base}/{url_prefix}/{self.username}/{self.password}/{stream_id}.{stream_ext}"
-
-                    item = {
-                        "id": stream_id,
-                        "number": str(num),
-                        "name": name,
-                        "logo": logo,
-                        "tv_genre_id": cid,  # Use STB-compatible field name
-                        "cmd": cmd,
-                    }
-
-                    if self.content_type == "itv":
-                        item["xmltv_id"] = s.get("epg_channel_id") or ""
-                    elif self.content_type == "vod":
-                        item["director"] = s.get("director") or ""
-                        item["description"] = s.get("plot") or ""
-                        item["rating"] = s.get("rating") or ""
-                        item["year"] = s.get("releasedate") or ""
-                        # Store container extension for reference
-                        item["container_extension"] = s.get("container_extension") or stream_ext
-                    elif self.content_type == "series":
-                        item["plot"] = s.get("plot") or ""
-                        item["rating"] = s.get("rating") or ""
-                        item["year"] = s.get("year") or ""
-
-                    items.append(item)
-
-                    # Build sorted_channels mapping
-                    sorted_channels.setdefault(cid, []).append(len(items) - 1)
-
+                    item = _xtream_item(s, self.content_type, address, stream_ext, len(items) + 1)
                 except Exception as e:
-                    logger.warning(f"Failed to process stream: {e}")
+                    logger.warning("Failed to process stream: %s", e)
                     continue
+                if item is not None:
+                    items.append(item)
+                    sorted_channels.setdefault(item["tv_genre_id"], []).append(len(items) - 1)
 
             # Sort channels within each category
             for cat_id in sorted_channels:
@@ -289,7 +309,7 @@ class XtreamLoaderWorker(QObject):
 
             # Add "None" category if there are uncategorized items
             if "None" in sorted_channels:
-                categories.append({"id": "None", "title": "Unknown Category"})
+                categories.append({"id": "None", "title": N_("Unknown Category")})
 
             result = {
                 "categories": categories,
@@ -299,6 +319,7 @@ class XtreamLoaderWorker(QObject):
                 "stream_base": resolved_base,
                 "stream_ext": stream_ext,
                 "max_connections": _max_connections(user_info),
+                **xtream_zone_fields(server_info),  # the panel's time zone (catch-up)
             }
 
             self.finished.emit(result)
@@ -338,18 +359,8 @@ class XtreamSeriesInfoWorker(QObject):
         try:
             # Use resolved_base if provided, otherwise determine from base_url
             if not self.resolved_base:
-                auth_url = xtream_player_api_url(self.base_url, self.username, self.password)
-                auth_resp = requests.get(
-                    auth_url, timeout=10, headers=CLIENT_HEADERS, verify=self.verify_ssl
-                )
-                auth_resp.raise_for_status()
-                auth_body = auth_resp.json() if auth_resp.content else {}
-                server_info = (
-                    auth_body.get("server_info", {}) if isinstance(auth_body, dict) else {}
-                )
-                self.resolved_base = _resolve_xtream_base(
-                    server_info, self.base_url, self.prefer_https
-                )
+                get = partial(requests.get, headers=CLIENT_HEADERS)
+                _user_info, self.resolved_base, _server = _xtream_sign_in(get, self)
 
             # Fetch series info
             info_url = xtream_player_api_url(
@@ -474,7 +485,7 @@ class STBCategoriesWorker(QObject):
                     category_id = str(channel.get("tv_genre_id"))
                     sorted_channels.setdefault(category_id, []).append(index)
                 if "None" in sorted_channels:
-                    categories.append({"id": "None", "title": "Unknown Category"})
+                    categories.append({"id": "None", "title": N_("Unknown Category")})
                 result["contents"] = all_channels
                 result["sorted_channels"] = sorted_channels
             self.finished.emit(result)
@@ -529,9 +540,6 @@ class LinkCreatorWorker(QObject):
 
 def _handshake_failure_message(failure: Optional[str]) -> str:
     """The user's text for a failed STB handshake (provider_manager.HANDSHAKE_*)."""
-    # The catalog's friendly texts; it imports this module, so import them on use.
-    from services.catalog import UNEXPECTED_ANSWER_MESSAGE, UNREACHABLE_MESSAGE
-
     if failure == HANDSHAKE_UNREACHABLE:
         return UNREACHABLE_MESSAGE
     if failure == HANDSHAKE_UNEXPECTED:
@@ -619,3 +627,34 @@ class StbListWorker(QObject):
             self.finished.emit(results[-1])
         else:
             self.error.emit(errors[-1] if errors else NO_PORTAL_DATA_MESSAGE)
+
+
+class ArchiveProbeWorker(QObject):
+    """Probe a channel's archive addresses in turn (catch-up, 2.2): `finished` carries
+    (the index of the first that plays, or -1; the forms' answer together, `catchup.overall`).
+
+    A refusal stops there (it may be the provider's connection limit: asking the next form
+    would only be refused too); a "nothing there" or no clear answer tries the next form, and
+    "nothing there" is the answer only when every form said so.
+    """
+
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, urls: List[str], headers: Dict[str, str], verify_ssl: bool = True):
+        super().__init__()
+        self.urls = list(urls)
+        self.headers = dict(headers)
+        self.verify_ssl = verify_ssl
+
+    def run(self):
+        answers: List[Answer] = []
+        for index, url in enumerate(self.urls):
+            answer = probe(url, headers=self.headers, verify=self.verify_ssl)
+            if answer is Answer.PLAYS:
+                self.finished.emit((index, answer.value))
+                return
+            answers.append(answer)
+            if answer is Answer.REFUSED:
+                break
+        self.finished.emit((-1, overall(answers).value))

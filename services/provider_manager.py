@@ -4,16 +4,16 @@ import logging
 import os
 import random
 import string
-import tempfile
 import threading
 import time
 from typing import Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from PySide6.QtCore import QObject, Signal
 import orjson as json
 import tzlocal
 
+from services.atomic_write import atomic_write
 from services.lazy_import import lazy_module
 from services.m3u import split_cached_groups
 from services.provider_api import provider_prefers_https
@@ -21,12 +21,12 @@ from services.redact import safe_exc
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
-urlobject = lazy_module("urlobject")
 
 # Why an STB handshake failed (StbHandshake.failure); the setup worker words it for the user.
 HANDSHAKE_UNREACHABLE = "unreachable"  # DNS, connection, timeout or a server error
 HANDSHAKE_REJECTED = "rejected"  # an explicit refusal (401/403, blocked) or no token
 HANDSHAKE_UNEXPECTED = "unexpected"  # any other answer: a wrong path, not JSON
+_PREHASH = "2614ddf9829ba9d284f389d88e8c669d81f6a5c2"
 # When attempts (portal paths, HTTPS then HTTP) fail differently, the stronger reason wins.
 _HANDSHAKE_FAILURE_RANK = {HANDSHAKE_UNREACHABLE: 0, HANDSHAKE_UNEXPECTED: 1, HANDSHAKE_REJECTED: 2}
 
@@ -327,21 +327,18 @@ class ProviderManager(QObject):
         self._cache_writer.submit(self._write_provider_cache, cache_path, generation, snapshot)
 
     def _write_provider_cache(self, cache_path, generation, snapshot):
-        temporary_path = None
+        def replace_if_newest(temporary, path):  # a newer snapshot queued meanwhile wins
+            with self._cache_lock:
+                if self._cache_generations.get(cache_path, 0) == generation:
+                    os.replace(temporary, path)
+
         try:
             with self._cache_lock:
                 if self._cache_generations.get(cache_path, 0) != generation:
                     return
             serialized = json.dumps(snapshot)
-            with tempfile.NamedTemporaryFile(
-                mode="wb", dir=self.provider_dir, suffix=".tmp", delete=False
-            ) as f:
-                temporary_path = f.name
+            with atomic_write(cache_path, replace_if_newest) as f:
                 f.write(serialized)
-            with self._cache_lock:
-                if self._cache_generations.get(cache_path, 0) == generation:
-                    os.replace(temporary_path, cache_path)
-                    temporary_path = None
         except OSError, TypeError:
             logger.exception("Failed to save provider cache")
         finally:
@@ -349,11 +346,6 @@ class ProviderManager(QObject):
                 pending = self._pending_cache_snapshots.get(cache_path)
                 if pending is not None and pending[0] == generation:
                     del self._pending_cache_snapshots[cache_path]
-            if temporary_path is not None:
-                try:
-                    os.remove(temporary_path)
-                except FileNotFoundError:
-                    pass
 
     def do_handshake(
         self,
@@ -397,6 +389,11 @@ class StbHandshake:
         self.token = token
         self.headers = {}
         self.failure = None  # a HANDSHAKE_* reason once run() has returned False
+        # What the attempts met, for an account check (services.account_check): each error
+        # status, whether one timed out, and the profile's answer (its "js") once one came.
+        self.statuses: list[int] = []
+        self.timed_out = False
+        self.profile = None
 
     def run(
         self,
@@ -421,8 +418,7 @@ class StbHandshake:
             if prefer_https and not _prefer_attempted and url.startswith("http://"):
                 url = "https://" + url[len("http://") :]
 
-            prehash = "2614ddf9829ba9d284f389d88e8c669d81f6a5c2"
-            fetchurl = f"{url}{serverload}?type=stb&action=handshake&prehash={prehash}&token=&JsHttpRequest=1-xml"
+            fetchurl = f"{url}{serverload}?type=stb&action=handshake&prehash={_PREHASH}&token=&JsHttpRequest=1-xml"
             handshake = requests.get(fetchurl, timeout=5, headers=self.headers, verify=ssl_verify)
             if handshake.status_code == 200:
                 body = handshake.json()
@@ -432,36 +428,15 @@ class StbHandshake:
             self.headers["Authorization"] = f"Bearer {self.token}"
 
             # Use get_profile request to detect blocked providers
-
-            params = {
-                "ver": "ImageDescription: 2.20.02-pub-424; ImageDate: Fri May 8 15:39:55 UTC 2020; PORTAL version: 5.3.0; API Version: JS API version: 343; STB API version: 146; Player Engine version: 0x588",
-                "num_banks": "2",
-                "sn": "062014N067770",
-                "stb_type": "MAG424",
-                "client_type": "STB",
-                "image_version": "220",
-                "video_out": "hdmi",
-                "device_id": "",
-                "device_id2": "",
-                "signature": "",
-                "auth_second_step": "1",
-                "hw_version": "1.7-BD-00",
-                "not_valid_token": "0",
-                "metrics": f'{{"mac":"{mac}", "sn":"062014N067770","model":"MAG424","type":"STB","uid":"","random":""}}',
-                "hw_version_2": "bb8b74cdcaa19c7f6a6bdfecc8e91b7e4b5ea556",
-                "timestamp": "1729441259",
-                "api_signature": "262",
-                "prehash": prehash,
-            }
-            encoded_params = urlencode(params)
-
-            fetchurl = f"{url}{serverload}?type=stb&action=get_profile&hd=1&{encoded_params}&JsHttpRequest=1-xml"
+            fetchurl = self.profile_url(url, serverload, mac)
             profile = requests.get(fetchurl, timeout=5, headers=self.headers, verify=ssl_verify)
             if profile.status_code == 200:
                 body = profile.json()
             else:
                 raise _PortalStatus("profile", profile.status_code)
 
+            if isinstance(body, dict) and isinstance(body.get("js"), dict):
+                self.profile = body["js"]
             theId = body["js"]["id"]
             theName = body["js"]["name"]
             if not theId and not theName:
@@ -470,6 +445,10 @@ class StbHandshake:
             self.failure = None
             return True
         except Exception as e:
+            if isinstance(e, _PortalStatus):
+                self.statuses.append(e.status_code)
+            elif isinstance(e, requests.exceptions.Timeout):
+                self.timed_out = True
             reason = classify_handshake_error(e)
             if self.failure is None or (
                 _HANDSHAKE_FAILURE_RANK[reason] > _HANDSHAKE_FAILURE_RANK[self.failure]
@@ -504,12 +483,74 @@ class StbHandshake:
             return False
 
     @staticmethod
+    def profile_url(url, serverload, mac):
+        """The portal's get_profile request, as a set-top box sends it after its handshake."""
+        params = {
+            "ver": "ImageDescription: 2.20.02-pub-424; ImageDate: Fri May 8 15:39:55 UTC 2020; PORTAL version: 5.3.0; API Version: JS API version: 343; STB API version: 146; Player Engine version: 0x588",
+            "num_banks": "2",
+            "sn": "062014N067770",
+            "stb_type": "MAG424",
+            "client_type": "STB",
+            "image_version": "220",
+            "video_out": "hdmi",
+            "device_id": "",
+            "device_id2": "",
+            "signature": "",
+            "auth_second_step": "1",
+            "hw_version": "1.7-BD-00",
+            "not_valid_token": "0",
+            "metrics": f'{{"mac":"{mac}", "sn":"062014N067770","model":"MAG424","type":"STB","uid":"","random":""}}',
+            "hw_version_2": "bb8b74cdcaa19c7f6a6bdfecc8e91b7e4b5ea556",
+            "timestamp": "1729441259",
+            "api_signature": "262",
+            "prehash": _PREHASH,
+        }
+        encoded_params = urlencode(params)
+        return f"{url}{serverload}?type=stb&action=get_profile&hd=1&{encoded_params}&JsHttpRequest=1-xml"
+
+    def check_profile(self, url, mac, headers):
+        """A profile request on a session that is signed in already (`headers`, with its
+        token): no handshake, so the portal keeps the token that session plays with (portals
+        bind one token to a MAC). True when the portal knows the device; `statuses`,
+        `timed_out` and `profile` record what came, as run() records them."""
+        self.headers = dict(headers)
+        bases = [url]
+        if self.prefer_https and url.startswith("http://"):
+            bases.insert(0, "https://" + url[len("http://") :])
+        for base in bases:
+            for serverload in ("/portal.php", "/server/load.php"):
+                try:
+                    response = requests.get(
+                        self.profile_url(base, serverload, mac),
+                        timeout=5,
+                        headers=self.headers,
+                        verify=self.ssl_verify,
+                    )
+                except requests.exceptions.Timeout:
+                    self.timed_out = True
+                    continue
+                except requests.RequestException:
+                    continue
+                if response.status_code != 200:
+                    self.statuses.append(response.status_code)
+                    continue
+                try:
+                    body = response.json()
+                except ValueError:
+                    continue
+                js = body.get("js") if isinstance(body, dict) else None
+                if isinstance(js, dict):
+                    self.profile = js
+                    return bool(js.get("id") or js.get("name"))
+        return False
+
+    @staticmethod
     def random_token():
         return "".join(random.choices(string.ascii_letters + string.digits, k=32))
 
     @staticmethod
     def create_headers(url, mac, token, serial_number="", device_id=""):
-        url = urlobject.URLObject(url)
+        parts = urlsplit(url)
         # Use a robust string representation of local timezone
         try:
             timezone = str(tzlocal.get_localzone())
@@ -532,10 +573,10 @@ class StbHandshake:
             "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
             "Accept-Charset": "UTF-8,*;q=0.8",
             "X-User-Agent": "Model: MAG200; Link: Ethernet",
-            "Host": f"{url.netloc}",
+            "Host": parts.netloc,
             "Range": "bytes=0-",
             "Accept": "*/*",
-            "Referer": f"{url}/c/" if not url.path else f"{url}/",
+            "Referer": f"{url}/c/" if not parts.path else f"{url}/",  # the URL as given
             "Cookie": "; ".join(cookie_parts) + ";",
             "Authorization": f"Bearer {token}",
         }

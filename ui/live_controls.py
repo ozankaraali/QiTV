@@ -10,15 +10,25 @@ played directly whose stream ends (an on-demand restream may show a placeholder 
 opens again in the same player, so in the same budget slot, twice per tune at most, after
 RECONNECT_MS: "Reconnecting…", and only then "The stream ended".
 
+Recording (2.2): R and the record button record the time-shifted channel being watched from
+where it plays (rewound or not) into the Recordings folder (`services.recording`), or stop
+it; the record button is lit and the REC chip counts while the large picture's channel
+records. A channel played directly, or one still opening, says why it cannot record.
+
+Provider catch-up (2.3, `ui.catchup_controls.CatchUp`): on a channel with an archive the bar
+reaches further back than the buffer; seeking there, stepping back past the buffer's start or
+⏮ to a programme that began before it plays the provider's archive, and the transport's
+controls then act on it (Go live returns to the live channel).
+
 TVController owns the target and the LiveTuner and hands this unit what it needs. With
 picture in picture it is the large picture's: a swap hands it the other player's tuner, live
-session and player (`use_slot`).
+session and player (`use_slot`); a multiview's focused tile is the large picture.
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
@@ -26,26 +36,34 @@ from urllib.parse import urlsplit
 from PySide6.QtCore import QObject, QTimer, SignalInstance
 from PySide6.QtGui import QPixmap
 
-from services import favorites
+from services import favorites, recording
+from services.catchup_memory import CatchupMemory
 from services.epg_view import Programme
+from services.i18n import N_, tr, tr_n, translate
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from ui import item_provider
+from ui.catchup_controls import NO_RECORDING_TEXT, NOT_AVAILABLE_TEXT, CatchUp
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, LiveTuner
-from ui.overlays.transport import Transport
+from ui.overlays.transport import NO_RECORDING, Transport
 
 logger = logging.getLogger(__name__)
 
 LIVE_SEEK_S = 10.0  # ←/→ while time-shifting (spec §6.7)
+_PAST_BUFFER_S = 1.0  # a point this far before the buffer's start is the archive's
+_AT_START_S = 5.0  # ⏮ this near a programme's start goes to the one before (the archive)
 TICK_PROGRAMMES = 6  # programme starts marked on the time-shift bar
-LIMITED_TEXT = "Your provider limits concurrent streams"  # when its limit is not known
-REFUSED_TEXT = "The provider refused the stream — it may"  # a plain 403: maybe the limit
+# When its limit is not known (shown with translate()).
+LIMITED_TEXT = N_("Your provider limits concurrent streams")  # i18n: error toast
 ERROR_MS = 6000
 RECONNECT_MS = (1000, 3000)  # the back-off before each reopen of a live stream that ended
-RECONNECTING_TEXT = "Reconnecting…"
+# i18n: toast: a live channel's stream ended and is opened again
+RECONNECTING_TEXT = N_("Reconnecting…")
+# i18n: a toast: R or the record button was pressed while the channel is still opening
+NOT_YET_TEXT = N_("Recording can start once the channel plays")
 _PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
 # Never opened again: on-demand content, and a file listed as a channel ends for good.
 _NOT_LIVE = (PlayKind.VOD_FILE, PlayKind.VOD_STREAM, PlayKind.LIVE_PIPELINE)
@@ -60,8 +78,10 @@ def stream_options(item: dict) -> dict[str, Any]:
     return options
 
 
-def _streams(count: int) -> str:
-    return f"{count} stream" if count == 1 else f"{count} streams"
+def _named(title: str, message: str) -> str:
+    """A failure after the channel's name, when it has one."""
+    # i18n: an error toast: a channel's, a film's or a provider's name, then what went wrong
+    return tr("{name}: {message}", name=title, message=message) if title else message
 
 
 class LiveControls(QObject):
@@ -86,9 +106,23 @@ class LiveControls(QObject):
         restore_channel: Callable[[], None],
         show_transport: Callable[[], None],
         logo: Callable[[dict], Optional[QPixmap]] = lambda channel: None,
+        explain: Callable[[dict, str], None] = lambda item, title: None,
+        may_reopen: Callable[[Target], bool] = lambda target: True,
+        memory: Optional[CatchupMemory] = None,
+        prepare: Callable[[Any, Target], None] = lambda session, target: None,
+        archive_allowed: Callable[[], bool] = lambda: True,
+        runner: Any = None,
         parent: Optional[QObject] = None,
     ) -> None:
+        """`explain(item, title)` asks why the failure just toasted happened at the item's
+        provider (TVController._explain_item). `may_reopen(target)`: whether an ended
+        direct stream may open again (a multiview tile's checks its provider's slot
+        first). Catch-up: `memory` keeps whether each channel's archive answered (None: for
+        this run only), `prepare(session, target)` readies the player for a channel before
+        its archive opens, `archive_allowed()` says whether archives may play now, `runner`
+        runs the archive probes (a JobRunner by default)."""
         super().__init__(parent)
+        self._may_reopen = may_reopen
         self._tuner = tuner
         self.live = live
         self.session = session
@@ -107,12 +141,29 @@ class LiveControls(QObject):
         self._restore_channel = restore_channel
         self._show_transport = show_transport
         self._logo = logo
+        self._explain = explain
         self._ticks: list[tuple[float, str]] = []
         self._wired = False
         self._reconnects = 0  # reopens of the current tune's ended stream so far
         self._reopen_due: Optional[tuple[Target, str, PlayKind]] = None  # after the back-off
         self._reopen_timer = QTimer(self, singleShot=True)
         self._reopen_timer.timeout.connect(self._reopen)
+        self.catchup = CatchUp(
+            tuner=tuner,
+            session=session,
+            catalog=catalog,
+            config=config,
+            memory=memory if memory is not None else CatchupMemory(None),
+            now=now,
+            toast=toast,
+            request=request,
+            changed=self._on_archive_changed,
+            limit=self.limit,
+            prepare=prepare,
+            allowed=archive_allowed,
+            runner=runner,
+            parent=self,
+        )
 
     def wire(self) -> None:
         transport = self._transport
@@ -121,6 +172,7 @@ class LiveControls(QObject):
         transport.goLiveRequested.connect(self.go_live)
         transport.programmeStartRequested.connect(self._programme_start)
         transport.seekToRequested.connect(self._seek_to)
+        transport.recordRequested.connect(self.toggle_recording)
         self._wired = True
         self._connect(True)
 
@@ -135,6 +187,7 @@ class LiveControls(QObject):
                 (live.timelineChanged, self._on_live_timeline),
                 (live.notice, self._on_live_notice),
                 (live.failed, self._on_live_failed),
+                (live.recordingChanged, self._on_recording_changed),
             ]
         for signal, slot in pairs:
             if connect:
@@ -149,15 +202,34 @@ class LiveControls(QObject):
         self._tuner, self.live, self.session = tuner, live, session
         if self._wired:
             self._connect(True)
-        self.new_target()
+        self._forget_channel()
+        self.catchup.use_slot(tuner, session)  # the new large picture's archive, if any
+        self._on_recording_changed()  # the REC chip is the new large picture's
 
     # ---- tuning -------------------------------------------------------------------------------
 
     def new_target(self) -> None:
-        """A new target plays: the old channel's ticks and reopen are gone."""
+        """A new target plays: the old channel's ticks, reopen and archive are gone."""
+        self._forget_channel()
+        self.catchup.reset()
+
+    def _forget_channel(self) -> None:
         self._ticks = []
         self._reconnects = 0
         self._cancel_reopen()
+
+    def open_archive(self, target: Target, url: str) -> bool:
+        """`target` (with `archive_at`) plays its archive instead of live: False when it
+        offers none now (it plays live then)."""
+        if target.archive_at is None:
+            return False
+        return self.catchup.open(
+            target,
+            target.archive_at,
+            until=target.archive_until,
+            link=url,
+            live_playing=False,
+        )
 
     def through_pipeline(self, url: str, kind: PlayKind) -> bool:
         """Whether a live link plays through the time-shift pipeline.
@@ -179,7 +251,13 @@ class LiveControls(QObject):
         return self._tuner.budget.limit_for(provider, reported)
 
     def limit_text(self, limit: Optional[int]) -> str:
-        return f"Your provider allows {_streams(limit)} at a time" if limit else LIMITED_TEXT
+        if not limit:
+            return translate(LIMITED_TEXT)
+        return tr_n(
+            "Your provider allows {n} stream at a time",  # i18n: error toast
+            "Your provider allows {n} streams at a time",
+            limit,
+        )
 
     def tune_pipeline(self, target: Target, url: str) -> bool:
         """Ask for a budget slot for `target` (spec §6.9); it starts once the old one is released.
@@ -214,6 +292,7 @@ class LiveControls(QObject):
 
     def stop_tune(self) -> None:
         self._cancel_reopen()
+        self.catchup.reset()
         self._tuner.stop()
         self._ticks = []
 
@@ -245,7 +324,7 @@ class LiveControls(QObject):
         self._reopen_due = (current, url, kind)
         self._reopen_timer.start(RECONNECT_MS[self._reconnects])
         self._reconnects += 1
-        self._toast(RECONNECTING_TEXT)
+        self._toast(translate(RECONNECTING_TEXT))
         return True
 
     def _reopen(self) -> None:
@@ -256,6 +335,8 @@ class LiveControls(QObject):
         session = self.session
         if self._current() is not target or session.url != url:
             return  # something else plays now
+        if not self._may_reopen(target):
+            return  # no stream of its provider to spare (the caller says so)
         logger.info("Opening %s again after its stream ended", target.title)
         session.play(
             url, kind=kind, latency=self.config.live_latency, **stream_options(target.item)
@@ -275,9 +356,10 @@ class LiveControls(QObject):
 
     def _on_live_start_failed(self, message: str) -> None:
         if not self._closed():
+            message = translate(message)
             current = self._current()
             title = current.title if current is not None else ""
-            self._error(f"{title}: {message}" if title else message)
+            self._error(_named(title, message))
 
     def _on_live_mode(self, _mode: str) -> None:
         current = self._current()
@@ -289,6 +371,20 @@ class LiveControls(QObject):
     def _on_live_timeline(self, state: dict) -> None:
         current = self._current()
         if self._closed() or not self._tuner.running() or current is None or not current.live:
+            return
+        state = self.catchup.extend(state, current)  # the bar reaches into an archive
+        transport = self._transport
+        if transport.isVisible():
+            self._ticks = self._programme_ticks(current.item, state)
+        transport.update_timeline(state, self._ticks)
+
+    def _on_archive_changed(self) -> None:
+        """The archive's bar moved (it plays, opened, or was sought): the transport follows."""
+        current = self._current()
+        if self._closed() or current is None or not current.live:
+            return
+        state = self.catchup.timeline()
+        if state is None:
             return
         transport = self._transport
         if transport.isVisible():
@@ -312,7 +408,7 @@ class LiveControls(QObject):
             # Said when it matters, not at every tune: a rewind on a channel that plays
             # directly says it (the owner found the toast on load noise on slow channels).
             return
-        self._toast(text)
+        self._toast(translate(text))  # LiveSession's notices are English (N_) texts
 
     def on_playing(self) -> None:
         """The player plays (kept for the controller's call; nothing is held back now)."""
@@ -327,6 +423,7 @@ class LiveControls(QObject):
             # reached, and a retry would only be refused or take another device's slot.
             self.stop_tune()  # nothing plays: its slot goes back
             self._toast(self._refusal_text(message), "error", ERROR_MS)
+            self._explain_failure(current)
             return
         if current is not None and self.may_retry(current):
             self.retry(current)  # STB play tokens expire: a fresh link before the error
@@ -335,52 +432,142 @@ class LiveControls(QObject):
         if message in REFUSALS:
             self.stop_tune()  # nothing plays: its slot goes back
             self._toast(self._refusal_text(message), "error", ERROR_MS)
+            self._explain_failure(current)
             return
-        self._error(f"{title}: {message}" if title else message)
+        message = translate(message)  # the player's, or LiveSession's N_ texts
+        self._error(_named(title, message))
+        self._explain_failure(current)
+
+    def _explain_failure(self, current: Optional[Target]) -> None:
+        if current is not None:
+            self._explain(current.item, current.title)
 
     def _refusal_text(self, message: str) -> str:
         current = self._current()
         limit = self.limit(current.item if current is not None else None)
         if message != STREAM_REFUSED:
             return self.limit_text(limit)
-        if limit:
-            return f"{REFUSED_TEXT} allow only {_streams(limit)} at a time"
-        return f"{REFUSED_TEXT} limit concurrent streams"
+        if limit:  # a plain 403: maybe the limit
+            return tr_n(
+                # i18n: error toast
+                "The provider refused the stream — it may allow only {n} stream at a time",
+                "The provider refused the stream — it may allow only {n} streams at a time",
+                limit,
+            )
+        return tr("The provider refused the stream — it may limit concurrent streams")
+
+    # ---- recording (2.2) ----------------------------------------------------------------------
+
+    def toggle_recording(self) -> None:
+        """R and the record button: record the channel being watched from where it plays, or
+        stop recording (the file is kept; its toast follows once it is closed)."""
+        live, current = self.live, self._current()
+        if live is not None and live.recording():
+            live.stop_recording()
+            self._show_transport()
+            return
+        if current is None or not current.live:
+            return  # a movie or nothing: there is no live channel to record
+        if self.catchup.active():
+            self._toast(translate(NO_RECORDING_TEXT))
+            return
+        if live is None or not live.recordable() or not self.pipeline_live():
+            opening = live is not None and self._tuner.opening()
+            self._toast(translate(NOT_YET_TEXT if opening else NO_RECORDING))
+            return
+        when = self._now().astimezone()
+        if live.start_recording(recording.path_for(self.config, current.title, when)):
+            self._show_transport()
+
+    def _on_recording_changed(self, *_args: Any) -> None:
+        live = self.live
+        self._transport.set_recording(live.recording_since() if live is not None else None)
 
     # ---- the transport's time-shift controls --------------------------------------------------
 
     def seek_live(self, back: bool) -> bool:
-        """←/→ on a time-shifted channel: False when it is not one (the caller seeks)."""
+        """←/→ on a time-shifted channel (or its archive): False when it is not one (the
+        caller seeks)."""
+        step = -LIVE_SEEK_S if back else LIVE_SEEK_S
+        if self.catchup.active():
+            self.catchup.seek_relative(step)
+            self._show_transport()
+            return True
         if not self.pipeline_live() or self.live is None:
             return False
-        self.live.seek_relative(-LIVE_SEEK_S if back else LIVE_SEEK_S)
+        if not (back and self._rewind_to_archive(step)):
+            self.catchup.cancel()  # within the buffer: a probe for the archive is dropped
+            self.live.seek_relative(step)
         self._show_transport()
         return True
 
     def _seek_relative_ms(self, delta_ms: int) -> None:
-        if self.pipeline_live() and self.live is not None:
-            self.live.seek_relative(delta_ms / 1000.0)
+        seconds = delta_ms / 1000.0
+        if self.catchup.active():
+            self.catchup.seek_relative(seconds)
+        elif self.pipeline_live() and self.live is not None:
+            if not (seconds < 0 and self._rewind_to_archive(seconds)):
+                self.catchup.cancel()
+                self.live.seek_relative(seconds)
         else:
             self.session.seek_relative(delta_ms)
 
     def _seek_to(self, seconds: float) -> None:
-        if self.pipeline_live() and self.live is not None:
+        if self.catchup.active():
+            self.catchup.seek_to(seconds)  # the archive's bar is in Unix seconds
+        elif self.pipeline_live() and self.live is not None:
+            state = self._tuner.timeline
+            if state is not None and seconds < float(state["start"]) - _PAST_BUFFER_S:
+                if self._open_archive_at(state, seconds):
+                    return
+            self.catchup.cancel()  # within the buffer: a probe for the archive is dropped
             self.live.seek_to(seconds)
 
+    def _rewind_to_archive(self, seconds: float) -> bool:
+        """A step back from where the buffer plays that lands before its start opens the
+        archive there, when the channel has one: True when it did."""
+        state = self._tuner.timeline
+        if state is None:
+            return False
+        t = float(state["position"]) + seconds
+        return t < float(state["start"]) - _PAST_BUFFER_S and self._open_archive_at(state, t)
+
+    def _open_archive_at(self, state: dict, t: float) -> bool:
+        """The channel's archive at the time-shift timeline's `t` (its live edge is now)."""
+        current = self._current()
+        if current is None or self.catchup.offered(current) is None:
+            if self.catchup.known_failed(current):
+                self._toast(translate(NOT_AVAILABLE_TEXT))
+            return False
+        moment = self._now().timestamp() - (float(state["live_edge"]) - t)
+        return self.catchup.open(current, moment)
+
     def _set_speed(self, rate: float) -> None:
-        if self.pipeline_live() and self.live is not None:
+        if self.catchup.active():
+            self.session.set_rate(rate)
+            self.catchup.set_rate(rate)
+        elif self.pipeline_live() and self.live is not None:
             self.live.set_speed(rate)
         else:
             self.session.set_rate(rate)
 
     def go_live(self) -> None:
         current = self._current()
-        if current is not None and current.live and self._tuner.go_live():
+        if self.catchup.active():
+            self.catchup.go_live()  # the channel tunes again
+            self._show_transport()
+        elif current is not None and current.live and self._tuner.go_live():
+            self.catchup.cancel()  # a probe for the archive is dropped
             self._show_transport()
 
     def _programme_start(self) -> None:
-        """⏮: the start of the programme being watched if buffered, else the oldest point."""
+        """⏮: the start of the programme being watched if buffered, else the oldest point; on
+        a channel with an archive, a programme that began before the buffer from the archive
+        (and, playing the archive, the programme before when at a programme's start)."""
         current, state = self._current(), self._tuner.timeline
+        if self.catchup.active():
+            self._archive_programme_start()
+            return
         if not self.pipeline_live() or self.live is None or current is None or state is None:
             return
         now = self._now()
@@ -391,19 +578,49 @@ class LiveControls(QObject):
             start = edge - (now - programme.start).total_seconds()
             if programme.is_on(watching) and start >= oldest:
                 target = start
+            elif programme.is_on(watching) and self._open_archive_at(state, start):
+                self._show_transport()
+                return
+        self.catchup.cancel()
         self.live.seek_to(target)
         self._show_transport()
+
+    def _archive_programme_start(self) -> None:
+        current, position = self._current(), self.catchup.position()
+        if current is None or position is None:
+            return
+        watching = datetime.fromtimestamp(position, timezone.utc)
+        programme = self._programme_at(current.item, watching)
+        if programme is None:
+            self.catchup.seek_relative(-LIVE_SEEK_S)
+        else:
+            if (watching - programme.start).total_seconds() < _AT_START_S:
+                earlier = programme.start - timedelta(seconds=1)
+                programme = self._programme_at(current.item, earlier) or programme
+            self.catchup.seek_to(programme.start.timestamp())
+        self._show_transport()
+
+    def _programme_at(self, channel: dict, moment: datetime) -> Optional[Programme]:
+        for programme in self._programmes(channel, moment, 1):
+            if programme.is_on(moment):
+                return programme
+        return None
 
     def show_live_transport(self, target: Target) -> None:
         now = self._now_title(target.item)
         subtitle = now[0] if now else ""
         transport = self._transport
         transport.set_favorite(favorites.is_favorite(self.config, target.item))  # its star
+        if self.catchup.active():
+            transport.show_timeshift(target.title, subtitle, self._logo(target.item))
+            self._on_archive_changed()
+            return
         if not self.pipeline_live():
             transport.show_live(target.title, subtitle, self._logo(target.item))
             return
         transport.show_timeshift(target.title, subtitle, self._logo(target.item))
         timeline = self._tuner.timeline
         if timeline is not None:
+            timeline = self.catchup.extend(timeline, target)  # into an archive, if any
             self._ticks = self._programme_ticks(target.item, timeline)
             transport.update_timeline(timeline, self._ticks)

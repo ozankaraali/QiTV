@@ -683,6 +683,8 @@ class OnScreenKeysTests(unittest.TestCase):
             ("previous", t.previousRequested, t.button_rect("previous")),
             ("fullscreen", t.fullscreenRequested, t.button_rect("fullscreen")),
             ("pip", t.pipRequested, t.button_rect("pip")),
+            ("audio", t.audioRequested, t.button_rect("audio")),  # 2.2: they open panels
+            ("subtitles", t.subtitleRequested, t.button_rect("subtitles")),
         ):
             with self.subTest(name=name):
                 spy = QSignalSpy(signal)
@@ -698,11 +700,14 @@ class OnScreenKeysTests(unittest.TestCase):
         self.assertEqual([spy.at(i)[0] for i in range(spy.count())], [-10_000, -10_000])
 
     def test_the_sound_buttons_say_what_they_do(self):
-        # 2.0.1 review M3: ♪ and the subtitles had no tooltip (neither has a key).
+        # 2.0.1 review M3: ♪ and the subtitles had no tooltip; 2.2: they name their sync keys.
         t = self.make()
         t.show_vod("Film", "")
         t.update_position(0, 100_000)
-        for name, tooltip in (("audio", "Audio track"), ("subtitles", "Subtitles")):
+        for name, tooltip in (
+            ("audio", "Sound: track and sync (J, K)"),
+            ("subtitles", key_hint("Subtitles: track, file and sync", "Shift+J, Shift+K")),
+        ):
             self.assertEqual(t.tooltip_at(t.button_rect(name).center()), tooltip, name)
 
     def test_the_channels_name_shows_its_info(self):
@@ -1023,6 +1028,49 @@ class SmallWidthLayoutTests(unittest.TestCase):
                 for name, rect in rects.items():
                     self.assertGreaterEqual(rect.left(), 0, name)
                     self.assertLessEqual(rect.right(), width, name)
+
+    def test_less_room_drops_adjusted_then_the_name_before_cutting_the_text(self):
+        # Auto adjusted and adding buffer: the busiest state. At each width the indicator
+        # reads its whole text, else without "adjusted", else without its name, and only then
+        # is its text cut (or the indicator left out).
+        t = Transport(idle_ms=3000)
+        self.addCleanup(t.close)
+        t.set_pip_state(True, False)
+        t.show_timeshift("One", "")
+        slower = dict(self.state("live", 12.5, 0.95), target=10.0, auto=True, adjusted=True)
+        stages = set()
+        for width in range(1280, 296, -4):
+            t.setGeometry(0, 0, width, round(width * 9 / 16))
+            t.update_timeline(dict(slower, nudge=0.95), [])
+            variants = t._indicator_variants()
+            self.assertEqual(len(variants), 3)  # whole, without "adjusted", without the name
+            layout = t._layout()
+            box = layout.get("indicator")
+            if box is None:
+                stages.add("left out")
+                continue
+            un = Units(width)
+            fm = QFontMetricsF(t._indicator_font(un))
+
+            def needs(head, tail):
+                return t._indicator_bare(un, fm, head) + fm.horizontalAdvance(tail)
+
+            # Between ◀10 and the LIVE badge.
+            room = layout["live"].x() - un.px(0.8) - (layout["back10"].right() + un.px(1.5))
+            head, tail, _ = t._indicator_fit(un, box.width() + 0.01)
+            with self.subTest(width=width):
+                fitting = [v for v in variants if needs(*v) <= room + 0.01]
+                if not fitting:  # cut: the shortest, in all the room
+                    self.assertEqual((head, tail), variants[-1])
+                    self.assertAlmostEqual(box.width(), room, delta=0.01)
+                    stages.add("cut")
+                    continue
+                self.assertEqual((head, tail), fitting[0])  # the longest that fits
+                stages.add(variants.index((head, tail)))
+                self.assertAlmostEqual(box.width(), needs(head, tail), delta=0.01)
+                shown = f"{head} ● {tail}" if head else f"● {tail}"
+                self.assertEqual(t.indicator_text(), shown)
+        self.assertLessEqual({1, 2, "cut"}, stages)
 
     def test_a_wide_transport_shows_the_whole_indicator(self):
         t = Transport(idle_ms=3000)

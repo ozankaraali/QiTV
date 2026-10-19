@@ -12,6 +12,8 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 from shiboken6 import delete, isValid
 from timer_fixtures import elapse, wait_until
 
+from services import i18n
+from services.i18n import translate
 from ui.overlay_host import OverlayHost
 from ui.overlays.painting import MIN_FONT_PX
 from ui.overlays.pip_label import PipLabel
@@ -148,6 +150,27 @@ class PipFrameTests(FrameCase):
         self.assertIs(self.on_top_at_small_centre(), self.pip)
         with self.assertRaises(ValueError):
             frame.set_large("other")
+
+    def test_a_third_surface_by_name_is_hidden_until_it_has_a_role(self):
+        frame = self.make()
+        tile = self.surface_type(self.container)
+        frame.add_surface("t2", tile)
+        frame.show_pip()
+        self.assertTrue(tile.isHidden())
+        frame.set_large("t2")  # not the PiP's: main is hidden, pip stays small
+        self.assertEqual(tile.geometry(), self.container.rect())
+        self.assertTrue(self.main.isHidden())
+        self.assertEqual(self.pip.geometry(), BOTTOM_RIGHT)
+        frame.set_roles("main", "t2")
+        self.assertEqual(self.main.geometry(), self.container.rect())
+        self.assertEqual(tile.geometry(), BOTTOM_RIGHT)
+        self.assertTrue(self.pip.isHidden())
+        frame.set_large("t2")  # the PiP's: a swap
+        self.assertEqual(self.main.geometry(), BOTTOM_RIGHT)
+        with self.assertRaises(ValueError):
+            frame.add_surface("t2", tile)
+        with self.assertRaises(ValueError):
+            frame.set_roles("main", "main")
 
     def test_hide_pip_leaves_the_large_surface_large(self):
         frame = self.make()
@@ -630,6 +653,31 @@ class PipLabelTests(LabelCase):
         self.assertTrue(name.endswith("…") and len(name) > 1, name)
         self.assertEqual(shown, "LIVE")
         self.assertLessEqual(label.pill_rect().right(), label.button_rect("swap").left())
+
+    def test_a_longer_word_for_live_narrows_before_it_shrinks_under_9_px(self):
+        # A mini player (360 px): its PiP is 90 px wide. "DIRECTO" shrank to 7 px; now its
+        # letters get narrower at 9 px first, and LIVE is whole in every language.
+        self.addCleanup(i18n.set_language, "en")
+        for language in ("en", "tr", "de", "es", "fr"):
+            self.assertEqual(i18n.set_language(language), language)
+            host = QWidget()
+            host.resize(360, 203)
+            label = PipLabel(host)
+            label.follow(corner_rect(QSize(360, 203), "br"))
+            for state in ("LIVE", "REC", "−03:20", "−1:02:15"):
+                with self.subTest(language=language, state=state):
+                    label.set_info("Nature One HD", state)
+                    self.assertEqual(label.shown_text()[1], translate(state))  # whole
+                    font = label._layout().state_font
+                    narrowed = font.stretch() not in (0, 100)
+                    if font.pixelSize() > 9:
+                        self.assertFalse(narrowed)  # narrower letters only at 9 px or less
+                    if state == "LIVE":
+                        self.assertGreaterEqual(label.state_pixel_size(), 9)
+                    pill, speaker = label.pill_rect(), label.button_rect("speaker")
+                    self.assertTrue(QRectF(label.rect()).contains(pill))
+                    self.assertLessEqual(pill.right(), speaker.left())
+                    self.assertFalse(label.grab().isNull())
 
     def test_a_small_pip_leaves_the_swap_button_out_before_live_shrinks(self):
         # Under 160 px wide (a 640 px window): the pill (which swaps too) keeps LIVE whole.

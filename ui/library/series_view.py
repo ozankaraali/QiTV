@@ -26,6 +26,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QWidget
 
+from services.catalog import shown_label
+from services.i18n import N_, tr, translate
 from services.library import Details
 from services.navigation import episode_key, item_key
 from ui.library.poster_grid import poster_url
@@ -49,11 +51,11 @@ CHIP_GAP_U = 0.8
 ROW_H_U = 5.0
 SEASON_DEBOUNCE_MS = 250
 WATCHED_AT = 0.9
-LOADING_TEXT = "Loading…"
-ERROR_TEXT = "Couldn't load — press Enter to retry"
-EMPTY_SEASONS_TEXT = "No seasons"
-EMPTY_EPISODES_TEXT = "No episodes"
-START_OVER_TEXT = "↺ Start over"
+# What the series view shows instead of its episodes: shown with translate().
+LOADING_TEXT = N_("Loading…")
+ERROR_TEXT = N_("Couldn't load — press Enter to retry")
+EMPTY_SEASONS_TEXT = N_("No seasons")  # i18n: a series in the Library without seasons
+EMPTY_EPISODES_TEXT = N_("No episodes")  # i18n: a season in the Library without episodes
 
 SEASONS, EPISODES = "seasons", "episodes"
 
@@ -114,8 +116,9 @@ def episode_duration(episode: dict) -> str:
     if not minutes or minutes <= 0:
         return ""
     if minutes >= 60:
-        return f"{minutes // 60}h {minutes % 60:02d}m"
-    return f"{minutes} min"
+        # i18n: a running time, abbreviated (1h 5m)
+        return tr("{h}h {m}m", h=minutes // 60, m=f"{minutes % 60:02d}")
+    return tr("{n} min", n=minutes)  # i18n: an episode's running time in minutes, abbreviated
 
 
 class EpisodesModel(QAbstractListModel):
@@ -173,7 +176,8 @@ class EpisodesModel(QAbstractListModel):
         if role == NumberRole:
             return episode_number(item, row)
         if role in (TitleRole, Qt.DisplayRole):
-            return str(item.get("ename") or item.get("name") or item.get("title") or "")
+            title = str(item.get("ename") or item.get("name") or item.get("title") or "")
+            return shown_label(title)  # the loaders' "Episode 5" in the active language
         if role == DurationRole:
             return episode_duration(item)
         if role == ProgressRole:
@@ -218,7 +222,8 @@ class EpisodeRowDelegate(QStyledItemDelegate):
         p.drawText(
             QRectF(left, rect.y(), 4.5 * u, rect.height()),
             Qt.AlignLeft | Qt.AlignVCenter,
-            f"E{index.data(NumberRole)}",
+            # i18n: an episode's number in the Library's episode list (E: episode); max ~2 letters
+            tr("E{n}", n=index.data(NumberRole)),
         )
 
         duration = index.data(DurationRole) or ""
@@ -258,7 +263,8 @@ class EpisodeRowDelegate(QStyledItemDelegate):
                 fill_round(p, btn, qcolor(PALETTE.text, 0.12), 1.5 * u)
             p.setFont(units.font(1.0, QFont.Weight.DemiBold))
             p.setPen(qcolor(PALETTE.text))
-            p.drawText(btn, Qt.AlignCenter, START_OVER_TEXT)
+            # i18n: button on an episode row: play it from its beginning
+            p.drawText(btn, Qt.AlignCenter, "↺ " + tr("Start over"))
 
         title_x = left + 5.0 * u
         title_w = right - dur_w - check_w - btn_w - 1.0 * u - title_x
@@ -432,17 +438,17 @@ class SeriesView(QWidget):
     def _status(self) -> str:
         """The message replacing the episodes list, or '' when the list is shown."""
         if self._seasons_error:
-            return ERROR_TEXT
+            return translate(ERROR_TEXT)
         if self._episodes_error:
-            return ERROR_TEXT
+            return translate(ERROR_TEXT)
         if self._seasons is None and self._episodes is None:
-            return LOADING_TEXT
+            return translate(LOADING_TEXT)
         if self._seasons is not None and not self._seasons and self._episodes is None:
-            return EMPTY_SEASONS_TEXT
+            return translate(EMPTY_SEASONS_TEXT)
         if self._episodes is None:
-            return LOADING_TEXT
+            return translate(LOADING_TEXT)
         if not self._episodes:
-            return EMPTY_EPISODES_TEXT
+            return translate(EMPTY_EPISODES_TEXT)
         return ""
 
     def _is_error(self) -> bool:
@@ -608,7 +614,10 @@ class SeriesView(QWidget):
         # o_name: the provider's own name; normalize_seasons prefixes `name` with the series.
         name = str(season.get("o_name") or season.get("name") or season.get("title") or "")
         name = name.strip()
-        return name or f"Season {season.get('season_number') or idx + 1}"
+        if name:
+            return shown_label(name)  # the loaders' "Season 2" in the active language
+        # i18n: a season without a name of its own
+        return tr("Season {n}", n=season.get("season_number") or idx + 1)
 
     def _wrap(self, text: str, fm: QFontMetrics, width: int, lines: int) -> list[str]:
         key = (width, text)

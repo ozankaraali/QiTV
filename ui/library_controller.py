@@ -27,7 +27,10 @@ from typing import Callable, Optional
 from PySide6.QtCore import QObject, QPoint, Signal
 from PySide6.QtWidgets import QMenu
 
+from services import i18n
 from services.catalog import PROVIDER_LOADING_MESSAGE
+from services.failure_reasons import shown_message
+from services.i18n import N_, tr, tr_n, translate
 from services.library import (
     PINNED_TITLES,
     SORT_LABELS,
@@ -45,23 +48,33 @@ from services.watch_state import RESUME_MAX_RATIO, WatchState
 from ui.keymap import Action
 from ui.library.library_screen import LibraryScreen
 from ui.library.poster_grid import poster_url
-from ui.library.search_session import DEBOUNCE_MS, SECTION_LABELS, SearchSession
+from ui.library.search_session import DEBOUNCE_MS, SearchSession
 
 logger = logging.getLogger(__name__)
 
 
 def _titles(count: int) -> str:
     """The grid header's count: "1 title", "1,200 titles"."""
-    return f"{count:,} title" if count == 1 else f"{count:,} titles"
+    # i18n: the number of films or series in the Library's genre (beside its name)
+    return tr_n("{n} title", "{n} titles", count, n=i18n.number(count))
+
+
+def _no_section_text(source: str, section: str) -> str:
+    """What the grid says when the source has no such section (an M3U playlist's movies)."""
+    if section == "movies":
+        return tr("{source} has no movies", source=source)  # i18n: {source}: a provider's name
+    if section == "series":
+        return tr("{source} has no series", source=source)  # i18n: {source}: a provider's name
+    return tr("{source} has no live TV", source=source)  # i18n: {source}: a provider's name
 
 
 SEARCH_DEBOUNCE_MS = DEBOUNCE_MS
-LOADING_TEXT = "Loading…"
-EMPTY_TEXT = "Nothing here"
-RETRY_TEXT = "Couldn't load — press Enter to retry"
-SERIES_FAILED_NOTICE = "Couldn't load that series"
-UNKNOWN_PROVIDER_NOTICE = "That title's provider is no longer in your list"
-ZONES = ("nav", "genres", "grid", "series", "search")
+# What the grid or a toast shows: shown with translate().
+LOADING_TEXT = N_("Loading…")
+EMPTY_TEXT = N_("Nothing here")  # i18n: a Library genre without titles
+RETRY_TEXT = N_("Couldn't load — press Enter to retry")
+SERIES_FAILED_NOTICE = N_("Couldn't load that series")
+UNKNOWN_PROVIDER_NOTICE = N_("That title's provider is no longer in your list")
 _MOVES = {
     Action.NAV_LEFT: (-1, 0),
     Action.NAV_RIGHT: (1, 0),
@@ -237,7 +250,7 @@ class LibraryController(QObject):
     def _source_title(self) -> str:
         """The Library's source as the user reads it: a provider's name, or All providers."""
         name = self._catalog.current_provider_name()
-        return ALL_PROVIDERS_TITLE if name == ALL_PROVIDERS else name
+        return translate(ALL_PROVIDERS_TITLE) if name == ALL_PROVIDERS else name
 
     def _series_owner(self) -> str:
         """The provider of the series open (the one shown while none is)."""
@@ -268,9 +281,13 @@ class LibraryController(QObject):
             self._on_model_changed()
         self._focus("grid")
 
-    def open_search(self) -> None:
+    def open_search(self, query: str = "") -> None:
+        """The search; `query` (typed elsewhere: the channel list's find) is searched at once."""
         if self._closed:
             return
+        if query:
+            self._search.set_query(query)
+            self._search.run_now()
         if self._grid_content == "browse":  # the series view keeps its series current
             self._restore_item = self._current_item()
         self._series = None
@@ -491,7 +508,7 @@ class LibraryController(QObject):
             action.triggered.connect(lambda _checked=False, n=name: self._choose_source(n))
         if len(names) > 1:  # with one provider there is nothing to mix
             menu.addSeparator()
-            action = menu.addAction(ALL_PROVIDERS_TITLE)
+            action = menu.addAction(translate(ALL_PROVIDERS_TITLE))
             action.setCheckable(True)
             action.setChecked(current == ALL_PROVIDERS)
             action.triggered.connect(lambda _checked=False: self._choose_source(ALL_PROVIDERS))
@@ -539,25 +556,24 @@ class LibraryController(QObject):
         if not same:
             self._failed = False
         if not available:
-            label = SECTION_LABELS.get(model.section, model.section).lower()
             grid.set_header("", "", [], "")
             grid.set_sections([])
             grid.set_letter_index(None)
-            grid.set_message(f"{self._source_title()} has no {label}")
+            grid.set_message(_no_section_text(self._source_title(), model.section))
             return
         items = model.items()
         sorts: list[tuple[str, str]] = []
         if model.genre_id not in PINNED_TITLES:
-            sorts = [(s.value, SORT_LABELS[s]) for s in model.available_sorts()]
+            sorts = [(s.value, translate(SORT_LABELS[s])) for s in model.available_sorts()]
         count = "" if items is None else _titles(len(items))
         grid.set_header(self._genre_title(), count, sorts, model.sort.value)
         if not items:
             grid.set_sections([])
             grid.set_letter_index(None)
             if items is None:
-                grid.set_message(RETRY_TEXT if self._failed else LOADING_TEXT)
+                grid.set_message(translate(RETRY_TEXT if self._failed else LOADING_TEXT))
             else:
-                grid.set_message(EMPTY_TEXT)
+                grid.set_message(translate(EMPTY_TEXT))
             return
         grid.set_message(None)
         grid.set_sections([("", items)], keep_current=same)
@@ -578,7 +594,7 @@ class LibraryController(QObject):
         if self._grid_content == "browse":
             grid = self._screen.grid
             grid.set_sections([])
-            grid.set_message(RETRY_TEXT)
+            grid.set_message(translate(RETRY_TEXT))
 
     def _retry(self) -> None:
         self._failed = False
@@ -614,7 +630,7 @@ class LibraryController(QObject):
         """
         catalogs = self._catalog.catalogs
         if provider not in catalogs.names():
-            self.notice.emit(UNKNOWN_PROVIDER_NOTICE)
+            self.notice.emit(translate(UNKNOWN_PROVIDER_NOTICE))
             return
         ready = catalogs.is_ready(provider)
         loaded = (
@@ -760,13 +776,17 @@ class LibraryController(QObject):
         action = self._pending.action
         if not self._closed and action and action.provider not in self._catalog.catalogs.names():
             self._pending.cancel()
-            self.notice.emit(UNKNOWN_PROVIDER_NOTICE)
+            self.notice.emit(translate(UNKNOWN_PROVIDER_NOTICE))
 
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self._closed:
             return
         if self._pending.on_failed(name) is not None:
-            self.notice.emit(f"{name}: {message}" if name else message)
+            shown = shown_message(message)  # the catalog's message is English
+            if name:
+                # i18n: a toast: {provider} is a provider's name, {message} why it failed
+                shown = tr("{provider}: {message}", provider=name, message=shown)
+            self.notice.emit(shown)
 
     def _on_section_ready(self, provider: str, section: str) -> None:
         if self._closed:
@@ -780,7 +800,7 @@ class LibraryController(QObject):
             return
         if self._pending.on_section_failed(provider, section) is not None:
             logger.info("A pending %s section failed to load (%s)", section, message)
-            self.notice.emit(SERIES_FAILED_NOTICE)
+            self.notice.emit(translate(SERIES_FAILED_NOTICE))
 
     # ---- series -------------------------------------------------------------------------------
 

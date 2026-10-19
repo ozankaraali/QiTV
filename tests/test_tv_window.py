@@ -15,18 +15,29 @@ os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.*=false")
 
 from PySide6.QtCore import (
     QEvent,
+    QEventLoop,
     QLoggingCategory,
     QMargins,
+    QMimeData,
     QObject,
     QPoint,
+    QPointF,
     QRect,
     Qt,
     QTimer,
+    QUrl,
     qInstallMessageHandler,
 )
-from PySide6.QtGui import QContextMenuEvent, QGuiApplication, QKeySequence
+from PySide6.QtGui import (
+    QContextMenuEvent,
+    QDragEnterEvent,
+    QDropEvent,
+    QGuiApplication,
+    QKeySequence,
+)
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMenu
+from PySide6.QtWidgets import QApplication, QMenu, QWidget
+from gc_fixtures import collect_on_the_gui_thread
 from timer_fixtures import elapse, wait_until
 
 import main as qitv_main
@@ -78,6 +89,27 @@ HOST_ATTRIBUTES = ("config_manager", "provider_manager", "epg_manager", "image_m
 _OFFSCREEN_NOISE = "This plugin does not support"
 
 
+def drag_and_drop(target, paths):
+    """Drag `paths` (local files) over `target` and drop them there: (entered, dropped)."""
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+    copy, left = Qt.DropAction.CopyAction, Qt.MouseButton.LeftButton
+    point = QPoint(20, 20)
+    enter = QDragEnterEvent(point, copy, mime, left, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(target, enter)
+    drop = QDropEvent(QPointF(point), copy, mime, left, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(target, drop)
+    return enter.isAccepted(), drop.isAccepted()
+
+
+def subtitle_file(test) -> Path:
+    directory = tempfile.TemporaryDirectory()
+    test.addCleanup(directory.cleanup)
+    path = Path(directory.name) / "Channel.en.srt"
+    path.write_text("1\n00:00:00,000 --> 00:00:30,000\nHello\n", encoding="utf-8")
+    return path
+
+
 class WindowCase(unittest.TestCase):
     """A TVWindow over the local fixture provider in a temporary QITV_CONFIG_DIR.
 
@@ -90,6 +122,7 @@ class WindowCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        collect_on_the_gui_thread(cls)  # as main() does: the engine's supervisor never collects
         QLoggingCategory.setFilterRules("qt.qpa.*=false")
         previous = None
 
@@ -354,6 +387,23 @@ class TVWindowTests(WindowCase):
         self.close_window()
         self.assertFalse(timer.isActive())
 
+    def test_a_subtitle_file_is_refused_while_nothing_plays(self):
+        window = self.window
+        self.assertTrue(window.acceptDrops() and window.host.acceptDrops())
+        srt = subtitle_file(self)
+        for target in (window, window.host):
+            self.assertEqual(drag_and_drop(target, [srt]), (False, False))
+        self.assertEqual(self.toasts, [])
+
+    def test_the_sound_and_subtitles_panels_sit_over_the_mixer_under_the_drawer(self):
+        window, host = self.window, self.window.host
+        order = [w for w in host.children() if isinstance(w, QWidget) and w in host._overlays]
+        mixer, drawer = order.index(window.mixer), order.index(window.overlays.drawer)
+        sound, subtitles = order.index(window.sound_panel), order.index(window.subtitle_panel)
+        self.assertLess(mixer, sound)
+        self.assertLess(sound, subtitles)
+        self.assertLess(subtitles, drawer)
+
     def test_the_transport_covers_the_overlay_host(self):
         self.show()
         drawer = self.wait_for_drawer()
@@ -423,7 +473,10 @@ class TVWindowTests(WindowCase):
                 ("Quit", "Ctrl+Q"),
             ],
         )
-        self.assertEqual(shortcuts(menus["File"]), [("Open File…", "Ctrl+O"), ("Export", "")])
+        self.assertEqual(
+            shortcuts(menus["File"]),
+            [("Open File…", "Ctrl+O"), ("Export", ""), ("Open Recordings Folder", "")],
+        )
         export = menus["File"].actions()[1].menu()
         self.assertEqual(
             [a.text() for a in export.actions()],
@@ -435,6 +488,8 @@ class TVWindowTests(WindowCase):
                 ("Live TV", "Ctrl+1"),
                 ("Movies", "Ctrl+2"),
                 ("Series", "Ctrl+3"),
+                ("Multiview", "Ctrl+4"),
+                ("Restore Last Multiview", ""),
                 ("Search", "Ctrl+F"),
                 ("Refresh Channels and Guide", "Ctrl+R"),
                 ("Guide", "G"),
@@ -450,6 +505,7 @@ class TVWindowTests(WindowCase):
                 ("Mute", "M"),
                 ("Previous Channel", "Backspace"),
                 ("Go Live", "L"),
+                ("Record", "R"),
             ],
         )
         self.assertEqual(
@@ -464,6 +520,7 @@ class TVWindowTests(WindowCase):
             "Live TV",
             "Movies",
             "Series",
+            "Multiview",
             "Search",
             "Refresh Channels and Guide",
             "Mini Player",
@@ -490,9 +547,9 @@ class TVWindowTests(WindowCase):
         self.assertEqual(triggered, [])  # not "Channel list" re-opening the drawer
         for key in (Qt.Key.Key_F, Qt.Key.Key_M, Qt.Key.Key_Space):
             QTest.keyClick(self.window, key)
-        self.assertEqual(drawer.filter_text, "fm ")
-        QTest.keyClick(self.window, Qt.Key.Key_Backspace)  # edits the filter: not "previous"
-        self.assertEqual(drawer.filter_text, "fm")
+        self.assertEqual(drawer.find_text, "fm ")
+        QTest.keyClick(self.window, Qt.Key.Key_Backspace)  # edits the find: not "previous"
+        self.assertEqual(drawer.find_text, "fm")
         self.assertTrue(drawer.isVisible())
         self.assertFalse(self.window.isFullScreen())
         self.assertEqual(triggered, [])
@@ -549,6 +606,40 @@ class TVWindowTests(WindowCase):
         QTest.keyClick(window, Qt.Key.Key_F, ctrl)
         self.assertTrue(window.screens.library_shown())
         self.assertFalse(window.overlays.guide.isVisible())
+
+    def found(self, text):
+        """Type `text` in the open channel list; its find's rows once the channels came."""
+        drawer = self.window.overlays.drawer
+        QTest.keyClicks(self.window, text)
+        self.assertEqual(drawer.find_text, text)
+        right = drawer._columns["right"]
+        self.assertTrue(wait_until(lambda: any(n.layer == "item" for n in right.nodes)))
+        return drawer, right
+
+    def test_a_channel_the_find_found_plays_and_the_list_closes(self):
+        self.show()
+        self.wait_for_drawer()
+        drawer, right = self.found("channel 2")
+        row = next(r for r, n in enumerate(right.nodes) if n.title == "Channel 2")
+        drawer.move_by(row - right.nodes.index(drawer.highlighted()))
+        QTest.keyClick(self.window, Qt.Key.Key_Return)
+        zap = self.window.zap
+        self.assertTrue(
+            wait_until(lambda: (zap.context.current() or {}).get("name") == "Channel 2")
+        )
+        self.assertFalse(drawer.isVisible())
+
+    def test_the_finds_last_row_searches_the_library_with_its_words(self):
+        self.show()
+        self.wait_for_drawer()
+        drawer, right = self.found("channel")
+        drawer.move_by(len(right.nodes))  # the last row
+        self.assertEqual(drawer.highlighted().layer, "found_library")
+        QTest.keyClick(self.window, Qt.Key.Key_Return)
+        window = self.window
+        self.assertTrue(window.screens.library_shown())
+        self.assertEqual(window.library_controller.mode, "search")
+        self.assertEqual(window.library_controller.query, "channel")
 
     def test_the_librarys_fullscreen_button_toggles_fullscreen(self):
         # Windows and Linux hide the menu bar in fullscreen: the Library has a button for it.
@@ -1164,6 +1255,55 @@ class VlcWindowTests(WindowCase):
         self.assertIs(window.pip_live._tuning, tuning)
         self.assertEqual(tuning._path, os.path.join(self.config_dir, "live_tuning.json"))
 
+    def test_k_and_j_move_the_channels_sound_and_the_panel_shows_it(self):
+        # 2.2: on the large picture's player, kept for the channel in sound_sync.json.
+        window = self.window
+        self.assertEqual(window.sound_sync._path, os.path.join(self.config_dir, "sound_sync.json"))
+        self.open_first_channel()
+        self.assertTrue(wait_until(self.session_on(channel_urls()[0])))
+        for key in (Qt.Key.Key_K, Qt.Key.Key_K, Qt.Key.Key_K, Qt.Key.Key_J):
+            QTest.keyClick(window, key)
+        self.assertEqual(window.session.audio_delay(), 100)
+        self.assertIn(("Sound 100 ms later", "info"), self.toasts)
+        channel = window.controller._current.item
+        self.assertEqual(window.sound_sync.audio_ms(window.controller._sync_key(channel)), 100)
+        window.controller.mouse_moved()  # the player controls, then ♫
+        transport = window.overlays.transport
+        self.assertTrue(transport.isVisible())
+        transport.audioRequested.emit()
+        panel = window.sound_panel
+        self.assertTrue(panel.isVisible())
+        self.assertIn(panel, window.host.visible_overlays())
+        self.assertEqual(panel.model().sync.text, "Sound 100 ms later")
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertFalse(panel.isVisible())
+        self.assertTrue(transport.isVisible())  # Esc closed the panel only
+
+    def test_a_subtitle_file_dropped_on_the_window_or_its_overlays_shows(self):
+        # 2.2: libVLC adds it to the stream that plays; its track is named after the file.
+        window = self.window
+        srt = subtitle_file(self)
+        self.open_first_channel()
+        self.assertTrue(wait_until(self.session_on(channel_urls()[0], (PlaybackState.PLAYING,))))
+        self.assertEqual(drag_and_drop(window, [srt.with_suffix(".mkv")]), (False, False))
+        self.assertEqual(drag_and_drop(window.host, [srt]), (True, True))  # over the overlays
+        session = window.session
+
+        def shown():
+            return dict(session.subtitle_tracks()).get(session.subtitle_track()) == srt.name
+
+        self.assertTrue(wait_until(shown))
+        self.assertIn((f"Subtitles: {srt.name}", "info"), self.toasts)
+        self.assertEqual(drag_and_drop(window, [srt]), (True, True))  # on the video
+        window.controller.mouse_moved()
+        window.overlays.transport.subtitleRequested.emit()
+        panel = window.subtitle_panel
+        self.assertTrue(panel.isVisible())
+        self.assertIn(srt.name, [row.text for row in panel.model().rows])
+        QTest.keyClick(window, Qt.Key.Key_K, Qt.KeyboardModifier.ShiftModifier)
+        self.assertEqual(session.subtitle_delay(), 50)
+        self.assertEqual(panel.model().sync.text, "Subtitles 50 ms later")
+
     def test_down_tunes_the_second_channel(self):
         self.open_first_channel()
         self.assertTrue(wait_until(self.session_on(channel_urls()[0])))
@@ -1357,7 +1497,8 @@ class LivePipelineWindowTests(WindowCase):
 
         QTest.keyClick(self.window, Qt.Key.Key_P)  # closes the small picture: Channel 2
         self.assertFalse(sessions.pip_open())
-        self.assertTrue(wait_until(lambda: window.budget.holders(PROVIDER_NAME) == ["main"]))
+        # Channel 1's stream, large on the "pip" player, carries that player's name.
+        self.assertTrue(wait_until(lambda: window.budget.holders(PROVIDER_NAME) == ["pip"]))
         self.assertTrue(playing(pip, pip_live)())  # Channel 1 plays on, large
         self.assertEqual(window.pip_surface.geometry(), page)
         self.assertTrue(window.pip_surface.isVisible())  # on screen, not black (review C1)
@@ -1901,6 +2042,105 @@ class DrawerSettingsTests(WindowCase):
         self.assertEqual(heard.events, [])
         self.assertEqual(self.window.library_controller.mode, "search")
 
+    def click_where_search_was(self, open_search):
+        """`open_search()`, then at once a click where the drawer's ⌕ was; the mouse events the
+        Library's widget there heard."""
+        self.show()
+        drawer = self.wait_for_drawer()
+        host = drawer.window()
+        at = host.mapToGlobal(drawer.mapTo(host, drawer.search_rect().center().toPoint()))
+        open_search()
+        self.assertTrue(self.window.screens.library_shown())
+        inside = self.window.mapFromGlobal(at)
+        under = self.window.childAt(inside)
+        self.assertIsNotNone(under)
+        heard = MouseHeard(under)
+        QTest.mouseClick(self.window.windowHandle(), Qt.MouseButton.LeftButton, pos=inside)
+        self.assertEqual(self.window.library_controller.mode, "search")
+        return heard.events
+
+    def test_a_click_right_after_a_key_opened_the_search_reaches_the_library(self):
+        # A key makes no double-click: the next click is aimed at the Library (only the second
+        # click of a click that showed it, as on ⌕ above, reaches nothing).
+        ctrl_f = (self.window, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+        events = self.click_where_search_was(lambda: QTest.keyClick(*ctrl_f))
+        self.assertEqual(events, [QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease])
+
+    def test_a_click_right_after_the_menu_opened_the_search_reaches_the_library(self):
+        events = self.click_where_search_was(self.menu_actions()["Search"].trigger)
+        self.assertEqual(events, [QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease])
+
+    def test_a_click_on_the_menus_entry_keeps_its_second_click_off_the_library(self):
+        # On Windows and Linux the menu drops down over the page: a double-click on its Search
+        # entry put the second click on the Library it shows. Only its shortcut (above) and
+        # the menu's own keys are keys.
+        action = self.menu_actions()["Search"]
+
+        def click_the_entry():
+            menu = next(o for o in action.associatedObjects() if isinstance(o, QMenu))
+            menu.popup(self.window.mapToGlobal(QPoint(40, 40)))
+            self.assertTrue(QTest.qWaitForWindowExposed(menu))
+            QTest.mouseClick(
+                menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(action).center()
+            )
+
+        self.assertEqual(self.click_where_search_was(click_the_entry), [])
+        QTest.qWait(1)  # the click was handled: the next entry chosen by its keys is a key
+        self.assertFalse(self.window.menus._clicked)
+
+    def test_a_dialogs_own_loop_inside_a_menu_entry_guards_its_clicks(self):
+        # A menu entry (or a key) that opens a modal dialog: a click in the dialog's own event
+        # loop that shows a page is a click, whose second click is guarded.
+        self.show()
+        self.wait_for_drawer()
+        screens = self.window.screens
+        armed = []
+        with mock.patch.object(screens._second_click, "arm", lambda: armed.append(True)):
+            with screens.from_keys():
+                screens.open_library("movies")  # the key's own move: not guarded
+                self.assertEqual(armed, [])
+                loop = QEventLoop()
+
+                def clicked_in_the_dialog():
+                    screens.open_search()  # what a click in the dialog does meanwhile
+                    loop.quit()
+
+                QTimer.singleShot(0, clicked_in_the_dialog)
+                loop.exec()  # as a modal dialog's exec
+                screens.open_library("series")  # the key's again, once the dialog closed
+        self.assertEqual(armed, [True])
+
+    def test_a_closing_window_arms_no_guard(self):
+        self.show()
+        self.wait_for_drawer()
+        screens = self.window.screens
+        with (
+            mock.patch.object(screens._second_click, "arm") as arm,
+            mock.patch.object(self.window, "closing", return_value=True),
+        ):
+            screens._guard_second_click()
+        arm.assert_not_called()
+
+    def test_a_closing_window_keeps_no_click_off_another_window(self):
+        # The second-click guard filters the whole application. A window closed within the
+        # double-click interval of its last page move swallowed the first click on the next
+        # window (a test's last move, the next test's ‹ Library: CI, a fast runner).
+        other = QWidget()
+        self.addCleanup(other.deleteLater)
+        self.addCleanup(other.close)
+        other.resize(200, 200)
+        other.show()
+        self.assertTrue(QTest.qWaitForWindowExposed(other))
+        heard = MouseHeard(other)
+        self.show()
+        self.wait_for_drawer()
+        self.window.screens.open_library("movies")  # as the drawer's Movies row: armed
+        self.window.close()  # its first step lets go of the second click
+        QTest.mouseClick(other.windowHandle(), Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+        self.assertEqual(
+            heard.events, [QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease]
+        )
+
     def test_the_drawers_open_file_row_opens_a_file(self):
         # Ctrl/⌘+O without the menu bar (hidden in fullscreen on Windows and Linux).
         self.show()
@@ -2131,13 +2371,6 @@ class OptionsDialogTests(WindowCase):
         self.assertEqual(self.config.live_latency, "stable")  # applies until QiTV closes
         self.assertIn((SAVE_FAILED_TEXT, "error"), self.toasts)
         self.assertNotIn(self.config_dir, "\n".join(logs.output))
-
-    def test_cache_size_is_read_from_the_config_directory(self):
-        cache = Path(self.config_dir) / "cache"
-        (cache / "probe.bin").write_bytes(b"x" * 1024 * 1024)
-        self.provider_manager._cache_writer.submit(lambda: None).result(timeout=5)
-        expected = sum(f.stat().st_size for f in cache.rglob("*") if f.is_file()) / (1024 * 1024)
-        self.assertAlmostEqual(self.dialog().get_cache_size(), expected, places=3)
 
     def test_an_edit_that_keeps_the_connection_reloads_nothing_and_the_list_stays(self):
         # Polish: one provider, only its stream limit changed. Its cache was cleared, its

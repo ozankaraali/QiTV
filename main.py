@@ -75,6 +75,13 @@ def handle_replace_flag():
         logging.error(f"Failed to perform update replacement: {e}")
 
 
+def written_dirs(config_dir: str) -> list[str]:
+    """Where QiTV writes files through services.atomic_write: the config (and the channel
+    stores beside it), the guide cache and the provider cache."""
+    cache = os.path.join(config_dir, "cache")
+    return [config_dir, os.path.join(cache, "epg"), os.path.join(cache, "provider")]
+
+
 def _migrate_favorites(config_manager) -> None:
     """Old stars (bare names) become per-provider entries once; a failed save is only logged."""
     from services import favorites
@@ -87,12 +94,15 @@ def _migrate_favorites(config_manager) -> None:
 
 def main() -> int:
     from PySide6 import QtGui
-    from PySide6.QtCore import QLoggingCategory, qInstallMessageHandler
+    from PySide6.QtCore import QLocale, QLoggingCategory, qInstallMessageHandler
     from PySide6.QtWidgets import QApplication
     import qdarktheme
 
+    from services import i18n
+    from services.atomic_write import sweep_in_background
     from services.config_manager import ConfigManager, get_app_version
     from services.epg_manager import EpgManager
+    from services.gc_guard import GcGuard
     from services.image_manager import ImageManager
     from services.provider_manager import ProviderManager
     from services.sleep_manager import allow_sleep, prevent_sleep
@@ -121,6 +131,9 @@ def main() -> int:
     # the window responsive while it works.
     sys.setswitchinterval(0.0005)
     app = QApplication(sys.argv)
+    # Before any worker starts: garbage cycles are collected on this (the GUI) thread only.
+    gc_guard = GcGuard(app)
+    gc_guard.start()
 
     # Optional: capture Qt warnings to help debug thread/timer issues
     def _qt_msg_handler(mode, context, message):
@@ -145,10 +158,17 @@ def main() -> int:
             icon_path = os.path.join(sys._MEIPASS, "assets", "qitv.png")
 
     config_manager = ConfigManager()
+    # The language, before any window: every text is looked up as it is shown.
+    i18n.set_language(i18n.resolve(config_manager.language))
+    i18n.install_qt_translations(app)
+    # Qt's own widgets (spin boxes, date edits, file dialogs) write numbers and dates so too.
+    QLocale.setDefault(i18n.app_locale())
     _migrate_favorites(config_manager)
     image_manager = ImageManager(config_manager, config_manager.max_cache_image_size * 1024 * 1024)
     provider_manager = ProviderManager(config_manager)
     epg_manager = EpgManager(config_manager, provider_manager)
+    # Temporary files of writes killed midway, a day old, go (on a thread of their own).
+    sweep_in_background(written_dirs(config_manager.get_config_dir()))
 
     if platform.system() == "Windows":
         myappid = f"com.ozankaraali.qitv.{get_app_version()}"

@@ -14,14 +14,18 @@ overlay host, and its toast, hide with the player page.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
-from typing import Optional
+from typing import Iterator, Optional
 
-from PySide6.QtCore import QObject, QPoint
+from PySide6.QtCore import QObject, QPoint, QThread
 from PySide6.QtWidgets import QFileDialog, QWidget
 
 from services.exporter import ExportKind
+from services.failure_reasons import shown_message
+from services.i18n import tr
 from services.library import LibraryModel
+from ui.keymap import Action
 from ui.library_controller import LibraryController
 from ui.page_stack import PageStack
 from ui.pointer import SecondClickGuard
@@ -29,10 +33,23 @@ from ui.tv_controller import ERROR_MS, INFO_MS, scrub
 
 logger = logging.getLogger(__name__)
 
-MEDIA_FILTER = (
-    "Media files (*.mp4 *.m4v *.mkv *.avi *.mov *.webm *.ts *.m2ts *.mts *.mpg *.mpeg *.flv"
-    " *.wmv *.ogv *.mp3 *.m4a *.aac *.flac *.ogg *.opus *.wav *.m3u8);;All files (*)"
+# File → Open File…'s files (the dialog's filter, after its name).
+MEDIA_PATTERNS = (
+    "*.mp4 *.m4v *.mkv *.avi *.mov *.webm *.ts *.m2ts *.mts *.mpg *.mpeg *.flv"
+    " *.wmv *.ogv *.mp3 *.m4a *.aac *.flac *.ogg *.opus *.wav *.m3u8"
 )
+
+
+def _loop_level() -> int:
+    """How many event loops run on this (the GUI) thread: a modal dialog's exec adds one."""
+    return QThread.currentThread().loopLevel()
+
+
+def media_filter() -> str:
+    """Open File's filters: media files, then every file."""
+    media = tr("Media files")  # i18n: a file type in the Open File dialog
+    every = tr("All files")  # i18n: a file type in the Open File dialog
+    return f"{media} ({MEDIA_PATTERNS});;{every} (*)"
 
 
 class TVPages(QObject):
@@ -42,8 +59,10 @@ class TVPages(QObject):
         super().__init__(parent)
         self._window = window
         self._return_to_library = False  # the movie playing came from the Library
-        # After ‹ Library, ⌕ and the Movies/Series rows: see back_to_library.
+        # After ‹ Library, ⌕ and the Movies/Series rows: see _guard_second_click.
         self._second_click = SecondClickGuard(self)
+        # The event loop level a key or a menu item moves the pages at, else None: from_keys.
+        self._keys_level: Optional[int] = None
         self.library_model = LibraryModel(
             window.library_catalog, window.config_manager, window.watch, self
         )
@@ -92,15 +111,42 @@ class TVPages(QObject):
             stack.show_player()
         window.menus.set_player_enabled(not library)
 
+    def _guard_second_click(self) -> None:
+        """A click just showed another page: a double-click's second click would land on
+        whatever that page shows under the pointer, so for the double-click interval it reaches
+        nothing (SecondClickGuard). A key or a menu item makes no double-click (from_keys):
+        the next click is the user's own and reaches the page. A closing window arms nothing
+        (it let go of the guard: shutdown)."""
+        if self._window.closing():
+            return
+        if self._keys_level is None or self._keys_level != _loop_level():
+            self._second_click.arm()
+
+    @contextmanager
+    def from_keys(self) -> Iterator[None]:
+        """The page moves made inside come from a key or a menu item (TVWindow's keys, the
+        menus' shortcuts and keyed entries): no second click follows them. Only at this event
+        loop level: a modal dialog's own loop inside (exec) takes clicks, which are guarded."""
+        keyed, self._keys_level = self._keys_level, _loop_level()
+        try:
+            yield
+        finally:
+            self._keys_level = keyed
+
+    def shutdown(self) -> None:
+        """The window closes: the guard, which filters the whole application, lets go now
+        (another window's next click is not this one's second click)."""
+        self._second_click.disarm()
+
     def back_to_player(self) -> None:
         """⤢, a click on the corner player: the player page again, what plays as it was.
 
         A double-click's second click would land on the player page under the pointer (a
-        double-click there toggles fullscreen): it reaches nothing (see back_to_library).
+        double-click there toggles fullscreen): it reaches nothing (_guard_second_click).
         """
         if not self._window.closing() and self._window.pages.mode() == PageStack.CORNER:
             self._show_page(self._window.player_page)
-            self._second_click.arm()
+            self._guard_second_click()
 
     def stop_corner(self) -> None:
         """× on the corner player: what plays stops (today's stop for the Library) and the
@@ -112,30 +158,31 @@ class TVPages(QObject):
         self._set_return_to_library(False)
         window.controller.stop_for_library()
         self._show_page(window.library_page)
-        self._second_click.arm()
+        self._guard_second_click()
 
     def open_library(self, section: str) -> None:
         """Movies or Series: what plays goes on in a corner of the Library (nothing playing: the
         Library has the whole window).
 
         From the channel list's Movies and Series rows the Library shows at once, so a
-        double-click's second click reaches nothing (see back_to_library). Keys and the menu
-        arm the guard too: only a click within the double-click interval is dropped.
+        double-click's second click reaches nothing (_guard_second_click); after a key or
+        the menu the next click reaches the Library.
         """
         if self._window.closing():
             return
         self._enter_library()
         self.library_controller.open(section)
-        self._second_click.arm()
+        self._guard_second_click()
 
-    def open_search(self) -> None:
+    def open_search(self, query: str = "") -> None:
         """The quick search: from ⌕ (the player controls, the guide, the channel list) a
-        double-click's second click reaches nothing, as in open_library."""
+        double-click's second click reaches nothing, as in open_library. `query` is what the
+        channel list's find had typed (its films-and-series row)."""
         if self._window.closing():
             return
         self._enter_library()
-        self.library_controller.open_search()
-        self._second_click.arm()
+        self.library_controller.open_search(query)
+        self._guard_second_click()
 
     def _enter_library(self) -> None:
         window = self._window
@@ -184,6 +231,26 @@ class TVPages(QObject):
         self._set_return_to_library(False)
         window.controller.resume_live()
 
+    def toggle_multiview(self) -> None:
+        """View → Multiview: the grid over live TV (from the Library, live TV first: what
+        plays in its corner, or the last channel), or back to one picture."""
+        window = self._window
+        if window.closing():
+            return
+        if self.library_shown():
+            self.back_to_tv()
+        window.controller.handle(Action.MULTIVIEW)
+
+    def restore_multiview(self) -> None:
+        """View → Restore Last Multiview: the grid over live TV with the last grid's channels
+        (from the Library, live TV first)."""
+        window = self._window
+        if window.closing():
+            return
+        if self.library_shown():
+            self.back_to_tv()
+        window.controller.restore_multiview()
+
     def escape_to_library(self) -> bool:
         """Esc on a movie from the Library, with nothing open on the player: back to it.
 
@@ -213,7 +280,7 @@ class TVPages(QObject):
         """
         if not self._window.closing() and self._can_return():
             self._enter_library()
-            self._second_click.arm()
+            self._guard_second_click()
 
     def _can_return(self) -> bool:
         """The title playing, on its way or failed came from the Library, and no live channel
@@ -235,7 +302,8 @@ class TVPages(QObject):
         window = self._window
         if window.closing():
             return
-        path, _filter = QFileDialog.getOpenFileName(window, "Open File", "", MEDIA_FILTER)
+        title = tr("Open File")  # i18n: the title of the dialog that picks a media file
+        path, _filter = QFileDialog.getOpenFileName(window, title, "", media_filter())
         if not path or window.closing():
             return
         self._show_page(window.player_page)
@@ -254,13 +322,16 @@ class TVPages(QObject):
     # ---- messages -----------------------------------------------------------------------------
 
     def notify(self, text: str, kind: str = "info", ms: int = INFO_MS) -> None:
-        """A message on whichever page shows (each page has its toast)."""
+        """A message on whichever page shows (each page has its toast). A text marked where it
+        was written (the Library's, the exports') shows in the active language."""
         window = self._window
+        text = shown_message(text)
         for toast in (window.overlays.toast, window.library_toast):
             toast.show_message(text, kind, ms)
 
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self.library_shown():  # the player's toast says it too, but its page is hidden
-            self._window.library_toast.show_message(
-                scrub(f"{name}: {message}" if name else message), "error", ERROR_MS
-            )
+            message = shown_message(message)
+            if name:
+                message = tr("{name}: {message}", name=name, message=message)
+            self._window.library_toast.show_message(scrub(message), "error", ERROR_MS)

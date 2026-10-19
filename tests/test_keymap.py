@@ -122,6 +122,35 @@ class ClosedKeymapTests(unittest.TestCase):
     def test_tab_switches_the_mixers_rows(self):
         self.assertEqual(closed(K.Key_Tab, "\t"), (Action.TAB, ""))
 
+    def test_j_and_k_move_the_sound_and_with_shift_the_subtitles(self):
+        # 2.2, VLC's J and K; its G and H are the subtitles' there, but G is the guide here.
+        self.assertEqual(closed(K.Key_J, "j"), (Action.SOUND_EARLIER, ""))
+        self.assertEqual(closed(K.Key_K, "k"), (Action.SOUND_LATER, ""))
+        self.assertEqual(closed(K.Key_J, "J", SHIFT), (Action.SUBTITLES_EARLIER, ""))
+        self.assertEqual(closed(K.Key_K, "K", SHIFT), (Action.SUBTITLES_LATER, ""))
+        self.assertIsNone(closed(K.Key_J, "j", CTRL))
+        self.assertIsNone(closed(K.Key_K, "˚", ALT))
+
+    def test_j_and_k_are_free_everywhere_else(self):
+        # The channel list and the Library type them; the guide does nothing with them.
+        for mods, text in ((NONE, "j"), (SHIFT, "J")):
+            self.assertEqual(opened(K.Key_J, text, mods), (Action.NAV_TEXT, text))
+            self.assertEqual(library(K.Key_J, text, mods), (Action.NAV_TEXT, text))
+            self.assertIsNone(guide(K.Key_J, text, mods))
+            self.assertIsNone(guide(K.Key_K, text.replace("j", "k").replace("J", "K"), mods))
+        claimed = {  # the screens that act on letters (the others type them)
+            key
+            for context in ("player", "guide")
+            for keys, _what in SHORTCUTS[context]
+            for key in shortcut_keys(keys)
+            if key in ("J", "K", "H", "Shift+J", "Shift+K")
+        }
+        self.assertEqual(claimed, {"J", "K", "Shift+J", "Shift+K"})
+
+    def test_other_shifted_letters_still_act_as_their_letters(self):
+        self.assertEqual(closed(K.Key_L, "L", SHIFT), (Action.GO_LIVE, ""))
+        self.assertEqual(closed(K.Key_M, "M", SHIFT), (Action.MUTE, ""))
+
     def test_media_volume_keys(self):
         self.assertEqual(closed(K.Key_VolumeUp), (Action.VOL_UP, ""))
         self.assertEqual(closed(K.Key_VolumeDown), (Action.VOL_DOWN, ""))
@@ -344,7 +373,7 @@ class ContextTests(unittest.TestCase):
             self.assertIsNone(resolve(K.Key_P.value, CTRL, "p", context=context), context)
 
     def test_new_actions_exist(self):
-        for name in ("SEARCH", "FAVORITE", "NAV_HOME", "NAV_END", "LIBRARY", "GUIDE", "OPEN_FILE"):
+        for name in ("SEARCH", "FAVORITE", "NAV_HOME", "NAV_END", "LIBRARY", "GUIDE"):
             self.assertIn(name, Action.__members__)
 
 
@@ -369,6 +398,38 @@ class KeyHintTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def subtitles(key, text="", mods=NONE):
+    return resolve(int(key), mods, text, context="subtitles")
+
+
+class SubtitleSearchKeymapTests(unittest.TestCase):
+    """The OpenSubtitles search (2.2): it types like the channel list, and Ctrl/⌘+V pastes."""
+
+    def test_it_types_and_moves_like_the_channel_list(self):
+        self.assertEqual(subtitles(K.Key_A, "a"), (Action.NAV_TEXT, "a"))
+        self.assertEqual(subtitles(K.Key_L, "L", SHIFT), (Action.NAV_TEXT, "L"))  # not Go live
+        self.assertEqual(subtitles(K.Key_J, "j"), (Action.NAV_TEXT, "j"))  # not the sync
+        self.assertEqual(subtitles(K.Key_7, "7"), (Action.NAV_TEXT, "7"))  # not a channel
+        self.assertEqual(subtitles(K.Key_Up), (Action.NAV_UP, ""))
+        self.assertEqual(subtitles(K.Key_PageDown), (Action.NAV_PAGE_DOWN, ""))
+        self.assertEqual(subtitles(K.Key_Left), (Action.NAV_LEFT, ""))
+        self.assertEqual(subtitles(K.Key_Return, "\r"), (Action.NAV_ACTIVATE, ""))
+        self.assertEqual(subtitles(K.Key_Backspace, "\x08"), (Action.NAV_BACKSPACE, ""))
+        self.assertEqual(subtitles(K.Key_Escape, "\x1b"), (Action.ESCAPE, ""))
+
+    def test_ctrl_v_pastes_there_only(self):
+        self.assertEqual(subtitles(K.Key_V, "\x16", CTRL), (Action.PASTE, ""))
+        self.assertIsNone(opened(K.Key_V, "\x16", CTRL))
+        self.assertIsNone(closed(K.Key_V, "\x16", CTRL))
+        self.assertIsNone(library(K.Key_V, "\x16", CTRL))
+
+    def test_the_shortcuts_every_screen_has_still_work(self):
+        self.assertEqual(subtitles(K.Key_F, "", CTRL), (Action.SEARCH, ""))
+        self.assertEqual(subtitles(K.Key_F11), (Action.FULLSCREEN, ""))
+        self.assertEqual(subtitles(K.Key_MediaTogglePlayPause), (Action.PLAY_PAUSE, ""))
+        self.assertIsNone(subtitles(K.Key_P, "", CTRL))  # no picture-in-picture from here
 
 
 class ShortcutTableTests(unittest.TestCase):

@@ -16,6 +16,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QFont, QFontMetrics, QFontMetricsF, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QStyle, QStyledItemDelegate
 
+from services.catalog import shown_label
 from services.provider_ids import provider_of
 from services.zapping import ZapContext
 from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round
@@ -63,6 +64,10 @@ def tag_layout(
 
 
 LOGO_ROWS_MAX = 5000  # past this many rows the model does not index them by logo
+SINGLE_PASS_ROWS = 5000  # a list this long is laid out at once at a reset (a few ms)
+# A longer one, this many rows per event (~3 ms): row 150,000 of 200,000 has its place
+# ~0.5 s after a reset; at Qt's 100 rows per event, ~0.7 s.
+BATCH_ROWS = 1000
 
 
 class LazyNumbers:
@@ -174,7 +179,9 @@ class ChannelRowsModel(QAbstractListModel):
             return None
         item = self._items[row]
         if role == Qt.DisplayRole:
-            return item.get("name", "")
+            name = item.get("name", "")
+            # A name a loader made up ("Stream 2") in the active language.
+            return shown_label(name) if isinstance(name, str) else name
         if role == NumberRole:
             return self._numbers[row] if self._numbers is not None else item.get("number")
         if role == ProviderRole:
@@ -212,9 +219,13 @@ def column_focused(widget) -> bool:
 
 
 class ChannelRowDelegate(QStyledItemDelegate):
-    def __init__(self, scale: float = 1.0, parent=None) -> None:
+    def __init__(self, scale: float = 1.0, parent=None, *, provider_below: bool = False) -> None:
+        """`provider_below`: the provider's name starts the second line ("Harbor IPTV · what
+        is on") instead of following the channel's in a chip, which leaves the name the row's
+        whole width (the drawer's find, where long names from several providers must read)."""
         super().__init__(parent)
         self._scale = scale
+        self._provider_below = provider_below
 
     def _units(self, widget) -> Units:
         width = getattr(widget, "units_width", 100) or 100
@@ -267,6 +278,9 @@ class ChannelRowDelegate(QStyledItemDelegate):
         # text column
         width = max(0.0, right - x)
         now = str(index.data(NowRole) or "")
+        tag = str(index.data(ProviderRole) or "")
+        if self._provider_below and tag:
+            now, tag = (f"{tag} · {now}" if now else tag), ""
         progress = index.data(ProgressRole)
         progress = -1.0 if progress is None else float(progress)
         name_h, now_h, bar_h, gap = 2.1 * u, 1.7 * u, 0.3 * u, 0.4 * u
@@ -278,7 +292,6 @@ class ChannelRowDelegate(QStyledItemDelegate):
         name_font = units.font(1.6, QFont.Weight.DemiBold)
         p.setFont(name_font)
         p.setPen(qcolor(PALETTE.text))
-        tag = str(index.data(ProviderRole) or "")
         if tag:
             # The provider's name follows the channel's, in a chip; the name elides first.
             chip_font = tag_font(units)
@@ -325,13 +338,15 @@ class ChannelListView(QListView):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.units_width = 100
+        self._scroll_due: tuple[QPersistentModelIndex, QAbstractItemView.ScrollHint] | None = None
         self.setFrameShape(QFrame.NoFrame)
         self.setFocusPolicy(Qt.NoFocus)
         self.setUniformItemSizes(True)
-        # A single pass asks the model for every row (200,000 channels: ~1 s on the GUI
-        # thread at each reset); batches lay out the rows near the top first, the rest between
-        # events, and scrollTo/indexAt lay out as far as they need.
+        # A single pass asks the model for every row (200,000 channels: ~0.5 s on the GUI
+        # thread at each reset), so a longer list than SINGLE_PASS_ROWS is laid out in batches
+        # between events (see reset). Until its batch comes a row has no place: scrollTo waits.
         self.setLayoutMode(QListView.LayoutMode.Batched)
+        self.setBatchSize(BATCH_ROWS)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -340,6 +355,56 @@ class ChannelListView(QListView):
         self.setStyleSheet("QListView { background: transparent; border: none; }")
         self.viewport().setAutoFillBackground(False)
         self.clicked.connect(lambda idx: self.rowClicked.emit(idx.row()))
+
+    def reset(self) -> None:
+        """A new list (and a new model): laid out at once when short. In batches a row past
+        the first batch would have no place yet when the highlight is scrolled to it, and the
+        scroll position would be cut back to the first batch."""
+        self._scroll_due = None
+        model = self.model()
+        rows = model.rowCount() if model is not None else 0
+        mode = QListView.LayoutMode
+        self.setLayoutMode(mode.SinglePass if rows <= SINGLE_PASS_ROWS else mode.Batched)
+        super().reset()  # (the layout itself waits for the next event or for a row's place)
+
+    def scrollTo(self, index, hint=QAbstractItemView.ScrollHint.EnsureVisible) -> None:
+        self._scroll_due = None
+        super().scrollTo(index, hint)
+        if index.isValid() and not self.visualRect(index).isValid():
+            # A long list's row whose batch has not been laid out: scrolled to once it has.
+            self._scroll_due = (QPersistentModelIndex(index), hint)
+
+    def timerEvent(self, event) -> None:
+        super().timerEvent(event)  # (a batch of the layout among them)
+        if self._scroll_due is None:
+            return
+        due, hint = self._scroll_due
+        model = self.model()
+        if not due.isValid() or model is None:
+            self._scroll_due = None
+            return
+        index = model.index(due.row(), due.column(), self.rootIndex())
+        if self.visualRect(index).isValid():
+            self._scroll_due = None
+            self.updateGeometries()  # the scroll range grows only at the layout's end otherwise
+            super().scrollTo(index, hint)
+        elif self._laid_out(model) or self.viewport().rect().isEmpty():
+            # Every row has its place but this one, or there is no room: it never will. A
+            # later timer must not pull the list there.
+            self._scroll_due = None
+
+    def _laid_out(self, model) -> bool:
+        """Whether the layout reached the last row (no batch to come)."""
+        rows = model.rowCount(self.rootIndex())
+        return rows == 0 or self.visualRect(model.index(rows - 1, 0, self.rootIndex())).isValid()
+
+    def wheelEvent(self, event) -> None:
+        self._scroll_due = None  # the user scrolls: a scroll still waiting would undo it
+        super().wheelEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self._scroll_due = None  # shown again, the list is scrolled anew (or stays as it was)
+        super().hideEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() in NAV_BUTTONS:

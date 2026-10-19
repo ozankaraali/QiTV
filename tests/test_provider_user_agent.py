@@ -11,11 +11,13 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from services.epg_manager import EpgManager
+from services import provider_api
+from services.epg_manager import EpgManager, _xtream_cache_key
 from services.provider_api import CLIENT_HEADERS
 from services.workers import M3ULoaderWorker, XtreamLoaderWorker, XtreamSeriesInfoWorker
 from ui.settings_dialog import ProviderVerificationWorker
@@ -147,6 +149,13 @@ class BlockedLibraryAgentTests(unittest.TestCase):
         manager._fetch_epg_from_xtream(self.base, "user", "password")
         self.assertEqual([path for path, _ in self.requests], ["/xmltv.php"])
         self.assertTrue(any(manager.index.values()))  # a guide, not a failed source
+        # A stray path 2.2.0 cut off (the panel is at the root): the root's guide, once.
+        self.requests.clear()
+        with mock.patch.dict(provider_api._answered_at_root, clear=True):
+            manager._fetch_epg_from_xtream(f"{self.base}/c/", "user", "password")
+        self.assertEqual([path for path, _ in self.requests], ["/c/xmltv.php", "/xmltv.php"])
+        key = _xtream_cache_key(f"{self.base}/c/", "user")
+        self.assertTrue(manager.index.get(key))
 
     def test_xtream_verify_signs_in_instead_of_probing_the_host(self):
         # The bare host answers 502 here, so only a real sign-in can verify it.

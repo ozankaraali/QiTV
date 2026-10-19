@@ -13,6 +13,11 @@ Every key goes through ui.keymap: on the Library page to the LibraryController, 
 TVController, so the open drawer receives typed text. Single-key menu entries only show their
 key; modifier combinations are real shortcuts. Keys the keymap resolves are claimed before any
 shortcut or native menu key equivalent (ShortcutOverride), so nothing fires twice.
+
+A subtitle file dropped on the window (the video, its overlays or the Library with its corner
+player) loads with what plays (2.2; the controller says whether it would, while it is dragged).
+A dropped playlist file (.m3u, .m3u8) or provider link becomes a provider (ui/provider_drop.py);
+one drop may carry both kinds.
 """
 
 from __future__ import annotations
@@ -36,10 +41,15 @@ from PySide6.QtCore import (
     QRect,
     Qt,
     QTimer,
+    QUrl,
 )
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
+    QDesktopServices,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
     QGuiApplication,
     QKeyEvent,
     QMouseEvent,
@@ -48,14 +58,19 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QMainWindow,
     QWidget,
 )
 
-from services import free_channels, thread_cleanup
+from services import favorites, free_channels, thread_cleanup
+from services.account_check import AccountChecks
 from services.browsed_catalog import BrowsedCatalog
 from services.catalogs import Catalogs
+from services.catchup_memory import FILE_NAME as CATCHUP_FILE, CatchupMemory
 from services.connection_budget import ConnectionBudget
+from services.find import Preferences, preferences_for
+from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
 from services.live.engine import LiveEngine
@@ -69,15 +84,21 @@ from services.playback import (
     create_instance,
     default_args,
 )
+from services.provider_link import ProviderLink
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
+from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
+from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
 from services.thread_cleanup import has_pending_threads
 from services.update_checker import call_before_update
 from services.watch_state import WatchState
 from services.zapping import ZapController
+from ui import provider_drop
 from ui.bottom_band import BottomBand
 from ui.export_flow import ExportFlow
+from ui.find_session import FindSession
 from ui.free_channels_menu import show_menu as show_free_channels_menu
+from ui.grid_frame import GridFrame
 from ui.keymap import Action, as_int, resolve
 from ui.library.library_screen import LibraryScreen
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
@@ -87,11 +108,14 @@ from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.corner_controls import CornerControls
 from ui.overlays.drawer import Drawer
+from ui.overlays.grid_tiles import GridTiles
 from ui.overlays.guide import Guide
 from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
 from ui.overlays.pip_label import PipLabel
+from ui.overlays.subtitle_search import SubtitleSearchPage
 from ui.overlays.toast import Toast
+from ui.overlays.track_panel import TrackPanel
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import ZapBanner
@@ -99,6 +123,8 @@ from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
 from ui.settings_dialog import OptionsDialog
+from ui.subtitle_search import OnlineSetup
+from ui.track_controls import SUBTITLE_FILTER
 from ui.tv_controller import ERROR_MS, Overlays, TVController
 from ui.tv_menus import TVMenus
 from ui.tv_pages import TVPages
@@ -108,7 +134,7 @@ logger = logging.getLogger(__name__)
 
 WINDOW_NAME = "tv_window"
 TIMESHIFT_DIR = "timeshift"  # the live buffers' root, in the config directory
-CLOSING_TEXT = "Closing after background requests finish…"
+CLOSING_TEXT = N_("Closing after background requests finish…")  # i18n: a toast while QiTV quits
 CLOSE_RETRY_MS = 50
 CLOSE_THREAD_WAIT_MS = 30_000  # then quit anyway: a stuck worker must not keep QiTV open
 CLOSING_NOTICE_AFTER = 10  # close retries (half a second) before the notice shows
@@ -120,7 +146,7 @@ MINI_MARGIN = 10
 FULLSCREEN_EXIT_MS = 1500  # the longest wait for the platform to finish leaving fullscreen
 FULLSCREEN_SETTLE_MS = 5000  # the longest wait for macOS to report a fullscreen change
 # config.json could not be written (locked by antivirus, read-only, a full disk).
-SAVE_FAILED_TEXT = "Couldn't save the settings; changes will be lost when QiTV closes"
+SAVE_FAILED_TEXT = N_("Couldn't save the settings; changes will be lost when QiTV closes")
 ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
 # The Qt platform whose window ids libVLC can draw into (NSView, HWND, X11 window).
 _NATIVE_PLATFORMS = {"Darwin": "cocoa", "Windows": "windows", "Linux": "xcb"}
@@ -301,7 +327,8 @@ class TVWindow(QMainWindow):
         self._fs_settle.timeout.connect(self._fullscreen_settled)
         self._fit_fallback = QTimer(self, singleShot=True, interval=FULLSCREEN_EXIT_MS)
         self._fit_fallback.timeout.connect(self._fit_to_screen)
-        self._bound_pip: Optional[int] = None  # the PiP surface's native window, once bound
+        # Each other player's surface's native window, once bound (the PiP's, the tiles').
+        self._bound: dict[str, int] = {}
         self._drag: Optional[tuple[QPoint, QPoint]] = None  # (press, window position)
         self._dragged = False  # the last press on the video moved the mini player
         self._pressed = False  # the left button is down on the video
@@ -309,6 +336,7 @@ class TVWindow(QMainWindow):
 
         self.setWindowTitle("QiTV")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAcceptDrops(True)  # subtitle files, playlists or provider links dropped on it
         # The player page is the video container: the large surface fills it, and picture in
         # picture puts the other one in a corner (the PiP frame lays them out). The page paints
         # the black behind the video; the surfaces paint nothing (see ui/video_surface.py).
@@ -319,7 +347,9 @@ class TVWindow(QMainWindow):
         self.player_page.setAutoFillBackground(True)
         self.surface = VideoSurface(self.player_page)
         self.pip_surface = VideoSurface(self.player_page)
-        for surface in (self.surface, self.pip_surface):
+        # Every player's surface by its slot's name; a multiview's tiles add theirs.
+        self.surfaces: dict[str, VideoSurface] = {"main": self.surface, "pip": self.pip_surface}
+        for surface in self.surfaces.values():
             surface.installEventFilter(self)  # before the PiP frame's: it sees them first
         # The first frame: then the libraries background jobs need load (services.lazy_import).
         self._first_frame = False
@@ -334,6 +364,8 @@ class TVWindow(QMainWindow):
         self.setCentralWidget(self.pages)
         # Glued to the page, not a surface: either surface may be the large one.
         self.host = OverlayHost(self, self.player_page)  # shown only while the page is
+        self.host.setAcceptDrops(True)  # a window of its own: a drop on the overlays
+        self.host.installEventFilter(self)
 
         # One catalog per provider behind the hub; each page browses its own provider's.
         # provider_manager stays the registry (the provider list Settings edits).
@@ -390,35 +422,25 @@ class TVWindow(QMainWindow):
             self.pip_live = LiveSession(self.engine, self.pip_session, tuning=self.live_tuning)
             self.engine.start()
             self.sessions = SessionManager(
-                Slot(
-                    "main",
-                    self.session,
-                    self.live_session,
-                    tuner=LiveTuner(
-                        self.session, config_manager, self.live_session, self.budget, self
-                    ),
-                ),
-                Slot(
-                    "pip",
-                    self.pip_session,
-                    self.pip_live,
-                    tuner=LiveTuner(
-                        self.pip_session,
-                        config_manager,
-                        self.pip_live,
-                        self.budget,
-                        self,
-                        purpose="pip",
-                    ),
-                ),
+                self._slot("main", self.session, self.live_session),
+                self._slot("pip", self.pip_session, self.pip_live),
                 self.budget,
                 parent=self,
             )
-            main_tuner, pip_tuner = self.sessions.large().tuner, self.sessions.other().tuner
-            assert isinstance(main_tuner, LiveTuner) and isinstance(pip_tuner, LiveTuner)
-            one_disk_ring(main_tuner, pip_tuner)  # the user's disk cap is the total
-            wait_for_each_other(main_tuner, pip_tuner)  # a closing PiP may hold the last slot
+            self._join_tuners()
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
+        # Each channel's sound sync (J/K, the Sound panel), written off the GUI thread.
+        self.sound_sync = SoundSync(os.path.join(config_manager.get_config_dir(), SOUND_SYNC_FILE))
+        # Whether each channel's provider archive answered (catch-up, 2.2).
+        self.catchup_memory = CatchupMemory(
+            os.path.join(config_manager.get_config_dir(), CATCHUP_FILE)
+        )
+        # The subtitles downloaded from OpenSubtitles for each title (2.2), and the folder.
+        self.subtitle_picks = SubtitlePicks(
+            os.path.join(config_manager.get_config_dir(), SUBTITLE_PICKS_FILE),
+            config_manager.subtitles_dir(),
+        )
+        self.jobs = JobRunner(self)  # the Library's searches, the exports, OpenSubtitles
 
         # The drawer and column ask the controller for "now" titles, and the controller
         # needs the overlays: a closure breaks the cycle.
@@ -430,9 +452,16 @@ class TVWindow(QMainWindow):
         def guide_programmes(channel: dict, start: datetime, limit: int):
             return catalog.programmes(channel, start, limit=limit)
 
+        def archive_days(channel: dict) -> int:
+            return controller.archive_days(channel)
+
         host = self.host
+        self.grid_tiles = GridTiles(host)  # the multiview's labels, focus ring, "+" and cards
         self.pip_label = PipLabel(host)
         self.mixer = Mixer(host)
+        self.sound_panel = TrackPanel(host)
+        self.subtitle_panel = TrackPanel(host)
+        self.subtitle_search = SubtitleSearchPage(host)
         self.corner_controls = CornerControls(host)
         self.overlays = Overlays(
             banner=ZapBanner(host),
@@ -440,28 +469,42 @@ class TVWindow(QMainWindow):
             drawer=Drawer(self.nav, self.logos, now_provider, parent=host),
             transport=Transport(host),
             toast=Toast(host),
-            guide=Guide(self.logos, guide_programmes, _local_now, parent=host),
+            guide=Guide(
+                self.logos, guide_programmes, _local_now, parent=host, archive_days=archive_days
+            ),
             next_card=NextCard(host),
             welcome=WelcomeCard(host),
             pip_label=self.pip_label,
             mixer=self.mixer,
+            sound_panel=self.sound_panel,
+            subtitle_panel=self.subtitle_panel,
+            subtitle_search=self.subtitle_search,
             library_toast=self.library_toast,
         )
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
         # bottom corner's PiP: its pill, ⇄, speaker and × stay within reach; elsewhere on the
         # PiP the transport keeps only its own buttons and bar, and other clicks reach the
-        # small picture (OverlayHost.set_hole). The mixer shows over both (it sits above the
-        # transport's controls and beside the PiP). The drawer and the guide cover them all.
+        # small picture (OverlayHost.set_hole). The multiview's tiles are drawn under all of
+        # them, and take their clicks over the transport but for its buttons and bar
+        # (GridTiles.hits). The mixer shows over them (it sits above the transport's controls
+        # and beside the PiP), and the Sound and Subtitles panels over it (above their
+        # buttons). The drawer and the guide cover them all; the OpenSubtitles search covers
+        # the player with its backdrop, under the corner player's controls and the toast.
         for overlay in (
+            self.grid_tiles,
             self.overlays.banner,
             self.overlays.column,
             self.overlays.transport,
+            self.grid_tiles.hits,
             self.pip_label,
             self.mixer,
+            self.sound_panel,
+            self.subtitle_panel,
             self.overlays.drawer,
             self.overlays.guide,
             self.overlays.next_card,
             self.overlays.welcome,
+            self.subtitle_search,
             self.corner_controls,
             self.overlays.toast,
         ):
@@ -486,6 +529,9 @@ class TVWindow(QMainWindow):
         self.pip_label.pillPressed.connect(self.pip_frame.pill_press)
         self.pip_label.pillMoved.connect(self.pip_frame.pill_move)
         self.pip_label.pillReleased.connect(self.pip_frame.pill_release)
+        # The multiview lays the surfaces out as tiles of the page (no surface moves pages);
+        # after the PiP frame's filters, so it sees the tiles' presses first.
+        self.grid_frame = GridFrame(self.player_page, self.surfaces, self.grid_tiles)
         controller = TVController(
             config=config_manager,
             catalog=self.catalog,
@@ -500,13 +546,22 @@ class TVWindow(QMainWindow):
             budget=self.budget,
             sessions=self.sessions,
             pip_frame=self.pip_frame,
+            sound_sync=self.sound_sync,
+            catchup_memory=self.catchup_memory,
+            pick_subtitle_file=self.pick_subtitle_file,
+            # Why a channel or a provider failed, asked of its account (no stream opened).
+            account_checks=AccountChecks(config_manager, parent=self),
+            online_subtitles=OnlineSetup(self.jobs, self.subtitle_picks, self.open_url),
+            grid_frame=self.grid_frame,
+            grid_tiles=self.grid_tiles,
+            host=self.host,
+            make_slot=self._make_slot,
             parent=self,
         )
         self.controller = controller
         # Wired before the Library connects to the catalog: on providerReady the controller
         # settles the provider change before a Library play waiting for it runs.
         controller.wire()
-        self.jobs = JobRunner(self)  # the Library's searches and the exports
         self.screens = TVPages(self, self)  # the Library's controller and the page moves
         self.library_controller = self.screens.library_controller
         self.exports = ExportFlow(
@@ -535,10 +590,25 @@ class TVWindow(QMainWindow):
         self.overlays.welcome.addRequested.connect(self.add_provider)
         self.overlays.welcome.freeRequested.connect(self.show_free_channels)
         self.overlays.drawer.actionRequested.connect(self.menus.on_drawer_action)
+        # The channel list's find: genres and channels at every provider, found in a worker;
+        # its last row looks for films and series in the Library's search.
+        self.finder = FindSession(
+            self.provider_manager,
+            self.jobs,
+            loaded=self.catalog.loaded_contents,
+            signature=self._find_signature,
+            preferences=self._find_preferences,
+            parent=self,
+        )
+        self.overlays.drawer.set_finder(self.finder)
+        # Its index holds the catalogs' channels: a refresh or an edited list lets them go.
+        self.catalogs.contentChanged.connect(self.finder.content_changed)
+        self.catalogs.providersChanged.connect(self.finder.content_changed)
+        self.overlays.drawer.libraryFindRequested.connect(self.screens.open_search)
         # A Windows self-update waits for background threads: the engine's must stop first,
         # and start again if the update cannot launch.
         call_before_update(self.stop_live, self.restart_live)
-        sources = (self.surface, self.pip_surface, self.host)
+        sources = (*self.surfaces.values(), self.host)
         # The pointer over the video goes with the player controls (and comes back on a move).
         self.pointer = PointerHider(
             sources,
@@ -547,18 +617,76 @@ class TVWindow(QMainWindow):
             parent=self,
         )
         for source in sources:
-            source.clicked.connect(self._on_video_clicked)
-            source.doubleClicked.connect(controller.video_double_clicked)
-            source.mouseMoved.connect(self.pointer.moved)
-            source.mouseMoved.connect(controller.mouse_moved)
-            source.wheelSteps.connect(controller.wheel)
-            source.backPressed.connect(controller.mouse_back)
-            source.forwardPressed.connect(controller.mouse_forward)
+            self._wire_source(source)
         self.epg_refresh = QTimer(self, interval=EPG_REFRESH_MS)  # the guide keeps moving
         self.epg_refresh.timeout.connect(lambda: self.catalog.refresh_epg())
 
         self.menus.build()
         config_manager.apply_window_settings(WINDOW_NAME, self)
+
+    # ---- the players --------------------------------------------------------------------------
+
+    def _slot(self, name: str, playback: PlaybackSession, live: LiveSession) -> Slot:
+        """A player's slot: its tuner's budget slots carry the slot's name."""
+        tuner = LiveTuner(playback, self.config_manager, live, self.budget, self, purpose=name)
+        return Slot(name, playback, live, tuner=tuner)
+
+    def _join_tuners(self) -> None:
+        """Every player's tuner: one disk ring among them (the user's disk cap is the total),
+        and a direct open waits for the others' closing streams (one may hold the last slot)."""
+        if self.sessions is None:
+            return
+        tuners = [slot.tuner for slot in self.sessions.slots()]
+        live_tuners = [t for t in tuners if isinstance(t, LiveTuner)]
+        one_disk_ring(*live_tuners)
+        wait_for_each_other(*live_tuners)
+
+    def _wire_source(self, source) -> None:
+        """A surface (or the host over them): its clicks, moves, wheel and side buttons."""
+        controller = self.controller
+        source.clicked.connect(self._on_video_clicked)
+        source.doubleClicked.connect(controller.video_double_clicked)
+        source.mouseMoved.connect(self.pointer.moved)
+        source.mouseMoved.connect(controller.mouse_moved)
+        source.wheelSteps.connect(controller.wheel)
+        source.backPressed.connect(controller.mouse_back)
+        source.forwardPressed.connect(controller.mouse_forward)
+
+    def _make_slot(self, name: str) -> Optional[Slot]:
+        """A multiview tile's player: a surface on the player page (hidden until the grid lays
+        it out), a player, a live session and a tuner, known to the session manager, the
+        frames, the pointer and the controller. None without libVLC."""
+        if (
+            self._closing
+            or self.sessions is None
+            or self.engine is None
+            or self._instance is None
+            or name in self.surfaces
+        ):
+            return None
+        surface = VideoSurface(self.player_page)
+        surface.hide()
+        surface.installEventFilter(self)  # before the frames': it sees them first
+        self.surfaces[name] = surface
+        hardware = self.config_manager.hardware_decoding
+        playback = PlaybackSession(self._instance, self, hardware=hardware)
+        live = LiveSession(self.engine, playback, tuning=self.live_tuning)
+        slot = self._slot(name, playback, live)
+        self.sessions.add_slot(slot)
+        self._join_tuners()
+        self.pip_frame.add_surface(name, surface)
+        self.grid_frame.add_surface(name, surface)
+        self.pointer.add_widget(surface)
+        self._wire_source(surface)
+        self.controller.slot_added(slot)
+        self._bind_video()
+        return slot
+
+    def _players(self) -> list[tuple[str, Session]]:
+        """Every player by its slot's name (the main one alone without libVLC)."""
+        if self.sessions is None:
+            return [("main", self.session)]
+        return [(slot.name, slot.playback) for slot in self.sessions.slots()]
 
     # ---- state the menus and pages read -------------------------------------------------------
 
@@ -586,6 +714,19 @@ class TVWindow(QMainWindow):
             self.corner_controls.hide()
             if mode == PageStack.PLAYER and not self.pip_frame.small_rect().isEmpty():
                 self.pip_label.show()  # the corner hid it; the PiP only shows it when it opens
+
+    def open_url(self, url: str) -> None:
+        """A web page in the browser (OpenSubtitles' sign-up and API key page)."""
+        if not self._closing:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def pick_subtitle_file(self, folder: str) -> str:
+        """The Subtitles panel's "Load a file…": a subtitle file, from `folder` ("": none)."""
+        if self._closing:
+            return ""
+        title = tr("Load subtitles")  # i18n: the title of the dialog that picks a subtitle file
+        path, _filter = QFileDialog.getOpenFileName(self, title, folder, translate(SUBTITLE_FILTER))
+        return path if not self._closing else ""
 
     def _on_corner_sound(self) -> None:
         self.controller.handle(Action.MUTE)
@@ -627,6 +768,10 @@ class TVWindow(QMainWindow):
             return
         action, payload = resolved
         event.accept()
+        with self.screens.from_keys():  # a page a key shows gets no second click
+            self._act(action, payload, key=as_int(event.key()))
+
+    def _act(self, action: Action, payload: str, key: int) -> None:
         if action is Action.ESCAPE and self.exports.cancel():
             return  # Esc while exporting cancels the export
         if self.screens.library_shown():
@@ -639,7 +784,7 @@ class TVWindow(QMainWindow):
             return
         if action is Action.ESCAPE and self.screens.escape_to_library():
             return
-        self.controller.handle(action, payload, key=as_int(event.key()))
+        self.controller.handle(action, payload, key=key)
 
     def _on_video_clicked(self) -> None:
         if self._dragged:  # the press moved the mini player
@@ -651,8 +796,74 @@ class TVWindow(QMainWindow):
             return
         self.controller.video_clicked()
 
+    # ---- dropped files -------------------------------------------------------------------------
+
+    @staticmethod
+    def _dropped_paths(event: QDropEvent) -> list[str]:
+        mime = event.mimeData()
+        if mime is None or not mime.hasUrls():
+            return []
+        return [url.toLocalFile() for url in mime.urls() if url.isLocalFile()]
+
+    @staticmethod
+    def _dropped_texts(event: QDropEvent) -> list[str]:
+        """Dropped web addresses and text: a provider's link, maybe (2.2)."""
+        mime = event.mimeData()
+        if mime is None:
+            return []
+        texts = [url.toString() for url in mime.urls() if not url.isLocalFile()]
+        if mime.hasText():
+            texts.append(mime.text())
+        return texts
+
+    def _dropped_providers(self, event: QDropEvent) -> tuple[list[str], list[ProviderLink]]:
+        """The playlist files and provider links a drop carries (ui/provider_drop.py)."""
+        files = provider_drop.playlist_files(self._dropped_paths(event))
+        return files, provider_drop.links(self._dropped_texts(event))
+
+    def _on_drag(self, event: QDropEvent) -> None:
+        """Dragged over the window (or its overlays): taken only when it would load: subtitle
+        files for what plays, or a playlist file or a provider's link (2.2)."""
+        files, links = self._dropped_providers(event)
+        subtitles = self.controller.accepts_subtitles(self._dropped_paths(event))
+        if not self._closing and (subtitles or files or links):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def _on_drop(self, event: QDropEvent) -> None:
+        """Subtitle files go to what plays; playlist files and links become providers."""
+        if self._closing:
+            event.ignore()
+            return
+        subtitles = self.controller.drop_subtitles(self._dropped_paths(event))
+        files, links = self._dropped_providers(event)
+        added = bool(files or links)
+        if added:
+            # After the drop: adding switches the list, and a portal's form is a dialog.
+            QTimer.singleShot(0, self, lambda: self.add_dropped_providers(files, links))
+        if subtitles or added:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        self._on_drag(event)
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        self._on_drag(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        self._on_drop(event)
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if watched in (self.surface, self.pip_surface) and isinstance(event, QMouseEvent):
+        if isinstance(watched, OverlayHost) and isinstance(event, QDropEvent):  # drags too
+            if event.type() == QEvent.Type.Drop:
+                self._on_drop(event)
+            else:
+                self._on_drag(event)
+            return True
+        if isinstance(event, QMouseEvent) and watched in self.surfaces.values():
             if event.type() in _CLICK_EVENTS:
                 reclaim_first_responder(self)  # macOS: libVLC's view took the keys
             if event.type() in _MOUSE_EVENTS:
@@ -775,6 +986,7 @@ class TVWindow(QMainWindow):
         """Frameless and on top, a quarter of the screen wide in the bottom-right corner."""
         if self._closing or self._mini_waiting:
             return
+        self.controller.leave_multiview()  # the mini player shows one picture
         if self._mini_restore is not None:
             self._leave_mini()
         elif self.isFullScreen():
@@ -927,14 +1139,69 @@ class TVWindow(QMainWindow):
             OptionsDialog(self).exec()
             self.menus.rebuild_providers()
 
-    def add_provider(self) -> None:
-        """Settings on the Providers tab, with a new provider to fill in (spec §8)."""
+    def add_provider(self, link: Optional[ProviderLink] = None) -> None:
+        """Settings on the Providers tab, with a new provider to fill in (spec §8); from
+        `link` when one was dropped (a portal's, whose MAC the user adds)."""
         if self._closing:
             return
         dialog = OptionsDialog(self)
         dialog.start_new_provider()
+        if link is not None:
+            dialog.fill_from_link(link)
         dialog.exec()
         self.menus.rebuild_providers()
+
+    def add_dropped_providers(self, files: list[str], links: list[ProviderLink]) -> None:
+        """Playlist files and provider links dropped on the window (2.2) become providers, as
+        Free channels adds one: the list switches to the last one and a toast says so. One
+        already in the list is only switched to. A portal's link without its MAC opens the
+        add-provider form filled in instead."""
+        if self._closing:
+            return
+        entries = [provider_drop.file_entry(path) for path in files]
+        form: Optional[ProviderLink] = None
+        for link in links:
+            entry = provider_drop.link_entry(link)
+            if entry is not None:
+                entries.append(entry)
+            elif form is None:
+                form = link
+        added: list[str] = []
+        known: list[str] = []
+        for entry in entries:
+            name, existing = self._add_provider_entry(entry, provider_drop.same_provider)
+            (known if existing else added).append(name)
+        if added or known:
+            self._show_provider((added or known)[-1])
+            if added:
+                names = ", ".join(added)
+                # i18n: a toast; {names} is one or more provider names, joined with ", "
+                self.screens.notify(tr("Added {names} to your providers", names=names))
+            else:
+                self.screens.notify(tr("{name} is already in your providers", name=known[-1]))
+        if form is not None:
+            self.add_provider(form)
+
+    def _add_provider_entry(self, entry: dict, same) -> tuple[str, bool]:
+        """Add provider `entry` (renamed "name (2)"… when its name is taken), unless the list
+        has it already (`same(listed, entry)`): (its name in the list, whether it was there)."""
+        providers = self.provider_manager.providers
+        existing = next((p for p in providers if same(p, entry)), None)
+        if existing is not None:
+            return str(existing.get("name", "")), True
+        entry["name"] = provider_drop.unique_name(entry["name"], (p.get("name") for p in providers))
+        providers.append(entry)
+        self.provider_manager.save_providers()
+        self.catalogs.reload()  # the find, the Library and All providers hear of it
+        return entry["name"], False
+
+    def _show_provider(self, name: str) -> None:
+        """The channel list shows provider `name` (loaded when it is not the one shown)."""
+        self.config_manager.selected_provider_name = name
+        self.save_config()
+        self.menus.rebuild_providers()
+        if name != self.catalog.current_provider_name():
+            self.set_provider()
 
     def show_free_channels(self, global_pos: QPoint) -> None:
         """The Free channels… menu under `global_pos` (the welcome card's and the drawer's)."""
@@ -947,23 +1214,11 @@ class TVWindow(QMainWindow):
         if self._closing:
             return
         entry = free_channels.provider_entry(code)
-        providers = self.provider_manager.providers
-        existing = next((p for p in providers if p.get("url") == entry["url"]), None)
-        if existing is not None:
-            name = existing.get("name", "")
-        else:
-            taken = {p.get("name") for p in providers}
-            name, number = entry["name"], 2
-            while name in taken:
-                name = f"{entry['name']} ({number})"
-                number += 1
-            entry["name"] = name
-            providers.append(entry)
-            self.provider_manager.save_providers()
+        name, existing = self._add_provider_entry(entry, lambda p, e: p.get("url") == e["url"])
         self.config_manager.selected_provider_name = name
         self.save_config()
         self.menus.rebuild_providers()
-        if existing is None or name != self.catalog.current_provider_name():
+        if not existing or name != self.catalog.current_provider_name():
             self.set_provider()
 
     def _providers_in_use(self) -> set[str]:
@@ -972,9 +1227,11 @@ class TVWindow(QMainWindow):
         return self.catalog.shown_providers() | self.library_catalog.shown_providers()
 
     def providers_saved(self) -> None:
-        """Settings changed the provider list: catalogs of removed or edited providers go."""
+        """Settings changed the provider list: catalogs of removed or edited providers go, and
+        what shows the guide reads it again (a provider's guide time offset may have moved)."""
         self.catalogs.reload()
         self.menus.rebuild_providers()
+        self.controller.guides_changed()
 
     def save_config(self) -> None:
         """Settings → Save: the new settings apply even when config.json cannot be written."""
@@ -982,7 +1239,7 @@ class TVWindow(QMainWindow):
             self.config_manager.save_config()
         except Exception as e:
             logger.warning("Couldn't save the settings: %s", safe_message(e))
-            self.screens.notify(SAVE_FAILED_TEXT, "error", ERROR_MS)
+            self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
         self.controller.settings_saved()
 
     def set_provider(self, force_update: bool = False) -> None:
@@ -1010,7 +1267,7 @@ class TVWindow(QMainWindow):
         self.controller.start()
         self.epg_refresh.start()
         if self.config_manager.save_failed():  # e.g. the defaults patched in at start
-            self.screens.notify(SAVE_FAILED_TEXT, "error", ERROR_MS)
+            self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
 
     def _fit_restored(self) -> None:
         """Bring the saved geometry onto a screen: its monitor may be gone (Minor 13).
@@ -1051,11 +1308,13 @@ class TVWindow(QMainWindow):
         if handle != self._bound_handle:
             self._bound_handle = handle
             self.session.set_window(handle)
-        if self.pip_session is not None:
-            handle = self.pip_surface.native_handle()
-            if handle != self._bound_pip:
-                self._bound_pip = handle
-                self.pip_session.set_window(handle)
+        for name, player in self._players():
+            if name == "main":
+                continue
+            handle = self.surfaces[name].native_handle()
+            if handle != self._bound.get(name):
+                self._bound[name] = handle
+                player.set_window(handle)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Close in steps, each after the event loop ran again (`close_retry`).
@@ -1089,7 +1348,7 @@ class TVWindow(QMainWindow):
                 self._close_retries += 1
                 toast = self.overlays.toast
                 if self._close_retries >= CLOSING_NOTICE_AFTER and not toast.isVisible():
-                    toast.show_message(CLOSING_TEXT, "info", CLOSING_NOTICE_MS)
+                    toast.show_message(translate(CLOSING_TEXT), "info", CLOSING_NOTICE_MS)
                 self._close_later(event)
                 return
             self._abandon_threads()
@@ -1159,18 +1418,38 @@ class TVWindow(QMainWindow):
         self.controller.resume_stopped()  # what played before plays again
 
     def _lives(self) -> list[LiveSession]:
-        return [live for live in (self.live_session, self.pip_live) if live is not None]
+        if self.sessions is None:
+            return [live for live in (self.live_session,) if live is not None]
+        return [slot.live for slot in self.sessions.slots()]
+
+    def _find_signature(self) -> tuple:
+        """Changes when what the channel list's find reads may have: the providers, or the
+        content of a provider's catalog."""
+        hub = self.catalogs
+        versions = tuple((name, hub.catalog(name).content_version()) for name in hub.created())
+        return tuple(hub.names()), versions
+
+    def _find_preferences(self) -> Preferences:
+        """What ranks first in the channel list's find: the provider it shows, the providers
+        and channels watched lately, the stars."""
+        catalog, config = self.catalog, self.config_manager
+        favorite = favorites.matcher(config)
+        names, browsed = catalog.provider_names(), catalog.current_provider_name()
+        return preferences_for(names, browsed, config.watch_history, favorite)
 
     def _shut_down(self) -> None:
         self.epg_refresh.stop()
         self._run_steps(
+            ("let the next click through", self.screens.shutdown),
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
+            ("stop the channel list's find", self.finder.shutdown),
             ("stop the live pipeline", self.stop_live),
             ("stop the catalogs", self.catalogs.shutdown),  # and cancel their running jobs
             ("cancel the Library's jobs", self.jobs.cancel_all),  # its searches
             ("stop the controller", self.controller.shutdown),
             ("stop following the surfaces", self.pip_frame.close),
+            ("stop laying out the tiles", self.grid_frame.close),
             ("stop loading logos", self.logos.shutdown),
             ("stop loading posters", self.posters.shutdown),
             ("save the window geometry", self._save_geometry),
@@ -1190,9 +1469,8 @@ class TVWindow(QMainWindow):
         self.config_manager.save_window_settings(_Geometry(self._normal_geometry()), WINDOW_NAME)
 
     def _release_video(self) -> None:
-        self.session.release()
-        if self.pip_session is not None:
-            self.pip_session.release()
+        for _name, player in self._players():
+            player.release()
         if self._owns_instance and self._instance is not None:
             instance, self._instance = self._instance, None
             instance.release()

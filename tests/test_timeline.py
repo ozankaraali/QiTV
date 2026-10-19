@@ -7,7 +7,6 @@ from services.live.timeline import (
     START_KEY,
     START_NONE,
     START_OPEN,
-    START_QUALITIES,
     Span,
     Timeline,
     _pts_delta,
@@ -124,7 +123,6 @@ class TimelineTests(unittest.TestCase):
         )
         # Spans made without one (older readers, tests) start on a keyframe, as before.
         self.assertEqual(Span(0, 0.0, 2.0, False), Span(0, 0.0, 2.0, False, START_KEY))
-        self.assertEqual(START_QUALITIES, ("key", "open", "none"))  # best first
 
     def test_close_of_unknown_seq_raises(self):
         tl = Timeline()
@@ -157,31 +155,6 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(reset.oldest_seq, 8)
         self.assertAlmostEqual(reset.start, base.start, delta=0.08)
         self.assertAlmostEqual(reset.start, 16.0, delta=0.08)
-
-    def test_locate_clamps(self):
-        tl = Timeline()
-        feed(tl, 3)
-        tl.on_evicted(0)
-        self.assertEqual(tl.locate(-5), (1, 0.0))
-        self.assertEqual(tl.locate(3.0), (1, 1.0))
-        self.assertEqual(tl.locate(99), (2, 2.0))
-        self.assertIsNone(Timeline().locate(0))
-        self.assertEqual(tl.locate(tl.live_edge(None, 5.0)), (2, 2.0))
-
-    def test_seq_after(self):
-        tl = Timeline()
-        feed(tl, 3)
-        self.assertEqual(tl.seq_after(0.0), 0)
-        self.assertEqual(tl.seq_after(0.1), 1)
-        self.assertEqual(tl.seq_after(4.0), 2)
-        self.assertEqual(tl.seq_after(6.5), 3)  # the open segment
-
-    def test_seq_after_full_eviction(self):
-        tl = Timeline()
-        feed(tl, 3)
-        tl.on_closed(3, None, 200.0)
-        tl.on_evicted(3)
-        self.assertEqual(tl.seq_after(0.0), 4)
 
     def test_live_edge_never_decreases(self):
         tl = Timeline()

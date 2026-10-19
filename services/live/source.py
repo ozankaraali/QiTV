@@ -1,10 +1,12 @@
-"""Network input for the live pipeline: raw MPEG-TS over HTTP(S), and HLS of TS segments.
+"""Network input for the live pipeline: raw MPEG-TS over HTTP(S), and HLS of TS or fragmented
+MP4 segments.
 
-A source yields the stream's bytes untouched (no remux) plus ``Discontinuity`` markers. HLS
-segments are fetched in media-sequence order, AES-128 is decrypted as a stream, and media
-playlists are reloaded live. Variant choice, redirect handling and error texts are ported
-from main's ``services/timeshift_source.py``; that version handed media to FFmpeg, which
-this pipeline never uses.
+A source yields the stream's bytes untouched plus ``Discontinuity`` markers; only fragmented
+MP4 (CMAF) segments are remuxed, to TS (`services.live.fmp4`). HLS segments are fetched in
+media-sequence order, AES-128 is decrypted as a stream, and media playlists are reloaded live.
+Variant choice, redirect handling and error texts are ported from main's
+``services/timeshift_source.py``; that version handed media to FFmpeg, which this pipeline
+never uses.
 
 Every request goes through one ``requests.Session`` per source, so cookies persist,
 cross-origin redirects drop ``Authorization`` and the SSL setting applies on every hop and
@@ -13,57 +15,52 @@ after that, 10 s without a byte breaks the connection. ``close()`` may be called
 thread, never blocks, and interrupts a TLS handshake, header read, body read or backoff
 wait at once. A DNS lookup (``getaddrinfo``) is not bounded at all, and a TCP connect is
 bounded only by the 60 s connect timeout per address. Credentials never reach error texts
-or log lines: all ``SourceError`` messages are fixed strings.
-
-Platforms: on macOS and Linux, ``close()`` shuts down a duplicate descriptor of each live
-connection, which wakes any call blocked on it, and never closes a descriptor from another
-thread. On Windows a ``shutdown()`` wakes nothing blocked in Winsock (on a duplicate or on
-the original handle); only closing the handle the call waits on does. There ``close()``
-closes the owning plain socket objects, so the reader's own later close is a no-op. TLS
-sockets are never touched from another thread (OpenSSL keeps using the raw handle value,
-which a new socket may already own): they wait in slices of at most 0.25 s and stop on
-their own once the source is closed.
+or log lines: all ``SourceError`` messages are fixed strings. How ``close()`` wakes a
+blocked call on each platform: `services.live.interruptible_http`. What a source reads can
+be saved for replay: `services.live.capture`.
 """
 
 from __future__ import annotations
 
-import _socket
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 import logging
+import math
 import os
 import re
-import socket
-import ssl
-import sys
 import threading
 import time
-from typing import Any, BinaryIO, Protocol, TypeVar, cast
+from typing import Any, BinaryIO, Protocol, TypeVar
 from urllib.parse import urljoin, urlsplit
 from urllib.request import url2pathname
-import weakref
 
 from Cryptodome.Cipher import AES
 from Cryptodome.Util.Padding import unpad
 import m3u8
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.connection import HTTPConnection, HTTPSConnection
-from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.exceptions import NameResolutionError, ReadTimeoutError
-from urllib3.util.ssl_ import create_urllib3_context, resolve_cert_reqs, resolve_ssl_version
 
+from services.live import interruptible_http
+from services.live.capture import _Capture
+from services.live.fmp4 import Fmp4Error, Fmp4Remuxer
+from services.live.hls_audio import _LEAD_TICKS, AudioWeaver, video_start
+from services.live.interruptible_http import _Closed, _Interrupter, _InterruptibleAdapter
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED  # noqa: F401 (and here)
-from services.live.ts import ContinuityJoiner, program_has_audio
+from services.live.ts import ContinuityJoiner, program_has_audio, pts_delta
 from services.vlc_profile import DEFAULT_USER_AGENT
 
 log = logging.getLogger(__name__)
 
 _TIMEOUT = 60.0  # connect, and a response's headers and first body byte
 # Once a body has sent bytes, this long without one is a broken connection: a provider that
-# stops sending but keeps the connection open is reconnected (raw TS) or skipped (HLS).
+# stops sending but keeps the connection open is skipped (an HLS segment or playlist) ...
 _STALL_TIMEOUT = 10.0
+# ... or reconnected (raw TS), later: one provider's raw TS pauses for up to ~14 s (measured:
+# 3.7-14 s every 30-60 s) and then goes on in the same connection with its timestamps
+# continuous. A reconnect within the pause started 2-4 s back (the ring held them twice) or
+# at live (the delayed seconds were never seen).
+_TS_STALL_TIMEOUT = 20.0
 _MANIFEST_LIMIT = 2 * 1024 * 1024
 _READ_SIZE = 64 * 1024
 _SNIFF_SIZE = 10
@@ -76,6 +73,13 @@ _PLAYLIST_TYPES = (
 # A variant whose master names a separate default audio playlist: how much of its first
 # segment may pass before its program tables must have shown audio of its own.
 _AUDIO_LOOK = 64 * 1024
+# A separate audio playlist is reloaded for a segment it does not list yet at most once in
+# this part of its target duration (at least a second apart).
+_AUDIO_RELOAD_PART = 0.5
+# An audio segment found by its place in the playlist that starts this long after the video
+# segment it is for (90 kHz): the one before it is taken too ...
+_AUDIO_SLACK = 45000
+_AUDIO_STEPS = 3  # ... and so on, this many segments back at most
 _PACKET = 188
 _BLOCK = 16
 _RECONNECT_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0, 8.0)
@@ -89,6 +93,12 @@ _STOP_POLL = 0.1
 _PLAYLIST_HOPS = 4
 _KEY_CACHE = 16
 _KEY_LIMIT = 1024
+# A live playlist's newest segments checked before fetching, this long in all (`_check_media`).
+_CHECKED_SECONDS = 300.0
+_INIT_LIMIT = 4 * 1024 * 1024  # an fMP4 init segment (EXT-X-MAP): some kilobytes in practice
+# A media time an edit list on one rendition only keeps (`_balance_edits`): B-frame offsets and
+# AAC priming are a fraction of this.
+_EDIT_KEEP_S = 1.0
 # A live playlist without a new segment for this long is frozen.
 _FROZEN_TIMEOUT = 60.0
 # An older playlist copy that overlaps recent segments is waited out this many targets.
@@ -108,11 +118,7 @@ _LIMIT_WORDS = re.compile(
 )
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 _IDENTITY = {"Accept-Encoding": "identity"}
-_WINDOWS = sys.platform == "win32"
-# Interrupt plain sockets through their owning objects and let TLS sockets wait in slices,
-# instead of shutting down duplicates (see the module docstring).
-_INTERRUPT_OWNERS = _WINDOWS
-_TLS_SLICE = 0.25
+
 
 _OPEN_FAILED = "The channel could not be opened for time-shift."
 _HTTP_FAILED = "The channel could not be reached over HTTP."
@@ -124,7 +130,7 @@ _TOO_LARGE = "The channel's HLS playlist is too large."
 _NO_VIDEO = "The HLS channel has no compatible video quality."
 _INVALID_PLAYLIST = "The channel supplied an invalid HLS playlist."
 _NON_HTTP = "The HLS channel references a non-HTTP resource."
-_FRAGMENTED = "The HLS channel uses fragmented MP4 or byte-range segments."
+_BYTE_RANGES = "The HLS channel uses byte-range segments."
 _SEPARATE_AUDIO = "The HLS channel carries its audio in a separate playlist."
 _ENCRYPTION = "The HLS channel uses an unsupported encryption method."
 _UNDECRYPTABLE = "The HLS channel could not be decrypted."
@@ -165,6 +171,13 @@ class Discontinuity:
     """A break in the byte stream: an HLS discontinuity, a sequence gap or a reconnect."""
 
 
+@dataclass(frozen=True)
+class Reconnecting:
+    """Raw TS only: the connection broke (it ended, or sent nothing for `_TS_STALL_TIMEOUT`)
+    and a new one is being opened; a `Discontinuity` follows once it delivers. Until then the
+    source waits on the provider, as during a pause it waits out."""
+
+
 class CaughtUp:
     """HLS only: the source delivered every segment its playlist listed, so what follows comes
     as the provider publishes it. Yielded after each such batch; the helper then reports its
@@ -172,7 +185,7 @@ class CaughtUp:
     the next one) and that the backlog fetched at the start has landed."""
 
 
-Chunk = bytes | Discontinuity | CaughtUp
+Chunk = bytes | Discontinuity | CaughtUp | Reconnecting
 
 
 class Source(Protocol):
@@ -192,10 +205,6 @@ class Source(Protocol):
         """After ``close()``: wait up to ``timeout`` until the upstream connection is closed
         (on Windows a TLS reader closes it within one 0.25 s slice); True once it is."""
         ...
-
-
-class _Closed(Exception):
-    """The source was closed or stopped; iteration ends quietly."""
 
 
 class _ReadError(Exception):
@@ -301,246 +310,6 @@ def _quietly(action: Callable[[], object], what: str) -> None:
         log.debug("Closing the %s failed (%s).", what, type(error).__name__)
 
 
-def _shutdown(sock: socket.socket) -> None:
-    try:
-        sock.shutdown(socket.SHUT_RDWR)
-    except OSError:
-        pass  # already closed or never connected: nothing left to interrupt
-
-
-def _abort(sock: socket.socket) -> None:
-    """Interrupt a call blocked on ``sock`` (an owning plain socket) from another thread.
-
-    On Windows only, the handle is then closed: nothing else wakes a blocked Winsock call.
-    The C-level close marks the object's descriptor invalid under the GIL before releasing
-    the handle, so the reader's later calls fail and its own close does nothing. POSIX
-    never closes here: on macOS a close right after the shutdown can swallow its wakeup.
-    """
-    try:
-        _socket.socket.shutdown(sock, socket.SHUT_RDWR)
-    except OSError:
-        pass  # not connected or already closed
-    if not _WINDOWS:
-        return
-    try:
-        _socket.socket.close(sock)
-    except OSError:
-        pass  # the peer already reset it; the handle is released either way
-
-
-class _Interrupter:
-    """Lets another thread interrupt every live connection of one source.
-
-    macOS and Linux: a duplicate descriptor per connection. It shares the kernel socket,
-    so shutting it down wakes a TLS handshake, header read or body read blocked on the
-    original descriptor. Duplicates are only closed under the lock, so a recycled
-    descriptor number is never touched.
-
-    Windows: the owning plain socket objects (held weakly). Only closing a handle wakes a
-    call blocked on it there; see ``_abort``. TLS sockets are left to ``_sliced_tls_socket``.
-    (Tests force this mode elsewhere, where the shutdown alone wakes a plain reader.)
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._handles: dict[int, socket.socket] = {}
-        self._owners: weakref.WeakSet[socket.socket] = weakref.WeakSet()
-        self._interrupted = False
-
-    @property
-    def interrupted(self) -> bool:
-        return self._interrupted
-
-    def adopt(self, sock: socket.socket) -> None:
-        """Windows: a plain socket object that owns its handle."""
-        with self._lock:
-            if not self._interrupted:
-                self._owners.add(sock)
-                return
-        _abort(sock)  # the source closed while this connection was being made
-
-    def track(self, connection: object, sock: socket.socket) -> None:
-        if _INTERRUPT_OWNERS:
-            # An HTTPS connection's socket is about to become a TLS socket's handle, which
-            # must not be closed from another thread; its TLS socket waits in slices.
-            if not isinstance(connection, HTTPSConnection):
-                self.adopt(sock)
-            return
-        with self._lock:
-            if not self._interrupted:
-                self._forget_locked(connection)
-                try:
-                    self._handles[id(connection)] = sock.dup()
-                except OSError as error:
-                    log.debug("A connection cannot be interrupted (%s).", type(error).__name__)
-                return
-        _shutdown(sock)  # the source closed while this connection was being made
-
-    def forget(self, connection: object) -> None:
-        with self._lock:
-            self._forget_locked(connection)
-
-    def _forget_locked(self, connection: object) -> None:
-        handle = self._handles.pop(id(connection), None)
-        if handle is not None:
-            handle.close()
-
-    def interrupt(self) -> None:
-        with self._lock:
-            self._interrupted = True
-            for handle in self._handles.values():
-                _shutdown(handle)
-                handle.close()
-            self._handles.clear()
-            for owner in list(self._owners):
-                _abort(owner)
-
-
-def _tls_context(connection: Any, socket_class: type[ssl.SSLSocket]) -> ssl.SSLContext:
-    """The context urllib3 builds for a connection without one, plus ``socket_class``."""
-    context = create_urllib3_context(
-        ssl_version=resolve_ssl_version(connection.ssl_version),
-        ssl_minimum_version=connection.ssl_minimum_version,
-        ssl_maximum_version=connection.ssl_maximum_version,
-        cert_reqs=resolve_cert_reqs(connection.cert_reqs),
-    )
-    # urllib3 loads the system roots itself only into a context it built (requests always
-    # passes its CA bundle when verifying, so this matters only without verification).
-    if not (connection.ca_certs or connection.ca_cert_dir or connection.ca_cert_data):
-        context.load_default_certs()
-    context.sslsocket_class = socket_class
-    return context
-
-
-def _sliced_tls_socket(interrupter: _Interrupter) -> type[ssl.SSLSocket]:
-    """Windows TLS sockets that wait in slices and stop by themselves once interrupted.
-
-    The real socket timeout is at most ``_TLS_SLICE``; the caller's timeout is kept as a
-    deadline over the retries. Retrying after an ``_ssl`` timeout is safe: it is raised
-    only while OpenSSL waits for the network (WANT_READ or WANT_WRITE), and CPython
-    allows a write to be retried from a moved buffer. Only that timeout, which has no
-    errno, is retried: a Winsock WSAETIMEDOUT is sticky and raised at once.
-    """
-
-    def waiting(self: Any, operation: Callable[[], _T]) -> _T:
-        timeout = self.gettimeout()
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            if interrupter.interrupted:
-                raise _Closed()
-            try:
-                return operation()
-            except TimeoutError as error:
-                if error.errno is not None:
-                    raise
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise
-
-    def settimeout(self: Any, value: float | None) -> None:
-        self._logical_timeout = value
-        if value is None:
-            ssl.SSLSocket.settimeout(self, _TLS_SLICE)
-        else:
-            ssl.SSLSocket.settimeout(self, min(float(value), _TLS_SLICE))
-
-    def gettimeout(self: Any) -> float | None:
-        if "_logical_timeout" not in self.__dict__:
-            return ssl.SSLSocket.gettimeout(self)
-        timeout: float | None = self._logical_timeout
-        return timeout
-
-    def setblocking(self: Any, flag: bool) -> None:
-        self.settimeout(None if flag else 0.0)
-
-    def read(self: Any, len: int = 1024, buffer: Any = None) -> Any:  # also recv, recv_into
-        return waiting(self, lambda: ssl.SSLSocket.read(self, len, buffer))
-
-    def send(self: Any, data: Any, flags: int = 0) -> int:  # also sendall
-        return waiting(self, lambda: ssl.SSLSocket.send(self, data, flags))
-
-    def do_handshake(self: Any, block: bool = False) -> None:
-        waiting(self, lambda: ssl.SSLSocket.do_handshake(self, block))
-
-    namespace = {
-        "settimeout": settimeout,
-        "gettimeout": gettimeout,
-        "setblocking": setblocking,
-        "read": read,
-        "send": send,
-        "do_handshake": do_handshake,
-    }
-    return cast("type[ssl.SSLSocket]", type("SSLSocket", (ssl.SSLSocket,), namespace))
-
-
-def _interruptible_pools(interrupter: _Interrupter) -> dict[str, type[HTTPConnectionPool]]:
-    tls_socket = _sliced_tls_socket(interrupter)
-
-    def connection_class(base: type[HTTPConnection]) -> type[HTTPConnection]:
-        def new_conn(self: HTTPConnection) -> socket.socket:
-            sock = base._new_conn(self)
-            interrupter.track(self, sock)
-            return sock
-
-        def close(self: HTTPConnection) -> None:
-            try:
-                base.close(self)
-            finally:
-                interrupter.forget(self)
-
-        def connect(self: Any) -> None:
-            # Windows TLS sockets must wait in slices; the TLS socket exists only inside
-            # urllib3's wrap_socket: hand urllib3 its usual context with a sliced class.
-            if not (_INTERRUPT_OWNERS and isinstance(self, HTTPSConnection)):
-                base.connect(self)
-                return
-            if self.ssl_context is not None:
-                base.connect(self)  # a caller's own context: left as it is
-                return
-            self.ssl_context = _tls_context(self, tls_socket)
-            try:
-                base.connect(self)
-            finally:
-                self.ssl_context = None
-
-        def getresponse(self: HTTPConnection) -> Any:
-            sock = self.sock  # http.client drops it at once for a close-delimited body
-            response = base.getresponse(self)
-            response.qitv_socket = sock  # the reader shortens its timeout (`_Http.read`)
-            return response
-
-        namespace = {
-            "_new_conn": new_conn,
-            "close": close,
-            "connect": connect,
-            "getresponse": getresponse,
-        }
-        return cast("type[HTTPConnection]", type(base.__name__, (base,), namespace))
-
-    def pool_class(base: type[HTTPConnectionPool], connection: type[HTTPConnection]) -> Any:
-        return type(base.__name__, (base,), {"ConnectionCls": connection_class(connection)})
-
-    return {
-        "http": pool_class(HTTPConnectionPool, HTTPConnection),
-        "https": pool_class(HTTPSConnectionPool, HTTPSConnection),
-    }
-
-
-class _InterruptibleAdapter(HTTPAdapter):
-    def __init__(self, interrupter: _Interrupter) -> None:
-        self._pool_classes = _interruptible_pools(interrupter)
-        super().__init__()
-
-    def init_poolmanager(self, *args: Any, **kwargs: Any) -> None:
-        super().init_poolmanager(*args, **kwargs)
-        self.poolmanager.pool_classes_by_scheme = self._pool_classes
-
-    def proxy_manager_for(self, proxy: str, **proxy_kwargs: Any) -> Any:
-        manager = super().proxy_manager_for(proxy, **proxy_kwargs)
-        if not proxy.lower().startswith("socks"):  # SOCKS pools bring their own connections
-            manager.pool_classes_by_scheme = self._pool_classes
-        return manager
-
-
 def _retryable(error: Exception) -> bool:
     if isinstance(error, (_ReadError, _NotPlaylist)):
         return True
@@ -607,6 +376,7 @@ class _Http:
         self._owner: int | None = None
         self._verify_ssl = verify_ssl
         self._stop = stop
+        self._stall_timeout = _STALL_TIMEOUT
         self.closed = False
         provided = {name.lower(): value for name, value in headers.items() if value}
         self.user_agent = provided.get("user-agent") or DEFAULT_USER_AGENT
@@ -675,6 +445,13 @@ class _Http:
             raise
         return response
 
+    def stall_after(self, seconds: float) -> None:
+        """Break a body that sent bytes after `seconds` without one, the flowing one's too.
+        Call it on the reading thread (it may touch that response's socket)."""
+        self._stall_timeout = seconds
+        if self._flowing is not None:
+            _shorten_read_timeout(self._flowing, seconds)
+
     def release(self, response: Any) -> None:
         with self._lock:
             if self._response is not response:
@@ -695,7 +472,7 @@ class _Http:
             raise _Closed()
         if data and response is not self._flowing:
             self._flowing = response
-            _shorten_read_timeout(response)
+            _shorten_read_timeout(response, self._stall_timeout)
         return data or b""
 
     def read_prefix(self, response: Any) -> bytes:
@@ -764,7 +541,7 @@ class _Http:
             owner = self._owner
         self._closed_event.set()
         self._interrupter.interrupt()
-        if response is not None and not _INTERRUPT_OWNERS:
+        if response is not None and not interruptible_http._INTERRUPT_OWNERS:
             # A close-delimited body's socket has no live duplicate (http.client closed its
             # connection after the headers). Never used with owners: TLS sockets are not
             # touched from here, and plain owners were already interrupted above.
@@ -792,8 +569,8 @@ class _Http:
             self._released.set()
 
 
-def _shorten_read_timeout(response: Any) -> None:
-    """Media flowed: from now on a silence of `_STALL_TIMEOUT` breaks the connection.
+def _shorten_read_timeout(response: Any, seconds: float) -> None:
+    """Media flowed: from now on a silence of `seconds` breaks the connection.
 
     Called on the reading thread, the only one that may touch a TLS socket. On Windows a
     sliced TLS socket keeps the value as its deadline over the slices. A response from a
@@ -803,13 +580,16 @@ def _shorten_read_timeout(response: Any) -> None:
     if sock is None:
         return
     try:
-        sock.settimeout(min(_STALL_TIMEOUT, _TIMEOUT))
+        sock.settimeout(min(seconds, _TIMEOUT))
     except OSError as error:  # closed under the reader: its next read fails anyway
         log.debug("A read timeout could not be shortened (%s).", type(error).__name__)
 
 
-def _guarded(http: _Http, inner: Iterator[Chunk]) -> Iterator[Chunk]:
-    """End quietly when closed; turn every other failure into a context-free SourceError."""
+def _guarded(
+    http: _Http, inner: Iterator[Chunk], capture: _Capture | None = None
+) -> Iterator[Chunk]:
+    """End quietly when closed; turn every other failure into a context-free SourceError.
+    The capture, if any, is closed with the source, in the reading thread."""
     failure: SourceError | None = None
     try:
         yield from inner
@@ -820,7 +600,11 @@ def _guarded(http: _Http, inner: Iterator[Chunk]) -> Iterator[Chunk]:
             return
         failure = _translate(error)
     finally:
-        http.close()
+        try:
+            http.close()
+        finally:
+            if capture is not None:
+                capture.close()
     if failure is not None:
         raise failure
 
@@ -834,38 +618,57 @@ class TsSource:
 
     hls = False
 
-    def __init__(self, http: _Http, url: str, response: Any, prefix: bytes) -> None:
+    def __init__(
+        self,
+        http: _Http,
+        url: str,
+        response: Any,
+        prefix: bytes,
+        *,
+        capture: _Capture | None = None,
+    ) -> None:
         self.user_agent = http.user_agent
+        http.stall_after(_TS_STALL_TIMEOUT)
         self._http = http
         self._url = url
         self._response = response
         self._prefix = prefix
+        self._prefix_at = time.monotonic()  # the open has just read it
+        self._capture = capture
 
     @property
     def burst_s(self) -> float:
         return 0.0
 
     def chunks(self) -> Iterator[Chunk]:
-        return _guarded(self._http, self._run())
+        return _guarded(self._http, self._run(), self._capture)
 
     def close(self) -> None:
         self._http.close()
+        if self._capture is not None:
+            self._capture.flush()
 
     def wait_closed(self, timeout: float) -> bool:
+        if self._capture is not None:
+            self._capture.flush()
         return self._http.wait_closed(timeout)
 
-    def _run(self) -> Iterator[bytes | Discontinuity]:
-        http, response, prefix = self._http, self._response, self._prefix
+    def _run(self) -> Iterator[bytes | Discontinuity | Reconnecting]:
+        http, response, prefix, capture = self._http, self._response, self._prefix, self._capture
         self._response, self._prefix = None, b""
         if response is None:
             return
         backoff = _Backoff()
         connected, received, reconnected = time.monotonic(), 0, False
         if prefix:
+            if capture is not None:
+                capture.write(prefix, self._prefix_at)
             yield prefix
         while True:
             try:
                 while block := http.read(response):
+                    if capture is not None:
+                        capture.write(block)
                     if reconnected:
                         reconnected = False
                         yield Discontinuity()
@@ -885,7 +688,10 @@ class TsSource:
                 log.info("The channel connection broke off (%s); reconnecting.", error.kind)
             finally:
                 http.release(response)
+            yield Reconnecting()  # before the backoff: the helper says so at once
             response = http.retry(lambda: http.get(self._url), backoff)
+            if capture is not None:
+                capture.mark("reconnect")
             connected, received, reconnected = time.monotonic(), 0, True
 
 
@@ -935,11 +741,18 @@ def _video_compatible(variant):
     return False
 
 
+def _whole_segments(playlist: Any) -> Any:
+    """A media playlist without the segment a low-latency (LL-HLS) playlist lists only as its
+    parts, still being made: it has no URI of its own, and a later reload lists it whole."""
+    playlist.segments[:] = [segment for segment in playlist.segments if segment.uri]
+    return playlist
+
+
 def _select_manifest(content, url):
     try:
         playlist = m3u8.loads(content.decode("utf-8-sig"), uri=url)
         if not playlist.is_variant:
-            return playlist
+            return _whole_segments(playlist)
         candidates = [item for item in playlist.playlists if _video_compatible(item)]
         if not candidates:
             raise SourceError("unsupported", _NO_VIDEO)
@@ -997,37 +810,69 @@ def _key_method(key: Any) -> str:
     return str(key.method or "NONE").upper() if key is not None else "NONE"
 
 
-def _check_media(playlist: Any, base: str) -> None:
-    """Reject what a TS-concatenating fetcher cannot play, before fetching any of it."""
+def _checked(playlist: Any) -> list[Any]:
+    """The segments `_check_media` checks: a finished playlist's all, a live one's newest
+    `_CHECKED_SECONDS` of them."""
     segments = playlist.segments
-    if playlist.segment_map or any(
-        segment.init_section is not None or segment.byterange for segment in segments
+    if playlist.is_endlist:
+        return list(segments)
+    start, total = len(segments), 0.0
+    while start > 0 and total < _CHECKED_SECONDS:
+        start -= 1
+        total += float(segments[start].duration or 0)
+    return list(segments[start:])
+
+
+def _check_media(playlist: Any, base: str) -> None:
+    """Reject what this fetcher cannot play, before fetching any of it: byte ranges (of a
+    segment or an init section), keys other than AES-128, URIs other than HTTP(S). A live
+    playlist's URIs are resolved for its newest segments (`_checked`): a DVR window lists
+    hours of them, reloaded every few seconds, and the source fetches near its end (resolving
+    each URI again as it fetches it); its key methods are looked at whole (a start further
+    back than that window still meets no other key)."""
+    segments = playlist.segments
+    if (
+        any(segment.byterange for segment in segments)
+        or any(init.byterange for init in playlist.segment_map or ())
+        or any(s.init_section is not None and s.init_section.byterange for s in segments)
     ):
-        raise SourceError("unsupported", _FRAGMENTED)
-    for segment in segments:
+        raise SourceError("unsupported", _BYTE_RANGES)
+    if any(_key_method(segment.key) not in ("NONE", "AES-128") for segment in segments):
+        raise SourceError("unsupported", _ENCRYPTION)
+    resolved: set[str] = set()  # an init's or key's URI, which many segments share
+    for segment in _checked(playlist):
         _resolve(base, segment.uri)
+        uris = [segment.init_section.uri] if segment.init_section is not None else []
         method = _key_method(segment.key)
         if method == "AES-128":
             if not segment.key.uri:
                 raise SourceError("unsupported", _UNDECRYPTABLE)
-            _resolve(base, segment.key.uri)
+            uris.append(segment.key.uri)
         elif method != "NONE":
             raise SourceError("unsupported", _ENCRYPTION)
+        for uri in uris:
+            if uri not in resolved:
+                resolved.add(uri)
+                _resolve(base, uri)
 
 
-def _check_audio(playlist: Any) -> bool:
-    """Only the default AUDIO rendition matters: whether it is a separate playlist (True), which
-    a TS-only fetcher cannot mux. The variant may carry that audio too (some multi-track restream
-    servers name each track's playlist and mux the first into the video's): its first segment
-    decides (`HlsSource._own_audio`)."""
+def _check_audio(playlist: Any, url: str) -> str | None:
+    """Only the default AUDIO rendition matters: its playlist's URL when it is a separate one
+    (2.2: woven into the variant's TS, `AudioWeaver`), else None. The variant may carry that
+    audio too (some multi-track restream servers name each track's playlist and mux the first
+    into the video's): its first segment decides (`HlsSource._with_audio`)."""
     audio = [item for item in playlist.media if item.type == "AUDIO"]
     if not audio:
-        return False
+        return None
     default = next((item for item in audio if item.default == "YES"), audio[0])
-    dropped = [item.name or item.language or "unnamed" for item in audio if item.uri]
+    dropped = [
+        item.name or item.language or "unnamed"
+        for item in audio
+        if item.uri and item is not default
+    ]
     if dropped:
         log.info("Alternate audio renditions are not time-shifted: %s.", ", ".join(dropped))
-    return bool(default.uri)
+    return _resolve(url, default.uri) if default.uri else None
 
 
 def _sniff(http: _Http, response: Any) -> tuple[bytes, bytes | None]:
@@ -1053,16 +898,16 @@ def _load_playlist(http: _Http, url: str) -> tuple[bytes, str]:
     return content, final
 
 
-def _media_playlist(http: _Http, content: bytes, url: str) -> tuple[Any, str, bool]:
-    """Follow the best variant down to a checked media playlist and its final URL; and
-    whether a master on the way named a separate default audio playlist (`_check_audio`)."""
-    separate = False
+def _media_playlist(http: _Http, content: bytes, url: str) -> tuple[Any, str, str | None]:
+    """Follow the best variant down to a checked media playlist and its final URL; and the
+    separate default audio playlist a master on the way named (`_check_audio`), if any."""
+    separate: str | None = None
     for _hop in range(_PLAYLIST_HOPS):
         playlist = _select_manifest(content, url)
         if not playlist.is_variant:
             _check_media(playlist, url)
             return playlist, url, separate
-        separate = _check_audio(playlist) or separate
+        separate = _check_audio(playlist, url) or separate
         content, url = _load_playlist(http, _resolve(url, playlist.playlists[0].uri))
     raise SourceError("unsupported", _INVALID_PLAYLIST)
 
@@ -1157,9 +1002,18 @@ class HlsSource:
       window, resumes at the live start;
     - reloads that bring no new segment for 60 s (download time excluded) time out.
 
-    A master that names a separate default audio playlist is followed to its variant; the
-    variant's first segment then passes only when its program tables list audio of its own
-    (`_own_audio`), else the channel is unsupported (nothing here muxes the separate audio).
+    Fragmented MP4 (CMAF) segments, a playlist with an init section (EXT-X-MAP), are fetched
+    whole and remuxed to TS (`Fmp4Remuxer`), the init loaded whenever its URI changes: one
+    encrypted (CENC, SAMPLE-AES) or of a codec not remuxed leaves the channel unsupported
+    (direct play) at its first segment, as any segment that is not TS did before.
+
+    A master that names a separate default audio playlist is followed to its variant. When the
+    variant's first segment lists no audio of its own in its program tables, the separate
+    playlist (MPEG-TS, packed ADTS or fMP4 segments, the last remuxed to TS first) is woven in
+    (2.2, `_with_audio`): each video segment waits for the audio segment of the same media
+    sequence number, and passes on as one TS with it (`AudioWeaver`); a missing audio segment
+    leaves its video segment silent. An audio playlist that cannot be read, or whose fMP4
+    init cannot be remuxed, leaves the channel unsupported, as before.
 
     Segments are joined with each PID's continuity counter running on (`ContinuityJoiner`):
     some CDNs package every segment on its own, its counters restarting at 0, and VLC took
@@ -1179,14 +1033,34 @@ class HlsSource:
         target: float | None = None,
         extra: float = 0.0,
         *,
-        separate_audio: bool = False,
+        separate_audio: str | None = None,
+        capture: _Capture | None = None,
     ) -> None:
         self.user_agent = http.user_agent
         self._http = http
+        self._capture = capture
         self._playlist = playlist
-        # The master named a separate default audio playlist: the first segment must show the
-        # variant's own audio (`_own_audio`) before any of it passes.
-        self._audio_unknown = separate_audio
+        # The master named a separate default audio playlist: the first segment shows whether
+        # the variant carries audio of its own, or the separate one is woven in (`_with_audio`).
+        self._audio_url = separate_audio
+        self._audio_unknown = separate_audio is not None
+        self._weaver: AudioWeaver | None = None
+        self._audio_list: dict[int, Any] = {}  # the audio playlist's segments by sequence
+        self._audio_base = ""
+        self._audio_target = 0.0  # its target duration
+        self._audio_loaded = -math.inf  # when it was (re)loaded last (time.monotonic)
+        self._audio_next: int | None = None  # the audio segment to fetch next (None: find it)
+        # The tail of the newest video segment whose sound is not listed yet (`_pass_covered`),
+        # and the end of that segment (90 kHz).
+        self._held = b""
+        self._held_end = 0
+        self._audio_ended = False  # it is finished (ENDLIST): no reload lists more
+        # Fragmented MP4 remuxed to TS: the variant's, and the separate audio's (no PCR: its
+        # PES are woven into the video's TS), each with the URI of the init it read last.
+        self._remuxer = Fmp4Remuxer()
+        self._init: str | None = None
+        self._audio_remuxer = Fmp4Remuxer(pcr=False)
+        self._audio_init: str | None = None
         self._url = url
         self._live_delay = live_delay
         self._target = target  # the session's target (None: start at live_delay only)
@@ -1242,12 +1116,16 @@ class HlsSource:
         return self._rest
 
     def chunks(self) -> Iterator[Chunk]:
-        return _guarded(self._http, self._run())
+        return _guarded(self._http, self._run(), self._capture)
 
     def close(self) -> None:
         self._http.close()
+        if self._capture is not None:
+            self._capture.flush()
 
     def wait_closed(self, timeout: float) -> bool:
+        if self._capture is not None:
+            self._capture.flush()
         return self._http.wait_closed(timeout)
 
     def _mark(self) -> None:
@@ -1356,6 +1234,8 @@ class HlsSource:
                 progress = time.monotonic()
                 yield CaughtUp()  # what follows comes as the provider publishes it
             if playlist.is_endlist:
+                yield from self._emit(self._release(final=True))
+                yield from self._emit(self._flush_held())
                 return
             interval = max(1.0, float(playlist.target_duration or 0) / 2)
             if http.wait(interval - (time.monotonic() - loaded)):
@@ -1365,12 +1245,16 @@ class HlsSource:
             playlist, url, _separate = _media_playlist(http, content, final)
             self._burst = float(playlist.target_duration or 0)
             self._finite = bool(playlist.is_endlist)
+            yield from self._emit(self._release())
 
     def _segment(self, segment: Any, sequence: int, base: str) -> Iterator[bytes | Discontinuity]:
         uri = _resolve(base, segment.uri)
         self._recent.append(_identity(uri))
         skipped: tuple[SourceError, bool] | None = None
+        fragmented = segment.init_section is not None
         try:
+            if fragmented:
+                self._init = self._load_init(self._remuxer, segment.init_section, base, self._init)
             decryptor = self._decryptor(segment.key, sequence, base)
             response = self._http.fetch(lambda: self._http.get(uri, headers=_IDENTITY))
         except Exception as error:
@@ -1384,10 +1268,21 @@ class HlsSource:
         content = False
         joiner = self._joiner
         joiner.segment()
+        if self._capture is not None:
+            if self._pending:
+                self._capture.mark("discontinuity")
+            self._capture.mark("segment", sequence)
         try:
-            blocks = _checked_ts(self._blocks(response, decryptor))
-            if self._audio_unknown:
-                blocks = self._own_audio(blocks)
+            if fragmented:
+                blocks = iter([self._remuxed(response, decryptor)])
+            else:
+                blocks = _checked_ts(self._blocks(response, decryptor, self._capture))
+            if self._audio_unknown or self._weaver is not None:
+                duration = float(segment.duration or 0)
+                before, woven = self._with_audio(b"".join(blocks), sequence, duration)
+                if before and (block := joiner.feed(before)):  # the timeline before the break
+                    yield block
+                blocks = iter([woven] if woven else [])
             for block in blocks:
                 if self._pending:  # only ever right before bytes that really arrive
                     self._pending = False
@@ -1411,26 +1306,278 @@ class HlsSource:
         else:
             self._skip(failure, content)
 
-    def _own_audio(self, blocks: Iterator[bytes]) -> Iterator[bytes]:
-        """A segment's blocks, held until its program tables show whether the variant carries
-        audio of its own (2.1: public channels VLC played were refused for their master alone,
-        which named a separate default audio playlist the variant also muxed). Without such
-        audio by `_AUDIO_LOOK` bytes (or the segment's end), the channel is unsupported: a
-        TS-only fetcher cannot mux the separate playlist. Asked of the first whole segment
-        only (a missing one is skipped as any other, and the next one asked)."""
-        head = b""
-        audio: bool | None = None
-        for block in blocks:
-            head += block
-            audio = program_has_audio(head)
-            if audio is not None or len(head) >= _AUDIO_LOOK:
+    def _remuxed(self, response: Any, decryptor: _Decryptor | None) -> bytes:
+        """A whole fMP4 segment as TS (`Fmp4Remuxer`); captured as that TS, which the
+        replay tool reads."""
+        data = b"".join(self._blocks(response, decryptor, None))
+        try:
+            ts = self._remuxer.remux(data)
+        except Fmp4Error as error:
+            raise _BadSegment(str(error)) from None
+        if self._capture is not None:
+            self._capture.write(ts)
+        return ts
+
+    def _load_init(self, remuxer: Fmp4Remuxer, init: Any, base: str, loaded: str | None) -> str:
+        """Read an fMP4 init section into `remuxer` unless its URI is `loaded` (the one read
+        last); returns its URI. Raises `_BadSegment` when it cannot be remuxed."""
+        uri = _resolve(base, init.uri)
+        if uri == loaded:
+            return uri
+        data = self._http.fetch(lambda: self._fetch_small(uri, _INIT_LIMIT))
+        try:
+            remuxer.init(data)
+        except Fmp4Error as error:
+            raise _BadSegment(str(error)) from None
+        if self._audio_url is not None:
+            _balance_edits(self._remuxer, self._audio_remuxer)
+        return uri
+
+    def _with_audio(self, video: bytes, sequence: int, duration: float) -> tuple[bytes, bytes]:
+        """A whole video segment with its sound: the first one's program tables show whether
+        the variant carries audio of its own (2.1: some multi-track restream servers name a
+        separate default audio playlist and mux it too), which leaves the separate playlist
+        out; else that playlist is read (`_load_audio`: unreadable, or fMP4 audio whose init
+        cannot be remuxed, the channel is unsupported) and from then on each segment's audio is
+        woven in (2.2). Asked of the first whole segment only (a missing one is skipped as any
+        other).
+
+        The audio is matched by time, not by media sequence number (one packager numbers and
+        cuts its renditions each its own way): the audio segments listed are fetched in order
+        and queued (`_take_audio`), and the video segment takes what is due before its end (its
+        first picture's time and EXTINF; `AudioWeaver.weave_due`). Where the audio queued does
+        not reach that end yet (at the live edge, renditions cut apart publish their segments
+        apart), the video goes on as far as the audio covers it and the rest is held
+        (`_pass_covered`) until more audio is listed (`_release`, at each playlist reload) or
+        the next video segment comes, which takes it whatever audio there is: waiting for
+        the audio held 10 s segments back 5-8 s each, and VLC ran dry between them. The first
+        audio segment, and the one after a break or one gone from the playlist, is found by its
+        place from the playlist's end, as far back as the video segment's (`_audio_find`).
+
+        Returns (what of the timeline before a break was held, to go on before its marker;
+        what goes on now)."""
+        if self._audio_unknown:
+            if program_has_audio(video[:_AUDIO_LOOK]):
+                self._audio_unknown = False
+                log.info("The HLS variant carries audio of its own; its separate one is left out.")
+                return b"", video
+            self._load_audio()
+            first = next(iter(self._audio_list.values()), None)
+            if first is not None and first.init_section is not None:
+                try:
+                    self._audio_init = self._load_init(
+                        self._audio_remuxer, first.init_section, self._audio_base, None
+                    )
+                except _BadSegment:
+                    raise _BadSegment(_SEPARATE_AUDIO) from None
+            self._audio_unknown = False
+            self._weaver = AudioWeaver()
+            log.info("The HLS variant has no audio of its own; its separate playlist is woven in.")
+        weaver = self._weaver
+        assert weaver is not None
+        before = b""
+        if self._pending and self._held:  # a break: what was held goes on first, as it is
+            before = self._flush_held()
+        held, self._held = self._held, b""
+        start = video_start(video)
+        if start is None:  # no picture's time to match: the audio of the same number
+            audio = self._audio_segment(sequence)
+            return before, held + (weaver.weave(video, audio) if audio else video)
+        end = (start + round(duration * 90000)) % (1 << 33)
+        if self._pending or self._audio_next is None:  # a break, or the first: found by time
+            weaver.reset()
+            if self._pending:  # the audio's own break: as it is listed now
+                try:
+                    self._load_audio()
+                except _BadSegment:
+                    pass  # the list before it
+            self._audio_next = self._audio_find(start, duration)
+        self._take_audio(start, end, duration)
+        video = held + video
+        weaver.drop(((video_start(video) or start) - _LEAD_TICKS) % (1 << 33))  # too late
+        return before, self._pass_covered(video, len(held), end)
+
+    def _take_audio(self, start: int, end: int, duration: float) -> None:
+        """Queue the audio segments listed in order until they reach `end` (a video segment
+        from `start`, `duration` long), a few at most; one that left the playlist is found
+        again (`_audio_find`)."""
+        weaver = self._weaver
+        assert weaver is not None
+        fetches = 2 + math.ceil(duration / max(1.0, self._audio_target))
+        while self._audio_next is not None and fetches > 0 and not weaver.reaches(end):
+            audio = self._audio_segment(self._audio_next)
+            fetches -= 1
+            if audio is None:
+                if self._audio_list and self._audio_next < min(self._audio_list):
+                    self._audio_next = self._audio_find(start, duration)  # fell behind it
+                    continue
+                break  # not listed yet
+            self._audio_next += 1
+            if audio:
+                weaver.add(audio)
+
+    def _pass_covered(self, video: bytes, since: int, end: int) -> bytes:
+        """`video` (a segment ending at `end`, after `since` bytes held before) with its sound,
+        as far as the audio queued covers it (`AudioWeaver.covered`); the rest is held for
+        more audio (`_held`). What was held before (`since`) goes on regardless: no tail waits
+        past the next video segment."""
+        weaver = self._weaver
+        assert weaver is not None
+        if weaver.reaches(end):
+            return weaver.weave_due(video, end)
+        cut, until = weaver.covered(video, since)
+        self._held, self._held_end = video[cut:], end
+        return weaver.weave_due(video[:cut], end if until is None else until) if cut else b""
+
+    def _release(self, final: bool = False) -> bytes:
+        """At a playlist reload, while a tail is held: the audio listed since, and what of the
+        tail it covers, woven (`_pass_covered`); `final` (a finished playlist's end): the audio
+        playlist reloaded however recently it was."""
+        if not self._held or self._weaver is None:
+            return b""
+        if final:
+            self._audio_loaded = -math.inf
+        held, self._held = self._held, b""
+        start = video_start(held)
+        if start is not None:
+            self._take_audio(start, self._held_end, self._burst)
+        return self._pass_covered(held, 0, self._held_end)
+
+    def _flush_held(self) -> bytes:
+        """What is held, with what audio there is for it (a break, or the playlist's end)."""
+        held, self._held = self._held, b""
+        if not held or self._weaver is None:
+            return held
+        return self._weaver.weave_due(held, self._held_end)
+
+    def _emit(self, data: bytes) -> Iterator[bytes | Discontinuity]:
+        """Bytes between segments (a released tail), after a marker that is due."""
+        if not data:
+            return
+        if self._pending:
+            self._pending = False
+            self._joiner.discontinuity()
+            yield Discontinuity()
+        self._started = True
+        if block := self._joiner.feed(data):
+            yield block
+
+    def _audio_find(self, start: int, duration: float) -> int | None:
+        """The audio segment to follow on from for a video segment that starts at `start`
+        (`duration` long), queued; returns the one after it. Found by its place from the audio
+        playlist's end, as far back as the video segment's from the video playlist's end, then
+        up to `_AUDIO_STEPS` segments earlier while it starts later than the video segment (one
+        packager's audio playlist runs 13 s ahead of its video's)."""
+        weaver = self._weaver
+        assert weaver is not None
+        listed = sorted(self._audio_list)
+        if not listed:
+            return None
+        back, chosen = self._rest + duration, listed[0]
+        for sequence in reversed(listed):
+            back -= float(self._audio_list[sequence].duration or 0)
+            if back <= 0.001:
+                chosen = sequence
                 break
+        audio = self._audio_segment(chosen)
         if not audio:
-            raise _BadSegment(_SEPARATE_AUDIO)
-        self._audio_unknown = False
-        log.info("The HLS variant carries audio of its own; its separate playlist is left out.")
-        yield head
-        yield from blocks
+            return chosen + 1 if audio is not None else None
+        found = [audio]
+        times = weaver.peek(audio)
+        earliest = chosen
+        while (
+            times is not None
+            and pts_delta(start, times[0]) > _AUDIO_SLACK
+            and earliest - 1 in self._audio_list
+            and len(found) <= _AUDIO_STEPS
+        ):
+            earliest -= 1
+            earlier = self._audio_segment(earliest)
+            if not earlier:
+                break
+            found.insert(0, earlier)
+            times = weaver.peek(earlier)
+        for data in found:
+            span = weaver.peek(data)
+            if span is None or pts_delta(start, span[1]) >= 0:  # not over before the video
+                weaver.add(data)
+        return chosen + 1
+
+    def _load_audio(self) -> None:
+        """(Re)load the separate audio playlist; raise `_BadSegment` when it cannot be woven."""
+        assert self._audio_url is not None
+        url = self._audio_url
+        try:
+            content, final = self._http.fetch(lambda: _load_playlist(self._http, url))
+            playlist = _whole_segments(m3u8.loads(content.decode("utf-8-sig"), uri=final))
+        except _Closed:
+            raise
+        except Exception:
+            raise _BadSegment(_SEPARATE_AUDIO) from None
+        try:
+            if playlist.is_variant:
+                raise SourceError("unsupported")
+            _check_media(playlist, final)
+        except SourceError:
+            raise _BadSegment(_SEPARATE_AUDIO) from None  # byte ranges, other keys: not read
+        first = (playlist.media_sequence or 0) + len(playlist.segments)
+        newest = _checked(playlist)  # a DVR window's: as far back as a start may be
+        first -= len(newest)
+        self._audio_list = {first + k: segment for k, segment in enumerate(newest)}
+        self._audio_loaded = time.monotonic()
+        self._audio_base = final
+        self._audio_target = float(playlist.target_duration or 0)
+        self._audio_ended = bool(playlist.is_endlist)
+
+    def _audio_segment(self, sequence: int) -> bytes | None:
+        """The audio segment of `sequence` (a live playlist that does not list it yet reloaded
+        once, unless it was less than half its target duration ago: the video is held
+        meanwhile, `_pass_covered`), decrypted and as TS or packed audio; None when the
+        playlist does not list it (not yet, or no more), b"" when it fails (the video plays
+        without it)."""
+        segment = self._audio_list.get(sequence)
+        due = self._audio_loaded + max(1.0, _AUDIO_RELOAD_PART * self._audio_target)
+        if segment is None and not self._audio_ended and time.monotonic() >= due:
+            if not self._audio_list or sequence > min(self._audio_list):  # not gone from it
+                try:
+                    self._load_audio()
+                except _BadSegment:
+                    return b""
+                segment = self._audio_list.get(sequence)
+        if segment is None:
+            log.info("The HLS audio playlist does not list segment %d.", sequence)
+            return None
+        uri = _resolve(self._audio_base, segment.uri)
+        try:
+            decryptor = self._decryptor(segment.key, sequence, self._audio_base)
+            response = self._http.fetch(lambda: self._http.get(uri, headers=_IDENTITY))
+        except Exception as error:
+            if _skippable(error) is None:
+                raise
+            return b""
+        capture = self._capture.audio() if self._capture is not None else None
+        if capture is not None:  # its own pair: the video's stays a playable TS
+            capture.mark("segment", sequence)
+        try:
+            if segment.init_section is None:
+                return b"".join(self._blocks(response, decryptor, capture))
+            data = b"".join(self._blocks(response, decryptor, None))
+            self._audio_init = self._load_init(
+                self._audio_remuxer, segment.init_section, self._audio_base, self._audio_init
+            )
+            audio = self._audio_remuxer.remux(data)
+            if capture is not None:  # as the TS it became: the replay weaves TS
+                capture.write(audio)
+            return audio
+        except (_ReadError, _BadSegment, Fmp4Error) as error:
+            log.info("An HLS audio segment could not be read (%s); it plays silent.", error)
+            return b""
+        except Exception as error:
+            if _skippable(error) is None:
+                raise
+            return b""  # its init section is missing: silent, as a missing segment
+        finally:
+            self._http.release(response)
 
     def _skip(self, failure: SourceError, content: bool = False) -> None:
         """Skip a segment with a marker, or end the session: on bad content before any
@@ -1442,11 +1589,21 @@ class HlsSource:
         log.info("Skipped an HLS segment (%s %s).", failure.kind, failure.status or "")
         self._mark()
 
-    def _blocks(self, response: Any, decryptor: _Decryptor | None) -> Iterator[bytes]:
+    def _blocks(
+        self, response: Any, decryptor: _Decryptor | None, capture: _Capture | None
+    ) -> Iterator[bytes]:
+        """A segment's bytes as read (decrypted), each saved in `capture` too, if any."""
         while block := self._http.read(response):
-            yield decryptor.update(block) if decryptor else block
+            if decryptor:
+                block = decryptor.update(block)
+            if capture is not None:
+                capture.write(block)
+            yield block
         if decryptor:
-            yield decryptor.finish()
+            block = decryptor.finish()
+            if capture is not None:
+                capture.write(block)
+            yield block
 
     def _decryptor(self, key: Any, sequence: int, base: str) -> _Decryptor | None:
         if _key_method(key) == "NONE":
@@ -1461,14 +1618,29 @@ class HlsSource:
         return _Decryptor(secret, _iv(key, sequence))
 
     def _fetch_key(self, uri: str) -> bytes:
-        response = self._http.get(uri, headers=_IDENTITY)
-        try:
-            secret = self._http.read_all(response, b"", _KEY_LIMIT)
-        finally:
-            self._http.release(response)
+        secret = self._fetch_small(uri, _KEY_LIMIT)
         if len(secret) != _BLOCK:
             raise _BadSegment(_UNDECRYPTABLE)
         return secret
+
+    def _fetch_small(self, uri: str, limit: int) -> bytes:
+        """A small resource (a key, an init section) whole, or just over `limit` bytes of it
+        when it is longer (`_Http.read_all`)."""
+        response = self._http.get(uri, headers=_IDENTITY)
+        try:
+            return self._http.read_all(response, b"", limit)
+        finally:
+            self._http.release(response)
+
+
+def _balance_edits(video: Fmp4Remuxer, audio: Fmp4Remuxer) -> None:
+    """A video and its separate audio rendition (either fMP4, or both): an edit list's media
+    time on one side only, longer than a B-frame offset or an AAC priming (`_EDIT_KEEP_S`),
+    is left out, the other side having none to match: it would move the sound off the
+    picture (empty edits' delays stay)."""
+    video_s, audio_s = video.edit_media_s, audio.edit_media_s
+    if (video_s > 0) != (audio_s > 0):
+        (video if video_s > 0 else audio).drop_edit_media(_EDIT_KEEP_S)
 
 
 def _open_local(url: str, scheme: str) -> Source:
@@ -1562,16 +1734,19 @@ def _open_http(
     target: float | None,
     extra: float,
     on_answer: Callable[[bool], None] | None = None,
+    capture: _Capture | None = None,
 ) -> Source:
     response, prefix, content = _first_answer(http, url, on_answer)
     if content is None:
-        return TsSource(http, url, response, prefix)  # it now owns the response
+        return TsSource(http, url, response, prefix, capture=capture)  # it now owns the response
     try:
         final = str(response.url)
     finally:
         http.release(response)
     playlist, base, separate = _media_playlist(http, content, final)
-    return HlsSource(http, playlist, base, live_delay, target, extra, separate_audio=separate)
+    return HlsSource(
+        http, playlist, base, live_delay, target, extra, separate_audio=separate, capture=capture
+    )
 
 
 def open_source(
@@ -1612,6 +1787,8 @@ def open_source(
     the result from another thread interrupts a TLS handshake, read or wait; a DNS lookup
     is not bounded and a TCP connect ends within the 60 s timeout per address. An
     interrupted open raises ``SourceError("network")``; an interrupted ``chunks()`` ends.
+
+    With ``QITV_CAPTURE_DIR`` set, the source also saves what it reads there (`_Capture`).
     """
     try:
         scheme = _scheme(url)
@@ -1624,8 +1801,9 @@ def open_source(
     if scheme not in ("http", "https"):
         raise SourceError("unsupported")
     http = _Http(headers, verify_ssl, stop)
+    capture = _Capture.from_environment(url)
     try:
-        return _open_http(http, url, live_delay, target, extra, on_answer)
+        return _open_http(http, url, live_delay, target, extra, on_answer, capture)
     except Exception as error:
         failure = SourceError("network", _STOPPED) if http.closed else _translate(error)
     except BaseException:

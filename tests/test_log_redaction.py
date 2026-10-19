@@ -10,10 +10,10 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Signal
+from job_fixtures import ImmediateRunner
 import requests
 
 from services.epg_manager import EpgManager
-from services.jobs import ImmediateRunner
 from services.provider_manager import StbHandshake
 from services.redact import redact_url, safe_exc, safe_message, safe_traceback
 from services.workers import (
@@ -51,6 +51,9 @@ class _Response:
     def raise_for_status(self):
         if not self.ok:
             raise requests.HTTPError(f"{self.status_code} Error for url: {CREDENTIAL_URL}")
+
+    def close(self):
+        pass
 
 
 class RedactTests(unittest.TestCase):
@@ -303,7 +306,7 @@ class RawUrlLogTests(unittest.TestCase):
         stb = {"type": "STB", "url": "http://h/c/", "mac": MAC}
         worker = ProviderVerificationWorker(1, stb, False, True)
         with (
-            patch("ui.settings_dialog.StbHandshake.run", side_effect=refused()),
+            patch("services.provider_manager.StbHandshake.run", side_effect=refused()),
             self.assertLogs(level="DEBUG") as logs,
         ):
             worker.run()

@@ -355,6 +355,9 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
         elif name == "pip":  # a second channel: a screen with a picture inset
             line(_rrect(0.08, 0.2, 0.84, 0.6, 0.08))
             fill(_rrect(0.5, 0.48, 0.32, 0.24, 0.04))
+        elif name == "grid":  # multiview: four pictures, two by two
+            for x, y in ((0.12, 0.2), (0.52, 0.2), (0.12, 0.52), (0.52, 0.52)):
+                fill(_rrect(x, y, 0.36, 0.28, 0.05))
         elif name == "swap":  # ⇄: the small and the large picture trade places
             shafts = QPainterPath(QPointF(0.16, 0.34))
             shafts.lineTo(0.72, 0.34)
@@ -429,6 +432,20 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             dot = QPainterPath()
             dot.addEllipse(QRectF(0.25, 0.25, 0.5, 0.5))
             fill(dot)
+        elif name == "record":  # record the channel: a dot in a ring
+            ring = QPainterPath()
+            ring.addEllipse(QRectF(0.1, 0.1, 0.8, 0.8))
+            line(ring)
+            dot = QPainterPath()
+            dot.addEllipse(QRectF(0.26, 0.26, 0.48, 0.48))
+            fill(dot)
+        elif name == "check":  # ✓: the track that plays
+            tick = QPainterPath(QPointF(0.2, 0.52))
+            tick.lineTo(0.42, 0.74)
+            tick.lineTo(0.82, 0.28)
+            p.setPen(QPen(color, 0.12, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(tick)
         else:
             raise KeyError(f"Unknown icon: {name!r}")
     finally:

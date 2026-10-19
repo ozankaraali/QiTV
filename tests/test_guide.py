@@ -28,6 +28,7 @@ from ui.overlays.guide import (
     box_span,
     footer_programme,
     programme_spans,
+    slot_start,
     wrap_lines,
 )
 from ui.video_surface import VideoSurface
@@ -562,11 +563,27 @@ class ProgrammeSpansTests(unittest.TestCase):
         a, b = prog("A", self.start, 60), prog("B", self.start + HALF_HOUR, 60)
         result = programme_spans([a, b], self.start, 0.0, 500.0, 10.0)
         self.assertEqual(self.spans([a, b]), [("A", 0.0, 100.0), ("B", 100.0, 200.0)])
-        self.assertEqual(result[0].stop, self.start + HALF_HOUR)
+        self.assertEqual(result[0].programme.stop, self.start + HALF_HOUR)
 
-    def test_equal_starts_draw_one_box(self):
+    def test_of_equal_starts_the_longer_is_drawn(self):
         a, b = prog("A", self.start, 30), prog("B", self.start, 60)
         self.assertEqual(self.spans([a, b]), [("B", 0.0, 200.0)])
+        self.assertEqual(self.spans([b, a]), [("B", 0.0, 200.0)])
+
+    def test_a_day_long_placeholder_starting_with_a_programme_is_drawn_after_it(self):
+        placeholder = prog("Placeholder", self.start, 26 * 60)
+        film = prog("Film", self.start, 60)
+        self.assertEqual(
+            self.spans([placeholder, film]), [("Film", 0.0, 200.0), ("Placeholder", 200.0, 300.0)]
+        )
+
+    def test_a_long_programme_is_drawn_again_after_one_inside_it(self):
+        outer = prog("Outer", self.start, 120)
+        inner = prog("Inner", self.start + HALF_HOUR, 30)
+        self.assertEqual(
+            self.spans([outer, inner]),
+            [("Outer", 0.0, 100.0), ("Inner", 100.0, 100.0), ("Outer", 200.0, 200.0)],
+        )
 
     def test_slivers_narrower_than_the_minimum_are_dropped(self):
         sliver = prog("Sliver", self.start - timedelta(minutes=29), 30)  # 1 min in the window
@@ -587,6 +604,24 @@ class FooterProgrammeTests(unittest.TestCase):
         self.assertIs(footer_programme([ended, upcoming, later], NOW), upcoming)
         self.assertIsNone(footer_programme([ended], NOW))
         self.assertIsNone(footer_programme([], NOW))
+
+    def test_the_details_show_the_grids_on_now_box(self):
+        # A guide merged from several feeds: a placeholder longer than a day, listed first,
+        # starts with a real programme; the next real one is on now.
+        start = NOW.replace(minute=0) - timedelta(hours=2)
+        placeholder = prog("Placeholder", start, 27 * 60)
+        film = prog("Late Film", start, 105)
+        comedy = prog("Comedy Night", film.stop, 90)
+        later = prog("Drama Hour", comedy.stop, 150)
+        programmes = [placeholder, film, comedy, later]
+        window_start = slot_start(NOW)
+        on_now = [
+            s.programme
+            for s in programme_spans(programmes, window_start, 0.0, 500.0, 1.0)
+            if s.programme.is_on(NOW)
+        ]
+        self.assertEqual([p.title for p in on_now], ["Comedy Night"])
+        self.assertEqual(footer_programme(programmes, NOW).title, "Comedy Night")
 
 
 _LOCAL_TIME_SCRIPT = """

@@ -420,6 +420,54 @@ def shift_pts(data, from_frame, offset, pids=(fx.VIDEO_PID, fx.AUDIO_PID)):
     return bytes(out)
 
 
+def flag_backward_pcrs(data):
+    """`data` (in packet sync) with the discontinuity_indicator set on each PCR that steps back
+    by more than 0.1 s on its PID without one."""
+    out = bytearray(data)
+    last = {}
+    for at in range(0, len(out) - PACKET + 1, PACKET):
+        pid = pid_of(out[at : at + 3])
+        if out[at + 3] & 0x20 and out[at + 4] >= 7 and out[at + 5] & 0x10:
+            b = out[at + 6 : at + 11]
+            pcr = b[0] << 25 | b[1] << 17 | b[2] << 9 | b[3] << 1 | b[4] >> 7
+            if pid in last and pts_delta(last[pid], pcr) < -CLOCK // 10 and not out[at + 5] & 0x80:
+                out[at + 5] |= 0x80
+            last[pid] = pcr
+    return bytes(out)
+
+
+def cc_breaks(data):
+    """Offsets of the packets (in sync) whose continuity counter skips with no indicator."""
+    breaks, last = [], {}
+    for at in range(0, len(data) - PACKET + 1, PACKET):
+        pid, b3 = pid_of(data[at : at + 3]), data[at + 3]
+        if pid == 0x1FFF or not b3 & 0x10:
+            continue
+        flag = b3 & 0x20 and data[at + 4] and data[at + 5] & 0x80
+        cc = b3 & 0x0F
+        if pid in last and cc not in (last[pid], (last[pid] + 1) & 0x0F) and not flag:
+            breaks.append(at)
+        last[pid] = cc
+    return breaks
+
+
+def flag_first_packets(data):
+    """`data` with the discontinuity_indicator on each PID's first packet, as a restarted
+    provider stream starts (a PSI packet makes room for it in its stuffing)."""
+    out, seen = [], set()
+    for p in split_packets(data):
+        pid = pid_of(p)
+        if pid not in seen:
+            seen.add(pid)
+            if p[3] & 0x20:
+                p = p[:5] + bytes([p[5] | 0x80]) + p[6:]
+            else:
+                assert p[-2:] == b"\xff\xff", "no stuffing to make room for the flag"
+                p = bytes([p[0], p[1], p[2], p[3] | 0x20]) + b"\x01\x80" + p[4:-2]
+        out.append(p)
+    return b"".join(out)
+
+
 def starts_with_idr(body):
     return b"\x00\x00\x01\x65" in body[:PACKET]
 
@@ -984,20 +1032,25 @@ class SegmenterTests(unittest.TestCase):
     # 11
     def test_chunk_boundaries_do_not_change_events(self):
         clean = fx.make_stream(10, resets=(6.0,))
-        # 79 junk bytes starting with a stray sync byte: the junk is taken for a packet, and the
-        # bytes up to the next proven packet start (three sync bytes 188 apart) are dropped.
+        # The reset's first PCR steps back without the discontinuity_indicator: it gets one.
+        flagged = flag_backward_pcrs(clean)
+        self.assertNotEqual(flagged, clean)
+        # 79 junk bytes starting with a stray sync byte: a packet cut short (the next proven
+        # packet start, three sync bytes 188 apart, lies within its 188 bytes), dropped whole.
         cut = 300 * PACKET
         junk = b"\x47" + b"\x00" * 76 + b"\x47\x47"
         dirty = clean[:cut] + junk + clean[cut:]
         # 1000 bytes with a sync byte every third byte but no three 188 apart: a resync that
-        # waits for more input must not take a stray sync byte at the start of its tail.
+        # waits for more input must not take a stray sync byte at the start of its tail. No
+        # proven start lies within its first 188 bytes: they are taken for a packet.
         noise = b"\x47\x00\x00" * 333 + b"\x47"
         noisy = clean[:cut] + noise + clean[cut:]
+        noisy_flagged = flagged[:cut] + noise + flagged[cut:]
         first = pusi_offset(clean, fx.VIDEO_PID, 900000)
         kept = {
-            "clean": clean[first:],
-            "dirty": dirty[first : cut + PACKET] + dirty[cut + len(junk) + PACKET :],
-            "noisy": noisy[first : cut + PACKET] + noisy[cut + len(noise) :],
+            "clean": flagged[first:],
+            "dirty": flagged[first:],
+            "noisy": noisy_flagged[first : cut + PACKET] + noisy_flagged[cut + len(noise) :],
         }
         for name, data in (("clean", clean), ("dirty", dirty), ("noisy", noisy)):
             with self.subTest(stream=name):
@@ -1016,7 +1069,10 @@ class SegmenterTests(unittest.TestCase):
         events = seg.feed(fx.make_stream(5))
         last = opens(events)[-1]
         self.assertEqual(last.seq, 2)
-        self.assertEqual(seg.finish(), [Closed(2, seg.latest_pts, 5.0)])
+        # The last packet waited for a next input's sync byte: it goes before the close.
+        self.assertEqual(
+            seg.finish(), [Data(fx.make_stream(5)[-PACKET:]), Closed(2, seg.latest_pts, 5.0)]
+        )
         self.assertEqual(seg.latest_pts, 900000 + 124 * FRAME)
         self.assertEqual(seg.finish(), [])
         # Input after finish() starts a new segment, numbered on, across a discontinuity.
@@ -1093,12 +1149,47 @@ class SegmenterTests(unittest.TestCase):
         first = pusi_offset(old, fx.VIDEO_PID, 900000)
         self.assertEqual(payload(events), old[first : PACKET * 300] + new)
 
+    def test_a_packet_cut_short_where_a_restarted_stream_begins_is_dropped_whole(self):
+        # A provider splices a restarted stream in: the old one's last packet ends 144 bytes
+        # in, and the new one starts with every PID flagged discontinuous. The cut-short packet
+        # never reaches the ring (passed whole, its tail would be the new stream's first bytes
+        # and that packet lost with its flag), so no counter breaks without an indicator.
+        old = fx.make_stream(4, audio=False)
+        new = flag_first_packets(fx.make_stream(4, audio=False, pts_start=0))
+        self.assertEqual(pid_of(old[-PACKET:]), fx.VIDEO_PID)
+        data = old[:-PACKET] + old[-PACKET : -PACKET + 144] + new
+        first = pusi_offset(old, fx.VIDEO_PID, 900000)
+        for chunk in (None, 1, 187, 1000):
+            with self.subTest(chunk=chunk):
+                _, events = run(data, chunk=chunk)
+                body = payload(events)
+                self.assertEqual(body, old[first:-PACKET] + new)
+                self.assertEqual(cc_breaks(body), [])
+                self.assertEqual([e.discontinuity for e in opens(events)].count(True), 1)
+
+    def test_a_pcr_that_steps_back_without_the_indicator_gets_it(self):
+        old = fx.make_stream(4, audio=False)
+        first = pusi_offset(old, fx.VIDEO_PID, 900000)
+        back = old + fx.make_stream(4, audio=False)  # the clock starts over, unflagged
+        on = old + fx.make_stream(4, audio=False, pts_start=900000 + 30 * CLOCK)
+        flagged = old + flag_first_packets(fx.make_stream(4, audio=False))
+        for chunk in (None, 1, 187):
+            with self.subTest(chunk=chunk):
+                body = payload(run(back, chunk=chunk)[1])
+                self.assertEqual(body, flag_backward_pcrs(back)[first:])
+                # One byte changed: the flags of the new clock's first PCR (after PAT and PMT).
+                changed = [k for k in range(len(body)) if body[k] != back[first + k]]
+                self.assertEqual(changed, [len(old) + 2 * PACKET + 5 - first])
+                # A forward step, and a step back already flagged, pass byte for byte.
+                self.assertEqual(payload(run(on, chunk=chunk)[1]), on[first:])
+                self.assertEqual(payload(run(flagged, chunk=chunk)[1]), flagged[first:])
+
     def test_no_program_tables_within_3_mib_is_unsupported(self):
         null = bytes([0x47, 0x1F, 0xFF, 0x10]) + b"\xff" * 184
         seg = Segmenter(clock=lambda: 0.0)
         seg.feed(null * (3 * 1024 * 1024 // PACKET - 2))
         with self.assertRaises(Unsupported) as raised:
-            seg.feed(null * 4)
+            seg.feed(null * 5)  # the last one waits for the next input
         self.assertEqual(str(raised.exception), "no program tables")
 
     def test_malformed_tables_and_pes_headers_are_skipped(self):

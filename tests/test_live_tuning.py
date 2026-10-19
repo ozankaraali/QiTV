@@ -154,7 +154,7 @@ class LiveTuningTests(unittest.TestCase):
         store = self.store()
         with (
             mock.patch(
-                "services.live.tuning.os.replace", side_effect=PermissionError(13, "No", "/x")
+                "services.atomic_write.os.replace", side_effect=PermissionError(13, "No", "/x")
             ),
             self.assertLogs("services.live.tuning", "WARNING") as logs,
         ):
@@ -276,7 +276,7 @@ class LiveTuningTests(unittest.TestCase):
         store = self.store()
         failure = ValueError("cannot serialise http://provider.example/user/secret/1.ts")
         with (
-            mock.patch("services.live.tuning.json.dumps", side_effect=failure),
+            mock.patch("services.channel_store.json.dumps", side_effect=failure),
             self.assertLogs("services.live.tuning", "WARNING") as logs,
         ):
             store.remember("a", Tuning(extra=1.5))

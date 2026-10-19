@@ -7,17 +7,36 @@ generation so results that arrive after a provider switch are dropped.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, tzinfo
 import itertools
 import logging
 import re
 from typing import Any, Callable, Iterator, Optional, cast
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from services.catchup import known_zone
 from services.epg_view import Programme, programmes_for_channel
+from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as before)
+    BLOCKED_PREFIX,
+    FORBIDDEN_MESSAGE,
+    LOGIN_REFUSED_MESSAGE,
+    NOT_FOUND_MESSAGE,
+    PROXY_MESSAGE,
+    TOO_SLOW_MESSAGE,
+    UNEXPECTED_ANSWER_MESSAGE,
+    UNREACHABLE_MESSAGE,
+    status_message,
+)
+from services.i18n import N_, tr, translate
 from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
-from services.provider_api import provider_prefers_https, stb_endpoint, stb_portal_base
+from services.provider_api import (
+    provider_prefers_https,
+    stb_endpoint,
+    stb_portal_base,
+    xtream_stream_url,
+)
 from services.provider_ids import stamp
 from services.redact import safe_message
 from services.workers import NO_PORTAL_DATA_MESSAGE, STB_DEVICE_REJECTED_MESSAGE, find_roman_token
@@ -26,24 +45,22 @@ logger = logging.getLogger(__name__)
 
 SECTION_CONTENT_TYPES = {"live": "itv", "movies": "vod", "series": "series"}
 ALL_GROUP_ID = "*"
-NO_SERIES_MESSAGE = "This provider has no series"
-PROVIDER_LOADING_MESSAGE = "The provider is still loading"
-GROUP_UNAVAILABLE_MESSAGE = "This group isn't available"
-SECTION_UNAVAILABLE_MESSAGE = "This provider doesn't offer this section"
-NO_STREAM_MESSAGE = "This item has no stream address"
-EMPTY_LINK_MESSAGE = "The portal returned an empty link"
+# The failure messages are compared as they are and leave the service in English; the screens
+# show them with translate().
+NO_SERIES_MESSAGE = N_("This provider has no series")
+PROVIDER_LOADING_MESSAGE = N_("The provider is still loading")
+GROUP_UNAVAILABLE_MESSAGE = N_("This group isn't available")
+SECTION_UNAVAILABLE_MESSAGE = N_("This provider doesn't offer this section")
+NO_STREAM_MESSAGE = N_("This item has no stream address")
+EMPTY_LINK_MESSAGE = N_("The portal returned an empty link")
 # Catalog network jobs (sections, groups, seasons, episodes) running at once per service:
 # portals rate-limit, and some ban a MAC that opens many connections.
 MAX_CATALOG_JOBS = 2
 
 # --- failure messages shown to the user ---------------------------------------------------
 # Worker errors are exception texts that can carry URLs, query strings and credentials
-# (Xtream puts the username and password in every URL). Only these fixed strings, and the
-# service's own messages, ever leave the service.
-UNREACHABLE_MESSAGE = "Couldn't reach the provider"
-LOGIN_REFUSED_MESSAGE = "The provider refused the login"
-TOO_SLOW_MESSAGE = "The provider took too long to answer"
-UNEXPECTED_ANSWER_MESSAGE = "The provider sent an unexpected answer"
+# (Xtream puts the username and password in every URL). Only fixed strings (their words are
+# services.failure_reasons'), and the service's own messages, ever leave the service.
 _SAFE_MESSAGES = frozenset(
     {
         PROVIDER_LOADING_MESSAGE,
@@ -60,15 +77,21 @@ _SAFE_MESSAGES = frozenset(
         LOGIN_REFUSED_MESSAGE,
         TOO_SLOW_MESSAGE,
         UNEXPECTED_ANSWER_MESSAGE,
+        FORBIDDEN_MESSAGE,
+        NOT_FOUND_MESSAGE,
+        PROXY_MESSAGE,
     }
 )
-_SAFE_PREFIXES = ("Unknown section: ", "Unsupported provider: ")
+_SAFE_PREFIXES = ("Unknown section: ", "Unsupported provider: ", BLOCKED_PREFIX)
 _TOO_SLOW = re.compile(r"timed? ?out|timeout", re.IGNORECASE)
-_LOGIN_REFUSED = re.compile(
-    r"\b(?:401|403)\s+(?:client\s+)?error\b|unauthori[sz]ed|forbidden"
-    r"|status(?:\s*code)?\W+(?:401|403)\b|:\s*(?:401|403)\s*$",
+# An HTTP status in requests' "404 Client Error: …", "status code 407" or "…: 458".
+_STATUS = re.compile(
+    r"\b([45]\d\d)\s+(?:client\s+|server\s+)?error\b"
+    r"|status(?:\s*code)?\W+([45]\d\d)\b|:\s+([45]\d\d)\s*$",  # not a host's :port
     re.IGNORECASE,
 )
+_LOGIN_REFUSED = re.compile(r"unauthori[sz]ed", re.IGNORECASE)
+_FORBIDDEN = re.compile(r"forbidden", re.IGNORECASE)
 _UNREACHABLE = re.compile(
     r"max retries exceeded|failed to establish|connection (?:refused|reset|aborted|error)"
     r"|connectionerror|failed to resolve|name or service not known|nodename nor servname"
@@ -81,6 +104,18 @@ _UNREACHABLE = re.compile(
 )
 
 
+def _host(url: Any) -> str:
+    """A web address's host and port, lower case ("" for none); one typed without its scheme
+    ("panel.example:8080") is read as http."""
+    text = str(url or "").strip()
+    if text and "://" not in text:
+        text = f"http://{text}"
+    try:
+        return urlsplit(text).netloc.lower()
+    except ValueError:
+        return ""
+
+
 def friendly_error(message: object) -> str:
     """Map a worker's error text (or exception) to a fixed message without URLs or credentials.
 
@@ -91,10 +126,15 @@ def friendly_error(message: object) -> str:
     text = "" if message is None else str(message)
     if text in _SAFE_MESSAGES or text.startswith(_SAFE_PREFIXES):
         return text
+    status = _status(text)
     if not text.strip() or _TOO_SLOW.search(text):
         friendly = TOO_SLOW_MESSAGE  # an empty text is almost always a timeout
-    elif _LOGIN_REFUSED.search(text):
+    elif status == 401 or _LOGIN_REFUSED.search(text):
         friendly = LOGIN_REFUSED_MESSAGE
+    elif status is not None and status_message(status) is not None:
+        friendly = str(status_message(status))  # 403, 404, 407, a block (451, 456, 458)
+    elif _FORBIDDEN.search(text):
+        friendly = FORBIDDEN_MESSAGE
     elif _UNREACHABLE.search(text):
         friendly = UNREACHABLE_MESSAGE
     else:
@@ -104,6 +144,43 @@ def friendly_error(message: object) -> str:
     else:
         logger.info("Provider request failed: %s", friendly)
     return friendly
+
+
+# The labels the loaders write into a provider's lists when the provider gives none: stored
+# and compared in English, shown by `shown_label`.
+_LOADER_LABELS = frozenset(
+    {
+        N_("All"),  # i18n: the group of every channel or title
+        N_("Unknown Category"),  # i18n: the group of channels or titles without a category
+        N_("Unknown"),  # i18n: a provider's category without a name
+        N_("Uncategorized"),  # i18n: a playlist's group of the channels without a group
+        N_("Stream"),  # i18n: the only channel of a provider that is a single stream
+    }
+)
+_NUMBERED_LABEL = re.compile(r"(Season|Episode|Stream) (\d+)")
+
+
+def shown_label(text: str) -> str:
+    """A group, season, episode or channel name as shown: the labels the loaders make up when
+    a provider names none ("All", "Unknown Category", "Season 2", "Episode 5") in the active
+    language; a provider's own name as it is."""
+    match = _NUMBERED_LABEL.fullmatch(text)
+    if match is not None:
+        kind, number = match.groups()
+        if kind == "Season":
+            return tr("Season {n}", n=number)  # i18n: a season without a name of its own
+        if kind == "Episode":
+            return tr("Episode {n}", n=number)  # i18n: an episode without a name of its own
+        return tr("Stream {n}", n=number)  # i18n: a channel or film without a name (its number)
+    return translate(text) if text in _LOADER_LABELS else text
+
+
+def _status(text: str) -> Optional[int]:
+    """The HTTP error status a worker's text names, if any (the text itself is never logged)."""
+    match = _STATUS.search(text)
+    if match is None:
+        return None
+    return int(next(group for group in match.groups() if group))
 
 
 def normalize_seasons(series_name: str, items: list[dict]) -> list[dict]:
@@ -164,7 +241,9 @@ def format_xtream_episodes(season, stream_base, stream_ext, username, password) 
         episode_id = ep.get("id")
         # Use container_extension from episode data, fallback to stream_ext
         container_ext = ep.get("container_extension") or stream_ext
-        cmd = f"{stream_base}/series/{username}/{password}/{episode_id}.{container_ext}"
+        cmd = xtream_stream_url(
+            stream_base, "series", username, password, episode_id, container_ext
+        )
         # Robust episode number extraction
         number_str = None
         for key in ("episode_num", "episode", "num"):
@@ -576,6 +655,29 @@ class CatalogService(QObject):
                 return int(content["max_connections"])
         return None
 
+    def archive_zone(self) -> Optional[tzinfo]:
+        """The time zone an Xtream panel's archive addresses are in (catch-up, 2.2): what its
+        sign-in said when the live channels loaded; None when it is not known (another
+        provider, or live channels loaded before 2.2)."""
+        content = self.provider_manager.current_provider_content.get("itv")
+        if not isinstance(content, dict):
+            return None
+        return known_zone(content.get("timezone"), content.get("tz_offset"))
+
+    def stream_hosts(self) -> set[str]:
+        """The hosts (with their ports) the provider's address and its streams are at."""
+        hosts = {_host(self.current_provider().get("url"))}
+        content = self.provider_manager.current_provider_content.get("itv")
+        if isinstance(content, dict):
+            hosts |= {_host(content.get(key)) for key in ("resolved_base", "stream_base")}
+        return {host for host in hosts if host}
+
+    def catchup_source(self) -> str:
+        """An M3U playlist's catch-up template for every channel (its #EXTM3U line's), or ""."""
+        content = self.provider_manager.current_provider_content.get("itv")
+        source = content.get("catchup_source") if isinstance(content, dict) else None
+        return source if isinstance(source, str) else ""
+
     # --- sections --------------------------------------------------------------------
     def sections(self) -> list[str]:
         if self.provider_type() in ("STB", "XTREAM"):
@@ -607,13 +709,13 @@ class CatalogService(QObject):
         if ptype == "M3USTREAM":
             item = {
                 "id": 1,
-                "name": provider.get("name") or "Stream",
+                "name": provider.get("name") or N_("Stream"),
                 "cmd": provider.get("url", ""),
             }
             self._store_section(
                 ct,
                 {
-                    "categories": [{"id": ALL_GROUP_ID, "title": "All"}],
+                    "categories": [{"id": ALL_GROUP_ID, "title": N_("All")}],
                     "contents": [item],
                     "sorted_channels": {ALL_GROUP_ID: [0]},
                 },
@@ -712,7 +814,7 @@ class CatalogService(QObject):
         if isinstance(content, list):
             if not content:
                 return []
-            return [Group(section, ALL_GROUP_ID, "All", len(content), self._pinned or "")]
+            return [Group(section, ALL_GROUP_ID, N_("All"), len(content), self._pinned or "")]
         if not isinstance(content, dict):
             return []
         contents = content.get("contents")

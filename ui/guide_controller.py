@@ -5,7 +5,8 @@ the channel tuned last; in all providers mode, when the drawer shows another liv
 group's channels (any provider's) instead. While it is open it takes the keys:
 - ↑/↓, PgUp/PgDn and Ch± move the highlight; ←/→ move the time window;
 - digits jump to a channel number (the fast way through thousands of channels), Enter tunes
-  the highlighted channel and closes the guide;
+  the highlighted channel and closes the guide (on a channel with a provider archive, a past
+  programme chosen in the guide plays from its start instead: `catchupRequested`);
 - G and Esc close it. A request for the drawer (the View menu, a click) or for the previous
   channel (the Playback menu) closes it and then acts as usual; the media keys do nothing,
   as with the drawer open. Playback, volume, fullscreen and favorites keys are not its own.
@@ -35,6 +36,8 @@ _IGNORED = (Action.MEDIA_NEXT, Action.MEDIA_PREV)
 
 class GuideController(QObject):
     tuneRequested = Signal(object, str, object)  # channel, group key, the group's channels
+    # channel, its programme (from its start, from the provider's archive), group key, channels
+    catchupRequested = Signal(object, object, str, object)
 
     def __init__(
         self, guide: Guide, *, digits_ms: int = DIGITS_MS, parent: Optional[QObject] = None
@@ -47,6 +50,9 @@ class GuideController(QObject):
         self._digit_timer = QTimer(self, singleShot=True, interval=digits_ms)
         self._digit_timer.timeout.connect(self._end_number)
         guide.tuneRequested.connect(self._on_tune)
+        programme = getattr(guide, "programmeRequested", None)
+        if programme is not None:
+            programme.connect(self._on_programme)
 
     def is_open(self) -> bool:
         return bool(self.guide.isVisible())
@@ -142,3 +148,8 @@ class GuideController(QObject):
         group, channels = self._group, self._channels
         self.close()
         self.tuneRequested.emit(channel, group, channels)
+
+    def _on_programme(self, channel: dict, programme: object) -> None:
+        group, channels = self._group, self._channels
+        self.close()
+        self.catchupRequested.emit(channel, programme, group, channels)

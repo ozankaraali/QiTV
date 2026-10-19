@@ -18,6 +18,8 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject
 
+from services.catalog import shown_label
+from services.i18n import N_, translate
 from services.navigation import episode_key, item_key, item_title
 from services.next_episode import (
     NeedEpisodes,
@@ -32,10 +34,11 @@ from ui.overlays.next_card import NextCard
 
 logger = logging.getLogger(__name__)
 
-FINISHED_TEXT = "Finished"
-NOTHING_NEXT_TEXT = "Nothing to play next"
-NEXT_SEASON_FAILED_TEXT = "Couldn't load the next season"
-LOADING_NEXT_SEASON_TEXT = "Loading next season…"
+# English (N_): shown with translate().
+FINISHED_TEXT = N_("Finished")  # i18n: toast and picture label: the movie or episode ended
+NOTHING_NEXT_TEXT = N_("Nothing to play next")  # i18n: toast after Next (no next episode or movie)
+NEXT_SEASON_FAILED_TEXT = N_("Couldn't load the next season")  # i18n: error toast
+LOADING_NEXT_SEASON_TEXT = N_("Loading next season…")  # i18n: hint while a season loads
 
 
 @dataclass
@@ -117,7 +120,7 @@ class Autoplay(QObject):
 
     def hint(self) -> Optional[str]:
         """The lasting hint autoplay wants shown now: its wait for a season, else None."""
-        return LOADING_NEXT_SEASON_TEXT if self._awaiting is not None else None
+        return translate(LOADING_NEXT_SEASON_TEXT) if self._awaiting is not None else None
 
     def play_now(self) -> bool:
         """Enter while the card shows: play it now."""
@@ -171,14 +174,14 @@ class Autoplay(QObject):
             season_id = str(result.season.get("id"))
             if season_id == loaded:
                 logger.info("Season %s has no episodes after loading them", season_id)
-                self._notify(NEXT_SEASON_FAILED_TEXT, "error")
+                self._notify(translate(NEXT_SEASON_FAILED_TEXT), "error")
                 return
             self._awaiting = _Awaiting(target, play_now, str(series.get("id")), season_id)
-            self._set_hint(LOADING_NEXT_SEASON_TEXT)
+            self._set_hint(translate(LOADING_NEXT_SEASON_TEXT))
             self.catalog.request_episodes(series, result.season)
             return
         if result is None:
-            self._notify(NOTHING_NEXT_TEXT if play_now else FINISHED_TEXT, "info")
+            self._notify(translate(NOTHING_NEXT_TEXT if play_now else FINISHED_TEXT), "info")
             return
         episode = kind == "episode"
         episodes = self.catalog.episodes(context["series"], result.season) if episode else None
@@ -190,7 +193,9 @@ class Autoplay(QObject):
         if episode:
             subtitle = episode_label(result.season, result.item)
         else:
-            groups = ((group.id, group.title) for group in self.catalog.groups("movies"))
+            groups = (
+                (group.id, shown_label(group.title)) for group in self.catalog.groups("movies")
+            )
             subtitle = genre_title(result.item, groups)
         self.card.show_next(item_title(result.item, episode=episode), subtitle, kind=kind)
 
@@ -215,7 +220,7 @@ class Autoplay(QObject):
 
     def _on_episodes_failed(self, series_id: str, season_id: str, _message: str) -> None:
         if self._take_awaiting(series_id, season_id) is not None:
-            self._notify(NEXT_SEASON_FAILED_TEXT, "error")
+            self._notify(translate(NEXT_SEASON_FAILED_TEXT), "error")
 
     # ---- the card -----------------------------------------------------------------------------
 

@@ -35,32 +35,38 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import partial
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 
 from services.catalog import ALL_GROUP_ID
+from services.i18n import N_, tr_n, translate
 from services.live.refusals import STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
-from services.sessions import PURPOSE, SessionManager, Slot, limit_message
+from services.sessions import SessionManager, Slot, limit_message
 from services.zapping import ZapContext
 from ui import item_provider
 from ui.autoplay import FINISHED_TEXT
 from ui.context_actions import is_channel
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, start_kwargs
-from ui.overlays.pip_label import CONNECTING, LIVE
+from ui.overlays.pip_label import CONNECTING, LIVE, REC
 from ui.overlays.transport import fmt_behind
 
 logger = logging.getLogger(__name__)
 
-PIP_LIVE_ONLY = "Picture-in-picture is for live TV"
-PIP_EXTERNAL = "Picture-in-picture is off while channels play in an external player"
-NO_PREVIOUS = "No previous channel yet"
-OPEN_PIP_FIRST = "Open picture-in-picture first (P)"
-ALREADY_LARGE = "This channel is already playing"
-SWITCHING = "Switching…"  # a swap asked for while the large picture's channel opens
+# The toasts (kept in English; shown translated).
+PIP_LIVE_ONLY = N_("Picture-in-picture is for live TV")  # i18n: a toast
+PIP_EXTERNAL = N_(
+    "Picture-in-picture is off while channels play in an external player"
+)  # i18n: a toast
+# i18n: a toast: there is no channel watched before this one to open small
+NO_PREVIOUS = N_("No previous channel yet")
+OPEN_PIP_FIRST = N_("Open picture-in-picture first (P)")  # i18n: a toast; P is the key
+ALREADY_LARGE = N_("This channel is already playing")  # i18n: a toast
+# A swap asked for while the large picture's channel opens.
+SWITCHING = N_("Switching…")  # i18n: a toast: the two pictures are about to swap
 SWITCHING_MS = 1500
 SHIFTED_MARGIN_S = 1.0  # the label says "−MM:SS" once the lag is this far beyond the target
 ERROR_MS = 6000
@@ -110,6 +116,8 @@ class PipControls(QObject):
         toast: Callable[..., None],
         swap: Callable[[], bool],
         toggle_mute: Callable[[], None],
+        sound: Optional[Callable[[Any, dict], None]] = None,
+        explain: Callable[[dict, str], None] = lambda item, title: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
@@ -119,7 +127,8 @@ class PipControls(QObject):
         channel); `all_live()` every live channel; `large_channel()` what the large picture
         plays; `vod()` whether a movie or an episode is current; `external()` whether channels
         play in an external player (it holds the provider's stream); `swap()` the shell's swap
-        (False when it has to wait); `toggle_mute()` mutes or unmutes the small picture.
+        (False when it has to wait); `toggle_mute()` mutes or unmutes the small picture;
+        `sound(player, channel)` gives a channel opening small its sound sync (2.2).
         """
         super().__init__(parent)
         self.sessions = sessions
@@ -142,6 +151,8 @@ class PipControls(QObject):
         self._toast = toast
         self._swap = swap
         self._toggle_mute = toggle_mute
+        self._sound = sound
+        self._explain = explain  # why a failure happened, at the item's provider
         self._views: dict[str, SlotView] = {}
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
@@ -156,9 +167,8 @@ class PipControls(QObject):
         sessions.denied.connect(self._on_denied)
         sessions.pipFailed.connect(self._on_failed)
         sessions.slotTimeline.connect(self._on_timeline)
-        for slot in (sessions.large(), sessions.other()):
-            slot.live.modeChanged.connect(self._refresh_label)
-            slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
+        for slot in sessions.slots():
+            self.watch_slot(slot)
         self._lanes.sideFailed.connect(self._on_link_failed)
         self._transport.pipRequested.connect(self.toggle_previous)
         self._transport.set_pip_state(True, False)
@@ -170,12 +180,24 @@ class PipControls(QObject):
             label.muteRequested.connect(self._toggle_mute)
             label.swapRequested.connect(self.user_swap)
 
+    def watch_slot(self, slot: Slot) -> None:
+        """Follow a slot's player and live session (each slot's at wiring, a tile's when the
+        multiview adds it): the label shows the state of whichever is small."""
+        slot.live.modeChanged.connect(self._refresh_label)
+        slot.live.recordingChanged.connect(self._refresh_label)  # REC (2.2)
+        slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
+
     # ---- state --------------------------------------------------------------------------------
 
     def busy(self) -> bool:
         """PiP is open, opening, or its link is on its way."""
         sessions = self.sessions
         return self._wanted is not None or sessions.pip_open() or sessions.pip_opening()
+
+    def on_its_way(self) -> bool:
+        """A channel is on its way to the small picture: its link, its opening or its change."""
+        sessions = self.sessions
+        return self._wanted is not None or sessions.pip_opening() or sessions.changing()
 
     def small_showing(self, channel: dict) -> Optional[Slot]:
         """The small slot when it shows `channel` (the large picture may take it by a swap)."""
@@ -240,7 +262,7 @@ class PipControls(QObject):
     def swap_key(self) -> None:
         """S: swap, or say how to open picture in picture."""
         if not self.sessions.pip_open():
-            self._toast(OPEN_PIP_FIRST)
+            self._toast(translate(OPEN_PIP_FIRST))
         else:
             self.user_swap()
 
@@ -248,7 +270,7 @@ class PipControls(QObject):
         """S, a click on the PiP or its ⇄: a swap that has to wait says so."""
         swapped = self._swap()
         if not swapped and self.sessions.pip_open():
-            self._toast(SWITCHING, "info", SWITCHING_MS)
+            self._toast(translate(SWITCHING), "info", SWITCHING_MS)
         return swapped
 
     def open_node(self, node) -> None:
@@ -291,7 +313,7 @@ class PipControls(QObject):
             return
         previous, context = self._previous_channel()
         if previous is None:
-            self._toast(NO_PREVIOUS)
+            self._toast(translate(NO_PREVIOUS))
             return
         self.open_channel(previous, context)
 
@@ -302,7 +324,7 @@ class PipControls(QObject):
         if self._refused():
             return
         if ZapContext.same(channel, self._large_channel()):
-            self._toast(ALREADY_LARGE)
+            self._toast(translate(ALREADY_LARGE))
             return
         if self.small_showing(channel) is not None:
             return  # already small
@@ -320,10 +342,10 @@ class PipControls(QObject):
     def _refused(self) -> bool:
         """A movie plays, or channels play in an external player: no PiP (toasted)."""
         if self._vod():
-            self._toast(PIP_LIVE_ONLY)
+            self._toast(translate(PIP_LIVE_ONLY))
             return True
         if self._external():
-            self._toast(PIP_EXTERNAL)
+            self._toast(translate(PIP_EXTERNAL))
             return True
         return False
 
@@ -419,11 +441,14 @@ class PipControls(QObject):
             or item_provider.provider_name(self.catalog, channel) != name
         ):
             return ""
-        plural = "s" if limit != 1 else ""
-        return (
-            f"Closed {channel.get('name') or ''} to play {title}: "
-            f"{name} allows {limit} stream{plural}"
-        )
+        return tr_n(
+            "Closed {channel} to play {title}: {provider} allows {n} stream",
+            "Closed {channel} to play {title}: {provider} allows {n} streams",
+            limit,
+            channel=channel.get("name") or "",
+            title=title,
+            provider=name,
+        )  # i18n: a toast; {channel} closed for the film or episode {title}
 
     def _limit_reached(self, channel: dict) -> bool:
         """The limit of the channel's own provider leaves no stream for a small picture: say
@@ -435,7 +460,8 @@ class PipControls(QObject):
         if limit is None:
             return False
         name = str(provider.get("name", ""))
-        others = [p for p in self._budget.holders(name) if p != PURPOSE]  # its own go back
+        own = self.sessions.other().name  # the slot it would open in: its own go back
+        others = [p for p in self._budget.holders(name) if p != own]
         if limit > 0 and len(others) < limit:
             return False
         self._toast(limit_message(limit), "error", ERROR_MS)
@@ -501,6 +527,8 @@ class PipControls(QObject):
             xtream_max=item_provider.max_connections(self.catalog, target.item),
             start_kwargs=kwargs,
         )
+        if self._sound is not None:  # its old stream stopped: the new one opens with it
+            self._sound(slot.playback, target.item)
         slot.group_key = target.group_key
         if sessions.pip_open():
             self._refresh_label()  # the small picture's channel changed
@@ -549,7 +577,10 @@ class PipControls(QObject):
         if view is not None and self._may_retry(view.target):
             self._retry(view)
             return
-        self._toast(message, "error", ERROR_MS)
+        self._toast(translate(message), "error", ERROR_MS)  # one kept in English shows translated
+        target = view.target if view is not None else None
+        if target is not None:
+            self._explain(target.item, target.title)  # why, at its provider
 
     def _may_retry(self, target: Optional[Target]) -> bool:
         """As the large picture (LiveControls.may_retry): once per channel opened small, never
@@ -609,6 +640,8 @@ class PipControls(QObject):
     def _state_text(self, slot: Slot, *, live: bool = True) -> str:
         if not live:  # a movie or an episode swapped small plays on: its title alone
             return FINISHED_TEXT if slot.name in self._ended else ""
+        if slot.live.recording():
+            return REC  # its recording goes on small (2.2)
         mode = slot.live.mode
         timeline = self._timelines.get(slot.name)
         if mode == "pipeline" and timeline is not None:

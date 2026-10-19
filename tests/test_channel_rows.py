@@ -15,6 +15,7 @@ from services.provider_ids import PROVIDER_KEY
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.channel_rows import (
+    SINGLE_PASS_ROWS,
     ChannelListView,
     ChannelRowDelegate,
     ChannelRowsModel,
@@ -250,7 +251,7 @@ class ProviderTagTests(unittest.TestCase):
         self.assertGreaterEqual(short_w, QFontMetricsF(name_font).horizontalAdvance("BBC"))
         self.assertAlmostEqual(dx - short_w, 0.8 * units.u)  # a gap, not a column
 
-    def render(self, rows, show_provider):
+    def render(self, rows, show_provider, **delegate):
         view = ChannelListView()
         view.units_width = 1000
         model = ChannelRowsModel(None, now_provider)
@@ -261,10 +262,33 @@ class ProviderTagTests(unittest.TestCase):
         image = QImage(600, 66, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(QColor("black"))
         painter = QPainter(image)
-        ChannelRowDelegate(1.0, view).paint(painter, option, model.index(0))
+        ChannelRowDelegate(1.0, view, **delegate).paint(painter, option, model.index(0))
         painter.end()
         view.deleteLater()
         return image
+
+    def drawn(self, rows, **delegate):
+        """The texts a row draws (through `elided`): its name, and its second line."""
+        from unittest import mock
+
+        from ui.overlays import channel_rows
+
+        texts, elided = [], channel_rows.elided
+
+        def spy(p, text, width):
+            texts.append(text)
+            return elided(p, text, width)
+
+        with mock.patch.object(channel_rows, "elided", spy):
+            self.render(rows, True, **delegate)
+        return texts
+
+    def test_the_provider_can_start_the_second_line_instead_of_a_chip(self):
+        # The drawer's find: the name keeps the row's width; "provider · what is on" below.
+        self.assertEqual(self.drawn(tagged()), ["Chan 0", "Show Chan 0"])  # a chip: no elided
+        below = self.drawn(tagged(), provider_below=True)
+        self.assertEqual(below, ["Chan 0", "Harbor IPTV · Show Chan 0"])
+        self.assertEqual(self.drawn(tagged(2)[1:], provider_below=True), ["Chan 1", "Harbor IPTV"])
 
     def test_a_tagged_row_paints_the_tag_and_an_untagged_one_does_not(self):
         plain = self.render(tagged(), False)
@@ -407,9 +431,15 @@ class ColumnTests(unittest.TestCase):
         return host, col
 
     def test_hover_keeps_the_column_open(self):
-        host, col = self.hosted_column(idle_ms=200)
+        # The pointer arrives with no idle time running out meanwhile (under load more than
+        # 200 ms could pass before the moves were handled): the test waits on the hover, then
+        # gives the column a short idle time again and lets three of them pass.
+        host, col = self.hosted_column(idle_ms=60_000)
         for x in (240, 250, 260):  # onto the column's rows, moving
             QTest.mouseMove(host.windowHandle(), QPoint(x, x + 100))
+        self.assertTrue(wait_until(lambda: col._hovering and col.underMouse()))
+        col._idle.setInterval(200)
+        col.highlight(0)  # a zap step: the idle time starts now
         elapse(600)
         self.assertTrue(col.isVisible())  # the pointer rests on it, about to click a row
         QTest.mouseMove(host.windowHandle(), QPoint(1000, 300))  # off the column
@@ -428,6 +458,110 @@ class ColumnTests(unittest.TestCase):
         col.rowClicked.connect(got.append)
         col._view.rowClicked.emit(4)
         self.assertEqual(got, [4])
+
+
+def shown(view, row):
+    """Whether the row is laid out and wholly in sight."""
+    rect = view.visualRect(view.model().index(row))
+    return rect.isValid() and view.viewport().rect().contains(rect)
+
+
+def placed(view, row):
+    """Whether the layout reached the row (it has its place, in sight or not)."""
+    return view.visualRect(view.model().index(row)).isValid()
+
+
+class FarRowTests(unittest.TestCase):
+    """A row far down a list is scrolled to right after the list is set (2.1.0 laid the rows
+    out 100 at a time, and a scroll to a row past them did nothing: the list showed its top)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        host = QWidget()
+        host.resize(600, 400)
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        self.view = ChannelListView(host)
+        self.view.units_width = 1280
+        self.view.setGeometry(0, 0, 500, 400)
+        self.view.setItemDelegate(ChannelRowDelegate(1.0, self.view))
+        self.model = ChannelRowsModel(None, now_provider, self.view)
+        self.view.setModel(self.model)
+        host.show()
+
+    def go_to(self, row, hint=ChannelListView.ScrollHint.EnsureVisible):
+        index = self.model.index(row)
+        self.view.setCurrentIndex(index)
+        self.view.scrollTo(index, hint)
+
+    def test_a_row_far_down_is_shown_right_after_the_list_is_set(self):
+        self.model.set_channels(items(600))
+        self.go_to(550)
+        self.assertTrue(shown(self.view, 550))
+
+    def test_a_list_set_again_keeps_its_scroll_position(self):
+        self.model.set_channels(items(600))
+        self.go_to(400, ChannelListView.ScrollHint.PositionAtCenter)
+        value = self.view.verticalScrollBar().value()
+        self.model.set_channels(items(600))  # e.g. a count changed
+        elapse(20)
+        self.assertEqual(self.view.verticalScrollBar().value(), value)
+        self.assertTrue(shown(self.view, 400))
+
+    def test_a_row_far_down_a_very_long_list_is_shown_once_its_rows_are_laid_out(self):
+        count = SINGLE_PASS_ROWS * 2  # laid out in batches between events
+        self.model.set_channels(items(count))
+        self.go_to(count - 10)
+        self.assertTrue(wait_until(lambda: shown(self.view, count - 10), 5000))
+
+    def test_a_wheel_turn_while_the_row_waits_keeps_the_users_scroll(self):
+        count = SINGLE_PASS_ROWS * 2
+        self.model.set_channels(items(count))
+        self.go_to(count - 10)
+        self.assertFalse(placed(self.view, count - 10))
+        center = QPointF(self.view.viewport().rect().center())
+        QTest.wheelEvent(self.view.window().windowHandle(), center, QPoint(0, -120))
+        self.assertTrue(wait_until(lambda: placed(self.view, count - 10), 5000))
+        elapse(20)
+        self.assertFalse(shown(self.view, count - 10))  # not pulled down there after the turn
+
+    def test_a_list_hidden_while_its_row_waits_is_not_pulled_there_later(self):
+        count = SINGLE_PASS_ROWS * 2
+        self.model.set_channels(items(count))
+        self.go_to(count - 10)
+        self.view.hide()  # e.g. the drawer closed
+        self.assertTrue(wait_until(lambda: placed(self.view, count - 1), 5000))
+        self.view.show()
+        elapse(20)
+        self.assertEqual(self.view.verticalScrollBar().value(), 0)
+
+    def test_a_row_left_without_a_place_is_not_scrolled_to_later(self):
+        count = SINGLE_PASS_ROWS * 2
+        self.model.set_channels(items(count))
+        self.go_to(count - 10)
+        self.view.setRowHidden(count - 10, True)  # the layout ends without a place for it
+        self.assertTrue(wait_until(lambda: placed(self.view, count - 1), 5000))
+        elapse(20)
+        self.view.setRowHidden(count - 10, False)  # a later layout, and its timers
+        self.assertTrue(wait_until(lambda: placed(self.view, count - 10), 5000))
+        elapse(20)
+        self.assertEqual(self.view.verticalScrollBar().value(), 0)
+
+    def test_the_fast_zap_column_opens_centred_on_a_channel_far_down(self):
+        host = QWidget()
+        host.resize(1280, 720)
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        column = ChannelColumn(FakeLogos(), now_provider, parent=host)
+        host.show()
+        column.open("All", items(600), 550)
+        view = column._view
+        self.assertTrue(shown(view, 550))
+        middle = view.visualRect(column._model.index(550)).center().y()
+        self.assertAlmostEqual(middle, view.viewport().rect().center().y(), delta=40)
 
 
 class HostedColumnInputTests(unittest.TestCase):

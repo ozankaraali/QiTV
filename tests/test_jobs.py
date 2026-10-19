@@ -11,8 +11,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from job_fixtures import ImmediateRunner
 
-from services.jobs import Cancelled, ImmediateRunner, JobRunner, cancel_requested
+from services.jobs import Cancelled, JobRunner, cancel_requested
 from tests.timer_fixtures import wait_until
 
 GENERIC_FAILURE = "The background task failed"
@@ -220,7 +221,9 @@ class JobCancellationTests(unittest.TestCase):
                 sent.append(1)
                 yield b"<!-- " + b"x" * 1000 + b" -->"
 
-        response = SimpleNamespace(status_code=200, headers={}, iter_content=endless)
+        response = SimpleNamespace(
+            status_code=200, headers={}, iter_content=endless, close=lambda: None
+        )
         with mock.patch("services.epg_manager.requests.get", return_value=response):
             worker = EpgLoadWorker(manager, force_refresh=True)
             kind, _ = self.run_and_cancel(worker, lambda: len(sent) > 5)

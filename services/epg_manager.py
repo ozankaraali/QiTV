@@ -1,3 +1,4 @@
+from contextlib import closing, contextmanager
 import copy
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime, parsedate_to_datetime
@@ -7,19 +8,19 @@ import itertools
 import logging
 import os
 import pickle
-import shutil
-import tempfile
 import threading
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Generator, Iterator, List, Optional, Set, Tuple, cast
 import xml.etree.ElementTree as ET
 import zipfile
 
 import orjson as json
 import tzlocal  # the GUI thread's guide lookups use it: loaded with the window
 
+from services.atomic_write import atomic_write
 from services.content_loader import ContentLoader
 from services.epg_store import PackedGuide, read_guide, write_guide
 from services.epg_time import parse_stb, parse_xmltv, parse_xmltv_as
+from services.epg_view import guide_offset
 from services.jobs import Cancelled, cancel_requested
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
@@ -29,6 +30,7 @@ from services.provider_api import (
     https_fallback_candidates,
     provider_prefers_https,
     stb_endpoint,
+    xtream_sign_in_bases,
     xtream_xmltv_url,
 )
 from services.redact import redact_url, safe_exc
@@ -47,7 +49,7 @@ def _http_date(moment: datetime) -> str:
 
 
 def _cache_key(source: str) -> str:
-    """Name an EPG source's cache entry (index key and pickle file stem)."""
+    """Name an EPG source's cache entry (index key and guide file stem)."""
     return hashlib.md5(source.encode()).hexdigest()
 
 
@@ -77,11 +79,30 @@ def _file_stamp(path: str) -> tuple[int, int, int]:
 _XMLTV_FORMATS = ("%Y%m%d%H%M%S %z", "%Y%m%d%H%M%S")
 
 
+def _stop_not_before(start: str, stop: str) -> bool:
+    """True when the text alone shows `stop` is not before `start`: both begin with 14 ASCII
+    digits ("YYYYmmddHHMMSS"), end the same (" +HHMM", or nothing), and stop's digits are not
+    lower. Such times parse with the same offset and compare as their digits do, or one of
+    them does not parse: either way normalize_programme_stop returns `stop` as it is."""
+    if len(start) != len(stop) or len(stop) not in (14, 20) or start[14:] != stop[14:]:
+        return False
+    first, last = start[:14], stop[:14]
+    return (
+        first <= last
+        and first.isascii()
+        and last.isascii()
+        and first.isdecimal()
+        and last.isdecimal()
+    )
+
+
 def normalize_programme_stop(start: str, stop: str) -> str:
     """Move a stop time that precedes its start (programme ends after midnight) to the next day.
 
     Accepts XMLTV times with or without a UTC offset; unparseable values are returned unchanged.
     """
+    if _stop_not_before(start, stop):  # most programmes: no time is parsed
+        return stop
     for fmt in _XMLTV_FORMATS:
         try:
             start_dt = parse_xmltv_as(start, fmt)
@@ -94,77 +115,142 @@ def normalize_programme_stop(start: str, stop: str) -> str:
     return stop
 
 
-def xml_to_dict(element):
+_SHARED_LENGTH = 64
+_PROGRAMME_TEXTS = ("title", "desc")
+
+
+def _programme(
+    element: ET.Element, start: str, stop: str, shared: Dict[str, str]
+) -> Dict[str, str]:
+    """What the guide reads of a <programme> (epg_view.parse_programme): its start, its stop
+    (see normalize_programme_stop), and the first of its titles and of its descriptions with
+    text, without sub-elements, stripped (a programme without one has no such key).
+
+    `shared`, a dict the caller keeps over the guide, makes equal strings of up to
+    _SHARED_LENGTH characters one object (a guide's times and titles repeat over thousands
+    of programmes).
     """
-    Recursively converts an XML element and its children into a dictionary.
-    Handles multiple occurrences of the same child element by storing them in a list.
-    Includes attributes of elements in the resulting dictionary.
+    stop = normalize_programme_stop(start, stop)
+    programme = {"@start": shared.setdefault(start, start), "@stop": shared.setdefault(stop, stop)}
+    for child in element:
+        tag = child.tag
+        if tag in _PROGRAMME_TEXTS and tag not in programme and not len(child):
+            text = (child.text or "").strip()
+            if text:
+                programme[tag] = (
+                    shared.setdefault(text, text) if len(text) <= _SHARED_LENGTH else text
+                )
+    return programme
+
+
+_READ_BYTES = 1 << 20  # how much of an XMLTV file the guide parse reads at a time
+
+
+class _NoXml(ValueError):
+    """A zip guide without an .xml file in it."""
+
+
+@contextmanager
+def _open_xmltv(path: str) -> Iterator[Any]:
+    """The XMLTV file at `path` opened to read, unpacked as it is read when it is gzip or zip.
+
+    Its first bytes tell (a file's name, and a server's headers, are not trusted: feeds are
+    often served as application/octet-stream). A zip without an .xml file raises _NoXml (a
+    ValueError); a damaged archive raises as it is read (EOFError, BadGzipFile, BadZipFile).
     """
+    with open(path, "rb") as f:
+        magic = f.read(4)
+        f.seek(0)
+        if magic[:2] == b"\x1f\x8b":
+            with gzip.GzipFile(fileobj=f) as unpacked:
+                yield unpacked
+        elif magic == b"PK\x03\x04":
+            with zipfile.ZipFile(f) as archive:
+                # The largest .xml member: an archive made on a Mac also lists __MACOSX/._*.xml
+                # resource forks, and some name the guide in capitals.
+                members = [
+                    info
+                    for info in archive.infolist()
+                    if info.filename.lower().endswith(".xml")
+                    and not info.is_dir()
+                    and not info.filename.startswith("__MACOSX/")
+                ]
+                if not members:
+                    raise _NoXml("no XML in archive")
+                largest = max(members, key=lambda info: info.file_size)
+                with archive.open(largest) as member:
+                    yield member
+        else:
+            yield f
 
-    def parse_element(element):
-        parsed_data: Dict[str, Any] = {}
 
-        # Include element attributes
-        if element.attrib:
-            parsed_data.update(("@" + k, v) for k, v in element.attrib.items())
+def _root_children(path: str) -> Generator[ET.Element, None, None]:
+    """The elements directly under the root of the XML file at `path` (see _open_xmltv),
+    each complete, in document order.
 
-        for child in element:
-            if len(child):
-                child_data = parse_element(child)
+    The file is read a piece at a time and each element is let go once the next one is
+    asked for, so the whole document is never in memory (ET.parse's tree took several times
+    the file's size). Raises ET.ParseError where ET.parse would (after yielding the elements
+    before the error), and Cancelled between pieces when the job is cancelled.
+    """
+    parser: ET.XMLPullParser = ET.XMLPullParser(events=("start", "end"))
+    root: Optional[ET.Element] = None
+    depth = 0
+    with _open_xmltv(path) as f:
+        while True:
+            if cancel_requested():
+                raise Cancelled()
+            data = f.read(_READ_BYTES)
+            if data:
+                parser.feed(data)
             else:
-                child_data = {"__text": child.text}
-                if child.attrib:
-                    child_data.update(("@" + k, v) for k, v in child.attrib.items())
-
-            if child.tag in parsed_data:
-                if isinstance(parsed_data[child.tag], list):
-                    parsed_data[child.tag].append(child_data)
-                else:
-                    parsed_data[child.tag] = [parsed_data[child.tag], child_data]
-            else:
-                parsed_data[child.tag] = child_data
-        return parsed_data
-
-    return {element.tag: parse_element(element)}
+                parser.close()
+            events = cast(Iterator[Tuple[str, ET.Element]], parser.read_events())
+            for event, element in events:
+                if event == "start":
+                    depth += 1
+                    if depth == 1:
+                        root = element
+                    continue
+                depth -= 1
+                if depth == 1:
+                    yield element
+                    # Detach it from the root (and the siblings after it already read: they
+                    # are whole elements still, each yielded as its end is read).
+                    assert root is not None
+                    root.clear()
+            if not data:
+                return
 
 
 _CHUNK = 65536
 
 
 def write_xmltv_body(response, path: str) -> None:
-    """Write an XMLTV download to ``path``, unpacking gzip or zip bodies by their bytes.
+    """Stream an XMLTV download to ``path`` as it comes: a gzip or zip body stays packed
+    (the parse unpacks it, see _open_xmltv; requests has already decoded Content-Encoding).
 
-    `response` is a streamed requests response, or its body's chunks. Headers are not
-    trusted: feeds are often served as ``application/octet-stream``, and requests has
-    already decoded ``Content-Encoding``. The body is streamed to a temporary ``.download``
-    file first, which is always removed. A cancelled job (the window closing) stops between
-    chunks with Cancelled.
+    `response` is a streamed requests response, or its body's chunks. When anything fails
+    there is no file at ``path``. A cancelled job (the window closing) stops between chunks
+    with Cancelled.
     """
     chunks = response.iter_content(_CHUNK) if hasattr(response, "iter_content") else response
-    temp_path = path + ".download"
     try:
-        with open(temp_path, "wb") as f:
+        with open(path, "wb") as f:
             for chunk in chunks:
                 if cancel_requested():
                     raise Cancelled()
                 f.write(chunk)
-        with open(temp_path, "rb") as f:
-            magic = f.read(4)
-        if magic[:2] == b"\x1f\x8b":
-            with gzip.open(temp_path, "rb") as src, open(path, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-        elif magic == b"PK\x03\x04":
-            with zipfile.ZipFile(temp_path) as z:
-                name = next((n for n in z.namelist() if n.endswith(".xml")), None)
-                if name is None:
-                    raise ValueError("no XML in archive")
-                with z.open(name) as src, open(path, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-        else:
-            os.replace(temp_path, path)
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+    except BaseException:
+        _remove_quietly(path)  # a part of it, which the caller must not read
+        raise
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:  # not there (or, on Windows, still open somewhere)
+        pass
 
 
 # What reading a saved guide raises when the file is damaged or from another format version
@@ -244,10 +330,6 @@ class EpgManager:
     def _guide_path(self, cache_key):
         return os.path.join(self._cache_dir(), f"{cache_key}.guide")
 
-    def _pickle_path(self, cache_key):
-        """Where versions before the piecewise format (epg_store) saved the guide."""
-        return os.path.join(self._cache_dir(), f"{cache_key}.pkl")
-
     def _is_expired(self, epg_info):
         epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
         age = datetime.now() - epg_date
@@ -273,11 +355,8 @@ class EpgManager:
         The guide shown is kept when it is the one in that file and the file is unchanged.
         """
         path = self._guide_path(cache_key)
-        legacy = not os.path.exists(path)
-        if legacy:
-            path = self._pickle_path(cache_key)
-            if not os.path.exists(path):
-                return False
+        if not os.path.exists(path):
+            return False
         stamp = _file_stamp(path)
         saved = self._saved
         shown = (
@@ -288,11 +367,7 @@ class EpgManager:
         )
         if not shown:
             try:
-                if legacy:
-                    with open(path, "rb") as f:
-                        guide = pickle.load(f)
-                else:
-                    guide = read_guide(path)
+                guide = read_guide(path)
             except _UNREADABLE_GUIDE as e:
                 # Damaged, or written by another version: it stays so, so treat it as
                 # missing (the caller fetches the guide and saves a new file).
@@ -316,10 +391,6 @@ class EpgManager:
         # one parsed above, about 1 KiB of objects per programme, can go.
         self._publish(cache_key, saved)
         self._saved = (path, _file_stamp(path), saved)
-        try:
-            os.remove(self._pickle_path(cache_key))  # an earlier version's copy
-        except FileNotFoundError:
-            pass
         now = datetime.now()
         self.index[cache_key] = {
             "date": (source_date or now).strftime(_INDEX_TIME_FORMAT),
@@ -346,29 +417,37 @@ class EpgManager:
         self.index[cache_key] = None
         self._publish(cache_key, MultiKeyDict())
 
-    def _source_key(self):
-        """The cache key of the configured guide source, or None when there is none."""
+    def _source(self) -> Optional[tuple[str, str, tuple]]:
+        """The configured guide source as (kind, cache key, its fetch's arguments), or None
+        when there is none. The kinds: "stb" and "xtream", the provider's own guide; "file"
+        and "url", every provider's (see _take_shared_entry)."""
         epg_source = self.config_manager.epg_source
-        provider = self.provider_manager.current_provider
         if epg_source == "STB":
+            provider = self.provider_manager.current_provider
             provider_type = provider.get("type", "").upper()
+            url = provider.get("url", "")
             if provider_type == "STB":
-                return _cache_key(provider.get("url", ""))
+                return "stb", _cache_key(url), (url,)
             if provider_type == "XTREAM":
-                return _xtream_cache_key(provider.get("url", ""), provider.get("username", ""))
+                username = provider.get("username", "")
+                password = provider.get("password", "")
+                return "xtream", _xtream_cache_key(url, username), (url, username, password)
         elif epg_source == "Local File":
-            return _cache_key(self.config_manager.epg_file)
+            path = self.config_manager.epg_file
+            return "file", _cache_key(path), (path,)
         elif epg_source == "URL":
-            return _cache_key(self.config_manager.epg_url)
+            url = self.config_manager.epg_url
+            return "url", _cache_key(url), (url,)
         return None
 
-    def _forget_other_source(self):
-        """Drop a guide loaded from another source (a provider switch or a settings change).
-
-        A reload of the same source keeps its guide visible until the new one is swapped in.
-        """
-        if self._epg_source != self._source_key():
+    def _switch_source(self):
+        """The configured source (see _source). A guide loaded from another source (a provider
+        switch or a settings change) is dropped; a reload of the same source keeps its guide
+        visible until the new one is swapped in."""
+        source = self._source()
+        if self._epg_source != (source[1] if source else None):
             self._publish(None, MultiKeyDict())
+        return source
 
     def _load_index(self):
         self.index.clear()
@@ -383,18 +462,9 @@ class EpgManager:
             with open(index_file, "r", encoding="utf-8") as f:
                 data = json.loads(f.read())
         except (json.JSONDecodeError, IOError) as e:
-            logger.warning(f"Error loading index file: {e}")
+            logger.warning("Error loading index file: %s", e)
             return {}
         return data if isinstance(data, dict) else {}
-
-    def clear_index(self):
-        cache_dir = self._cache_dir()
-        for file in os.listdir(cache_dir):
-            file_path = os.path.join(cache_dir, file)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-        self.index.clear()
-        self.save_index()
 
     def _index_programs(self, xmltv_file):
         """
@@ -402,43 +472,50 @@ class EpgManager:
         their program lists. In addition to the canonical channel id, also map
         common aliases (display-name values) to the same program list so lookups
         can succeed even when providers don't supply xmltv_id.
+
+        The file is read as it is parsed (see _root_children), so a <channel> entry may come
+        before or after its programmes. A programme keeps what the guide reads of it (see
+        _programme).
         """
         programs = MultiKeyDict()
 
-        tree = ET.parse(xmltv_file).getroot()
-
-        # 1) Build channel -> alias names map from <channel> entries
+        # 1) Build channel -> alias names map from <channel> entries, and
+        # 2) accumulate the programmes' per-channel lists, in one pass over the file.
         alias_map: Dict[str, Set[str]] = {}
-        for ch in tree.findall("channel"):
-            ch_id = ch.get("id")
-            if not ch_id:
-                continue
-            names: Set[str] = alias_map.setdefault(ch_id, set())
-            for dn in ch.findall("display-name"):
-                txt = (dn.text or "").strip()
-                if not txt:
-                    continue
-                names.add(txt)
-                # Include a lowercase variant for more forgiving matching
-                names.add(txt.lower())
-
-        # 2) Iterate over programmes and accumulate per-channel lists using a stable
-        #     multikey tuple that includes id + aliases + any user-provided keys.
         tmp_lists: Dict[str, List[Dict[str, Any]]] = {}
-        for programme in tree.findall("programme"):
-            channel_id = programme.get("channel")
-            start_time = programme.get("start")
-            stop_time = programme.get("stop")
+        shared: Dict[str, str] = {}
+        # The generator is closed (its file too) also when this loop is left by an error.
+        with closing(_root_children(xmltv_file)) as elements:
+            for element in elements:
+                if element.tag == "programme":
+                    channel_id = element.get("channel")
+                    start_time = element.get("start")
+                    stop_time = element.get("stop")
 
-            if not channel_id or not start_time or not stop_time:
-                # Skip malformed entries
-                continue
+                    if not channel_id or not start_time or not stop_time:
+                        # Skip malformed entries
+                        continue
 
-            program_data = xml_to_dict(programme)["programme"]
-            program_data["@stop"] = normalize_programme_stop(start_time, stop_time)
-            tmp_lists.setdefault(channel_id, []).append(program_data)
+                    program_data = _programme(element, start_time, stop_time, shared)
+                    plist = tmp_lists.get(channel_id)
+                    if plist is None:
+                        plist = tmp_lists[channel_id] = []
+                    plist.append(program_data)
+                elif element.tag == "channel":
+                    ch_id = element.get("id")
+                    if not ch_id:
+                        continue
+                    names: Set[str] = alias_map.setdefault(ch_id, set())
+                    for dn in element.findall("display-name"):
+                        txt = (dn.text or "").strip()
+                        if not txt:
+                            continue
+                        names.add(txt)
+                        # Include a lowercase variant for more forgiving matching
+                        names.add(txt.lower())
 
         # 3) Commit lists into MultiKeyDict with expanded keys per channel
+        #     (a stable multikey tuple: id + aliases + any user-provided keys).
         for ch_id, plist in tmp_lists.items():
             # Start with user-provided key group if exists, otherwise the channel id
             user_keys = self.config_manager.xmltv_channel_map.get_keys(ch_id)
@@ -454,9 +531,17 @@ class EpgManager:
             # Keep tuple stable: channel id first, then sorted others
             other_keys = sorted(k for k in key_set if k != ch_id)
             multikeys = (ch_id, *other_keys)
-            programs.setdefault(multikeys, []).extend(plist)
+            programs[multikeys] = plist  # each channel id makes its own keys
 
         return programs
+
+    def _index_download(self, xmltv_file):
+        """_index_programs on a downloaded file, then the file goes: also when the parse
+        fails or is cancelled (a provider's guide can take hundreds of MB)."""
+        try:
+            return self._index_programs(xmltv_file)
+        finally:
+            _remove_quietly(xmltv_file)  # an error removing it must not hide the parse's
 
     def reindex_programs(self):
         """Re-key the guide shown after the XMLTV mapping changed (Settings, GUI thread).
@@ -495,158 +580,82 @@ class EpgManager:
             for key in self._index_base:
                 if key not in self.index:
                     merged.pop(key, None)
-            index_file = self._index_file()
-            handle, temporary = tempfile.mkstemp(
-                dir=os.path.dirname(index_file), prefix="index-", suffix=".tmp"
-            )
-            try:
-                with os.fdopen(handle, "w", encoding="utf-8") as f:
-                    f.write(json.dumps(merged, option=json.OPT_INDENT_2).decode("utf-8"))
-                os.replace(temporary, index_file)
-            except BaseException:
-                try:
-                    os.remove(temporary)
-                except OSError:
-                    pass
-                raise
+            with atomic_write(self._index_file()) as f:
+                f.write(json.dumps(merged, option=json.OPT_INDENT_2))
         self._index_base = copy.deepcopy(merged)
         for key, value in merged.items():  # other providers' entries are known here now
             self.index.setdefault(key, value)
 
-    # The _refresh_epg_* helpers refetch a cached source once it is out of date and
-    # return True when they did so.
-
-    def _refresh_epg_stb(self, provider_url, headers):
-        epg_info = self.index.get(_cache_key(provider_url))
-        if epg_info and self._is_expired(epg_info):
-            self._fetch_epg_from_stb(provider_url, headers)
-            return True
-        return False
-
-    def _refresh_epg_xtream(self, provider_url, username, password):
-        epg_info = self.index.get(_xtream_cache_key(provider_url, username))
-        if epg_info and self._is_expired(epg_info):
-            self._fetch_epg_from_xtream(provider_url, username, password)
-            return True
-        return False
-
-    def _refresh_epg_file(self, xmltv_file):
-        xmltv_filehash = _cache_key(xmltv_file)
-        epg_info = self.index.get(xmltv_filehash)
-        if epg_info:
-            # Check modified time
-            epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
-            if (
-                datetime.fromtimestamp(os.path.getmtime(xmltv_file)) - epg_date
-            ).total_seconds() > 2:
-                self._fetch_epg_from_file(xmltv_filehash, xmltv_file)
-                return True
-        return False
-
-    def _refresh_epg_url(self, url, seen=None):
-        url_hash = _cache_key(url)
-        epg_info = self.index.get(url_hash)
-        if epg_info:
-            # Check expiration time first, if expired check header for last-modified
-            last_access = datetime.strptime(epg_info["last_access"], _INDEX_TIME_FORMAT)
-            current_time = datetime.now()
-            if (current_time - last_access).total_seconds() > self.config_manager.epg_expiration:
-                epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
-                # Request the URL with "If-Modified-Since" header
-                headers = {
-                    **CLIENT_HEADERS,
-                    "If-Modified-Since": _http_date(epg_date),
-                }
-                r = requests.get(
-                    url, headers=headers, timeout=5, verify=self.config_manager.ssl_verify
-                )
-                if r.status_code == 304:
-                    # EPG is still fresh
-                    epg_info["last_access"] = current_time.strftime(_INDEX_TIME_FORMAT)
-                    return False
-                # EPG is not fresh, fetch it
-                self._fetch_epg_from_url(url, seen)
-                return True
-        return False
-
     def set_current_epg(self):
+        """Show the configured source's guide: a source indexed as None has none; an outdated
+        one is fetched again; otherwise its saved guide is shown. A source never indexed, or
+        whose guide file is gone, is fetched."""
         if not self.config_manager.channel_epg:
             self._publish(None, MultiKeyDict())
             return
-        self._forget_other_source()
+        source = self._switch_source()
+        if source is None:
+            return
+        kind, key, args = source
+        seen = None
+        if kind in ("file", "url"):  # every provider's: another's manager may have stored it
+            seen = _stored(self._where(key))[0]  # before the entry is taken: none is missed
+            self._take_shared_entry(key)
+        if key in self.index:
+            epg_info = self.index[key]
+            if epg_info is None:
+                return
+            if epg_info and self._out_of_date(kind, args, epg_info):
+                self._fetch(kind, args, seen)
+                return
+            if self._load_cached_epg(key):
+                return
+        self._fetch(kind, args, seen)
 
-        epg_source = self.config_manager.epg_source
-        if epg_source == "STB":
-            provider_type = self.provider_manager.current_provider.get("type", "").upper()
-            if provider_type == "STB":
-                self._set_epg_from_stb(
-                    self.provider_manager.current_provider["url"],
-                    self.provider_manager.headers,
-                )
-            elif provider_type == "XTREAM":
-                self._set_epg_from_xtream(
-                    self.provider_manager.current_provider["url"],
-                    self.provider_manager.current_provider.get("username", ""),
-                    self.provider_manager.current_provider.get("password", ""),
-                )
-        elif epg_source == "Local File":
-            self._set_epg_from_file(self.config_manager.epg_file)
-        elif epg_source == "URL":
-            self._set_epg_from_url(self.config_manager.epg_url)
+    def _fetch(self, kind, args, seen=None):
+        """Fetch the source's guide (see _source) whatever its index entry says; `seen`: see
+        _fetch_epg_from_url."""
+        if kind == "stb":
+            self._fetch_epg_from_stb(*args)
+        elif kind == "xtream":
+            self._fetch_epg_from_xtream(*args)
+        elif kind == "file":
+            self._fetch_epg_from_file(*args)
+        else:
+            self._fetch_epg_from_url(args[0], seen)
 
-    # Each _set_epg_from_* loader follows the same steps (set_current_epg has already
-    # dropped a guide of another source): a source indexed as None has no EPG; an
-    # outdated one is refetched; otherwise its cached pickle is used. Sources that were
-    # never indexed, or whose pickle is gone, are fetched.
+    def _out_of_date(self, kind, args, epg_info):
+        """Whether a cached source's guide is fetched again: a provider's once it is older
+        than the update period, a local file's once the file changed, a URL's once the period
+        passed since it was last checked and the server has a newer one."""
+        if kind == "file":
+            epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
+            modified = datetime.fromtimestamp(os.path.getmtime(args[0]))
+            return (modified - epg_date).total_seconds() > 2
+        if kind == "url":
+            return self._url_changed(args[0], epg_info)
+        return self._is_expired(epg_info)
 
-    def _set_epg_from_stb(self, provider_url, headers):
-        provider_hash = _cache_key(provider_url)
-        if provider_hash in self.index:
-            if self.index[provider_hash] is None:
-                return
-            if self._refresh_epg_stb(provider_url, headers):
-                return
-            if self._load_cached_epg(provider_hash):
-                return
-        self._fetch_epg_from_stb(provider_url, headers)
+    def _url_changed(self, url, epg_info) -> bool:
+        last_access = datetime.strptime(epg_info["last_access"], _INDEX_TIME_FORMAT)
+        current_time = datetime.now()
+        if (current_time - last_access).total_seconds() <= self.config_manager.epg_expiration:
+            return False
+        epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
+        headers = {**CLIENT_HEADERS, "If-Modified-Since": _http_date(epg_date)}
+        # Only the status is read: a server that ignores the header sends the whole guide,
+        # which the fetch streams to disk.
+        r = requests.get(
+            url, headers=headers, timeout=5, verify=self.config_manager.ssl_verify, stream=True
+        )
+        r.close()
+        if r.status_code == 304:  # still fresh
+            epg_info["last_access"] = current_time.strftime(_INDEX_TIME_FORMAT)
+            return False
+        return True
 
-    def _set_epg_from_xtream(self, provider_url, username, password):
-        provider_hash = _xtream_cache_key(provider_url, username)
-        if provider_hash in self.index:
-            if self.index[provider_hash] is None:
-                return
-            if self._refresh_epg_xtream(provider_url, username, password):
-                return
-            if self._load_cached_epg(provider_hash):
-                return
-        self._fetch_epg_from_xtream(provider_url, username, password)
-
-    def _set_epg_from_file(self, xmltv_file):
+    def _fetch_epg_from_file(self, xmltv_file):
         xmltv_filehash = _cache_key(xmltv_file)
-        self._take_shared_entry(xmltv_filehash)
-        if xmltv_filehash in self.index:
-            if self.index[xmltv_filehash] is None:
-                return
-            if self._refresh_epg_file(xmltv_file):
-                return
-            if self._load_cached_epg(xmltv_filehash):
-                return
-        self._fetch_epg_from_file(xmltv_filehash, xmltv_file)
-
-    def _set_epg_from_url(self, url):
-        url_hash = _cache_key(url)
-        seen = _stored(self._where(url_hash))[0]  # before the entry is taken: none is missed
-        self._take_shared_entry(url_hash)
-        if url_hash in self.index:
-            if self.index[url_hash] is None:
-                return
-            if self._refresh_epg_url(url, seen):
-                return
-            if self._load_cached_epg(url_hash):
-                return
-        self._fetch_epg_from_url(url, seen)
-
-    def _fetch_epg_from_file(self, xmltv_filehash, xmltv_file):
         guide = self._index_programs(xmltv_file)
         if guide:
             modified = datetime.fromtimestamp(os.path.getmtime(xmltv_file))
@@ -655,7 +664,8 @@ class EpgManager:
             self._source_failed(xmltv_filehash)
         self.save_index()
 
-    def _fetch_epg_from_stb(self, provider_url, headers):
+    def _fetch_epg_from_stb(self, provider_url):
+        headers = self.provider_manager.headers
         provider_hash = _cache_key(provider_url)
         base = base_from_url(provider_url)
         prefer_https = provider_prefers_https(
@@ -704,11 +714,23 @@ class EpgManager:
             "ssl_verify", self.config_manager.ssl_verify
         )
 
+        # HTTPS first when preferred; an address with a path is asked at its server's root
+        # too when nothing came under the path (a stray path: xtream_sign_in_bases).
+        candidates = [
+            candidate
+            for base in xtream_sign_in_bases(provider_url)
+            for candidate in https_fallback_candidates(
+                xtream_xmltv_url(base, username, password), prefer_https
+            )
+        ]
+        r = None  # the answer in use: every streamed answer is closed
         try:
             # Fetch the XMLTV data from Xtream endpoint, trying HTTPS first if preferred
-            r = None
             body = None  # the chunks of the first non-empty answer, streamed (cancellable)
-            for _url in https_fallback_candidates(xmltv_url, prefer_https):
+            for _url in candidates:
+                if r is not None:
+                    r.close()  # the answer of the candidate passed over
+                    r = None
                 try:
                     r = requests.get(
                         _url,
@@ -725,6 +747,8 @@ class EpgManager:
                             body = itertools.chain([first], chunks)
                             break
                 except requests.RequestException:
+                    if r is not None:
+                        r.close()
                     r = None
             if r is None:
                 raise RuntimeError("Failed to fetch Xtream XMLTV EPG")
@@ -740,8 +764,7 @@ class EpgManager:
                 write_xmltv_body(body if body is not None else iter(()), xmltv_file_path)
 
                 # Parse and index the XMLTV file
-                guide = self._index_programs(xmltv_file_path)
-                os.remove(xmltv_file_path)
+                guide = self._index_download(xmltv_file_path)
                 if guide:
                     self._store_guide(provider_hash, guide)
                 else:
@@ -751,6 +774,9 @@ class EpgManager:
         except Exception as e:
             logger.error("Error fetching Xtream EPG: %s", safe_exc(e))
             self._source_failed(provider_hash)
+        finally:
+            if r is not None:
+                r.close()
 
         self.save_index()
 
@@ -792,24 +818,23 @@ class EpgManager:
             headers=CLIENT_HEADERS,
             verify=self.config_manager.ssl_verify,
         )
-        if r.status_code == 200:
-            url_hash = _cache_key(url)
-            xmltv_file_path = os.path.join(self._cache_dir(), f"{url_hash}.xml")
-
-            try:
+        try:
+            if r.status_code == 200:
+                url_hash = _cache_key(url)
+                xmltv_file_path = os.path.join(self._cache_dir(), f"{url_hash}.xml")
                 write_xmltv_body(r, xmltv_file_path)
-            except ValueError as e:
-                # An archive without XML leaves no file, so the index is left untouched.
-                logger.warning("Error fetching XMLTV from %s: %s", redact_url(url), safe_exc(e))
-
-            if os.path.exists(xmltv_file_path):
-                guide = self._index_programs(xmltv_file_path)
-                os.remove(xmltv_file_path)
-                if guide:
-                    source_date = _source_date(r.headers.get("Last-Modified"))
-                    self._store_guide(url_hash, guide, source_date)
+                try:
+                    guide = self._index_download(xmltv_file_path)
+                except _NoXml as e:  # the index is left untouched
+                    logger.warning("Error fetching XMLTV from %s: %s", redact_url(url), safe_exc(e))
                 else:
-                    self._source_failed(url_hash)
+                    if guide:
+                        source_date = _source_date(r.headers.get("Last-Modified"))
+                        self._store_guide(url_hash, guide, source_date)
+                    else:
+                        self._source_failed(url_hash)
+        finally:
+            r.close()
         self.save_index()
 
     def force_refresh_current_epg(self):
@@ -819,141 +844,62 @@ class EpgManager:
         subsequent lookups use freshly indexed data. The current guide stays visible until
         the new one is swapped in, and stays when the refresh fails.
         """
-        self._forget_other_source()
-        epg_source = self.config_manager.epg_source
-        provider_type = self.provider_manager.current_provider.get("type", "").upper()
+        source = self._switch_source()
+        if source is not None:
+            self._fetch(source[0], source[2])
 
-        if epg_source == "STB":
-            if provider_type == "STB":
-                self._fetch_epg_from_stb(
-                    self.provider_manager.current_provider.get("url", ""),
-                    self.provider_manager.headers,
-                )
-            elif provider_type == "XTREAM":
-                self._fetch_epg_from_xtream(
-                    self.provider_manager.current_provider.get("url", ""),
-                    self.provider_manager.current_provider.get("username", ""),
-                    self.provider_manager.current_provider.get("password", ""),
-                )
-        elif epg_source == "Local File":
-            xmltv_file = self.config_manager.epg_file
-            self._fetch_epg_from_file(_cache_key(xmltv_file), xmltv_file)
-        elif epg_source == "URL":
-            self._fetch_epg_from_url(self.config_manager.epg_url)
+    def guide_offset(self) -> timedelta:
+        """The provider's guide time offset (epg_view.GUIDE_OFFSET_KEY): its programmes move by
+        it (epg_view.normalize), and the lookup window below moves the other way."""
+        return guide_offset(getattr(self.provider_manager, "current_provider", None))
 
-    def get_programs_for_channel(self, channel_data, start_time=None, max_programs=5):
-        epg_source = self.config_manager.epg_source
-        provider_type = self.provider_manager.current_provider.get("type", "").upper()
-
-        if epg_source == "STB" and provider_type == "STB":
-            channel_id = channel_data.get("id", "")
-            return self._get_programs_for_channel_from_stb(channel_id, start_time, max_programs)
-        else:
-            # For Xtream, Local File, and URL sources, use XMLTV format
-            return self._get_programs_for_channel_from_xmltv(channel_data, start_time, max_programs)
-
-    def _get_programs_for_channel_from_stb(self, channel_id, start_time, max_programs):
+    def get_programs_for_channel(self, channel_data):
+        """The guide's raw entries of a channel, oldest first: all of a portal's, and an XMLTV
+        guide's on from now until the list window's end (epg_list_window_hours; 0: all of
+        them), now moved by the provider's guide time offset into the guide's own times."""
         epg = self.epg  # one reference: a refresh may swap in a new guide meanwhile
-        programs = epg.get(channel_id, [])
-        # If unlimited requested and no windowing, return all entries sorted
-        if (not max_programs or max_programs <= 0) and start_time is None:
+        provider_type = self.provider_manager.current_provider.get("type", "").upper()
+        if self.config_manager.epg_source == "STB" and provider_type == "STB":
+            programs = epg.get(channel_data.get("id", ""), [])
             return sorted(programs, key=lambda program: parse_stb(program["time"]))
-        if start_time is None:
-            start_time = datetime.now()
-        # Apply end-of-window limit based on config (0 = unlimited)
-        window_hours = self.config_manager.epg_list_window_hours
-        end_time = start_time + timedelta(hours=window_hours) if window_hours > 0 else None
-        filtered = []
-        for program in programs:
-            p_start = parse_stb(program["time"])
-            p_stop = parse_stb(program["time_to"])
-            if p_start >= start_time or p_stop > start_time:
-                if end_time is None or p_start < end_time:
-                    filtered.append(program)
-                    if max_programs and max_programs > 0 and len(filtered) >= max_programs:
-                        break
-        filtered.sort(key=lambda program: parse_stb(program["time"]))
-        return filtered
-
-    def _get_programs_for_channel_from_xmltv(self, channel_info, start_time, max_programs):
-        epg = self.epg  # one reference: a refresh may swap in a new guide meanwhile
-        if start_time is None:
-            # Use local timezone-aware datetime to avoid naive/aware mismatches
-            try:
-                start_time = datetime.now(tzlocal.get_localzone())
-            except Exception:
-                start_time = datetime.now()
-
-        # Candidate keys in priority order: explicit xmltv_id, then channel name variants
-        candidates: List[str] = []
-        xmltv_id = (channel_info.get("xmltv_id") or "").strip()
-        if xmltv_id:
-            candidates.append(xmltv_id)
-
-        name = (channel_info.get("name") or "").strip()
-        if name and name not in candidates:
-            candidates.append(name)
-        lname = name.lower()
-        if lname and lname not in candidates:
-            candidates.append(lname)
-
-        chosen_key = None
-        for key in candidates:
-            if key in epg:
-                chosen_key = key
-                break
-            # Also consider user-provided mapping keys
-            mapped = self.config_manager.xmltv_channel_map.get_keys(key)
-            if mapped:
-                for mk in mapped:
-                    if mk in epg:
-                        chosen_key = mk
-                        break
-            if chosen_key:
-                break
-
-        if not chosen_key:
+        # Xtream, Local File and URL guides are XMLTV.
+        entries = self._xmltv_entries(epg, channel_data)
+        if not entries:
             return []
-
-        # search the timezone used by programs by looking at the first/last program
-        ref_time_str = epg[chosen_key][0]["@start"]
-        ref_time = parse_xmltv(ref_time_str)
-        ref_timezone = ref_time.tzinfo
-
-        ref_time_str1 = epg[chosen_key][-1]["@start"]
-        ref_time1 = parse_xmltv(ref_time_str1)
-        ref_timezone1 = ref_time1.tzinfo
-        need_check_tz = ref_timezone1 != ref_timezone
-
-        # If unlimited requested and no windowing (window_hours <= 0), return all entries sorted
+        # The timezone of the programmes, by the first and the last.
+        ref_timezone = parse_xmltv(entries[0]["@start"]).tzinfo
+        need_check_tz = parse_xmltv(entries[-1]["@start"]).tzinfo != ref_timezone
         window_hours = self.config_manager.epg_list_window_hours
-        if (not max_programs or max_programs <= 0) and window_hours <= 0:
-            programs = list(epg[chosen_key])
-            programs.sort(key=lambda program: program["@start"])
-            return programs
-
-        # Get the start time in the timezone of the programs
+        if window_hours <= 0:
+            return sorted(entries, key=lambda program: program["@start"])
+        try:
+            start_time = datetime.now(tzlocal.get_localzone())  # aware, as the guide's times
+        except Exception:
+            start_time = datetime.now()
+        start_time -= self.guide_offset()  # in the guide's own times
+        end_time = start_time + timedelta(hours=window_hours)
         start_time_str = start_time.astimezone(ref_timezone).strftime("%Y%m%d%H%M%S %z")
-
         programs = []
-        # Compute end-of-window cutoff if configured
-        end_time = start_time + timedelta(hours=window_hours) if window_hours > 0 else None
-        for entry in epg[chosen_key]:
+        for entry in entries:
             if need_check_tz:
                 tz = parse_xmltv(entry["@start"]).tzinfo
                 start_time_str = start_time.astimezone(tz).strftime("%Y%m%d%H%M%S %z")
             if entry["@start"] >= start_time_str or entry["@stop"] > start_time_str:
-                if end_time is not None:
-                    # Compare with end_time in the entry's timezone
-                    entry_start_dt = parse_xmltv(entry["@start"])
-                    if entry_start_dt >= end_time.astimezone(entry_start_dt.tzinfo):
-                        continue
-                programs.append(entry)
-                if max_programs and max_programs > 0 and len(programs) >= max_programs:
-                    break
-
+                entry_start = parse_xmltv(entry["@start"])  # the window's end in its timezone
+                if entry_start < end_time.astimezone(entry_start.tzinfo):
+                    programs.append(entry)
         programs.sort(key=lambda program: program["@start"])
-        # If unlimited requested (max_programs <= 0), return full filtered list
-        if not max_programs or max_programs <= 0:
-            return programs
-        return programs[:max_programs]
+        return programs
+
+    def _xmltv_entries(self, epg, channel_info):
+        """The channel's programme list in an XMLTV guide, by its xmltv_id, else its name (as
+        it is, then in lower case), each also through the user's XMLTV mapping; None when the
+        guide has none."""
+        name = (channel_info.get("name") or "").strip()
+        xmltv_id = (channel_info.get("xmltv_id") or "").strip()
+        for key in dict.fromkeys(k for k in (xmltv_id, name, name.lower()) if k):
+            for found in (key, *(self.config_manager.xmltv_channel_map.get_keys(key) or ())):
+                entries = epg.get(found)
+                if entries is not None:
+                    return entries
+        return None

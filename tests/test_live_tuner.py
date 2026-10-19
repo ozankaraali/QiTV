@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse
 
 from services.connection_budget import ConnectionBudget
-from ui.live_tuner import LiveStart, LiveTuner, start_kwargs, wait_for_each_other
+from ui.live_tuner import LiveStart, LiveTuner, one_disk_ring, start_kwargs, wait_for_each_other
 
 app = QApplication.instance() or QApplication([])
 
@@ -103,6 +103,47 @@ class DirectSlotTests(unittest.TestCase):
         peer_session.let_go()
         self.assertEqual((self.played, self.holders()), (["file", "movie"], ["main"]))
 
+    def test_a_direct_play_waits_for_every_other_picture_closing(self):
+        # A multiview's tiles: any of them may hold the provider's last slot as it closes.
+        peers = []
+        for name in ("pip", "t2"):
+            session = FakeSession()
+            peer = LiveTuner(session, self.tuner.config, FakeLive(), self.budget, purpose=name)
+            peer.open(lambda: None, direct=True, provider=PROVIDER)
+            session.holding = True
+            peers.append((peer, session))
+        wait_for_each_other(self.tuner, *(peer for peer, _ in peers))
+        wait_for_each_other(self.tuner, *(peer for peer, _ in peers))  # joined once each
+        for peer, _session in peers:
+            peer.stop()
+        self.tuner.open(self.play("movie"), direct=True, provider=PROVIDER)
+        peers[0][1].let_go()
+        self.assertEqual(self.played, [])  # t2's stream still closes
+        peers[1][1].let_go()
+        self.assertEqual((self.played, self.holders()), (["movie"], ["main"]))
+
+    def test_another_providers_closing_stream_never_holds_the_open(self):
+        # A multiview: a tile of another provider closing holds none of this one's slots.
+        peer_session = FakeSession()
+        peer = LiveTuner(peer_session, self.tuner.config, FakeLive(), self.budget, purpose="t2")
+        wait_for_each_other(self.tuner, peer)
+        peer.open(lambda: None, direct=True, provider="Other provider")
+        peer_session.holding = True
+        peer.stop()
+        self.assertTrue(peer.releasing_from("Other provider"))
+        self.assertFalse(peer.releasing_from(PROVIDER))
+        self.tuner.open(self.play("channel"), direct=True, provider=PROVIDER)
+        self.assertEqual(self.played, ["channel"])
+
+    def test_a_reopen_keeps_its_slot_or_takes_one_within_the_limit(self):
+        self.tuner.open(self.play("channel"), direct=True, provider=PROVIDER)
+        self.assertTrue(self.tuner.ensure_held(PROVIDER, 1))  # it still holds its own
+        self.tuner._held.give_back()
+        self.budget.request(PROVIDER, 1, purpose="pip")  # another player took the last one
+        self.assertFalse(self.tuner.ensure_held(PROVIDER, 1))
+        self.assertTrue(self.tuner.ensure_held(PROVIDER, 2))
+        self.assertEqual(sorted(self.holders()), ["main", "pip"])
+
     def test_a_direct_play_holds_the_main_slot_until_vlc_let_go(self):
         self.tuner.open(self.play("movie"), direct=True)
         self.assertEqual(self.played, ["movie"])
@@ -134,6 +175,17 @@ class DirectSlotTests(unittest.TestCase):
         self.assertEqual((self.played, self.holders()), (["first"], ["main"]))
         self.session.let_go()
         self.assertEqual((self.played, self.holders()), (["first", "second"], ["main"]))
+
+    def test_a_direct_open_with_a_limit_plays_only_when_a_stream_is_spare(self):
+        # A multiview tile: other players' streams count against the provider's limit.
+        denied = []
+        self.tuner.denied.connect(denied.append)
+        self.budget.request(PROVIDER, 1, purpose="pip")
+        self.tuner.open(self.play("tile"), direct=True, provider=PROVIDER, limit=1)
+        self.assertEqual((self.played, denied, self.holders()), ([], [1], ["pip"]))
+        self.assertTrue(self.tuner.idle())
+        self.tuner.open(self.play("tile"), direct=True, provider=PROVIDER, limit=2)
+        self.assertEqual((self.played, sorted(self.holders())), (["tile"], ["main", "pip"]))
 
     def test_an_external_launch_holds_nothing(self):
         self.tuner.open(self.play("vlc"))
@@ -292,6 +344,20 @@ class SlotRoleTests(unittest.TestCase):
         QTest.qWait(10)
         self.assertEqual(self.live.kwargs[-1]["disk"], True)
         self.assertTrue(self.tuner.on_disk())
+
+    def test_one_disk_ring_among_every_player(self):
+        names = ("main", "pip", "t2")
+        tuners = [
+            LiveTuner(FakeSession(), self.config, FakeLive(), self.budget, purpose=name)
+            for name in names
+        ]
+        disks = dict.fromkeys(names, False)
+        for tuner in tuners:
+            tuner.on_disk = lambda name=tuner.purpose: disks[name]  # type: ignore[method-assign]
+        one_disk_ring(*tuners)
+        self.assertEqual([t._disk_allowed() for t in tuners], [True, True, True])
+        disks["t2"] = True
+        self.assertEqual([t._disk_allowed() for t in tuners], [False, False, True])
 
 
 if __name__ == "__main__":

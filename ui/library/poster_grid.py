@@ -26,6 +26,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QFrame, QWidget
 
+from services.i18n import tr
 from services.library import Details, letter_of, title_of
 from services.text_fold import fold
 from ui.overlays.painting import Units, draw_icon, draw_progress, elided, fill_round, fmt_duration
@@ -133,21 +134,25 @@ def _wrap(fm: QFontMetricsF, text: str, width: float, max_lines: int) -> list[st
 
 def _button_specs(details: Details | None) -> list[tuple[str, str, str]]:
     """(name, label, style) left to right, per the kind of the current title."""
+    play = tr("Play")  # i18n: button (verb) on the Library's detail strip
     if details is None:
-        return [(PLAY, "Play", _ACCENT)]
+        return [(PLAY, play, _ACCENT)]
     if details.kind == "series":
-        return [(FAVORITE, "", _SQUARE), (PLAY, "Episodes", _ACCENT)]
+        # i18n: button on the Library's detail strip that opens a series' episodes
+        return [(FAVORITE, "", _SQUARE), (PLAY, tr("Episodes"), _ACCENT)]
+    start_over = tr("Start over")  # i18n: button: play the title from its beginning
+    resume = tr("Resume")  # i18n: button: play the title from where it was left
     if details.kind == "episode":
         if details.resume_ms:
-            return [(START_OVER, "Start over", _RAISED), (PLAY, "Resume", _ACCENT)]
-        return [(PLAY, "Play", _ACCENT)]
+            return [(START_OVER, start_over, _RAISED), (PLAY, resume, _ACCENT)]
+        return [(PLAY, play, _ACCENT)]
     if details.resume_ms:
         return [
-            (START_OVER, "Start over", _RAISED),
+            (START_OVER, start_over, _RAISED),
             (FAVORITE, "", _SQUARE),
-            (PLAY, "Resume", _ACCENT),
+            (PLAY, resume, _ACCENT),
         ]
-    return [(FAVORITE, "", _SQUARE), (PLAY, "Play", _ACCENT)]
+    return [(FAVORITE, "", _SQUARE), (PLAY, play, _ACCENT)]
 
 
 class _Line(NamedTuple):
@@ -1151,7 +1156,10 @@ class PosterGrid(QAbstractScrollArea):
         if details.rating:
             parts.append(f"★ {details.rating}")
         meta = SEPARATOR.join(part for part in parts if part)
-        watched = f"{fmt_duration(details.resume_ms)} watched" if details.resume_ms else ""
+        watched = ""
+        if details.resume_ms:
+            # i18n: on the Library's detail strip: how much of the title was watched (12:34)
+            watched = tr("{time} watched", time=fmt_duration(details.resume_ms))
         return meta, watched
 
     def _paint_meta(self, p: QPainter, rect: QRectF, meta: str, watched: str, font: QFont) -> None:

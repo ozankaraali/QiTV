@@ -96,9 +96,9 @@ class FakeTuner(QObject):
 
     released = Signal()
 
-    def __init__(self, live, budget, cap_ms):
+    def __init__(self, live, budget, cap_ms, purpose="main"):
         super().__init__()
-        self.stream = BudgetedStream(live, budget, "main", cap_ms=cap_ms, parent=self)
+        self.stream = BudgetedStream(live, budget, purpose, cap_ms=cap_ms, parent=self)
         self.stream.released.connect(self.released)
         self.holding = False
         self.stops = 0
@@ -289,7 +289,7 @@ class SessionManagerTests(_Fixture):
         self.assertFalse(self.manager.pip_open())
         self.assertEqual(sorted(self.budget.holders(PROVIDER)), ["main", "pip"])  # until released
         self.main.live.released.emit()
-        self.assertEqual(self.budget.holders(PROVIDER), ["main"])  # the large picture's
+        self.assertEqual(self.budget.holders(PROVIDER), ["pip"])  # the large picture's slot
         self.assertIsNone(self.manager.slot_showing(A))
         self.assertIs(self.manager.slot_showing(B), self.pip)
 
@@ -343,14 +343,16 @@ class RoleTests(_Fixture):
         self.pump()
         self.assertTrue(self.manager.swap())
 
-    def test_a_swap_hands_each_ticket_to_its_new_role(self):
+    def test_each_ticket_keeps_its_slots_name_across_swaps(self):
+        # A slot's tickets carry its name, whatever its role: "every stream but mine" is the
+        # holders under other names, with two slots or nine.
         self.run_main(2)
         self.open(B)
         self.pump()
         main_ticket, pip_ticket = self.main_tuner.stream.ticket, self.pip.ticket
         self.manager.swap()
-        self.assertEqual(self.budget._active[pip_ticket][1], "main")  # the large picture's
-        self.assertEqual(self.budget._active[main_ticket][1], "pip")
+        self.assertEqual(self.budget._active[pip_ticket][1], "pip")
+        self.assertEqual(self.budget._active[main_ticket][1], "main")
         self.assertEqual(self.budget.in_use(PROVIDER), 2)  # nothing counted twice
         self.manager.swap()
         self.assertEqual(self.budget._active[main_ticket][1], "main")
@@ -574,7 +576,7 @@ class PipFailureTests(_Fixture):
         self.assertEqual(self.pip_states(), [True, False])
         self.assertIs(self.manager.large(), self.pip)
         self.assertEqual(self.calls("main", "live")[-1], ("stop",))
-        self.assertEqual(self.budget.holders(PROVIDER), ["main"])
+        self.assertEqual(self.budget.holders(PROVIDER), ["pip"])  # the large one, by its name
 
     def test_a_soft_refusal_names_the_limit_too(self):
         self.open_granted(B)
@@ -724,6 +726,99 @@ class ReleaseCapTests(_Fixture):
         with self.assertLogs("services.budgeted_stream", "WARNING"):
             elapse(self.cap_ms * 2)
         self.assertEqual(self.budget.holders(PROVIDER), ["main"])
+
+
+class NamedSlotTests(_Fixture):
+    """More slots than two (a multiview's tiles): the large role goes to any of them."""
+
+    def setUp(self):
+        super().setUp()
+        self.tiles = {}
+        for name in ("t2", "t3"):
+            live = FakeLive(name, self.log)
+            tuner = FakeTuner(live, self.budget, self.cap_ms, purpose=name)
+            self.tiles[name] = Slot(name, FakePlayback(name, self.log), live, tuner=tuner)
+            self.manager.add_slot(self.tiles[name])
+        self.changes = []
+        self.manager.largeChanged.connect(lambda new, old: self.changes.append((new, old)))
+
+    def test_slots_are_listed_in_the_order_they_were_made(self):
+        names = [slot.name for slot in self.manager.slots()]
+        self.assertEqual(names, ["main", "pip", "t2", "t3"])
+        self.assertIs(self.manager.slot("t3"), self.tiles["t3"])
+        with self.assertRaises(KeyError):
+            self.manager.slot("t9")
+        with self.assertRaises(ValueError):
+            self.manager.add_slot(self.tiles["t2"])
+
+    def test_a_tile_starts_muted_at_the_pips_level(self):
+        self.assertEqual((self.manager.muted("t2"), self.manager.level("t2")), (True, PIP_LEVEL))
+
+    def test_set_large_gives_any_slot_the_role_and_says_which_had_it(self):
+        self.assertTrue(self.manager.set_large("t2"))
+        self.assertIs(self.manager.large(), self.tiles["t2"])
+        self.assertIs(self.manager.other(), self.pip)  # the PiP's slot stays the PiP's
+        self.assertIsNone(self.manager.small())
+        self.assertTrue(self.manager.set_large("t3"))
+        self.assertTrue(self.manager.set_large("main"))
+        self.assertEqual(self.changes, [("t2", "main"), ("t3", "t2"), ("main", "t3")])
+        self.assertFalse(self.manager.set_large("main"))  # it is large already
+        self.assertEqual(len(self.changes), 3)
+
+    def test_the_sound_follows_the_large_role_with_the_users_mute(self):
+        self.manager.set_large("t2")
+        self.assertEqual((self.last_mute("main"), self.last_mute("t2")), (True, False))
+        self.manager.set_muted("t2", True)  # the user mutes the large picture
+        self.manager.set_large("t3")
+        self.assertEqual([self.manager.muted(n) for n in ("main", "t2", "t3")], [True, True, True])
+        self.manager.set_muted("t3", False)
+        self.manager.set_large("main")
+        self.assertEqual([self.manager.muted(n) for n in ("main", "t2", "t3")], [False, True, True])
+
+    def test_a_slot_the_user_made_audible_keeps_both_mutes(self):
+        self.manager.set_muted("t2", False)  # heard beside the large picture
+        self.manager.set_large("t2")
+        self.assertEqual((self.manager.muted("main"), self.manager.muted("t2")), (False, False))
+
+    def test_set_large_onto_the_pips_slot_is_a_swap(self):
+        self.open_granted(B)
+        self.assertTrue(self.manager.set_large("pip"))
+        self.assertIs(self.manager.small(), self.main)
+        self.assertEqual(self.changes, [("pip", "main")])
+        self.assertTrue(self.manager.swap())
+        self.assertEqual(self.changes[-1], ("main", "pip"))
+
+    def test_set_large_waits_for_nothing_while_the_pips_change_is_on_its_way(self):
+        self.pip.live.auto_release = False
+        self.open_granted(B)
+        self.open(C)  # B stops; C waits for its release
+        self.assertFalse(self.manager.set_large("t2"))
+        self.pip.live.released.emit()
+        self.pump()
+        self.assertTrue(self.manager.set_large("t2"))
+
+    def test_a_tiles_streams_carry_its_name(self):
+        stream = self.tiles["t2"].tuner.stream
+        self.hold_main(3)
+        stream.request(PROVIDER, 3)
+        self.pump()
+        self.assertEqual(sorted(self.budget.holders(PROVIDER)), ["main", "t2"])
+        self.manager.set_large("t2")  # roles change, names stay
+        self.assertEqual(sorted(self.budget.holders(PROVIDER)), ["main", "t2"])
+
+    def test_a_tiles_failure_is_not_the_pips(self):
+        self.open_granted(B)
+        stream = self.tiles["t2"].tuner.stream
+        stream.request(PROVIDER, 3)
+        self.pump()
+        stream.start(**start_kwargs(C))
+        self.tiles["t2"].live.failed.emit(STREAM_LIMIT)
+        self.assertEqual(self.failures, [])
+        self.assertTrue(self.manager.pip_open())
+
+    def test_a_tiles_timeline_is_reported_by_its_name(self):
+        self.tiles["t3"].live.timelineChanged.emit({"lag": 3.0})
+        self.assertEqual(self.timelines, [("t3", {"lag": 3.0})])
 
 
 if __name__ == "__main__":

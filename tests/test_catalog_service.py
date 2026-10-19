@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QObject, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from job_fixtures import ImmediateRunner
 
 from services.catalog import (
     ALL_GROUP_ID,
@@ -16,7 +17,7 @@ from services.catalog import (
     CatalogService,
     Group,
 )
-from services.jobs import ImmediateRunner, JobRunner
+from services.jobs import JobRunner
 
 
 class FakeWorker(QObject):
@@ -100,7 +101,7 @@ def make_service(provider, factory=None, runner=None):
         save_config=lambda: None,
     )
     providers = FakeProviders(provider)
-    epg = SimpleNamespace(get_programs_for_channel=lambda channel, start, limit: [])
+    epg = SimpleNamespace(get_programs_for_channel=lambda channel: [])
     factory = factory or FakeFactory()
     service = CatalogService(
         config, providers, epg, runner=runner or ImmediateRunner(), factory=factory
@@ -266,7 +267,7 @@ class CatalogServiceTests(unittest.TestCase):
 
     def test_programmes_need_ready_epg(self):
         service, _, factory, epg = make_service({"name": "X", "type": "XTREAM", "url": "h:1"})
-        epg.get_programs_for_channel = lambda c, s, l: [
+        epg.get_programs_for_channel = lambda c: [
             {
                 "@start": "20261015200000 +0000",
                 "@stop": "20261015210000 +0000",
@@ -279,6 +280,26 @@ class CatalogServiceTests(unittest.TestCase):
         factory.results["epg"] = {"result": {}}
         service.select_provider()
         self.assertEqual([p.title for p in service.programmes({"id": 1}, now)], ["On"])
+
+    def test_the_programme_on_now_is_the_grids_when_programmes_overlap(self):
+        # A placeholder over a day long, listed first, starts with a real programme: the
+        # info line (one programme asked) shows what the guide's grid shows, not it.
+        service, _, factory, epg = make_service({"name": "X", "type": "XTREAM", "url": "h:1"})
+
+        def raw(start, stop, title):
+            return {"@start": start, "@stop": stop, "title": {"__text": title}}
+
+        epg.get_programs_for_channel = lambda c: [
+            raw("20261018211500 +0000", "20261019235950 +0000", "Placeholder"),
+            raw("20261018211500 +0000", "20261018230000 +0000", "Late Film"),
+            raw("20261018230000 +0000", "20261019003000 +0000", "Comedy Night"),
+        ]
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
+        factory.results["epg"] = {"result": {}}
+        service.select_provider()
+        now = datetime(2026, 10, 18, 23, 29, tzinfo=timezone.utc)
+        on_now = service.programmes({"id": 1}, now, limit=1)
+        self.assertEqual([p.title for p in on_now], ["Comedy Night"])
 
     def test_is_live(self):
         service, *_ = make_service({"name": "X", "type": "XTREAM", "url": "h:1"})

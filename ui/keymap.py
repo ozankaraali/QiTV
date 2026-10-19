@@ -9,6 +9,8 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence
 
+from services.i18n import N_, tr
+
 
 class Action(str, Enum):
     CH_NEXT = "ch_next"
@@ -45,13 +47,20 @@ class Action(str, Enum):
     SEARCH = "search"
     FAVORITE = "favorite"
     LIBRARY = "library"
-    OPEN_FILE = "open_file"
     PIP = "pip"  # picture in picture: open (the previous or highlighted channel) or close
     SWAP = "swap"  # the large and the small picture trade places
+    MULTIVIEW = "multiview"  # the grid of channels, or back to one picture
     TAB = "tab"  # the mixer's other row
+    SOUND_EARLIER = "sound_earlier"  # J: the sound 50 ms earlier against the picture
+    SOUND_LATER = "sound_later"  # K: 50 ms later (VLC's keys)
+    SUBTITLES_EARLIER = "subtitles_earlier"  # Shift+J: the subtitles 50 ms earlier
+    SUBTITLES_LATER = "subtitles_later"  # Shift+K (VLC's G and H: G is the guide here)
+    PASTE = "paste"  # Ctrl/⌘+V: the clipboard into the subtitles search's field
+    RECORD = "record"  # R: record the channel being watched, or stop (2.2)
 
 
-CONTEXTS = ("player", "drawer", "library", "guide")
+# "subtitles": the OpenSubtitles search over the player (2.2): it types like the drawer.
+CONTEXTS = ("player", "drawer", "library", "guide", "subtitles")
 
 
 _K = Qt.Key
@@ -99,6 +108,15 @@ _PLAYER_CHARS = {
     _K.Key_Minus.value: Action.VOL_DOWN,
     _K.Key_P.value: Action.PIP,
     _K.Key_S.value: Action.SWAP,
+    _K.Key_V.value: Action.MULTIVIEW,
+    _K.Key_J.value: Action.SOUND_EARLIER,
+    _K.Key_K.value: Action.SOUND_LATER,
+    _K.Key_R.value: Action.RECORD,
+}
+# With Shift, the sound's sync keys move the subtitles (the player only).
+_PLAYER_SHIFT_CHARS = {
+    _K.Key_J.value: Action.SUBTITLES_EARLIER,
+    _K.Key_K.value: Action.SUBTITLES_LATER,
 }
 # Remote channel keys (drawer closed, like the arrows they stand in for).
 _CHANNEL_KEYS = {
@@ -164,9 +182,9 @@ def resolve(
 ) -> tuple[Action, str] | None:
     """Map a key press to (action, payload); the payload is the digit or the typed text.
 
-    `context` is "player", "drawer", "library" or "guide". `drawer_open` is the Phase 1B
-    spelling (True means "drawer", False "player") and is used only when `context` is not
-    given.
+    `context` is "player", "drawer", "library", "guide" or "subtitles". `drawer_open` is the
+    Phase 1B spelling (True means "drawer", False "player") and is used only when `context`
+    is not given.
     """
     if context is None:
         context = "drawer" if drawer_open else "player"
@@ -183,7 +201,7 @@ def resolve(
     if held == _CTRL and key in _CTRL_KEYS:
         return _CTRL_KEYS[key], ""
     if held == _CTRL and key == _K.Key_P.value and context in ("player", "drawer"):
-        # The drawer types P into its filter: Ctrl/⌘+P opens the highlighted channel small.
+        # The drawer types P into its find: Ctrl/⌘+P opens the highlighted channel small.
         return Action.PIP, ""
     if context == "library":
         if key in _LIBRARY_KEYS:
@@ -194,6 +212,12 @@ def resolve(
     if context == "drawer":
         if key in _DRAWER_KEYS:
             return _DRAWER_KEYS[key], ""
+        return _text(text, mods, windows=platform.startswith("win"))
+    if context == "subtitles":
+        if key in _DRAWER_KEYS:
+            return _DRAWER_KEYS[key], ""
+        if held == _CTRL and key == _K.Key_V.value:
+            return Action.PASTE, ""
         return _text(text, mods, windows=platform.startswith("win"))
     keys, chars = (
         (_GUIDE_KEYS, _GUIDE_CHARS) if context == "guide" else (_PLAYER_KEYS, _PLAYER_CHARS)
@@ -208,13 +232,15 @@ def resolve(
         return Action.DIGIT, chr(key)
     if len(text) == 1 and text in _DIGITS:  # layouts where digits need Shift
         return Action.DIGIT, text
+    if mods & _SHIFT and context == "player" and key in _PLAYER_SHIFT_CHARS:
+        return _PLAYER_SHIFT_CHARS[key], ""
     if key in chars:
         return chars[key], ""
     return None
 
 
 def _text(text: str, mods: int, *, windows: bool) -> tuple[Action, str] | None:
-    """Printable text for the drawer and Library filters.
+    """Printable text for the drawer's find and the Library's filters.
 
     Ctrl/⌘ and Meta never type, except Ctrl+Alt on Windows, which is how it reports AltGr
     (ł, @, €); on macOS ⌘⌥ is a shortcut. Alt (macOS Option) composes letters such as ç, so
@@ -234,76 +260,100 @@ def _text(text: str, mods: int, *, windows: bool) -> tuple[Action, str] | None:
 # Per context, (keys, what they do): keys are QKeySequence texts; ", " separates alternatives,
 # and "0…9" / "A…Z" stand for every key in between. The "menu" rows are the menu bar's own
 # shortcuts. Tests resolve every key in its context, so the table cannot drift from resolve().
+# The titles and what the keys do stay English here (the README is made from them) and are
+# shown with `translate` (ui/shortcuts_dialog.py); the keys' names are Qt's.
 SHORTCUT_TITLES = {
-    "player": "Watching TV",
-    "drawer": "Channel list",
-    "guide": "Guide",
-    "library": "Movies and Series",
-    "menu": "Anywhere",
+    "player": N_("Watching TV"),  # i18n: a heading of Help → Keyboard Shortcuts
+    "drawer": N_("Channel list"),
+    "guide": N_("Guide"),  # i18n: the TV guide (the programme grid)
+    "library": N_("Movies and Series"),
+    "subtitles": N_("Finding subtitles"),
+    "menu": N_("Anywhere"),  # i18n: a heading of Help → Keyboard Shortcuts: keys for anywhere
 }
 SHORTCUTS: dict[str, list[tuple[str, str]]] = {
     "player": [
-        ("Up, Down", "Previous / next channel (volume during a movie)"),
-        ("0…9", "Type a channel number"),
-        ("Backspace", "Previous channel"),
-        ("Return", "Channel list"),
-        ("Left, Right", "Back / forward 10 seconds"),
-        ("Space", "Play / pause"),
-        ("L", "Go live"),
-        ("G", "Guide"),
-        ("I", "Channel info"),
-        ("+, -", "Volume up / down (the mixer)"),
-        ("M", "Mute"),
-        ("Tab", "The mixer's other row (while it shows)"),
-        ("F, F11, Ctrl+Meta+F", "Fullscreen"),
-        ("Ctrl+F", "Search"),
-        ("Ctrl+D", "Add or remove a favorite channel"),
-        ("P, Ctrl+P", "Picture-in-picture with the previous channel, or close it"),
-        ("S", "Swap the large and the small picture"),
-        ("Alt+P", "Mini player"),
-        ("Esc", "Close what is open, leave fullscreen; after a movie, back to the Library"),
+        ("Up, Down", N_("Previous / next channel (volume during a movie)")),
+        ("0…9", N_("Type a channel number")),
+        ("Backspace", N_("Previous channel")),
+        ("Return", N_("Channel list")),
+        ("Left, Right", N_("Back / forward 10 seconds")),
+        ("Space", N_("Play / pause")),
+        ("L", N_("Go live")),
+        ("R", N_("Record the channel, or stop recording")),
+        ("G", N_("Guide")),
+        ("I", N_("Channel info")),
+        ("+, -", N_("Volume up / down (the mixer)")),
+        ("M", N_("Mute")),  # i18n: what a key does (verb)
+        ("Tab", N_("The mixer's other row (while it shows)")),
+        ("J, K", N_("Sound 50 ms earlier / later (sync with the picture)")),
+        ("Shift+J, Shift+K", N_("Subtitles 50 ms earlier / later")),
+        ("F, F11, Ctrl+Meta+F", N_("Fullscreen")),
+        ("Ctrl+F", N_("Search")),  # i18n: what a key does (verb)
+        ("Ctrl+D", N_("Add or remove a favorite channel")),
+        ("P, Ctrl+P", N_("Picture-in-picture with the previous channel, or close it")),
+        ("S", N_("Swap the large and the small picture")),
+        ("V", N_("Multiview: several channels at once, or back to one")),
+        ("Alt+P", N_("Mini player")),
+        (
+            "Esc",
+            N_(
+                "Close what is open, leave the multiview or fullscreen; after a movie, back to "
+                "the Library"
+            ),
+        ),
     ],
     "drawer": [
-        ("Up, Down", "Move"),
-        ("PgUp, PgDown", "Page"),
-        ("Left, Right", "Layer up / down"),
-        ("Return", "Open or play"),
-        ("A…Z", "Type to filter"),
-        ("Backspace", "Delete a letter of the filter"),
-        ("Ctrl+D", "Add or remove a favorite channel"),
-        ("Ctrl+P", "Open the channel in picture-in-picture"),
-        ("Ctrl+F", "Search"),
-        ("F11, Ctrl+Meta+F", "Fullscreen"),
-        ("Esc", "Clear the filter, then close"),
+        ("Up, Down", N_("Move")),  # i18n: what the arrow keys do in a list (verb)
+        ("PgUp, PgDown", N_("Page")),  # i18n: what Page Up / Page Down do: a page up or down
+        ("Left, Right", N_("Layer up / down")),
+        ("Return", N_("Open or play")),
+        ("A…Z", N_("Find a genre or channel (every provider)")),
+        ("Backspace", N_("Delete a letter of the find")),
+        ("Ctrl+D", N_("Add or remove a favorite channel")),
+        ("Ctrl+P", N_("Open the channel in picture-in-picture")),
+        ("Ctrl+F", N_("Search")),
+        ("F11, Ctrl+Meta+F", N_("Fullscreen")),
+        ("Esc", N_("End the find, then close")),
     ],
     "guide": [
-        ("Up, Down", "Move between channels"),
-        ("Left, Right", "Earlier / later"),
-        ("0…9", "Jump to a channel number"),
-        ("Return", "Watch the channel"),
-        ("Ctrl+F", "Search"),
-        ("F, F11, Ctrl+Meta+F", "Fullscreen"),
-        ("G, Esc", "Close the guide"),
+        ("Up, Down", N_("Move between channels")),
+        ("Left, Right", N_("Earlier / later")),
+        ("0…9", N_("Jump to a channel number")),
+        ("Return", N_("Watch the channel; a past programme from its start")),
+        ("Ctrl+F", N_("Search")),
+        ("F, F11, Ctrl+Meta+F", N_("Fullscreen")),
+        ("G, Esc", N_("Close the guide")),
     ],
     "library": [
-        ("Up, Down, Left, Right", "Move"),
-        ("Return", "Play or open"),
-        ("Home, End", "First / last title"),
-        ("A…Z", "Jump to a letter, or filter the genres"),
-        ("Ctrl+F", "Search"),
-        ("/", "Search, or type it in the search"),
-        ("Ctrl+D", "Add to or remove from My list"),
-        ("F11, Ctrl+Meta+F", "Fullscreen"),
-        ("Esc", "Back; from the genres, back to live TV"),
+        ("Up, Down, Left, Right", N_("Move")),
+        ("Return", N_("Play or open")),
+        ("Home, End", N_("First / last title")),
+        ("A…Z", N_("Jump to a letter, or filter the genres")),
+        ("Ctrl+F", N_("Search")),
+        ("/", N_("Search, or type it in the search")),
+        ("Ctrl+D", N_("Add to or remove from My list")),
+        ("F11, Ctrl+Meta+F", N_("Fullscreen")),
+        ("Esc", N_("Back; from the genres, back to live TV")),
+    ],
+    "subtitles": [
+        ("Up, Down", N_("Move in a list; up from the top to the search field")),
+        ("PgUp, PgDown", N_("Page")),
+        ("Left, Right", N_("Between the languages and the subtitles")),
+        ("Return", N_("Download and show the subtitles; in the field, search (or save the key)")),
+        ("A…Z", N_("Type what to search for (or the API key)")),
+        ("Ctrl+V", N_("Paste")),  # i18n: what a key does (verb)
+        ("Backspace", N_("Delete a letter")),
+        ("Esc", N_("Close")),  # i18n: what a key does (verb)
     ],
     "menu": [
-        ("Ctrl+1", "Live TV"),
-        ("Ctrl+2", "Movies"),
-        ("Ctrl+3", "Series"),
-        ("Ctrl+O", "Open a file"),
-        ("Ctrl+,", "Settings"),
-        ("Ctrl+R", "Refresh channels and guide"),
-        ("Ctrl+Q", "Quit"),
+        ("Ctrl+1", N_("Live TV")),
+        ("Ctrl+2", N_("Movies")),
+        ("Ctrl+3", N_("Series")),
+        ("Ctrl+4", N_("Multiview")),
+        ("Ctrl+O", N_("Open a file")),
+        ("Ctrl+,", N_("Settings")),
+        ("Ctrl+R", N_("Refresh channels and guide")),
+        ("Ctrl+Q", N_("Quit")),  # i18n: what a key does (verb)
     ],
 }
 
@@ -315,10 +365,11 @@ def key_hint(what: str, keys: str) -> str:
     """An on-screen control's tooltip naming its key, as this computer names it.
 
     "Guide (G)", "Search (⌘F)" on macOS and "Search (Ctrl+F)" elsewhere; arrows read as
-    arrows everywhere.
+    arrows everywhere. `what` is already in the active language.
     """
     name = _ARROWS.get(keys) or QKeySequence(keys).toString(QKeySequence.SequenceFormat.NativeText)
-    return f"{what} ({name})"
+    # i18n: a control's tooltip: what it does, then its key in brackets: "Guide (G)"
+    return tr("{action} ({key})", action=what, key=name)
 
 
 def shortcut_keys(keys: str) -> list[str]:

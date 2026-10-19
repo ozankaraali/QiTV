@@ -54,7 +54,13 @@ On a first start QiTV opens with a [publicly available playlist](https://github.
    - **M3U Stream:** the address of a single stream;
    - **Xtream:** the server address, your username and your password;
    - **STB:** the portal address and your MAC address (serial number and device ID only if your provider asks for them).
+
+   Got a single link from your provider? Copy it and press **Paste link** beside the address (or paste it into the address): an Xtream link with your username and password in it (`get.php?username=…&password=…` or `player_api.php?…`) fills in Xtream, the server, the username and the password; a playlist address ending in .m3u or .m3u8 fills in an M3U playlist; a portal address with `/c/` or `/stalker_portal/` in it fills in STB (add the MAC address yourself).
+
+   You can also drop a playlist file (.m3u or .m3u8) or such a link onto the QiTV window: it becomes a provider and the channel list switches to it (a portal's link opens this form, for its MAC address). A subtitle file dropped at the same time still goes to what plays.
 4. Press **Verify Provider** to check the details, then **Save**. QiTV loads the channels, and the Library loads the provider's movies and series.
+
+When a channel or a film doesn't open, or a provider can't be reached, QiTV asks the provider's account why (without opening a stream, at most once a minute) and says it in plain words: the subscription has expired, all the streams the account allows are in use ("Your account allows 1 stream; one is in use"), the username or password is wrong, the server refused or blocked QiTV, or it didn't answer. When QiTV's other picture is the one using the account's only stream, it says that instead. **Verify Provider** says the same: an expired, disabled or refused account doesn't verify, and a portal whose profile shows an end date in the past verifies with a note (some portals keep old dates).
 
 If you delete every provider, including the free playlist, QiTV shows a welcome card whose **Add provider** button does the same; its **Free channels…** button adds iptv-org's free list again, for all countries or one country. Settings is one click away too: the **⚙** at the right end of the channel list's top row (beside it, **↻** loads your provider's channels and guide again, also <kbd>Ctrl/⌘+R</kbd>, and **⌕** searches), or the menu bar (<kbd>Ctrl/⌘+,</kbd>). The same row starts with **‹**, which goes back a level like <kbd>←</kbd>, and the names of where you are: click one to go there. To browse another provider, click your provider's name in that row and pick another in the sources column, or use the **Providers** menu. This only changes what the list shows: what plays keeps playing (see [Several providers](#several-providers)).
 
@@ -80,7 +86,7 @@ Use the arrow keys like a TV remote: <kbd>↑</kbd> and <kbd>↓</kbd> change th
 
 ![The fast-zap list while changing channels](docs/screenshots/02-fast-zap.png)
 
-The channel list has your groups (with ★ Favorites and Recent at the top) on the left and their channels on the right, each with what is on now. Type to filter it. With the mouse: click the picture for the channel list, double-click it for fullscreen, and use the wheel to change channels (or the volume: see Settings → Mouse wheel; <kbd>Ctrl/⌘</kbd> with the wheel always changes the volume). Moving the mouse shows the player controls. Besides play and the speaker they have **⌕** (search), the guide, **⟲** (the channel before) and, at the live edge of a channel you can rewind, **◀10**. On live TV, click the channel's name at the top for what is on, and the **★** beside it to add it to your favorites or remove it. Typing aside, every key in the tables below has a way to do it on screen: a button (its tooltip names the key), a row, the A–Z rail, the mixer's rows, a click, double-click or the wheel on the picture, or the window's own close button.
+The channel list has your groups (with ★ Favorites and Recent at the top) on the left and their channels on the right, each with what is on now. To find a genre or a channel, type its name (or click **⌕ Find** above the channels first): the matching genres come first, then the channels, from every provider (with two or more, each says which provider it is from): whole words before parts of words, then the provider you are browsing or watched last, then your favorites. Click or press <kbd>Enter</kbd> to open a genre or play a channel; the last row looks for films and series with those words in the Library. <kbd>Esc</kbd> or **✕** takes the list back to where it was. With the mouse: click the picture for the channel list, double-click it for fullscreen, and use the wheel to change channels (or the volume: see Settings → Mouse wheel; <kbd>Ctrl/⌘</kbd> with the wheel always changes the volume). Moving the mouse shows the player controls. Besides play and the speaker they have **⌕** (search), the guide, **⟲** (the channel before) and, at the live edge of a channel you can rewind, **◀10**. On live TV, click the channel's name at the top for what is on, the **★** beside it to add it to your favorites or remove it, and the red **●** after that to record the channel (see [Recording](#recording)). Typing aside, every key in the tables below has a way to do it on screen: a button (its tooltip names the key), a row, the A–Z rail, the mixer's rows, a click, double-click or the wheel on the picture, or the window's own close button.
 
 ![The channel list over the picture](docs/screenshots/03-drawer.png)
 
@@ -100,18 +106,22 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>←</kbd> / <kbd>→</kbd> | Back / forward 10 seconds |
 | <kbd>Space</kbd> | Play / pause |
 | <kbd>L</kbd> | Go live |
+| <kbd>R</kbd> | Record the channel, or stop recording |
 | <kbd>G</kbd> | Guide |
 | <kbd>I</kbd> | Channel info |
 | <kbd>+</kbd> / <kbd>-</kbd> | Volume up / down (the mixer) |
 | <kbd>M</kbd> | Mute |
 | <kbd>Tab</kbd> | The mixer's other row (while it shows) |
+| <kbd>J</kbd> / <kbd>K</kbd> | Sound 50 ms earlier / later (sync with the picture) |
+| <kbd>Shift+J</kbd> / <kbd>Shift+K</kbd> | Subtitles 50 ms earlier / later |
 | <kbd>F</kbd> / <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>Ctrl/⌘+D</kbd> | Add or remove a favorite channel |
 | <kbd>P</kbd> / <kbd>Ctrl/⌘+P</kbd> | Picture-in-picture with the previous channel, or close it |
 | <kbd>S</kbd> | Swap the large and the small picture |
+| <kbd>V</kbd> | Multiview: several channels at once, or back to one |
 | <kbd>Alt/⌥+P</kbd> | Mini player |
-| <kbd>Esc</kbd> | Close what is open, leave fullscreen; after a movie, back to the Library |
+| <kbd>Esc</kbd> | Close what is open, leave the multiview or fullscreen; after a movie, back to the Library |
 
 **Channel list**
 
@@ -121,13 +131,13 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Page Up</kbd> / <kbd>Page Down</kbd> | Page |
 | <kbd>←</kbd> / <kbd>→</kbd> | Layer up / down |
 | <kbd>Enter</kbd> | Open or play |
-| <kbd>A–Z</kbd> | Type to filter |
-| <kbd>Backspace</kbd> | Delete a letter of the filter |
+| <kbd>A–Z</kbd> | Find a genre or channel (every provider) |
+| <kbd>Backspace</kbd> | Delete a letter of the find |
 | <kbd>Ctrl/⌘+D</kbd> | Add or remove a favorite channel |
 | <kbd>Ctrl/⌘+P</kbd> | Open the channel in picture-in-picture |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
-| <kbd>Esc</kbd> | Clear the filter, then close |
+| <kbd>Esc</kbd> | End the find, then close |
 
 **Guide**
 
@@ -136,7 +146,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>↑</kbd> / <kbd>↓</kbd> | Move between channels |
 | <kbd>←</kbd> / <kbd>→</kbd> | Earlier / later |
 | <kbd>0–9</kbd> | Jump to a channel number |
-| <kbd>Enter</kbd> | Watch the channel |
+| <kbd>Enter</kbd> | Watch the channel; a past programme from its start |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>F</kbd> / <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>G</kbd> / <kbd>Esc</kbd> | Close the guide |
@@ -155,6 +165,19 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Esc</kbd> | Back; from the genres, back to live TV |
 
+**Finding subtitles**
+
+| Keys | What they do |
+| --- | --- |
+| <kbd>↑</kbd> / <kbd>↓</kbd> | Move in a list; up from the top to the search field |
+| <kbd>Page Up</kbd> / <kbd>Page Down</kbd> | Page |
+| <kbd>←</kbd> / <kbd>→</kbd> | Between the languages and the subtitles |
+| <kbd>Enter</kbd> | Download and show the subtitles; in the field, search (or save the key) |
+| <kbd>A–Z</kbd> | Type what to search for (or the API key) |
+| <kbd>Ctrl/⌘+V</kbd> | Paste |
+| <kbd>Backspace</kbd> | Delete a letter |
+| <kbd>Esc</kbd> | Close |
+
 **Anywhere**
 
 | Keys | What they do |
@@ -162,6 +185,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Ctrl/⌘+1</kbd> | Live TV |
 | <kbd>Ctrl/⌘+2</kbd> | Movies |
 | <kbd>Ctrl/⌘+3</kbd> | Series |
+| <kbd>Ctrl/⌘+4</kbd> | Multiview |
 | <kbd>Ctrl/⌘+O</kbd> | Open a file |
 | <kbd>Ctrl/⌘+,</kbd> | Settings |
 | <kbd>Ctrl/⌘+R</kbd> | Refresh channels and guide |
@@ -169,6 +193,22 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 <!-- keys:end -->
 
 In the channel list, plain <kbd>P</kbd> types into the filter, so picture-in-picture there is <kbd>Ctrl/⌘+P</kbd>.
+
+### Sound and subtitles
+
+On some channels the sound slowly drifts out of step with the picture. The **♫** button in the player controls opens the **Sound** panel: pick another sound track there when the channel or film has more than one, and use the **Sync** row to move the sound: **−** makes it play earlier and **+** later, 50 milliseconds at a time (up to 5 seconds either way). It reads, for example, "Sound 150 ms later", or "In sync"; **Reset** puts it back. <kbd>J</kbd> and <kbd>K</kbd> do the same from anywhere on the player. QiTV remembers the setting for each live channel, also after a restart, and uses it whenever that channel plays, big or small. For a film or an episode it lasts while that title plays.
+
+The subtitles button beside it opens the **Subtitles** panel: **Off**, the subtitles the stream brings, and **Load a file…** to pick a subtitle file from your computer (.srt, .ass, .ssa, .vtt or .sub; it opens in the folder you used last). You can also drop a subtitle file onto the window while something plays. The file then shows in the list under its own name. While subtitles show, the panel has a **Sync** row too, for subtitles that come too early or too late; <kbd>Shift+J</kbd> and <kbd>Shift+K</kbd> do the same. A subtitle file and its timing last while that film, episode or channel plays.
+
+Click anywhere else, or press <kbd>Esc</kbd>, to close a panel. While one is open, <kbd>↑</kbd> and <kbd>↓</kbd> move through it, <kbd>Enter</kbd> picks, and <kbd>←</kbd> and <kbd>→</kbd> move the sync.
+
+#### Subtitles from OpenSubtitles
+
+For a film or an episode, the Subtitles panel also has **Search OpenSubtitles…**: QiTV looks for subtitles on [OpenSubtitles.com](https://www.opensubtitles.com), a free subtitle website, using the title that plays (with the film's year, or the series with its season and episode number; tags such as "EN:" or "4K" in a provider's title are left out). The languages that have subtitles are on the left with how many each has, your last language (or your computer's) first; the selected language's subtitles are on the right, the best first: from trusted uploaders and downloaded most. **Machine translated** ones are marked and come last; **Hearing impaired** ones are marked and come after the others, unless the last ones you picked were for the hearing impaired. Click one, or press <kbd>Enter</kbd>, and it downloads, shows at once and appears in the Subtitles panel under its own name. If the title is not found, change the words in the search field at the top and press **Search**. The next time that film or episode plays, the Subtitles panel offers the same file again at its top ("… (OpenSubtitles)"), without a new download.
+
+OpenSubtitles needs an **API key**. The release downloads of QiTV may come with one. If yours does not, the first search asks for one: **Get a free key** opens the OpenSubtitles website, where you make a free account and then create a key on its "API consumers" page; copy the key, click **Paste** (or press <kbd>Ctrl/⌘+V</kbd>) and **Save**. You can change it later in **Settings → Subtitles**.
+
+Without signing in, OpenSubtitles allows 5 downloads a day per internet connection. To get more, enter your OpenSubtitles username and password in **Settings → Subtitles** (optional; **Sign out** there removes them). After each download QiTV says how many downloads you have left today and when more come back. Downloaded subtitles are kept in the `subtitles` folder beside QiTV's settings (see [Portable mode](#portable-mode) for where that is).
 
 ### Pause and rewind live TV (time-shift)
 
@@ -179,12 +219,34 @@ QiTV keeps the last few minutes of every live channel you watch, so you can paus
 - **In memory, by default.** Each stream has its own memory for this, set in Settings → Time-shift → **Memory per stream**: 128, 256 (the default) or 512 MiB, about 2, 4 or 9 minutes of HD video.
 - **On disk, only if you allow it.** Tick **Use disk for a longer time-shift buffer** in the same tab and choose the size with the slider, from 256 MiB to 16 GiB (2 GiB is about 36 minutes of HD). Only one stream uses the disk at a time; the small picture of picture-in-picture always uses memory. This is temporary history, not a recording: QiTV deletes the oldest part as it goes and everything when you change channel or quit.
 
+### Catch-up: your provider's archive
+
+Many providers keep the last days of some channels, so you can watch what was on earlier. QiTV knows which channels have such an archive from your provider's channel list (Xtream providers, and M3U playlists that say so; not STB portals yet), and uses it where its own time-shift buffer ends:
+
+- **Rewind further back.** On a channel with an archive, the time-shift bar reaches half an hour further back than the buffer; that part of the line is dashed. Drag there, press <kbd>←</kbd> at the start of the buffer, or press **⏮** for a programme that began before it, and QiTV plays the provider's archive from that moment ("From the provider's archive"). The bar then shows the archive from that time to now, the bubble over the knob says which moment plays (with the day, if it is not today), and <kbd>←</kbd>, <kbd>→</kbd>, **⏮** and the bar move within it. <kbd>L</kbd> or **Go live** goes back to the live channel.
+- **Watch a past programme from the start.** In the guide, <kbd>←</kbd> (or **‹**) also goes back in time on such channels. The programme at the left edge of the guide, or a past one you click, is outlined: press <kbd>Enter</kbd>, double-click it, or click **▶ Watch from the start** at the bottom of the guide. That button also plays the programme on now from its beginning.
+- **One stream at a time.** The archive is another stream from your provider, so QiTV closes the live stream before it opens the archive, and the other way round when you go back to live. With a provider that allows one stream, you never use two.
+- **Some archives don't answer.** A channel can claim an archive the provider doesn't have. Then QiTV says so and keeps playing (or goes back to live). When the provider says it has nothing twice, for two different times, QiTV doesn't ask for that channel's archive again for three days.
+
+How far back you can go depends on the provider (often one to seven days). Archive times follow your provider's time zone, which QiTV reads from Xtream providers when it loads their channels (refresh the channel list once after updating); an M3U playlist's Xtream-style channels use the time zone of your Xtream provider on the same server, else UTC. While the archive plays, <kbd>R</kbd> doesn't record: recordings come from the live buffer.
+
+### Recording
+
+Press <kbd>R</kbd>, or the red **●** after the channel's name and ★ at the top of the player controls, to record the live channel you are watching; press it again to stop. While it records, the **●** is lit and **● REC 01:23** beside it counts the time.
+
+- **From where you are watching.** If you have paused or rewound, the recording starts there, with what the time-shift buffer holds after it, and then goes on with the live stream.
+- **Until you stop it.** It also stops, keeping what it recorded, when you change channel or quit QiTV, after 4 hours, or when less than 2 GB is left on the disk. A message then says **Recording saved** with the file's name (and why it stopped, if you did not stop it).
+- **In your Movies folder.** Recordings go to **QiTV** in your Movies folder (macOS) or Videos folder (Windows and Linux). **Settings → Time-shift → Recordings** changes the folder and opens it (so does **File → Open Recordings Folder**).
+- **As the channel sends it.** Each file is named after the channel and the time, for example `My Channel 2026-10-19 21.30.ts`: an MPEG-TS file with the channel's own picture and sound, not re-encoded, which VLC, MPV and most players play.
+- **No second stream.** A recording is written from the time-shift buffer, so it never asks your provider for another stream. That is also why a channel that plays without time-shift can't be recorded: its button is dimmed and says so.
+- In the multiview the button records the focused tile. A recording goes on when the focus moves, or when its channel becomes the small picture of picture-in-picture: that tile or small picture says **REC** on its label.
+
 ### Live latency
 
 Live streams arrive a little behind the broadcast. Settings → **Live latency** chooses how far behind QiTV plays:
 
-- **Auto** (recommended, and the default for new installs) learns it for each channel from how the channel's pieces arrive: about 2.5–3.5 seconds for a steady stream, more for one that arrives in uneven pieces or in bursts (never less than one burst). It plays a channel further behind only after the picture ran dry, not for a pause the buffer covered, and quiet minutes bring it closer again. QiTV remembers what it learned per channel for the next time. At the live edge the player controls show how far behind the channel plays, with "adjusted" while trouble holds it further back, for example "Stay live ● ≈ 7 s behind · adjusted".
-- **Low** (about 1 second, starts sooner), **Normal** (about 2.5 seconds) or **Stable** (about 6 seconds, for unreliable streams) keep the same distance on every channel. A setting you chose before 2.0.2 stays as it was.
+- **Auto** (recommended, and the default) learns it for each channel from how the channel's pieces arrive: about 2.5–3.5 seconds for a steady stream, more for one that arrives in uneven pieces or in bursts (never less than one burst). It plays a channel further behind only after the picture ran dry, not for a pause the buffer covered, and quiet minutes bring it closer again. QiTV remembers what it learned per channel for the next time. At the live edge the player controls show how far behind the channel plays, with "adjusted" while trouble holds it further back, for example "Stay live ● ≈ 7 s behind · adjusted" (in a small window "adjusted", then "Stay live", give way first).
+- **Low** (about 1 second, starts sooner), **Normal** (about 2.5 seconds) or **Stable** (about 6 seconds, for unreliable streams) keep the same distance on every channel. When you update, QiTV moves you to Auto once, whatever you had chosen before; a latency you choose in Settings afterwards stays.
 
 QiTV gently speeds playback up or down to stay there, only when the distance has drifted for a while: a few percent, eased in and out, at most about once every 5 minutes (the dot beside the distance is amber meanwhile). When a channel has fallen far behind (more than about 8 seconds), QiTV jumps closer once instead, at most once a minute, starting where the picture is complete. A channel starts at that distance too, not at the oldest part of what the provider sends; when a provider sends a backlog right after the start, QiTV picks the start again within seconds. On a channel where that does not play smoothly, QiTV notices within a few seconds, plays it at normal speed only and remembers that for a day; then it tries again. Channels that cannot be time-shifted play directly; under Auto they play as with Normal. A few channels whose streams can't be time-shifted smoothly play without rewind too; QiTV notices this by itself and tries again a day later.
 
@@ -195,20 +257,32 @@ Watch a second channel in a small picture in the bottom-right corner:
 - <kbd>P</kbd> (or the player controls' second-channel button) opens the channel you watched before, small; press <kbd>P</kbd> again to close it;
 - in the channel list, right-click a channel and choose **Open in picture-in-picture**, or highlight it and press <kbd>Ctrl/⌘+P</kbd>; the channel can come from any of your providers;
 - click the small picture or its **⇄**, or press <kbd>S</kbd>, to swap the two: the small one becomes big;
-- the sound follows the big picture. The speaker on the small picture turns its sound on or off. <kbd>+</kbd> and <kbd>-</kbd> (or the speaker in the player controls, beside ♪) show the mixer, which sets each picture's volume (<kbd>Tab</kbd> moves to the other row) and hides after a few seconds; without picture-in-picture it shows only the main volume;
+- the sound follows the big picture. The speaker on the small picture turns its sound on or off. <kbd>+</kbd> and <kbd>-</kbd> (or the speaker in the player controls, beside ♫) show the mixer, which sets each picture's volume (<kbd>Tab</kbd> moves to the other row) and hides after a few seconds; without picture-in-picture it shows only the main volume;
 - the **×** on the small picture closes it.
 
 Picture-in-picture is for live TV, and it needs two streams: a provider that allows two at a time, or one stream each from two providers. A film or an episode from the Library is the one exception: it takes the big picture and keeps the channel you were watching small (see [Keep watching while you browse](#keep-watching-while-you-browse)).
 
 ![Picture-in-picture with the volume mixer](docs/screenshots/08-pip.png)
 
+### Multiview
+
+Watch several live channels side by side: press <kbd>V</kbd>, choose **View → Multiview** (<kbd>Ctrl/⌘+4</kbd>) or click the grid button on the player controls. The channel you are watching becomes the first tile and an open picture-in-picture the second; the others show **+**.
+
+- Click a tile to give it the focus: its sound plays, and the player controls, the channel list, zapping and the banner act on it. Click **+** to choose a channel for that tile, or drag a channel from the channel list onto any tile.
+- The grid you leave is kept: next time, the **Last grid** chip beside the layout chip (or **View → Restore Last Multiview**) brings its channels back.
+- The chip beside the grid button switches between 2 and 4 tiles, and also 6 and 9 when hardware decoding is on (**Settings**).
+- Each tile asks your provider for a stream of its own. When a provider has no stream to spare, the tile says so and keeps the channel: click it to try again. QiTV never retries by itself.
+- <kbd>V</kbd>, <kbd>Esc</kbd> or a double-click on a tile goes back to one picture: the focused tile becomes the big picture and the tile you had before it stays as picture-in-picture. Picture-in-picture itself waits until you leave the grid.
+
+Each tile's label shows LIVE, or how far behind live it plays (−00:42). Tiles without the focus play at normal speed and only jump back to live when they fall far behind; each can be paused and rewound like the big picture once it has the focus. Its time-shift buffer is in memory: the focused tile gets the memory per stream (**Settings**), the others a short one of 64 MiB (`"multiview_tile_ram_mib"` in `config.json` changes it; at least 48, enough for a 4K channel). A tile you paused or rewound keeps what it plays until it is back at live.
+
 ## The guide
 
-Press <kbd>G</kbd> (or the guide button in the player controls) for the programme guide (EPG): the channels of the group you are watching, from the current half hour on, up to 24 hours ahead. Move with the arrow keys, type a number to jump to a channel, and press <kbd>Enter</kbd> to watch it. With the mouse, click a channel and double-click it to watch; **‹** and **›** beside the day move in time, and **⌕**, **⛶** (fullscreen) and **×** (close) are at the top right. The bottom shows the highlighted programme's description.
+Press <kbd>G</kbd> (or the guide button in the player controls) for the programme guide (EPG): the channels of the group you are watching, from the current half hour on, up to 24 hours ahead. Move with the arrow keys, type a number to jump to a channel, and press <kbd>Enter</kbd> to watch it. With the mouse, click a channel and double-click it to watch; **‹** and **›** beside the day move in time, and **⌕**, **⛶** (fullscreen) and **×** (close) are at the top right. The bottom shows the highlighted programme's description. On channels whose provider keeps an archive, the guide also goes back in time and plays past programmes from their start (see [Catch-up](#catch-up-your-providers-archive)).
 
 ![The programme guide](docs/screenshots/07-guide.png)
 
-The guide comes from your provider (STB and Xtream), or from a guide file or web address of your own (XMLTV): choose it in Settings → EPG.
+The guide comes from your provider (STB and Xtream), or from a guide file or web address of your own (XMLTV): choose it in Settings → EPG. If a provider's guide is off by whole hours (programmes start an hour before or after the guide says), set its **Guide time offset** in Settings → Providers (−12 to +12 hours, in half hours): the guide, the banner, what is on now and next, and the marks on the time-shift bar all move together.
 
 ## The Library: movies and series
 
@@ -292,6 +366,8 @@ Or with [uv](https://docs.astral.sh/uv/): `uv sync --frozen --dev`, then `uv run
 
 To try QiTV without a provider, `uv run python scripts/make_demo_content.py --out build/demo --serve` serves the demo content on your computer and prints how to start QiTV with it. `--screenshots docs/screenshots` instead of `--serve` takes this page's screenshots again.
 
+A build from the source code has no OpenSubtitles API key of its own: enter yours in Settings → Subtitles (free, see [Subtitles from OpenSubtitles](#subtitles-from-opensubtitles)). The release builds get theirs from CI: before packaging, each build runs `scripts/write_build_keys.py`, which writes the repository secret named `QITV_OPENSUBTITLES_KEY` into `services/_build_keys.py` (without that secret, as in a fork, the key stays empty). The file in the repository stays empty: never commit a key into it.
+
 </details>
 
 ### Debug switches
@@ -304,6 +380,7 @@ Set these before starting QiTV (for example `QITV_DEBUG_QT=1 python main.py`):
 - `QITV_VLC_LOG=/path/to/vlc.log` writes VLC's detailed log to that file. **This log is not cleaned up: it contains the addresses of the streams you play, which often include your provider username and password. Never share it publicly.**
 - `QITV_DEBUG_QT=1` prints Qt's warnings about timers and threads to the terminal.
 - `QITV_DEBUG_CURL=1` logs the guide requests QiTV sends to an STB portal as `curl` commands you can run yourself, with the cookies (your MAC address, serial number and device ID) and the session token masked. `QITV_DEBUG_CURL=raw` logs them unmasked: never share that output.
+- `QITV_CAPTURE_DIR=/path/to/folder` saves what time-shift receives from the provider each time a channel opens, so a glitch can be replayed later: `<date-time>-<id>.ts` holds the stream's bytes as they arrived, and `<date-time>-<id>.times` has one `<cumulative bytes> <seconds>` line per read (lines starting with `#` are comments, such as `# reconnect <seconds>`). An HLS channel whose sound comes as a separate stream also gets `<date-time>-<id>.audio.ts` and `.audio.times` with that sound's pieces: `scripts/replay_capture.py` weaves them back in, and a player plays the pair with sound (for example `mpv <name>.ts --audio-file=<name>.audio.ts`). It stops at 2 GiB or 3 hours per channel and never leaves less than 1 GiB free. The files are written by the thread that reads the stream, so point this at a local disk. **The files hold the provider's stream: keep them private** (QiTV makes them readable by you only). They never contain the stream's address or your credentials.
 
 </details>
 
@@ -348,6 +425,5 @@ QiTV is licensed under [MIT](LICENSE). The release downloads also contain other 
 | requests | Apache-2.0 |
 | tzlocal | MIT |
 | urllib3 | MIT |
-| URLObject | Public Domain |
 
 QiTV 1.14.x bundled MPV (GPLv3); 2.0 does not.

@@ -20,6 +20,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.request import urlopen
@@ -27,6 +28,7 @@ from urllib.request import urlopen
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from gc_fixtures import collect_on_the_gui_thread
 from http_fixtures import LocalSource
 from process_fixtures import still_running, terminate
 from ts_fixtures import make_stream
@@ -59,6 +61,7 @@ STATE_KEYS = {
     "open_quality",
     "video",
     "answered",
+    "reconnecting",
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024
@@ -213,6 +216,58 @@ class StartTargetTests(unittest.TestCase):
         supervisor._records["s1"] = engine_module._Record(command=command, sent=True)
         supervisor._receive(("error", "s1", "disk", "The disk buffer failed."))
         self.assertEqual(supervisor._records["s1"].command[6:], command[6:])
+
+
+class ResizeTests(unittest.TestCase):
+    """2.2: the multiview's tiles grow and shrink their RAM buffers; a reopen keeps the size."""
+
+    def test_a_resize_reaches_the_helper_and_a_reopen_keeps_it(self):
+        import queue
+
+        from services.live import engine as engine_module
+
+        commands: queue.Queue = queue.Queue()
+        engine = engine_module.LiveEngine.__new__(engine_module.LiveEngine)
+        engine._shut, engine._sessions, engine._commands = False, {}, commands
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=256 * MIB, target=2.5
+        )
+        opened = commands.get_nowait()
+        engine.resize_session(sid, 64 * MIB)
+        engine.resize_session("unknown", 64 * MIB)  # not a session of this engine
+        engine.resize_session(sid, 0)
+        self.assertEqual(commands.get_nowait(), ("resize", sid, 64 * MIB))
+        self.assertTrue(commands.empty())
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), commands)
+        sent = []
+        connection = SimpleNamespace(send=sent.append)
+        supervisor._records[sid] = engine_module._Record(command=opened, sent=True)
+        commands.put(("resize", sid, 64 * MIB))
+        supervisor._send_next(connection)
+        self.assertEqual(sent, [("resize", sid, 64 * MIB)])
+        record = supervisor._records[sid]
+        self.assertEqual(record.command[5], {"kind": "ram", "max_bytes": 64 * MIB})
+        self.assertEqual(record.command[6:], opened[6:])  # the target stays
+        record.sent = False  # the helper died: a reopen opens with the new size
+        commands.put(("resize", sid, 128 * MIB))
+        supervisor._send_next(connection)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(record.command[5]["max_bytes"], 128 * MIB)
+
+    def test_a_disk_session_keeps_the_users_size(self):
+        import queue
+
+        from services.live import engine as engine_module
+
+        commands: queue.Queue = queue.Queue()
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), commands)
+        ring = {"kind": "disk", "dir": "d", "max_bytes": 4096 * MIB}
+        command = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        supervisor._records["s1"] = engine_module._Record(command=command, sent=True)
+        sent = []
+        commands.put(("resize", "s1", 64 * MIB))
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual((sent, supervisor._records["s1"].command), ([], command))
 
 
 class FailureReasonTests(unittest.TestCase):
@@ -424,6 +479,7 @@ class LiveEngineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        collect_on_the_gui_thread(cls)  # the supervisor thread never runs the collector
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="qitv-live-engine-test-")

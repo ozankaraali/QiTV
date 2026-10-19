@@ -11,16 +11,18 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QWidget
 
+from services.i18n import N_, translate
 from ui.brand import logo_aspect, logo_available, logo_pixmap
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, fill_round
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, RADIUS_CARD, RADIUS_PANEL, qcolor
 
-TITLE_TEXT = "Welcome to QiTV"
-BODY_TEXT = "Add your IPTV provider (STB portal, Xtream or M3U playlist) to start watching."
-BUTTON_TEXT = "Add provider"
-FREE_TEXT = "Free channels…"
+# English (tests read them); translate() shows them.
+TITLE_TEXT = N_("Welcome to QiTV")
+BODY_TEXT = N_("Add your IPTV provider (STB portal, Xtream or M3U playlist) to start watching.")
+BUTTON_TEXT = N_("Add provider")  # i18n: the welcome card's main button
+FREE_TEXT = N_("Free channels…")  # i18n: the welcome card's second button; opens a menu
 WIDTH_U = 44.0
 TITLE_U = 2.4
 BODY_U = 1.2
@@ -105,8 +107,8 @@ class WelcomeCard(Overlay):
         metrics = QFontMetrics(self._button_font(units))
         pad = 2 * units.px(BUTTON_PAD_U)
         return (
-            metrics.horizontalAdvance(BUTTON_TEXT) + pad,
-            metrics.horizontalAdvance(FREE_TEXT) + pad,
+            metrics.horizontalAdvance(translate(BUTTON_TEXT)) + pad,
+            metrics.horizontalAdvance(translate(FREE_TEXT)) + pad,
         )
 
     def _buttons(self) -> tuple[QRectF, QRectF]:
@@ -141,8 +143,12 @@ class WelcomeCard(Overlay):
 
     def _text_heights(self, units: Units, inner: int) -> tuple[int, int]:
         box = QRect(0, 0, max(1, inner), 10_000)
-        title = QFontMetrics(self._title_font(units)).boundingRect(box, _TEXT_FLAGS, TITLE_TEXT)
-        body = QFontMetrics(self._body_font(units)).boundingRect(box, _TEXT_FLAGS, BODY_TEXT)
+        title = QFontMetrics(self._title_font(units)).boundingRect(
+            box, _TEXT_FLAGS, translate(TITLE_TEXT)
+        )
+        body = QFontMetrics(self._body_font(units)).boundingRect(
+            box, _TEXT_FLAGS, translate(BODY_TEXT)
+        )
         return title.height(), body.height()
 
     def _layout(self) -> None:
@@ -200,11 +206,11 @@ class WelcomeCard(Overlay):
         title = self.title_rect()
         p.setFont(self._title_font(units))
         p.setPen(qcolor(PALETTE.text))
-        p.drawText(title, _TEXT_FLAGS, TITLE_TEXT)
+        p.drawText(title, _TEXT_FLAGS, translate(TITLE_TEXT))
         p.setFont(self._body_font(units))
         p.setPen(qcolor(PALETTE.text, BODY_OPACITY))
         body_top = title.bottom() + units.px(GAP_U)
-        p.drawText(QRectF(pad, body_top, inner, body_h), _TEXT_FLAGS, BODY_TEXT)
+        p.drawText(QRectF(pad, body_top, inner, body_h), _TEXT_FLAGS, translate(BODY_TEXT))
         self._paint_button(p, units)
         self._paint_free_button(p, units)
         p.end()
@@ -223,7 +229,7 @@ class WelcomeCard(Overlay):
         p.drawRoundedRect(ring.adjusted(half, half, -half, -half), ring_radius, ring_radius)
         p.setFont(self._button_font(units))
         p.setPen(qcolor(PALETTE.canvas))
-        p.drawText(button, Qt.AlignCenter, BUTTON_TEXT)
+        p.drawText(button, Qt.AlignCenter, translate(BUTTON_TEXT))
 
     def _paint_free_button(self, p: QPainter, units: Units) -> None:
         """The secondary button: a quiet fill and outline, the text colour."""
@@ -234,7 +240,7 @@ class WelcomeCard(Overlay):
         p.drawRoundedRect(button.adjusted(0.5, 0.5, -0.5, -0.5), RADIUS_CARD, RADIUS_CARD)
         p.setFont(self._button_font(units))
         p.setPen(qcolor(PALETTE.text))
-        p.drawText(button, Qt.AlignCenter, FREE_TEXT)
+        p.drawText(button, Qt.AlignCenter, translate(FREE_TEXT))
 
     # ---- input: consumed here, so nothing reaches the video behind -------------------------
 

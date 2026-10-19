@@ -1,0 +1,59 @@
+{
+  "selected_provider_name": "iptv-org.github.io",
+  "check_updates": true,
+  "prefer_https": false,
+  "ssl_verify": true,
+  "data": [
+    {
+      "type": "M3UPLAYLIST",
+      "name": "iptv-org.github.io",
+      "url": "https://iptv-org.github.io/iptv/index.m3u"
+    }
+  ],
+  "window_positions": {
+    "channel_list": {
+      "x": 1250,
+      "y": 100,
+      "width": 400,
+      "height": 800,
+      "splitter_ratio": 0.75,
+      "splitter_content_info_ratio": 0.33
+    },
+    "video_player": {
+      "x": 50,
+      "y": 100,
+      "width": 1200,
+      "height": 800
+    },
+    "tv_window": {
+      "x": 80,
+      "y": 80,
+      "width": 1280,
+      "height": 720
+    }
+  },
+  "favorites": [],
+  "channel_logos": true,
+  "channel_epg": true,
+  "xmltv_channel_map": [],
+  "max_cache_image_size": 100,
+  "epg_list_window_hours": 24,
+  "epg_stb_period_hours": 5,
+  "live_latency": "auto",
+  "mouse_wheel_action": "channel",
+  "start_with_last_channel": true,
+  "last_live_channel": null,
+  "timeshift_enabled": false,
+  "hardware_decoding": true,
+  "timeshift_max_mib": 2048,
+  "timeshift_ram_mib": 256,
+  "tv_defaults_version": 2,
+  "last_watched": null,
+  "epg_source": "STB",
+  "epg_url": "",
+  "epg_file": "",
+  "epg_expiration_value": 2,
+  "epg_expiration_unit": "Hours",
+  "decoding_defaults_version": 1,
+  "latency_defaults_version": 1
+}

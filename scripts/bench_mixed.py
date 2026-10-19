@@ -401,6 +401,7 @@ def run(args) -> int:
     from services import playback
     from services.config_manager import ConfigManager
     from services.epg_manager import EpgManager
+    from services.gc_guard import GcGuard
     from services.image_manager import ImageManager
     from services.provider_manager import ProviderManager
     from ui import tv_window
@@ -411,6 +412,9 @@ def run(args) -> int:
     if args.trace:
         install_trace()
     app = QApplication.instance() or QApplication(sys.argv)
+    if not args.automatic_gc:
+        gc_guard = GcGuard(app)  # as main.py does: garbage cycles collected on the GUI thread
+        gc_guard.start()
     if playback.vlc is not None:
 
         def muted(extra_args: Optional[list[str]] = None) -> Any:
@@ -514,6 +518,23 @@ def run(args) -> int:
     bench.step("filter_all_1char", lambda: handle(Action.NAV_TEXT, "k"))
     bench.step("filter_all_2char", lambda: handle(Action.NAV_TEXT, "a"))
     bench.step("filter_all_clear", lambda: handle(Action.ESCAPE))
+    bench.idle()
+
+    # The find (typing above ends before its pause): the genres at once, every provider's
+    # channels from a worker; its first find folds every channel's title there. GUI stalls
+    # meanwhile are recorded under these steps.
+    finder = window.finder
+
+    def type_find(text: str) -> None:
+        for char in text:
+            handle(Action.NAV_TEXT, char)
+
+    bench.timed("find_first", lambda: type_find("spor"), lambda: not finder.searching)
+    res["find_genres"], res["find_channels"] = len(finder.genres), len(finder.channels)
+    bench.timed("find_more", lambda: handle(Action.NAV_TEXT, "t"), lambda: not finder.searching)
+    bench.idle()
+    bench.timed("find_again", lambda: type_find(" 1"), lambda: not finder.searching)
+    bench.step("find_end", lambda: handle(Action.ESCAPE))
     bench.step("drawer_close", lambda: handle(Action.ESCAPE))
     bench.idle()
     res["drawer_open_again"] = None
@@ -609,6 +630,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--switch", type=float, default=0.0005, help="sys.setswitchinterval(s)")
     parser.add_argument("--sample", action="store_true", help="show where threads are in a stall")
     parser.add_argument("--trace", action="store_true", help="time the hot functions per step")
+    parser.add_argument(
+        "--automatic-gc", action="store_true", help="Python collects on any thread (no GcGuard)"
+    )
     parser.add_argument(
         "--profile", action="append", default=[], metavar="STEP", help="print a cProfile of STEP"
     )

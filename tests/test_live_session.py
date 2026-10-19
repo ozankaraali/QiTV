@@ -55,6 +55,7 @@ class FakeEngine(QObject):
     sessionFailed = Signal(str, str, str)
     sessionEnded = Signal(str)
     sessionClosed = Signal(str)
+    recordingEnded = Signal(str, str, str, int)  # 2.3: (rid, reason, path, written)
 
     def __init__(self):
         super().__init__()
@@ -62,6 +63,9 @@ class FakeEngine(QObject):
         self.gave_up = False  # an engine that gave up before this LiveSession existed
         self.opened = []  # (sid, url, keyword arguments)
         self.closed = []
+        self.resizes = []  # (sid, max_bytes): a multiview tile's buffer grew or shrank
+        self.recordings = []  # (rid, sid, path, seq, keyword arguments)
+        self.record_stops = []  # sids
         self.events = []  # ("open", sid) as sessions open
         self._answered = set()
         self._spans = {}
@@ -88,6 +92,19 @@ class FakeEngine(QObject):
         self.closed.append(sid)
         if self.gave_up:
             QTimer.singleShot(0, self.answer)
+
+    def resize_session(self, sid, max_bytes):
+        self.resizes.append((sid, max_bytes))
+
+    def start_recording(self, sid, path, seq, **kwargs):
+        rid = f"r{len(self.recordings) + 1}"
+        self.recordings.append((rid, sid, path, seq, kwargs))
+        self.events.append(("record", sid, seq))
+        return rid
+
+    def stop_recording(self, sid):
+        self.record_stops.append(sid)
+        self.events.append(("record_stop", sid))
 
     def answer(self):
         """The helper confirms every close so far."""
@@ -332,8 +349,10 @@ class Feed:
         pcr=0.0,
         speed=1.0,
         speed_1x=1.0,
+        open_s=0.0,
     ):
         self.case, self.sid, self.burst, self.gop = case, sid, burst, gop
+        self.open_s, self.opening_until = open_s, None  # VLC takes this long to play an open
         self.crawl, self.crawled = crawl, 0.0  # wall seconds at another rate since a step
         self.crawl_1x = crawl_1x
         self.hls = hls
@@ -398,7 +417,13 @@ class Feed:
                 self.position, self.media = self.case.live.position(), 0.0
                 self.stamp = self.pending_jump = 0.0
                 self.stamp_offset = self.lead  # VLC's clock may start ahead of its picture
+                if self.open_s > 0:
+                    self.opening_until = self.case.clock.now + self.open_s
+                    return
                 playback.set_state(PlaybackState.PLAYING)
+        if self.opening_until is not None and self.case.clock.now >= self.opening_until - 1e-9:
+            self.opening_until = None
+            playback.set_state(PlaybackState.PLAYING)
 
     def run(self, seconds):
         case, playback = self.case, self.case.playback
@@ -594,6 +619,75 @@ class LiveSessionCase(unittest.TestCase):
         self.assertEqual(self.notices[-1], notice)
         self.assertEqual(self.modes[-1], "direct")
         self.assertFalse(self.live.is_pipeline())
+
+
+class ResizeTests(LiveSessionCase):
+    """2.2, the multiview: a tile's memory buffer grows with the focus and shrinks without."""
+
+    def test_a_running_memory_buffer_is_resized_and_a_later_open_takes_the_size(self):
+        sid = self.start(max_bytes=256 * MiB)
+        self.live.resize(64 * MiB)
+        self.assertEqual(self.engine.resizes, [(sid, 64 * MiB)])
+        self.live.resize(0)  # never an empty buffer
+        self.assertEqual(len(self.engine.resizes), 1)
+        self.assertEqual(self.live._open_args["max_bytes"], 64 * MiB)
+
+    def test_a_disk_buffer_keeps_the_users_size(self):
+        self.start(disk=True, max_bytes=4096 * MiB)
+        self.live.resize(64 * MiB)
+        self.assertEqual(self.engine.resizes, [])
+        self.assertEqual(self.live._open_args["max_bytes"], 4096 * MiB)
+
+    def test_before_a_start_only_the_size_is_kept(self):
+        self.live.resize(64 * MiB)
+        self.assertEqual(self.engine.resizes, [])
+
+    def test_a_smaller_buffer_waits_while_it_plays_behind_live(self):
+        # Review: a paused (or rewound) tile losing the focus keeps the minutes it plays
+        # until it is back at live; a larger buffer comes at once.
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.toggle_pause()
+        self.live.resize(64 * MiB)
+        self.step(0.25, media=0)
+        self.assertEqual(self.engine.resizes, [])
+        self.assertEqual(self.live._open_args["max_bytes"], 128 * MiB)  # a reopen's too
+        self.live.go_live()
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.assertEqual(self.engine.resizes, [(sid, 64 * MiB)])
+        self.live.toggle_pause()
+        self.live.resize(256 * MiB)
+        self.assertEqual(self.engine.resizes[-1], (sid, 256 * MiB))
+        self.live.resize(32 * MiB)  # waits again, and a later larger one cancels it
+        self.live.resize(256 * MiB)
+        self.live.go_live()
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.assertEqual(self.engine.resizes[-1], (sid, 256 * MiB))
+
+
+class BackgroundTests(LiveSessionCase):
+    """2.2, the multiview: a tile without the focus plays at 1x; stay-live only goes live."""
+
+    def test_a_rate_stay_live_set_goes_back_to_1x_and_it_holds_for_later_tunes(self):
+        self.start()
+        self.live._set_rate(1.03)  # a nudge under way
+        self.live.set_background(True)
+        self.assertEqual(self.playback.rates[-1], 1.0)
+        self.assertTrue(self.live._stay.background)
+        self.start()  # a later tune of the tile: still without the focus
+        self.assertTrue(self.live._stay.background)
+        self.live.set_background(False)
+        self.assertFalse(self.live._stay.background)
+
+    def test_a_speed_the_user_chose_is_left_alone(self):
+        self.start()
+        self.live._stay.user_paused()
+        self.live._set_rate(1.5)
+        rates = len(self.playback.rates)
+        self.live.set_background(True)
+        self.assertEqual(len(self.playback.rates), rates)
 
 
 class NoRewindReasonTests(LiveSessionCase):
@@ -1979,7 +2073,12 @@ class StayLiveTests(LiveSessionCase):
         feed.run(20.0)
         feed.stalled = True
         feed.run(3.0)
-        self.assertTrue(self.timelines[-1]["stalled"])  # "Reconnecting…" while it lasts
+        self.assertTrue(self.timelines[-1]["stalled"])  # "Waiting for the channel…" meanwhile
+        self.assertFalse(self.timelines[-1]["reconnecting"])
+        self.engine._snapshots[sid]["reconnecting"] = True  # the helper opens a new connection
+        feed.run(0.5)
+        self.assertTrue(self.timelines[-1]["reconnecting"])  # "Reconnecting…"
+        self.engine._snapshots[sid]["reconnecting"] = False
         feed.stalled = False
         feed.run(0.25)  # the source sends again
         self.assertFalse(self.timelines[-1]["stalled"])
@@ -4608,6 +4707,46 @@ class RepickTests(LiveSessionCase):
                     self.assertEqual(self.outcome(feed), (2, 0.0))
                     self.assertLess(lag, 22.0)
 
+    def test_a_dump_then_a_flow_is_picked_again_when_vlcs_first_reading_comes_late(self):
+        # Re-review 2, M-r: VLC slow to open (1.5 s) a sparse-PCR channel, whose clock reads
+        # its first time only at its next PCR (2 s): more than `_REPICK_PLAY_S` after the
+        # open, within it of the playing. The dump then flow is picked again all the same.
+        for latency in (AUTO, "normal"):
+            with self.subTest(latency=latency):
+                feed = self.tune(latency, burst=0.0, edge=2.0, pcr=2.0, open_s=1.5)
+                feed.ready(backlog_after_start=False)
+                self.opened(feed)
+                opened = self.clock.now
+                feed.run(0.7)
+                feed.edge += 20.0
+                feed.push()
+                for _ in range(80):
+                    feed.run(0.25)
+                    if len(self.playback.plays) > 1:
+                        break
+                self.assertLess(self.clock.now - opened, 12.0)
+                self.assertEqual(self.outcome(feed)[0], 2)
+
+    def test_a_dump_after_a_slow_open_is_judged_from_vlcs_playing(self):
+        # VLC reaches Playing only 4 s after the open (past `_REPICK_PLAY_S` and `_REPICK_S`
+        # from it), and the dump comes a second after that, then 1x: the windows count from
+        # the playing, so it is picked again; the deadline still bounds them.
+        for latency in (AUTO, "normal"):
+            with self.subTest(latency=latency):
+                feed = self.tune(latency, burst=0.0, edge=2.0, open_s=4.0)
+                feed.ready(backlog_after_start=False)
+                self.opened(feed)
+                opened = self.clock.now
+                feed.run(5.0)  # 4 s opening, 1 s playing
+                feed.edge += 20.0
+                feed.push()
+                for _ in range(80):
+                    feed.run(0.25)
+                    if len(self.playback.plays) > 1:
+                        break
+                self.assertLess(self.clock.now - opened, live_session._REPICK_DEADLINE_S)
+                self.assertEqual(self.outcome(feed)[0], 2)
+
     def test_a_reopen_in_software_and_the_re_pick_are_never_two_opens_in_a_row(self):
         # Hardware decoding froze the picture right after the dump: the stream opened again
         # in software where it played; the re-pick still comes, but not within the reopen
@@ -4619,7 +4758,7 @@ class RepickTests(LiveSessionCase):
         feed.run(0.7)
         feed.edge += 20.0
         feed.push()
-        feed.run(2.3)
+        feed.run(2.2)
         self.playback.pictureFroze.emit()
         self.assertEqual(len(self.playback.plays), 2)
         opens.append(self.clock.now)

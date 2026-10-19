@@ -51,8 +51,8 @@ class OverlayHost(QWidget):
         self._surface = surface
         self._overlays: list[QWidget] = []
         self._hole = QRect()  # the PiP (see set_hole)
+        self._cover = False  # the hole is the multiview's grid (see set_hole)
         self._only: QWidget | None = None  # see show_only
-        self._attached_id = 0
         # macOS: from a minimize until the platform reports the window restored, the window
         # counts as in the Dock here, whatever Qt's state says (see _update_visibility).
         self._in_dock = False
@@ -122,15 +122,19 @@ class OverlayHost(QWidget):
     def visible_overlays(self) -> list[QWidget]:
         return [w for w in self._overlays if isValid(w) and w.isVisibleTo(self)]
 
-    def set_hole(self, rect: QRect) -> None:
+    def set_hole(self, rect: QRect, *, cover: bool = False) -> None:
         """Where the picture-in-picture surface is (host coordinates; empty: nowhere).
 
         Clicks there reach the small picture below, except where an overlay claims them:
         an overlay's `hole_claims()` (a transport's buttons), else its whole mask (a panel, the
         PiP label's pill); an overlay transparent for the mouse (the banner) claims nothing.
+        `cover`: the hole is the whole picture (the multiview's tiles), and the overlays
+        transparent for the mouse (the banner, the toast) still show over it, taking its
+        clicks there (on to the host).
         """
-        if rect != self._hole:
+        if rect != self._hole or cover != self._cover:
             self._hole = QRect(rect)
+            self._cover = cover
             self._update_mask()
 
     def sync_geometry(self) -> None:
@@ -152,7 +156,9 @@ class OverlayHost(QWidget):
                 continue
             if hasattr(widget, "hole_claims"):
                 claims = claims.united(widget.hole_claims())
-            elif not widget.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents):
+            elif self._cover or not widget.testAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents
+            ):
                 claims = claims.united(part)
         if not self._hole.isEmpty():
             region = region.subtracted(QRegion(self._hole).subtracted(claims))
@@ -206,10 +212,7 @@ class OverlayHost(QWidget):
                 # is ordered out. A child is ordered above its parent: no raise there, since
                 # on macOS raise_() activates QiTV, and an overlay shown over the inactive
                 # window (a wheel zap's banner) must not take the focus from another app.
-                native_id = int(self.winId())
-                if attach_child_window(self._window, self):
-                    self._attached_id = native_id
-                else:
+                if not attach_child_window(self._window, self):
                     self.raise_()
         elif self.isVisible():
             self.hide()

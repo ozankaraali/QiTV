@@ -11,7 +11,7 @@ from the hub, whichever provider an item belongs to.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, tzinfo
 import logging
 from typing import Any, Callable, Optional
 
@@ -20,6 +20,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, CatalogService, Group
 from services.catalogs import Catalogs
 from services.epg_view import Programme
+from services.i18n import N_
 from services.provider_ids import (
     ALL_PROVIDERS,
     mixed_group_id,
@@ -263,6 +264,19 @@ class BrowsedCatalog(QObject):
         """What provider `name` reported as its simultaneous streams (None: unknown)."""
         return self._catalogs.max_connections(name)
 
+    def archive_zone_of(self, name: str) -> Optional[tzinfo]:
+        """The time zone provider `name`'s archive addresses are in (catch-up; None: not
+        known)."""
+        return self._catalogs.archive_zone(name)
+
+    def xtream_zone_at(self, host: str) -> Optional[tzinfo]:
+        """The time zone of a signed-in provider whose streams are at `host` (catch-up)."""
+        return self._catalogs.xtream_zone_at(host)
+
+    def catchup_source_of(self, name: str) -> str:
+        """Provider `name`'s playlist-wide catch-up template ("" for none)."""
+        return self._catalogs.catchup_source(name)
+
     def sign_in_again(self, name: str) -> None:
         """Sign provider `name` in again: a link asked next waits for it (an STB retry)."""
         self._failed.discard(name)
@@ -504,7 +518,7 @@ class BrowsedCatalog(QObject):
                     Group(section, mixed_group_id(name, group.id), group.title, group.count, name)
                 )
         if any_all:
-            rows.insert(0, Group(section, ALL_GROUP_ID, "All", total))
+            rows.insert(0, Group(section, ALL_GROUP_ID, N_("All"), total))  # catalog.shown_label
         self._memo[("groups", section)] = (versions, rows)
         return rows
 
@@ -587,3 +601,11 @@ class BrowsedCatalog(QObject):
     def max_connections(self) -> Optional[int]:
         catalog = self._cat()
         return catalog.max_connections() if catalog is not None else None
+
+    def archive_zone(self) -> Optional[tzinfo]:
+        catalog = self._cat()
+        return catalog.archive_zone() if catalog is not None else None
+
+    def catchup_source(self) -> str:
+        catalog = self._cat()
+        return catalog.catchup_source() if catalog is not None else ""

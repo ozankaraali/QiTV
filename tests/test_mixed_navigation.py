@@ -9,14 +9,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from job_fixtures import ImmediateRunner
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config
 from test_browsed_catalog import FakeEpg, ScriptedFactory
 from test_catalog_service import FakeWorker
+from timer_fixtures import elapse
 
 from services.browsed_catalog import BrowsedCatalog
 from services.catalog import ALL_GROUP_ID
 from services.catalogs import Catalogs
-from services.jobs import ImmediateRunner
 from services.m3u import parse_m3u
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode, item_key
 from services.provider_ids import (
@@ -27,6 +28,7 @@ from services.provider_ids import (
     with_provider,
 )
 from services.zapping import ZapContext
+from ui.find_session import DEBOUNCE_MS, FindSession
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import Drawer
 
@@ -58,6 +60,7 @@ class MixedNavigationTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory(prefix="qitv-mixed-nav-")
         self.addCleanup(directory.cleanup)
         config, registry = mixed_config(directory.name, providers, contents)
+        self.registry = registry
         self.addCleanup(registry._cache_writer.shutdown, wait=True)
         self.factory = ScriptedFactory()
         catalogs = Catalogs(
@@ -196,12 +199,43 @@ class MixedNavigationTests(unittest.TestCase):
         drawer.open_drawer(focus_key="1")  # an unstamped channel: by id, as before
         self.assertEqual(provider_of(drawer.highlighted().payload), "Demo TV")
 
-    def test_a_filter_matches_groups_not_headings(self):
+    # ---- the find: genres and channels at both providers --------------------------------------
+
+    def find(self, drawer, text):
+        drawer.set_finder(
+            FindSession(self.registry, ImmediateRunner(), loaded=self.view.loaded_contents)
+        )
+        drawer.open_drawer()
+        drawer.type_text(text)
+        elapse(DEBOUNCE_MS + 100)
+        return drawer._columns["right"]
+
+    def test_the_find_names_both_providers_and_a_genre_opens_under_its_heading_in_all(self):
         self.open_all()
         drawer = self.drawer()
-        drawer.open_drawer()
-        drawer.type_text("harbor")  # Harbor IPTV's heading is no group
-        self.assertEqual(drawer._columns["right"].nodes, [])
+        right = self.find(drawer, "news")
+        genres = [(n.payload.provider, n.title) for n in right.nodes if n.layer == "found_genre"]
+        self.assertEqual(genres, [("Demo TV", "News"), ("Harbor IPTV", "UK: News")])
+        channels = [(provider_of(n.payload), n.title) for n in right.nodes if n.layer == "item"]
+        self.assertEqual(channels, [("Demo TV", "News"), ("Harbor IPTV", "News")])  # same id
+        harbor_news = mixed_group_id("Harbor IPTV", "42")
+        drawer.move_by(1)  # Harbor IPTV's UK: News
+        drawer.activate()
+        path = [n.key for n in self.nav.path]
+        self.assertEqual(path, [ALL_PROVIDERS, "live", harbor_news])  # where it is in All
+        self.assertEqual(drawer._columns["left"].current.key, harbor_news)
+        self.assertEqual(len(drawer._columns["right"].nodes), 28)
+        drawer.go_up()  # ‹: every provider's genres, under their headings, on UK: News
+        self.assertEqual(right.current.key, harbor_news)
+
+    def test_a_genre_found_at_the_other_provider_opens_there(self):
+        drawer = self.drawer()
+        self.nav.reset_to("live")  # Demo TV's genres
+        self.find(drawer, "haber")
+        drawer.activate()  # TR: Haber, Harbor IPTV's
+        self.assertEqual(self.view.current_provider_name(), "Harbor IPTV")
+        self.assertEqual([n.key for n in self.nav.path], ["Harbor IPTV", "live", "41"])
+        self.assertEqual(len(drawer._columns["right"].nodes), 41)
 
     # ---- the mixed lists ----------------------------------------------------------------------
 

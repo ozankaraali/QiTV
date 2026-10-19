@@ -46,6 +46,9 @@ class _Response:
     def iter_content(self, size):
         yield self.content
 
+    def close(self):
+        self.closed = True
+
 
 def serving(body):
     return lambda url, **kwargs: _Response(body)
@@ -95,8 +98,8 @@ class _GuideCase(unittest.TestCase):
         return EpgManager(self.config, self.providers)
 
     def titles(self, manager):
-        programmes = manager.get_programs_for_channel(CHANNEL, None, 0)
-        return [p["title"]["__text"] for p in programmes]
+        programmes = manager.get_programs_for_channel(CHANNEL)
+        return [p["title"] for p in programmes]
 
     def load(self, manager, title="Old"):
         with patch("services.epg_manager.requests.get", side_effect=serving(xmltv(title))):
@@ -239,7 +242,7 @@ class EpgRefreshTests(_GuideCase):
         with patch("services.epg_manager.ContentLoader", Loader):
             manager.set_current_epg()
             manager.force_refresh_current_epg()  # the portal answers with nothing
-        self.assertEqual(manager.get_programs_for_channel({"id": "7"}, None, 0), [programme])
+        self.assertEqual(manager.get_programs_for_channel({"id": "7"}), [programme])
         self.assertIsNotNone(manager.index[_cache_key("http://s/c/")])
 
     def test_startup_refresh_failure_uses_the_saved_guide(self):
@@ -267,6 +270,57 @@ class EpgRefreshTests(_GuideCase):
         with patch("services.epg_manager.requests.get", side_effect=failing):
             manager.set_current_epg()
         self.assertEqual(self.titles(manager), [])
+
+
+class SourceTests(_GuideCase):
+    """Each configured source is fetched by its kind's fetch, with its own arguments."""
+
+    def setUp(self):
+        super().setUp()
+        self.config.epg_file = os.path.join(self.config.get_config_dir(), "guide.xml")
+        self.config.epg_url = "http://g.test/guide.xml"
+        self.fetched = []
+        for kind in ("stb", "xtream", "file", "url"):
+            fetch = self.recorder(kind)
+            self.enterContext(patch.object(EpgManager, f"_fetch_epg_from_{kind}", fetch))
+
+    def recorder(self, kind):
+        return lambda manager, *args: self.fetched.append((kind, args))
+
+    def cases(self):
+        xtream = self.providers.current_provider
+        portal = {"type": "STB", "name": "S", "url": "http://s/c/"}
+        path, url = self.config.epg_file, self.config.epg_url
+        return [
+            ("STB", portal, "stb", _cache_key("http://s/c/"), ("http://s/c/",)),
+            ("STB", xtream, "xtream", self.key, ("http://h", "u", "p")),
+            ("Local File", xtream, "file", _cache_key(path), (path,)),
+            ("URL", xtream, "url", _cache_key(url), (url,)),
+        ]
+
+    def test_each_source_is_fetched_by_its_kind(self):
+        for epg_source, provider, kind, key, args in self.cases():
+            with self.subTest(kind):
+                self.config.epg_source, self.providers.current_provider = epg_source, provider
+                manager = self.manager()
+                self.assertEqual(manager._source(), (kind, key, args))
+                manager.set_current_epg()
+                manager.index[key] = None  # a source without a guide is not fetched again
+                manager.set_current_epg()
+                manager.force_refresh_current_epg()  # unless asked to
+                # A URL's fetch also gets how many guides of it were stored when the load began
+                # (None: when the fetch begins).
+                seen, now = ((0,), (None,)) if kind == "url" else ((), ())
+                self.assertEqual(self.fetched, [(kind, args + seen), (kind, args + now)])
+                self.fetched.clear()
+
+    def test_without_a_source_nothing_is_fetched(self):
+        self.providers.current_provider = {"type": "M3UPLAYLIST", "name": "M", "url": "http://m"}
+        manager = self.manager()
+        self.assertIsNone(manager._source())
+        manager.set_current_epg()
+        manager.force_refresh_current_epg()
+        self.assertEqual(self.fetched, [])
 
 
 class SavedGuideTests(_GuideCase):
@@ -329,9 +383,7 @@ class SavedGuideTests(_GuideCase):
         self.assertEqual(len(logged.records), 1)  # logged once, without the path or contents
         self.assertNotIn(self.config.get_config_dir(), logged.output[0])
         self.assertEqual(self.titles(restarted), ["New"])
-        self.assertEqual(
-            sorted(epg_store_module.read_guide(path).items())[0][1][0]["title"], {"__text": "New"}
-        )
+        self.assertEqual(sorted(epg_store_module.read_guide(path).items())[0][1][0]["title"], "New")
         with get as fetch:  # and the next start reads the new file
             self.manager().set_current_epg()
         fetch.assert_not_called()
@@ -368,8 +420,8 @@ class SavedGuideTests(_GuideCase):
             manager.reindex_programs()
         self.assertEqual(decodes, [])
         self.assertEqual(manager.epg.packed(), 1)  # still pickled
-        extra = manager.get_programs_for_channel({"xmltv_id": "extra.id", "name": "Other"}, None, 0)
-        self.assertEqual([p["title"]["__text"] for p in extra], ["Old"])  # under its new keys
+        extra = manager.get_programs_for_channel({"xmltv_id": "extra.id", "name": "Other"})
+        self.assertEqual([p["title"] for p in extra], ["Old"])  # under its new keys
         self.assertEqual(self.titles(manager), ["Old"])
 
     def test_reindexing_publishes_the_new_guide_like_every_other_change(self):
@@ -385,7 +437,8 @@ class SavedGuideTests(_GuideCase):
         self.assertIsNot(manager.epg, old)
         self.assertEqual(manager._epg_source, source)
 
-    def test_a_guide_saved_by_an_earlier_version_is_read_and_replaced(self):
+    def test_a_1x_pickled_guide_is_ignored_and_the_guide_is_fetched(self):
+        # Only 1.x saved the guide as <key>.pkl; every 2.x saves <key>.guide.
         guide = MultiKeyDict()
         guide[("news.test", "News")] = [
             {
@@ -402,11 +455,13 @@ class SavedGuideTests(_GuideCase):
         legacy = os.path.join(manager._cache_dir(), f"{self.key}.pkl")
         with open(legacy, "wb") as f:
             pickle.dump(guide, f)
-        manager.set_current_epg()
-        self.assertEqual(self.titles(manager), ["Legacy"])
-        self.expire(manager)
-        self.load(manager, "New")
-        self.assertEqual(self.cache_files(), [f"{self.key}.guide", "index.json"])
+        get = patch("services.epg_manager.requests.get", side_effect=serving(xmltv("New")))
+        with get as fetch, patch.object(pickle, "load") as unpickle:
+            manager.set_current_epg()
+        fetch.assert_called_once()
+        unpickle.assert_not_called()
+        self.assertEqual(self.titles(manager), ["New"])
+        self.assertIn(f"{self.key}.guide", self.cache_files())
 
 
 class SharedIndexTests(_GuideCase):
@@ -635,6 +690,24 @@ class UrlGuideDateTests(_GuideCase):
         manager.set_current_epg()
         self.assertEqual(self.titles(manager), ["Served"])
         self.assert_download_time(self.stored_date(manager))
+
+    def test_a_stale_guide_is_checked_by_its_status_alone_then_fetched(self):
+        seen = self.serve(None)  # this server ignores If-Modified-Since: always the guide
+        manager = self.manager()
+        manager.set_current_epg()
+        self.config.epg_expiration = -1  # the saved guide is out of date at once
+        get, asked = requests.get, []
+
+        def recording(url, **kwargs):
+            asked.append(kwargs)
+            return get(url, **kwargs)
+
+        with patch("services.epg_manager.requests.get", side_effect=recording):
+            manager.set_current_epg()
+        self.assertEqual(seen, ["/guide.xml"] * 3)  # the first load, the check, the fetch
+        # Neither answer is read into memory whole (a guide can take hundreds of MB).
+        self.assertEqual([kwargs.get("stream") for kwargs in asked], [True, True])
+        self.assertEqual(self.titles(manager), ["Served"])
 
     def test_the_servers_last_modified_is_the_guides_date(self):
         self.serve("Sun, 18 Oct 2026 02:00:00 GMT")

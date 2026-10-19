@@ -6,12 +6,12 @@ from pathlib import Path
 import platform
 import shutil
 import sys
-import tempfile
 import time
 import tomllib
 
 import orjson as json
 
+from services.atomic_write import atomic_write
 from services.free_channels import ALL_NAME, ALL_URL
 from services.multikeydict import MultiKeyDict
 from services.redact import safe_message
@@ -25,6 +25,11 @@ _REPLACE_RETRY_DELAY_S = 0.05
 # After a failed save, saves try once without those retries for this long: a file that stays
 # locked must not stall every save (a settled zap's among them) by the whole retry wait.
 SAVE_BACKOFF_S = 30.0
+# A new config's keys that update_patcher does not add to a loaded one: its providers (a loaded
+# config has its own), its windows (added one by one) and what the one-time steps set.
+_SET_ELSEWHERE = frozenset(
+    "selected_provider_name data window_positions channel_epg tv_defaults_version".split()
+)
 
 
 def _one_of(choices, default):
@@ -133,9 +138,11 @@ class ConfigManager:
     EPG_EXPIRATION_CHOICES = ("Hours", "Days", "Weeks", "Months")  # what Settings offers
     DEFAULT_OPTION_PREFER_HTTPS = False
     DEFAULT_OPTION_SSL_VERIFY = True
-    # Auto (2.0.2) learns each channel's latency; a latency saved before stays as it was.
+    # Auto learns each channel's latency; every saved latency is moved to it once.
     DEFAULT_OPTION_LIVE_LATENCY = "auto"
     LIVE_LATENCY_CHOICES = ("auto", "low", "normal", "stable")
+    # Bumped by each one-time change of the latency default (`update_patcher`).
+    LATENCY_DEFAULTS_VERSION = 1
     DEFAULT_OPTION_MOUSE_WHEEL = "channel"
     MOUSE_WHEEL_CHOICES = ("channel", "volume")
     DEFAULT_OPTION_START_WITH_LAST_CHANNEL = True
@@ -153,6 +160,10 @@ class ConfigManager:
     DEFAULT_OPTION_CORNER_PLAYER_CORNER = "bottom-right"  # what plays, small, over the Library
     CORNER_PLAYER_CORNER_CHOICES = ("top-left", "top-right", "bottom-left", "bottom-right")
     DEFAULT_OPTION_PIP_VOLUME = 30  # the small picture's own level once it is made audible
+    # 2.2, the multiview: a tile's time-shift buffer while it has no focus (an optional key,
+    # never written by default). 48 MiB holds one keyframe interval of a 4K channel.
+    DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB = 64
+    MULTIVIEW_TILE_RAM_RANGE = (48, 512)
     TV_DEFAULTS_VERSION = 2
     DEFAULT_TV_WINDOW = {"x": 80, "y": 80, "width": 1280, "height": 720}
     # A 1.x window smaller than this, or not landscape, does not size the TV window.
@@ -165,14 +176,12 @@ class ConfigManager:
     DEFAULT_OPTION_AUTO_PLAY_EPISODES = True
     DEFAULT_OPTION_AUTO_PLAY_MOVIES = True
     DEFAULT_WATCH_HISTORY_LIMIT = 100
-    DEFAULT_WATCHED_THRESHOLD = 0.90  # 90% = watched
 
     def __init__(self):
         self.config = {}
         self._save_failed_at: float | None = None  # monotonic time of the last failed save
         self.config_path = self._get_config_path()
         os.makedirs(os.path.dirname(self.config_path) or ".", exist_ok=True)
-        self._migrate_old_config()
         self.load_config()
 
     def _get_config_path(self):
@@ -221,16 +230,9 @@ class ConfigManager:
     def get_config_dir(self):
         return os.path.dirname(self.config_path)
 
-    def _migrate_old_config(self):
-        if os.environ.get("QITV_CONFIG_DIR"):
-            return
-        try:
-            old_config_path = "config.json"
-            if os.path.isfile(old_config_path) and not os.path.isfile(self.config_path):
-                shutil.copy(old_config_path, self.config_path)
-                os.remove(old_config_path)
-        except Exception as e:
-            logger.warning(f"Error during config migration: {e}")
+    def subtitles_dir(self) -> str:
+        """Where downloaded subtitles are kept (made by the first download)."""
+        return os.path.join(self.get_config_dir(), "subtitles")
 
     def load_config(self):
         try:
@@ -255,36 +257,22 @@ class ConfigManager:
         if "tv_window" not in window_positions:
             window_positions["tv_window"] = self._initial_tv_window(window_positions)
             need_update = True
-        for window_name, settings in self.default_config()["window_positions"].items():
+        defaults = self.default_config()
+        for window_name, settings in defaults["window_positions"].items():
             if window_name not in window_positions:
                 window_positions[window_name] = settings
                 need_update = True
 
-        # Add settings introduced after the loaded config was written.
+        # Add settings introduced after the loaded config was written: a new config's (see
+        # _SET_ELSEWHERE), and these.
         missing_defaults: dict[str, object] = {
-            "favorites": [],
+            **{key: value for key, value in defaults.items() if key not in _SET_ELSEWHERE},
             "last_watched": None,
-            "check_updates": ConfigManager.DEFAULT_OPTION_CHECKUPDATE,
-            "channel_logos": ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO,
-            "max_cache_image_size": ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE,
             "epg_source": ConfigManager.DEFAULT_OPTION_EPG_SOURCE,
             "epg_url": ConfigManager.DEFAULT_OPTION_EPG_URL,
             "epg_file": ConfigManager.DEFAULT_OPTION_EPG_FILE,
             "epg_expiration_value": ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_VALUE,
             "epg_expiration_unit": ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_UNIT,
-            "xmltv_channel_map": MultiKeyDict(),
-            "prefer_https": ConfigManager.DEFAULT_OPTION_PREFER_HTTPS,
-            "ssl_verify": ConfigManager.DEFAULT_OPTION_SSL_VERIFY,
-            "epg_list_window_hours": ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS,
-            "epg_stb_period_hours": ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS,
-            "live_latency": ConfigManager.DEFAULT_OPTION_LIVE_LATENCY,
-            "mouse_wheel_action": ConfigManager.DEFAULT_OPTION_MOUSE_WHEEL,
-            "start_with_last_channel": ConfigManager.DEFAULT_OPTION_START_WITH_LAST_CHANNEL,
-            "last_live_channel": None,
-            "timeshift_enabled": ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED,
-            "hardware_decoding": ConfigManager.DEFAULT_OPTION_HARDWARE_DECODING,
-            "timeshift_max_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_MAX_MIB,
-            "timeshift_ram_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB,
         }
         if "timeshift_minutes" in self.config:  # the time limit was retired for a size limit
             del self.config["timeshift_minutes"]
@@ -312,17 +300,30 @@ class ConfigManager:
         # Linux) every config saved `false`, so a choice and the old default look alike: it
         # is switched on once, and a choice made afterwards stays. 2.0.x keeps the key and
         # reads `hardware_decoding` as it is.
-        decoding_defaults = self.config.get("decoding_defaults_version", 0)
-        if not isinstance(decoding_defaults, int) or isinstance(decoding_defaults, bool):
-            decoding_defaults = 0
+        decoding_defaults = self._defaults_version("decoding_defaults_version")
         if decoding_defaults < 1:
             self.config["hardware_decoding"] = True
         if decoding_defaults < ConfigManager.DECODING_DEFAULTS_VERSION:
             self.config["decoding_defaults_version"] = ConfigManager.DECODING_DEFAULTS_VERSION
             need_update = True
 
+        # 2.1's Auto is new enough that everyone is moved to it once, whatever was saved
+        # (2.0.0 and 2.0.1 saved Normal for everyone, and a fixed distance skips where Auto
+        # plays further behind). A choice made afterwards stays. 2.x before this ignores the key.
+        latency_defaults = self._defaults_version("latency_defaults_version")
+        if latency_defaults < 1:
+            self.config["live_latency"] = "auto"
+        if latency_defaults < ConfigManager.LATENCY_DEFAULTS_VERSION:
+            self.config["latency_defaults_version"] = ConfigManager.LATENCY_DEFAULTS_VERSION
+            need_update = True
+
         if need_update:
             self._save_at_start()
+
+    def _defaults_version(self, key: str) -> int:
+        """Which one-time steps under `key` already ran: 0 when missing or not a number."""
+        version = self.config.get(key, 0)
+        return version if isinstance(version, int) and not isinstance(version, bool) else 0
 
     def _save_at_start(self) -> None:
         """Save while starting: a locked or read-only config.json must not stop QiTV.
@@ -430,8 +431,49 @@ class ConfigManager:
     pip_volume = _config_property(
         "pip_volume", DEFAULT_OPTION_PIP_VOLUME, coerce=int, clamp=(0, 100)
     )
+    # The last multiview grid (2.2, optional; older builds ignore it): {"version": 1, "cells",
+    # "focus", "tiles": [a last_live_channel-style record, or None per tile]}.
+    multiview = _config_property("multiview", None)
+    multiview_tile_ram_mib = _config_property(
+        "multiview_tile_ram_mib",
+        DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB,
+        coerce=int,
+        clamp=MULTIVIEW_TILE_RAM_RANGE,
+    )
+    subtitle_folder = _config_property("subtitle_folder", "", coerce=str)  # 2.2: Load a file…
+    # 2.3, optional (older builds ignore it): the Recordings folder Settings chose; "" is the
+    # system's Movies (Videos) folder's QiTV (services.recording).
+    recordings_dir = _config_property(
+        "recordings_dir", "", coerce=lambda value: value if isinstance(value, str) else ""
+    )
+    # 2.2: OpenSubtitles. Optional keys (older builds ignore them); the key and the password
+    # are never logged. The language is the one downloaded last; "hearing impaired" whether
+    # that file was for the hearing impaired (such files then rank first).
+    opensubtitles_api_key = _config_property("opensubtitles_api_key", "", coerce=str)
+    opensubtitles_username = _config_property("opensubtitles_username", "", coerce=str)
+    opensubtitles_password = _config_property("opensubtitles_password", "", coerce=str)
+    opensubtitles_language = _config_property("opensubtitles_language", "", coerce=str)
+    opensubtitles_hearing_impaired = _config_property(
+        "opensubtitles_hearing_impaired", False, coerce=lambda value: value is True
+    )
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
+
+    @property
+    def language(self) -> str | None:
+        """The language chosen in Settings ("tr"), or None to follow the system's.
+
+        2.2, optional: no key (what older builds write, and ignore) is the system's language.
+        """
+        code = self.config.get("language")
+        return code if isinstance(code, str) and code else None
+
+    @language.setter
+    def language(self, code: str | None) -> None:
+        if code:
+            self.config["language"] = code
+        else:
+            self.config.pop("language", None)
 
     @staticmethod
     def _initial_tv_window(window_positions):
@@ -461,6 +503,7 @@ class ConfigManager:
 
     @staticmethod
     def default_config():
+        """A new config.json (update_patcher adds its settings to an older one)."""
         return {
             "selected_provider_name": ALL_NAME,
             "check_updates": ConfigManager.DEFAULT_OPTION_CHECKUPDATE,
@@ -538,24 +581,15 @@ class ConfigManager:
         finally:
             self.xmltv_channel_map = MultiKeyDict.deserialize(self.xmltv_channel_map)
 
-        # Write a sibling file and swap it in: a failed or interrupted write never
-        # truncates the saved settings.
-        directory = os.path.dirname(self.config_path) or "."
-        fd, temporary = tempfile.mkstemp(dir=directory, prefix=".config-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(serialized_config)
-            if os.path.exists(self.config_path):
-                shutil.copymode(self.config_path, temporary)
-            self._replace_config(temporary, retries)
-        except BaseException:
-            try:
-                os.remove(temporary)
-            except OSError as e:
-                logger.debug("Could not remove %s: %s", temporary, e)
-            raise
+        with atomic_write(
+            self.config_path, lambda temporary, path: self._replace_config(temporary, retries)
+        ) as f:
+            f.write(serialized_config)
 
     def _replace_config(self, temporary, retries):
+        """Swap the written settings in, keeping the file's permissions."""
+        if os.path.exists(self.config_path):
+            shutil.copymode(self.config_path, temporary)
         for attempt in range(retries + 1):
             try:
                 os.replace(temporary, self.config_path)
@@ -658,57 +692,3 @@ class ConfigManager:
             "timestamp": datetime.now().isoformat(),
         }
         self.playback_positions = positions
-
-    def get_playback_position(self, content_id: str) -> int | None:
-        """Get saved playback position for content.
-
-        Args:
-            content_id: Unique content identifier
-
-        Returns:
-            Position in milliseconds, or None if not found
-        """
-        positions = self.playback_positions or {}
-        entry = positions.get(content_id)
-        if entry:
-            pos = entry.get("position")
-            return int(pos) if pos is not None else None
-        return None
-
-    def get_watched_status(self, content_id: str) -> str:
-        """Get the watched status of content.
-
-        Args:
-            content_id: Unique content identifier
-
-        Returns:
-            "watched" if >90% complete, "partial" if started, "unwatched" otherwise
-        """
-        positions = self.playback_positions or {}
-        entry = positions.get(content_id)
-        if not entry:
-            return "unwatched"
-
-        position = entry.get("position", 0)
-        duration = entry.get("duration", 0)
-
-        if duration <= 0:
-            return "unwatched"
-
-        ratio = position / duration
-        if ratio >= self.DEFAULT_WATCHED_THRESHOLD:
-            return "watched"
-        elif ratio > 0.01:  # More than 1% watched
-            return "partial"
-        return "unwatched"
-
-    def clear_playback_position(self, content_id: str) -> None:
-        """Clear saved playback position for content.
-
-        Args:
-            content_id: Unique content identifier
-        """
-        positions = self.playback_positions or {}
-        if content_id in positions:
-            del positions[content_id]
-            self.playback_positions = positions

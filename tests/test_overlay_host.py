@@ -7,14 +7,14 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QRegion, QWheelEvent
+from PySide6.QtGui import QHelpEvent, QRegion, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
 from shiboken6 import isValid
 from timer_fixtures import elapse, wait_until
 
 from ui.overlay_host import RESTORE_REPORT_MS, OverlayHost
-from ui.overlays.base import Overlay
+from ui.overlays.base import Overlay, TooltipWidget
 from ui.video_surface import VideoSurface
 
 
@@ -333,6 +333,49 @@ class LifetimeTests(HostCase):
         self.assertGreater(stack.index(top), stack.index(self.panel))
 
 
+class _Tips(TooltipWidget):
+    def tooltip_at(self, pos):
+        return "Close" if pos.x() < 10 else ""
+
+
+class _Parent(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.tips = 0
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ToolTip:
+            self.tips += 1
+        return super().event(event)
+
+
+class TooltipTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def hover(self, widget, x):
+        point = QPoint(x, 5)
+        QApplication.sendEvent(widget, QHelpEvent(QEvent.Type.ToolTip, point, point))
+
+    def test_hovering_shows_the_text_at_that_point(self):
+        tips = _Tips()
+        with patch("ui.overlays.base.QToolTip.showText") as show:
+            self.hover(tips, 5)
+        show.assert_called_once()
+        self.assertEqual(show.call_args[0][1], "Close")
+
+    def test_an_empty_spot_passes_the_tooltip_to_the_parent_only_when_flagged(self):
+        for flagged, parent_tips in ((False, 0), (True, 1)):
+            parent = _Parent()
+            tips = _Tips(parent)
+            tips.pass_empty_tooltip = flagged
+            with patch("ui.overlays.base.QToolTip.hideText") as hide:
+                self.hover(tips, 50)
+            hide.assert_called_once()
+            self.assertEqual(parent.tips, parent_tips)
+
+
 class ConfigDirOverrideTests(unittest.TestCase):
     def test_env_override(self):
         from services.config_manager import ConfigManager
@@ -356,23 +399,30 @@ class ConfigDirOverrideTests(unittest.TestCase):
             self.assertTrue(path.endswith("config.json"))
             self.assertNotEqual(os.path.dirname(path), "")
 
-    def test_override_skips_legacy_migration(self):
+    def test_a_config_json_in_the_current_directory_stays_put(self):
+        # Pre-1.0 QiTV kept config.json in the current directory, and later versions moved
+        # one found there into the config directory: whatever file sat where QiTV started.
         from services.config_manager import ConfigManager
 
         with tempfile.TemporaryDirectory() as cwd, tempfile.TemporaryDirectory() as directory:
+            decoy = os.path.join(cwd, "config.json")
+            with open(decoy, "w", encoding="utf-8") as f:
+                f.write('{"favorites": ["Decoy"]}')
+            config_path = os.path.join(directory, "config.json")
             old = os.getcwd()
             os.chdir(cwd)
             try:
-                with open("config.json", "w") as f:
-                    f.write("{}")
-                manager = ConfigManager.__new__(ConfigManager)
-                manager.config_path = os.path.join(directory, "config.json")
-                with patch.dict(os.environ, {"QITV_CONFIG_DIR": directory}):
-                    manager._migrate_old_config()
-                self.assertTrue(os.path.isfile("config.json"))
-                self.assertFalse(os.path.exists(manager.config_path))
+                with (
+                    patch.dict(os.environ),
+                    patch.object(ConfigManager, "_get_config_path", return_value=config_path),
+                ):
+                    os.environ.pop("QITV_CONFIG_DIR", None)
+                    manager = ConfigManager()
             finally:
                 os.chdir(old)
+            with open(decoy, encoding="utf-8") as f:
+                self.assertEqual(f.read(), '{"favorites": ["Decoy"]}')
+            self.assertNotIn("Decoy", manager.favorites or [])
 
 
 if __name__ == "__main__":

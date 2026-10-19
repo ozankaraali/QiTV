@@ -148,6 +148,13 @@ class PointerHider(QObject):
     def hidden(self) -> bool:
         return self._hidden
 
+    def add_widget(self, widget: QWidget) -> None:
+        """Another widget the pointer hides over (a multiview tile's surface)."""
+        if widget not in self._widgets:
+            self._widgets = (*self._widgets, widget)
+            if self._hidden and not hide_pointer_until_moved():
+                widget.setCursor(Qt.CursorShape.BlankCursor)
+
     def moved(self) -> None:
         self._idle.start()
         if self._hidden:

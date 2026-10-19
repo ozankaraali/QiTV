@@ -74,7 +74,8 @@ steers by has hysteresis (a burst the helper measures for a moment is none:
 `LagFilter.burst`); the timeline's target, the stall bound and Go live follow the helper's
 at once. Held against the instantaneous peak, the rate would change at every burst. A source
 that sends nothing for a burst plus 2 s (a steady one: 2 s) has stalled: the timeline says
-so (`stalled`; the transport reads "Reconnecting…"), the lag is the closed form with the
+so (`stalled`; the transport reads "Waiting for the channel…", or "Reconnecting…" once the
+helper opens a new connection: `reconnecting`), the lag is the closed form with the
 time since the edge moved counted up to there only, and StayLive takes it as buffering, as
 it does a VLC whose clock stood still while it reports Playing (libVLC 3 does when starved)
 clearly longer than it steps (1.5 learned intervals plus a quarter second, at least 0.5 s):
@@ -202,6 +203,14 @@ once libVLC let go of the provider's stream (`inputEnded`, or after `_CLOSE_CAP_
 `use_engine()` hands over a restarted engine.
 `failed(message)` reports a playback error in direct mode, or the provider's refusal for its
 connection limit; pipeline playback errors are recovered here and never reported.
+
+Recording (2.2): while it plays from the buffer, `start_recording(path)` has the helper write
+the buffer to a file from the clean start at or before where it plays (rewound or not), then
+on with the live edge, opening no connection (`LiveEngine.start_recording`). It stops with
+`stop_recording()`, `stop()` (a channel change), a fallback or a refusal (the file is kept),
+or by itself (the input's end, a limit, a failure, the helper's death). `recordingChanged`
+says when it records and no longer; each recording's end comes as `recordingEnded(reason,
+path, written)`, also after the session closed.
 """
 
 from __future__ import annotations
@@ -216,7 +225,9 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from services.i18n import N_
 from services.live.learned_target import LearnedTarget, learned_target
+from services.live.recorder import MAX_SECONDS, MIN_FREE_BYTES
 from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.stay_live import (
     AUTO,
@@ -244,16 +255,21 @@ _LOG = logging.getLogger(__name__)
 
 # How far behind the provider's live point an HLS source starts, per latency (Phase 2A).
 LIVE_DELAY = {"low": 3.0, "normal": 6.0, "stable": 12.0, AUTO: 6.0}
-UNAVAILABLE = "Time-shift isn't available for this channel"
-LOST = "Lost the time-shift buffer; playing live"
-BUFFERED = "Lost the connection; playing what's buffered"
-DISK = "Disk time-shift isn't available; using memory"
-REWOUND = "Rewound past the buffer"
-CRAWLING = "Plays without rewind for smoother playback"
-RECONNECTING = "Reconnecting…"
+# The notices (`notice`, `no_rewind_reason`) stay English: the shell compares them, and
+# shows them with services.i18n.translate.
+UNAVAILABLE = N_("Time-shift isn't available for this channel")  # i18n: toast
+LOST = N_("Lost the time-shift buffer; playing live")  # i18n: toast
+BUFFERED = N_("Lost the connection; playing what's buffered")  # i18n: toast
+# i18n: toast: the time-shift buffer could not be kept on disk; it is kept in memory
+DISK = N_("Disk time-shift isn't available; using memory")
+# i18n: toast: the point rewound to is no longer buffered (it plays from the oldest one)
+REWOUND = N_("Rewound past the buffer")
+# i18n: toast and rewind hint: this channel plays without time-shift (rewind)
+CRAWLING = N_("Plays without rewind for smoother playback")
+RECONNECTING = N_("Reconnecting…")  # i18n: toast: the channel's stream is opened again
 _DIRECT_RETRIES_MS = (3000, 5000, 10000)  # a fallback's direct play, failing at once ...
 _DIRECT_QUICK_S = 5.0  # ... within this of its play call (a timeout is reported at once)
-LOADING = "Still loading…"
+LOADING = N_("Still loading…")  # i18n: toast: a channel takes long to start
 _CLOSE_CAP_MS = 2000  # a close not confirmed by then counts as done
 _RECOVERY_MS = 10_000  # a helper restart must bring the session back by then
 _EXPIRED_S = 0.5  # a position this far before the oldest buffered point is gone
@@ -289,8 +305,12 @@ _RELAND_S = 10.0
 # then 2 s every 2 s, and the viewer sat 23 s behind for a minute (the jumps' cooldown counts
 # from the tune). A burst flows at 3x and more, then stands still for most of its period: it
 # never qualifies, whatever the tick it lands on or how it is spread (re-reviews 1 and 2: the
-# unmeasured burst read as a backlog ran VLC dry 4-7 s). Only while VLC played within
-# `_REPICK_PLAY_S` of the open, and never later than `_REPICK_DEADLINE_S` after it.
+# unmeasured burst read as a backlog ran VLC dry 4-7 s). Only while VLC's clock moved within
+# `_REPICK_PLAY_S` of its playing (a sparse-PCR channel's first reading comes ~2 s after it:
+# re-review 2, M-r), with the dump's window open at least `_REPICK_S` past that playing (a
+# slow open), and never later than `_REPICK_DEADLINE_S` after the open. By design it moves the
+# chosen latency's exposure to a stalling source forward: the start it picks again is nearer
+# the edge (M-p).
 REPICK = True
 _REPICK_S = 5.0
 _REPICK_DUMP_S = 4.0
@@ -397,6 +417,9 @@ class LiveSession(QObject):
     notice = Signal(str)
     failed = Signal(str)
     released = Signal()
+    recordingChanged = Signal(bool)  # 2.3: it records now, or no longer
+    # (reason, path, written): a recording it started ended (LiveEngine.recordingEnded)
+    recordingEnded = Signal(str, str, int)
 
     def __init__(
         self,
@@ -455,6 +478,8 @@ class LiveSession(QObject):
         self._referrer: Optional[str] = None
         self._open_args: dict[str, Any] = {}
         self._stay = StayLive()
+        self._background = False  # a multiview tile without the focus (set_background)
+        self._shrink_to: Optional[int] = None  # a smaller buffer, once it is back at live
         self._snapshot_cache: dict[str, Any] = {}
         self._ended = False  # the session's input is over: no reopen, no stay-live
         self._source_lost = False  # ended by a source failure: fall back when it runs out
@@ -491,6 +516,7 @@ class LiveSession(QObject):
         self._repick_moved = 0.0  # ... and when it last moved since ...
         self._repick_seen = 0.0  # ... and the last tick it was looked at
         self._repick_opened = -math.inf  # the tune's first open
+        self._repick_playing: Optional[float] = None  # ... and when VLC first played it
         self._rewound = False  # "Rewound past the buffer" was said; VLC has not played since
         # The mean lag over the source's arrival rhythm, and the lag as shown (2.1).
         self._filter = LagFilter()
@@ -518,6 +544,11 @@ class LiveSession(QObject):
         self._said: Optional[tuple[float, float, float]] = None
         self._troubled_at: Optional[float] = None
         self._cushion = 0.0  # the largest lag at the live edge since the tune (or the target)
+        # 2.3: the recording under way (its id at the engine) and since when (the clock's);
+        # every recording started whose end the engine has not told yet.
+        self._recording: Optional[str] = None
+        self._recording_since: Optional[float] = None
+        self._recordings: set[str] = set()
         self._wire_engine(engine, connect=True)
         playback.stateChanged.connect(self._on_state)
         playback.ended.connect(self._on_interrupted)
@@ -533,6 +564,7 @@ class LiveSession(QObject):
             (engine.sessionFailed, self._on_failed),
             (engine.sessionEnded, self._on_ended),
             (engine.sessionClosed, self._on_closed),
+            (engine.recordingEnded, self._on_recording_ended),
         ):
             if connect:
                 signal.connect(slot)
@@ -558,8 +590,10 @@ class LiveSession(QObject):
         """The engine was shut down, which no signal tells: count it gone for this run.
 
         Nothing it held is open any more, so a stop's wait for its close ends now (without
-        the close-cap warning); later starts play directly until `use_engine()`.
+        the close-cap warning); later starts play directly until `use_engine()`. A recording
+        ended with it (the helper's shutdown closed its file), unannounced.
         """
+        self._recordings.clear()
         self._on_available(False)
 
     def use_engine(self, engine: LiveEngine) -> None:
@@ -603,6 +637,7 @@ class LiveSession(QObject):
         self._cushion = 0.0
         self._repick_until, self._repick_step = -math.inf, None
         self._land_offset, self._land_check = 0.0, None  # each tune's own (ruling R38)
+        self._shrink_to = None
         self._open_args = {
             "headers": dict(headers),
             "verify_ssl": verify_ssl,
@@ -612,6 +647,7 @@ class LiveSession(QObject):
         if ram_bytes is not None:
             self._open_args["ram_bytes"] = ram_bytes
         self._stay = StayLive(self._latency)
+        self._stay.set_background(self._background)  # a multiview tile without the focus
         self._stay.jump_lag = self._jump_lag  # where a jump to live would land (stage 5)
         if self._memory.rate_locked:
             self._stay.lock_rate()  # VLC could not play it at another rate before
@@ -639,7 +675,9 @@ class LiveSession(QObject):
         self._begin()
 
     def stop(self) -> None:
-        """Stop playback and close the session; `released()` follows (see the docstring)."""
+        """Stop playback and close the session; `released()` follows (see the docstring). A
+        recording stops and keeps its file (`recordingEnded` follows)."""
+        self._end_recording()
         if self._phase is _Phase.IDLE:
             return
         if self._learned is not None:
@@ -811,6 +849,39 @@ class LiveSession(QObject):
             self._steered, self._steer_burst = SteeredTarget(), None
             self._forget_feed()
 
+    def set_background(self, background: bool) -> None:
+        """A multiview tile without the focus (2.2): muted and small, it plays at 1x and
+        stay-live only goes live far behind (a rate it had is set back to 1x at once); with
+        the focus it steers again. It holds for the tunes that follow, until changed. A
+        speed the user chose (time-shifted, catching up) is left alone."""
+        self._background = background
+        self._stay.set_background(background)
+        if background and self._rate != 1.0 and self._stay.mode is Mode.LIVE:
+            self._set_rate(1.0)
+
+    def resize(self, max_bytes: int) -> None:
+        """A memory buffer's size from now on (2.2, the multiview: the focused tile's grows to
+        the memory per stream, the others' shrink): the running session's at once (a smaller
+        one lets its oldest minutes go), and a session reopened later. A disk buffer keeps
+        the user's size. A smaller buffer waits while it plays behind live (paused, rewound
+        or catching up): what it plays stays until it is back at live (`_tick`)."""
+        if max_bytes <= 0 or self._open_args.get("disk"):
+            return
+        size = int(max_bytes)
+        current = self._open_args.get("max_bytes")
+        if self._sid is not None and isinstance(current, int) and size < current:
+            if self._away_from_live():
+                self._shrink_to = size
+                return
+        self._shrink_to = None
+        self._open_args["max_bytes"] = size
+        if self._sid is not None:
+            self._engine.resize_session(self._sid, size)
+
+    def _away_from_live(self) -> bool:
+        """It plays away from the live edge by the user's choice: paused, or time-shifted."""
+        return self._paused or self._stay.mode is not Mode.LIVE
+
     def buffered_range(self) -> tuple[float, float]:
         """The buffered timeline seconds, from the oldest point to the live edge."""
         if self._phase is not _Phase.PIPELINE:
@@ -822,6 +893,76 @@ class LiveSession(QObject):
         if self._phase is _Phase.PIPELINE:
             return self._advance()
         return self._base + self._elapsed
+
+    # ---- recording (2.2) ---------------------------------------------------------------
+    def recordable(self) -> bool:
+        """It plays from the time-shift buffer: a recording can start."""
+        return self._phase is _Phase.PIPELINE and self._sid is not None
+
+    def recording(self) -> bool:
+        return self._recording is not None
+
+    def recording_since(self) -> Optional[float]:
+        """When the recording under way started (this object's clock); None without one."""
+        return self._recording_since if self._recording is not None else None
+
+    def start_recording(
+        self, path: str, *, max_s: float = MAX_SECONDS, min_free: int = MIN_FREE_BYTES
+    ) -> bool:
+        """Record the channel to a new file at `path` from where it plays (rewound or not:
+        the clean start a seek there would open) on, following the live edge, until
+        `stop_recording()`, a channel change, a fallback, its input's end or a limit; the
+        helper writes it from the buffer, opening no connection. False when it cannot start
+        (not `recordable()`, or it records already)."""
+        if not self.recordable() or self._recording is not None:
+            return False
+        assert self._sid is not None
+        seq = self._record_from()
+        if seq is None:
+            return False
+        rid = self._engine.start_recording(self._sid, path, seq, max_s=max_s, min_free=min_free)
+        if not rid:
+            return False
+        self._recording, self._recording_since = rid, self._clock()
+        self._recordings.add(rid)
+        self.recordingChanged.emit(True)
+        return True
+
+    def stop_recording(self) -> None:
+        """Stop recording at the live edge; `recordingEnded` follows once the file is closed."""
+        self._end_recording()
+
+    def _end_recording(self) -> None:
+        if self._recording is None:
+            return
+        self._recording = self._recording_since = None
+        if self._sid is not None:
+            self._engine.stop_recording(self._sid)
+        self.recordingChanged.emit(False)
+
+    def _record_from(self) -> Optional[int]:
+        """The segment a recording starts at: the clean start at or before where it plays
+        (as a seek there opens), the open segment while it plays that, else the oldest."""
+        assert self._sid is not None
+        spans = self._engine.spans(self._sid)
+        position = self._advance()
+        if spans and position < spans[-1].end:
+            span = self._seek_start(position, hi=position + 1e-6)
+            if span is not None:
+                return span.seq
+        open_seq = self._snapshot().get("open")
+        if isinstance(open_seq, int):
+            return open_seq
+        return spans[-1].seq if spans else self._oldest_seq()
+
+    def _on_recording_ended(self, rid: str, reason: str, path: str, written: int) -> None:
+        if rid not in self._recordings:
+            return  # another player's
+        self._recordings.discard(rid)
+        if rid == self._recording:  # it ended by itself: a limit, the end, a failure
+            self._recording = self._recording_since = None
+            self.recordingChanged.emit(False)
+        self.recordingEnded.emit(reason, path, written)
 
     # ---- sessions ----------------------------------------------------------------------
     def _begin(self) -> None:
@@ -871,6 +1012,7 @@ class LiveSession(QObject):
         if self._limited:
             self._refuse()
             return
+        self._end_recording()  # a direct play has no buffer to record from
         self._stop_timers()
         sid, self._sid = self._sid, None
         self._phase = _Phase.FALLING_BACK
@@ -887,6 +1029,7 @@ class LiveSession(QObject):
 
     def _refuse(self) -> None:
         """The provider refused for its connection limit: close it all, play nothing."""
+        self._end_recording()
         self._stop_timers()
         sid, self._sid = self._sid, None
         self._phase = _Phase.REFUSED
@@ -1100,6 +1243,7 @@ class LiveSession(QObject):
         self._reland_edge = self._live_edge(snapshot)
         self._repick_until, self._repick_step = self._clock() + _REPICK_S, None
         self._repick_opened = self._clock()
+        self._repick_playing = None
 
     def _open_first_again(self) -> None:
         """The tune's first open failed (no helper served it): pick its start again."""
@@ -1366,6 +1510,8 @@ class LiveSession(QObject):
             else:
                 self._emit_timeline()
             return
+        if self._shrink_to is not None and not self._away_from_live():
+            self.resize(self._shrink_to)  # back at live: the smaller buffer now
         snapshot = self._snapshot()
         position = self._advance()
         self._check_rate(snapshot, position)
@@ -1504,9 +1650,17 @@ class LiveSession(QObject):
             self._repick_until, self._repick_step = -math.inf, None
             return False
         tick, self._repick_seen = max(0.0, now - self._repick_seen), now
+        if self._opened_at is None and self._repick_playing is None:
+            # VLC plays: a slow open may have outlasted the dump's window, which counts from
+            # here then (within the deadline), and its clock has `_REPICK_PLAY_S` to move.
+            self._repick_playing = now
+            deadline = self._repick_opened + _REPICK_DEADLINE_S
+            self._repick_until = min(max(self._repick_until, now + _REPICK_S), deadline)
         played = self._opened_at is None and self._last_ms != 0
         since = now - self._repick_opened
-        if since > _REPICK_DEADLINE_S or (not played and since > _REPICK_PLAY_S):
+        playing = self._repick_playing
+        late = playing is not None and now - playing > _REPICK_PLAY_S
+        if since > _REPICK_DEADLINE_S or (not played and late):
             self._repick_until, self._repick_step = -math.inf, None  # never, this tune
             return False
         if grown > _REPICK_DUMP_S and now < self._repick_until:
@@ -1954,6 +2108,8 @@ class LiveSession(QObject):
                 "ended": self._ended,
                 "target": self._target(snapshot),
                 "stalled": self._stalled(snapshot),
+                # The helper is opening a new connection (raw TS), not waiting on this one.
+                "reconnecting": bool(snapshot.get("reconnecting", False)),
                 "auto": learned is not None,
                 "adjusted": learned is not None and learned.prior.margin() > 0.0,
             }

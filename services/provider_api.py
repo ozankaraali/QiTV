@@ -89,22 +89,84 @@ def stb_request_url(
 # -----------------------------
 
 
-def _ensure_base(url: str) -> str:
-    """Normalize a provider URL to a base 'scheme://host[:port]' string.
+# What a server address may end in besides the path the panel is served under: an API file.
+_XTREAM_FILES = ("player_api.php", "get.php", "xmltv.php", "panel_api.php")
 
-    Accepts inputs like 'domain:8080', 'http://domain:8080', 'https://domain', etc.
+
+def _ensure_base(url: str) -> str:
+    """Normalize an Xtream server address to its base, 'scheme://host[:port][/path]'.
+
+    Accepts 'domain:8080', 'http://domain:8080/', 'https://domain/player_api.php?…' and
+    the like. A panel served under a path ('http://domain/xc') keeps it: its API and
+    streams are under it. An address without one (most saved providers) gives
+    'scheme://host[:port]' as before; an API file pasted with it ('…/player_api.php',
+    'get.php', …), a trailing slash, a query or a fragment are dropped.
     """
     try:
+        url = url.strip()
         if "://" not in url:
             # Default to http if scheme not provided; auth may instruct https later
             url = f"http://{url}"
-        # Trim trailing slash
-        if url.endswith("/"):
-            url = url[:-1]
-        # Reduce to scheme://netloc if path present
-        return base_from_url(url)
+        parts = urlsplit(url)
+        segments = [s for s in parts.path.split("/") if s]
+        if segments and segments[-1].lower() in _XTREAM_FILES:
+            segments.pop()
+        base = f"{parts.scheme}://{parts.netloc}"
+        return f"{base}/{'/'.join(segments)}" if segments else base
     except Exception:
         return url
+
+
+# This session's saved addresses with a path whose panel answered at its server's root instead
+# (a stray path, 'http://host:8080/c/', that 2.2.0 and older cut off), by their base.
+_answered_at_root: Dict[str, str] = {}
+
+
+def xtream_base(url: str) -> str:
+    """An Xtream server address's base: where its API files and streams are (its server's root
+    once the panel answered there instead of under the address's path)."""
+    base = _ensure_base(url)
+    return _answered_at_root.get(base, base)
+
+
+def xtream_sign_in_bases(url: str) -> List[str]:
+    """Where to ask the panel of the address `url`, in order: its base, then, when that has a
+    path, the server's root, once (`xtream_elsewhere`; `remember_xtream_root` when the root
+    answers)."""
+    base = xtream_base(url)
+    root = base_from_url(base)
+    return [base, root] if root != base else [base]
+
+
+def xtream_elsewhere(response: Any) -> bool:
+    """Whether a Player API answer under an address's path says the panel is not there: a 404,
+    or a body that is not the API's JSON (a web server's page)."""
+    if response.status_code == 404:
+        return True
+    if not response.content:
+        return False
+    try:
+        response.json()
+    except ValueError:
+        return True
+    return False
+
+
+def remember_xtream_root(url: str, root: str) -> None:
+    """The panel of the address `url` answered at its server's `root`: every address built for
+    it uses the root from now on (this session)."""
+    base = _ensure_base(url)
+    if root != base and _answered_at_root.get(base) != root:
+        _answered_at_root[base] = root
+        logger.info(
+            "The Xtream panel did not answer under its address's path but at its server's root;"
+            " the root is used."
+        )
+
+
+def _xtream_path(url: str) -> str:
+    """The path an Xtream server address's panel is served under ('/xc'), or ''."""
+    return urlsplit(xtream_base(url)).path
 
 
 def _build_xtream_url(
@@ -119,7 +181,7 @@ def _build_xtream_url(
     All Xtream URLs follow the pattern: {base}/{endpoint}?username=U&password=P[&extra...]
     This factory centralizes URL construction and query encoding.
     """
-    base = _ensure_base(base)
+    base = xtream_base(base)
     query = {"username": username, "password": password}
     if extra:
         query.update(extra)
@@ -162,16 +224,6 @@ def xtream_signed_in(body: Any) -> bool:
     return status.lower() == "active"
 
 
-def xtream_get_php_url(
-    base: str, username: str, password: str, extra: Optional[Dict[str, str]] = None
-) -> str:
-    """Build the legacy get.php URL for M3U retrieval using the resolved base.
-
-    Example: {base}/get.php?username=U&password=P&type=m3u
-    """
-    return _build_xtream_url(base, "get.php", username, password, extra)
-
-
 def xtream_choose_resolved_base(
     server_info: Dict[str, str], input_base: Optional[str] = None, prefer_https: bool = False
 ) -> str:
@@ -187,6 +239,14 @@ def xtream_choose_resolved_base(
         host = (server_info.get("url") or "").strip()
         if not host:
             return ""
+        if input_base and _xtream_path(input_base):
+            # A panel under a path sits behind a web server it doesn't know of: the host
+            # and port it advertises are its own, not that server's. The user's address is
+            # where its API and streams are (HTTPS when preferred).
+            base = xtream_base(input_base)
+            if prefer_https and base.startswith("http://"):
+                base = "https://" + base[len("http://") :]
+            return base
 
         # Determine preferred scheme from input_base if provided
         preferred_scheme = None
@@ -242,18 +302,12 @@ def xtream_xmltv_url(base: str, username: str, password: str) -> str:
     return _build_xtream_url(base, "xmltv.php", username, password)
 
 
-def xtream_epg_url(
-    base: str, username: str, password: str, stream_id: str, limit: Optional[int] = None
+def xtream_stream_url(
+    base: str, kind: str, username: str, password: str, stream_id: Any, ext: str
 ) -> str:
-    """Build the EPG data table URL for a specific Xtream stream.
-
-    Gets all EPG listings for a single stream (like STB portal).
-    Example: {base}/player_api.php?username=U&password=P&action=get_simple_data_table&stream_id=XXX&limit=X
-    """
-    extra: Dict[str, str] = {"action": "get_simple_data_table", "stream_id": stream_id}
-    if limit is not None:
-        extra["limit"] = str(limit)
-    return _build_xtream_url(base, "player_api.php", username, password, extra)
+    """A stream's address on an Xtream panel: {base}/{kind}/{username}/{password}/{id}.{ext},
+    `kind` being live, movie or series (an episode)."""
+    return f"{base}/{kind}/{username}/{password}/{stream_id}.{ext}"
 
 
 def provider_prefers_https(provider: Dict[str, Any], global_default: bool) -> bool:

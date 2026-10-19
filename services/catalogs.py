@@ -10,7 +10,7 @@ each catalog gets its own pinned `ProviderManager` (and `EpgManager`) over that 
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, tzinfo
 import gc
 import itertools
 import logging
@@ -21,12 +21,14 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from services.catalog import CatalogService, WorkerFactory
 from services.epg_manager import EpgManager
 from services.epg_view import Programme
+from services.i18n import N_
 from services.provider_ids import provider_of
 from services.provider_manager import ProviderManager
 
 logger = logging.getLogger(__name__)
 
-UNKNOWN_PROVIDER_MESSAGE = "This provider is no longer in your list."
+# A link failure's message, like the catalog's: English here, shown with translate().
+UNKNOWN_PROVIDER_MESSAGE = N_("This provider is no longer in your list.")
 
 
 class _LinkIds(Iterator[int]):
@@ -270,6 +272,25 @@ class Catalogs(QObject):
     def max_connections(self, name: str) -> Optional[int]:
         catalog = self._by_name.get(name)
         return catalog.max_connections() if catalog is not None else None
+
+    def archive_zone(self, name: str) -> Optional[tzinfo]:
+        """The time zone provider `name`'s archive addresses are in (None: not known)."""
+        catalog = self._by_name.get(name)
+        return catalog.archive_zone() if catalog is not None else None
+
+    def xtream_zone_at(self, host: str) -> Optional[tzinfo]:
+        """The time zone of a signed-in provider whose streams are at `host` (an M3U
+        playlist's xc channels on an Xtream provider's server), when one knows it."""
+        for catalog in self._by_name.values():
+            zone = catalog.archive_zone()
+            if zone is not None and host in catalog.stream_hosts():
+                return zone
+        return None
+
+    def catchup_source(self, name: str) -> str:
+        """Provider `name`'s playlist-wide catch-up template ("" for none)."""
+        catalog = self._by_name.get(name)
+        return catalog.catchup_source() if catalog is not None else ""
 
     def use_guides(self, names: set[str]) -> None:
         """Keep the guides of `names` loaded; the others give their memory back."""

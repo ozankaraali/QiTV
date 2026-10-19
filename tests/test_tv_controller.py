@@ -232,10 +232,19 @@ class FakeSession(QObject):
         self.audio = [(-1, "Disable"), (1, "English"), (2, "Deutsch")]
         self.subtitles = [(-1, "Disable"), (3, "Français")]
         self.audio_set, self.subtitle_set = [], []
+        self.audio_playing = 1  # audio_track(): the track libVLC plays
+        self.delay = 0  # audio_delay(): the sound's sync, in ms
+        self.delays = []  # every set_audio_delay()
+        self.play_delays = []  # the sync each play() opened with (PlaybackSession sets it then)
+        self.subtitle_on = -1  # subtitle_track()
+        self.subtitle_ms = 0  # subtitle_delay()
+        self.files = []  # add_subtitle_file()
+        self.clears = 0  # clear_subtitles()
         self.url, self.kind = None, None  # what plays, as PlaybackSession.url and .kind
 
     def play(self, url, **kwargs):
         self.plays.append((url, kwargs))
+        self.play_delays.append(self.delay)
         self.url, self.kind = url, kwargs.get("kind")
         self.stateChanged.emit("opening")
 
@@ -284,12 +293,45 @@ class FakeSession(QObject):
 
     def set_audio_track(self, track_id):
         self.audio_set.append(track_id)
+        self.audio_playing = track_id
+
+    def audio_track(self):
+        return self.audio_playing
+
+    def audio_delay(self):
+        return self.delay
+
+    def set_audio_delay(self, ms):
+        self.delay = ms
+        self.delays.append(ms)
 
     def subtitle_tracks(self):
         return list(self.subtitles)
 
     def set_subtitle_track(self, track_id):
         self.subtitle_set.append(track_id)
+        self.subtitle_on = track_id
+
+    def subtitle_track(self):
+        return self.subtitle_on
+
+    def subtitle_delay(self):
+        return self.subtitle_ms
+
+    def set_subtitle_delay(self, ms):
+        self.subtitle_ms = ms
+
+    def add_subtitle_file(self, path):
+        """As libVLC adds a slave: a new track, named after the file, chosen."""
+        self.files.append(path)
+        track = max(i for i, _ in self.subtitles) + 1
+        self.subtitles.append((track, os.path.basename(path)))
+        self.subtitle_on = track
+        return True
+
+    def clear_subtitles(self):
+        self.clears += 1
+        self.files, self.subtitle_ms = [], 0
 
 
 class FakeOverlay(QObject):
@@ -353,6 +395,7 @@ class FakeColumn(FakeOverlay):
 
 class FakeDrawer(FakeOverlay):
     playRequested = Signal(object, object, object)
+    channelFound = Signal(object, str)
     contextRequested = Signal(object, object)
     closed = Signal()
     highlight = None
@@ -414,6 +457,9 @@ class FakeTransport(FakeOverlay):
     seekToRequested = Signal(float)
     nextRequested = Signal()
     pipRequested = Signal()
+    gridRequested = Signal()
+    layoutRequested = Signal()
+    restoreRequested = Signal()
     miniPlayerRequested = Signal()
     externalRequested = Signal(QPoint)
     volumeRequested = Signal()
@@ -422,9 +468,16 @@ class FakeTransport(FakeOverlay):
     previousRequested = Signal()
     infoRequested = Signal()
     favoriteRequested = Signal()
+    recordRequested = Signal()  # 2.3
+    bandChanged = Signal()
+    recording_since = None
 
     def set_muted(self, muted):
         self.record("set_muted", muted)
+
+    def set_recording(self, since):
+        self.record("set_recording", since)
+        self.recording_since = since
 
     def set_favorite(self, favorite):
         self.record("set_favorite", favorite)
@@ -434,6 +487,13 @@ class FakeTransport(FakeOverlay):
 
     def set_pip_state(self, available, open_):
         self.record("set_pip_state", available, open_)
+
+    def set_grid_state(self, available, shown, layout="", restorable=False):
+        self.record("set_grid_state", available, shown, layout)
+        self.restorable = restorable
+
+    def follow_pip(self, rect):
+        self.record("follow_pip", rect)
 
     def show_vod(self, title, subtitle):
         self.record("show_vod", title, subtitle)
@@ -458,9 +518,6 @@ class FakeTransport(FakeOverlay):
 
     def update_timeline(self, state, ticks):
         self.record("update_timeline", state, ticks)
-
-    def show_live_edge(self, lag_s, catching_up):
-        self.record("show_live_edge", lag_s, catching_up)
 
     def update_position(self, position, length):
         self.record("update_position", position, length)
@@ -601,6 +658,8 @@ class FakeLiveSession(QObject):
     notice = Signal(str)
     failed = Signal(str)
     released = Signal()
+    recordingChanged = Signal(bool)  # 2.3
+    recordingEnded = Signal(str, str, int)  # (reason, path, written)
 
     def __init__(self, playback):
         super().__init__()
@@ -609,6 +668,32 @@ class FakeLiveSession(QObject):
         self.mode = ""
         self.running = False
         self.no_rewind_reason = UNAVAILABLE
+        self.resizes = []  # the memory buffer sizes the multiview gave it
+        self.background = False  # a multiview tile without the focus
+        self.recorded_since = None  # recording since (a clock reading), else None
+
+    def recordable(self):
+        return self.running and self.mode == "pipeline"
+
+    def recording(self):
+        return self.recorded_since is not None
+
+    def recording_since(self):
+        return self.recorded_since
+
+    def start_recording(self, path, **kwargs):
+        if not self.recordable() or self.recording():
+            return False
+        self.calls.append(("start_recording", path))
+        self.recorded_since = 100.0
+        self.recordingChanged.emit(True)
+        return True
+
+    def stop_recording(self):
+        if self.recording():
+            self.calls.append(("stop_recording",))
+            self.recorded_since = None
+            self.recordingChanged.emit(False)
 
     def named(self, name):
         return [c[1:] for c in self.calls if c[0] == name]
@@ -622,6 +707,7 @@ class FakeLiveSession(QObject):
         self.url = url
 
     def stop(self):
+        self.stop_recording()  # as LiveSession: a recording stops, its file is kept
         if not self.running:
             return
         self.calls.append(("stop",))
@@ -660,6 +746,14 @@ class FakeLiveSession(QObject):
 
     def set_latency(self, name):
         self.calls.append(("set_latency", name))
+
+    def resize(self, max_bytes):
+        """The multiview: its memory buffer grows with the focus or shrinks without it."""
+        self.resizes.append(max_bytes)
+
+    def set_background(self, background):
+        """The multiview: a tile without the focus plays at 1x and only jumps to live."""
+        self.background = background
 
 
 class FakeWindow:
@@ -1671,6 +1765,31 @@ class DrawerPlayTests(ControllerTestCase):
         self.assertEqual(self.requested(), ["Three"])
         self.assertEqual(self.zap.context.channels, CHANNELS)
         self.assertEqual(self.drawer.calls[-1], ("close_drawer",))
+
+    def test_a_channel_the_find_found_plays_in_its_genre_and_the_list_closes(self):
+        self.catalog.live["20"] = [{"id": 9, "name": "Nine", "cmd": "ffrt http://tv/9"}]
+        self.controller.start()
+        self.drawer.visible = True
+        self.drawer.channelFound.emit({**CHANNELS[1], "_provider": "Home"}, "10")
+        self.assertEqual(self.requested(), ["Two"])
+        self.assertEqual(self.zap.context.group_key, "10")  # ↑/↓ walk its genre, as in 2.0
+        self.assertEqual(
+            [c["name"] for c in self.zap.context.channels], ["One", "Two", "Three", "Four"]
+        )
+        self.assertEqual(self.drawer.calls[-1], ("close_drawer",))
+
+    def test_a_found_channel_the_list_cannot_show_in_its_genre_walks_every_channel(self):
+        self.catalog.live["20"] = [{"id": 9, "name": "Nine", "cmd": "ffrt http://tv/9"}]
+        self.controller.start()
+        for channel, group in (
+            (BACKUP_TWO, "10"),  # another provider's, the list on Home
+            ({**CHANNELS[1], "_provider": "Home"}, "20"),  # a genre that does not list it
+            ({**CHANNELS[1], "_provider": "Home"}, ""),  # in no genre
+        ):
+            self.drawer.visible = True
+            self.drawer.channelFound.emit(channel, group)
+            self.assertEqual(self.zap.context.group_key, "*", (channel, group))
+            self.assertEqual(len(self.zap.context.channels), 5)
 
     def test_the_drawer_plays_only_channels(self):
         # Movies and Series open the Library from the drawer: their titles and episodes

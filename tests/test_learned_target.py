@@ -6,6 +6,9 @@ import random
 import unittest
 from unittest import mock
 
+import auto_target
+from auto_target import AutoTarget
+
 from services.live import learned_target as lt, stay_live, worker
 from services.live.learned_target import (
     ArrivalModel,
@@ -14,7 +17,7 @@ from services.live.learned_target import (
     StarvationPrior,
     learned_target,
 )
-from services.live.stay_live import STALL_S, TARGETS, AutoTarget
+from services.live.stay_live import STALL_S, TARGETS
 
 TICK = 0.25  # the session's update interval
 START = 1_000_000.0  # a wall clock far from zero
@@ -310,7 +313,7 @@ class ConstantsTests(unittest.TestCase):
         self.assertEqual(lt.FLOOR_S, TARGETS["normal"])
         self.assertEqual(lt.STALL_S, STALL_S)
         self.assertEqual(lt.STEP_S, stay_live._STEP_S)
-        self.assertEqual(lt.NEED_MAX_S, stay_live._AUTO_MAX_S)
+        self.assertEqual(lt.NEED_MAX_S, auto_target.AUTO_MAX_S)
         self.assertEqual(lt._TICK_S, stay_live._TICK_S)
         self.assertEqual(lt._MAX_DT, stay_live._MAX_DT)
         for burst in (0.0, 6.0, 7.9, 8.0, 10.0, 20.0):  # today's cap, with the need for it

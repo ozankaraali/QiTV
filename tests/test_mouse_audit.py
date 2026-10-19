@@ -8,13 +8,20 @@ here, and so does a control that is gone. The menu bar never counts: Windows and
 in fullscreen.
 
 Screens and their controls:
-- "transport": the player controls' buttons by name, and on live TV the title row's "title"
-  (the channel's name and logo) and "favorite" (the star after it);
+- "transport": the player controls' buttons by name ("grid" is the multiview's), and on live
+  TV the title row's "title" (the channel's name and logo), "favorite" (the star after it) and
+  "record" (the red dot after that, 2.3);
 - "picture": the video's own "click", "double-click" and "wheel";
 - "mixer": each row's "speaker" and "slider", and the "row" itself;
+- "sound": the Sound panel ♫ opens: its track "rows", its sync's "earlier" (−), "later" (+)
+  and "reset";
+- "subtitles": the Subtitles panel its button opens, alike, and its "Load a file…";
+- "subtitle_search": the OpenSubtitles search its "Search OpenSubtitles…" opens: the key page's
+  "field", "clear" (✕), "get_key", "paste" and "save", the search's "field", "clear", "paste" and
+  "search", its "languages" and "files" rows, and "close" (×);
 - "pip_label": the small picture's "swap", "speaker" and "close";
-- "drawer": the top row's "back", "names", "search", "refresh" and "settings", its "rows", and
-  the rows of its sources and sections columns by title ("Settings", "Open file", "Movies" …);
+- "drawer": the top row's "back", "names", "search", "refresh" and "settings", the ⌕ "find" box,
+  its "rows", and the rows of its sources and sections columns by title ("Settings", "Movies" …);
 - "context": the channel list's right-click menu, by entry;
 - "guide": its header's buttons and its "rows";
 - "library": the top bar's items ("live", "search", "fullscreen" …), the grid's "posters", the
@@ -31,6 +38,7 @@ from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QApplication, QWidget
 
 from services.navigation import NavModel
+from services.opensubtitles import SubtitleFile
 from tests.test_navigation import FakeCatalog
 from tests.test_poster_grid import FakePosters, details, titles
 from ui.context_actions import OPEN_PIP_TEXT, ContextActions
@@ -42,6 +50,8 @@ from ui.overlays.drawer import Drawer
 from ui.overlays.guide import Guide
 from ui.overlays.mixer import Mixer, MixerRow
 from ui.overlays.pip_label import PipLabel
+from ui.overlays.subtitle_search import LanguageRow, SubtitleSearchPage
+from ui.overlays.track_panel import PanelModel, PanelRow, PanelSync, TrackPanel
 from ui.overlays.transport import Transport
 from ui.pip import corner_rect
 from ui.video_surface import VideoSurface
@@ -62,16 +72,28 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("player", "Left, Right"): (("transport", "back10"), ("transport", "fwd10")),
     ("player", "Space"): (("transport", "play"),),
     ("player", "L"): (("transport", "golive"),),
+    # The record button after the channel's star (2.2): lit while it records, dimmed on a
+    # channel played directly (a press says why).
+    ("player", "R"): (("transport", "record"),),
     ("player", "G"): (("transport", "guide"),),
     ("player", "I"): (("transport", "title"),),
     ("player", "+, -"): (("transport", "volume"), ("mixer", "slider")),
     ("player", "M"): (("transport", "volume"), ("mixer", "speaker"), ("pip_label", "speaker")),
     ("player", "Tab"): (("mixer", "row"),),
+    # ♫ opens the Sound panel: its − and + are J and K.
+    ("player", "J, K"): (("transport", "audio"), ("sound", "earlier"), ("sound", "later")),
+    ("player", "Shift+J, Shift+K"): (
+        ("transport", "subtitles"),
+        ("subtitles", "earlier"),
+        ("subtitles", "later"),
+    ),
     ("player", "F, F11, Ctrl+Meta+F"): (("transport", "fullscreen"), ("picture", "double-click")),
     ("player", "Ctrl+F"): (("transport", "search"),),
     ("player", "Ctrl+D"): (("transport", "favorite"),),
     ("player", "P, Ctrl+P"): (("transport", "pip"), ("pip_label", "close")),
     ("player", "S"): (("pip_label", "swap"), ("picture", "click")),
+    # The multiview's button on the player controls, lit while its grid shows.
+    ("player", "V"): (("transport", "grid"),),
     ("player", "Alt+P"): (("transport", "mini"),),
     # Close what is open: a click on the picture closes the channel list, × the guide (the
     # banner, the zap list and the mixer fade by themselves); ⛶ leaves fullscreen; after a
@@ -87,6 +109,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("drawer", "PgUp, PgDown"): (("drawer", "rows"),),
     ("drawer", "Left, Right"): (("drawer", "back"), ("drawer", "names"), ("drawer", "rows")),
     ("drawer", "Return"): (("drawer", "rows"),),
+    ("drawer", "A…Z"): (("drawer", "find"),),  # a click on it, then the rows of what it finds
     ("drawer", "Ctrl+D"): (("context", "Add to favorites"),),
     ("drawer", "Ctrl+P"): (("context", OPEN_PIP_TEXT),),
     ("drawer", "Ctrl+F"): (("drawer", "search"),),
@@ -115,15 +138,33 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("menu", "Ctrl+1"): (("library", "live"), ("drawer", "rows")),
     ("menu", "Ctrl+2"): (("drawer", "Movies"), ("library", "movies")),
     ("menu", "Ctrl+3"): (("drawer", "Series"), ("library", "series")),
+    ("menu", "Ctrl+4"): (("transport", "grid"),),
     ("menu", "Ctrl+O"): (("drawer", "Open file"),),
     ("menu", "Ctrl+,"): (("drawer", "settings"), ("drawer", "Settings")),
     ("menu", "Ctrl+R"): (("drawer", "refresh"),),
+    # ---- Finding subtitles (the OpenSubtitles search) ----------------------------------------
+    # A click on a row; the wheel scrolls a list; a click on the field puts the keys there.
+    ("subtitles", "Up, Down"): (
+        ("subtitle_search", "languages"),
+        ("subtitle_search", "files"),
+        ("subtitle_search", "field"),
+    ),
+    ("subtitles", "PgUp, PgDown"): (("subtitle_search", "languages"), ("subtitle_search", "files")),
+    ("subtitles", "Left, Right"): (("subtitle_search", "languages"), ("subtitle_search", "files")),
+    ("subtitles", "Return"): (
+        ("subtitle_search", "files"),
+        ("subtitle_search", "search"),
+        ("subtitle_search", "save"),
+    ),
+    ("subtitles", "A…Z"): (("subtitle_search", "field"),),
+    ("subtitles", "Ctrl+V"): (("subtitle_search", "paste"),),
+    ("subtitles", "Backspace"): (("subtitle_search", "clear"),),  # ✕ clears the field
+    ("subtitles", "Esc"): (("subtitle_search", "close"),),
 }
 
 EXEMPT: dict[tuple[str, str], str] = {
     ("player", "0…9"): "a channel number: the channel list lists every channel (the brief)",
-    ("drawer", "A…Z"): "typing to filter needs a keyboard; the rows are there to click",
-    ("drawer", "Backspace"): "deletes a letter typed into the filter",
+    ("drawer", "Backspace"): "deletes a letter typed into the find (its ✕ clears it all)",
     ("guide", "0…9"): "a channel number: the rows and the wheel reach every channel",
     ("menu", "Ctrl+Q"): "the window's own close button (leave fullscreen with ⛶ first)",
 }
@@ -152,6 +193,7 @@ def _transport(host: QWidget) -> set[str]:
     from the Library."""
     t = Transport(host)
     t.set_pip_state(True, False)
+    t.set_grid_state(True, False)
     found: set[str] = set()
 
     def take() -> None:
@@ -195,6 +237,54 @@ def _mixer(host: QWidget) -> set[str]:
     return found
 
 
+def _sound(host: QWidget) -> set[str]:
+    panel = TrackPanel(host)
+    rows = (PanelRow(1, "English", True), PanelRow(2, "Deutsch"))
+    sync = PanelSync("Sound 150 ms later", "Sound 5,000 ms earlier", reset=True)
+    panel.show_panel(PanelModel("Sound", rows, sync))
+    found = {"rows"} if not panel.row_rect(0).isEmpty() else set()
+    found.update(n for n in ("earlier", "later", "reset") if not panel.control_rect(n).isEmpty())
+    return found
+
+
+def _subtitles(host: QWidget) -> set[str]:
+    panel = TrackPanel(host)
+    rows = (
+        PanelRow(-1, "Off"),
+        PanelRow(3, "English", True),
+        PanelRow("load_file", "Load a file…", action=True),
+    )
+    sync = PanelSync("In sync", "Subtitles 5,000 ms earlier")
+    panel.show_panel(PanelModel("Subtitles", rows, sync))
+    found = {"rows"} if not panel.row_rect(0).isEmpty() else set()
+    if any(row.action for row in panel.model().rows) and not panel.row_rect(2).isEmpty():
+        found.add("Load a file…")
+    found.update(n for n in ("earlier", "later") if not panel.control_rect(n).isEmpty())
+    return found
+
+
+def _subtitle_search(host: QWidget) -> set[str]:
+    """The key page, a key typed into it, then the search with what it found."""
+    page = SubtitleSearchPage(host)
+    found: set[str] = set()
+
+    def take(*names: str) -> None:
+        found.update(n for n in names if not page.control_rect(n).isEmpty())
+
+    page.show_key_page()
+    page.type_text("k")
+    take("field", "clear", "get_key", "paste", "save", "close")
+    page.show_search("Lighthouse (2019)")
+    files = [SubtitleFile(1, "en", "Lighthouse.2019"), SubtitleFile(2, "de", "Lighthouse.2019")]
+    rows = [LanguageRow("en", "English", 1), LanguageRow("de", "German", 1)]
+    page.set_results(rows, {"en": files[:1], "de": files[1:]}, "2 subtitles in 2 languages")
+    take("field", "clear", "paste", "search", "close")
+    for name in ("languages", "files"):
+        if not page.row_rect(name, 0).isEmpty():
+            found.add(name)
+    return found
+
+
 def _pip_label(host: QWidget) -> set[str]:
     label = PipLabel(host)
     label.follow(corner_rect(QSize(1280, 720), "br"))
@@ -215,6 +305,7 @@ def _drawer_and_context(host: QWidget) -> tuple[set[str], set[str]]:
         ("search", drawer.search_rect()),
         ("refresh", drawer.refresh_rect()),
         ("settings", drawer.settings_gear_rect()),
+        ("find", drawer.find_rect()),
     ):
         if not rect.isEmpty():
             found.add(name)
@@ -280,6 +371,9 @@ class MouseOnlyAuditTests(unittest.TestCase):
             "transport": _transport(_child(host)),
             "picture": _picture(),
             "mixer": _mixer(_child(host)),
+            "sound": _sound(_child(host)),
+            "subtitles": _subtitles(_child(host)),
+            "subtitle_search": _subtitle_search(_child(host)),
             "pip_label": _pip_label(_child(host)),
             "drawer": drawer,
             "context": context,

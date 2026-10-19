@@ -22,6 +22,19 @@ Commands (parent to helper):
   HLS source starts far enough back for a start at that target (`HlsSource._depth`);
 - `("close", sid)`, always answered by `("closed", sid)`, once the session's upstream
   connection is closed but at most 0.5 s later;
+- `("resize", sid, max_bytes)` (2.2, the multiview): a RAM session holds up to `max_bytes`
+  from now on, its open ring at once (a smaller size evicts the oldest segments) and a ring
+  made later too; a disk session's size stays the user's. Unanswered; an unknown sid is
+  ignored;
+- `("record_start", sid, rid, path, seq, limits)` (2.2): recording `rid` (the parent's name for
+  it) writes the session's ring to a new file at `path` (a unique name next to it when that
+  exists) from segment `seq` on, following the live edge, until "record_stop", the session's
+  close or the helper's shutdown, the end of its input, or `limits` (`{"max_s": seconds,
+  "min_free": bytes}`, both optional) stop it (`services.live.recorder`). It opens no
+  connection. One recording per session at a time (another start is answered as failed);
+  a stopped one may still be finishing. Answered by "recorded";
+- `("record_stop", sid)`: the session's recording ends at the live edge; an unknown sid, or
+  one that records nothing, is ignored;
 - `("shutdown",)`.
 
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
@@ -32,6 +45,13 @@ each addition a newly closed segment's `(seq, start, end, discontinuity, start_q
 (`Span`'s fields; an engine from before 2.1 would not take the fifth, but the helper and the
 engine always ship in one build, and the engine still takes four);
 `("ready", sid)` once the first segment is open (its state comes first);
+`("recording", sid, rid, path, written)` once recording `rid` made its file and every few
+seconds while it grows (2.2), and `("recorded", sid, rid, reason, path, written)` once it ended
+(`reason` is one of `recorder.REASONS`; `path` the file written, "" when none was). After a
+"close" they come before or after the session's "closed", in no set order: the close never
+waits for its recording (the next channel opens on "closed"), and the session's teardown lets
+the recording reach the live edge meanwhile. A recording outlives its session's cancel, and
+these messages are never dropped for it;
 `("error", sid, kind, message[, status])`, an HTTP failure's status last (2.1: the parent
 logs why a channel played directly); `("ended", sid)`; `("closed", sid)`. Error messages are
 fixed strings. `kind`, one meaning each:
@@ -76,9 +96,21 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from services.live.timeline import StartQuality, Timeline
-from services.live.ts import Data, Event, Opened, Segmenter, Unsupported
+from services.live.ts import (
+    AudioRelabeler,
+    ClockJoiner,
+    Data,
+    Event,
+    LoopTrimmer,
+    Opened,
+    ReconnectTrimmer,
+    RepeatTrimmer,
+    Segmenter,
+    Unsupported,
+)
 
 if TYPE_CHECKING:
+    from services.live.recorder import Recorder
     from services.live.ring import Ring
     from services.live.server import StreamServer
     from services.live.source import Source
@@ -86,11 +118,17 @@ if TYPE_CHECKING:
 _LOG = logging.getLogger(__name__)
 _POLL = 0.1
 _NOTIFY_INTERVAL = 0.25
+# A live edge this far past the one last reported is reported at once, throttle or not: a burst
+# lands in one read, and the throttle held it back until the next read (up to a pause later).
+_EDGE_STEP_S = 0.5
+# Raw TS: how often a restart the trimmer holds is judged while the source sends nothing.
+_HOLD_TICK_S = 0.5
 # The parent terminates the helper 0.5 s after "shutdown"; both waits are usually instant.
 _SHUTDOWN_GRACE = 0.25  # for session threads to remove their disk buffers
 _FLUSH_GRACE = 0.25  # for the writer to deliver what is queued
 _RELEASE_WAIT = 0.5  # for a closed session to close its upstream before "closed" is sent
 _OWNER_GRACE = 1.0  # after the owner died: for the shutdown to remove the disk buffers
+_RECORD_GRACE = 2.0  # at a session's teardown: for its recording to reach the live edge
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # as the stream server requires
 _INTERNAL = "The live buffer stopped unexpectedly."
 _UNSUPPORTED = "The channel's stream cannot be time-shifted."
@@ -356,6 +394,11 @@ class _Session:
         # is queued, so nothing from this session follows its "closed".
         self.cancelled = False
         self.lock = threading.Lock()
+        # Raw TS: held by whatever moves bytes down the pipeline (the session thread with each
+        # item of the source, the hold ticker while the source is silent: `_hold_ticker`).
+        self._moving = threading.RLock()
+        # What a tick failed with: the session thread raises it with its next item (`_take`).
+        self._tick_failed: BaseException | None = None
         self.released = threading.Event()  # the session holds no upstream connection anymore
         self._helper = helper
         self._url = url
@@ -371,18 +414,103 @@ class _Session:
         self._ready = False
         self._ended = False
         self._segmenter = Segmenter()
+        # Renames an audio stream the PMT misnames, on the bytes' way to the segmenter.
+        self._relabeler = AudioRelabeler()
+        # Raw TS only (`_ingest`): drops what a reconnect sends again in the old timebase.
+        self._rejoiner: ReconnectTrimmer | None = None
+        # Raw TS only: drops what a restart inside the connection sends twice.
+        self._trimmer: RepeatTrimmer | None = None
+        # Raw TS only: drops what a provider replays while its own source is down.
+        self._loop_trimmer: LoopTrimmer | None = None
+        # Raw TS only: re-bases a restarted run's timestamps so its clock runs on.
+        self._clock_joiner: ClockJoiner | None = None
         self._timeline = Timeline()
         self._bursts = BurstMeter()  # raw TS that arrives in bursts (HLS reports its own)
         self._received = 0  # bytes from the source, those before the first keyframe too
         self._answered = False  # the source's response headers came (bytes may not have yet)
         self._caught_up = False  # HLS: every segment its playlist listed was delivered once
+        self._reconnecting = False  # raw TS: the connection broke, a new one is being opened
         self._segment = (0, 0.0)  # HLS: the segment being fetched (serial), the edge it began at
         self._measured = (0.0, 0.0)  # HLS: media and EXTINF seconds of the whole segments
         self._pending: list[_Addition] = []
         # (timeline position, seconds left out) of the latest PTS jumps the segmenter dropped
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
         self._last_notify = 0.0
+        self._heard_edge = 0.0  # the live edge the latest state reported
+        self._recorder: Recorder | None = None  # 2.3: writes the ring to a file (`record`)
+        self._finishing: set[Recorder] = set()  # stopped, still writing up to the live edge
         self.thread = threading.Thread(target=self._run, name="qitv-live-session", daemon=True)
+
+    def record(self, rid: str, path: str, seq: int, limits: dict[str, Any]) -> None:
+        """Called by the command loop ("record_start"): never blocks; the recorder's thread
+        makes the file. Answered by "recorded" once it ends (at once when it cannot start: the
+        session records already, or it was closed)."""
+        from services.live.recorder import FAILED, Recorder
+
+        kwargs: dict[str, Any] = {}
+        if isinstance(limits.get("max_s"), (int, float)):
+            kwargs["max_s"] = float(limits["max_s"])
+        if isinstance(limits.get("min_free"), int):
+            kwargs["min_free"] = limits["min_free"]
+        recorder = Recorder(
+            lambda: self._ring,
+            self._is_ended,
+            path,
+            seq,
+            self._recorded,
+            on_progress=self._recording,
+            **kwargs,
+        )
+        recorder.name = rid
+        with self.lock:
+            busy = self.cancelled or self._recorder is not None
+            if not busy:
+                self._recorder = recorder
+        if busy:
+            self._helper.send(("recorded", self.sid, rid, FAILED, "", 0))
+            return
+        recorder.start()
+
+    def stop_recording(self) -> None:
+        """Called by the command loop ("record_stop"); never blocks. The recording writes on
+        up to the live edge meanwhile, and a new one may start at once."""
+        with self.lock:
+            recorder, self._recorder = self._recorder, None
+            if recorder is not None:
+                self._finishing.add(recorder)
+        if recorder is not None:
+            recorder.stop()
+
+    def _recording(self, recorder: Recorder) -> None:
+        """A recording's file and its size so far (its thread): the parent names the file
+        should the helper die."""
+        message = ("recording", self.sid, recorder.name, recorder.path, recorder.written)
+        self._helper.send(message)
+
+    def _recorded(self, recorder: Recorder) -> None:
+        """A recording's end (its own thread): the parent hears it, before or after "closed"."""
+        with self.lock:
+            if self._recorder is recorder:
+                self._recorder = None
+            self._finishing.discard(recorder)
+        end = (recorder.reason, recorder.path, recorder.written)
+        self._helper.send(("recorded", self.sid, recorder.name, *end))
+
+    def resize(self, max_bytes: int) -> None:
+        """Called by the command loop: a RAM session's size from now on (see "resize"). A
+        disk session's, or one that fell back to RAM after its disk failed, stays."""
+        from services.live.ring import RamRing, RingError
+
+        with self.lock:
+            if self.cancelled or self._ring_spec.get("kind") != "ram":
+                return
+            self._ring_spec = dict(self._ring_spec, max_bytes=max_bytes)  # a ring made later
+            ring = self._ring
+        if isinstance(ring, RamRing):
+            try:
+                ring.set_max_bytes(max_bytes)
+            except RingError:
+                _LOG.warning("A live buffer could not change its size.")
 
     def cancel(self) -> None:
         """Called by the command loop; never blocks and never joins the session thread."""
@@ -416,7 +544,7 @@ class _Session:
 
     def _ingest(self) -> None:
         from services.live.ring import RingError
-        from services.live.source import CaughtUp, Discontinuity, SourceError, open_source
+        from services.live.source import SourceError, open_source
 
         target = self._start.get("target")
         try:
@@ -442,25 +570,37 @@ class _Session:
             raise _Cancelled()
         self._adopt(self._make_ring())
         segmenter = self._segmenter
+        trimmer = rejoiner = None
+        if not source.hls:  # HLS has its own discontinuities and no such restarts
+
+            def program() -> tuple[int | None, int | None]:
+                return segmenter.video_pid, segmenter.video_type
+
+            rejoiner = self._rejoiner = ReconnectTrimmer(program=program)
+            self._clock_joiner = ClockJoiner(program=program)
+            # The clock joiner runs the counters on at every junction; without one, the trimmer
+            # does where it drops.
+            trimmer = self._trimmer = RepeatTrimmer(
+                program=program, clock=time.monotonic, join_counters=self._clock_joiner is None
+            )
+            self._loop_trimmer = LoopTrimmer(program=program, clock=time.monotonic)
+        ticking = self._hold_ticker(trimmer) if trimmer is not None else None
         try:
-            for item in source.chunks():
+            try:
+                for item in source.chunks():
+                    with self._moving:
+                        self._take(item, source, trimmer, rejoiner)
+            finally:
+                if ticking is not None:
+                    ticking.set()
+            with self._moving:
+                self._raise_tick_failure()
                 self._check()
-                if isinstance(item, Discontinuity):
-                    segmenter.discontinuity()
-                elif isinstance(item, CaughtUp):
-                    # The batch's end, which the throttle may have held back, and the start's
-                    # backlog has landed: the parent chooses where to start on this.
-                    self._caught_up = True
-                    self._notify(force=True)
-                else:
-                    self._follow(source)  # before its bytes: where an HLS segment begins
-                    self._received += len(item)
-                    self._apply(segmenter.feed(item))
-                    self._measure()
-                    if not self._ready:
-                        self._notify()  # bytes flow, nothing playable yet: say so
-            self._check()
-            self._apply(segmenter.finish())
+                if trimmer is not None and rejoiner is not None:
+                    self._pass_on(trimmer.feed(rejoiner.finish()))
+                    self._pass_on(trimmer.finish())
+                    self._clock_end(reconnect=False)
+                self._finish_segmenter()
         except SourceError as error:
             self._fail(error.kind, str(error), error.status)
             return
@@ -610,12 +750,103 @@ class _Session:
             self._answered = answered
             self._notify(force=True)
 
+    def _take(
+        self,
+        item: Any,
+        source: Source,
+        trimmer: RepeatTrimmer | None,
+        rejoiner: ReconnectTrimmer | None,
+    ) -> None:
+        """One item of the source down the pipeline: bytes, or a marker."""
+        from services.live.source import CaughtUp, Discontinuity, Reconnecting
+
+        self._raise_tick_failure()
+        self._check()
+        if isinstance(item, Reconnecting):
+            self._reconnecting = True
+            self._notify(force=True)
+            return
+        self._reconnecting = False
+        if isinstance(item, Discontinuity):
+            self._relabeler.reconnect()
+            if trimmer is not None and rejoiner is not None:
+                # A reconnect: what they hold passes on untouched.
+                self._pass_on(trimmer.feed(rejoiner.reconnect()))
+                self._pass_on(trimmer.discontinuity())
+                self._clock_end(reconnect=True)
+            self._discontinuity()
+        elif isinstance(item, CaughtUp):
+            # The batch's end, which the throttle may have held back, and the start's
+            # backlog has landed: the parent chooses where to start on this.
+            self._caught_up = True
+            self._notify(force=True)
+        else:
+            self._follow(source)  # before its bytes: where an HLS segment begins
+            self._received += len(item)
+            if trimmer is None or rejoiner is None:
+                self._to_segmenter(item)
+            else:
+                self._pass_on(trimmer.feed(rejoiner.feed(item)))
+            self._measure()
+            if not self._ready:
+                self._notify()  # bytes flow, nothing playable yet: say so
+
+    def _hold_ticker(self, trimmer: RepeatTrimmer) -> threading.Event:
+        """Raw TS: while the session thread waits on a silent source (it reads with a 20 s
+        stall timeout), a restart the trimmer holds is still judged every `_HOLD_TICK_S`
+        (`RepeatTrimmer.tick`), so a pause in its burst lets it go then, not with the next
+        read: VLC plays its cushion meanwhile, and what was held would be missing from it.
+        Each tick takes the pipeline as the session thread does (`_moving`), only while
+        something is held; returns the event that stops it. A tick that fails (a ring that
+        cannot take a segment, say) ends the ticker: what it failed with is logged and the
+        session thread raises it with its next item, as if that item had met it, so the
+        session ends the way it would have (`_fail`)."""
+        stop = threading.Event()
+
+        def tick() -> None:
+            while not stop.wait(_HOLD_TICK_S):
+                if not trimmer.holding:
+                    continue  # nothing held: the pipeline is left to the session thread
+                with self._moving:
+                    if stop.is_set() or self.cancelled or not trimmer.holding:
+                        continue
+                    try:
+                        self._pass_on(trimmer.tick())
+                        self._measure()
+                    except _Cancelled:
+                        return
+                    except Exception as error:
+                        _LOG.warning(
+                            "A held restart could not be passed on (%s); the session ends.",
+                            type(error).__name__,
+                        )
+                        self._tick_failed = error
+                        return
+
+        threading.Thread(target=tick, name=f"qitv-live-hold-{self.sid}", daemon=True).start()
+        return stop
+
+    def _raise_tick_failure(self) -> None:
+        """What a hold tick failed with, raised in the session thread (`_hold_ticker`)."""
+        failed, self._tick_failed = self._tick_failed, None
+        if failed is not None:
+            raise failed
+
     def _fail(self, kind: str, message: str, status: int | None = None) -> None:
         """Report a failure that ends the input; the buffered part stays playable."""
+        with self._moving:
+            self._end_input(kind, message, status)
+
+    def _end_input(self, kind: str, message: str, status: int | None) -> None:
         if self._ring is not None:
             self._check()  # a cancelled session never touches its ring again
             try:
-                self._apply(self._segmenter.finish())
+                if self._trimmer is not None:
+                    if self._rejoiner is not None:
+                        self._pass_on(self._trimmer.feed(self._rejoiner.finish()))
+                    self._pass_on(self._trimmer.finish())
+                    self._clock_end(reconnect=False)
+                self._finish_segmenter()
             except _Cancelled:
                 raise
             except Exception as error:
@@ -623,6 +854,55 @@ class _Session:
             self._ended = True  # readers stop at the end of the buffer instead of waiting
             self._notify(force=True)
         self._send(_error(self.sid, kind, message, status))
+
+    def _pass_on(self, pieces: list[bytes]) -> None:
+        """The trimmer's output, through the loop trimmer and the clock joiner, to the
+        segmenter. Between two of the trimmer's pieces a restarted run starts (and between two
+        of the loop trimmer's, the new content after a loop it dropped): the clock joiner
+        re-bases it so its timestamps run on, and between two of its pieces (or, without one,
+        the trimmer's) the segmenter cuts the new run a segment of its own."""
+        loop = self._loop_trimmer
+        self._rebase(pieces if loop is None else loop.feed(pieces))
+
+    def _rebase(self, pieces: list[bytes]) -> None:
+        """Pieces through the clock joiner to the segmenter (see `_pass_on`)."""
+        clock = self._clock_joiner
+        for k, piece in enumerate(pieces):
+            parts = [piece] if clock is None else clock.feed(piece, junction=k > 0)
+            for j, part in enumerate(parts):
+                if (j if clock is not None else k) > 0:
+                    self._discontinuity()
+                if part:
+                    self._to_segmenter(part)
+
+    def _clock_end(self, reconnect: bool) -> None:
+        """The loop trimmer's and the clock joiner's input ends (a reconnect follows, or the
+        end): what they hold."""
+        loop = self._loop_trimmer
+        if loop is not None:
+            self._rebase(loop.reconnect() if reconnect else loop.finish())
+        clock = self._clock_joiner
+        if clock is not None:
+            tail = clock.discontinuity() if reconnect else clock.finish()
+            if tail:
+                self._to_segmenter(tail)
+
+    def _to_segmenter(self, data: bytes) -> None:
+        """Bytes for the segmenter, through the audio relabeler."""
+        self._apply(self._segmenter.feed(self._relabeler.feed(data)))
+
+    def _discontinuity(self) -> None:
+        """The segmenter's next cut is a discontinuity; what the relabeler holds goes first."""
+        held = self._relabeler.flush()
+        if held:
+            self._apply(self._segmenter.feed(held))
+        self._segmenter.discontinuity()
+
+    def _finish_segmenter(self) -> None:
+        held = self._relabeler.flush()
+        if held:
+            self._apply(self._segmenter.feed(held))
+        self._apply(self._segmenter.finish())
 
     def _follow(self, source: Source) -> None:
         """HLS: note the live edge where each segment's first bytes begin (`_backlog`), and
@@ -665,10 +945,11 @@ class _Session:
 
     def _measure(self) -> None:
         """Feed the burst meter; a new estimate is reported at once (it moves the parent's
-        target and stall bound)."""
+        target and stall bound), and so is a live edge `_EDGE_STEP_S` past the last reported."""
         before = self._bursts.burst_s
-        self._bursts.add(time.monotonic(), self._live_edge())
-        if self._bursts.burst_s != before:
+        edge = self._live_edge()
+        self._bursts.add(time.monotonic(), edge)
+        if self._bursts.burst_s != before or edge - self._heard_edge >= _EDGE_STEP_S:
             self._notify(force=True)
 
     def _notify(self, force: bool = False) -> None:
@@ -688,6 +969,7 @@ class _Session:
             if first is not None and evicted is not None and first <= evicted:
                 timeline.on_evicted(evicted)
         breaks = self._breaks
+        edge = self._live_edge()
         while breaks and breaks[0][0] < timeline.start - _BREAK_SLACK_S:
             breaks.popleft()  # its media went a while ago: no player can reach it any more
         snapshot = {
@@ -696,7 +978,7 @@ class _Session:
             "open": ring.open_seq if ring is not None else None,
             "start": timeline.start,
             "end": timeline.end,
-            "live_edge": self._live_edge(),
+            "live_edge": edge,
             "bytes": ring.bytes if ring is not None else 0,
             "ended": self._ended,
             # HLS: the target duration, which a reload may change; raw TS: what the meter
@@ -725,7 +1007,11 @@ class _Session:
             "video": self._segmenter.video_pid is not None,
             # The source answered (2.1): its headers came, though no byte may have yet.
             "answered": self._answered,
+            # Raw TS: the connection broke and a new one is being opened (a silent but open
+            # connection is waited out first: a stall is not a reconnect).
+            "reconnecting": self._reconnecting,
         }
+        self._heard_edge = edge
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the
         # parent drops spans older than `first` and appends the additions, so a long
@@ -751,6 +1037,15 @@ class _Session:
                 _LOG.info("A live upstream connection is still closing.")
 
     def _teardown(self) -> None:
+        with self.lock:
+            recorders = [r for r in (self._recorder, *self._finishing) if r is not None]
+        # A recording writes what the ring holds up to its live edge before the ring goes.
+        deadline = time.monotonic() + _RECORD_GRACE
+        for recorder in recorders:
+            recorder.stop()
+        for recorder in recorders:
+            if not recorder.join(max(0.0, deadline - time.monotonic())):
+                _LOG.info("A recording is still finishing as its buffer closes.")
         with self.lock:
             ring, self._ring = self._ring, None
         if ring is not None:
@@ -809,6 +1104,21 @@ class _Helper:
                     self._open(*command[1:])
                 else:
                     self._close(command[1])
+            elif name == "resize":
+                size = command[2] if len(command) == 3 else None
+                if not isinstance(command[1], str) or type(size) is not int or size <= 0:
+                    raise ValueError("a resize needs a session and a positive size")
+                session = self._sessions.get(command[1])
+                if session is not None:
+                    session.resize(size)
+            elif name == "record_start":
+                self._record(command)
+            elif name == "record_stop":
+                if len(command) != 2 or not isinstance(command[1], str):
+                    raise ValueError("a recording's stop needs a session")
+                session = self._sessions.get(command[1])
+                if session is not None:
+                    session.stop_recording()
             elif name == "shutdown":
                 return False
             else:
@@ -835,6 +1145,25 @@ class _Helper:
         session = _Session(self, sid, url, headers, verify_ssl, ring, live_delay, start)
         self._sessions[sid] = session
         session.thread.start()
+
+    def _record(self, command: tuple[Any, ...]) -> None:
+        """("record_start", sid, rid, path, seq, limits): the session records, else
+        "recorded" says it failed at once."""
+        from services.live.recorder import FAILED
+
+        if (
+            len(command) != 6
+            or not all(isinstance(command[k], str) and command[k] for k in (1, 2, 3))
+            or type(command[4]) is not int
+            or not isinstance(command[5], dict)
+        ):
+            raise ValueError("a recording needs a session, a name, a path, a segment, limits")
+        sid, rid, path, seq, limits = command[1:]
+        session = self._sessions.get(sid)
+        if session is None:
+            self.send(("recorded", sid, rid, FAILED, "", 0))
+            return
+        session.record(rid, path, seq, limits)
 
     def _close(self, sid: str) -> None:
         session = self._sessions.pop(sid, None)

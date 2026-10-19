@@ -15,6 +15,7 @@ from typing import Any, Optional
 from PySide6.QtCore import QObject, Signal
 
 from services.export import save_m3u_content, save_stb_content
+from services.i18n import N_, tr
 from services.lazy_import import lazy_module
 from services.provider_api import provider_prefers_https, stb_endpoint, stb_portal_base
 from services.redact import safe_exc
@@ -26,15 +27,17 @@ requests = lazy_module("requests")
 SECTION_KEYS = {"live": "itv", "movies": "vod", "series": "series"}
 REQUEST_TIMEOUT = (10, 30)
 
-MSG_STB_SERIES_ONLY = (
+# The messages stay English (ui/export_flow.py compares MSG_CANCELLED) and are shown with
+# `translate`.
+MSG_STB_SERIES_ONLY = N_(
     "Complete export is only available for STB series. Use “Cached content” instead."
 )
-MSG_LOAD_LIVE = "Load Live TV first."
-MSG_NOTHING_LOADED = "Nothing is loaded in this section yet."
-MSG_CANCELLED = "Export cancelled"
-MSG_NO_EPISODES = "No episodes found to export."
-MSG_UNREACHABLE = "Couldn\u2019t reach the provider to fetch episodes."
-MSG_WRITE_FAILED = "Export failed: couldn\u2019t write the file"
+MSG_LOAD_LIVE = N_("Load Live TV first.")
+MSG_NOTHING_LOADED = N_("Nothing is loaded in this section yet.")
+MSG_CANCELLED = N_("Export cancelled")
+MSG_NO_EPISODES = N_("No episodes found to export.")
+MSG_UNREACHABLE = N_("Couldn\u2019t reach the provider to fetch episodes.")
+MSG_WRITE_FAILED = N_("Export failed: couldn\u2019t write the file")
 POLL_SECONDS = 0.05
 
 
@@ -153,12 +156,13 @@ class ExportWorker(QObject):
             self.error.emit(MSG_WRITE_FAILED)
         except Exception as e:
             logger.error("Export failed: %s", safe_exc(e))
-            self.error.emit(f"Export failed: {type(e).__name__}")
+            # i18n: error is the failure's kind, as Python names it ("KeyError")
+            self.error.emit(tr("Export failed: {error}", error=type(e).__name__))
 
     def _run_simple(self) -> None:
         section = "live" if self._kind == ExportKind.ALL_LIVE else self._section
         items = collect_items(self._content, section)
-        self.progress.emit(1, 1, "Writing\u2026")
+        self.progress.emit(1, 1, tr("Writing\u2026"))  # i18n: an export's progress
         self.finished.emit(write_items(self._provider, items, self._path))
 
     def _run_complete(self) -> None:

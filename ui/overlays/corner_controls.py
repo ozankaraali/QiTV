@@ -18,7 +18,6 @@ acts once.
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
-    QHelpEvent,
     QMouseEvent,
     QPainter,
     QPaintEvent,
@@ -26,8 +25,9 @@ from PySide6.QtGui import (
     QRegion,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QToolTip, QWidget
+from PySide6.QtWidgets import QWidget
 
+from services.i18n import N_, translate
 from ui.overlays.base import Overlay
 from ui.overlays.painting import draw_icon, fill_round
 from ui.theme import PALETTE, qcolor
@@ -37,12 +37,18 @@ MIN_HIT_PX = 28  # each button is this square at least, at the default window an
 GAP_PX = 6
 INSET_PX = 6
 # No key: M types into the Library's search, which has the keys while the player is here.
-MUTE_TOOLTIP = "Mute"
-UNMUTE_TOOLTIP = "Unmute"
-TOOLTIPS = {"back": "Back to the player", "stop": "Stop"}
+# Shown with translate().
+MUTE_TOOLTIP = N_("Mute")  # i18n: tooltip of the corner player's speaker (verb)
+UNMUTE_TOOLTIP = N_("Unmute")  # i18n: tooltip of the corner player's speaker (verb)
+TOOLTIPS = {
+    "back": N_("Back to the player"),  # i18n: tooltip: the corner player takes the window again
+    "stop": N_("Stop"),  # i18n: tooltip of the corner player's × (verb: stop playing)
+}
 
 
 class CornerControls(Overlay):
+    pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
+
     soundRequested = Signal()
     backRequested = Signal()  # ⤢
     stopRequested = Signal()  # ×
@@ -77,8 +83,9 @@ class CornerControls(Overlay):
     def tooltip_at(self, pos: QPointF) -> str:
         name = self._part_at(pos)
         if name == "sound":
-            return UNMUTE_TOOLTIP if self._muted else MUTE_TOOLTIP
-        return TOOLTIPS.get(name or "", "")
+            return translate(UNMUTE_TOOLTIP if self._muted else MUTE_TOOLTIP)
+        text = TOOLTIPS.get(name or "", "")
+        return translate(text) if text else ""
 
     # ---- layout -------------------------------------------------------------------------
 
@@ -194,14 +201,3 @@ class CornerControls(Overlay):
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         event.accept()
-
-    def event(self, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
-            text = self.tooltip_at(QPointF(event.pos()))
-            if text:
-                QToolTip.showText(event.globalPos(), text, self)
-            else:
-                QToolTip.hideText()
-                event.ignore()
-            return True
-        return super().event(event)

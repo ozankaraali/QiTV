@@ -82,6 +82,10 @@ a = Analysis(
         # QiTV's license, and those of what the app ships (VLC, Qt, Python libraries).
         ('LICENSE', '.'),
         ('THIRD-PARTY-NOTICES.md', '.'),
+        # The texts in each language (services/i18n.py). Qt's own (qtbase_<code>.qm, its
+        # buttons and file dialogs) come with PyInstaller's QtCore hook, under
+        # PySide6/Qt/translations.
+        ('i18n/*.json', 'i18n'),
         ('licenses', 'licenses'),
     ],
     hiddenimports=[
@@ -93,7 +97,6 @@ a = Analysis(
         'aiohttp',
         'asyncio',
         'requests',
-        'urlobject',
     ],
     hookspath=[],
     hooksconfig={},

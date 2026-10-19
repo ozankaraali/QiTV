@@ -27,11 +27,13 @@ import warnings
 
 from http_fixtures import LocalSource, leaf, tls_server_context
 from process_fixtures import still_running, terminate
+from test_fmp4 import movie, trak, visual
 from ts_fixtures import PMT_PID, make_stream
 from urllib3.exceptions import InsecureRequestWarning
 
-from services.live import source as source_module, worker
+from services.live import interruptible_http, source as source_module, worker
 from services.live.ring import RamRing
+from services.live.ts import Unsupported
 from services.live.worker import helper_main
 
 REPO = Path(__file__).resolve().parents[1]
@@ -56,6 +58,7 @@ STATE_KEYS = {
     "open_quality",
     "video",
     "answered",
+    "reconnecting",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -764,7 +767,7 @@ class LiveWorkerTests(unittest.TestCase):
             "192-byte-packets": make_stream(4, packet_size=192),
             "scrambled": make_stream(4, scrambled=True),
             "too-short": b"<html>nope</html>",
-            "fragmented-hls": fragmented,
+            "encrypted-fmp4-hls": fragmented,  # its init is CENC: fMP4 is remuxed, that not
             # Its audio only in a separate playlist: the video's segments carry none.
             "separate-audio-hls": (
                 b'#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="a",DEFAULT=YES,'
@@ -772,6 +775,11 @@ class LiveWorkerTests(unittest.TestCase):
             ),
         }
         routes = {f"/user/secret/{name}": (200, {}, body) for name, body in bodies.items()}
+        routes["/user/secret/movie.mp4"] = (
+            200,
+            {},
+            movie(trak(1, b"vide", 90000, visual(b"encv"))),
+        )
         routes["/user/secret/v.m3u8"] = (200, {}, leaf("v.ts"))
         routes["/user/secret/v.ts"] = (200, {}, make_stream(4, audio=False))
         # A live input that turns out scrambled: its upstream is released at the error.
@@ -1308,6 +1316,39 @@ class OutboxTests(unittest.TestCase):
         parent.close()
         child.close()
 
+    def test_resize_sets_a_ram_sessions_size_now_and_for_a_ring_made_later(self):
+        # The multiview: the focused tile's buffer grows, the others' shrink (2.2).
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-live-worker-test-")
+        self.addCleanup(temporary.cleanup)
+        parent, child = multiprocessing.Pipe(duplex=True)
+        self.addCleanup(parent.close)
+        self.addCleanup(child.close)
+        helper = worker._Helper(child, temporary.name)
+        self.addCleanup(helper.server.stop)
+        url = "http://127.0.0.1:9" + SECRET_PATH
+        later = worker._Session(helper, "later", url, {}, True, dict(RAM), 6.0)
+        ram = worker._Session(helper, "ram", url, {}, True, dict(RAM), 6.0)
+        ram._ring = RamRing(RAM["max_bytes"])
+        for seq in range(4):
+            ram._ring.open_segment(seq, b"")
+            ram._ring.append(b"x" * 1000)
+            ram._ring.complete(seq)
+        disk_spec = {"kind": "disk", "dir": "d", "max_bytes": 1 << 30}
+        disk = worker._Session(helper, "disk", url, {}, True, disk_spec, 6.0)
+        helper._sessions.update(later=later, ram=ram, disk=disk)
+        self.assertTrue(helper._dispatch(("resize", "ram", 2500)))
+        self.assertEqual((ram._ring.max_bytes, ram._ring.oldest_seq), (2500, 2))
+        helper._dispatch(("resize", "later", 48 * 1024 * 1024))
+        self.assertEqual(later._make_ring().max_bytes, 48 * 1024 * 1024)
+        helper._dispatch(("resize", "disk", 1024))  # the user's disk size stays
+        self.assertEqual(disk._ring_spec["max_bytes"], 1 << 30)
+        helper._dispatch(("resize", "gone", 1024))  # a closed session: nothing
+        with self.assertLogs("services.live.worker", "WARNING"):
+            for bad in (("resize", "ram", 0), ("resize", "ram"), ("resize", "ram", "2")):
+                self.assertTrue(helper._dispatch(bad))  # the loop goes on
+        self.assertEqual(ram._ring.max_bytes, 2500)
+        self.assertFalse(parent.poll(0.1))  # unanswered
+
     def test_one_bad_message_never_stops_the_writer(self):
         parent, child = multiprocessing.Pipe(duplex=True)
         self.addCleanup(parent.close)
@@ -1398,7 +1439,7 @@ class ClosedAfterReleaseTests(unittest.TestCase):
         # Forced Windows mode: a TLS socket is never touched from another thread, so its
         # reader notices the close within one 0.25 s slice and only then closes it.
         created = []
-        sliced = source_module._sliced_tls_socket
+        sliced = interruptible_http._sliced_tls_socket
 
         def recording(interrupter):
             base = sliced(interrupter)
@@ -1423,8 +1464,8 @@ class ClosedAfterReleaseTests(unittest.TestCase):
         context = self.enterContext(tls_server_context())
         upstream = LocalSource({SECRET_PATH: (200, {}, stalled)}, tls=context)
         self.addCleanup(upstream.close)
-        self.enterContext(patch.object(source_module, "_INTERRUPT_OWNERS", True))
-        self.enterContext(patch.object(source_module, "_sliced_tls_socket", recording))
+        self.enterContext(patch.object(interruptible_http, "_INTERRUPT_OWNERS", True))
+        self.enterContext(patch.object(interruptible_http, "_sliced_tls_socket", recording))
         self.enterContext(warnings.catch_warnings())
         warnings.simplefilter("ignore", InsecureRequestWarning)
         helper = InProcessHelper(self)
@@ -1537,6 +1578,191 @@ class RamFallbackSizeTests(unittest.TestCase):
         self.assertEqual(len(adopted), 1)
         self.assertIsInstance(adopted[0], RamRing)
         self.assertEqual(adopted[0]._max_bytes, 3 * 1024**2)
+
+
+class HeardEdgeTests(unittest.TestCase):
+    """A burst that lands in one read is reported at once, not with the next read: the
+    throttle used to hold the state back, so the GUI heard an edge up to a segment old."""
+
+    def test_the_state_reports_a_burst_at_once(self):
+        from services.live.ts import Segmenter
+
+        data = make_stream(30, gop_s=10.0)  # 10 s segments: their closes are 10 s apart
+        second = len(data) // 30
+        reads = [(0.0, data[: 2 * second]), (0.3, data[2 * second : 3 * second])]
+        rest = data[3 * second :]
+        step = len(rest) // 3 + 1  # 27 s of media in three reads, 10 ms apart
+        reads += [(0.35 + 0.01 * k, rest[k * step : (k + 1) * step]) for k in range(3)]
+        clock = SimpleNamespace(now=0.0)
+        sent = []
+        behind = []
+        helper = SimpleNamespace(
+            root="",
+            send=lambda message, session=None: sent.append(message),
+            server=SimpleNamespace(add_session=lambda *args: None),
+        )
+        session = worker._Session(helper, "e", "http://provider.test/e.ts", {}, True, RAM, 6.0)
+        session._segmenter = Segmenter(clock=lambda: clock.now)
+
+        class Source:
+            hls = False
+            burst_s = 0.0
+            user_agent = "test"
+
+            def chunks(self):
+                for at, chunk in reads:
+                    clock.now = at
+                    yield chunk
+                    # The read is in: what the GUI heard last, against the pipeline's edge.
+                    heard = [m[2]["live_edge"] for m in sent if m[0] == "state"]
+                    behind.append(session._live_edge() - heard[-1])
+
+            def close(self):
+                pass
+
+            def wait_closed(self, timeout):
+                return True
+
+        with (
+            patch.object(worker, "time", SimpleNamespace(monotonic=lambda: clock.now)),
+            patch.object(source_module, "open_source", lambda *args, **kwargs: Source()),
+        ):
+            session._ingest()
+        self.assertGreater(session._live_edge(), 25.0)
+        self.assertLess(max(behind), worker._EDGE_STEP_S)
+
+    def test_the_state_says_a_new_connection_opens_until_it_delivers(self):
+        # A silent connection is no reconnect; the source's `Reconnecting` is, said at once
+        # (the GUI then reads "Reconnecting…" instead of "Waiting for the channel…").
+        from services.live.source import Discontinuity, Reconnecting
+
+        data = make_stream(8)
+        half = len(data) // 2 // 188 * 188
+        sent = []
+        heard = []
+        helper = SimpleNamespace(
+            root="",
+            send=lambda message, session=None: sent.append(message),
+            server=SimpleNamespace(add_session=lambda *args: None),
+        )
+        session = worker._Session(helper, "r", "http://provider.test/r.ts", {}, True, RAM, 6.0)
+
+        class Source:
+            hls = False
+            burst_s = 0.0
+            user_agent = "test"
+
+            def chunks(self):
+                yield data[:half]
+                heard.append([m[2]["reconnecting"] for m in sent if m[0] == "state"][-1])
+                yield Reconnecting()
+                heard.append([m[2]["reconnecting"] for m in sent if m[0] == "state"][-1])
+                yield Discontinuity()
+                yield data[half:]
+
+            def close(self):
+                pass
+
+            def wait_closed(self, timeout):
+                return True
+
+        with patch.object(source_module, "open_source", lambda *args, **kwargs: Source()):
+            session._ingest()
+        states = [m[2]["reconnecting"] for m in sent if m[0] == "state"]
+        self.assertEqual(heard, [False, True])
+        self.assertFalse(states[-1])
+
+    def paused_restart(self, pause, *, restart=True):
+        """A raw TS session whose source sends a run, then (with `restart`) a restart's burst
+        that repeats its last 5 s, then nothing for `pause` s, then the rest. Returns what it
+        sent, the trimmer's state seen before and after the pause, and the threads that took
+        the pipeline during it."""
+        from tests.test_repeat_trimmer import backlogged, repeat_runs, stream
+
+        timed = stream(repeat_runs(5.0, 1.0))
+        resume = backlogged(20.0) + 1.0  # the new run's burst lands then, the rest at 1x
+        before = b"".join(p for at, p in timed if at < resume)
+        burst = b"".join(p for at, p in timed if resume <= at <= resume + 1e-9)
+        rest = b"".join(p for at, p in timed if at > resume + 1e-9)
+        if not restart:
+            burst, rest = b"", make_stream(4)[188 * 20 :]
+        sent = []
+        helper = SimpleNamespace(
+            root="",
+            send=lambda message, session=None: sent.append(message),
+            server=SimpleNamespace(add_session=lambda *a: None),
+        )
+        session = worker._Session(helper, "h", "http://provider.test/h.ts", {}, True, RAM, 6.0)
+        seen = {"takers": set()}
+        moving = session._moving
+
+        class Watched:
+            """The pipeline's lock, noting the threads that take it."""
+
+            def __enter__(self):
+                moving.acquire()
+                seen["takers"].add(threading.current_thread().name)
+
+            def __exit__(self, *exc):
+                moving.release()
+
+        class Source:
+            hls = False
+            burst_s = 0.0
+            user_agent = "test"
+
+            def chunks(self):
+                yield before[: 188 * 20]  # the tables: the segmenter knows the picture's PID
+                yield before[188 * 20 :]
+                if burst:
+                    yield burst
+                seen["held"] = session._trimmer.holding
+                seen["takers"].clear()
+                session._moving = Watched()
+                time.sleep(pause)  # the source pauses
+                session._moving = moving
+                seen["after"] = session._trimmer.holding
+                seen["trims"] = [trim.reason for trim in session._trimmer.trims]
+                yield rest
+
+            def close(self):
+                pass
+
+            def wait_closed(self, timeout):
+                return True
+
+        with patch.object(source_module, "open_source", lambda *args, **kwargs: Source()):
+            session._ingest()
+        return sent, seen
+
+    def test_a_held_restart_goes_on_while_the_source_pauses(self):
+        # A raw TS restart's burst lands, then the source sends nothing for a while: the hold
+        # is let go during the pause (its media stood still), not with the next read.
+        _, seen = self.paused_restart(1.8)
+        self.assertEqual((seen["held"], seen["after"]), (True, False))
+        self.assertEqual(seen["trims"], ["dropped"])
+
+    def test_a_pause_with_nothing_held_leaves_the_pipeline_to_the_session(self):
+        # Review M4: the ticker looks at the trimmer and takes the pipeline only while
+        # something is held.
+        _, seen = self.paused_restart(1.3, restart=False)
+        self.assertFalse(seen["held"])
+        self.assertFalse(any(name.startswith("qitv-live-hold") for name in seen["takers"]))
+
+    def test_a_tick_that_fails_ends_the_session_with_its_failure(self):
+        # Review I3: what a tick failed with is logged and raised in the session thread with
+        # its next item: the session ends as that item would have ended it.
+        def failing(_self):
+            raise Unsupported("scrambled")
+
+        with (
+            patch.object(worker.RepeatTrimmer, "tick", failing),
+            self.assertLogs("services.live.worker", "WARNING") as logs,
+        ):
+            sent, seen = self.paused_restart(1.3)
+        self.assertTrue(seen["after"])  # still held: its tick failed
+        self.assertIn("unsupported", [m[2] for m in sent if m[0] == "error"])
+        self.assertTrue(any("could not be passed on" in line for line in logs.output))
 
 
 if __name__ == "__main__":

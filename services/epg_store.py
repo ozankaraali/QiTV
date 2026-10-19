@@ -16,11 +16,10 @@ its turn. An STB guide (a dict) is saved in pieces of plain entries; any other g
 
 from __future__ import annotations
 
-import os
 import pickle
-import tempfile
 from typing import Any, Iterable, Iterator
 
+from services.atomic_write import atomic_write
 from services.multikeydict import MultiKeyDict
 
 PIECE_BYTES = 1 << 20  # programme blobs per piece of the file
@@ -137,34 +136,24 @@ def write_guide(path: str, guide: Any) -> Any:
     else:
         kind = "object"
     packed = PackedGuide() if kind == "packed" else None
-    directory = os.path.dirname(path) or "."
-    fd, temporary = tempfile.mkstemp(dir=directory, prefix=".guide-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            pickle.dump((_MAGIC, _VERSION, kind), f, _PROTOCOL)
-            if kind == "object":
-                pickle.dump(guide, f, _PROTOCOL)
-            elif kind == "dict":
-                for piece in _entry_pieces(guide.items()):
-                    pickle.dump(piece, f, _PROTOCOL)
-                pickle.dump(_END, f, _PROTOCOL)
-            else:
-                assert packed is not None
-                for piece in _blob_pieces(guide._data.items()):
-                    pickle.dump(piece, f, _PROTOCOL)
-                    packed._data.update((keys, _Packed(blob)) for keys, blob in piece)
-                pickle.dump(_END, f, _PROTOCOL)
-                for piece in _entry_pieces(guide._keys_map.items()):
-                    pickle.dump(piece, f, _PROTOCOL)
-                pickle.dump(_END, f, _PROTOCOL)
-                packed._keys_map = dict(guide._keys_map)
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.remove(temporary)
-        except OSError:
-            pass
-        raise
+    with atomic_write(path) as f:
+        pickle.dump((_MAGIC, _VERSION, kind), f, _PROTOCOL)
+        if kind == "object":
+            pickle.dump(guide, f, _PROTOCOL)
+        elif kind == "dict":
+            for piece in _entry_pieces(guide.items()):
+                pickle.dump(piece, f, _PROTOCOL)
+            pickle.dump(_END, f, _PROTOCOL)
+        else:
+            assert packed is not None
+            for piece in _blob_pieces(guide._data.items()):
+                pickle.dump(piece, f, _PROTOCOL)
+                packed._data.update((keys, _Packed(blob)) for keys, blob in piece)
+            pickle.dump(_END, f, _PROTOCOL)
+            for piece in _entry_pieces(guide._keys_map.items()):
+                pickle.dump(piece, f, _PROTOCOL)
+            pickle.dump(_END, f, _PROTOCOL)
+            packed._keys_map = dict(guide._keys_map)
     return packed if packed is not None else guide
 
 

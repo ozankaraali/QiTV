@@ -1,10 +1,11 @@
 import random
 import unittest
 
+from auto_target import AutoTarget
+
 from services.live.stay_live import (
     AUTO,
     TARGETS,
-    AutoTarget,
     Decision,
     LagFilter,
     Mode,
@@ -505,6 +506,24 @@ class RateLockTests(unittest.TestCase):
         self.assertTrue(stay.rate_locked)  # for the channel, not until Go live
         self.assertEqual(stay.update(T + 5, False, now=clock.tick()), Decision(1.0))
         self.assertTrue(stay.update(R + 1, False, now=clock.tick()).reopen_live)
+
+    def test_a_tile_without_the_focus_keeps_1x_and_only_jumps_far_behind(self):
+        # 2.2, the multiview: a muted tile never changes its rate; it only goes live.
+        stay, clock = live(), Clock()
+        _, rates = drive(stay, stay.target + 12, 5.0, clock=clock)
+        self.assertNotEqual(rates[-1], 1.0)  # nudging, while it has the focus
+        stay.set_background(True)
+        self.assertEqual(stay.nudge, 1.0)
+        for lag in (0.0, stay.target + 1, stay.target + 5):
+            _, rates = drive(stay, lag, 30.0, clock=clock)
+            self.assertEqual(set(rates), {1.0})
+        lag, rates, jumps = steer(stay, T + 15.0, 20.0, clock=clock, landing=lambda *_: T)
+        self.assertEqual((len(jumps), set(rates)), (1, {1.0}))
+        self.assertFalse(stay.rate_locked)  # only while it has no focus
+        stay.user_go_live()
+        stay.set_background(False)  # the focus again: stay-live steers
+        _, rates = drive(stay, stay.target + 12, 5.0, clock=clock)
+        self.assertNotEqual(rates[-1], 1.0)
 
     def test_a_speed_the_user_chooses_still_applies(self):
         stay, clock = StayLive("normal"), Clock()

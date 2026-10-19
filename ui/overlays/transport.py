@@ -3,7 +3,8 @@
 Modes: VOD, plain live (direct play) and time-shift (live through the pipeline). Time-shift shows
 the bar over the buffered range, or, while the session's stay-live mode is LIVE, the stay-live
 latency indicator (it reads "catching up" while stay-live nudges the rate up, "adding buffer"
-while it nudges it down, and "Reconnecting…" while the source has stalled). It shows the settled
+while it nudges it down, "Waiting for the channel…" while the source has stalled, and
+"Reconnecting…" once the helper opens a new connection to it). It shows the settled
 lag (2.1: in half seconds, changed only once the lag moved for a few seconds): "≈ 2.5 s behind
 source"; under Auto latency "≈ 7 s behind", with "adjusted" while trouble holds the channel's
 learned target up (its starvation prior's margin; not what its arrivals need). Its dot is green
@@ -12,32 +13,60 @@ source stalled. The bar and the Go live chip show only when the viewer left live
 chosen speed); a drag keeps the bar.
 
 Left of fullscreen sit the mini player (the whole window small in a corner, Alt+P), on live
-TV while the window offers picture in picture the second channel (P), then "Open in external
-player" (the shell's VLC/MPV menu for what plays now). Hovering those names them and their keys.
-Left of the audio track (♪) a speaker opens the volume mixer on the large picture's row; it
-shows whether that picture is muted.
+TV while the window offers picture in picture the second channel (P) and the multiview (V,
+lit while its grid shows; the second channel gives way then), then "Open in external player"
+(the shell's VLC/MPV menu for what plays now). Hovering those names them and their keys.
+While the grid shows, a chip left of them names its layout ("2×2"): a click changes it; and
+while the last grid's channels can come back, a "Last grid" chip brings them.
+Left of the sound (♫) a speaker opens the volume mixer on the large picture's row; it shows
+whether that picture is muted. ♫ opens the Sound panel above it and the subtitles button
+the Subtitles panel (ui/track_controls.py): the controls stay up while one shows (`hold`).
 Without a keyboard every key of the player has a control here too (the owner's mouse-only
 rule): left of the speaker sit Search, and on live TV the guide and the previous channel; a
 time-shifted channel at its live edge has ◀10 beside play; on live TV the channel's name (and
 logo) shows its info, and a star after the name adds or removes it from the favorites. Each
 names its key when hovered. A movie or an episode played from the Library has "‹ Library" at the
 left of the right-hand buttons: back to where it came from, as Esc.
-At a small width the Stay live indicator's text is shortened, or the indicator left out, so it
-never runs under the play button.
+At a small width (or in a longer language) the Stay live indicator first leaves out "adjusted",
+then its name (the LIVE badge beside it says live), then its text is cut short, or the
+indicator left out, so it never runs under the play button.
+Catch-up (2.2): on a channel whose provider keeps an archive the time-shift bar reaches
+further back than the buffer (`buffer_start` in the state: where the buffer starts); that
+part of the line is dashed. While the archive plays (`archive` in the state) the whole line
+is dashed, its left end reads "Archive from 18:44", and the bubble over the knob names the
+day too when the moment playing is not today.
+On live TV a record button (a red dot in a ring, R) follows the star (2.2), a control of the
+channel's as the star is: it records a time-shifted channel from where it plays, and while it
+records it is lit and a "● REC 01:23" chip after it counts the time; a channel played directly
+shows it dimmed, and hovering it says why it cannot record (a press asks anyway: the shell
+says why too). It sits up there because the bottom row has no room to spare for it in longer
+languages (the Stay live indicator's).
 """
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import math
-from typing import Callable
+import time
+from typing import Callable, Optional
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QDate,
+    QEvent,
+    QLocale,
+    QObject,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
     QFontMetricsF,
-    QHelpEvent,
     QHideEvent,
     QLinearGradient,
     QMouseEvent,
@@ -47,9 +76,12 @@ from PySide6.QtGui import (
     QPixmap,
     QRegion,
 )
-from PySide6.QtWidgets import QToolTip, QWidget
+from PySide6.QtWidgets import QWidget
 
+from services import i18n
+from services.i18n import N_, tr, translate
 from services.live.stay_live import TARGETS, Mode, SettledLag
+from services.recording import elapsed_text
 from ui.keymap import key_hint
 from ui.overlays.base import Overlay
 from ui.overlays.painting import (
@@ -70,40 +102,56 @@ TOP_FRACTION = 0.22
 BOTTOM_FRACTION = 0.42
 TICK_LABEL_MAX_U = 25.0
 MINUS = "−"
+# The source stalled, its connection still open (the texts are shown with translate()).
+# i18n: the Stay live indicator on the player bar: the channel sends nothing for now
+WAITING = N_("Waiting for the channel…")
+# i18n: the Stay live indicator: a new connection to the channel is being opened
+RECONNECTING = N_("Reconnecting…")
 TOOLTIPS = {
-    "pip": "Second channel (P)",
-    "mini": "Mini player (Alt+P)",
-    "fullscreen": "Fullscreen (F)",
-    "mini_back": "Back to the full window (Alt+P)",
-    "fullscreen_back": "Exit fullscreen (F)",
-    "external": "Open in external player",
-    "volume": "Volume (+/−, M)",
-    "audio": "Audio track",
-    "subtitles": "Subtitles",
-    "slower": "Slower",
-    "speed": "Normal speed",
-    "faster": "Faster",
+    "pip": N_("Second channel (P)"),  # i18n: tooltip; P is the key (picture in picture)
+    "layout": N_("Tiles: 2, 4, 6 or 9"),  # i18n: tooltip of the multiview's layout chip
+    "restore": N_("The channels of the last grid"),  # i18n: tooltip of the "Last grid" chip
+    "mini": N_("Mini player (Alt+P)"),  # i18n: tooltip; the whole window small in a corner
+    "fullscreen": N_("Fullscreen (F)"),  # i18n: tooltip; F is the key
+    "mini_back": N_("Back to the full window (Alt+P)"),  # i18n: tooltip in the mini player
+    "fullscreen_back": N_("Exit fullscreen (F)"),  # i18n: tooltip; F is the key
+    "external": N_("Open in external player"),  # i18n: tooltip; VLC or MPV
+    "volume": N_("Volume (+/−, M)"),  # i18n: tooltip; +, − and M are its keys
+    "slower": N_("Slower"),  # i18n: tooltip of the playback speed's − button
+    "speed": N_("Normal speed"),  # i18n: tooltip of the playback speed chip (back to 1x)
+    "faster": N_("Faster"),  # i18n: tooltip of the playback speed's + button
 }
-LIBRARY_LABEL = "‹ Library"
-# Controls for a key of the player's (ui.keymap.SHORTCUTS): what they do, and that key.
+LIBRARY_LABEL = N_("‹ Library")  # i18n: chip on the player bar: back to the Library; short
+# The multiview's chip: the last grid's channels again.
+RESTORE_LABEL = N_("Last grid")  # i18n: chip on the player bar (multiview); short
+# Controls for a key of the player's (ui.keymap.SHORTCUTS): what they do (translated when
+# shown), and that key.
 KEY_HINTS = {
-    "play": ("Play / pause", "Space"),
-    "back10": ("Back 10 seconds", "Left"),
-    "fwd10": ("Forward 10 seconds", "Right"),
-    "golive": ("Go live", "L"),
-    "previous": ("Previous channel", "Backspace"),
-    "guide": ("Guide", "G"),
-    "search": ("Search", "Ctrl+F"),
-    "title": ("Channel info", "I"),
-    "library": ("Back to the Library", "Esc"),
+    "play": (N_("Play / pause"), "Space"),  # i18n: tooltip of the play button
+    "back10": (N_("Back 10 seconds"), "Left"),
+    "fwd10": (N_("Forward 10 seconds"), "Right"),
+    "golive": (N_("Go live"), "L"),  # i18n: button: jump to the channel's live point
+    "previous": (N_("Previous channel"), "Backspace"),
+    "guide": (N_("Guide"), "G"),  # i18n: tooltip; the programme guide (EPG)
+    "search": (N_("Search"), "Ctrl+F"),  # i18n: tooltip of the search button (verb)
+    "title": (N_("Channel info"), "I"),  # i18n: tooltip of the channel's name and logo
+    "library": (N_("Back to the Library"), "Esc"),
+    # 2.2: each opens a panel whose − and + are these keys.
+    "audio": (N_("Sound: track and sync"), "J, K"),  # i18n: tooltip of the sound button
+    # i18n: tooltip of the subtitles button
+    "subtitles": (N_("Subtitles: track, file and sync"), "Shift+J, Shift+K"),
 }
 FAVORITE_KEY = "Ctrl+D"
+GRID_KEY = "V"  # the multiview: its grid, or back to one picture
+RECORD_KEY = "R"  # record the channel, or stop recording (2.2)
+# i18n: tooltip of the record button (and a toast) on a channel played without time-shift
+NO_RECORDING = N_("Can't record: this channel plays without time-shift")
 # button name -> painting icon, if they differ
 _ICONS = {"mini": "mini_player", "pip": "pip", "previous": "recent"}
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
 # A quick second click (a double-click) repeats these steps; on any other control it counts
 # once: a toggle (★, ⛶, ▶) would undo itself, a jump (⟲, Next) go one further.
-_REPEATS = ("back10", "fwd10", "fwd60", "slower", "faster", "audio", "subtitles")
+_REPEATS = ("back10", "fwd10", "fwd60", "slower", "faster")
 _ICON_BUTTONS = (  # painted as icons
     "previous",
     "guide",
@@ -113,13 +161,24 @@ _ICON_BUTTONS = (  # painted as icons
     "volume",
     "external",
     "pip",
+    "grid",
     "mini",
     "fullscreen",
 )
 
 
 def _speed_label(rate: float) -> str:
-    return f"{rate:g}x"
+    return tr(
+        "{rate}x", rate=i18n.decimal(f"{rate:g}")
+    )  # i18n: playback speed on the player bar ("1.25x")
+
+
+def _live_label() -> str:
+    return tr("LIVE")  # i18n: red badge on the player bar (live TV), in capitals; max ~6 letters
+
+
+def _go_live_label() -> str:
+    return tr("Go live")  # i18n: chip on the time-shift bar: jump to the channel's live point
 
 
 def _seconds(value: float) -> float:
@@ -141,6 +200,10 @@ def _local_now() -> datetime:
     return datetime.now().astimezone()
 
 
+def _optional(value: object) -> Optional[float]:
+    return float(value) if isinstance(value, (int, float)) else None
+
+
 @dataclass(frozen=True)
 class _TitleRow:
     """The top row: the channel's (or title's) name, on live TV a star after it, the clock."""
@@ -148,6 +211,8 @@ class _TitleRow:
     name: str  # elided to its room
     name_rect: QRectF
     star: QRectF  # empty but on live TV
+    record: QRectF  # the record button (2.2): empty but on live TV
+    rec: QRectF  # the REC chip: empty but while it records
     subtitle_x: float
     clock: str
     clock_rect: QRectF
@@ -169,8 +234,11 @@ class _Timeline:
     paused: bool
     target: float
     stalled: bool
+    reconnecting: bool  # the helper opens a new connection (raw TS)
     auto: bool  # Auto latency
     adjusted: bool  # the channel's Auto target moved from where Auto starts
+    archive: bool = False  # the provider's archive plays (catch-up)
+    buffer_start: Optional[float] = None  # the bar reaches into an archive: the buffer's start
 
     @classmethod
     def from_state(cls, state: dict) -> "_Timeline":
@@ -187,12 +255,17 @@ class _Timeline:
             paused=bool(state["paused"]),
             target=float(state.get("target", TARGETS["normal"])),
             stalled=bool(state.get("stalled", False)),
+            reconnecting=bool(state.get("reconnecting", False)),
             auto=bool(state.get("auto", False)),
             adjusted=bool(state.get("adjusted", False)),
+            archive=bool(state.get("archive", False)),
+            buffer_start=_optional(state.get("buffer_start")),
         )
 
 
 class Transport(Overlay):
+    pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
+
     playPauseRequested = Signal()
     seekRequested = Signal(int)
     seekRelativeRequested = Signal(int)
@@ -205,6 +278,9 @@ class Transport(Overlay):
     programmeStartRequested = Signal()
     seekToRequested = Signal(float)
     pipRequested = Signal()  # the second channel: open picture in picture, or close it
+    gridRequested = Signal()  # the multiview: its grid, or back to one picture
+    layoutRequested = Signal()  # the grid's layout chip: the next layout
+    restoreRequested = Signal()  # the grid's "Last grid" chip: the last grid's channels
     miniPlayerRequested = Signal()
     # "Open in external player": the shell's menu opens from this point (the button's
     # top-left, global coordinates).
@@ -216,6 +292,7 @@ class Transport(Overlay):
     infoRequested = Signal()  # the channel's name: its info (the banner)
     favoriteRequested = Signal()  # the star after the name: add or remove the channel
     libraryRequested = Signal()  # ‹ Library: back to the Library the title came from (Esc)
+    recordRequested = Signal()  # the record button: record the channel, or stop (2.2)
     bandChanged = Signal()  # its controls changed (a mode, the bar): controls_top() moved
 
     def __init__(
@@ -223,11 +300,18 @@ class Transport(Overlay):
         parent: QWidget | None = None,
         idle_ms: int = 3000,
         now: Callable[[], datetime] = _local_now,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        """`clock`: what a recording's start (`set_recording`) is measured on."""
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self._now = now
+        self._rec_clock = clock
+        self._rec_since: Optional[float] = None  # recording since (the clock's), else None
+        self._rec_timer = QTimer(self)  # the REC chip counts the seconds while shown
+        self._rec_timer.setInterval(1000)
+        self._rec_timer.timeout.connect(self._tick_rec)
         self._live = False
         self._timeshift = False
         self._title = ""
@@ -240,11 +324,16 @@ class Transport(Overlay):
         self._next_available = False
         self._pip_available = False  # the window can open a second channel
         self._pip_open = False
+        self._grid_available = False  # the window can show the multiview's grid
+        self._grid_shown = False
+        self._grid_layout = ""  # the grid's layout, as its chip names it ("2×2")
+        self._grid_restorable = False  # the last grid can come back: its chip shows
         self._pip_rect = QRect()  # the small picture: the shades leave it alone
         self._muted = False  # the large picture's mute: the speaker shows it
         self._mini = self._fullscreen = False  # their buttons then show the way back
         self._favorite = False  # the live channel is a favorite: its star is lit
         self._library = False  # the title came from the Library: ‹ Library shows
+        self._held = ""  # the button whose panel is open: no fade meanwhile, and it is lit
         self._hand = False  # the pointer is over the title row's controls
         self._timeline: _Timeline | None = None
         self._claimed: tuple[object, ...] = ()  # what hole_claims() covered last
@@ -252,7 +341,8 @@ class Transport(Overlay):
         self._edge = True
         self._edge_lag: float | None = None
         self._catching_up = False
-        self._stalled = False  # the source stalled at the live edge: "Reconnecting…"
+        self._stalled = False  # the source stalled at the live edge: `WAITING` ...
+        self._reconnecting = False  # ... and a new connection is being opened: `RECONNECTING`
         self._auto: bool | None = None  # Auto latency: whether its target moved (else None)
         self._rate = 1.0
         # A bar fraction, not a time: the knob stays under the cursor while the buffer slides.
@@ -302,9 +392,12 @@ class Transport(Overlay):
         """Take a `LiveSession.timelineChanged` state; never changes visibility.
 
         `ticks` are programme starts in timeline seconds with their labels. An optional
-        `target` key is the session's effective stay-live target (default: Normal), and an
-        optional `stalled` key says the source stalled (the live-edge row reads "Reconnecting…").
+        `target` key is the session's effective stay-live target (default: Normal), an optional
+        `stalled` key says the source stalled (the live-edge row reads "Waiting for the
+        channel…"), and `reconnecting` that a new connection is being opened ("Reconnecting…").
         Optional `auto` and `adjusted` keys: Auto latency, and its target for the channel moved.
+        Catch-up: `buffer_start`, where the buffer starts on a bar that reaches into the
+        provider's archive; `archive`, the archive plays (the bar is its own).
         """
         tl = _Timeline.from_state(state)
         self._timeline = tl
@@ -314,22 +407,12 @@ class Transport(Overlay):
         self._edge_lag = tl.shown
         self._auto = tl.adjusted if tl.auto else None
         self._stalled = live and tl.stalled
+        self._reconnecting = self._stalled and tl.reconnecting
         # Steering: any rate but 1x (a nudge's ramp included), slower ones too.
         self._catching_up = live and (tl.rate != 1.0 or tl.nudge != 1.0) and not self._stalled
         self._rate = tl.nudge if tl.nudge != 1.0 else tl.rate  # the nudge's, not the ramp's
         self._speed = 1.0 if live else tl.rate  # stay-live's nudges are not a chosen speed
         self._paused = tl.paused
-        self.update()
-        self._controls_changed()
-
-    def show_live_edge(self, lag_s: float, catching_up: bool) -> None:
-        """Show the live-edge indicator instead of the bar; never changes visibility."""
-        self._live = self._timeshift = True
-        self._edge = True
-        self._edge_lag = SettledLag.rounded(_seconds(lag_s))
-        self._auto = None
-        self._catching_up = catching_up
-        self._stalled = False
         self.update()
         self._controls_changed()
 
@@ -373,6 +456,29 @@ class Transport(Overlay):
             self.update()
             self._controls_changed()
 
+    def set_grid_state(
+        self, available: bool, shown: bool, layout: str = "", restorable: bool = False
+    ) -> None:
+        """The multiview's button: shown on live TV when `available`; lit while its grid
+        shows, with the layout chip naming `layout` ("2×2") beside it, and while the last
+        grid's channels can come back (`restorable`), a "Last grid" chip."""
+        state = (available, shown, layout if shown else "", restorable and shown)
+        current = (
+            self._grid_available,
+            self._grid_shown,
+            self._grid_layout,
+            self._grid_restorable,
+        )
+        if state != current:
+            (
+                self._grid_available,
+                self._grid_shown,
+                self._grid_layout,
+                self._grid_restorable,
+            ) = state
+            self.update()
+            self._controls_changed()
+
     def set_muted(self, muted: bool) -> None:
         """Whether the large picture is muted: its speaker shows it."""
         if muted != self._muted:
@@ -403,6 +509,28 @@ class Transport(Overlay):
             self.update()
             self._controls_changed()
 
+    def set_recording(self, since: Optional[float]) -> None:
+        """The channel records since `since` (the clock's): the record button is lit and the
+        "● REC 01:23" chip shows; None: it does not."""
+        if since == self._rec_since:
+            return
+        self._rec_since = since
+        if since is None:
+            self._rec_timer.stop()
+        else:
+            self._rec_timer.start()
+        self.update()
+        self._controls_changed()
+
+    def recording(self) -> bool:
+        return self._rec_since is not None
+
+    def rec_text(self) -> str:
+        """What the REC chip says ("REC 01:23"); "" while nothing records."""
+        if self._rec_since is None:
+            return ""
+        return elapsed_text(self._rec_clock() - self._rec_since)
+
     def set_favorite(self, favorite: bool) -> None:
         """Whether the live channel is a favorite: its star is lit."""
         if favorite != self._favorite:
@@ -411,7 +539,8 @@ class Transport(Overlay):
 
     def title_rects(self) -> dict[str, QRectF]:
         """On live TV the title row's controls: "title" (the logo and the name: the channel's
-        info) and "favorite" (the star after the name); nothing otherwise."""
+        info), "favorite" (the star after the name) and "record" (the red dot after it);
+        nothing otherwise."""
         if not self._live:
             return {}
         row = self._title_row()
@@ -419,20 +548,34 @@ class Transport(Overlay):
         badge = self.badge_rect()
         if not badge.isEmpty():
             title = title.united(badge)
-        return {"title": title, "favorite": row.star}
+        return {"title": title, "favorite": row.star, "record": row.record}
+
+    def rec_rect(self) -> QRectF:
+        """The REC chip (empty while nothing records): it only says."""
+        return self._title_row().rec if self._live else QRectF()
 
     def hole_claims(self) -> QRegion:
         """Over the PiP, the clicks this keeps (host coordinates): its buttons and its bar, and
-        on live TV the channel's name and star."""
+        on live TV the channel's name and star. Over the multiview's grid (the whole picture)
+        also what it only says (LIVE, the times, the subtitle, the clock), so it shows whole."""
         region = QRegion()
         for name, rect in self._layout().items():
-            if name in _LABELS:
+            if name in _LABELS and not self._grid_shown:
                 continue
             if name == "seek":
                 rect = rect.adjusted(0, -rect.height(), 0, rect.height())  # its hit area
             region = region.united(QRegion(rect.toAlignedRect()))
         for rect in self.title_rects().values():
             region = region.united(QRegion(rect.toAlignedRect()))
+        if self._grid_shown:  # over the multiview's grid what it says shows whole too
+            row = self._title_row()
+            region = region.united(QRegion(row.clock_rect.toAlignedRect()))
+            if not row.rec.isEmpty():
+                region = region.united(QRegion(row.rec.toAlignedRect()))
+            if self._subtitle:
+                width = row.clock_rect.left() - Units(self.width()).px(2) - row.subtitle_x
+                subtitle = QRectF(row.subtitle_x, row.name_rect.y(), width, row.name_rect.height())
+                region = region.united(QRegion(subtitle.toAlignedRect()))
         return region.translated(self.geometry().topLeft())
 
     def controls_top(self) -> int:
@@ -453,10 +596,20 @@ class Transport(Overlay):
 
     def _controls_changed(self) -> None:
         """The host masks the PiP anew when this shows other controls (a mode, the bar)."""
+        layout = self._layout()
+        grid = self._grid_shown  # over the grid its labels and subtitle are claimed too
         claimed = (
             self.size(),
-            tuple(sorted(n for n in self._layout() if n not in _LABELS)),
+            tuple(sorted(n for n in layout if n not in _LABELS)),
             tuple((n, r.getRect()) for n, r in self.title_rects().items()),  # moves with the name
+            self.rec_rect().getRect() if grid else (),
+            grid,
+            (
+                tuple((n, r.toAlignedRect().getRect()) for n, r in layout.items() if n in _LABELS)
+                if grid
+                else ()
+            ),
+            self._subtitle if grid else "",
         )
         if claimed == self._claimed:
             return
@@ -475,21 +628,58 @@ class Transport(Overlay):
         return ""
 
     def _tooltip(self, name: str) -> str:
+        if name == "record":
+            if self._rec_since is not None:
+                return key_hint(tr("Stop recording"), RECORD_KEY)  # i18n: tooltip (verb)
+            if not self._timeshift:
+                return translate(NO_RECORDING)
+            # i18n: tooltip of the record button: record the channel being watched (verb)
+            return key_hint(tr("Record"), RECORD_KEY)
+        if name == "grid":
+            if self._grid_shown:
+                what = tr("Back to one picture")  # i18n: tooltip: leave the multiview's grid
+            else:
+                what = tr("Multiview")  # i18n: tooltip: several channels at once, in a grid
+            return key_hint(what, GRID_KEY)
         if name == "favorite":
-            what = "Remove from favorites" if self._favorite else "Add to favorites"
+            if self._favorite:
+                what = tr("Remove from favorites")  # i18n: tooltip of the star after the name
+            else:
+                what = tr("Add to favorites")  # i18n: tooltip of the star after the name
             return key_hint(what, FAVORITE_KEY)
         if name in KEY_HINTS:
-            return key_hint(*KEY_HINTS[name])
+            what, key = KEY_HINTS[name]
+            return key_hint(translate(what), key)
         if (name == "mini" and self._mini) or (name == "fullscreen" and self._fullscreen):
-            return TOOLTIPS[f"{name}_back"]
-        return TOOLTIPS.get(name, "")
+            return translate(TOOLTIPS[f"{name}_back"])
+        text = TOOLTIPS.get(name, "")
+        return translate(text) if text else ""
 
     def poke(self) -> None:
         """Show (fade later); already shown, only restart the fade: no repaint, no mask."""
         if self.isHidden():
             self._fit()
             self.show()  # paints, and the host takes the new mask
-        self._idle.start()
+        self._fade_later()
+
+    def hold(self, button: str) -> None:
+        """Stay up while `button`'s panel is open, the button lit (no fade); "": let go, the
+        fade starts again."""
+        if button != self._held:
+            self._held = button
+            self.update()
+        if button:
+            self._idle.stop()
+        elif self.isVisible():
+            self._idle.start()
+
+    def held(self) -> str:
+        """The button whose panel is open ("": none)."""
+        return self._held
+
+    def _fade_later(self) -> None:
+        if not self._held:
+            self._idle.start()
 
     def dismiss(self) -> None:
         if self._drag is not None:
@@ -501,22 +691,51 @@ class Transport(Overlay):
         if self.isVisible():
             self.update()
 
+    def _tick_rec(self) -> None:
+        """A second more on the REC chip (it widens at the hour: the controls move then)."""
+        if self.isVisible():
+            self.update()
+            self._controls_changed()
+
     def texts(self) -> tuple[str, str]:
         if self._timeshift:
             if not self._shows_bar():
-                return ("LIVE", self.indicator_text())
+                return (_live_label(), self.indicator_text())
             tl = self._timeline
             assert tl is not None
-            buffer_from = fmt_clock(self._wall(tl.live_edge - tl.start))
-            return (f"Buffer from {buffer_from}", f"{fmt_behind(self._shown_lag())} behind live")
+            if tl.archive:
+                archive_from = fmt_clock(self._wall(tl.live_edge - tl.start))
+                left = tr(
+                    "Archive from {time}",  # i18n: under the bar while the provider's archive plays
+                    time=archive_from,
+                )
+                behind = fmt_behind(self._shown_lag())
+                # i18n: under the time-shift bar, right: how far behind live it plays ("−00:38")
+                return (left, tr("{behind} behind live", behind=behind))
+            buffered = tl.start if tl.buffer_start is None else tl.buffer_start
+            buffer_from = fmt_clock(self._wall(tl.live_edge - buffered))
+            return (
+                # i18n: under the time-shift bar, left: the oldest buffered time ("18:44")
+                tr("Buffer from {time}", time=buffer_from),
+                # i18n: under the time-shift bar, right: how far behind live it plays ("−00:38")
+                tr("{behind} behind live", behind=fmt_behind(self._shown_lag())),
+            )
         if self._live:
-            return ("LIVE", "")
+            return (_live_label(), "")
         shown = self._shown_ms()
         return (fmt_duration(shown), "-" + fmt_duration(max(0, self._length - shown)))
 
     def indicator_text(self) -> str:
-        head, tail = self._indicator_parts()
-        return f"{head} ● {tail}" if tail else ""
+        """The Stay live indicator as it reads at this size ("" when it is not shown): with
+        less room without "adjusted", then without its name."""
+        box = self._layout().get("indicator") if self._timeshift else None
+        if box is None:
+            head, tail = self._indicator_parts()
+        else:
+            head, tail, _ = self._indicator_fit(Units(self.width()), box.width() + 0.01)
+        if not tail:
+            return ""
+        return f"{head} ● {tail}" if head else f"● {tail}"
 
     def mask_region(self) -> QRegion:
         top_h = round(self.height() * TOP_FRACTION)
@@ -576,21 +795,71 @@ class Transport(Overlay):
         return then.astimezone()
 
     def _indicator_parts(self) -> tuple[str, str]:
+        """The whole indicator: its name and its text."""
+        variants = self._indicator_variants()
+        return variants[0] if variants else ("", "")
+
+    def _indicator_variants(self) -> list[tuple[str, str]]:
+        """The indicator's (name, text), the whole first, then shorter ones for less room:
+        without "adjusted", then without the name (the LIVE badge beside it says live)."""
         if self._edge_lag is None:
-            return ("", "")
+            return []
+        # The mode that keeps a channel near its live point.
+        head = tr("Stay live")  # i18n: the latency indicator's name on the player bar; short
         if self._stalled:
-            return ("Stay live", "Reconnecting…")
-        lag = f"≈ {self._edge_lag:g} s behind"
+            tail = translate(RECONNECTING if self._reconnecting else WAITING)
+            return [(head, tail), ("", tail)]
+        seconds = i18n.decimal(f"{self._edge_lag:g}")
+        adjusted = ""
         if self._auto is not None:
-            tail = lag + (" · adjusted" if self._auto else "")
+            # i18n: Stay live indicator (Auto latency): how far behind live it plays; s = seconds
+            lag = tr("≈ {seconds} s behind", seconds=seconds)
+            if self._auto:
+                # i18n: the Stay live indicator: Auto latency raised this channel's delay
+                adjusted = tr("adjusted")
         else:
-            tail = lag + " source"
+            # i18n: Stay live indicator: how far behind the channel's source it plays; s = seconds
+            lag = tr("≈ {seconds} s behind source", seconds=seconds)
+        rate = ""
         if self._catching_up:
+            speed = i18n.decimal(f"{self._rate:g}")
             if self._rate < 1.0:
-                tail += f" · adding buffer {self._rate:g}×"
+                # i18n: the Stay live indicator: it plays slower to build a buffer ("0.95×")
+                rate = tr("adding buffer {rate}×", rate=speed)
+            elif self._rate > 1.0:
+                # i18n: the Stay live indicator: it plays faster to get nearer live ("1.05×")
+                rate = tr("catching up {rate}×", rate=speed)
             else:
-                tail += " · catching up" + (f" {self._rate:g}×" if self._rate > 1.0 else "")
-        return ("Stay live", tail)
+                rate = tr("catching up")  # i18n: the Stay live indicator
+        whole = " · ".join(part for part in (lag, adjusted, rate) if part)
+        short = " · ".join(part for part in (lag, rate) if part)
+        variants = [(head, whole)]
+        if short != whole:
+            variants.append((head, short))
+        variants.append(("", short))
+        return variants
+
+    def _indicator_fit(self, un: Units, room: float) -> tuple[str, str, float]:
+        """The indicator's (name, text) for `room` and its width: the first variant that fits
+        whole, else the shortest one painted elided in the room, else none (width 0)."""
+        variants = self._indicator_variants()
+        if not variants:
+            return ("", "", 0.0)
+        fm = QFontMetricsF(self._indicator_font(un))
+        for head, tail in variants:
+            width = self._indicator_bare(un, fm, head) + fm.horizontalAdvance(tail)
+            if width <= room:
+                return (head, tail, width)
+        head, tail = variants[-1]
+        if room >= self._indicator_bare(un, fm, head) + fm.horizontalAdvance("…"):
+            return (head, tail, room)
+        return (head, tail, 0.0)
+
+    @staticmethod
+    def _indicator_bare(un: Units, fm: QFontMetricsF, head: str) -> float:
+        """The indicator's width without its text: the pads, the name and the dot."""
+        named = fm.horizontalAdvance(head) + un.px(0.6) if head else 0.0
+        return 2 * un.px(1.1) + named + un.px(0.8) + un.px(0.6)
 
     # ---- geometry -----------------------------------------------------------------------------
 
@@ -624,6 +893,10 @@ class Transport(Overlay):
     def _indicator_font(un: Units) -> QFont:
         return un.font(1.1, QFont.Weight.DemiBold)
 
+    @staticmethod
+    def _live_font(un: Units) -> QFont:
+        return un.font(1.15, QFont.Weight.Bold)
+
     def _title_row(self) -> _TitleRow:
         un = Units(self.width())
         left, right = float(un.px(3)), float(self.width() - un.px(3))
@@ -636,18 +909,29 @@ class Transport(Overlay):
             left = badge.right() + un.px(1.2)
         gap = un.px(0.6)
         room = right - left - clock_w - un.px(4)
+        text = self.rec_text() if self._live else ""
+        rec_w = 0.0
+        if text:
+            fm = QFontMetricsF(self._indicator_font(un))
+            rec_w = 2 * un.px(1.0) + un.px(0.8) + un.px(0.6) + fm.horizontalAdvance(text)
         if self._live:
-            room -= gap + row_h  # the star keeps its room: the name gives way
-        fm = QFontMetrics(un.font(1.8, QFont.Weight.Bold))
-        name = fm.elidedText(self._title, Qt.ElideRight, max(0, int(room)))
-        name_w = fm.horizontalAdvance(name)
+            # The star, the record button and the REC chip keep their room: the name gives way.
+            room -= 2 * (gap + row_h) + (gap + rec_w if text else 0.0)
+        names = QFontMetrics(un.font(1.8, QFont.Weight.Bold))
+        name = names.elidedText(self._title, Qt.ElideRight, max(0, int(room)))
+        name_w = names.horizontalAdvance(name)
         name_rect = QRectF(left, y, name_w + 2, row_h)
-        star = QRectF()
+        star = record = rec = QRectF()
         subtitle_x = left + name_w + un.px(1.2)
         if self._live:
             star = QRectF(left + name_w + gap, y, row_h, row_h)
-            subtitle_x = star.right() + gap
-        return _TitleRow(name, name_rect, star, subtitle_x, clock, clock_rect)
+            record = QRectF(star.right() + gap, y, row_h, row_h)
+            subtitle_x = record.right() + gap
+            if text:
+                h = self._chip_h(un)
+                rec = QRectF(subtitle_x, y + (row_h - h) / 2, rec_w, h)
+                subtitle_x = rec.right() + un.px(1.2)
+        return _TitleRow(name, name_rect, star, record, rec, subtitle_x, clock, clock_rect)
 
     def _layout(self) -> dict[str, QRectF]:
         un = Units(self.width())
@@ -687,19 +971,16 @@ class Transport(Overlay):
                 x -= icon
                 rects[name] = QRectF(x, cy - icon / 2, icon, icon)
                 x -= un.px(1.8)
-            pill_w = un.px(5.2)
+            x = self._put_layout_chip(rects, un, x, cy)
+            # As wide as its word in a longer language ("EN VIVO"), never narrower than LIVE's.
+            badge = QFontMetricsF(self._live_font(un)).horizontalAdvance(_live_label())
+            pill_w = max(float(un.px(5.2)), badge + un.px(1.6))
             rects["live"] = QRectF(x - pill_w - un.px(0.4), cy - un.px(1.1), pill_w, un.px(2.2))
             if self._timeshift and self._edge_lag is not None:
-                head, tail = self._indicator_parts()
-                fm = QFontMetricsF(self._indicator_font(un))
-                bare = 2 * un.px(1.1) + fm.horizontalAdvance(head) + 2 * un.px(0.6) + un.px(0.8)
-                width = bare + fm.horizontalAdvance(tail)
-                pill = rects["live"]
-                right_edge = pill.x() - un.px(0.8)
-                # A narrow transport shortens the tail (painted elided), else leaves it out.
-                room = right_edge - left_end
-                if width > room:
-                    width = room if room >= bare + fm.horizontalAdvance("…") else 0.0
+                right_edge = rects["live"].x() - un.px(0.8)
+                # Less room drops "adjusted", then the name, then cuts the text (painted
+                # elided), else leaves the indicator out.
+                width = self._indicator_fit(un, right_edge - left_end)[2]
                 if width > 0:
                     rects["indicator"] = QRectF(
                         right_edge - width, cy - un.px(1.1), width, un.px(2.2)
@@ -722,14 +1003,16 @@ class Transport(Overlay):
                 x -= icon
                 rects[name] = QRectF(x, cy - icon / 2, icon, icon)
                 x -= un.px(1.8)
+            x = self._put_layout_chip(rects, un, x, cy)
             if shifted and self._behind():
                 fm = QFontMetricsF(self._chip_font(un))
-                width = 2 * un.px(1.0) + un.px(0.7) + un.px(0.5) + fm.horizontalAdvance("Go live")
+                label = _go_live_label()
+                width = 2 * un.px(1.0) + un.px(0.7) + un.px(0.5) + fm.horizontalAdvance(label)
                 h = self._chip_h(un)
                 rects["golive"] = QRectF(x - width, cy - h / 2, width, h)
             elif self._library and not self._live:
                 fm = QFontMetricsF(self._chip_font(un))
-                width = 2 * un.px(1.0) + fm.horizontalAdvance(LIBRARY_LABEL)
+                width = 2 * un.px(1.0) + fm.horizontalAdvance(translate(LIBRARY_LABEL))
                 h = self._chip_h(un)
                 rects["library"] = QRectF(x - width, cy - h / 2, width, h)
             chips = [rects[n].left() - un.px(0.8) for n in ("golive", "library") if n in rects]
@@ -754,12 +1037,28 @@ class Transport(Overlay):
             }
         return {"speed": QRectF(x, top, label, h)} if x + label <= room else {}
 
+    def _put_layout_chip(self, rects: dict[str, QRectF], un: Units, x: float, cy: float) -> float:
+        """While the grid shows, its layout chip ends at `x`; where the next control ends."""
+        if not (self._grid_shown and self._grid_layout):
+            return x
+        fm = QFontMetricsF(self._chip_font(un))
+        width = 2 * un.px(1.0) + fm.horizontalAdvance(self._grid_layout)
+        h = self._chip_h(un)
+        rects["layout"] = QRectF(x - width, cy - h / 2, width, h)
+        x -= width + un.px(1.2)
+        if self._grid_restorable:
+            width = 2 * un.px(1.0) + fm.horizontalAdvance(translate(RESTORE_LABEL))
+            rects["restore"] = QRectF(x - width, cy - h / 2, width, h)
+            x -= width + un.px(1.2)
+        return x
+
     def _right_buttons(self, *rest: str) -> tuple[str, ...]:
         """The icon buttons from the right edge inwards: the window's and the picture's, the
         sound's (`rest`), then Search and, on live TV, the guide and the previous channel."""
-        pip = ("pip",) if self._pip_available and self._live else ()
+        grid = ("grid",) if self._grid_available and self._live else ()
+        pip = ("pip",) if self._pip_available and self._live and not self._grid_shown else ()
         tv = ("search", "guide", "previous") if self._live else ("search",)
-        return ("fullscreen", "mini", *pip, "external", *rest, *tv)
+        return ("fullscreen", "mini", *pip, *grid, "external", *rest, *tv)
 
     def seek_rect(self) -> QRectF:
         return self._layout()["seek"]
@@ -823,9 +1122,46 @@ class Transport(Overlay):
             self._paint_vod(p, un, rects, text)
         for name in _ICON_BUTTONS:
             if name in rects:
-                lit = name == "pip" and self._pip_open
+                lit = (
+                    (name == "pip" and self._pip_open)
+                    or (name == "grid" and self._grid_shown)
+                    or name == self._held
+                )
                 draw_icon(p, self.icon(name), rects[name], qcolor(PALETTE.accent) if lit else text)
+        for name, label in (("layout", self._grid_layout), ("restore", translate(RESTORE_LABEL))):
+            chip = rects.get(name)
+            if chip is not None:
+                fill_round(p, chip, qcolor(PALETTE.text, 0.14), chip.height() / 2)
+                p.setFont(self._chip_font(un))
+                p.setPen(text)
+                p.drawText(chip, Qt.AlignCenter, label)
         p.end()
+
+    def _paint_record(self, p: QPainter, un: Units, row: _TitleRow) -> None:
+        """The record button (red; dim without time-shift; lit while it records) and the REC
+        chip."""
+        if not row.record.isEmpty():
+            side = un.px(1.9)  # as the star
+            c = row.record.center()
+            icon = QRectF(c.x() - side / 2, c.y() - side / 2, side, side)
+            if self._rec_since is not None:
+                halo = icon.adjusted(-un.px(0.4), -un.px(0.4), un.px(0.4), un.px(0.4))
+                fill_round(p, halo, qcolor(PALETTE.live, 0.3), halo.width() / 2)
+            color = qcolor(PALETTE.live) if self._timeshift else qcolor(PALETTE.text, 0.35)
+            draw_icon(p, "record", icon, color)
+        chip = row.rec
+        if chip.isEmpty():
+            return
+        fill_round(p, chip, qcolor(PALETTE.panel), chip.height() / 2)
+        d = un.px(0.8)
+        x = chip.x() + un.px(1.0)
+        fill_round(p, QRectF(x, chip.center().y() - d / 2, d, d), qcolor(PALETTE.live), d / 2)
+        x += d + un.px(0.6)
+        p.setFont(self._indicator_font(un))
+        p.setPen(qcolor(PALETTE.text))
+        p.drawText(
+            QRectF(x, chip.y(), chip.right() - x, chip.height()), Qt.AlignVCenter, self.rec_text()
+        )
 
     def _paint_scrims(self, p: QPainter) -> None:
         p.save()
@@ -864,6 +1200,7 @@ class Transport(Overlay):
             c = row.star.center()
             lit = qcolor(PALETTE.accent) if self._favorite else qcolor(PALETTE.text, 0.75)
             draw_icon(p, "star", QRectF(c.x() - size / 2, c.y() - size / 2, size, size), lit)
+        self._paint_record(p, un, row)
         if self._subtitle:
             p.setFont(un.font(1.5))
             p.setPen(qcolor(PALETTE.text, 0.75))
@@ -951,7 +1288,7 @@ class Transport(Overlay):
             fill_round(p, chip, qcolor(PALETTE.text, 0.14), chip.height() / 2)
             p.setFont(self._chip_font(un))
             p.setPen(text)
-            p.drawText(chip, Qt.AlignCenter, LIBRARY_LABEL)
+            p.drawText(chip, Qt.AlignCenter, translate(LIBRARY_LABEL))
 
     def _paint_timeshift(
         self, p: QPainter, un: Units, rects: dict[str, QRectF], text: QColor
@@ -961,6 +1298,7 @@ class Transport(Overlay):
         seek = rects["seek"]
         cy = seek.center().y()
         kc = self._paint_track(p, un, seek, 0.3)
+        self._paint_archive(p, un, seek)
         p.setFont(self._tick_font(un))
         p.setPen(qcolor(PALETTE.text, 0.75))
         tick_h = un.px(1.5)
@@ -995,12 +1333,49 @@ class Transport(Overlay):
             p.drawText(
                 QRectF(tx, chip.y(), chip.right() - tx, chip.height()),
                 Qt.AlignVCenter | Qt.AlignLeft,
-                "Go live",
+                _go_live_label(),
             )
+
+    def archive_fraction(self) -> float:
+        """How much of the bar, from its left, is the provider's archive (0: none)."""
+        tl = self._timeline
+        if tl is None or not self._timeshift or tl.end <= tl.start:
+            return 0.0
+        if tl.archive:
+            return 1.0
+        if tl.buffer_start is None:
+            return 0.0
+        return min(1.0, max(0.0, (tl.buffer_start - tl.start) / (tl.end - tl.start)))
+
+    def _paint_archive(self, p: QPainter, un: Units, seek: QRectF) -> None:
+        """The archive's part of the line, dashed (QiTV's own buffer is a solid line)."""
+        fraction = self.archive_fraction()
+        if fraction <= 0.0:
+            return
+        h = un.px(0.55)
+        part = QRectF(seek.x(), seek.center().y() - h / 2 - 1, seek.width() * fraction, h + 2)
+        step, gap = max(4.0, un.px(1.0)), max(1.5, un.px(0.35))
+        p.save()
+        p.setClipRect(part)
+        x = part.left() + step - gap
+        while x < part.right():
+            p.fillRect(QRectF(x, part.top(), gap, part.height()), qcolor(PALETTE.canvas, 0.9))
+            x += step
+        p.restore()
+
+    def bubble_text(self) -> str:
+        """The moment the knob shows ("14:32:05"; another day's with the day: "Sat 14:32:05")."""
+        moment = self._wall(self._shown_lag())
+        label = moment.strftime("%H:%M:%S")
+        if moment.date() != self._wall(0.0).date():
+            day = QDate(moment.year, moment.month, moment.day).dayOfWeek()
+            name = i18n.app_locale().dayName(day, QLocale.FormatType.ShortFormat)
+            label = f"{name} {label}"
+        return label
 
     def _paint_bubble(self, p: QPainter, un: Units, seek: QRectF, kc: QPointF) -> None:
         """Wall-clock time of the shown position, above the knob."""
-        label = self._wall(self._shown_lag()).strftime("%H:%M:%S")
+        label = self.bubble_text()
         p.setFont(un.font(1.05, QFont.Weight.Bold))
         w = p.fontMetrics().horizontalAdvance(label) + 2 * un.px(0.6)
         h = max(float(un.px(2.1)), p.fontMetrics().height())
@@ -1034,26 +1409,27 @@ class Transport(Overlay):
         self._paint_skips(p, un, rects, text)  # ◀10 at a time-shifted channel's live edge
         pill = rects["live"]
         fill_round(p, pill, qcolor(PALETTE.live), pill.height() / 2)
-        p.setFont(un.font(1.15, QFont.Weight.Bold))
+        p.setFont(self._live_font(un))
         p.setPen(qcolor("#ffffff"))
-        p.drawText(pill, Qt.AlignCenter, "LIVE")
+        p.drawText(pill, Qt.AlignCenter, _live_label())
         box = rects.get("indicator")
         if box is None:
             return
         fill_round(p, box, qcolor(PALETTE.panel), box.height() / 2)
-        head, tail = self._indicator_parts()
+        head, tail, _ = self._indicator_fit(un, box.width() + 0.01)  # as laid out
         p.setFont(self._indicator_font(un))
         p.setPen(text)
-        fm = p.fontMetrics()
+        fm = QFontMetricsF(p.font())  # as the layout measured it: whole pixels cut the tail
         x = box.x() + un.px(1.1)
-        p.drawText(QRectF(x, box.y(), box.right() - x, box.height()), Qt.AlignVCenter, head)
-        x += fm.horizontalAdvance(head) + un.px(0.6)
+        if head:
+            p.drawText(QRectF(x, box.y(), box.right() - x, box.height()), Qt.AlignVCenter, head)
+            x += fm.horizontalAdvance(head) + un.px(0.6)
         d = un.px(0.8)
         # Green only at 1x: amber while stay-live steers the rate (either way) or reconnecting.
         dot = qcolor(PALETTE.warn if self._catching_up or self._stalled else PALETTE.ok)
         fill_round(p, QRectF(x, box.center().y() - d / 2, d, d), dot, d / 2)
         x += d + un.px(0.6)
-        tail = fm.elidedText(tail, Qt.ElideRight, max(0, round(box.right() - un.px(1.1) - x)))
+        tail = fm.elidedText(tail, Qt.ElideRight, max(0.0, box.right() - un.px(1.1) - x + 0.5))
         p.drawText(QRectF(x, box.y(), box.right() - x, box.height()), Qt.AlignVCenter, tail)
 
     # ---- input --------------------------------------------------------------------------------
@@ -1093,6 +1469,11 @@ class Transport(Overlay):
             return
         self.mousePressEvent(event)  # as Qt's own: one more press
 
+    def control_at(self, pos: QPointF) -> str | None:
+        """The control under `pos` (this widget's coordinates), as `_control_at`: a press there
+        acts (an open Sound or Subtitles panel lets it through)."""
+        return self._control_at(pos)
+
     def _control_at(self, pos: QPointF) -> str | None:
         """The control under `pos`: a title row's, a button's, or None (the bar by its hit area)."""
         for name, rect in self.title_rects().items():
@@ -1128,17 +1509,6 @@ class Transport(Overlay):
             else:
                 self.unsetCursor()
 
-    def event(self, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
-            text = self.tooltip_at(QPointF(event.pos()))
-            if text:
-                QToolTip.showText(event.globalPos(), text, self)
-            else:
-                QToolTip.hideText()
-                event.ignore()
-            return True
-        return super().event(event)
-
     def hideEvent(self, event: QHideEvent) -> None:
         # Hidden mid-drag (the host hides with a minimized window): no release will come.
         self._end_drag()
@@ -1150,7 +1520,7 @@ class Transport(Overlay):
             return
         self._drag = None
         self.update()
-        self._idle.start()
+        self._fade_later()
         self._controls_changed()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
@@ -1161,7 +1531,7 @@ class Transport(Overlay):
             target_ms = 0 if timeshift else self._shown_ms()
             self._drag = None
             self.update()
-            self._idle.start()
+            self._fade_later()
             self._controls_changed()  # the bar may go with the drag
             if timeshift:
                 self.seekToRequested.emit(target_t)
@@ -1169,9 +1539,14 @@ class Transport(Overlay):
                 self.seekRequested.emit(target_ms)
 
     def _click(self, rects: dict[str, QRectF], pos: QPointF) -> None:
+        title_signals = {
+            "title": self.infoRequested,
+            "favorite": self.favoriteRequested,
+            "record": self.recordRequested,
+        }
         for name, rect in self.title_rects().items():
             if rect.contains(pos):
-                (self.infoRequested if name == "title" else self.favoriteRequested).emit()
+                title_signals[name].emit()
                 return
         for name, rect in rects.items():
             if not rect.contains(pos):
@@ -1207,6 +1582,12 @@ class Transport(Overlay):
                 self.subtitleRequested.emit()
             elif name == "pip":
                 self.pipRequested.emit()
+            elif name == "grid":
+                self.gridRequested.emit()
+            elif name == "layout":
+                self.layoutRequested.emit()
+            elif name == "restore":
+                self.restoreRequested.emit()
             elif name == "mini":
                 self.miniPlayerRequested.emit()
             elif name == "external":
@@ -1258,5 +1639,5 @@ class Transport(Overlay):
         self._edge_lag = None
         self._auto = None
         self._catching_up = False
-        self._stalled = False
+        self._stalled = self._reconnecting = False
         self._rate = 1.0

@@ -238,10 +238,6 @@ class TimeShiftCase(unittest.TestCase):
         self.assertEqual(t.texts()[1], "Stay live ● ≈ 3 s behind source · catching up 1.05×")
         t.update_timeline(at_edge(lag=2.6, rate=1.0), PROGRAMME)
         self.assertEqual(t.texts()[1], "Stay live ● ≈ 2.5 s behind source")
-        t.show_live_edge(3.0, True)
-        self.assertIn("catching up", t.texts()[1])
-        t.show_live_edge(0.9, False)
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● ≈ 1 s behind source"))
 
     def test_the_indicator_shows_the_settled_lag_and_the_nudge_not_its_ramp(self):
         # 2.1: the session's "shown" lag (settled, in half seconds) is what the row reads, and
@@ -290,12 +286,11 @@ class TimeShiftCase(unittest.TestCase):
         t.update_timeline(dict(at_edge(lag=7.0, rate=1.05), **auto), PROGRAMME)
         self.assertEqual(t.texts()[1], "Stay live ● ≈ 7 s behind · adjusted · catching up 1.05×")
         t.update_timeline(dict(at_edge(lag=4.9), stalled=True, **auto), PROGRAMME)
+        self.assertEqual(t.texts()[1], "Stay live ● Waiting for the channel…")
+        t.update_timeline(dict(at_edge(lag=4.9), stalled=True, reconnecting=True), PROGRAMME)
         self.assertEqual(t.texts()[1], "Stay live ● Reconnecting…")
         t.update_timeline(dict(at_edge(lag=2.6), target=2.5), PROGRAMME)  # a fixed latency
         self.assertEqual(t.texts()[1], "Stay live ● ≈ 2.5 s behind source")
-        t.update_timeline(dict(at_edge(lag=4.9), **auto), PROGRAMME)
-        t.show_live_edge(1.2, False)  # no timeline: the lag, as before
-        self.assertEqual(t.texts()[1], "Stay live ● ≈ 1 s behind source")
 
     def test_a_narrow_transport_shortens_the_auto_text_as_the_others(self):
         t = self.make()
@@ -321,13 +316,13 @@ class TimeShiftCase(unittest.TestCase):
         )
         return {image.pixelColor(x, y).name() for x in xs}
 
-    def test_a_stall_at_the_edge_reads_reconnecting_without_the_on_target_dot(self):
+    def test_a_stall_at_the_edge_reads_waiting_without_the_on_target_dot(self):
         t = self.make()
         t.show_timeshift("104", "Nature")
         t.update_timeline(at_edge(lag=2.6), PROGRAMME)
         self.assertIn(PALETTE.ok.lower(), self.dot_colors(t))
         t.update_timeline(dict(at_edge(lag=2.6, rate=1.05), stalled=True), PROGRAMME)
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● Reconnecting…"))
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● Waiting for the channel…"))
         colors = self.dot_colors(t)
         self.assertNotIn(PALETTE.ok.lower(), colors)
         self.assertIn(PALETTE.warn.lower(), colors)
@@ -338,12 +333,6 @@ class TimeShiftCase(unittest.TestCase):
         t = self.shifted()
         t.update_timeline(timeline(stalled=True), PROGRAMME)
         self.assertEqual(t.texts(), ("Buffer from 18:44", "−00:38 behind live"))
-
-    def test_show_live_edge_drops_the_bar(self):
-        t = self.shifted()
-        t.show_live_edge(1.2, False)
-        self.assertNotIn("seek", t._layout())
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● ≈ 1 s behind source"))
 
     def test_live_mode_shows_the_edge_row_whatever_the_lag(self):
         # After Go live on a long-GOP source the lag sits above the target while stay-live closes it.
@@ -386,8 +375,6 @@ class TimeShiftCase(unittest.TestCase):
             t.update_timeline(timeline(lag=bad), PROGRAMME)
             self.assertEqual(t.texts()[1], "−00:00 behind live", bad)
             self.assertFalse(t.grab().isNull())
-        t.show_live_edge(float("inf"), False)
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● ≈ 0 s behind source"))
 
     def test_tick_labels_elide_and_never_overlap(self):
         t = self.make()
@@ -439,6 +426,43 @@ class TimeShiftCase(unittest.TestCase):
         self.assertFalse(t.grab().isNull())
         t.update_timeline(timeline(start=0.0, end=0.0, live_edge=0.0, position=0.0, lag=0.0), [])
         self.assertFalse(t.grab().isNull())  # nothing buffered yet
+
+    # ---- catch-up (2.2) -----------------------------------------------------------------------
+
+    def test_a_bar_into_the_archive_keeps_the_buffers_start_and_dashes_the_archive(self):
+        t = self.make()
+        t.show_timeshift("104", "Nature")
+        # The buffer starts at 1740 (18:44 + 29 min); 29 min of archive before it.
+        t.update_timeline(timeline(buffer_start=1740.0), PROGRAMME)
+        self.assertEqual(t.texts(), ("Buffer from 19:13", "−00:38 behind live"))
+        self.assertAlmostEqual(t.archive_fraction(), 0.5)
+        self.assertFalse(t.grab().isNull())
+        t.update_timeline(timeline(), PROGRAMME)
+        self.assertEqual(t.archive_fraction(), 0.0)
+
+    def test_the_archive_playing_reads_from_when_and_its_bubble_names_another_day(self):
+        t = self.make()
+        t.show_timeshift("104", "Nature")
+        t.update_timeline(timeline(archive=True), PROGRAMME)
+        self.assertEqual(t.texts(), ("Archive from 18:44", "−00:38 behind live"))
+        self.assertEqual(t.archive_fraction(), 1.0)
+        self.assertEqual(t.bubble_text(), "19:41:22")
+        self.assertIn("golive", t._layout())  # Go live leads back
+        two_days = 2 * 86400.0
+        t.update_timeline(
+            timeline(
+                archive=True,
+                start=0.0,
+                position=100.0,
+                lag=two_days,
+                end=two_days + 100,
+                live_edge=two_days + 100,
+            ),
+            [],
+        )
+        self.assertTrue(t.bubble_text().endswith("19:42:00"))
+        self.assertGreater(len(t.bubble_text()), len("19:42:00"))  # the day's name before it
+        self.assertFalse(t.grab().isNull())
 
 
 if __name__ == "__main__":

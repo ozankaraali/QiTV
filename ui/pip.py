@@ -1,7 +1,10 @@
 """Picture-in-picture frame: the second video surface, small in a corner of the player (spec §7).
 
-Both surfaces are native children of the player page and never change parent, so the windows
-libVLC draws into never change: a swap exchanges their geometry and stacking only.
+The surfaces are named as their players' slots ("main", "pip", and a multiview's tiles once
+added). Every surface is a native child of the player page and never changes parent, so the
+windows libVLC draws into never change: a swap exchanges two surfaces' geometry and stacking
+only. The large surface fills the page, the PiP's sits in a corner while it shows, and any
+other is hidden.
 
 The small surface takes the left button (the shell's click would open the drawer): a click
 asks for a swap, and a drag moves it and, on release, snaps it to the nearest corner. These
@@ -43,7 +46,6 @@ logger = logging.getLogger(__name__)
 
 CORNERS = ("br", "bl", "tr", "tl")
 DEFAULT_CORNER = "br"
-SURFACES = ("main", "pip")
 WIDTH_FRACTION = 0.25
 HEIGHT_PER_WIDTH = 9 / 16
 MARGIN_UNITS = 2.0  # from the nearest edges; u = 1% of the player width
@@ -111,9 +113,10 @@ class PipFrame(QObject):
     ) -> None:
         super().__init__(container)
         self._container = container
-        self._surfaces = {"main": main_surface, "pip": pip_surface}
+        self._surfaces: dict[str, QWidget] = {"main": main_surface, "pip": pip_surface}
         self._config = config
         self._large = "main"
+        self._small_name = "pip"  # the PiP's surface (in the corner while shown)
         self._shown = False
         self._corner = self._saved_corner()
         self._press: _Press | None = None
@@ -125,6 +128,7 @@ class PipFrame(QObject):
         self._reported = QRect()
         self._closed = False
         self._interactive = True  # False: the player is a thumbnail over the Library
+        self._suspended = False  # True: the multiview lays the surfaces out (suspend)
         self._lift = 0  # pixels a bottom corner's PiP rises (the transport shows)
         self._lifting = QVariantAnimation(self)
         self._lifting.setDuration(LIFT_MS)
@@ -150,16 +154,39 @@ class PipFrame(QObject):
         self._shown = False
         self._layout()
 
+    def add_surface(self, name: str, surface: QWidget) -> None:
+        """Another player's surface (a multiview tile's): hidden until it is large or small."""
+        if name in self._surfaces:
+            raise ValueError(f"There is a {name!r} surface already")
+        self._surfaces[name] = surface
+        if not self._closed:
+            surface.installEventFilter(self)
+        self._layout()
+
     def set_large(self, name: str) -> None:
-        """Make "main" or "pip" fill the player; the other goes to the corner, on top."""
-        if name not in SURFACES:
+        """Make surface `name` fill the player. When it was the PiP's, the one that was large
+        becomes the PiP's (a swap: it goes to the corner, on top)."""
+        if name not in self._surfaces:
             raise ValueError(f"Unknown surface: {name!r}")
+        if name == self._small_name:
+            self._small_name = self._large
         self._large = name
+        self._layout()
+
+    def set_roles(self, large: str, small: str) -> None:
+        """Surface `large` fills the player and `small` is the PiP's (shown in the corner
+        while picture in picture shows)."""
+        for name in (large, small):
+            if name not in self._surfaces:
+                raise ValueError(f"Unknown surface: {name!r}")
+        if large == small:
+            raise ValueError("The large and the small surface are one")
+        self._large, self._small_name = large, small
         self._layout()
 
     def small_rect(self) -> QRect:
         """Where the small surface is, in container coordinates; empty while PiP is hidden."""
-        if not self._shown:
+        if not self._shown or self._suspended:
             return QRect()
         return QRect(self._small().geometry())
 
@@ -172,7 +199,7 @@ class PipFrame(QObject):
         if lift == self._lift:
             return
         self._lift = lift
-        if not self._shown or self._press is not None or self._closed:
+        if not self._shown or self._press is not None or self._closed or self._suspended:
             return  # shown, or once the drag ends, it lays out with the new lift
         small = self._small()
         target = self._small_target()
@@ -192,6 +219,29 @@ class PipFrame(QObject):
             self._press = None
             self._swap_at = None
 
+    def suspend(self) -> None:
+        """Stand aside while the multiview lays the surfaces out (ui/grid_frame.py): no
+        layout, no mouse, and the small rect reported empty. The PiP itself is hidden: it
+        shows again when picture in picture next opens (`show_pip`)."""
+        if self._suspended:
+            return
+        self._lifting.stop()
+        self._press = None
+        self._swap_at = None
+        self._shown = False
+        self._suspended = True
+        self._report()
+
+    def resume(self) -> None:
+        """Lay the surfaces out again after the multiview: the large one fills the page."""
+        if not self._suspended:
+            return
+        self._suspended = False
+        self._layout()
+
+    def suspended(self) -> bool:
+        return self._suspended
+
     def close(self) -> None:
         """Stop watching the player page and the surfaces (the window's shutdown)."""
         if self._closed:
@@ -204,7 +254,7 @@ class PipFrame(QObject):
 
     # The label's pill covers part of the small surface; it forwards its presses (globals).
     def pill_press(self, position: QPoint) -> None:
-        if self._shown and not self._closed and self._interactive:
+        if self._shown and not self._closed and self._interactive and not self._suspended:
             self._begin(self._small(), position, surface_events=False)
 
     def pill_move(self, position: QPoint) -> None:
@@ -220,7 +270,7 @@ class PipFrame(QObject):
     # ---- layout -------------------------------------------------------------------------
 
     def _small(self) -> QWidget:
-        return self._surfaces["pip" if self._large == "main" else "main"]
+        return self._surfaces[self._small_name]
 
     def _saved_corner(self) -> str:
         return _valid_corner(getattr(self._config, "pip_corner", DEFAULT_CORNER))
@@ -243,12 +293,17 @@ class PipFrame(QObject):
 
     def _layout(self) -> None:
         self._lifting.stop()
+        if self._suspended:
+            return  # the multiview's grid lays them out
         if self._press is not None:
             self._press.void = True  # its release neither swaps nor snaps
         large = self._surfaces[self._large]
         large.setGeometry(self._container.rect())
         large.show()  # it may have been the small one, hidden with PiP closed
         small = self._small()
+        for name, surface in self._surfaces.items():
+            if name not in (self._large, self._small_name):
+                surface.hide()  # a tile's, outside the multiview
         if self._shown:
             small.setGeometry(self._small_target())
             small.show()
@@ -292,7 +347,12 @@ class PipFrame(QObject):
         if kind in _LAYOUT_EVENTS:
             if watched is self._container:
                 self._layout()
-        elif kind in _MOUSE_EVENTS and isinstance(event, QMouseEvent) and self._interactive:
+        elif (
+            kind in _MOUSE_EVENTS
+            and isinstance(event, QMouseEvent)
+            and self._interactive
+            and not self._suspended
+        ):
             return self._mouse(watched, event)
         return False
 

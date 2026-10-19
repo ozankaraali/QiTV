@@ -5,13 +5,15 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Qt, QThread, Slot
 
+from services.i18n import N_
 from services.redact import safe_exc, safe_traceback
 from services.thread_cleanup import ThreadCleanup
 
 logger = logging.getLogger(__name__)
 
-FAILED_MESSAGE = "The background task failed"
-NO_RESULT_MESSAGE = "The background task ended without a result"
+# A job's error messages: sent from its thread in English, shown with translate().
+FAILED_MESSAGE = N_("The background task failed")
+NO_RESULT_MESSAGE = N_("The background task ended without a result")
 
 
 class Cancelled(Exception):
@@ -30,8 +32,8 @@ def cancel_requested() -> bool:
 class _WorkerGuard(QObject):
     """Runs a worker and guarantees one terminal signal (finished or error) and a quit.
 
-    Lives on the worker thread (or the caller's thread for ImmediateRunner), so the
-    terminal-signal flag is updated on the same thread that runs the worker.
+    Lives on the worker thread (or the caller's thread, in the tests' ImmediateRunner), so
+    the terminal-signal flag is updated on the same thread that runs the worker.
     """
 
     def __init__(self, worker: QObject, thread: Optional[QThread] = None):
@@ -145,23 +147,3 @@ class JobRunner(QObject):
 
     def pending(self) -> int:
         return len(self._jobs)
-
-
-class ImmediateRunner:
-    """Test double: runs a worker synchronously on the calling thread with direct signals."""
-
-    def run_worker(
-        self,
-        worker: QObject,
-        on_finished: Callable,
-        on_error: Optional[Callable] = None,
-        context: Any = None,
-    ) -> QObject:
-        worker.finished.connect(lambda payload: on_finished(context, payload))
-        if on_error is not None:
-            worker.error.connect(lambda message: on_error(context, message))
-        _WorkerGuard(worker).run()
-        return worker
-
-    def pending(self) -> int:
-        return 0

@@ -1,8 +1,13 @@
 import os
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QFileDialog
+
+from services import recording
 from services.config_manager import ConfigManager
 from tests import test_tv_window as base
 from ui.settings_dialog import OptionsDialog
@@ -80,6 +85,41 @@ class TimeshiftSettingsTests(base.WindowCase):
         saved = ConfigManager()
         self.assertFalse(saved.timeshift_enabled)
         self.assertEqual(saved.timeshift_max_mib, 2048)
+
+    def test_the_recordings_folder_is_chosen_saved_and_reset(self):
+        # 2.3: an optional key; without it, the system's Movies (Videos) folder's QiTV.
+        dialog = self.dialog()
+        self.assertEqual(dialog.recordings_folder.text(), recording.default_folder())
+        self.assertFalse(dialog.recordings_default_button.isEnabled())
+        dialog.save_settings()
+        self.assertNotIn("recordings_dir", ConfigManager().config)  # unchanged: not written
+        chosen = os.path.join(self.config_dir, "Rec")
+        with mock.patch.object(QFileDialog, "getExistingDirectory", return_value=chosen):
+            dialog.recordings_change_button.click()
+        self.assertEqual(dialog.recordings_folder.text(), chosen)
+        dialog.save_settings()
+        self.assertEqual(ConfigManager().recordings_dir, chosen)
+
+        dialog = self.dialog()  # it opens with the saved one
+        self.assertEqual(dialog.recordings_folder.text(), chosen)
+        self.assertTrue(dialog.recordings_default_button.isEnabled())
+        with mock.patch.object(QFileDialog, "getExistingDirectory", return_value=""):
+            dialog.recordings_change_button.click()  # cancelled: it stays
+        self.assertEqual(dialog.recordings_folder.text(), chosen)
+        dialog.recordings_default_button.click()
+        self.assertEqual(dialog.recordings_folder.text(), recording.default_folder())
+        dialog.save_settings()
+        self.assertEqual(ConfigManager().recordings_dir, "")
+
+    def test_open_folder_shows_the_folder_or_says_there_is_none_yet(self):
+        dialog = self.dialog()
+        with mock.patch.object(QDesktopServices, "openUrl", return_value=True) as opened:
+            dialog.recordings_open_button.click()
+        self.assertEqual(opened.call_args.args[0].toLocalFile(), recording.default_folder())
+        self.assertEqual(dialog.recordings_status.text(), "")
+        with mock.patch.object(QDesktopServices, "openUrl", return_value=False):
+            dialog.recordings_open_button.click()
+        self.assertEqual(dialog.recordings_status.text(), "There are no recordings yet")
 
     def test_fresh_install_gets_the_defaults(self):
         defaults = ConfigManager.default_config()
