@@ -412,10 +412,13 @@ class TVController(QObject):
                 external=lambda: self._external_launcher() is not None,
                 closed=lambda: self._closed,
                 toast=self._toast,
+                reopen=self._reopen_tile,
                 parent=self,
             )
             self._grid.changed.connect(self._mixer.refresh)
             self._grid.changed.connect(self._update_guides)
+        # The links of tiles opened beside the focused one, on the side lane (one at a time).
+        self._tile_links: dict[str, Target] = {}
         self._column_wheel = PointerInput(self)
         # While a live link resolves, the banner is shown again before it fades (Minor 11).
         self._tuning = QTimer(self, interval=TUNING_KEEP_MS)
@@ -1196,9 +1199,16 @@ class TVController(QObject):
             self.zap.tuned(playing.item)  # ↑/↓ move on from it, not from the dropped one
 
     def _on_side_failed(self, target: Target, message: str) -> None:
-        """A context menu's link failed (or what used it did)."""
-        if not self._closed:
-            self._menu_error(f"{target.title}: {message}")
+        """A context menu's link failed (or what used it did), or a tile's beside the focus:
+        that tile says so too."""
+        if self._closed:
+            return
+        for name, waiting in list(self._tile_links.items()):
+            if waiting is target:
+                del self._tile_links[name]
+                if self._grid is not None:
+                    self._grid.link_failed(name, target.item)
+        self._menu_error(f"{target.title}: {message}")
 
     def _keep_tuning_banner(self) -> None:
         """Show the banner again while the channel it announces is on its way: its link
@@ -1584,6 +1594,85 @@ class TVController(QObject):
             self.tune(channel, group_key=context.group_key, channels=context.channels)
         else:
             self.tune(channel, group_key=ALL_GROUP_ID, channels=self._all_live())
+
+    def play_in_tile(
+        self,
+        name: str,
+        channel: dict,
+        *,
+        group_key: str = ALL_GROUP_ID,
+        channels: Optional[list[dict]] = None,
+        retried: bool = False,
+    ) -> None:
+        """`channel` in the multiview's tile `name` (a restored grid, a channel dropped on a
+        tile, an STB tile's fresh link): the focused tile tunes as zapping does; another
+        opens beside it, its focus unchanged: its provider's limit is checked first, and its
+        link asked for on the side lane (one at a time, as the PiP's)."""
+        grid, sessions = self._grid, self.sessions
+        if grid is None or sessions is None or self._closed or not grid.shown():
+            return
+        if name not in grid.names():
+            return
+        listed = channels if channels is not None else self._all_live()
+        if name == sessions.large().name:
+            self.tune(channel, group_key=group_key, channels=listed)
+            return
+        if grid.tile_showing(channel) not in (None, name) or grid.refuse(channel, name):
+            return  # another tile shows it, or its provider has no stream to spare
+        title = str(channel.get("name") or "")
+        source = item_provider.pick_source(self.catalog, channel, group_key)
+        target = Target(channel, "live", title, group_key=group_key, source=source, retried=retried)
+        context = ZapContext(group_key, listed, fallback=self._all_live(), source=source)
+        self._tile_links[name] = target
+        grid.linking(name, channel)
+        self._lanes.request_side(
+            target, lambda url: self._on_tile_link(name, target, context, url), play=False
+        )
+
+    def _on_tile_link(self, name: str, target: Target, context: ZapContext, url: str) -> None:
+        """A tile's link came: it opens there (the newest choice for that tile only)."""
+        grid, sessions, pip = self._grid, self.sessions, self._pip
+        if self._tile_links.get(name) is not target:
+            return  # another channel was chosen for it since, or the grid went
+        del self._tile_links[name]
+        if grid is None or sessions is None or pip is None or not grid.awaits(name, target.item):
+            return  # the grid went (or came back) meanwhile, or the tile took another
+        if name == sessions.large().name:  # it took the focus meanwhile: as a tune
+            self._play_link(target, url)
+            return
+        item = target.item
+        view = pip.view(name)  # what the controls act on once it takes the focus
+        view.target, view.context, view.url, view.cid = target, context, url, None
+        slot = sessions.slot(name)
+        slot.group_key = target.group_key
+        provider_name = item_provider.provider_name(self.catalog, item)
+        limit = self._live_controls.limit(item)
+        kind = classify(url, self.catalog.is_live("live"))
+        if self._live_controls.through_pipeline(url, kind):
+            kwargs = tune_kwargs(
+                self._live_controls.live_start(target, url), self.config, disk=False
+            )
+            size = sessions.tile_bytes(False)
+            if size is not None:
+                kwargs["max_bytes"] = size
+            grid.open_tile(name, item, provider=provider_name, limit=limit, start_kwargs=kwargs)
+        else:
+            session = slot.playback
+
+            def play_direct() -> None:
+                session.play(
+                    url, kind=kind, latency=self.config.live_latency, **stream_options(item)
+                )
+
+            grid.open_tile(name, item, play_direct, provider=provider_name, limit=limit)
+        self._tracks.prepare_small(slot.playback, item)  # its sound sync, kept per channel
+
+    def _reopen_tile(self, name: str, channel: dict) -> None:
+        """A tile without the focus failed on an STB portal: a fresh link, once (its portal's
+        session may have expired; the grid says when)."""
+        logger.info("Making the link of a tile's channel again after it failed")
+        item_provider.sign_in_again(self.catalog, channel)
+        self.play_in_tile(name, channel, retried=True)
 
     def _drop_pip_on_its_way(self) -> None:
         """The grid shows: a channel still on its way to the small picture never opens."""

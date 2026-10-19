@@ -501,6 +501,7 @@ class StayLive:
         self._user_rate = 1.0
         self._reopened = False
         self.rate_locked = False  # VLC cannot play this channel at another rate: 1x for good
+        self.background = False  # a multiview tile without the focus: 1x, jumps only (2.2)
         self._last: Optional[float] = None  # the last update's time
         self._outside = 0.0  # seconds outside the band, on `_side`, counted while playing
         self._side = 0  # +1 behind the band, -1 ahead of it
@@ -555,6 +556,16 @@ class StayLive:
         self.rate_locked = True
         self._rate = 1.0
         self._nudge = None
+
+    def set_background(self, background: bool) -> None:
+        """A multiview tile without the focus (2.2): it is muted and small, so stay-live
+        changes no rate (a nudge under way ends at once, at 1x) and only goes live, as after
+        `lock_rate()`: a jump far behind, or the reopen beyond the target plus 20 s. With
+        the focus back it steers as before. A speed the user chose still applies."""
+        self.background = background
+        if background:
+            self._rate = 1.0
+            self._nudge = None
 
     def set_latency(self, name: str) -> None:
         self.target = start_target(name)
@@ -707,9 +718,10 @@ class StayLive:
         self._own_shortfall(lag_s, dt)
         if self._reopened:
             return Decision(1.0)  # asked for: the caller reopens (and calls user_go_live)
-        if self.rate_locked:
-            # 1x: set by lock_rate(), never changed after; far behind, a jump changes no
-            # rate (review I2: the channel stay-live cannot nudge needs it most).
+        if self.rate_locked or self.background:
+            # 1x: set by lock_rate() (never changed after) or by set_background() (a tile
+            # without the focus); far behind, a jump changes no rate (review I2: the channel
+            # stay-live cannot nudge needs it most).
             if self._far_locked(dt, lag_s):
                 return self._jump(now)
             return Decision(self._rate)

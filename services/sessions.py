@@ -33,9 +33,10 @@ aside: the slots are tiles, the large one is the focused tile, and a tile opens 
 (`open_slot`: through the time-shift pipeline as a PiP does, else directly) only when its
 provider's other streams leave it one; else `slotDenied` and nothing opens: a tile never
 waits, nor asks again by itself. A tile's memory buffer is small and the focused tile's the
-user's memory per stream (`set_large` grows the new focus and shrinks the old one). A tile's
-stream that fails says so (`slotFailed`); `close_slot` stops one. Leaving the grid keeps one
-tile as the PiP, or none.
+user's memory per stream (`set_large` grows the new focus and shrinks the old one), and only
+the focused tile's stay-live changes its rate (the others play at 1x and only jump to live).
+A tile's stream that fails says so (`slotFailed`); `close_slot` stops one. Leaving the grid
+keeps one tile as the PiP, or none.
 
 Audio follows the large picture: the PiP (and a tile) opens muted, and while the slot taking
 the large role is muted it takes the user's mute from the old large slot, which is muted in
@@ -350,6 +351,8 @@ class SessionManager(QObject):
         self._grid = False
         self._direct.clear()
         self._tile_opens.clear()
+        for slot in self._slots.values():
+            self._background(slot, False)  # a PiP's stay-live steers as ever
         if keep is not None and keep != self._large.name:
             self._small = self._slot(keep)
             if sizes is not None:
@@ -372,17 +375,25 @@ class SessionManager(QObject):
         return sizes[0] if focused else sizes[1]
 
     def _as_tile(self, slot: Slot, *, focused: bool) -> None:
-        """A tile's buffer follows its focus: the focused one's is the full one, the others'
-        small."""
+        """A tile's buffer and stay-live follow its focus: the focused one's buffer is the
+        full one, the others' small, and only the focused one's rate changes (the others play
+        at 1x and only jump to live: muted, they need no nudge)."""
         size = self.tile_bytes(focused)
         if size is not None:
             self._resize(slot, size)
+        self._background(slot, not focused)
 
     @staticmethod
     def _resize(slot: Slot, size: int) -> None:
         resize = getattr(slot.live, "resize", None)
         if resize is not None:
             resize(size)
+
+    @staticmethod
+    def _background(slot: Slot, background: bool) -> None:
+        set_background = getattr(slot.live, "set_background", None)
+        if set_background is not None:
+            set_background(background)
 
     def open_slot(
         self,

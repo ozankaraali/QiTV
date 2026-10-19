@@ -659,6 +659,7 @@ class FakeLiveSession(QObject):
         self.running = False
         self.no_rewind_reason = UNAVAILABLE
         self.resizes = []  # the memory buffer sizes the multiview gave it
+        self.background = False  # a multiview tile without the focus
 
     def named(self, name):
         return [c[1:] for c in self.calls if c[0] == name]
@@ -714,6 +715,10 @@ class FakeLiveSession(QObject):
     def resize(self, max_bytes):
         """The multiview: its memory buffer grows with the focus or shrinks without it."""
         self.resizes.append(max_bytes)
+
+    def set_background(self, background):
+        """The multiview: a tile without the focus plays at 1x and only jumps to live."""
+        self.background = background
 
 
 class FakeWindow:

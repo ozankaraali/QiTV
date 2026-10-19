@@ -456,6 +456,7 @@ class LiveSession(QObject):
         self._referrer: Optional[str] = None
         self._open_args: dict[str, Any] = {}
         self._stay = StayLive()
+        self._background = False  # a multiview tile without the focus (set_background)
         self._snapshot_cache: dict[str, Any] = {}
         self._ended = False  # the session's input is over: no reopen, no stay-live
         self._source_lost = False  # ended by a source failure: fall back when it runs out
@@ -613,6 +614,7 @@ class LiveSession(QObject):
         if ram_bytes is not None:
             self._open_args["ram_bytes"] = ram_bytes
         self._stay = StayLive(self._latency)
+        self._stay.set_background(self._background)  # a multiview tile without the focus
         self._stay.jump_lag = self._jump_lag  # where a jump to live would land (stage 5)
         if self._memory.rate_locked:
             self._stay.lock_rate()  # VLC could not play it at another rate before
@@ -811,6 +813,16 @@ class LiveSession(QObject):
             self._learned = self._new_learned()  # where the channel left it
             self._steered, self._steer_burst = SteeredTarget(), None
             self._forget_feed()
+
+    def set_background(self, background: bool) -> None:
+        """A multiview tile without the focus (2.2): muted and small, it plays at 1x and
+        stay-live only goes live far behind (a rate it had is set back to 1x at once); with
+        the focus it steers again. It holds for the tunes that follow, until changed. A
+        speed the user chose (time-shifted, catching up) is left alone."""
+        self._background = background
+        self._stay.set_background(background)
+        if background and self._rate != 1.0 and self._stay.mode is Mode.LIVE:
+            self._set_rate(1.0)
 
     def resize(self, max_bytes: int) -> None:
         """A memory buffer's size from now on (2.2, the multiview: the focused tile's grows to

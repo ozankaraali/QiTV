@@ -19,8 +19,14 @@ Before the focused tile asks for a link, its provider's limit is checked (an STB
 one per request): when the provider's other streams take all of it, the tile shows "No
 stream to spare at <provider>" with the channel, and asks for nothing; so does a tile whose
 stream the budget then refuses (`SessionManager.slotDenied`). A tile whose stream fails says
-so too. A click on the card tries again; nothing queues or asks again by itself. Zapping onto
-a channel another tile shows moves the focus there.
+so too. A click on the card tries again; nothing queues or asks again by itself, but for a
+tile without the focus whose STB channel failed: its link is made again once (the portal's
+play token may have expired), as the big picture's and the PiP's are. Zapping onto a channel
+another tile shows moves the focus there.
+
+A tile without the focus plays at 1x: muted, it needs no nudge, so its stay-live only jumps
+it to live when it fell far behind (`SessionManager.set_large`). Its label says LIVE, or
+"−MM:SS" while it plays that far behind live.
 
 Esc (with nothing else open), V or a double-click leaves: the focused tile is the big
 picture, the tile focused before it stays as the picture-in-picture if it plays, and the
@@ -38,6 +44,7 @@ from typing import Any, Callable, Optional
 from PySide6.QtCore import QObject, Signal
 
 from services.config_manager import ConfigManager
+from services.live.refusals import REFUSALS
 from services.live.stay_live import TARGETS
 from services.sessions import SessionManager, Slot
 from services.zapping import ZapContext
@@ -105,6 +112,7 @@ class GridControls(QObject):
         external: Callable[[], bool],
         closed: Callable[[], bool],
         toast: Callable[..., None],
+        reopen: Optional[Callable[[str, dict], None]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` lays the surfaces out and `tiles` (the GridTiles overlay; None in tests)
@@ -115,7 +123,8 @@ class GridControls(QObject):
         `retry(channel)` tunes `channel` again on the focused tile; `denied(name)` says a
         tile's stream was refused (the shell forgets what it opened there); `close_pip()`
         drops a picture-in-picture still on its way; `vod()` and `external()` say a film
-        plays or channels play in an external player."""
+        plays or channels play in an external player; `reopen(name, channel)` makes a tile's
+        link again (an STB portal's, once: `_may_retry`) and opens it in that tile."""
         super().__init__(parent)
         self.sessions = sessions
         self.frame = frame
@@ -137,12 +146,15 @@ class GridControls(QObject):
         self._external = external
         self._closed = closed
         self._toast = toast
+        self._reopen = reopen
         self._shown = False
         self._cells = DEFAULT_CELLS
         self._names: list[str] = []  # the tiles, in order
         self._previous: Optional[str] = None  # the tile focused before the focused one
         self._cards: dict[str, _Card] = {}
         self._wanted: dict[str, tuple[dict, str]] = {}  # an open on its way: channel, provider
+        self._linking: dict[str, dict] = {}  # a tile whose link is on its way: its channel
+        self._retried: dict[str, dict] = {}  # each tile's channel whose link was made again
         self._states: dict[str, str] = {}  # each player's last state
         self._timelines: dict[str, dict] = {}
         self._playing: set[str] = set()  # the tiles whose surface shows (frame)
@@ -196,6 +208,8 @@ class GridControls(QObject):
         card = self._cards.get(name)
         if card is not None:
             return card.state
+        if name in self._linking:
+            return OPENING  # its link is on its way
         slot = self._slot(name)
         if slot is None or slot.channel is None:
             return EMPTY
@@ -310,6 +324,8 @@ class GridControls(QObject):
         self._shown = False
         self._cards.clear()
         self._wanted.clear()
+        self._linking.clear()
+        self._retried.clear()
         self.frame.hide_grid()
         if self._tiles_view is not None:
             self._tiles_view.set_tiles([])
@@ -365,12 +381,12 @@ class GridControls(QObject):
         later = [cells for cells in choices if cells > current]
         self.set_cells(later[0] if later else choices[0])
 
-    # ---- the focused tile's channel -----------------------------------------------------
+    # ---- a tile's channel ---------------------------------------------------------------
 
-    def refuse(self, channel: dict) -> bool:
-        """`channel` was chosen for the focused tile: when its provider's other streams take
-        all its streams, the tile shows the card instead, nothing asks for a link (an STB
-        portal mints one per request), and True."""
+    def refuse(self, channel: dict, name: Optional[str] = None) -> bool:
+        """`channel` was chosen for tile `name` (the focused one by default): when its
+        provider's other streams take all its streams, the tile shows the card instead,
+        nothing asks for a link (an STB portal mints one per request), and True."""
         if not self._shown:
             return False
         provider = item_provider.provider_dict(self.catalog, channel)
@@ -379,17 +395,18 @@ class GridControls(QObject):
         )
         if limit is None:
             return False
-        name = item_provider.provider_name(self.catalog, channel)
-        focused = self.sessions.large().name
-        others = [p for p in self._budget.holders(name) if p != focused]  # its own go back
+        provider_name = item_provider.provider_name(self.catalog, channel)
+        tile = name if name is not None else self.sessions.large().name
+        others = [p for p in self._budget.holders(provider_name) if p != tile]  # its own go
         if limit > 0 and len(others) < limit:
             return False
-        card = self._cards.get(focused)
+        card = self._cards.get(tile)
         again = card is not None and card.state == DENIED and ZapContext.same(card.channel, channel)
-        self._stop(focused)
-        self._deny(focused, channel, name)
+        self._linking.pop(tile, None)
+        self._stop(tile)
+        self._deny(tile, channel, provider_name)
         if again:  # a click on the card: say it still holds
-            self._toast(NO_STREAM.format(provider=name or "your provider"), "error")
+            self._toast(NO_STREAM.format(provider=provider_name or "your provider"), "error")
         return True
 
     def open_focused(
@@ -404,8 +421,30 @@ class GridControls(QObject):
         """Play `channel` in the focused tile within `provider`'s `limit`: through the
         time-shift pipeline with `start_kwargs` (`LiveSession.start`'s), else directly
         (`action` plays it once what the tile played is released)."""
-        name = self.sessions.large().name
+        self.open_tile(
+            self.sessions.large().name,
+            channel,
+            action,
+            provider=provider,
+            limit=limit,
+            start_kwargs=start_kwargs,
+        )
+
+    def open_tile(
+        self,
+        name: str,
+        channel: dict,
+        action: Optional[Callable[[], None]] = None,
+        *,
+        provider: str,
+        limit: Optional[int],
+        start_kwargs: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Play `channel` in tile `name` (focused or not), as `open_focused` does."""
         self._cards.pop(name, None)
+        self._linking.pop(name, None)
+        if not ZapContext.same(self._retried.get(name), channel):
+            self._retried.pop(name, None)  # another channel: it may be made again once
         self._wanted[name] = (channel, provider)
         self.sessions.open_slot(
             name,
@@ -416,6 +455,36 @@ class GridControls(QObject):
             start_kwargs=start_kwargs,
         )
         self._refresh()
+
+    def linking(self, name: str, channel: dict) -> None:
+        """Tile `name`'s link for `channel` is on its way (it opens beside the focused one):
+        it says "Connecting…" with the channel's name meanwhile."""
+        if self._shown and name in self._names:
+            self._cards.pop(name, None)
+            self._stop(name)
+            self._linking[name] = channel
+            self._refresh()
+
+    def awaits(self, name: str, channel: dict) -> bool:
+        """Tile `name` still waits for `channel`'s link (`linking`)."""
+        return self._shown and self._linking.get(name) is channel
+
+    def link_failed(self, name: str, channel: dict) -> None:
+        """Tile `name`'s link never came: it says so (a click tries again)."""
+        if self._linking.get(name) is channel:
+            del self._linking[name]
+            self._cards[name] = _Card(FAILED, channel, TILE_FAILED)
+            self._refresh()
+
+    def label(self, name: str) -> tuple[str, str]:
+        """What tile `name`'s label (or card) says: the channel's name, and LIVE, "−MM:SS"
+        behind live, "Connecting…" or the card's why."""
+        card = self._cards.get(name)
+        if card is not None:
+            return self._title(name), card.detail
+        if self.state(name) in _SHOWING:
+            return self._title(name), self._detail(name)
+        return self._title(name), ""
 
     def ring_sizes(self) -> tuple[int, int]:
         """The focused tile's time-shift buffer (the memory per stream) and the others' (the
@@ -494,7 +563,7 @@ class GridControls(QObject):
             self._deny(name, channel, provider)
         self._denied(name)
 
-    def _on_slot_failed(self, name: str, _message: str) -> None:
+    def _on_slot_failed(self, name: str, message: str) -> None:
         """A tile's stream failed: it stops (its provider's stream goes back) and says so."""
         if not self._shown or name not in self._names:
             return
@@ -509,6 +578,23 @@ class GridControls(QObject):
         self._stop(name)
         self._cards[name] = _Card(FAILED, channel, TILE_FAILED)
         self._refresh()
+        if self._may_retry(name, channel, message):
+            # Its play token, or its portal's session, may have expired (as the big
+            # picture's and the PiP's): a fresh link, once per tile and channel.
+            self._retried[name] = channel
+            assert self._reopen is not None
+            self._reopen(name, channel)
+
+    def _may_retry(self, name: str, channel: dict, message: str) -> bool:
+        """A tile without the focus (the focused one is the shell's) whose STB channel
+        failed, never for the provider's limit, and once per tile and channel."""
+        return (
+            self._reopen is not None
+            and name != self.sessions.large().name
+            and message not in REFUSALS
+            and not ZapContext.same(self._retried.get(name), channel)
+            and item_provider.provider_type(self.catalog, channel) == "STB"
+        )
 
     def _on_player_state(self, name: str, state: str) -> None:
         self._states[name] = state
@@ -570,6 +656,9 @@ class GridControls(QObject):
         card = self._cards.get(name)
         if card is not None:
             return str(card.channel.get("name") or "")
+        linking = self._linking.get(name)
+        if linking is not None:
+            return str(linking.get("name") or "")
         slot = self._slot(name)
         channel = slot.channel if slot is not None else None
         return str((channel or {}).get("name") or "")
@@ -615,15 +704,8 @@ class GridControls(QObject):
         large = self.sessions.large().name
         tiles = []
         for name, rect in self.frame.tiles():
-            state = self.state(name)
-            card = self._cards.get(name)
-            if card is not None:
-                detail = card.detail
-            elif state in _SHOWING:
-                detail = self._detail(name)
-            else:
-                detail = ""
-            tiles.append(TileView(name, rect, state, self._title(name), detail, name == large))
+            title, detail = self.label(name)
+            tiles.append(TileView(name, rect, self.state(name), title, detail, name == large))
         view.set_tiles(tiles)
 
     def _follow_area(self) -> None:

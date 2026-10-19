@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import wait_until
 
 from services.connection_budget import ConnectionBudget
+from services.live.refusals import STREAM_LIMIT
 from services.sessions import SessionManager, Slot
 from services.zapping import ZapContext
 from tests.test_tv_controller import CHANNELS, FakeLiveSession, FakeSession
@@ -33,7 +34,7 @@ from ui.overlays.grid_tiles import (
     GridTiles,
     TileView,
 )
-from ui.overlays.pip_label import LIVE
+from ui.overlays.pip_label import CONNECTING, LIVE
 
 LEFT = Qt.MouseButton.LeftButton
 MIB = 1024 * 1024
@@ -585,6 +586,7 @@ class MultiviewTests(MultiviewCase):
         self.assertEqual(len(self.grid.names()), 4)
 
     def test_a_tile_whose_stream_fails_stops_and_says_so_until_clicked(self):
+        self.catalog.ptype = "XTREAM"  # no portal: no fresh link by itself (see stage 3)
         self.start_large(0)
         self.v()
         t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
@@ -600,6 +602,7 @@ class MultiviewTests(MultiviewCase):
         self.assertEqual(len(self.catalog.links), links + 1)
 
     def test_a_channel_that_cannot_be_time_shifted_plays_directly_and_says_when_it_fails(self):
+        self.catalog.ptype = "XTREAM"
         self.start_large(0)
         self.v()
         self.grid_frame.tileClicked.emit("t2")
@@ -641,6 +644,74 @@ class MultiviewTests(MultiviewCase):
         self.config.timeshift_ram_mib = 128
         self.config.multiview_tile_ram_mib = 512
         self.assertEqual(self.grid.ring_sizes(), (128 * MIB, 128 * MIB))
+
+    # ---- stage 3: stay-live per tile, labels, an STB tile's fresh link ----------------------
+
+    def test_tiles_without_the_focus_play_at_1x_and_only_jump_to_live(self):
+        self.two_pictures()
+        self.assertEqual((self.live.background, self.pip_live.background), (False, True))
+        self.grid_frame.focusRequested.emit("pip")
+        self.assertEqual((self.live.background, self.pip_live.background), (True, False))
+        self.v()  # the PiP's stay-live steers as ever
+        self.assertEqual((self.live.background, self.pip_live.background), (False, False))
+
+    def test_a_tiles_label_says_live_or_how_far_behind_live_it_plays(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.assertEqual(self.grid.label("t2"), ("Three", CONNECTING))
+        t2.live.timelineChanged.emit({"lag": 2.6, "target": 2.5})
+        self.assertEqual(self.grid.label("t2"), ("Three", LIVE))
+        t2.live.timelineChanged.emit({"lag": 42.0, "target": 2.5})
+        self.assertEqual(self.grid.label("t2"), ("Three", "−00:42"))
+
+    def test_a_channel_opened_beside_the_focus_keeps_the_focus_and_a_small_buffer(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        links = len(self.catalog.links)
+        self.controller.play_in_tile("t2", CHANNELS[2], group_key="10", channels=CHANNELS)
+        self.assertEqual(len(self.catalog.links), links + 1)  # on the side lane
+        self.assertEqual(self.grid.label("t2"), ("Three", CONNECTING))
+        self.ready("http://stream/3")
+        t2 = self.sessions.slot("t2")
+        self.assertTrue(wait_until(lambda: t2.live.running))
+        self.assertEqual(t2.live.named("start")[-1][1]["max_bytes"], 64 * MIB)
+        self.assertIs(self.sessions.large(), self.main_slot)
+        self.assertTrue(t2.playback.muted)
+        self.grid_frame.focusRequested.emit("t2")  # the controls act on what it plays
+        self.assertEqual(self.banner.info.name, "Three")
+        self.assertEqual(self.controller._current.title, "Three")
+        self.assertEqual(self.zap.context.group_key, "10")
+
+    def test_an_stb_tile_without_the_focus_gets_a_fresh_link_once(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.grid_frame.focusRequested.emit("main")
+        links = len(self.catalog.links)
+        t2.live.failed.emit("The stream broke")
+        t2.live.released.emit()
+        self.assertEqual(len(self.catalog.links), links + 1)  # its link made again
+        self.assertEqual(self.catalog.links[-1][1], CHANNELS[2])
+        self.ready("http://stream/3-again")
+        self.assertTrue(wait_until(lambda: t2.live.running and t2.live.url.endswith("again")))
+        self.assertEqual(self.grid.state("t2"), OPENING)
+        t2.live.failed.emit("The stream broke")  # again: it says so, and asks nothing more
+        self.assertEqual(self.grid.state("t2"), FAILED)
+        self.assertEqual(len(self.catalog.links), links + 1)
+
+    def test_a_refusal_is_never_asked_again(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.grid_frame.focusRequested.emit("main")
+        links = len(self.catalog.links)
+        t2.live.failed.emit(STREAM_LIMIT)
+        self.assertEqual((self.grid.state("t2"), len(self.catalog.links)), (FAILED, links))
 
     def test_the_guides_of_every_tiles_channel_are_in_use(self):
         self.start_large(0)

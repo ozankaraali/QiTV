@@ -622,6 +622,29 @@ class ResizeTests(LiveSessionCase):
         self.assertEqual(self.engine.resizes, [])
 
 
+class BackgroundTests(LiveSessionCase):
+    """2.2, the multiview: a tile without the focus plays at 1x; stay-live only goes live."""
+
+    def test_a_rate_stay_live_set_goes_back_to_1x_and_it_holds_for_later_tunes(self):
+        self.start()
+        self.live._set_rate(1.03)  # a nudge under way
+        self.live.set_background(True)
+        self.assertEqual(self.playback.rates[-1], 1.0)
+        self.assertTrue(self.live._stay.background)
+        self.start()  # a later tune of the tile: still without the focus
+        self.assertTrue(self.live._stay.background)
+        self.live.set_background(False)
+        self.assertFalse(self.live._stay.background)
+
+    def test_a_speed_the_user_chose_is_left_alone(self):
+        self.start()
+        self.live._stay.user_paused()
+        self.live._set_rate(1.5)
+        rates = len(self.playback.rates)
+        self.live.set_background(True)
+        self.assertEqual(len(self.playback.rates), rates)
+
+
 class NoRewindReasonTests(LiveSessionCase):
     def test_a_channel_that_cannot_be_time_shifted_says_so(self):
         sid = self.start()
