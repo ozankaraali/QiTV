@@ -55,9 +55,9 @@ select = ["E9", "F63", "F7", "F82"]
 [dependency-groups]
 dev = [
   "pyinstaller>=6.22.3",
-  "black==26.5.1",
-  "isort==9.0.1",
-  "mypy==2.3.1",
-  "flake8==7.3.0",
+  "black==26.10.1",
+  "isort==9.0.2",
+  "mypy==2.4.0",
+  "flake8==7.4.1",
   "types-requests==2.33.0.20260906",
 ]
