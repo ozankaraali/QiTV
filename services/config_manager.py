@@ -454,6 +454,8 @@ class ConfigManager:
     # 2.4, optional (older builds ignore it): on macOS, the fullscreen picture floats in a small
     # window while another desktop shows (ui/desktop_pip.py).
     desktop_pip = _config_property("desktop_pip", True, coerce=lambda value: value is not False)
+    # 2.4.1, optional: where the user moved or resized that window, [x, y, width, height].
+    desktop_pip_rect = _config_property("desktop_pip_rect", None)
     # 2.3, optional (older builds ignore it): the Picture panel's deinterlacing, every player's.
     deinterlace = _config_property(
         "deinterlace",
