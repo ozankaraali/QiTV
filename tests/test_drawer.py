@@ -1031,6 +1031,21 @@ class GenrePlaceTests(unittest.TestCase):
         self.assertEqual(resets, [])
         self.assertEqual(left.view.verticalScrollBar().value(), value)
 
+    def test_the_same_lists_again_compare_no_rows(self):
+        self.click("right", 250)
+        compared = []
+        shown_rows = drawer_module._shown_rows
+
+        def counted(nodes, *args):
+            compared.append(len(nodes))
+            return shown_rows(nodes, *args)
+
+        with mock.patch.object(drawer_module, "_shown_rows", counted):
+            self.nav.changed.emit()  # nothing in them changed: the same memoized lists
+            self.assertEqual(compared, [])
+            self.catalog.groupReady.emit("live", "250")  # an event: the lists are made again
+            self.assertIn(GENRES, compared)  # compared row by row, once
+
     def test_genres_refilled_with_a_new_count_stay_where_they_were(self):
         self.scroll_genres_to(250)
         self.click("right", 250)

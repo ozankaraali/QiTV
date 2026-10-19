@@ -364,6 +364,16 @@ class NavModelTests(unittest.TestCase):
         self.catalog.live["10"] = [{"id": 3, "name": "Three"}]
         self.assertEqual([n.title for n in self.nav.children(group)], ["Three"])
 
+    def test_a_memoized_list_keeps_its_token_while_it_is_kept(self):
+        # The drawer tells the same list from another by its token, as a long list's.
+        self.nav.reset_to("live", "10")
+        group = self.nav.path[-1]
+        first, again = self.nav.children(group), self.nav.children(group)
+        self.assertIsNot(first, again)  # each a copy: the memo's own is never handed out
+        self.assertEqual(first.token, again.token)
+        self.catalog.live["10"] = [{"id": 3, "name": "Three"}]
+        self.assertNotEqual(self.nav.children(group).token, first.token)
+
     def test_a_zap_does_not_rescan_favorites_or_rebuild_groups(self):
         home = self.nav.children(None)[1]
         self.nav.open(home)

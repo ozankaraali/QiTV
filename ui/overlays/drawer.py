@@ -321,7 +321,7 @@ def _shown_rows(
     a refreshed catalog brings new item dicts) and number. A genre's payload is told by its
     value: the catalog makes its Group anew at each catalog event and at each zap.
     """
-    if isinstance(nodes, NodeSeq):  # a long list is told by its identity, not row by row
+    if isinstance(nodes, NodeSeq):  # a long list is told by its token, not row by row
         return (live, ("rows", nodes.token), getattr(numbers, "signature", None), tagged)
     rows = tuple(
         (
@@ -624,6 +624,10 @@ class _Column:
         self.message: str | None = None
         self.rect = QRect()
         self.shown: tuple = ()  # what the list shows (_shown_rows), to skip refilling it
+        # The token of the list `shown` was read from (a NodeSeq's or a memoized list's), and
+        # its live and tagged flags: the same again shows the same rows, compared no further
+        # (emptied wherever `shown` is set from anything else).
+        self.shown_token: tuple = ()
 
 
 class Drawer(Overlay):
@@ -1105,7 +1109,12 @@ class Drawer(Overlay):
         # The same rows again (e.g. the section reported ready once more): the list keeps its
         # model, so it is neither laid out nor repainted from scratch.
         tagged = live and self._nav.shows_provider(parent)
-        shown = _shown_rows(nodes, live, numbers, tagged)
+        token = getattr(nodes, "token", None)
+        if token is not None and (token, live, tagged) == col.shown_token:
+            shown = col.shown  # the same list as last time: no row is compared
+        else:
+            shown = _shown_rows(nodes, live, numbers, tagged)
+        col.shown_token = (token, live, tagged) if token is not None else ()
         if shown != col.shown:
             col.shown = shown
             col.nodes = nodes
@@ -1199,6 +1208,7 @@ class Drawer(Overlay):
         col.parent = FIND_PARENT
         col.message = None
         shown = ("find", _shown_rows(nodes, False, None, labels))
+        col.shown_token = ()  # the find's rows are no list of the channel list's
         if shown != col.shown:
             col.shown = shown
             col.nodes = nodes
