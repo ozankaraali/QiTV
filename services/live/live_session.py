@@ -203,6 +203,14 @@ once libVLC let go of the provider's stream (`inputEnded`, or after `_CLOSE_CAP_
 `use_engine()` hands over a restarted engine.
 `failed(message)` reports a playback error in direct mode, or the provider's refusal for its
 connection limit; pipeline playback errors are recovered here and never reported.
+
+Recording (2.3): while it plays from the buffer, `start_recording(path)` has the helper write
+the buffer to a file from the clean start at or before where it plays (rewound or not), then
+on with the live edge, opening no connection (`LiveEngine.start_recording`). It stops with
+`stop_recording()`, `stop()` (a channel change), a fallback or a refusal (the file is kept),
+or by itself (the input's end, a limit, a failure, the helper's death). `recordingChanged`
+says when it records and no longer; each recording's end comes as `recordingEnded(reason,
+path, written)`, also after the session closed.
 """
 
 from __future__ import annotations
@@ -219,6 +227,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from services.i18n import N_
 from services.live.learned_target import LearnedTarget, learned_target
+from services.live.recorder import MAX_SECONDS, MIN_FREE_BYTES
 from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.stay_live import (
     AUTO,
@@ -408,6 +417,9 @@ class LiveSession(QObject):
     notice = Signal(str)
     failed = Signal(str)
     released = Signal()
+    recordingChanged = Signal(bool)  # 2.3: it records now, or no longer
+    # (reason, path, written): a recording it started ended (LiveEngine.recordingEnded)
+    recordingEnded = Signal(str, str, int)
 
     def __init__(
         self,
@@ -532,6 +544,11 @@ class LiveSession(QObject):
         self._said: Optional[tuple[float, float, float]] = None
         self._troubled_at: Optional[float] = None
         self._cushion = 0.0  # the largest lag at the live edge since the tune (or the target)
+        # 2.3: the recording under way (its id at the engine) and since when (the clock's);
+        # every recording started whose end the engine has not told yet.
+        self._recording: Optional[str] = None
+        self._recording_since: Optional[float] = None
+        self._recordings: set[str] = set()
         self._wire_engine(engine, connect=True)
         playback.stateChanged.connect(self._on_state)
         playback.ended.connect(self._on_interrupted)
@@ -547,6 +564,7 @@ class LiveSession(QObject):
             (engine.sessionFailed, self._on_failed),
             (engine.sessionEnded, self._on_ended),
             (engine.sessionClosed, self._on_closed),
+            (engine.recordingEnded, self._on_recording_ended),
         ):
             if connect:
                 signal.connect(slot)
@@ -572,8 +590,10 @@ class LiveSession(QObject):
         """The engine was shut down, which no signal tells: count it gone for this run.
 
         Nothing it held is open any more, so a stop's wait for its close ends now (without
-        the close-cap warning); later starts play directly until `use_engine()`.
+        the close-cap warning); later starts play directly until `use_engine()`. A recording
+        ended with it (the helper's shutdown closed its file), unannounced.
         """
+        self._recordings.clear()
         self._on_available(False)
 
     def use_engine(self, engine: LiveEngine) -> None:
@@ -655,7 +675,9 @@ class LiveSession(QObject):
         self._begin()
 
     def stop(self) -> None:
-        """Stop playback and close the session; `released()` follows (see the docstring)."""
+        """Stop playback and close the session; `released()` follows (see the docstring). A
+        recording stops and keeps its file (`recordingEnded` follows)."""
+        self._end_recording()
         if self._phase is _Phase.IDLE:
             return
         if self._learned is not None:
@@ -872,6 +894,76 @@ class LiveSession(QObject):
             return self._advance()
         return self._base + self._elapsed
 
+    # ---- recording (2.3) ---------------------------------------------------------------
+    def recordable(self) -> bool:
+        """It plays from the time-shift buffer: a recording can start."""
+        return self._phase is _Phase.PIPELINE and self._sid is not None
+
+    def recording(self) -> bool:
+        return self._recording is not None
+
+    def recording_since(self) -> Optional[float]:
+        """When the recording under way started (this object's clock); None without one."""
+        return self._recording_since if self._recording is not None else None
+
+    def start_recording(
+        self, path: str, *, max_s: float = MAX_SECONDS, min_free: int = MIN_FREE_BYTES
+    ) -> bool:
+        """Record the channel to a new file at `path` from where it plays (rewound or not:
+        the clean start a seek there would open) on, following the live edge, until
+        `stop_recording()`, a channel change, a fallback, its input's end or a limit; the
+        helper writes it from the buffer, opening no connection. False when it cannot start
+        (not `recordable()`, or it records already)."""
+        if not self.recordable() or self._recording is not None:
+            return False
+        assert self._sid is not None
+        seq = self._record_from()
+        if seq is None:
+            return False
+        rid = self._engine.start_recording(self._sid, path, seq, max_s=max_s, min_free=min_free)
+        if not rid:
+            return False
+        self._recording, self._recording_since = rid, self._clock()
+        self._recordings.add(rid)
+        self.recordingChanged.emit(True)
+        return True
+
+    def stop_recording(self) -> None:
+        """Stop recording at the live edge; `recordingEnded` follows once the file is closed."""
+        self._end_recording()
+
+    def _end_recording(self) -> None:
+        if self._recording is None:
+            return
+        self._recording = self._recording_since = None
+        if self._sid is not None:
+            self._engine.stop_recording(self._sid)
+        self.recordingChanged.emit(False)
+
+    def _record_from(self) -> Optional[int]:
+        """The segment a recording starts at: the clean start at or before where it plays
+        (as a seek there opens), the open segment while it plays that, else the oldest."""
+        assert self._sid is not None
+        spans = self._engine.spans(self._sid)
+        position = self._advance()
+        if spans and position < spans[-1].end:
+            span = self._seek_start(position, hi=position + 1e-6)
+            if span is not None:
+                return span.seq
+        open_seq = self._snapshot().get("open")
+        if isinstance(open_seq, int):
+            return open_seq
+        return spans[-1].seq if spans else self._oldest_seq()
+
+    def _on_recording_ended(self, rid: str, reason: str, path: str, written: int) -> None:
+        if rid not in self._recordings:
+            return  # another player's
+        self._recordings.discard(rid)
+        if rid == self._recording:  # it ended by itself: a limit, the end, a failure
+            self._recording = self._recording_since = None
+            self.recordingChanged.emit(False)
+        self.recordingEnded.emit(reason, path, written)
+
     # ---- sessions ----------------------------------------------------------------------
     def _begin(self) -> None:
         """Open the pipeline session for the channel `start()` stored; play directly at once
@@ -920,6 +1012,7 @@ class LiveSession(QObject):
         if self._limited:
             self._refuse()
             return
+        self._end_recording()  # a direct play has no buffer to record from
         self._stop_timers()
         sid, self._sid = self._sid, None
         self._phase = _Phase.FALLING_BACK
@@ -936,6 +1029,7 @@ class LiveSession(QObject):
 
     def _refuse(self) -> None:
         """The provider refused for its connection limit: close it all, play nothing."""
+        self._end_recording()
         self._stop_timers()
         sid, self._sid = self._sid, None
         self._phase = _Phase.REFUSED

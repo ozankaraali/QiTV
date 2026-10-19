@@ -46,6 +46,15 @@ directly); each kind has one meaning:
 After `sessionEnded` or a final failure, only `sessionClosed` follows; `sessionClosed` always
 answers `close_session`.
 
+Recording (2.3): `start_recording(sid, path, seq)` has the helper write the session's buffer
+to a file from segment `seq` on, following the live edge (no second connection: the helper's
+recorder reads the ring), until `stop_recording(sid)`, the session's close, its input's end or
+a limit. It returns the recording's id, and each is answered by one `recordingEnded(rid,
+reason, path, written)`, also after `sessionClosed`: `reason` is the helper's
+(`services.live.recorder.REASONS`), or the engine's "lost" when the helper died (or time-shift
+went off) before it said; then `path` is the one asked for and `written` -1 (not known). A
+start for a session no helper holds now is answered "failed". Nothing follows `shutdown()`.
+
 Known limits:
 - Commands are sent with a blocking write, one small command at a time between reads. Only
   a helper whose command loop hangs while several KiB of commands are unread could block
@@ -91,6 +100,7 @@ _SHUTDOWN_WAIT_MS = 1800  # the escalation takes at most 1.5 s
 _SESSION_PREFIX = ".qitv-timeshift-"
 _INTERNAL = "The live buffer stopped unexpectedly."
 _UNAVAILABLE = "The live buffer is not available."
+_FAILED, _LOST = "failed", "lost"  # a recording that could not start, or whose helper died
 # "internal" and "unavailable" are the engine's own kinds (see the module docstring).
 
 _Command = tuple[Any, ...]
@@ -220,6 +230,12 @@ class _Supervisor(QThread):
             if record.sent:
                 conn.send(command)
             return
+        if name in ("record_start", "record_stop"):
+            if record is not None and record.sent and not record.closing:
+                conn.send(command)
+            elif name == "record_start":  # no helper holds it now: nothing can be recorded
+                self._relay(("recorded", sid, command[2], _FAILED, "", 0))
+            return
         if record is None:
             self._relay(("closed", sid))
         elif record.sent:
@@ -256,6 +272,11 @@ class _Supervisor(QThread):
             self._relay(("hello", message[1]))
             return
         sid = message[1]
+        if name == "recorded":
+            # A recording outlives its session's close: relayed whatever the record says.
+            if isinstance(sid, str) and len(message) == 6:
+                self._relay(message)
+            return
         record = self._records.get(sid) if isinstance(sid, str) else None
         if record is None:
             return
@@ -407,7 +428,9 @@ class _Supervisor(QThread):
         if command[0] == "open":
             # Time-shift is off: available(False) was emitted already, and no reopen follows.
             self._relay(("error", command[1], "unavailable", _UNAVAILABLE))
-        else:
+        elif command[0] == "record_start":
+            self._relay(("recorded", command[1], command[2], _FAILED, "", 0))
+        elif command[0] != "record_stop":
             self._relay(("closed", command[1]))
 
     def _stop_helper(self) -> None:
@@ -486,12 +509,15 @@ class LiveEngine(QObject):
     sessionFailed = Signal(str, str, str)
     sessionEnded = Signal(str)
     sessionClosed = Signal(str)
+    # (rid, reason, path, written): a recording ended (see the module docstring)
+    recordingEnded = Signal(str, str, str, int)
 
     def __init__(self, root_dir: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._root = Path(root_dir)
         self._commands: queue.Queue[_Command | None] = queue.Queue()
         self._sessions: dict[str, _View] = {}
+        self._recordings: dict[str, str] = {}  # rid -> the path asked for, until it ends
         self._base_url = ""
         self._available = False
         self._started = False
@@ -575,6 +601,26 @@ class LiveEngine(QObject):
             return
         self._commands.put(("resize", sid, int(max_bytes)))
 
+    def start_recording(self, sid: str, path: str, seq: int, *, max_s: float, min_free: int) -> str:
+        """Record session `sid` to a new file at `path` from segment `seq` on (the module
+        docstring); `max_s` and `min_free` stop it after that long or once the disk holding
+        it has less free. The recording's id; "" (nothing asked, nothing follows) for a
+        session this engine does not hold open. Stop the session's recording first: the
+        helper records one at a time per session."""
+        view = self._sessions.get(sid)
+        if view is None or view.closing or self._shut:
+            return ""
+        rid = secrets.token_hex(6)
+        self._recordings[rid] = path
+        limits = {"max_s": float(max_s), "min_free": int(min_free)}
+        self._commands.put(("record_start", sid, rid, path, int(seq), limits))
+        return rid
+
+    def stop_recording(self, sid: str) -> None:
+        """End session `sid`'s recording at the live edge; `recordingEnded` follows."""
+        if sid in self._sessions and not self._shut:
+            self._commands.put(("record_stop", sid))
+
     def spans(self, sid: str) -> list[Span]:
         """The session's closed segments, oldest first; each says how cleanly playback starts
         at it (`Span.start_quality`)."""
@@ -599,6 +645,7 @@ class LiveEngine(QObject):
         self._available = False
         self._base_url = ""
         self._sessions.clear()
+        self._recordings.clear()  # the helper's shutdown ends them; no signal follows
         supervisor, cleanup = self._supervisor, self._cleanup
         if supervisor is None:
             return
@@ -609,6 +656,11 @@ class LiveEngine(QObject):
         if cleanup is not None:
             # Run ThreadCleanup's queued check now, so no pending thread outlives shutdown.
             QCoreApplication.sendPostedEvents(cleanup, QEvent.Type.MetaCall)
+
+    def _lose_recordings(self) -> None:
+        recordings, self._recordings = self._recordings, {}
+        for rid, path in recordings.items():
+            self.recordingEnded.emit(rid, _LOST, path, -1)
 
     @Slot(object)
     def _on_retired(self, _thread: object) -> None:
@@ -625,10 +677,17 @@ class LiveEngine(QObject):
             return
         if name in ("down", "unavailable"):
             self._base_url, self._available = "", False
+            self._lose_recordings()  # what the helper had not said ended with it
             if name == "unavailable":
                 self.available.emit(False)
             return
         sid = message[1]
+        if name == "recorded":
+            _, _, rid, reason, path, written = message
+            if rid in self._recordings:
+                del self._recordings[rid]
+                self.recordingEnded.emit(str(rid), str(reason), str(path), int(written))
+            return
         view = self._sessions.get(sid)
         if view is None:
             return

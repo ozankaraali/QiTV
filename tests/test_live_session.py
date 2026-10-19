@@ -55,6 +55,7 @@ class FakeEngine(QObject):
     sessionFailed = Signal(str, str, str)
     sessionEnded = Signal(str)
     sessionClosed = Signal(str)
+    recordingEnded = Signal(str, str, str, int)  # 2.3: (rid, reason, path, written)
 
     def __init__(self):
         super().__init__()
@@ -63,6 +64,8 @@ class FakeEngine(QObject):
         self.opened = []  # (sid, url, keyword arguments)
         self.closed = []
         self.resizes = []  # (sid, max_bytes): a multiview tile's buffer grew or shrank
+        self.recordings = []  # (rid, sid, path, seq, keyword arguments)
+        self.record_stops = []  # sids
         self.events = []  # ("open", sid) as sessions open
         self._answered = set()
         self._spans = {}
@@ -92,6 +95,16 @@ class FakeEngine(QObject):
 
     def resize_session(self, sid, max_bytes):
         self.resizes.append((sid, max_bytes))
+
+    def start_recording(self, sid, path, seq, **kwargs):
+        rid = f"r{len(self.recordings) + 1}"
+        self.recordings.append((rid, sid, path, seq, kwargs))
+        self.events.append(("record", sid, seq))
+        return rid
+
+    def stop_recording(self, sid):
+        self.record_stops.append(sid)
+        self.events.append(("record_stop", sid))
 
     def answer(self):
         """The helper confirms every close so far."""

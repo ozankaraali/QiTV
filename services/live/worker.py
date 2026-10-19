@@ -26,6 +26,15 @@ Commands (parent to helper):
   from now on, its open ring at once (a smaller size evicts the oldest segments) and a ring
   made later too; a disk session's size stays the user's. Unanswered; an unknown sid is
   ignored;
+- `("record_start", sid, rid, path, seq, limits)` (2.3): recording `rid` (the parent's name for
+  it) writes the session's ring to a new file at `path` (a unique name next to it when that
+  exists) from segment `seq` on, following the live edge, until "record_stop", the session's
+  close or the helper's shutdown, the end of its input, or `limits` (`{"max_s": seconds,
+  "min_free": bytes}`, both optional) stop it (`services.live.recorder`). It opens no
+  connection. One recording per session at a time (another start is answered as failed);
+  a stopped one may still be finishing. Answered by "recorded";
+- `("record_stop", sid)`: the session's recording ends at the live edge; an unknown sid, or
+  one that records nothing, is ignored;
 - `("shutdown",)`.
 
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
@@ -36,6 +45,9 @@ each addition a newly closed segment's `(seq, start, end, discontinuity, start_q
 (`Span`'s fields; an engine from before 2.1 would not take the fifth, but the helper and the
 engine always ship in one build, and the engine still takes four);
 `("ready", sid)` once the first segment is open (its state comes first);
+`("recorded", sid, rid, reason, path, written)` once recording `rid` ended (2.3: `reason` is
+one of `recorder.REASONS`; `path` the file written, "" when none was), also after "closed": a
+recording outlives its session's cancel, and this message is never dropped for it;
 `("error", sid, kind, message[, status])`, an HTTP failure's status last (2.1: the parent
 logs why a channel played directly); `("ended", sid)`; `("closed", sid)`. Error messages are
 fixed strings. `kind`, one meaning each:
@@ -93,6 +105,7 @@ from services.live.ts import (
 )
 
 if TYPE_CHECKING:
+    from services.live.recorder import Recorder
     from services.live.ring import Ring
     from services.live.server import StreamServer
     from services.live.source import Source
@@ -110,6 +123,7 @@ _SHUTDOWN_GRACE = 0.25  # for session threads to remove their disk buffers
 _FLUSH_GRACE = 0.25  # for the writer to deliver what is queued
 _RELEASE_WAIT = 0.5  # for a closed session to close its upstream before "closed" is sent
 _OWNER_GRACE = 1.0  # after the owner died: for the shutdown to remove the disk buffers
+_RECORD_GRACE = 2.0  # at a session's teardown: for its recording to reach the live edge
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # as the stream server requires
 _INTERNAL = "The live buffer stopped unexpectedly."
 _UNSUPPORTED = "The channel's stream cannot be time-shifted."
@@ -416,7 +430,50 @@ class _Session:
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
         self._last_notify = 0.0
         self._heard_edge = 0.0  # the live edge the latest state reported
+        self._recorder: Recorder | None = None  # 2.3: writes the ring to a file (`record`)
+        self._finishing: set[Recorder] = set()  # stopped, still writing up to the live edge
         self.thread = threading.Thread(target=self._run, name="qitv-live-session", daemon=True)
+
+    def record(self, rid: str, path: str, seq: int, limits: dict[str, Any]) -> None:
+        """Called by the command loop ("record_start"): never blocks; the recorder's thread
+        makes the file. Answered by "recorded" once it ends (at once when it cannot start: the
+        session records already, or it was closed)."""
+        from services.live.recorder import FAILED, Recorder
+
+        kwargs: dict[str, Any] = {}
+        if isinstance(limits.get("max_s"), (int, float)):
+            kwargs["max_s"] = float(limits["max_s"])
+        if isinstance(limits.get("min_free"), int):
+            kwargs["min_free"] = limits["min_free"]
+        recorder = Recorder(lambda: self._ring, self._is_ended, path, seq, self._recorded, **kwargs)
+        recorder.name = rid
+        with self.lock:
+            busy = self.cancelled or self._recorder is not None
+            if not busy:
+                self._recorder = recorder
+        if busy:
+            self._helper.send(("recorded", self.sid, rid, FAILED, "", 0))
+            return
+        recorder.start()
+
+    def stop_recording(self) -> None:
+        """Called by the command loop ("record_stop"); never blocks. The recording writes on
+        up to the live edge meanwhile, and a new one may start at once."""
+        with self.lock:
+            recorder, self._recorder = self._recorder, None
+            if recorder is not None:
+                self._finishing.add(recorder)
+        if recorder is not None:
+            recorder.stop()
+
+    def _recorded(self, recorder: Recorder) -> None:
+        """A recording's end (its own thread): the parent hears it, also after "closed"."""
+        with self.lock:
+            if self._recorder is recorder:
+                self._recorder = None
+            self._finishing.discard(recorder)
+        end = (recorder.reason, recorder.path, recorder.written)
+        self._helper.send(("recorded", self.sid, recorder.name, *end))
 
     def resize(self, max_bytes: int) -> None:
         """Called by the command loop: a RAM session's size from now on (see "resize"). A
@@ -949,6 +1006,15 @@ class _Session:
 
     def _teardown(self) -> None:
         with self.lock:
+            recorders = [r for r in (self._recorder, *self._finishing) if r is not None]
+        # A recording writes what the ring holds up to its live edge before the ring goes.
+        deadline = time.monotonic() + _RECORD_GRACE
+        for recorder in recorders:
+            recorder.stop()
+        for recorder in recorders:
+            if not recorder.join(max(0.0, deadline - time.monotonic())):
+                _LOG.info("A recording is still finishing as its buffer closes.")
+        with self.lock:
             ring, self._ring = self._ring, None
         if ring is not None:
             _close_ring(ring)
@@ -1013,6 +1079,14 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.resize(size)
+            elif name == "record_start":
+                self._record(command)
+            elif name == "record_stop":
+                if len(command) != 2 or not isinstance(command[1], str):
+                    raise ValueError("a recording's stop needs a session")
+                session = self._sessions.get(command[1])
+                if session is not None:
+                    session.stop_recording()
             elif name == "shutdown":
                 return False
             else:
@@ -1039,6 +1113,25 @@ class _Helper:
         session = _Session(self, sid, url, headers, verify_ssl, ring, live_delay, start)
         self._sessions[sid] = session
         session.thread.start()
+
+    def _record(self, command: tuple[Any, ...]) -> None:
+        """("record_start", sid, rid, path, seq, limits): the session records, else
+        "recorded" says it failed at once."""
+        from services.live.recorder import FAILED
+
+        if (
+            len(command) != 6
+            or not all(isinstance(command[k], str) and command[k] for k in (1, 2, 3))
+            or type(command[4]) is not int
+            or not isinstance(command[5], dict)
+        ):
+            raise ValueError("a recording needs a session, a name, a path, a segment, limits")
+        sid, rid, path, seq, limits = command[1:]
+        session = self._sessions.get(sid)
+        if session is None:
+            self.send(("recorded", sid, rid, FAILED, "", 0))
+            return
+        session.record(rid, path, seq, limits)
 
     def _close(self, sid: str) -> None:
         session = self._sessions.pop(sid, None)
