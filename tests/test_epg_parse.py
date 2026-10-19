@@ -1,7 +1,9 @@
 """The XMLTV guide is read as a stream and gives what the whole-tree parse gave.
 
-`_old_index_programs` below is the parse as it was (ET.parse, then findall): the streaming
-parse must give an equal guide, with its channels, keys and programme dicts in the same order.
+`_old_index_programs` below is the parse as it was (ET.parse, then findall, each programme's
+every child kept): the streaming parse must give the same channels and keys in the same order,
+and each programme as the guide reads it (epg_view.parse_programme), so each channel's
+timeline (epg_view.normalize) is the same.
 """
 
 from datetime import timedelta
@@ -24,6 +26,7 @@ from scripts.bench_epg import build_xmltv
 from services import epg_manager as epg_manager_module
 from services.epg_manager import EpgManager, _cache_key, normalize_programme_stop
 from services.epg_time import parse_xmltv_as
+from services.epg_view import normalize, parse_programme
 from services.jobs import Cancelled
 from services.multikeydict import MultiKeyDict
 
@@ -252,9 +255,14 @@ class _FileCase(unittest.TestCase):
         return path
 
     def assertSameGuide(self, new, old):
-        # repr shows each programme dict's key order too.
-        self.assertEqual(repr(list(new.items())), repr(list(old.items())))
+        self.assertEqual([keys for keys, _ in new.items()], [keys for keys, _ in old.items()])
         self.assertEqual(list(new._keys_map.items()), list(old._keys_map.items()))
+        for (keys, programmes), (_keys, before) in zip(new.items(), old.items()):
+            times = [(p["@start"], p["@stop"]) for p in programmes]
+            self.assertEqual(times, [(p["@start"], p["@stop"]) for p in before], keys)
+            read = [parse_programme(p) for p in programmes]
+            self.assertEqual(read, [parse_programme(p) for p in before], keys)
+            self.assertEqual(normalize(programmes), normalize(before), keys)
 
 
 class StreamingParseEqualsTheTreeParseTests(_FileCase):
@@ -297,19 +305,23 @@ class StreamingParseEqualsTheTreeParseTests(_FileCase):
         self.assertEqual(guide.get_keys("mapped alias")[0], "mapped.test")
         self.assertNotIn("My Uno", guide)
         self.assertEqual(
-            [p["title"]["__text"] for p in guide["late.test"]],
+            [p["title"] for p in guide["late.test"]],
             ["Before its channel", "After its channel"],
         )
         night = channels["one.test"][1][0]
-        self.assertEqual(night["@stop"], "20261020003000 +0200")
-        self.assertEqual(night["title"][0]["__text"], "News & Weather é☺")
-        self.assertEqual(night["desc"][0]["__text"], 'A <b>bold</b> & "quoted" night.')
-        self.assertEqual(night["new"], {"__text": None})
+        # Only what the guide reads: the first title and description with text.
         self.assertEqual(
-            night["{urn:example:extra}extra"]["@{urn:example:extra}kind"], "namespaced"
+            night,
+            {
+                "@start": "20261019233000 +0200",
+                "@stop": "20261020003000 +0200",
+                "title": "News & Weather é☺",
+                "desc": 'A <b>bold</b> & "quoted" night.',
+            },
         )
         self.assertEqual(len(guide["two.test"]), 4)
-        self.assertEqual(guide["undeclared.test"][0]["title"]["__text"], "Harbour Tales")
+        self.assertEqual(guide["undeclared.test"][0]["title"], "Harbour Tales")
+        self.assertNotIn("title", guide["three.test"][0])
         self.assertEqual(len(channels["one.test"][1]), 2)  # not the malformed or nested ones
 
     def test_a_guide_in_another_encoding_parses_as_before(self):
@@ -326,7 +338,7 @@ class StreamingParseEqualsTheTreeParseTests(_FileCase):
                 with patch.object(epg_manager_module, "_READ_BYTES", size):
                     new = _manager()._index_programs(path)
                 self.assertSameGuide(new, old)
-        self.assertEqual(new["ünlü kanal"][0]["title"]["__text"], "Çay saati ☺")
+        self.assertEqual(new["ünlü kanal"][0]["title"], "Çay saati ☺")
 
     def test_a_generated_guide_parses_as_before(self):
         # Larger than one read: elements are cut between reads.
@@ -383,11 +395,24 @@ class StreamingTests(_FileCase):
     def test_equal_short_strings_are_one_object(self):
         guide = _manager()._index_programs(self.write(TRICKY))
         first, second = next(p for keys, p in guide.items() if keys[0] == "one.test")
-        first_lang = next(key for key in first["category"][0] if key == "@lang")
-        second_lang = next(key for key in second["category"] if key == "@lang")
-        self.assertIs(first_lang, second_lang)
-        self.assertIs(first["category"][0]["__text"], second["category"]["__text"])
-        self.assertIs(first["@channel"], second["@channel"])
+        self.assertIs(first["title"], second["title"])
+        self.assertIs(first["@stop"], second["@start"])  # the stop moved to the next day too
+
+    def test_the_first_title_and_description_with_text_are_kept(self):
+        path = self.write(
+            '<tv><programme channel="a.test" start="20261019080000 +0000" '
+            'stop="20261019090000 +0000">'
+            "<title>   </title><title>With <b>a tag</b></title><title lang='de'> Third </title>"
+            "<title>Fourth</title><desc/><desc>  Said  </desc><sub-title>Not kept</sub-title>"
+            '</programme><programme channel="a.test" start="20261019090000 +0000" '
+            'stop="20261019100000 +0000"><title><b>Only a tag</b></title></programme></tv>'
+        )
+        new = _manager()._index_programs(path)
+        self.assertSameGuide(new, _old_index_programs(path, MultiKeyDict()))
+        first, second = new["a.test"]
+        self.assertEqual((first["title"], first["desc"]), ("Third", "Said"))
+        self.assertEqual(set(second), {"@start", "@stop"})
+        self.assertEqual(parse_programme(second).title, "Untitled")
 
 
 class _Answer:

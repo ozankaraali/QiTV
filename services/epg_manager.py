@@ -115,58 +115,32 @@ def normalize_programme_stop(start: str, stop: str) -> str:
     return stop
 
 
-def xml_to_dict(element, shared: Optional[Dict[str, str]] = None):
-    """
-    Recursively converts an XML element and its children into a dictionary.
-    Handles multiple occurrences of the same child element by storing them in a list.
-    Includes attributes of elements in the resulting dictionary.
-
-    `shared`, a dict the caller keeps over many calls, makes equal strings one object: the
-    "@name" keys, and attribute values and texts of up to _SHARED_LENGTH characters (a
-    guide's languages, categories, titles and times repeat over thousands of programmes).
-    """
-    return {element.tag: _element_dict(element, shared)}
-
-
 _SHARED_LENGTH = 64
+_PROGRAMME_TEXTS = ("title", "desc")
 
 
-def _attributes_into(data: Dict[str, Any], element, shared: Optional[Dict[str, str]]) -> None:
-    # items(), unlike .attrib, makes no dict for an element without attributes.
-    if shared is None:
-        for name, value in element.items():
-            data["@" + name] = value
-        return
-    for name, value in element.items():
-        key = "@" + name
-        key = shared.setdefault(key, key)
-        if len(value) <= _SHARED_LENGTH:
-            value = shared.setdefault(value, value)
-        data[key] = value
+def _programme(
+    element: ET.Element, start: str, stop: str, shared: Dict[str, str]
+) -> Dict[str, str]:
+    """What the guide reads of a <programme> (epg_view.parse_programme): its start, its stop
+    (see normalize_programme_stop), and the first of its titles and of its descriptions with
+    text, without sub-elements, stripped (a programme without one has no such key).
 
-
-def _element_dict(element, shared: Optional[Dict[str, str]]) -> Dict[str, Any]:
-    parsed_data: Dict[str, Any] = {}
-    _attributes_into(parsed_data, element, shared)
+    `shared`, a dict the caller keeps over the guide, makes equal strings of up to
+    _SHARED_LENGTH characters one object (a guide's times and titles repeat over thousands
+    of programmes).
+    """
+    stop = normalize_programme_stop(start, stop)
+    programme = {"@start": shared.setdefault(start, start), "@stop": shared.setdefault(stop, stop)}
     for child in element:
-        if len(child):
-            child_data = _element_dict(child, shared)
-        else:
-            text = child.text
-            if shared is not None and text is not None and len(text) <= _SHARED_LENGTH:
-                text = shared.setdefault(text, text)
-            child_data = {"__text": text}
-            _attributes_into(child_data, child, shared)
-
         tag = child.tag
-        if tag in parsed_data:
-            if isinstance(parsed_data[tag], list):
-                parsed_data[tag].append(child_data)
-            else:
-                parsed_data[tag] = [parsed_data[tag], child_data]
-        else:
-            parsed_data[tag] = child_data
-    return parsed_data
+        if tag in _PROGRAMME_TEXTS and tag not in programme and not len(child):
+            text = (child.text or "").strip()
+            if text:
+                programme[tag] = (
+                    shared.setdefault(text, text) if len(text) <= _SHARED_LENGTH else text
+                )
+    return programme
 
 
 _READ_BYTES = 1 << 20  # how much of an XMLTV file the guide parse reads at a time
@@ -486,8 +460,8 @@ class EpgManager:
         can succeed even when providers don't supply xmltv_id.
 
         The file is read as it is parsed (see _root_children), so a <channel> entry may come
-        before or after its programmes. Equal strings of the programmes are one object (see
-        xml_to_dict).
+        before or after its programmes. A programme keeps what the guide reads of it (see
+        _programme).
         """
         programs = MultiKeyDict()
 
@@ -508,10 +482,7 @@ class EpgManager:
                         # Skip malformed entries
                         continue
 
-                    program_data = xml_to_dict(element, shared)["programme"]
-                    program_data["@stop"] = normalize_programme_stop(
-                        program_data["@start"], program_data["@stop"]
-                    )
+                    program_data = _programme(element, start_time, stop_time, shared)
                     plist = tmp_lists.get(channel_id)
                     if plist is None:
                         plist = tmp_lists[channel_id] = []

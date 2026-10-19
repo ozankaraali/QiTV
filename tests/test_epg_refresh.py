@@ -99,7 +99,7 @@ class _GuideCase(unittest.TestCase):
 
     def titles(self, manager):
         programmes = manager.get_programs_for_channel(CHANNEL)
-        return [p["title"]["__text"] for p in programmes]
+        return [p["title"] for p in programmes]
 
     def load(self, manager, title="Old"):
         with patch("services.epg_manager.requests.get", side_effect=serving(xmltv(title))):
@@ -383,9 +383,7 @@ class SavedGuideTests(_GuideCase):
         self.assertEqual(len(logged.records), 1)  # logged once, without the path or contents
         self.assertNotIn(self.config.get_config_dir(), logged.output[0])
         self.assertEqual(self.titles(restarted), ["New"])
-        self.assertEqual(
-            sorted(epg_store_module.read_guide(path).items())[0][1][0]["title"], {"__text": "New"}
-        )
+        self.assertEqual(sorted(epg_store_module.read_guide(path).items())[0][1][0]["title"], "New")
         with get as fetch:  # and the next start reads the new file
             self.manager().set_current_epg()
         fetch.assert_not_called()
@@ -423,7 +421,7 @@ class SavedGuideTests(_GuideCase):
         self.assertEqual(decodes, [])
         self.assertEqual(manager.epg.packed(), 1)  # still pickled
         extra = manager.get_programs_for_channel({"xmltv_id": "extra.id", "name": "Other"})
-        self.assertEqual([p["title"]["__text"] for p in extra], ["Old"])  # under its new keys
+        self.assertEqual([p["title"] for p in extra], ["Old"])  # under its new keys
         self.assertEqual(self.titles(manager), ["Old"])
 
     def test_reindexing_publishes_the_new_guide_like_every_other_change(self):
