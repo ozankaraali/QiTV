@@ -3379,7 +3379,13 @@ class AudioRelabeler:
     again until its PES disagree anew. From the first renaming on, the version_number is this
     stage's: the last one written plus one whenever the section written differs from the last
     one (so VLC re-creates the stream with the right decoder, and a seek back to a segment
-    whose header PMT names the stream otherwise sees another version), else the same. A PMT
+    whose header PMT names the stream otherwise sees another version), else the same. So it is
+    too from the first PMT whose content changed while its version did not: an encoder that
+    restarts may switch its sound from MPEG audio to AAC and back on one PID, say so in its
+    PMT and keep version 0 each time, and VLC 3 ignores a PMT whose version it has seen (it
+    decodes the AAC as MPEG audio: silence until the old codec returns). Until then every PMT
+    passes as it came. Only the map of the program the PAT lists first counts: another
+    program's on the same PID passes as it came. A PMT
     section spanning packets is held with the packets after it until it ends
     (`_RELABEL_HOLD_PACKETS` at most, then it passes as it came), and only a section whose CRC
     holds is changed. While the PES agree with the PMT nothing changes. It reads the bytes on
@@ -3390,6 +3396,7 @@ class AudioRelabeler:
     def __init__(self) -> None:
         self._buf = b""  # a partial packet, or a PMT section that spans packets and the rest
         self._pmt_pid: int | None = None
+        self._program: int | None = None  # the program the PAT lists first
         self._declared: dict[int, int] = {}  # audio PID -> the stream type its PMT declares
         self._renamed: dict[int, int] = {}  # audio PID -> the stream type written instead
         self._streak: dict[int, tuple[int, int]] = {}  # PID -> (sniffed type, PES in a row)
@@ -3445,13 +3452,15 @@ class AudioRelabeler:
         if section is None or section[0] != 0x00 or _crc32(section):
             return
         for i in range(8, len(section) - 4 - 3, 4):
-            if (section[i] << 8) | section[i + 1]:  # program 0 is the network table
+            program = (section[i] << 8) | section[i + 1]
+            if program:  # program 0 is the network table
                 pmt_pid = ((section[i + 2] & 0x1F) << 8) | section[i + 3]
                 if pmt_pid != self._pmt_pid:
                     self._pmt_pid = pmt_pid
                     self._declared.clear()
                     self._renamed.clear()
                     self._streak.clear()
+                self._program = program
                 return
 
     def _on_pmt(self, data: bytes, off: int) -> list[tuple[int, int]] | None:
@@ -3463,6 +3472,8 @@ class AudioRelabeler:
         section = bytearray(data[at] for at in places)
         if len(section) < 16 or section[0] != 0x02 or _crc32(bytes(section)):
             return []
+        if self._program is not None and (section[3] << 8) | section[4] != self._program:
+            return []  # another program's map on the same PID
         end = len(section) - 4
         i = 12 + (((section[10] & 0x0F) << 8) | section[11])
         declared: dict[int, int] = {}
@@ -3483,6 +3494,10 @@ class AudioRelabeler:
         self._declared = declared
         written = bytes(section[:5]) + bytes([section[5] & 0xC1]) + bytes(section[6:-4])
         version = (section[5] >> 1) & 0x1F
+        if not self._managed and self._written and written != self._written:
+            if version == self._version and section[5] & 1:  # (a current one, not the next)
+                self._managed = True  # VLC would ignore this one: the versions are ours now
+                logger.info("The program map changed under the same version: it is renumbered.")
         if self._managed:
             if written != self._written and self._version is not None:
                 version = (self._version + 1) & 0x1F
