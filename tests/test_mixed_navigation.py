@@ -13,7 +13,7 @@ from job_fixtures import ImmediateRunner
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config
 from test_browsed_catalog import FakeEpg, ScriptedFactory
 from test_catalog_service import FakeWorker
-from timer_fixtures import elapse
+from timer_fixtures import elapse, wait_until
 
 from services.browsed_catalog import BrowsedCatalog
 from services.catalog import ALL_GROUP_ID
@@ -28,6 +28,7 @@ from services.provider_ids import (
     with_provider,
 )
 from services.zapping import ZapContext
+from tests.test_channel_rows import FakeLogos
 from ui.find_session import DEBOUNCE_MS, FindSession
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import Drawer
@@ -49,6 +50,18 @@ def harbor_content() -> dict:
     for category in content["categories"]:
         category["title"] = titles.get(category["id"], category["title"])
     return content
+
+
+def placed(drawer, row):
+    """Whether the right column's layout reached the row."""
+    view = drawer._columns["right"].view
+    return view.visualRect(view.model().index(row)).isValid()
+
+
+def in_sight(drawer, row):
+    view = drawer._columns["right"].view
+    rect = view.visualRect(view.model().index(row))
+    return rect.isValid() and view.viewport().rect().contains(rect)
 
 
 class MixedNavigationTests(unittest.TestCase):
@@ -547,6 +560,45 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertEqual((rows[1].layer, rows[1].title), ("header", "Harbor IPTV"))
         mixed_all = nav.children(nav.path[1])[0]
         self.assertEqual((mixed_all.key, mixed_all.count), (ALL_GROUP_ID, 2 + 69))
+
+    # ---- a channel far down the mixed All -----------------------------------------------------
+
+    def test_the_list_rests_on_a_channel_far_down_all_through_refreshes(self):
+        # Reported on 2.3.0: channel 9594 played and the list showed, and kept going back to,
+        # the channels around 995. Here All mixes 11,000 and 6,000 channels on two-line rows.
+        def numbered(count, prefix):
+            return live_content([f"{prefix} {n}" for n in range(1, count + 1)], {})
+
+        _config, view, nav = self.build(
+            [DEMO, HARBOR],
+            {"Demo TV": numbered(11_000, "Demo"), "Harbor IPTV": numbered(6_000, "Harbor")},
+        )
+        nav.open(nav.children(None)[0])
+        nav.reset_to("live", ALL_GROUP_ID)
+        host = QWidget()
+        host.resize(1280, 720)
+        host.show()
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        logos = FakeLogos()
+        drawer = Drawer(nav, logos, lambda item: None, host)
+        model = drawer._columns["right"].model
+        bar = drawer._columns["right"].view.verticalScrollBar()
+        for provider, number, row in (("Demo TV", 9594, 9593), ("Harbor IPTV", 5000, 15_999)):
+            drawer.open_drawer(focus_key=(provider, str(number)))
+            self.assertTrue(wait_until(lambda: in_sight(drawer, row) and placed(drawer, 16_999)))
+            node = drawer.highlighted()
+            self.assertEqual((provider_of(node.payload), node.key), (provider, str(number)))
+            self.assertEqual(model.index(row).data(ChannelRowsModel.ProviderRole), provider)
+            moves = []
+            bar.valueChanged.connect(moves.append)
+            nav.changed.emit()  # a guide loaded
+            view.groupReady.emit("live", ALL_GROUP_ID)  # a catalog event
+            logos.logoReady.emit("http://127.0.0.1:9/logo.png")
+            elapse(50)
+            self.assertEqual(moves, [])
+            self.assertTrue(in_sight(drawer, row))
+            bar.valueChanged.disconnect(moves.append)
 
 
 if __name__ == "__main__":

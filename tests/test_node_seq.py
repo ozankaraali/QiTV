@@ -96,6 +96,33 @@ class LongGroupTests(unittest.TestCase):
             self.assertIs(nav.children(group), seq)  # memoized: the same list, not a copy
         self.assertGreater(LAZY_ROWS, 100)
 
+    def test_a_catalog_event_that_changed_nothing_in_a_long_group_gives_the_same_list(self):
+        # Each catalog event made the long list anew, and the channel list laid its 11,000
+        # rows out again (reported on 2.3.0: the list went back to the channels around 995).
+        catalog = FakeCatalog()
+        catalog.live = {"10": channels(LAZY_ROWS + 1)}
+        catalog.items = lambda section, group_id: list(catalog.live["10"])  # a new list each time
+        nav = NavModel(catalog, SimpleNamespace(favorites=[], watch_history=[]))
+        nav.reset_to("live", "10")
+        group = nav.path[-1]
+        seq = nav.children(group)
+        self.assertIsInstance(seq, NodeSeq)
+        catalog.groupReady.emit("live", "10")  # e.g. another group loaded
+        self.assertIs(nav.children(group), seq)
+        catalog.live["10"] = channels(LAZY_ROWS + 1)  # the list loaded again: new dicts
+        catalog.groupReady.emit("live", "10")
+        fresh = nav.children(group)
+        self.assertIsNot(fresh, seq)
+        self.assertIs(fresh.items[0], catalog.live["10"][0])
+
+    def test_same_rows_are_the_same_dicts_in_the_same_order(self):
+        items = channels(5)
+        seq = NodeSeq(items)
+        self.assertTrue(seq.same_rows(NodeSeq(list(items))))
+        self.assertFalse(seq.same_rows(NodeSeq(items[::-1])))
+        self.assertFalse(seq.same_rows(NodeSeq(items[:4])))
+        self.assertFalse(seq.same_rows(NodeSeq([dict(i) for i in items])))  # equal, not the same
+
 
 class LazyDrawerTests(DrawerTests):
     """Every drawer test again, with the channel lists made on demand."""

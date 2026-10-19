@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 import itertools
 import logging
+import operator
 from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QObject, Signal
@@ -228,6 +229,17 @@ class NodeSeq(Sequence):
             self._digits = max((len(text) for text in map(_text, numbers) if text), default=0)
         return self._digits
 
+    def same_rows(self, other: "NodeSeq") -> bool:
+        """Whether `other` lists the very same item dicts in the same order (a catalog event
+        that changed nothing in this list; a refreshed catalog brings new dicts)."""
+        mine, theirs = self.items, other.items
+        return mine is theirs or (len(mine) == len(theirs) and all(map(operator.is_, mine, theirs)))
+
+
+def _same_long_list(old: Any, new: Any) -> bool:
+    """Whether two lists of nodes are long lists of the very same items (NodeSeq.same_rows)."""
+    return isinstance(old, NodeSeq) and isinstance(new, NodeSeq) and old.same_rows(new)
+
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
@@ -438,6 +450,10 @@ class NavModel(QObject):
         if value is None:
             self._memo.pop(key, None)
             return None
+        if entry is not None and _same_long_list(entry[1], value):
+            # Nothing in the long list changed (another list's event): the same list again,
+            # which the channel list neither lays out nor scrolls anew.
+            value = cast(list, entry[1])  # (a NodeSeq, read like the list of its nodes)
         token = value.token if isinstance(value, NodeSeq) else next(_TOKENS)
         self._memo[key] = (deps, value, token)
         self._memo.move_to_end(key)

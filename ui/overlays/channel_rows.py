@@ -333,12 +333,19 @@ class ChannelRowDelegate(QStyledItemDelegate):
 
 
 class ChannelListView(QListView):
+    """The rows' list. A row's height follows the list's width (`units_width`), never its data:
+    a change of data repaints the rows and lays none of them out again (see dataChanged)."""
+
     rowClicked = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.units_width = 100
         self._scroll_due: tuple[QPersistentModelIndex, QAbstractItemView.ScrollHint] | None = None
+        self._row_h = 0  # a row's height at the last layout (rows of one height), else 0
+        # Where a long list laid out again comes back to: its top row and how much of that row
+        # was scrolled past (a fraction of its height), once the layout reaches it.
+        self._keep: tuple[int, float] | None = None
         self.setFrameShape(QFrame.NoFrame)
         self.setFocusPolicy(Qt.NoFocus)
         self.setUniformItemSizes(True)
@@ -367,15 +374,76 @@ class ChannelListView(QListView):
         self.setLayoutMode(mode.SinglePass if rows <= SINGLE_PASS_ROWS else mode.Batched)
         super().reset()  # (the layout itself waits for the next event or for a row's place)
 
+    def dataChanged(self, top_left, bottom_right, roles=None) -> None:
+        # QListView lays every row out again at any change of data. A long list is laid out in
+        # batches, so a logo or a guide's update would cut its scroll position back to the
+        # first batch (channel 9594 played; the list showed the rows around 995). No row's
+        # height changed: the rows are repainted only.
+        QAbstractItemView.dataChanged(self, top_left, bottom_right, list(roles or ()))
+
+    def doItemsLayout(self) -> None:
+        """Lay the rows out again (a new width, a new list) where the list was scrolled to:
+        the same row at its top, once a long list's layout has reached it."""
+        keep = self._keep if self._keep is not None else self._top()
+        self._keep = None
+        super().doItemsLayout()
+        model = self.model()
+        rows = model.rowCount(self.rootIndex()) if model is not None else 0
+        self._row_h = 0
+        if rows and self.uniformItemSizes():
+            self._row_h = self.rectForIndex(model.index(0, 0, self.rootIndex())).height()
+        if keep is not None:
+            self._keep = keep
+            self._come_back()
+
+    def _top(self) -> tuple[int, float] | None:
+        """The row at the top of a scrolled list of rows of one height, and how much of it
+        is scrolled past; from the scroll position alone (asking the view for a row's place
+        would lay out a list that waits for its layout)."""
+        value = self.verticalScrollBar().value()
+        if value <= 0 or self._row_h <= 0 or not self.uniformItemSizes():
+            return None
+        row, past = divmod(value, self._row_h)
+        return row, past / self._row_h
+
+    def _come_back(self) -> None:
+        """Scroll back to the kept row once the layout has reached it and the rows below it
+        that fill the list (until a long list's last batch the scroll range ends at the rows
+        laid out so far)."""
+        model = self.model()
+        if self._keep is None or model is None:
+            self._keep = None
+            return
+        row, past = self._keep
+        rows = model.rowCount(self.rootIndex())
+        rect = self.rectForIndex(model.index(min(row, rows - 1), 0, self.rootIndex()))
+        value = rect.top() + round(past * rect.height()) if rect.isValid() else None
+        filled = value is not None and (
+            self.contentsSize().height() >= value + self.viewport().height()
+        )
+        if not filled and not self._laid_out(model):
+            return  # its batch, or those of the rows that fill the list below it, still to come
+        self._keep = None
+        if value is not None:
+            self.updateGeometries()  # the scroll range grows only at the layout's end otherwise
+            self.verticalScrollBar().setValue(value)
+        self.viewport().update()  # (a long list's rows are drawn once laid out)
+
     def scrollTo(self, index, hint=QAbstractItemView.ScrollHint.EnsureVisible) -> None:
         self._scroll_due = None
         super().scrollTo(index, hint)
         if index.isValid() and not self.visualRect(index).isValid():
             # A long list's row whose batch has not been laid out: scrolled to once it has.
             self._scroll_due = (QPersistentModelIndex(index), hint)
+        elif index.isValid():
+            self._keep = None  # scrolled to a row laid out: the list goes there, not back
 
     def timerEvent(self, event) -> None:
         super().timerEvent(event)  # (a batch of the layout among them)
+        if self._keep is not None:
+            self._come_back()
+            if self._keep is not None:
+                return  # a row waiting is scrolled to from where the list comes back to
         if self._scroll_due is None:
             return
         due, hint = self._scroll_due
@@ -399,7 +467,8 @@ class ChannelListView(QListView):
         return rows == 0 or self.visualRect(model.index(rows - 1, 0, self.rootIndex())).isValid()
 
     def wheelEvent(self, event) -> None:
-        self._scroll_due = None  # the user scrolls: a scroll still waiting would undo it
+        # The user scrolls: a scroll still waiting would undo it.
+        self._scroll_due = self._keep = None
         super().wheelEvent(event)
 
     def hideEvent(self, event) -> None:

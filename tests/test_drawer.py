@@ -11,7 +11,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from job_fixtures import ImmediateRunner
 from mixed_fixtures import live_content
-from timer_fixtures import elapse
+from timer_fixtures import elapse, wait_until
 
 from services.catalog import PROVIDER_LOADING_MESSAGE, Group
 from services.navigation import (
@@ -25,6 +25,7 @@ from services.navigation import (
     item_key,
 )
 from services.provider_ids import provider_of
+from tests.test_channel_rows import FakeLogos
 from tests.test_find import FakeProviders
 from tests.test_navigation import FakeCatalog
 from ui.find_session import DEBOUNCE_MS, FindSession
@@ -55,7 +56,7 @@ _OFFSCREEN_NOISE = (
 )
 
 
-def make(live=None):
+def make(live=None, logos=None):
     catalog = FakeCatalog()
     if live is not None:
         catalog.live = live
@@ -64,7 +65,7 @@ def make(live=None):
     host = QWidget()
     host.resize(1280, 720)
     host.show()
-    drawer = Drawer(nav, None, lambda item: None, host)
+    drawer = Drawer(nav, logos, lambda item: None, host)
     return catalog, nav, host, drawer
 
 
@@ -1067,6 +1068,102 @@ class GenrePlaceTests(unittest.TestCase):
         self.assertEqual(self.drawer.highlighted().title, "Chan 550")
         self.assertShown("right", 550)
         self.assertShown("left", 7)
+
+
+FAR_LIST = 11_000  # one provider's live channels, numbered 1 to 11,000
+FAR_NUMBER = 9594
+
+
+def far_list() -> list[dict]:
+    return [
+        {"id": n, "name": f"Chan {n}", "number": str(n), "logo": f"http://127.0.0.1:9/{n}.png"}
+        for n in range(1, FAR_LIST + 1)
+    ]
+
+
+class FarChannelTests(unittest.TestCase):
+    """The channel list opens at a channel far down a long list and stays there through what
+    refreshes it while the channel plays (reported on 2.3.0: "currently i am watching channel
+    9594 but my list shows and flick-refreshes towards 995-ish": each logo or guide update laid
+    the list out again, and its scroll position was cut back to the first rows laid out)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.logos = FakeLogos()
+        self.catalog, self.nav, self.host, self.drawer = make({"10": far_list()}, self.logos)
+        self.addCleanup(self.host.deleteLater)
+        self.addCleanup(self.host.close)
+        self.nav.reset_to("live", "10")
+        self.drawer.open_drawer(str(FAR_NUMBER))
+        self.right = self.drawer._columns["right"]
+        self.view = self.right.view
+        self.bar = self.view.verticalScrollBar()
+        self.assertTrue(wait_until(lambda: self.shown(FAR_NUMBER) and self.laid_out(), 5000))
+        self.value = self.bar.value()
+        self.moves = []
+        self.bar.valueChanged.connect(self.moves.append)
+
+    def shown(self, number):
+        rect = self.view.visualRect(self.view.model().index(number - 1))
+        return rect.isValid() and self.view.viewport().rect().contains(rect)
+
+    def laid_out(self):
+        return self.view.visualRect(self.view.model().index(FAR_LIST - 1)).isValid()
+
+    def assertStill(self):
+        self.assertTrue(wait_until(self.laid_out, 5000))
+        elapse(20)
+        self.assertEqual(self.moves, [])  # not even for a moment
+        self.assertTrue(self.shown(FAR_NUMBER))
+        self.assertEqual(self.drawer.highlighted().title, f"Chan {FAR_NUMBER}")
+
+    def test_it_opens_at_the_channel_that_plays(self):
+        self.assertEqual(self.drawer.highlighted().title, f"Chan {FAR_NUMBER}")
+        self.assertEqual(self.right.model.index(FAR_NUMBER - 1).data(NumberRole), "9594")
+
+    def test_a_guide_update_leaves_it_there(self):
+        self.nav.changed.emit()  # as the shell does when a guide loaded
+        self.assertStill()
+
+    def test_a_catalog_event_leaves_it_there(self):
+        self.catalog.groupReady.emit("live", "10")
+        self.catalog.sectionReady.emit("live")
+        self.assertStill()
+
+    def test_logos_arriving_leave_it_there(self):
+        for n in range(FAR_NUMBER - 5, FAR_NUMBER + 5):
+            self.logos.logoReady.emit(f"http://127.0.0.1:9/{n}.png")
+        self.assertStill()
+
+    def test_the_list_loaded_again_comes_back_to_the_same_place(self):
+        self.catalog.live = {"10": far_list()}  # the provider's list loaded again
+        self.catalog.groupReady.emit("live", "10")
+        self.assertTrue(wait_until(self.laid_out, 5000))
+        elapse(20)
+        self.assertEqual(self.bar.value(), self.value)
+        self.assertTrue(self.shown(FAR_NUMBER))
+
+    def test_a_new_window_size_keeps_the_channel_in_sight(self):
+        self.host.resize(1600, 900)  # taller rows
+        self.assertTrue(wait_until(self.laid_out, 5000))
+        elapse(20)
+        self.assertTrue(self.shown(FAR_NUMBER))
+
+    def test_a_list_the_user_scrolled_stays_where_it_was_left(self):
+        center = self.view.viewport().mapTo(self.host, self.view.viewport().rect().center())
+        for _ in range(3):
+            QTest.wheelEvent(self.host.windowHandle(), QPointF(center), QPoint(0, 120))
+        value = self.bar.value()
+        self.assertLess(value, self.value)
+        self.assertFalse(self.shown(FAR_NUMBER))
+        self.nav.changed.emit()  # a guide loaded
+        self.catalog.groupReady.emit("live", "10")
+        elapse(20)
+        self.assertEqual(self.bar.value(), value)
+        self.assertEqual(self.drawer.highlighted().title, f"Chan {FAR_NUMBER}")
 
 
 FIND_WAIT = DEBOUNCE_MS + 100
