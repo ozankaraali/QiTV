@@ -90,12 +90,35 @@ def tr_n(singular: str, plural: str, n: int, /, *, ctx: Optional[str] = None, **
 def translate(text: str, **fields: Any) -> str:
     """A text marked with N_ where it was written (a table's, a constant's), shown now.
 
-    A text that is no catalog's key (a provider's group name) comes back as it is.
+    A text that is no catalog's key (a provider's group name, braces and all) comes back as
+    it is; fields are filled in only when given.
     """
     found = _catalog.get(text) if _catalog else None
     if _pseudo and text not in _pseudo_known():
         return text
-    return _finish(text, found if isinstance(found, str) and found else None, fields)
+    found = found if isinstance(found, str) and found else None
+    if not fields:
+        shown = found or text
+        return pseudo(shown) if _pseudo else shown
+    return _finish(text, found, fields)
+
+
+def number(value: int) -> str:
+    """A whole number with the language's digit grouping: 1,234 in English, 1.234 in Turkish."""
+    if _language == SOURCE_LANGUAGE:
+        return f"{int(value):,}"
+    from PySide6.QtCore import QLocale
+
+    return str(QLocale(_language).toString(int(value)))
+
+
+def decimal(text: str) -> str:
+    """A number written with a "." decimal point ("1.5") as the language writes it: "1,5"."""
+    if _language == SOURCE_LANGUAGE or "." not in text:
+        return text
+    from PySide6.QtCore import QLocale
+
+    return text.replace(".", str(QLocale(_language).decimalPoint()))
 
 
 def upper(text: str) -> str:
