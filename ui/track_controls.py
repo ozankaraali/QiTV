@@ -24,6 +24,9 @@ stays with its player while that title plays (a retry of it keeps it too) and is
 stored: the next title starts in sync. Subtitle files and the subtitles' sync are the
 playback's alone: another title or channel starts without them, and a file chosen in the
 dialog is dropped when a zap or a swap came while it was open.
+For a film or an episode the panel also offers "Search OpenSubtitles…" (ui/subtitle_search.py,
+with `online`), and at its top the subtitles downloaded for that title last, "Name.srt
+(OpenSubtitles)", until they show.
 Without the panels (tests), the buttons cycle the tracks with a toast, as before 2.2.
 """
 
@@ -49,6 +52,9 @@ IN_SYNC = "In sync"
 OFF = "Off"
 LOAD_FILE = "load_file"  # the Subtitles panel's "Load a file…" row
 LOAD_TEXT = "Load a file…"
+SEARCH_ONLINE = "search_online"  # its "Search OpenSubtitles…" row
+SEARCH_ONLINE_TEXT = "Search OpenSubtitles…"
+REMEMBERED = "remembered"  # the title's pick from OpenSubtitles, at its top
 NO_AUDIO_TRACKS = "No audio tracks"
 NO_SUBTITLES = "No subtitles"
 SUBTITLES_OFF = "Subtitles are off"
@@ -99,13 +105,15 @@ class TrackControls(QObject):
         subtitle_panel=None,
         pick_file: Optional[Callable[[str], str]] = None,
         config: Any = None,
+        online: Any = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`sound_panel` and `subtitle_panel` are TrackPanels (None: toasts); `session()` the
         large picture's player, `current()` what it plays and `playing()` whether it has
         media; `channel_key` a live channel's key in `store`. `pick_file(folder)` asks for a
         subtitle file ("" when none was chosen; None: no "Load a file…"); `config` keeps its
-        folder (`subtitle_folder`)."""
+        folder (`subtitle_folder`). `online` is the OpenSubtitles search (an OnlineSubtitles;
+        None: no "Search OpenSubtitles…")."""
         super().__init__(parent)
         self._panels = {
             name: panel
@@ -122,6 +130,7 @@ class TrackControls(QObject):
         self._show_transport = show_transport
         self._pick_file = pick_file
         self._config = config
+        self._online = online
         self._refresh = QTimer(self, interval=REFRESH_MS)
         self._refresh.timeout.connect(self._follow_player)
 
@@ -144,6 +153,8 @@ class TrackControls(QObject):
         """`target` is about to open in `session` (the large picture's player, its old stream
         stopped): its sound as the viewer set it last, no subtitle file and the subtitles in
         sync. The same title or channel again (a retry) keeps what the player has."""
+        if self._online is not None:
+            self._online.follow(target)  # the OpenSubtitles search was for the title before
         if previous is not None and previous.same_as(target):
             return
         live = target.live
@@ -211,16 +222,18 @@ class TrackControls(QObject):
 
     # ---- subtitle files -----------------------------------------------------------------------
 
-    def load_subtitle_file(self, path: str, *, say: bool = True) -> bool:
+    def load_subtitle_file(
+        self, path: str, *, say: bool = True, remember_folder: bool = True
+    ) -> bool:
         """Show the subtitle file at `path` with what plays (chosen); False, said, when it
-        could not be loaded."""
+        could not be loaded. With `remember_folder`, "Load a file…" opens in its folder next."""
         if not self._playing():
             return False
         name = os.path.basename(path)
         if not self._session().add_subtitle_file(path):
             self._toast(f"Couldn't load the subtitles {name}", "error", ERROR_MS)
             return False
-        if self._config is not None:  # the dialog opens there next time
+        if remember_folder and self._config is not None:  # the dialog opens there next time
             self._config.subtitle_folder = os.path.dirname(os.path.abspath(path))
         if say:
             self._toast(f"Subtitles: {name}")
@@ -269,6 +282,8 @@ class TrackControls(QObject):
 
     def refresh(self) -> None:
         """What the panels show changed (the pictures swapped): the large one's."""
+        if self._online is not None:
+            self._online.follow()
         shown = self._shown()
         if shown is not None:
             if self._playing():
@@ -328,10 +343,22 @@ class TrackControls(QObject):
     def _subtitle_model(self) -> PanelModel:
         session = self._session()
         shown = session.subtitle_track()
-        rows = [PanelRow(-1, OFF, shown == -1)]
-        rows += [PanelRow(i, name, i == shown) for i, name in session.subtitle_tracks() if i != -1]
+        tracks = [(i, name) for i, name in session.subtitle_tracks() if i != -1]
+        online, target = self._online, self._current()
+        searchable = online is not None and online.available(target)
+        rows = []
+        if searchable:
+            pick = online.remembered(target)
+            if pick is not None and pick.name not in {name for _i, name in tracks}:
+                rows.append(
+                    PanelRow(REMEMBERED, online.row_text(pick), action=True, icon="subtitles")
+                )
+        rows.append(PanelRow(-1, OFF, shown == -1))
+        rows += [PanelRow(i, name, i == shown) for i, name in tracks]
         if self._pick_file is not None:
             rows.append(PanelRow(LOAD_FILE, LOAD_TEXT, action=True))
+        if searchable:
+            rows.append(PanelRow(SEARCH_ONLINE, SEARCH_ONLINE_TEXT, action=True, icon="search"))
         sync = None if shown == -1 else self._sync(SUBTITLES, session.subtitle_delay())
         return PanelModel(SUBTITLES_TITLE, tuple(rows), sync)
 
@@ -352,6 +379,15 @@ class TrackControls(QObject):
             return
         if key == LOAD_FILE:
             self._choose_file()
+            return
+        if key in (SEARCH_ONLINE, REMEMBERED):
+            target = self._current()
+            self.close()  # the search's page, or a toast once the file shows
+            if self._online is not None and target is not None:
+                if key == SEARCH_ONLINE:
+                    self._online.open()
+                else:
+                    self._online.load_remembered(target)
             return
         session = self._session()
         if name == AUDIO:

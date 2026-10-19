@@ -163,6 +163,19 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Esc</kbd> | Back; from the genres, back to live TV |
 
+**Finding subtitles**
+
+| Keys | What they do |
+| --- | --- |
+| <kbd>↑</kbd> / <kbd>↓</kbd> | Move in a list; up from the top to the search field |
+| <kbd>Page Up</kbd> / <kbd>Page Down</kbd> | Page |
+| <kbd>←</kbd> / <kbd>→</kbd> | Between the languages and the subtitles |
+| <kbd>Enter</kbd> | Download and show the subtitles; in the field, search (or save the key) |
+| <kbd>A–Z</kbd> | Type what to search for (or the API key) |
+| <kbd>Ctrl/⌘+V</kbd> | Paste |
+| <kbd>Backspace</kbd> | Delete a letter |
+| <kbd>Esc</kbd> | Close |
+
 **Anywhere**
 
 | Keys | What they do |
@@ -185,6 +198,14 @@ On some channels the sound slowly drifts out of step with the picture. The **♫
 The subtitles button beside it opens the **Subtitles** panel: **Off**, the subtitles the stream brings, and **Load a file…** to pick a subtitle file from your computer (.srt, .ass, .ssa, .vtt or .sub; it opens in the folder you used last). You can also drop a subtitle file onto the window while something plays. The file then shows in the list under its own name. While subtitles show, the panel has a **Sync** row too, for subtitles that come too early or too late; <kbd>Shift+J</kbd> and <kbd>Shift+K</kbd> do the same. A subtitle file and its timing last while that film, episode or channel plays.
 
 Click anywhere else, or press <kbd>Esc</kbd>, to close a panel. While one is open, <kbd>↑</kbd> and <kbd>↓</kbd> move through it, <kbd>Enter</kbd> picks, and <kbd>←</kbd> and <kbd>→</kbd> move the sync.
+
+#### Subtitles from OpenSubtitles
+
+For a film or an episode, the Subtitles panel also has **Search OpenSubtitles…**: QiTV looks for subtitles on [OpenSubtitles.com](https://www.opensubtitles.com), a free subtitle website, using the title that plays (with the film's year, or the series with its season and episode number; tags such as "EN:" or "4K" in a provider's title are left out). The languages that have subtitles are on the left with how many each has, your last language (or your computer's) first; the selected language's subtitles are on the right, the best first: from trusted uploaders and downloaded most. **Machine translated** ones are marked and come last; **Hearing impaired** ones are marked and come after the others, unless the last ones you picked were for the hearing impaired. Click one, or press <kbd>Enter</kbd>, and it downloads, shows at once and appears in the Subtitles panel under its own name. If the title is not found, change the words in the search field at the top and press **Search**. The next time that film or episode plays, the Subtitles panel offers the same file again at its top ("… (OpenSubtitles)"), without a new download.
+
+OpenSubtitles needs an **API key**. The release downloads of QiTV may come with one. If yours does not, the first search asks for one: **Get a free key** opens the OpenSubtitles website, where you make a free account and then create a key on its "API consumers" page; copy the key, click **Paste** (or press <kbd>Ctrl/⌘+V</kbd>) and **Save**. You can change it later in **Settings → Subtitles**.
+
+Without signing in, OpenSubtitles allows 5 downloads a day per internet connection. To get more, enter your OpenSubtitles username and password in **Settings → Subtitles** (optional; **Sign out** there removes them). After each download QiTV says how many downloads you have left today and when more come back. Downloaded subtitles are kept in the `subtitles` folder beside QiTV's settings (see [Portable mode](#portable-mode) for where that is).
 
 ### Pause and rewind live TV (time-shift)
 
@@ -307,6 +328,8 @@ python main.py
 Or with [uv](https://docs.astral.sh/uv/): `uv sync --frozen --dev`, then `uv run python main.py`. The tests run with `uv run python -m unittest discover -s tests`.
 
 To try QiTV without a provider, `uv run python scripts/make_demo_content.py --out build/demo --serve` serves the demo content on your computer and prints how to start QiTV with it. `--screenshots docs/screenshots` instead of `--serve` takes this page's screenshots again.
+
+A build from the source code has no OpenSubtitles API key of its own: enter yours in Settings → Subtitles (free, see [Subtitles from OpenSubtitles](#subtitles-from-opensubtitles)). The release builds get theirs from CI, which writes `services/_build_keys.py` while packaging, from a repository secret named `QITV_OPENSUBTITLES_KEY`; the file in the repository stays empty, so never commit a key into it.
 
 </details>
 

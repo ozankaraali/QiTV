@@ -110,6 +110,7 @@ from ui.overlays.zap_banner import BannerInfo, ZapBanner
 from ui.pip_controls import PipControls
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
+from ui.subtitle_search import OnlineSetup, OnlineSubtitles
 from ui.track_controls import TrackControls
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,7 @@ class Overlays:
     mixer: Any = None  # the volume mixer (Phase 4)
     sound_panel: Any = None  # the Sound panel above ♫ (2.2)
     subtitle_panel: Any = None  # the Subtitles panel above its button (2.2)
+    subtitle_search: Any = None  # its OpenSubtitles search page (2.2)
     library_toast: Any = None  # the Library page's toast: the menus' messages while it shows
 
 
@@ -170,13 +172,15 @@ class TVController(QObject):
         sound_sync: Optional[SoundSync] = None,
         pick_subtitle_file: Optional[Callable[[str], str]] = None,
         account_checks=None,
+        online_subtitles: Optional[OnlineSetup] = None,
         parent: Optional[QObject] = None,
     ):
         """With `sessions` (picture in picture), its large slot's player, live session and
         tuner stand for `session`, `live` and `budget`. `sound_sync` keeps each channel's
         sound sync (None: for this run only); `pick_subtitle_file(folder)` asks for a subtitle
-        file (the Subtitles panel's "Load a file…"). `account_checks` (an AccountChecks) says
-        why a failure happened (None: the failure's own words only)."""
+        file (the Subtitles panel's "Load a file…"); with `online_subtitles` (and the overlays'
+        `subtitle_search`) the panel searches OpenSubtitles too. `account_checks` (an
+        AccountChecks) says why a failure happened (None: the failure's own words only)."""
         super().__init__(parent)
         self._account_checks = account_checks
         self._toasts = 0  # toasts shown so far: a reason replaces only the one it explains
@@ -311,6 +315,22 @@ class TVController(QObject):
             audio_changed=self._on_audio_changed,
             parent=self,
         )
+        # Subtitles from OpenSubtitles for a film or an episode (the Subtitles panel's search).
+        self._online: Optional[OnlineSubtitles] = None
+        if online_subtitles is not None and overlays.subtitle_search is not None:
+            self._online = OnlineSubtitles(
+                page=overlays.subtitle_search,
+                setup=online_subtitles,
+                config=config,
+                current=lambda: self._current,
+                playing=self._has_media,
+                provider=lambda item: item_provider.provider_name(self.catalog, item),
+                load=lambda path: self._tracks.load_subtitle_file(
+                    path, say=False, remember_folder=False
+                ),
+                toast=self._toast,
+                parent=self,
+            )
         # The sound's and the subtitles' tracks and sync (their panels, J/K and Shift+J/K),
         # subtitle files; a channel's sound sync is kept.
         self._tracks = TrackControls(
@@ -318,6 +338,7 @@ class TVController(QObject):
             subtitle_panel=overlays.subtitle_panel,
             pick_file=pick_subtitle_file,
             config=config,
+            online=self._online,
             transport=overlays.transport,
             session=lambda: self.session,
             current=lambda: self._current,
@@ -517,6 +538,7 @@ class TVController(QObject):
         overlays.banner.dismiss()
         overlays.transport.dismiss()
         self._tracks.close()
+        self._close_online()
         try:
             self.watch.flush()  # a movie's last position
         except Exception as e:
@@ -561,6 +583,7 @@ class TVController(QObject):
         overlays.transport.dismiss()
         self._mixer.hide()
         self._tracks.close()
+        self._close_online()
         self._autoplay.drop()  # the Next card, and a wait for the next season
 
     def leave_library_playing(self) -> None:
@@ -630,7 +653,10 @@ class TVController(QObject):
     # ---- input --------------------------------------------------------------------------------
 
     def key_context(self) -> str:
-        """The keymap context for the next key: the open guide or drawer takes the keys."""
+        """The keymap context for the next key: the OpenSubtitles search, the open guide or
+        the drawer takes the keys."""
+        if self._online is not None and self._online.visible():
+            return "subtitles"
         if self._guide.is_open():
             return "guide"
         return "drawer" if self.overlays.drawer.isVisible() else "player"
@@ -640,7 +666,8 @@ class TVController(QObject):
         wait for the next season), a number being typed, the zap column or the banner."""
         overlays = self.overlays
         return bool(
-            self._guide.is_open()
+            (self._online is not None and self._online.visible())
+            or self._guide.is_open()
             or self._mixer.visible()
             or self._tracks.visible()
             or overlays.drawer.isVisible()
@@ -669,6 +696,8 @@ class TVController(QObject):
         """`key` is the Qt key pressed, when it matters (the mixer takes the arrow keys)."""
         if self._closed:
             return
+        if self._online is not None and self._online.handle(action, payload):
+            return  # the OpenSubtitles search shows: typing, the lists, Enter and Esc
         if self._guide.is_open() and self._guide.handle(action, payload):
             return
         drawer = self.overlays.drawer
@@ -788,6 +817,10 @@ class TVController(QObject):
     def mouse_moved(self) -> None:
         self._show_transport()
 
+    def _close_online(self) -> None:
+        if self._online is not None:
+            self._online.close()
+
     def pointer_may_hide(self) -> bool:
         """The pointer may go with the player controls: a picture plays on the player page and
         no list, guide, mixer or card that the pointer clicks is open."""
@@ -805,6 +838,7 @@ class TVController(QObject):
             overlays.mixer,
             overlays.sound_panel,
             overlays.subtitle_panel,
+            overlays.subtitle_search,
         )
         return not any(menu is not None and menu.isVisible() for menu in menus)
 

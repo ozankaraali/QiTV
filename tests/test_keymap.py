@@ -400,6 +400,38 @@ if __name__ == "__main__":
     unittest.main()
 
 
+def subtitles(key, text="", mods=NONE):
+    return resolve(int(key), mods, text, context="subtitles")
+
+
+class SubtitleSearchKeymapTests(unittest.TestCase):
+    """The OpenSubtitles search (2.2): it types like the channel list, and Ctrl/⌘+V pastes."""
+
+    def test_it_types_and_moves_like_the_channel_list(self):
+        self.assertEqual(subtitles(K.Key_A, "a"), (Action.NAV_TEXT, "a"))
+        self.assertEqual(subtitles(K.Key_L, "L", SHIFT), (Action.NAV_TEXT, "L"))  # not Go live
+        self.assertEqual(subtitles(K.Key_J, "j"), (Action.NAV_TEXT, "j"))  # not the sync
+        self.assertEqual(subtitles(K.Key_7, "7"), (Action.NAV_TEXT, "7"))  # not a channel
+        self.assertEqual(subtitles(K.Key_Up), (Action.NAV_UP, ""))
+        self.assertEqual(subtitles(K.Key_PageDown), (Action.NAV_PAGE_DOWN, ""))
+        self.assertEqual(subtitles(K.Key_Left), (Action.NAV_LEFT, ""))
+        self.assertEqual(subtitles(K.Key_Return, "\r"), (Action.NAV_ACTIVATE, ""))
+        self.assertEqual(subtitles(K.Key_Backspace, "\x08"), (Action.NAV_BACKSPACE, ""))
+        self.assertEqual(subtitles(K.Key_Escape, "\x1b"), (Action.ESCAPE, ""))
+
+    def test_ctrl_v_pastes_there_only(self):
+        self.assertEqual(subtitles(K.Key_V, "\x16", CTRL), (Action.PASTE, ""))
+        self.assertIsNone(opened(K.Key_V, "\x16", CTRL))
+        self.assertIsNone(closed(K.Key_V, "\x16", CTRL))
+        self.assertIsNone(library(K.Key_V, "\x16", CTRL))
+
+    def test_the_shortcuts_every_screen_has_still_work(self):
+        self.assertEqual(subtitles(K.Key_F, "", CTRL), (Action.SEARCH, ""))
+        self.assertEqual(subtitles(K.Key_F11), (Action.FULLSCREEN, ""))
+        self.assertEqual(subtitles(K.Key_MediaTogglePlayPause), (Action.PLAY_PAUSE, ""))
+        self.assertIsNone(subtitles(K.Key_P, "", CTRL))  # no picture-in-picture from here
+
+
 class ShortcutTableTests(unittest.TestCase):
     """Help → Keyboard Shortcuts lists SHORTCUTS: every key there resolves in its context."""
 

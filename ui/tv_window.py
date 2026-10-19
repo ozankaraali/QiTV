@@ -41,10 +41,12 @@ from PySide6.QtCore import (
     QRect,
     Qt,
     QTimer,
+    QUrl,
 )
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
+    QDesktopServices,
     QDragEnterEvent,
     QDragMoveEvent,
     QDropEvent,
@@ -84,6 +86,7 @@ from services.provider_link import ProviderLink
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
+from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
 from services.thread_cleanup import has_pending_threads
 from services.update_checker import call_before_update
 from services.watch_state import WatchState
@@ -106,6 +109,7 @@ from ui.overlays.guide import Guide
 from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
 from ui.overlays.pip_label import PipLabel
+from ui.overlays.subtitle_search import SubtitleSearchPage
 from ui.overlays.toast import Toast
 from ui.overlays.track_panel import TrackPanel
 from ui.overlays.transport import Transport
@@ -115,6 +119,7 @@ from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
 from ui.settings_dialog import OptionsDialog
+from ui.subtitle_search import OnlineSetup
 from ui.track_controls import SUBTITLE_FILTER
 from ui.tv_controller import ERROR_MS, Overlays, TVController
 from ui.tv_menus import TVMenus
@@ -441,6 +446,12 @@ class TVWindow(QMainWindow):
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
         # Each channel's sound sync (J/K, the Sound panel), written off the GUI thread.
         self.sound_sync = SoundSync(os.path.join(config_manager.get_config_dir(), SOUND_SYNC_FILE))
+        # The subtitles downloaded from OpenSubtitles for each title (2.2), and the folder.
+        self.subtitle_picks = SubtitlePicks(
+            os.path.join(config_manager.get_config_dir(), SUBTITLE_PICKS_FILE),
+            config_manager.subtitles_dir(),
+        )
+        self.jobs = JobRunner(self)  # the Library's searches, the exports, OpenSubtitles
 
         # The drawer and column ask the controller for "now" titles, and the controller
         # needs the overlays: a closure breaks the cycle.
@@ -457,6 +468,7 @@ class TVWindow(QMainWindow):
         self.mixer = Mixer(host)
         self.sound_panel = TrackPanel(host)
         self.subtitle_panel = TrackPanel(host)
+        self.subtitle_search = SubtitleSearchPage(host)
         self.corner_controls = CornerControls(host)
         self.overlays = Overlays(
             banner=ZapBanner(host),
@@ -471,6 +483,7 @@ class TVWindow(QMainWindow):
             mixer=self.mixer,
             sound_panel=self.sound_panel,
             subtitle_panel=self.subtitle_panel,
+            subtitle_search=self.subtitle_search,
             library_toast=self.library_toast,
         )
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
@@ -478,7 +491,9 @@ class TVWindow(QMainWindow):
         # PiP the transport keeps only its own buttons and bar, and other clicks reach the
         # small picture (OverlayHost.set_hole). The mixer shows over both (it sits above the
         # transport's controls and beside the PiP), and the Sound and Subtitles panels over it
-        # (above their buttons). The drawer and the guide cover them all.
+        # (above their buttons). The drawer and the guide cover them all; the OpenSubtitles
+        # search covers the player with its backdrop, under the corner player's controls and
+        # the toast.
         for overlay in (
             self.overlays.banner,
             self.overlays.column,
@@ -491,6 +506,7 @@ class TVWindow(QMainWindow):
             self.overlays.guide,
             self.overlays.next_card,
             self.overlays.welcome,
+            self.subtitle_search,
             self.corner_controls,
             self.overlays.toast,
         ):
@@ -533,13 +549,13 @@ class TVWindow(QMainWindow):
             pick_subtitle_file=self.pick_subtitle_file,
             # Why a channel or a provider failed, asked of its account (no stream opened).
             account_checks=AccountChecks(config_manager, parent=self),
+            online_subtitles=OnlineSetup(self.jobs, self.subtitle_picks, self.open_url),
             parent=self,
         )
         self.controller = controller
         # Wired before the Library connects to the catalog: on providerReady the controller
         # settles the provider change before a Library play waiting for it runs.
         controller.wire()
-        self.jobs = JobRunner(self)  # the Library's searches and the exports
         self.screens = TVPages(self, self)  # the Library's controller and the page moves
         self.library_controller = self.screens.library_controller
         self.exports = ExportFlow(
@@ -634,6 +650,11 @@ class TVWindow(QMainWindow):
             self.corner_controls.hide()
             if mode == PageStack.PLAYER and not self.pip_frame.small_rect().isEmpty():
                 self.pip_label.show()  # the corner hid it; the PiP only shows it when it opens
+
+    def open_url(self, url: str) -> None:
+        """A web page in the browser (OpenSubtitles' sign-up and API key page)."""
+        if not self._closing:
+            QDesktopServices.openUrl(QUrl(url))
 
     def pick_subtitle_file(self, folder: str) -> str:
         """The Subtitles panel's "Load a file…": a subtitle file, from `folder` ("": none)."""

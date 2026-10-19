@@ -52,9 +52,11 @@ class Action(str, Enum):
     SOUND_LATER = "sound_later"  # K: 50 ms later (VLC's keys)
     SUBTITLES_EARLIER = "subtitles_earlier"  # Shift+J: the subtitles 50 ms earlier
     SUBTITLES_LATER = "subtitles_later"  # Shift+K (VLC's G and H: G is the guide here)
+    PASTE = "paste"  # Ctrl/⌘+V: the clipboard into the subtitles search's field
 
 
-CONTEXTS = ("player", "drawer", "library", "guide")
+# "subtitles": the OpenSubtitles search over the player (2.2): it types like the drawer.
+CONTEXTS = ("player", "drawer", "library", "guide", "subtitles")
 
 
 _K = Qt.Key
@@ -174,9 +176,9 @@ def resolve(
 ) -> tuple[Action, str] | None:
     """Map a key press to (action, payload); the payload is the digit or the typed text.
 
-    `context` is "player", "drawer", "library" or "guide". `drawer_open` is the Phase 1B
-    spelling (True means "drawer", False "player") and is used only when `context` is not
-    given.
+    `context` is "player", "drawer", "library", "guide" or "subtitles". `drawer_open` is the
+    Phase 1B spelling (True means "drawer", False "player") and is used only when `context`
+    is not given.
     """
     if context is None:
         context = "drawer" if drawer_open else "player"
@@ -204,6 +206,12 @@ def resolve(
     if context == "drawer":
         if key in _DRAWER_KEYS:
             return _DRAWER_KEYS[key], ""
+        return _text(text, mods, windows=platform.startswith("win"))
+    if context == "subtitles":
+        if key in _DRAWER_KEYS:
+            return _DRAWER_KEYS[key], ""
+        if held == _CTRL and key == _K.Key_V.value:
+            return Action.PASTE, ""
         return _text(text, mods, windows=platform.startswith("win"))
     keys, chars = (
         (_GUIDE_KEYS, _GUIDE_CHARS) if context == "guide" else (_PLAYER_KEYS, _PLAYER_CHARS)
@@ -251,6 +259,7 @@ SHORTCUT_TITLES = {
     "drawer": "Channel list",
     "guide": "Guide",
     "library": "Movies and Series",
+    "subtitles": "Finding subtitles",
     "menu": "Anywhere",
 }
 SHORTCUTS: dict[str, list[tuple[str, str]]] = {
@@ -309,6 +318,16 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+D", "Add to or remove from My list"),
         ("F11, Ctrl+Meta+F", "Fullscreen"),
         ("Esc", "Back; from the genres, back to live TV"),
+    ],
+    "subtitles": [
+        ("Up, Down", "Move in a list; up from the top to the search field"),
+        ("PgUp, PgDown", "Page"),
+        ("Left, Right", "Between the languages and the subtitles"),
+        ("Return", "Download and show the subtitles; in the field, search (or save the key)"),
+        ("A…Z", "Type what to search for (or the API key)"),
+        ("Ctrl+V", "Paste"),
+        ("Backspace", "Delete a letter"),
+        ("Esc", "Close"),
     ],
     "menu": [
         ("Ctrl+1", "Live TV"),

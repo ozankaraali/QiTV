@@ -84,6 +84,7 @@ class PanelRow:
     text: str
     checked: bool = False
     action: bool = False  # it does something ("Load a file…"): never ticked, in the accent
+    icon: str = ""  # an action's icon (painting.draw_icon's name; "": a plus)
 
 
 @dataclass(frozen=True)
@@ -452,7 +453,8 @@ class TrackPanel(Overlay):
             if row.checked or row.action:
                 box = QRectF(x + (tick_w - icon) / 2 - un.px(0.3), 0, icon, icon)
                 box.moveCenter(QPointF(box.center().x(), rect.center().y()))
-                draw_icon(p, "plus" if row.action else "check", box, qcolor(PALETTE.accent))
+                glyph = (row.icon or "plus") if row.action else "check"
+                draw_icon(p, glyph, box, qcolor(PALETTE.accent))
             p.setFont(fonts["row"])
             p.setPen(qcolor(PALETTE.accent) if row.action else text)
             room = rect.right() - un.px(_PAD_U) / 2 - (x + tick_w) - arrow

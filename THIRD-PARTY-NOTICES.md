@@ -104,3 +104,11 @@ The libraries they need (as `uv.lock` resolves them):
 
 QiTV 1.14.x bundled MPV (GPLv3); 2.0 does not. The `mpv` library above only lets QiTV hand a
 stream to an MPV player you installed yourself ("Play in MPV").
+
+## Online services
+
+- **OpenSubtitles.com** finds and serves the subtitles of the Subtitles panel's "Search
+  OpenSubtitles…" (<https://www.opensubtitles.com>). QiTV talks to its public REST API
+  (<https://api.opensubtitles.com/api/v1>) with an API key and, when you sign in, your
+  account; no OpenSubtitles code is part of QiTV. The subtitles come from its users, under
+  the site's own terms.

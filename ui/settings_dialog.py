@@ -41,12 +41,25 @@ from services.epg_view import (
 )
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
+from services.opensubtitles import ANONYMOUS_DAILY, CONSUMERS_URL, built_in_key
 from services.provider_api import CLIENT_HEADERS
 from services.provider_link import parse_provider_link
 from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
 from ui.update_dialogs import check_for_updates
 
+OPENSUBTITLES_HINT = (
+    f'QiTV finds subtitles on <a href="{CONSUMERS_URL}">OpenSubtitles.com</a>. It needs a free'
+    " OpenSubtitles account and an API key: sign up there, create a key on its API consumers"
+    " page, and paste it here. The subtitles panel's “Search OpenSubtitles…” asks for it too."
+)
+OPENSUBTITLES_BUILT_IN_HINT = (
+    "This copy of QiTV has a key of its own: yours is optional, and is used instead when set."
+)
+OPENSUBTITLES_SIGN_IN_HINT = (
+    f"Signing in is optional: without it OpenSubtitles allows {ANONYMOUS_DAILY} downloads a day"
+    " per connection; with your account, as many as it allows you. Sign out clears both."
+)
 EXTERNAL_PLAYERS_HINT = (
     "Any channel or movie can also go to VLC or MPV from its right-click menu or the player"
     " controls."
@@ -273,6 +286,7 @@ class OptionsDialog(QDialog):
         # Add tab with settings
         self.create_settings_ui()
         self.create_timeshift_ui()
+        self.create_subtitles_ui()
 
         # Add tab with providers
         self.create_providers_ui()
@@ -411,6 +425,48 @@ class OptionsDialog(QDialog):
         )
         self.auto_play_movies_checkbox.setChecked(self.config_manager.auto_play_movies)
         self.settings_layout.addRow(self.auto_play_movies_checkbox)
+
+    def create_subtitles_ui(self):
+        """OpenSubtitles: the API key and an optional sign-in, masked (never logged)."""
+        tab = QWidget(self)
+        tab.setObjectName("subtitlesSettings")
+        self.options_tab.addTab(tab, "Subtitles")
+        layout = QFormLayout(tab)
+        intro = QLabel(OPENSUBTITLES_HINT, tab)
+        intro.setWordWrap(True)
+        intro.setOpenExternalLinks(True)
+        intro.setTextFormat(Qt.TextFormat.RichText)
+        layout.addRow(intro)
+        built_in = bool(built_in_key())
+        if built_in:
+            note = QLabel(OPENSUBTITLES_BUILT_IN_HINT, tab)
+            note.setWordWrap(True)
+            layout.addRow(note)
+        self.opensubtitles_key_input = QLineEdit(tab)
+        self.opensubtitles_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.opensubtitles_key_input.setPlaceholderText(
+            "Optional: your own key" if built_in else "Paste your API key"
+        )
+        self.opensubtitles_key_input.setText(self.config_manager.opensubtitles_api_key)
+        layout.addRow("API key", self.opensubtitles_key_input)
+        sign_in = QLabel(OPENSUBTITLES_SIGN_IN_HINT, tab)
+        sign_in.setWordWrap(True)
+        layout.addRow(sign_in)
+        self.opensubtitles_username_input = QLineEdit(tab)
+        self.opensubtitles_username_input.setText(self.config_manager.opensubtitles_username)
+        layout.addRow("Username", self.opensubtitles_username_input)
+        self.opensubtitles_password_input = QLineEdit(tab)
+        self.opensubtitles_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.opensubtitles_password_input.setText(self.config_manager.opensubtitles_password)
+        layout.addRow("Password", self.opensubtitles_password_input)
+        self.opensubtitles_sign_out_button = QPushButton("Sign out", tab)
+        self.opensubtitles_sign_out_button.clicked.connect(self.sign_out_of_opensubtitles)
+        layout.addRow(self.opensubtitles_sign_out_button)
+
+    def sign_out_of_opensubtitles(self):
+        """Sign out: the username and password go (saved with Save, which ends the sign-in)."""
+        self.opensubtitles_username_input.clear()
+        self.opensubtitles_password_input.clear()
 
     def create_timeshift_ui(self):
         tab = QWidget(self)
@@ -977,6 +1033,13 @@ class OptionsDialog(QDialog):
         self.config_manager.timeshift_max_mib = self.timeshift_size_slider.value()
         self.config_manager.timeshift_ram_mib = self.timeshift_ram_combo.currentData()
         self.config_manager.channel_logos = self.channel_logos_checkbox.isChecked()
+        self.config_manager.opensubtitles_api_key = "".join(
+            self.opensubtitles_key_input.text().split()
+        )
+        self.config_manager.opensubtitles_username = (
+            self.opensubtitles_username_input.text().strip()
+        )
+        self.config_manager.opensubtitles_password = self.opensubtitles_password_input.text()
 
         if self.epg_source_combo.currentText() != self.config_manager.epg_source:
             self.config_manager.epg_source = self.epg_source_combo.currentText()

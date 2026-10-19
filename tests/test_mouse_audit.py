@@ -15,6 +15,9 @@ Screens and their controls:
 - "sound": the Sound panel ♫ opens: its track "rows", its sync's "earlier" (−), "later" (+)
   and "reset";
 - "subtitles": the Subtitles panel its button opens, alike, and its "Load a file…";
+- "subtitle_search": the OpenSubtitles search its "Search OpenSubtitles…" opens: the key page's
+  "field", "clear" (✕), "get_key", "paste" and "save", the search's "field", "clear" and
+  "search", its "languages" and "files" rows, and "close" (×);
 - "pip_label": the small picture's "swap", "speaker" and "close";
 - "drawer": the top row's "back", "names", "search", "refresh" and "settings", the ⌕ "find" box,
   its "rows", and the rows of its sources and sections columns by title ("Settings", "Movies" …);
@@ -34,6 +37,7 @@ from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QApplication, QWidget
 
 from services.navigation import NavModel
+from services.opensubtitles import SubtitleFile
 from tests.test_navigation import FakeCatalog
 from tests.test_poster_grid import FakePosters, details, titles
 from ui.context_actions import OPEN_PIP_TEXT, ContextActions
@@ -45,6 +49,7 @@ from ui.overlays.drawer import Drawer
 from ui.overlays.guide import Guide
 from ui.overlays.mixer import Mixer, MixerRow
 from ui.overlays.pip_label import PipLabel
+from ui.overlays.subtitle_search import LanguageRow, SubtitleSearchPage
 from ui.overlays.track_panel import PanelModel, PanelRow, PanelSync, TrackPanel
 from ui.overlays.transport import Transport
 from ui.pip import corner_rect
@@ -130,6 +135,24 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("menu", "Ctrl+O"): (("drawer", "Open file"),),
     ("menu", "Ctrl+,"): (("drawer", "settings"), ("drawer", "Settings")),
     ("menu", "Ctrl+R"): (("drawer", "refresh"),),
+    # ---- Finding subtitles (the OpenSubtitles search) ----------------------------------------
+    # A click on a row; the wheel scrolls a list; a click on the field puts the keys there.
+    ("subtitles", "Up, Down"): (
+        ("subtitle_search", "languages"),
+        ("subtitle_search", "files"),
+        ("subtitle_search", "field"),
+    ),
+    ("subtitles", "PgUp, PgDown"): (("subtitle_search", "languages"), ("subtitle_search", "files")),
+    ("subtitles", "Left, Right"): (("subtitle_search", "languages"), ("subtitle_search", "files")),
+    ("subtitles", "Return"): (
+        ("subtitle_search", "files"),
+        ("subtitle_search", "search"),
+        ("subtitle_search", "save"),
+    ),
+    ("subtitles", "A…Z"): (("subtitle_search", "field"),),
+    ("subtitles", "Ctrl+V"): (("subtitle_search", "paste"),),
+    ("subtitles", "Backspace"): (("subtitle_search", "clear"),),  # ✕ clears the field
+    ("subtitles", "Esc"): (("subtitle_search", "close"),),
 }
 
 EXEMPT: dict[tuple[str, str], str] = {
@@ -232,6 +255,28 @@ def _subtitles(host: QWidget) -> set[str]:
     return found
 
 
+def _subtitle_search(host: QWidget) -> set[str]:
+    """The key page, a key typed into it, then the search with what it found."""
+    page = SubtitleSearchPage(host)
+    found: set[str] = set()
+
+    def take(*names: str) -> None:
+        found.update(n for n in names if not page.control_rect(n).isEmpty())
+
+    page.show_key_page()
+    page.type_text("k")
+    take("field", "clear", "get_key", "paste", "save", "close")
+    page.show_search("Lighthouse (2019)")
+    files = [SubtitleFile(1, "en", "Lighthouse.2019"), SubtitleFile(2, "de", "Lighthouse.2019")]
+    rows = [LanguageRow("en", "English", 1), LanguageRow("de", "German", 1)]
+    page.set_results(rows, {"en": files[:1], "de": files[1:]}, "2 subtitles in 2 languages")
+    take("field", "clear", "search", "close")
+    for name in ("languages", "files"):
+        if not page.row_rect(name, 0).isEmpty():
+            found.add(name)
+    return found
+
+
 def _pip_label(host: QWidget) -> set[str]:
     label = PipLabel(host)
     label.follow(corner_rect(QSize(1280, 720), "br"))
@@ -320,6 +365,7 @@ class MouseOnlyAuditTests(unittest.TestCase):
             "mixer": _mixer(_child(host)),
             "sound": _sound(_child(host)),
             "subtitles": _subtitles(_child(host)),
+            "subtitle_search": _subtitle_search(_child(host)),
             "pip_label": _pip_label(_child(host)),
             "drawer": drawer,
             "context": context,
