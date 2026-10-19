@@ -700,6 +700,7 @@
   "The external player could not start": "Harici oynatıcı başlatılamadı",
   "The mixer's other row (while it shows)": "Mikserin diğer satırı (göründüğü sürece)",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Yeni sürüm şuraya kaydedildi:\n{path}\n\nLütfen mevcut uygulamayı indirilen dosyayla değiştirin.",
+  "The portal has no recording of this programme": "Portalda bu programın kaydı yok",
   "The portal returned an empty link": "Portal boş bir bağlantı döndürdü",
   "The portal returned no data": "Portal veri döndürmedi",
   "The portal says your subscription ended on {date}": "Portala göre aboneliğiniz {date} tarihinde sona erdi",

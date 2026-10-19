@@ -14,7 +14,8 @@ programme within its archive can be watched from its start (`programmeRequested`
 clicked on (a programme that has ended), else, with the window moved back from now, the one
 at the window's left edge. It is outlined, the footer describes it, and its "▶ Watch from the
 start" button and Enter (a double-click on its box) play it; the footer's button also shows
-for the programme on now (from its start). Otherwise Enter tunes the channel, as before.
+for the programme on now (from its start). Otherwise Enter tunes the channel, as before. On
+an STB portal's channel only a programme its guide does not mark as not recorded can play.
 """
 
 from collections.abc import Callable
@@ -40,7 +41,7 @@ from PySide6.QtWidgets import QWidget
 
 from services import i18n
 from services.catalog import shown_label
-from services.catchup import ARCHIVE_KEY
+from services.catchup import ARCHIVE_KEY, programme_in_archive
 from services.epg_view import Programme, now_next, timeline
 from services.i18n import N_, tr, translate
 from services.navigation import item_key
@@ -356,12 +357,17 @@ class Guide(Overlay):
     # ---- catch-up (2.2) ---------------------------------------------------------------------
 
     def _playable(self, programme: Programme | None, channel: dict | None) -> bool:
-        """`programme` began in the past, within the channel's archive."""
+        """`programme` began in the past, within the channel's archive (an STB portal's: one
+        its guide lists as recorded, or says nothing of)."""
         if programme is None or channel is None:
             return False
         days = self._archive_days(channel)
         now = self._now().astimezone()
-        return days > 0 and now - timedelta(days=days) <= programme.start < now
+        return (
+            days > 0
+            and now - timedelta(days=days) <= programme.start < now
+            and programme_in_archive(channel, programme)
+        )
 
     def chosen(self) -> Programme | None:
         """The past programme Enter plays from its start: the one clicked on in the highlighted

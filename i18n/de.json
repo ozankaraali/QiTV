@@ -709,6 +709,7 @@
   "The external player could not start": "Der externe Player konnte nicht starten",
   "The mixer's other row (while it shows)": "Die andere Zeile des Mixers (solange er sichtbar ist)",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Die neue Version wurde gespeichert unter:\n{path}\n\nBitte ersetzen Sie die aktuelle Anwendung durch die heruntergeladene Datei.",
+  "The portal has no recording of this programme": "Das Portal hat keine Aufzeichnung dieser Sendung",
   "The portal returned an empty link": "Das Portal hat einen leeren Link geliefert",
   "The portal returned no data": "Das Portal hat keine Daten geliefert",
   "The portal says your subscription ended on {date}": "Laut Portal ist Ihr Abo am {date} abgelaufen",

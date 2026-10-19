@@ -45,6 +45,21 @@ opens it again once where it was, then goes live.
 
 Each large picture keeps its own: a swap (`use_slot`) shows the other picture's (none for a
 live one); the small picture plays on what it had.
+
+An STB portal's archive (a channel the portal marks archived) has no address to build: the
+portal makes a link to the recording of one programme of its guide, as it makes a channel's
+live link. So a moment opens the recording of the guide's programme on then (one the guide does
+not mark as not recorded; none: the toast says so and what plays goes on), whose link is asked
+in the link lanes' side lane (`LinkLanes.request_archive`) while the channel plays on; it opens
+as any archive address does once it comes, sought to the moment, and is never probed (a probe
+could spend its play token, and a portal's limit counts as one stream). A portal that answers without a
+link has no recording: the toast says so (twice, for moments apart, is learned as "nothing
+there" above). A link that does not come otherwise (an expired session's "Authorization
+failed.", say), or a recording that does not open, has its link made again once after its
+portal signs in again (`item_provider.sign_in_again`, as a channel's link after a failure);
+then the toast says why and the channel plays live. A seek within the recording moves within
+it; one past its end, and its end, open the next programme's (live, quietly, when that one is
+not recorded yet: the programme on now).
 """
 
 from __future__ import annotations
@@ -57,17 +72,21 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer
 
+from services.catalog import EMPTY_LINK_MESSAGE
 from services.catchup import (
     MAX_MINUTES,
+    STB,
     Answer,
     Archive,
     address_start,
     archive_of,
     archive_urls,
+    recording_at,
     wall_clock,
 )
 from services.catchup_memory import CatchupMemory
 from services.connection_budget import DENIED
+from services.epg_view import Recording
 from services.i18n import N_, translate
 from services.jobs import JobRunner
 from services.live.tuning import channel_key
@@ -89,6 +108,8 @@ NOT_AVAILABLE_TEXT = N_("This channel's archive isn't available right now")
 REFUSED_TEXT = N_("The provider refused its archive — it may limit concurrent streams")
 # i18n: a toast: R (record) while the channel plays from the provider's archive
 NO_RECORDING_TEXT = N_("Can't record from the provider's archive")
+# i18n: a toast: the STB portal has no recording of the programme asked for; what plays goes on
+NOT_RECORDED_TEXT = N_("The portal has no recording of this programme")
 EXTEND_S = 30 * 60  # the bar reaches this far back beyond the buffer, or the moment asked
 LIVE_S = 30.0  # a seek this near now goes live
 MIN_AGE_S = 120.0  # an archive moment is at least this old (newer: the archive may not have it)
@@ -114,6 +135,9 @@ class _Ask:
     urls: list[str]
     live_playing: bool  # the channel plays live meanwhile (a rewind): it plays on if it fails
     guessed: bool = False  # its addresses' time zone is a UTC guess: their answers teach nothing
+    retried: bool = False  # it opens again after a failure once it played (a second: live)
+    programme: str = ""  # an STB portal's: the programme whose recording plays (its guide id)
+    fresh: bool = False  # an STB portal's: its link was made again after a new sign-in
 
 
 @dataclass
@@ -147,13 +171,16 @@ class CatchUp(QObject):
         prepare: Callable[[Any, Target], None] = lambda session, target: None,
         allowed: Callable[[], bool] = lambda: True,
         runner: Any = None,
+        lanes: Any = None,
         clock: Callable[[], float] = time.monotonic,
         parent: Optional[QObject] = None,
     ) -> None:
         """`request(target)` plays a target (the channel live again); `changed()` says the
         archive's bar changed (it plays, moved, or ended); `limit(item)` is the item's
         provider's streams at a time (None: no limit); `prepare(session, target)` readies the
-        player for the channel (its sound sync) before the archive opens there."""
+        player for the channel (its sound sync) before the archive opens there; `lanes` (the
+        LinkLanes) asks an STB portal for its recordings' links (None: STB archives don't
+        open)."""
         super().__init__(parent)
         self._tuner, self._session = tuner, session
         self.catalog = catalog
@@ -167,11 +194,13 @@ class CatchUp(QObject):
         self._prepare = prepare
         self._allowed = allowed
         self._runner = runner if runner is not None else JobRunner(self)
+        self._lanes = lanes
         self._clock = clock
         self._slots: dict[int, _Playing] = {}  # by tuner: each picture's archive
-        self._generation = 0  # asks and probes before a newer one are dropped
+        self._generation = 0  # asks, probes and links before a newer one are dropped
         self._probing = False
         self._asked: Optional[_Ask] = None  # the newest ask a running probe answers
+        self._linking: Optional[_Ask] = None  # an STB recording's ask whose link is on its way
         self._key: tuple[Optional[dict], str, str] = (None, "", "")  # item, provider, its key
         self._timer = QTimer(self, interval=TICK_MS)
         self._timer.timeout.connect(self._tick)
@@ -194,8 +223,8 @@ class CatchUp(QObject):
             self._connect(self._session, False)
             self._connect(session, True)
         self._tuner, self._session = tuner, session
-        self._generation += 1  # a probe for the picture that went small is dropped
-        self._probing, self._asked = False, None
+        self._generation += 1  # a probe or a link for the picture that went small is dropped
+        self._probing, self._asked, self._linking = False, None, None
         self._run_timer()
 
     @property
@@ -217,9 +246,10 @@ class CatchUp(QObject):
         return self._probing
 
     def reset(self) -> None:
-        """Another title plays large (a zap, a film): its archive and a probe are forgotten."""
+        """Another title plays large (a zap, a film): its archive, a probe and a link on its
+        way are forgotten."""
         self._generation += 1
-        self._probing, self._asked = False, None
+        self._probing, self._asked, self._linking = False, None, None
         self._set_playing(None)
 
     # ---- what a channel offers ------------------------------------------------------------
@@ -235,11 +265,11 @@ class CatchUp(QObject):
         return key
 
     def cancel(self) -> None:
-        """A probe still running is dropped (Go live, a seek within the buffer); its slot
-        goes back when it ends."""
-        if self._probing:
+        """A probe still running, or an STB recording's link on its way, is dropped (Go live,
+        a seek within the buffer); a probe's slot goes back when it ends."""
+        if self._probing or self._linking is not None:
             self._generation += 1
-            self._probing, self._asked = False, None
+            self._probing, self._asked, self._linking = False, None, None
 
     def offered(self, target: Optional[Target]) -> Optional[Archive]:
         """The channel's archive when it may be played now; else None."""
@@ -282,14 +312,18 @@ class CatchUp(QObject):
         until: Optional[float] = None,
         link: str = "",
         live_playing: bool = True,
+        retried: bool = False,
     ) -> bool:
         """Play `target`'s archive from `moment` (Unix seconds; to `until`, a programme's end):
-        False, doing nothing, when it has none to offer or its addresses can't be made. A
-        moment newer than `MIN_AGE_S` ago plays from then (the archive may not have it
-        yet), one older than its depth from its oldest."""
+        False, doing nothing, when it has none to offer or its addresses can't be made (an
+        STB portal's: the guide has no recording then, which the toast says). A moment newer
+        than `MIN_AGE_S` ago plays from then (the archive may not have it yet), one older than
+        its depth from its oldest. `retried`: it opens again after it failed once it played."""
         archive = self.offered(target)
         if archive is None:
             return False
+        if archive.kind == STB:
+            return self._open_recording(target, archive, moment, live_playing, retried)
         item = target.item
         if archive.kind in ("default", "append") and not archive.source:
             source = item_provider.playlist_source(self.catalog, item)  # its #EXTM3U line's
@@ -320,7 +354,7 @@ class CatchUp(QObject):
             logger.info("No archive address for %s", target.title)
             return False
         key = self.key(target)
-        ask = _Ask(target, archive, key, moment, begins, ends, urls, live_playing, guessed)
+        ask = _Ask(target, archive, key, moment, begins, ends, urls, live_playing, guessed, retried)
         asked = self._asked
         if self._probing and asked is not None and asked.key == key:
             # A probe of this channel's archive runs: its answer serves this newer ask (← held
@@ -335,6 +369,85 @@ class CatchUp(QObject):
         elif not self._probe(ask):
             self._play(ask, 0, probed=False)
         return True
+
+    # ---- an STB portal's recordings --------------------------------------------------------
+
+    def _open_recording(
+        self, target: Target, archive: Archive, moment: float, live_playing: bool, retried: bool
+    ) -> bool:
+        """`open` on an STB portal's channel: the recording of the guide's programme on at
+        `moment`, whose link the portal makes (see the module docstring)."""
+        if self._lanes is None:
+            return False
+        now = self._now().timestamp()
+        moment = min(max(moment, now - archive.seconds + EDGE_S), now - MIN_AGE_S)
+        recording = self._recording(target, moment)
+        if recording is None:
+            logger.info("The guide of %s lists no recording then", target.title)
+            self._toast(translate(NOT_RECORDED_TEXT))
+            return False
+        key = self.key(target)
+        begins, ends = recording.start.timestamp(), recording.stop.timestamp()
+        ask = _Ask(target, archive, key, moment, begins, ends, [], live_playing, False, retried)
+        ask = replace(ask, programme=recording.id)
+        linking = self._linking
+        if linking is not None and linking.key == key and linking.programme == recording.id:
+            # Its link is on its way: it serves this newer moment (← held down asks once).
+            live = linking.live_playing and live_playing
+            self._linking = replace(ask, live_playing=live, fresh=linking.fresh)
+            return True
+        self._generation += 1
+        self._probing, self._asked = False, None
+        self._link(ask)
+        return True
+
+    def _recording(self, target: Target, moment: float) -> Optional[Recording]:
+        """The recording of the guide's programme on at `moment` (Unix seconds), if any."""
+        when = datetime.fromtimestamp(moment, timezone.utc)
+        return recording_at(self.catalog.programmes(target.item, when, 3), when)
+
+    def _link(self, ask: _Ask) -> None:
+        """Ask the portal for the link of the ask's recording; it opens when it comes, unless
+        a zap, a swap, Go live or a newer ask came meanwhile."""
+        self._linking = ask
+        generation = self._generation
+        self._lanes.request_archive(
+            ask.target,
+            ask.programme,
+            lambda url: self._on_link(generation, url),
+            lambda message: self._on_link_failed(generation, message),
+        )
+
+    def _on_link(self, generation: int, url: str) -> None:
+        ask = self._linking
+        if generation != self._generation or ask is None:
+            return
+        self._linking = None
+        self._play(replace(ask, urls=[url]), 0, probed=False)
+
+    def _on_link_failed(self, generation: int, message: str) -> None:
+        ask = self._linking
+        if generation != self._generation or ask is None:
+            return
+        self._linking = None
+        if message == EMPTY_LINK_MESSAGE:
+            # The portal answered as a signed-in session does, without a recording.
+            self._learn_failure(ask)
+            self._failed(ask, NOT_RECORDED_TEXT)
+        elif not ask.fresh:
+            self._link_again(ask)  # e.g. "Authorization failed.": its session expired
+        else:
+            self._failed(ask, NO_ANSWER_TEXT)
+
+    def _link_again(self, ask: _Ask) -> None:
+        """The recording's link did not come, or did not open: its portal's session may have
+        expired. It signs in again (a channel's link after a failure does so too) and the link
+        is asked once more."""
+        logger.info("Asking for the recording of %s again", ask.target.title)
+        item_provider.sign_in_again(self.catalog, ask.target.item)
+        self._generation += 1
+        self._probing, self._asked = False, None
+        self._link(replace(ask, fresh=True))
 
     def _probe_room(self, target: Target) -> Optional[str]:
         """The provider's name when a probe may open a connection beside what plays."""
@@ -443,7 +556,15 @@ class CatchUp(QObject):
         bar_start = max(ask.moment - EXTEND_S, now - ask.archive.seconds + EDGE_S)
         old = self._playing
         self._set_playing(
-            _Playing(ask, url, form, probed, self._clock(), min(bar_start, ask.moment))
+            _Playing(
+                ask,
+                url,
+                form,
+                probed,
+                self._clock(),
+                min(bar_start, ask.moment),
+                retried=ask.retried,
+            )
         )
         name = item_provider.provider_name(self.catalog, item)
         logger.info("Opening the archive of %s", target.title)
@@ -501,6 +622,9 @@ class CatchUp(QObject):
         moment = max(moment, now - ask.archive.seconds + EDGE_S)
         session = self._session
         if playing.played and ask.begins <= moment < ask.ends - 5.0 and session.is_seekable():
+            if self._linking is not None:  # another recording's link on its way: not now
+                self._generation += 1
+                self._linking = None
             session.seek(int((moment - ask.begins) * 1000))
             self._changed()
             return
@@ -524,7 +648,7 @@ class CatchUp(QObject):
         if playing is None:
             return
         self._generation += 1
-        self._probing, self._asked = False, None
+        self._probing, self._asked, self._linking = False, None, None
         self._set_playing(None)
         target = playing.ask.target
         logger.info("Back to live on %s", target.title)
@@ -533,12 +657,12 @@ class CatchUp(QObject):
         self._tuner.stop()
         self._request(replace(target, archive_at=None, archive_until=None, zapped=False))
 
-    def _reopen(self, playing: _Playing, moment: float) -> None:
+    def _reopen(self, playing: _Playing, moment: float, *, retried: bool = False) -> None:
         ask = playing.ask
         until = None
         if ask.ends < self._now().timestamp() - LIVE_S:
             until = ask.ends - AFTER_S  # a programme's stretch: the next one to its end
-        if not self.open(ask.target, moment, until=until, live_playing=False):
+        if not self.open(ask.target, moment, until=until, live_playing=False, retried=retried):
             self.go_live()
 
     # ---- the player's reports (the controller asks first) ---------------------------------
@@ -561,6 +685,14 @@ class CatchUp(QObject):
             return False
         if playing.played and not playing.retried:
             self._again(playing)
+            return True
+        if playing.ask.programme:
+            # An STB portal's recording that did not open: its play token may have expired.
+            if not playing.played and not playing.ask.fresh:
+                self._link_again(playing.ask)  # the failed player goes once the link comes
+                return True
+            self._toast(translate(NO_ANSWER_TEXT))
+            self.go_live()
             return True
         quick = self._clock() - playing.opened <= QUICK_S
         if not playing.played and not playing.probed and quick:
@@ -596,22 +728,25 @@ class CatchUp(QObject):
             return False
         if not playing.played:
             return self.on_error("")
-        position = self.position() or playing.ask.ends
+        ask = playing.ask
+        position = self.position() or ask.ends
+        short = position - ask.moment < SHORT_S
+        if ask.programme and not short:
+            position = max(position, ask.ends)  # the recording is over: the next programme's
         if position >= self._now().timestamp() - LIVE_S - 60.0:
             self.go_live()
-        elif position - playing.ask.moment < SHORT_S:
+        elif short:
             self._toast(translate(NO_ANSWER_TEXT))  # it ended at once: no stretch to go on with
             self.go_live()
+        elif ask.programme and self._recording(ask.target, position) is None:
+            self.go_live()  # the next programme is not recorded (yet): live goes on from here
         else:
             self._reopen(playing, position)
         return True
 
     def _again(self, playing: _Playing) -> None:
         position = self.position() or playing.ask.moment
-        self._reopen(playing, position)
-        again = self._playing
-        if again is not None:
-            again.retried = True
+        self._reopen(playing, position, retried=True)
 
     def _on_position(self, *_args: Any) -> None:
         if self._playing is not None:
