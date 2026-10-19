@@ -454,6 +454,22 @@ class ConfigManager:
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 
+    @property
+    def language(self) -> str | None:
+        """The language chosen in Settings ("tr"), or None to follow the system's.
+
+        2.2, optional: no key (what older builds write, and ignore) is the system's language.
+        """
+        code = self.config.get("language")
+        return code if isinstance(code, str) and code else None
+
+    @language.setter
+    def language(self, code: str | None) -> None:
+        if code:
+            self.config["language"] = code
+        else:
+            self.config.pop("language", None)
+
     @staticmethod
     def _initial_tv_window(window_positions):
         """Place the single TV window where the larger of the two old windows was.

@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 import orjson as json
 
-from services import failure_reasons as reasons, provider_link
+from services import failure_reasons as reasons, i18n, provider_link
 from services.account_check import check_account
 from services.config_manager import ConfigManager
 from services.epg_view import (
@@ -39,6 +39,7 @@ from services.epg_view import (
     GUIDE_OFFSET_STEP,
     guide_offset_minutes,
 )
+from services.i18n import tr
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
 from services.opensubtitles import ANONYMOUS_DAILY, CONSUMERS_URL, built_in_key
@@ -298,6 +299,25 @@ class OptionsDialog(QDialog):
         self.settings_tab = QWidget(self)
         self.options_tab.addTab(self.settings_tab, "Settings")
         self.settings_layout = QFormLayout(self.settings_tab)
+
+        # The language: every text is read as it is shown, so a new one shows from the next
+        # start (a switch now would leave half the window in the old one).
+        self.language_combo = QComboBox(self.settings_tab)
+        languages = i18n.available_languages()
+        system = dict(languages).get(i18n.system_language(), i18n.SOURCE_NAME)
+        self.language_combo.addItem(tr("System default ({language})", language=system), "")
+        for code, name in languages:
+            self.language_combo.addItem(name, code)
+        self.language_combo.setCurrentIndex(
+            max(0, self.language_combo.findData(self.config_manager.language or ""))
+        )
+        self.language_note = QLabel(tr("Applies when QiTV starts again."), self.settings_tab)
+        self.language_note.setEnabled(False)  # the theme's quieter text
+        language_row = QHBoxLayout()
+        language_row.addWidget(self.language_combo)
+        language_row.addWidget(self.language_note)
+        language_row.addStretch(1)
+        self.settings_layout.addRow(tr("Language"), language_row)
 
         # Add check button to allow checking for updates
         self.check_updates_checkbox = QCheckBox("Allow Check for Updates", self.settings_tab)
@@ -1017,6 +1037,7 @@ class OptionsDialog(QDialog):
         current_provider_changed = (
             self._original_selected_provider_name != self.selected_provider_name
         )
+        self.config_manager.language = self.language_combo.currentData() or None
         self.config_manager.check_updates = self.check_updates_checkbox.isChecked()
         self.config_manager.max_cache_image_size = int(self.cache_image_size_input.text())
         self.config_manager.prefer_https = self.prefer_https_checkbox.isChecked()

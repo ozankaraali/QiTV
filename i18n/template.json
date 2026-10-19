@@ -1,0 +1,6 @@
+{
+  "@about": "Every text QiTV shows, in English. A new language: `uv run python scripts/i18n_extract.py --init <code> --name <its own name>`, then fill in each translation of i18n/<code>.json (an empty one shows English). Keep every {field}; a plural entry holds the forms the language needs (one, few, many, other). @context explains texts whose meaning is unclear; @plurals has each counted text's English plural.",
+  "Applies when QiTV starts again.": "",
+  "Language": "",
+  "System default ({language})": ""
+}

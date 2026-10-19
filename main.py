@@ -91,6 +91,7 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication
     import qdarktheme
 
+    from services import i18n
     from services.config_manager import ConfigManager, get_app_version
     from services.epg_manager import EpgManager
     from services.image_manager import ImageManager
@@ -145,6 +146,9 @@ def main() -> int:
             icon_path = os.path.join(sys._MEIPASS, "assets", "qitv.png")
 
     config_manager = ConfigManager()
+    # The language, before any window: every text is looked up as it is shown.
+    i18n.set_language(i18n.resolve(config_manager.language))
+    i18n.install_qt_translations(app)
     _migrate_favorites(config_manager)
     image_manager = ImageManager(config_manager, config_manager.max_cache_image_size * 1024 * 1024)
     provider_manager = ProviderManager(config_manager)
