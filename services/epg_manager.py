@@ -165,10 +165,19 @@ def _open_xmltv(path: str) -> Iterator[Any]:
                 yield unpacked
         elif magic == b"PK\x03\x04":
             with zipfile.ZipFile(f) as archive:
-                name = next((n for n in archive.namelist() if n.endswith(".xml")), None)
-                if name is None:
+                # The largest .xml member: an archive made on a Mac also lists __MACOSX/._*.xml
+                # resource forks, and some name the guide in capitals.
+                members = [
+                    info
+                    for info in archive.infolist()
+                    if info.filename.lower().endswith(".xml")
+                    and not info.is_dir()
+                    and not info.filename.startswith("__MACOSX/")
+                ]
+                if not members:
                     raise _NoXml("no XML in archive")
-                with archive.open(name) as member:
+                largest = max(members, key=lambda info: info.file_size)
+                with archive.open(largest) as member:
                     yield member
         else:
             yield f

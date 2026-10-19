@@ -96,6 +96,12 @@ class OpenXmltvTests(_Directory):
             with self.subTest(name):
                 self.assertEqual(self.unpacked(self.write(data, name)), XML)
 
+    def test_a_zip_reads_its_largest_xml_and_skips_mac_resource_forks(self):
+        archive = zip_bytes(
+            {"__MACOSX/._GUIDE.XML": b"\x00\x05" * 4000, "small.xml": b"<tv/>", "GUIDE.XML": XML}
+        )
+        self.assertEqual(self.unpacked(self.write(archive)), XML)
+
     def test_a_zip_without_xml_raises(self):
         with self.assertRaisesRegex(ValueError, "no XML in archive"):
             self.unpacked(self.write(zip_bytes({"readme.txt": b"hello"})))
