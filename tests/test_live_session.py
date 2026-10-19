@@ -4714,6 +4714,26 @@ class RepickTests(LiveSessionCase):
                 self.assertLess(self.clock.now - opened, 12.0)
                 self.assertEqual(self.outcome(feed)[0], 2)
 
+    def test_a_dump_after_a_slow_open_is_judged_from_vlcs_playing(self):
+        # VLC reaches Playing only 4 s after the open (past `_REPICK_PLAY_S` and `_REPICK_S`
+        # from it), and the dump comes a second after that, then 1x: the windows count from
+        # the playing, so it is picked again; the deadline still bounds them.
+        for latency in (AUTO, "normal"):
+            with self.subTest(latency=latency):
+                feed = self.tune(latency, burst=0.0, edge=2.0, open_s=4.0)
+                feed.ready(backlog_after_start=False)
+                self.opened(feed)
+                opened = self.clock.now
+                feed.run(5.0)  # 4 s opening, 1 s playing
+                feed.edge += 20.0
+                feed.push()
+                for _ in range(80):
+                    feed.run(0.25)
+                    if len(self.playback.plays) > 1:
+                        break
+                self.assertLess(self.clock.now - opened, live_session._REPICK_DEADLINE_S)
+                self.assertEqual(self.outcome(feed)[0], 2)
+
     def test_a_reopen_in_software_and_the_re_pick_are_never_two_opens_in_a_row(self):
         # Hardware decoding froze the picture right after the dump: the stream opened again
         # in software where it played; the re-pick still comes, but not within the reopen

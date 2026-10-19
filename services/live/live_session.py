@@ -298,9 +298,10 @@ _RELAND_S = 10.0
 # never qualifies, whatever the tick it lands on or how it is spread (re-reviews 1 and 2: the
 # unmeasured burst read as a backlog ran VLC dry 4-7 s). Only while VLC's clock moved within
 # `_REPICK_PLAY_S` of its playing (a sparse-PCR channel's first reading comes ~2 s after it:
-# re-review 2, M-r), which came within `_REPICK_PLAY_S` of the open, and never later than
-# `_REPICK_DEADLINE_S` after it. By design it moves the chosen latency's exposure to a stalling
-# source forward: the start it picks again is nearer the edge (M-p).
+# re-review 2, M-r), with the dump's window open at least `_REPICK_S` past that playing (a
+# slow open), and never later than `_REPICK_DEADLINE_S` after the open. By design it moves the
+# chosen latency's exposure to a stalling source forward: the start it picks again is nearer
+# the edge (M-p).
 REPICK = True
 _REPICK_S = 5.0
 _REPICK_DUMP_S = 4.0
@@ -1556,11 +1557,15 @@ class LiveSession(QObject):
             return False
         tick, self._repick_seen = max(0.0, now - self._repick_seen), now
         if self._opened_at is None and self._repick_playing is None:
+            # VLC plays: a slow open may have outlasted the dump's window, which counts from
+            # here then (within the deadline), and its clock has `_REPICK_PLAY_S` to move.
             self._repick_playing = now
+            deadline = self._repick_opened + _REPICK_DEADLINE_S
+            self._repick_until = min(max(self._repick_until, now + _REPICK_S), deadline)
         played = self._opened_at is None and self._last_ms != 0
         since = now - self._repick_opened
-        began = self._repick_opened if self._repick_playing is None else self._repick_playing
-        late = now - began > _REPICK_PLAY_S
+        playing = self._repick_playing
+        late = playing is not None and now - playing > _REPICK_PLAY_S
         if since > _REPICK_DEADLINE_S or (not played and late):
             self._repick_until, self._repick_step = -math.inf, None  # never, this tune
             return False
