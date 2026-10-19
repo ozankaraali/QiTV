@@ -200,7 +200,7 @@ def programmes_for_channel(
     passes its window's start), oldest first, moved by its provider's guide time offset (the
     manager's `guide_offset`); [] if the EPG is unavailable."""
     try:
-        raw = epg_manager.get_programs_for_channel(channel, None, 0)
+        raw = epg_manager.get_programs_for_channel(channel)
         offset_of = getattr(epg_manager, "guide_offset", None)
         offset = offset_of() if callable(offset_of) else None
         if not isinstance(offset, timedelta):

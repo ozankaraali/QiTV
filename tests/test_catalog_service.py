@@ -101,7 +101,7 @@ def make_service(provider, factory=None, runner=None):
         save_config=lambda: None,
     )
     providers = FakeProviders(provider)
-    epg = SimpleNamespace(get_programs_for_channel=lambda channel, start, limit: [])
+    epg = SimpleNamespace(get_programs_for_channel=lambda channel: [])
     factory = factory or FakeFactory()
     service = CatalogService(
         config, providers, epg, runner=runner or ImmediateRunner(), factory=factory
@@ -267,7 +267,7 @@ class CatalogServiceTests(unittest.TestCase):
 
     def test_programmes_need_ready_epg(self):
         service, _, factory, epg = make_service({"name": "X", "type": "XTREAM", "url": "h:1"})
-        epg.get_programs_for_channel = lambda c, s, l: [
+        epg.get_programs_for_channel = lambda c: [
             {
                 "@start": "20261015200000 +0000",
                 "@stop": "20261015210000 +0000",
@@ -289,7 +289,7 @@ class CatalogServiceTests(unittest.TestCase):
         def raw(start, stop, title):
             return {"@start": start, "@stop": stop, "title": {"__text": title}}
 
-        epg.get_programs_for_channel = lambda c, s, l: [
+        epg.get_programs_for_channel = lambda c: [
             raw("20261018211500 +0000", "20261019235950 +0000", "Placeholder"),
             raw("20261018211500 +0000", "20261018230000 +0000", "Late Film"),
             raw("20261018230000 +0000", "20261019003000 +0000", "Comedy Night"),

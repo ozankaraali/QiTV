@@ -148,10 +148,55 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(found[0].start, local.astimezone())
 
 
+class ListWindowTests(unittest.TestCase):
+    """An XMLTV channel's entries run from now to the list window's end (a day by default),
+    in the guide's own times: the offset moves the window the other way."""
+
+    def setUp(self):
+        ManagerTests.setUp(self)  # type: ignore[arg-type]
+        self.config.epg_list_window_hours = 24
+        now, minutes = self.now, timedelta(minutes=1)
+        self.manager.epg = MultiKeyDict()
+        self.manager.epg[("news.test", "News", "news")] = [
+            entry("Beyond", now + 25 * HOUR, now + 26 * HOUR),
+            entry("Ended", now - 3 * HOUR, now - HOUR),
+            entry("On now", now - 30 * minutes, now + 30 * minutes),
+            entry("Later", now + 23 * HOUR, now + 24 * HOUR),
+        ]
+
+    def titles(self, channel):
+        return [p["title"]["__text"] for p in self.manager.get_programs_for_channel(channel)]
+
+    def test_a_day_from_now(self):
+        self.assertEqual(self.titles({"xmltv_id": "news.test"}), ["On now", "Later"])
+
+    def test_the_offset_moves_the_window(self):
+        self.provider[GUIDE_OFFSET_KEY] = 120  # the guide's now is two hours earlier
+        self.assertEqual(self.titles({"xmltv_id": "news.test"}), ["Ended", "On now"])
+
+    def test_without_a_window_every_entry_oldest_first(self):
+        self.config.epg_list_window_hours = 0
+        self.assertEqual(
+            self.titles({"xmltv_id": "news.test"}), ["Ended", "On now", "Later", "Beyond"]
+        )
+
+    def test_the_channel_is_found_by_id_name_or_mapping(self):
+        self.config.xmltv_channel_map[("news.test", "My News")] = None
+        for channel in (
+            {"xmltv_id": "news.test", "name": "Other"},
+            {"xmltv_id": "missing.test", "name": "News"},
+            {"name": "NEWS"},  # in lower case
+            {"name": "My News"},  # through the user's mapping
+        ):
+            with self.subTest(channel=channel):
+                self.assertEqual(self.titles(channel), ["On now", "Later"])
+        self.assertEqual(self.titles({"xmltv_id": "missing.test", "name": "Other"}), [])
+
+
 def fake_manager(offset_minutes, raw):
     provider = {GUIDE_OFFSET_KEY: offset_minutes}
     return SimpleNamespace(
-        get_programs_for_channel=lambda channel, start, limit: raw,
+        get_programs_for_channel=lambda channel: raw,
         guide_offset=lambda: guide_offset(provider),
     )
 

@@ -874,123 +874,53 @@ class EpgManager:
         it (epg_view.normalize), and the lookup window below moves the other way."""
         return guide_offset(getattr(self.provider_manager, "current_provider", None))
 
-    def get_programs_for_channel(self, channel_data, start_time=None, max_programs=5):
-        """The guide's raw entries of a channel from `start_time` (now by default; a real
-        time, which the provider's guide time offset turns into the guide's own)."""
-        epg_source = self.config_manager.epg_source
-        provider_type = self.provider_manager.current_provider.get("type", "").upper()
-
-        if epg_source == "STB" and provider_type == "STB":
-            channel_id = channel_data.get("id", "")
-            return self._get_programs_for_channel_from_stb(channel_id, start_time, max_programs)
-        else:
-            # For Xtream, Local File, and URL sources, use XMLTV format
-            return self._get_programs_for_channel_from_xmltv(channel_data, start_time, max_programs)
-
-    def _get_programs_for_channel_from_stb(self, channel_id, start_time, max_programs):
+    def get_programs_for_channel(self, channel_data):
+        """The guide's raw entries of a channel, oldest first: all of a portal's, and an XMLTV
+        guide's on from now until the list window's end (epg_list_window_hours; 0: all of
+        them), now moved by the provider's guide time offset into the guide's own times."""
         epg = self.epg  # one reference: a refresh may swap in a new guide meanwhile
-        programs = epg.get(channel_id, [])
-        # If unlimited requested and no windowing, return all entries sorted
-        if (not max_programs or max_programs <= 0) and start_time is None:
+        provider_type = self.provider_manager.current_provider.get("type", "").upper()
+        if self.config_manager.epg_source == "STB" and provider_type == "STB":
+            programs = epg.get(channel_data.get("id", ""), [])
             return sorted(programs, key=lambda program: parse_stb(program["time"]))
-        if start_time is None:
+        # Xtream, Local File and URL guides are XMLTV.
+        entries = self._xmltv_entries(epg, channel_data)
+        if not entries:
+            return []
+        # The timezone of the programmes, by the first and the last.
+        ref_timezone = parse_xmltv(entries[0]["@start"]).tzinfo
+        need_check_tz = parse_xmltv(entries[-1]["@start"]).tzinfo != ref_timezone
+        window_hours = self.config_manager.epg_list_window_hours
+        if window_hours <= 0:
+            return sorted(entries, key=lambda program: program["@start"])
+        try:
+            start_time = datetime.now(tzlocal.get_localzone())  # aware, as the guide's times
+        except Exception:
             start_time = datetime.now()
         start_time -= self.guide_offset()  # in the guide's own times
-        # Apply end-of-window limit based on config (0 = unlimited)
-        window_hours = self.config_manager.epg_list_window_hours
-        end_time = start_time + timedelta(hours=window_hours) if window_hours > 0 else None
-        filtered = []
-        for program in programs:
-            p_start = parse_stb(program["time"])
-            p_stop = parse_stb(program["time_to"])
-            if p_start >= start_time or p_stop > start_time:
-                if end_time is None or p_start < end_time:
-                    filtered.append(program)
-                    if max_programs and max_programs > 0 and len(filtered) >= max_programs:
-                        break
-        filtered.sort(key=lambda program: parse_stb(program["time"]))
-        return filtered
-
-    def _get_programs_for_channel_from_xmltv(self, channel_info, start_time, max_programs):
-        epg = self.epg  # one reference: a refresh may swap in a new guide meanwhile
-        if start_time is None:
-            # Use local timezone-aware datetime to avoid naive/aware mismatches
-            try:
-                start_time = datetime.now(tzlocal.get_localzone())
-            except Exception:
-                start_time = datetime.now()
-        start_time -= self.guide_offset()  # in the guide's own times
-
-        # Candidate keys in priority order: explicit xmltv_id, then channel name variants
-        candidates: List[str] = []
-        xmltv_id = (channel_info.get("xmltv_id") or "").strip()
-        if xmltv_id:
-            candidates.append(xmltv_id)
-
-        name = (channel_info.get("name") or "").strip()
-        if name and name not in candidates:
-            candidates.append(name)
-        lname = name.lower()
-        if lname and lname not in candidates:
-            candidates.append(lname)
-
-        chosen_key = None
-        for key in candidates:
-            if key in epg:
-                chosen_key = key
-                break
-            # Also consider user-provided mapping keys
-            mapped = self.config_manager.xmltv_channel_map.get_keys(key)
-            if mapped:
-                for mk in mapped:
-                    if mk in epg:
-                        chosen_key = mk
-                        break
-            if chosen_key:
-                break
-
-        if not chosen_key:
-            return []
-
-        # search the timezone used by programs by looking at the first/last program
-        ref_time_str = epg[chosen_key][0]["@start"]
-        ref_time = parse_xmltv(ref_time_str)
-        ref_timezone = ref_time.tzinfo
-
-        ref_time_str1 = epg[chosen_key][-1]["@start"]
-        ref_time1 = parse_xmltv(ref_time_str1)
-        ref_timezone1 = ref_time1.tzinfo
-        need_check_tz = ref_timezone1 != ref_timezone
-
-        # If unlimited requested and no windowing (window_hours <= 0), return all entries sorted
-        window_hours = self.config_manager.epg_list_window_hours
-        if (not max_programs or max_programs <= 0) and window_hours <= 0:
-            programs = list(epg[chosen_key])
-            programs.sort(key=lambda program: program["@start"])
-            return programs
-
-        # Get the start time in the timezone of the programs
+        end_time = start_time + timedelta(hours=window_hours)
         start_time_str = start_time.astimezone(ref_timezone).strftime("%Y%m%d%H%M%S %z")
-
         programs = []
-        # Compute end-of-window cutoff if configured
-        end_time = start_time + timedelta(hours=window_hours) if window_hours > 0 else None
-        for entry in epg[chosen_key]:
+        for entry in entries:
             if need_check_tz:
                 tz = parse_xmltv(entry["@start"]).tzinfo
                 start_time_str = start_time.astimezone(tz).strftime("%Y%m%d%H%M%S %z")
             if entry["@start"] >= start_time_str or entry["@stop"] > start_time_str:
-                if end_time is not None:
-                    # Compare with end_time in the entry's timezone
-                    entry_start_dt = parse_xmltv(entry["@start"])
-                    if entry_start_dt >= end_time.astimezone(entry_start_dt.tzinfo):
-                        continue
-                programs.append(entry)
-                if max_programs and max_programs > 0 and len(programs) >= max_programs:
-                    break
-
+                entry_start = parse_xmltv(entry["@start"])  # the window's end in its timezone
+                if entry_start < end_time.astimezone(entry_start.tzinfo):
+                    programs.append(entry)
         programs.sort(key=lambda program: program["@start"])
-        # If unlimited requested (max_programs <= 0), return full filtered list
-        if not max_programs or max_programs <= 0:
-            return programs
-        return programs[:max_programs]
+        return programs
+
+    def _xmltv_entries(self, epg, channel_info):
+        """The channel's programme list in an XMLTV guide, by its xmltv_id, else its name (as
+        it is, then in lower case), each also through the user's XMLTV mapping; None when the
+        guide has none."""
+        name = (channel_info.get("name") or "").strip()
+        xmltv_id = (channel_info.get("xmltv_id") or "").strip()
+        for key in dict.fromkeys(k for k in (xmltv_id, name, name.lower()) if k):
+            for found in (key, *(self.config_manager.xmltv_channel_map.get_keys(key) or ())):
+                entries = epg.get(found)
+                if entries is not None:
+                    return entries
+        return None

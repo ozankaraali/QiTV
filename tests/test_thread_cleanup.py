@@ -240,7 +240,7 @@ def run_child(scenario, playlist):
         config = SimpleNamespace(
             selected_provider_name="Local", prefer_https=False, ssl_verify=True, channel_epg=False
         )
-        epg = SimpleNamespace(get_programs_for_channel=lambda channel, start, limit: [])
+        epg = SimpleNamespace(get_programs_for_channel=lambda channel: [])
         factory = Factory()
         # Only the provider and EPG stand-ins are fakes: the worker factory, the JobRunner
         # threads, signal delivery and job retirement are production code.

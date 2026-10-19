@@ -87,7 +87,7 @@ class NowNextTests(unittest.TestCase):
 class ProgrammesForChannelTests(unittest.TestCase):
     def test_filters_ended_and_limits(self):
         manager = type("M", (), {})()
-        manager.get_programs_for_channel = lambda channel, start, limit: [
+        manager.get_programs_for_channel = lambda channel: [
             xmltv("20261015190000 +0200", "20261015200000 +0200", "Ended"),
             xmltv("20261015200000 +0200", "20261015210000 +0200", "On"),
             xmltv("20261015210000 +0200", "20261015220000 +0200", "Next"),
@@ -270,7 +270,7 @@ class OverlappingGuideTests(unittest.TestCase):
 
     def manager(self):
         manager = type("M", (), {})()
-        manager.get_programs_for_channel = lambda channel, start, limit: overlapping_guide()
+        manager.get_programs_for_channel = lambda channel: overlapping_guide()
         return manager
 
     def test_now_and_next_follow_the_grid(self):

@@ -98,7 +98,7 @@ class _GuideCase(unittest.TestCase):
         return EpgManager(self.config, self.providers)
 
     def titles(self, manager):
-        programmes = manager.get_programs_for_channel(CHANNEL, None, 0)
+        programmes = manager.get_programs_for_channel(CHANNEL)
         return [p["title"]["__text"] for p in programmes]
 
     def load(self, manager, title="Old"):
@@ -242,7 +242,7 @@ class EpgRefreshTests(_GuideCase):
         with patch("services.epg_manager.ContentLoader", Loader):
             manager.set_current_epg()
             manager.force_refresh_current_epg()  # the portal answers with nothing
-        self.assertEqual(manager.get_programs_for_channel({"id": "7"}, None, 0), [programme])
+        self.assertEqual(manager.get_programs_for_channel({"id": "7"}), [programme])
         self.assertIsNotNone(manager.index[_cache_key("http://s/c/")])
 
     def test_startup_refresh_failure_uses_the_saved_guide(self):
@@ -422,7 +422,7 @@ class SavedGuideTests(_GuideCase):
             manager.reindex_programs()
         self.assertEqual(decodes, [])
         self.assertEqual(manager.epg.packed(), 1)  # still pickled
-        extra = manager.get_programs_for_channel({"xmltv_id": "extra.id", "name": "Other"}, None, 0)
+        extra = manager.get_programs_for_channel({"xmltv_id": "extra.id", "name": "Other"})
         self.assertEqual([p["title"]["__text"] for p in extra], ["Old"])  # under its new keys
         self.assertEqual(self.titles(manager), ["Old"])
 

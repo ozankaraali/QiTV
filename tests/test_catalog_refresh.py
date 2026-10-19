@@ -186,7 +186,7 @@ class CatalogFreshnessTests(unittest.TestCase):
         self.manager.set_current_provider(SimpleNamespace(emit=lambda message: None))
         self.factory = FakeFactory()
         self.factory.results["m3u"] = {"result": _content("Fresh")}
-        epg = SimpleNamespace(get_programs_for_channel=lambda channel, start, limit: [])
+        epg = SimpleNamespace(get_programs_for_channel=lambda channel: [])
         self.service = CatalogService(
             self.config, self.manager, epg, runner=ImmediateRunner(), factory=self.factory
         )
