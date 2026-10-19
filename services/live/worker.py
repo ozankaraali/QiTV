@@ -77,6 +77,7 @@ from typing import TYPE_CHECKING, Any
 
 from services.live.timeline import StartQuality, Timeline
 from services.live.ts import (
+    AudioRelabeler,
     ClockJoiner,
     Data,
     Event,
@@ -383,6 +384,8 @@ class _Session:
         self._ready = False
         self._ended = False
         self._segmenter = Segmenter()
+        # Renames an audio stream the PMT misnames, on the bytes' way to the segmenter.
+        self._relabeler = AudioRelabeler()
         # Raw TS only (`_ingest`): drops what a reconnect sends again in the old timebase.
         self._rejoiner: ReconnectTrimmer | None = None
         # Raw TS only: drops what a restart inside the connection sends twice.
@@ -483,7 +486,7 @@ class _Session:
                         self._pass_on(trimmer.feed(rejoiner.reconnect()))
                         self._pass_on(trimmer.discontinuity())
                         self._clock_end(reconnect=True)
-                    segmenter.discontinuity()
+                    self._discontinuity()
                 elif isinstance(item, CaughtUp):
                     # The batch's end, which the throttle may have held back, and the start's
                     # backlog has landed: the parent chooses where to start on this.
@@ -493,7 +496,7 @@ class _Session:
                     self._follow(source)  # before its bytes: where an HLS segment begins
                     self._received += len(item)
                     if trimmer is None or rejoiner is None:
-                        self._apply(segmenter.feed(item))
+                        self._to_segmenter(item)
                     else:
                         self._pass_on(trimmer.feed(rejoiner.feed(item)))
                     self._measure()
@@ -504,7 +507,7 @@ class _Session:
                 self._pass_on(trimmer.feed(rejoiner.finish()))
                 self._pass_on(trimmer.finish())
                 self._clock_end(reconnect=False)
-            self._apply(segmenter.finish())
+            self._finish_segmenter()
         except SourceError as error:
             self._fail(error.kind, str(error), error.status)
             return
@@ -664,7 +667,7 @@ class _Session:
                         self._pass_on(self._trimmer.feed(self._rejoiner.finish()))
                     self._pass_on(self._trimmer.finish())
                     self._clock_end(reconnect=False)
-                self._apply(self._segmenter.finish())
+                self._finish_segmenter()
             except _Cancelled:
                 raise
             except Exception as error:
@@ -683,9 +686,9 @@ class _Session:
             parts = [piece] if clock is None else clock.feed(piece, junction=k > 0)
             for j, part in enumerate(parts):
                 if (j if clock is not None else k) > 0:
-                    self._segmenter.discontinuity()
+                    self._discontinuity()
                 if part:
-                    self._apply(self._segmenter.feed(part))
+                    self._to_segmenter(part)
 
     def _clock_end(self, reconnect: bool) -> None:
         """The clock joiner's input ends (a reconnect follows, or the end): what it holds."""
@@ -693,7 +696,24 @@ class _Session:
         if clock is not None:
             tail = clock.discontinuity() if reconnect else clock.finish()
             if tail:
-                self._apply(self._segmenter.feed(tail))
+                self._to_segmenter(tail)
+
+    def _to_segmenter(self, data: bytes) -> None:
+        """Bytes for the segmenter, through the audio relabeler."""
+        self._apply(self._segmenter.feed(self._relabeler.feed(data)))
+
+    def _discontinuity(self) -> None:
+        """The segmenter's next cut is a discontinuity; what the relabeler holds goes first."""
+        held = self._relabeler.flush()
+        if held:
+            self._apply(self._segmenter.feed(held))
+        self._segmenter.discontinuity()
+
+    def _finish_segmenter(self) -> None:
+        held = self._relabeler.flush()
+        if held:
+            self._apply(self._segmenter.feed(held))
+        self._apply(self._segmenter.finish())
 
     def _follow(self, source: Source) -> None:
         """HLS: note the live edge where each segment's first bytes begin (`_backlog`), and

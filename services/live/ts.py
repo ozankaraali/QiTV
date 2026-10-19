@@ -2029,6 +2029,205 @@ def _shift_packet(buf: bytearray, at: int, offset: int) -> None:
             _write_timestamp(buf, start + 14, dts)
 
 
+_RELABEL_PES = 3  # audio PES starts in a row of a codec the PMT misnames before it is renamed
+_RELABEL_HOLD_PACKETS = 64  # a PMT section spanning packets is held this long at most
+_CODEC_FAMILY = {0x03: "mpeg", 0x04: "mpeg", 0x0F: "aac", 0x11: "latm", 0x81: "ac3", 0x87: "ac3"}
+
+
+def _sniffed_type(es: bytes) -> int | None:
+    """The stream type the first bytes of an audio PES's payload show: 0x0F for ADTS AAC (a
+    12-bit sync, layer 00), 0x03 or 0x04 for MPEG-1 or -2 audio (an 11-bit sync and a layer),
+    0x81 for AC-3 (0x0B77); None for anything else."""
+    if len(es) < 2:
+        return None
+    if es[0] == 0x0B:
+        return 0x81 if es[1] == 0x77 else None
+    if es[0] != 0xFF:
+        return None
+    if es[1] & 0xF6 == 0xF0:
+        return 0x0F
+    if es[1] & 0xE0 == 0xE0 and es[1] & 0x06:
+        return 0x03 if es[1] & 0x18 == 0x18 else 0x04
+    return None
+
+
+class AudioRelabeler:
+    """Renames an audio stream's codec in the PMT when its PES carry another one.
+
+    One provider alternates sources behind a channel and sometimes keeps the old source's PMT:
+    it declares MPEG audio (stream_type 0x03) while the PES carry ADTS AAC, and VLC decodes
+    them with the MPEG audio decoder: silence (ffprobe too). At each PES start of an audio PID
+    the PMT lists (MPEG audio, AAC, LATM, AC-3), the payload's first bytes tell the codec
+    (`_sniffed_type`; anything else counts for nothing). After `_RELABEL_PES` PES in a row of a
+    codec the PMT does not declare, every following PMT names that one (0x0F, 0x03 or 0x04,
+    0x81), its version_number moved on and its CRC32 recomputed, so VLC re-creates the stream
+    with the right decoder; the same way back once the PES carry what the provider declares
+    again. A PMT section spanning packets is held with the packets after it until it ends
+    (`_RELABEL_HOLD_PACKETS` at most, then it passes as it came), and only a section whose CRC
+    holds is changed. While the PES agree with the PMT nothing changes. It reads the bytes on
+    their way to the segmenter (raw TS and HLS), whose segment headers then carry the renamed
+    PMT; `flush()` before a discontinuity or the end passes on what it holds.
+    """
+
+    def __init__(self) -> None:
+        self._buf = b""  # a partial packet, or a PMT section that spans packets and the rest
+        self._pmt_pid: int | None = None
+        self._declared: dict[int, int] = {}  # audio PID -> the stream type its PMT declares
+        self._renamed: dict[int, int] = {}  # audio PID -> the stream type written instead
+        self._streak: dict[int, tuple[int, int]] = {}  # PID -> (sniffed type, PES in a row)
+        self._shift = 0  # how far the version_number is moved on: once per renaming
+        self.renamings: deque[tuple[int, int, int]] = deque(maxlen=_TRIMS_KEPT)  # (PID, from, to)
+
+    def feed(self, chunk: bytes) -> bytes:
+        """Take bytes; return what passes on (a partial packet waits for the next bytes)."""
+        data = self._buf + chunk if self._buf else bytes(chunk)
+        out: bytearray | None = None
+        n = len(data)
+        off = 0
+        while off + PACKET <= n:
+            if data[off] != SYNC:
+                found = data.find(_SYNC_BYTE, off + 1)
+                off = n if found < 0 else found
+                continue
+            b1 = data[off + 1]
+            if b1 & 0x40 and not b1 & 0x80:
+                pid = ((b1 & 0x1F) << 8) | data[off + 2]
+                if pid in self._declared:
+                    self._sniff(pid, data, off)
+                elif pid == 0:
+                    self._on_pat(data, off)
+                elif pid == self._pmt_pid:
+                    done = self._on_pmt(data, off)
+                    if done is None and n - off <= _RELABEL_HOLD_PACKETS * PACKET:
+                        self._buf = data[off:]  # it ends in a later packet: held from here
+                        return bytes(out[:off]) if out is not None else data[:off]
+                    if done:  # (None: it never ended within the bound; as it came)
+                        if out is None:
+                            out = bytearray(data)
+                        for at, value in done:
+                            out[at] = value
+            off += PACKET
+        self._buf = data[off:]
+        return bytes(out[:off]) if out is not None else data[:off]
+
+    def flush(self) -> bytes:
+        """A discontinuity or the end comes next: what is held passes on as it came."""
+        held, self._buf = self._buf, b""
+        return held
+
+    def _on_pat(self, data: bytes, off: int) -> None:
+        section = _section_at(data, off)
+        if section is None or section[0] != 0x00 or _crc32(section):
+            return
+        for i in range(8, len(section) - 4 - 3, 4):
+            if (section[i] << 8) | section[i + 1]:  # program 0 is the network table
+                pmt_pid = ((section[i + 2] & 0x1F) << 8) | section[i + 3]
+                if pmt_pid != self._pmt_pid:
+                    self._pmt_pid = pmt_pid
+                    self._declared.clear()
+                return
+
+    def _on_pmt(self, data: bytes, off: int) -> list[tuple[int, int]] | None:
+        """Read the PMT section starting at `off`: its audio streams' declared types, and the
+        bytes to change ((offset in `data`, value)); None while it ends beyond `data`."""
+        places = _section_places(data, off, self._pmt_pid)
+        if places is None:
+            return None
+        section = bytearray(data[at] for at in places)
+        if not places or section[0] != 0x02 or _crc32(bytes(section)):
+            return []
+        end = len(section) - 4
+        i = 12 + (((section[10] & 0x0F) << 8) | section[11])
+        declared: dict[int, int] = {}
+        while i + 5 <= end:
+            stream_type = section[i]
+            pid = ((section[i + 1] & 0x1F) << 8) | section[i + 2]
+            if stream_type in _CODEC_FAMILY:
+                declared[pid] = stream_type
+                renamed = self._renamed.get(pid)
+                if renamed is not None:
+                    section[i] = renamed
+            i += 5 + (((section[i + 3] & 0x0F) << 8) | section[i + 4])
+        for pid in set(self._renamed) - set(declared):
+            del self._renamed[pid]  # no longer listed
+        self._declared = declared
+        if not self._shift:
+            return []
+        version = (((section[5] >> 1) & 0x1F) + self._shift) & 0x1F
+        section[5] = (section[5] & 0xC1) | (version << 1)
+        section[-4:] = _crc32(bytes(section[:-4])).to_bytes(4, "big")
+        return [(at, section[k]) for k, at in enumerate(places) if section[k] != data[at]]
+
+    def _sniff(self, pid: int, data: bytes, off: int) -> None:
+        pkt = data[off : off + PACKET]
+        found = _sniffed_type(pkt[_pes_start(pkt)[2] :])
+        if found is None:
+            return
+        declared = self._declared[pid]
+        written = self._renamed.get(pid, declared)
+        if _CODEC_FAMILY[found] == _CODEC_FAMILY[written]:
+            self._streak.pop(pid, None)
+            return
+        last, count = self._streak.get(pid, (found, 0))
+        count = count + 1 if _CODEC_FAMILY[last] == _CODEC_FAMILY[found] else 1
+        if count < _RELABEL_PES:
+            self._streak[pid] = (found, count)
+            return
+        del self._streak[pid]
+        if _CODEC_FAMILY[found] == _CODEC_FAMILY[declared]:
+            del self._renamed[pid]  # what the provider's PMT declares again
+        else:
+            self._renamed[pid] = found
+        self._shift += 1
+        to = self._renamed.get(pid, declared)
+        self.renamings.append((pid, written, to))
+        logger.info(
+            "Audio PID %#x carries stream type %#x, not %#x: its PMT is renamed.", pid, to, written
+        )
+
+
+def _section_at(data: bytes, off: int) -> bytes | None:
+    """The section starting in the PUSI packet at `off` when it ends in that packet."""
+    afc = (data[off + 3] >> 4) & 3
+    start = off + (5 + data[off + 4] if afc & 2 else 4)
+    if not afc & 1 or start >= off + PACKET:
+        return None
+    begin = start + 1 + data[start]
+    if begin + 3 > off + PACKET:
+        return None
+    end = begin + 3 + (((data[begin + 1] & 0x0F) << 8) | data[begin + 2])
+    return data[begin:end] if end <= off + PACKET and end - begin >= 12 else None
+
+
+def _section_places(data: bytes, off: int, pid: int | None) -> list[int] | None:
+    """Where the bytes of the section starting in the PUSI packet at `off` lie in `data`, on
+    across that PID's next packets; None when it ends beyond `data`; [] when unreadable."""
+    afc = (data[off + 3] >> 4) & 3
+    start = off + (5 + data[off + 4] if afc & 2 else 4)
+    if not afc & 1 or start >= off + PACKET:
+        return []
+    begin = start + 1 + data[start]
+    if begin >= off + PACKET:
+        return []
+    places = list(range(begin, off + PACKET))
+    at = off + PACKET
+    while len(places) < 3 or len(places) < 3 + (((data[places[1]] & 0x0F) << 8) | data[places[2]]):
+        while at + PACKET <= len(data) and (
+            data[at] != SYNC or ((data[at + 1] & 0x1F) << 8) | data[at + 2] != pid
+        ):
+            at += PACKET
+        if at + PACKET > len(data):
+            return None
+        if data[at + 1] & 0xC0 or not data[at + 3] & 0x10:  # a new start, or damaged
+            return []
+        afc = (data[at + 3] >> 4) & 3
+        places.extend(range(at + (5 + data[at + 4] if afc & 2 else 4), at + PACKET))
+        at += PACKET
+    if len(places) < 12:
+        return []
+    return places[: 3 + (((data[places[1]] & 0x0F) << 8) | data[places[2]])]
+
+
 def program_has_audio(data: bytes) -> bool | None:
     """Whether the first program's PMT in `data` (packet-aligned, as an HLS segment starts)
     lists an audio stream: one of the audio stream types, or a private PES (0x06) with a DVB
