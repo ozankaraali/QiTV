@@ -1008,8 +1008,9 @@ high.m3u8
         self.assertFalse(any("secret" in line or "127.0.0.1" in line for line in logs))
 
     def test_a_raw_ts_body_that_stalls_after_data_reconnects_at_the_stall_timeout(self):
-        # Once media flowed, a silent connection is broken after the stall timeout (10 s in
-        # production) instead of the 60 s read timeout. The first byte keeps the full timeout.
+        # Once media flowed, a silent connection is broken after the raw TS stall timeout
+        # (20 s in production) instead of the 60 s read timeout. The first byte keeps the full
+        # timeout.
         head = self.video[: 188 * 50]
         rest = self.video[188 * 50 :]
         tls_context = self.enterContext(self.optional_tls_context())
@@ -1039,7 +1040,7 @@ high.m3u8
                 self.addCleanup(release.set)
                 context = tls_context if tls else None
                 server = self.server({"/live.ts": live}, tls=context, keep_alive=keep_alive)
-                fast = {"_STALL_TIMEOUT": 0.3, "_RECONNECT_DELAYS": FAST_RETRIES}
+                fast = {"_TS_STALL_TIMEOUT": 0.3, "_RECONNECT_DELAYS": FAST_RETRIES}
                 with patch.multiple(source_module, **fast):
                     parts = media(server.url + "/live.ts", verify_ssl=not tls)
                 self.assertEqual(parts, [head, Discontinuity(), rest])
@@ -1047,6 +1048,25 @@ high.m3u8
                 waited = marks["reconnected"] - marks["stalled"]
                 self.assertGreaterEqual(waited, 0.25)
                 self.assertLess(waited, 1.3, "the stalled connection was kept too long")
+
+    def test_a_raw_ts_pause_longer_than_an_hls_stall_goes_on_in_the_same_connection(self):
+        # One provider pauses its raw TS for up to ~14 s and then goes on: a pause past the
+        # HLS stall timeout but within the raw TS one is waited out, with no reconnect.
+        head, rest = self.video[: 188 * 50], self.video[188 * 50 :]
+
+        def paused(request):
+            request.wfile.write(head)
+            request.wfile.flush()
+            time.sleep(0.8)
+            request.wfile.write(rest)
+
+        server = self.server({"/live.ts": (200, {"Content-Length": str(len(self.video))}, paused)})
+        fast = {"_STALL_TIMEOUT": 0.3, "_TS_STALL_TIMEOUT": 2.0, "_RECONNECT_DELAYS": FAST_RETRIES}
+        with patch.multiple(source_module, **fast):
+            parts = media(server.url + "/live.ts")
+        self.assertEqual(b"".join(parts), self.video)
+        self.assertNotIn(Discontinuity(), parts)
+        self.assertEqual(server.counts["/live.ts"], 1)
 
     def test_raw_ts_follows_redirects_to_another_port(self):
         # An Xtream load balancer answers a channel's link with a 302 to a stream server on

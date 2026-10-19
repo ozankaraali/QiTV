@@ -64,8 +64,13 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT = 60.0  # connect, and a response's headers and first body byte
 # Once a body has sent bytes, this long without one is a broken connection: a provider that
-# stops sending but keeps the connection open is reconnected (raw TS) or skipped (HLS).
+# stops sending but keeps the connection open is skipped (an HLS segment or playlist) ...
 _STALL_TIMEOUT = 10.0
+# ... or reconnected (raw TS), later: one provider's raw TS pauses for up to ~14 s (measured:
+# 3.7-14 s every 30-60 s) and then goes on in the same connection with its timestamps
+# continuous. A reconnect within the pause started 2-4 s back (the ring held them twice) or
+# at live (the delayed seconds were never seen).
+_TS_STALL_TIMEOUT = 20.0
 _MANIFEST_LIMIT = 2 * 1024 * 1024
 _READ_SIZE = 64 * 1024
 _SNIFF_SIZE = 10
@@ -619,6 +624,7 @@ class _Http:
         self._owner: int | None = None
         self._verify_ssl = verify_ssl
         self._stop = stop
+        self._stall_timeout = _STALL_TIMEOUT
         self.closed = False
         provided = {name.lower(): value for name, value in headers.items() if value}
         self.user_agent = provided.get("user-agent") or DEFAULT_USER_AGENT
@@ -687,6 +693,13 @@ class _Http:
             raise
         return response
 
+    def stall_after(self, seconds: float) -> None:
+        """Break a body that sent bytes after `seconds` without one, the flowing one's too.
+        Call it on the reading thread (it may touch that response's socket)."""
+        self._stall_timeout = seconds
+        if self._flowing is not None:
+            _shorten_read_timeout(self._flowing, seconds)
+
     def release(self, response: Any) -> None:
         with self._lock:
             if self._response is not response:
@@ -707,7 +720,7 @@ class _Http:
             raise _Closed()
         if data and response is not self._flowing:
             self._flowing = response
-            _shorten_read_timeout(response)
+            _shorten_read_timeout(response, self._stall_timeout)
         return data or b""
 
     def read_prefix(self, response: Any) -> bytes:
@@ -804,8 +817,8 @@ class _Http:
             self._released.set()
 
 
-def _shorten_read_timeout(response: Any) -> None:
-    """Media flowed: from now on a silence of `_STALL_TIMEOUT` breaks the connection.
+def _shorten_read_timeout(response: Any, seconds: float) -> None:
+    """Media flowed: from now on a silence of `seconds` breaks the connection.
 
     Called on the reading thread, the only one that may touch a TLS socket. On Windows a
     sliced TLS socket keeps the value as its deadline over the slices. A response from a
@@ -815,7 +828,7 @@ def _shorten_read_timeout(response: Any) -> None:
     if sock is None:
         return
     try:
-        sock.settimeout(min(_STALL_TIMEOUT, _TIMEOUT))
+        sock.settimeout(min(seconds, _TIMEOUT))
     except OSError as error:  # closed under the reader: its next read fails anyway
         log.debug("A read timeout could not be shortened (%s).", type(error).__name__)
 
@@ -1040,6 +1053,7 @@ class TsSource:
         capture: _Capture | None = None,
     ) -> None:
         self.user_agent = http.user_agent
+        http.stall_after(_TS_STALL_TIMEOUT)
         self._http = http
         self._url = url
         self._response = response
