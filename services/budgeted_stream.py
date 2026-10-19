@@ -94,6 +94,11 @@ class BudgetedStream(QObject):
         """A stopped stream's upstream may still be open: `released` has not come yet."""
         return self._waiting
 
+    def releasing_providers(self) -> set[str]:
+        """The providers whose slots a stopped stream still holds until `released`."""
+        found = {self.budget.provider_of(ticket) for ticket in self._releasing}
+        return {name for name in found if name is not None}
+
     def start(self, *args: Any, **kwargs: Any) -> None:
         """Start the live session on the held ticket; if it raises, the ticket goes back."""
         self._running = True

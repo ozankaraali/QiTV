@@ -122,6 +122,28 @@ class DirectSlotTests(unittest.TestCase):
         peers[1][1].let_go()
         self.assertEqual((self.played, self.holders()), (["movie"], ["main"]))
 
+    def test_another_providers_closing_stream_never_holds_the_open(self):
+        # A multiview: a tile of another provider closing holds none of this one's slots.
+        peer_session = FakeSession()
+        peer = LiveTuner(peer_session, self.tuner.config, FakeLive(), self.budget, purpose="t2")
+        wait_for_each_other(self.tuner, peer)
+        peer.open(lambda: None, direct=True, provider="Other provider")
+        peer_session.holding = True
+        peer.stop()
+        self.assertTrue(peer.releasing_from("Other provider"))
+        self.assertFalse(peer.releasing_from(PROVIDER))
+        self.tuner.open(self.play("channel"), direct=True, provider=PROVIDER)
+        self.assertEqual(self.played, ["channel"])
+
+    def test_a_reopen_keeps_its_slot_or_takes_one_within_the_limit(self):
+        self.tuner.open(self.play("channel"), direct=True, provider=PROVIDER)
+        self.assertTrue(self.tuner.ensure_held(PROVIDER, 1))  # it still holds its own
+        self.tuner._held.give_back()
+        self.budget.request(PROVIDER, 1, purpose="pip")  # another player took the last one
+        self.assertFalse(self.tuner.ensure_held(PROVIDER, 1))
+        self.assertTrue(self.tuner.ensure_held(PROVIDER, 2))
+        self.assertEqual(sorted(self.holders()), ["main", "pip"])
+
     def test_a_direct_play_holds_the_main_slot_until_vlc_let_go(self):
         self.tuner.open(self.play("movie"), direct=True)
         self.assertEqual(self.played, ["movie"])

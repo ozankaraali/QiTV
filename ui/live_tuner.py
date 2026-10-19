@@ -20,9 +20,9 @@ A direct play (`open(direct=True)`: a channel the pipeline cannot read, a movie,
 episode) holds a "main" slot too (a `HeldSlot`, under the provider the caller names: the
 catalog's, as for pipeline tunes), from its start until libVLC let go of its stream, so a
 PiP sees the slot taken. It never waits for one: this gate already orders the main player's
-streams. It waits for the other pictures' tuners, though (`wait_for_each_other`): a closing
-PiP's stream may still hold the provider's last slot, so the open runs at that tuner's
-`released`. A local file (`local=True`) is no provider's stream: it is stopped and waited for
+streams. It waits for the other pictures' tuners of its provider, though
+(`wait_for_each_other`): a closing PiP's stream may still hold the provider's last slot, so
+the open runs at that tuner's `released`; another provider's closing stream holds none. A local file (`local=True`) is no provider's stream: it is stopped and waited for
 like a direct play, but holds no slot.
 
 Picture in picture (Phase 4) and the multiview's tiles give each player a tuner of its own.
@@ -203,6 +203,21 @@ class LiveTuner(QObject):
         stream = self._stream
         return self._input_wait or (stream is not None and stream.waiting())
 
+    def releasing_from(self, provider: str) -> bool:
+        """A stopped stream of this player may still hold one of `provider`'s slots: a
+        direct play libVLC has not let go of, or a time-shift stream not yet released."""
+        if self._input_wait and self.budget.provider_of(self._held.ticket) == provider:
+            return True
+        stream = self._stream
+        return stream is not None and stream.waiting() and provider in stream.releasing_providers()
+
+    def ensure_held(self, provider: str, limit: Optional[int]) -> bool:
+        """A direct play about to open again (a reconnect) still holds its slot, or takes one
+        within `limit` (a multiview tile's: the other tiles' streams count); False: none."""
+        if self._held.ticket is not None:
+            return True
+        return self._held.try_take(provider, limit)
+
     def open(
         self,
         action: Callable[[], None],
@@ -269,13 +284,13 @@ class LiveTuner(QObject):
         if self._input_wait or (stream is not None and stream.waiting()):
             return
         if self._action is not None:
-            if self._action_slot and any(peer.releasing() for peer in self._peers):
+            provider = self._action_provider
+            if provider is None:
+                provider = str(getattr(self.config, "selected_provider_name", "") or "")
+            if self._action_slot and any(peer.releasing_from(provider) for peer in self._peers):
                 return  # a closing stream may hold the provider's last slot (a PiP's)
             action, self._action = self._action, None
             if self._action_slot:
-                provider = self._action_provider
-                if provider is None:
-                    provider = str(getattr(self.config, "selected_provider_name", "") or "")
                 limit = self._action_limit
                 if limit is None:
                     self._held.take(provider)

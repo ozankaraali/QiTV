@@ -87,11 +87,15 @@ class LiveControls(QObject):
         show_transport: Callable[[], None],
         logo: Callable[[dict], Optional[QPixmap]] = lambda channel: None,
         explain: Callable[[dict, str], None] = lambda item, title: None,
+        may_reopen: Callable[[Target], bool] = lambda target: True,
         parent: Optional[QObject] = None,
     ) -> None:
         """`explain(item, title)` asks why the failure just toasted happened at the item's
-        provider (TVController._explain_item)."""
+        provider (TVController._explain_item). `may_reopen(target)`: whether an ended
+        direct stream may open again (a multiview tile's checks its provider's slot
+        first)."""
         super().__init__(parent)
+        self._may_reopen = may_reopen
         self._tuner = tuner
         self.live = live
         self.session = session
@@ -260,6 +264,8 @@ class LiveControls(QObject):
         session = self.session
         if self._current() is not target or session.url != url:
             return  # something else plays now
+        if not self._may_reopen(target):
+            return  # no stream of its provider to spare (the caller says so)
         logger.info("Opening %s again after its stream ended", target.title)
         session.play(
             url, kind=kind, latency=self.config.live_latency, **stream_options(target.item)
