@@ -228,6 +228,18 @@ class QueuedAudioTests(unittest.TestCase):
         weaver.add(packed(1, None))  # still follows on from the first, not from what peek read
         self.assertEqual(weaver._queue[46][0], 900000 + 46 * AUDIO_TICKS)
 
+    def test_covered_is_the_video_the_queued_audio_can_go_with(self):
+        weaver = AudioWeaver()
+        self.assertEqual(weaver.covered(self.video)[0], 2 * PACKET)  # no audio: the tables alone
+        weaver.add(audio_ts(2, 0x102))  # 2 s of the 4 s
+        cut, due = weaver.covered(self.video)
+        self.assertTrue(0 < cut < len(self.video) and cut % PACKET == 0)
+        self.assertGreater(pts_delta(900000 + 2 * CLOCK - AUDIO_TICKS, due), 0)  # past the audio
+        self.assertLessEqual(pts_delta(900000 + 2 * CLOCK, due), 3600)  # by a picture at most
+        self.assertEqual(weaver.covered(self.video, since=len(self.video))[0], len(self.video))
+        weaver.add(audio_ts(6, 0x102))  # past the video and the lead
+        self.assertEqual(weaver.covered(self.video), (len(self.video), None))
+
     def test_video_start_is_the_earliest_picture(self):
         self.assertEqual(video_start(self.later), 900000 + 4 * CLOCK)
         self.assertIsNone(video_start(audio_ts(1, 0x102)))

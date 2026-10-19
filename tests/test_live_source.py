@@ -578,10 +578,10 @@ high.m3u8
                 self.assertEqual(server.counts["/high.m3u8"], 1)
                 self.assertEqual(server.counts["/video.ts"], 1)
 
-    def test_an_audio_playlist_a_little_behind_the_video_is_waited_for(self):
+    def test_an_audio_playlist_a_little_behind_the_video_is_reloaded_for_it(self):
         # At the live edge the audio packager may list a segment after the video's: its
-        # playlist is reloaded (a target duration in all) before the video segment goes on
-        # without it.
+        # playlist is reloaded at once (what of the video it does not cover yet is held for
+        # it meanwhile: `test_video_whose_audio_is_not_listed_yet_goes_on_as_far_as_its_audio`).
         master = b"""#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",DEFAULT=YES,URI="audio.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=100000,AUDIO="a"
@@ -608,6 +608,69 @@ video.m3u8
         self.assertEqual(server.counts["/audio.m3u8"], 2)  # once more for a1.ts, then listed
         self.assertEqual((server.counts["/a0.ts"], server.counts["/a1.ts"]), (1, 1))
         self.assertEqual(len(out), 2 * (len(video) + len(ts_fixtures.audio_only(4)) - 2 * 188))
+
+    def held_tail_routes(self, video_playlist):
+        """A master whose video (4 s from 900000) has audio for its first 2 s at first, and
+        for the rest from its third load on (the video playlist's reload)."""
+        master = b"""#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",DEFAULT=YES,URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=100000,AUDIO="a"
+video.m3u8
+"""
+
+        def audio_playlist(_request, count):
+            names = ["a0.ts", *(["a1.ts"] if count > 2 else [])]
+            return 200, {}, hls(0, names, target=2, ended=count > 2)
+
+        return {
+            "/master.m3u8": (200, {}, master),
+            "/video.m3u8": video_playlist,
+            "/audio.m3u8": audio_playlist,
+            "/v0.ts": (200, {}, ts_fixtures.make_stream(4, audio=False)),
+            "/v1.ts": (200, {}, ts_fixtures.make_stream(4, audio=False, pts_start=90000)),
+            "/a0.ts": (200, {}, ts_fixtures.audio_only(2)),
+            "/a1.ts": (200, {}, ts_fixtures.audio_only(2, pts_start=900000 + 2 * 90000)),
+        }
+
+    def test_video_whose_audio_is_not_listed_yet_goes_on_as_far_as_its_audio(self):
+        # Renditions cut apart publish their segments apart: the video segment goes on as far
+        # as the audio covers it, and its tail once the audio for it is listed (2.3: waiting
+        # for the audio whole held 10 s segments back 5-8 s, and VLC ran dry between them).
+        def video_playlist(_request, count):
+            return 200, {}, hls(0, ["v0.ts"], target=4, ended=count > 1)
+
+        server = self.server(self.held_tail_routes(video_playlist))
+        head, caught_up, tail = media(server.url + "/master.m3u8", caught_up=True)
+        self.assertIsInstance(caught_up, CaughtUp)
+        video = ts_fixtures.make_stream(4, audio=False)
+        whole = head + tail
+        packets = [whole[at : at + 188] for at in range(0, len(whole), 188)]
+        own = [video[at : at + 188] for at in range(0, len(video), 188)]
+        pmt = ts_fixtures.PMT_PID
+        pid = lambda p: ((p[1] & 0x1F) << 8) | p[2]  # noqa: E731
+        self.assertEqual(
+            [p[4:] for p in packets if pid(p) not in (0x101, pmt)],
+            [p[4:] for p in own if pid(p) != pmt],
+        )  # every video packet once, in order (the counters run on)
+        self.assertLess(len(head), len(video))  # the tail waited for its audio
+        times = [frame.pts for frame in frames(whole)[0x101]]
+        audio = ts_fixtures.audio_only(2) + ts_fixtures.audio_only(2, pts_start=900000 + 180000)
+        self.assertEqual(times, [frame.pts for frame in frames(audio)[0x101]])
+        self.assertEqual(server.counts["/audio.m3u8"], 3)  # read, again at once, then at the reload
+
+    def test_a_tail_still_held_at_a_break_goes_on_before_its_marker(self):
+        def video_playlist(_request, count):
+            text = hls(0, ["v0.ts"], target=4).decode()
+            text += "#EXT-X-DISCONTINUITY\n#EXTINF:4,\nv1.ts\n#EXT-X-ENDLIST\n"
+            return 200, {}, text.encode()
+
+        routes = self.held_tail_routes(video_playlist)
+        routes["/audio.m3u8"] = (200, {}, hls(0, ["a0.ts"], target=2, ended=False))
+        server = self.server(routes)
+        first, marker, second = media(server.url + "/master.m3u8")
+        self.assertIsInstance(marker, Discontinuity)
+        video = ts_fixtures.make_stream(4, audio=False)
+        self.assertGreaterEqual(len(first), len(video))  # all of v0, its tail silent
 
     def test_live_leaf_reloads_real_redirect_url_and_tolerates_segment_gap(self):
         def playlist(_request, count):

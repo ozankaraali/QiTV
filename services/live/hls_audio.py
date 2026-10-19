@@ -59,6 +59,7 @@ class AudioWeaver:
         self._cc = 0  # the counter of the packets built from packed audio
         self._next_pts: int | None = None  # packed audio: where its last segment ended
         self._queue: list[Unit] = []  # audio added and not woven yet, in PTS order
+        self._tables: tuple[int, set[int]] | None = None  # the last video's (PMT PID, PIDs)
         self._last: int | None = None  # the PTS of the last unit queued
         self.woven = 0  # segments woven so far
 
@@ -112,6 +113,32 @@ class AudioWeaver:
         step = max(0, pts_delta(self._queue[-2][0], last)) if len(self._queue) > 1 else 0
         return pts_delta(end, (last + 2 * step) % _PTS_MODULO) >= 0
 
+    def covered(self, video: bytes, since: int = 0) -> tuple[int, int | None]:
+        """How much of `video` the audio queued covers: the bytes before the first packet at
+        or after `since` whose clock (its PCR; before one, the first picture's time) comes
+        within `_LEAD_TICKS` of the queued audio's end (its sound may not be queued yet), and
+        that clock plus `_LEAD_TICKS` (the audio due before it); (all of it, None) when no such
+        packet comes."""
+        end: int | None = None
+        if self._queue:
+            last = self._queue[-1][0]
+            step = max(0, pts_delta(self._queue[-2][0], last)) if len(self._queue) > 1 else 0
+            end = (last + step) % _PTS_MODULO
+        clock: int | None = None
+        for at in range(0, len(video) - PACKET + 1, PACKET):
+            if video[at] != SYNC:
+                continue
+            if video[at + 3] & 0x20 and video[at + 4] >= 7 and video[at + 5] & 0x10:
+                clock = _pcr_base(video, at + 6)
+            elif clock is None and video[at + 1] & 0x40:
+                clock = _pes_times(video, at)[0]
+            if at < since or clock is None:
+                continue
+            due = (clock + _LEAD_TICKS) % _PTS_MODULO
+            if end is None or pts_delta(end, due) > 0:
+                return at, due
+        return len(video), None
+
     def drop(self, before: int) -> None:
         """Leave out the queued audio due before `before` (a video segment's start: VLC would
         throw it away as late)."""
@@ -125,7 +152,7 @@ class AudioWeaver:
     def weave_due(self, video: bytes, until: int) -> bytes:
         """`video` with the queued audio due before `until` (its end) in it; the rest stays
         queued. Its PMT lists the audio once there is any, even when none is due."""
-        tables = _program(video)
+        tables = _program(video) or self._tables  # a held tail has none of its own
         if tables is None or self._stream is None:
             return video
         due: list[Unit] = []
@@ -144,6 +171,7 @@ class AudioWeaver:
         stream: tuple[int, bytes, int],
     ) -> bytes:
         pmt_pid, used = tables
+        self._tables = tables
         if self._pid is None:
             stream_type, info, own_pid = stream
             self._pid = own_pid if own_pid not in used else _free_pid(used)

@@ -73,9 +73,6 @@ _PLAYLIST_TYPES = (
 # A variant whose master names a separate default audio playlist: how much of its first
 # segment may pass before its program tables must have shown audio of its own.
 _AUDIO_LOOK = 64 * 1024
-# A separate audio playlist that does not list a video segment's audio yet: reloaded this many
-# times, a target duration apart in all, before the segment plays silent.
-_AUDIO_RELOADS = 4
 # An audio segment found by its place in the playlist that starts this long after the video
 # segment it is for (90 kHz): the one before it is taken too ...
 _AUDIO_SLACK = 45000
@@ -1043,6 +1040,10 @@ class HlsSource:
         self._audio_base = ""
         self._audio_target = 0.0  # its target duration
         self._audio_next: int | None = None  # the audio segment to fetch next (None: find it)
+        # The tail of the newest video segment whose sound is not listed yet (`_pass_covered`),
+        # and the end of that segment (90 kHz).
+        self._held = b""
+        self._held_end = 0
         self._audio_ended = False  # it is finished (ENDLIST): no reload lists more
         # Fragmented MP4 remuxed to TS: the variant's, and the separate audio's (no PCR: its
         # PES are woven into the video's TS), each with the URI of the init it read last.
@@ -1223,6 +1224,7 @@ class HlsSource:
                 progress = time.monotonic()
                 yield CaughtUp()  # what follows comes as the provider publishes it
             if playlist.is_endlist:
+                yield from self._emit(self._flush_held())
                 return
             interval = max(1.0, float(playlist.target_duration or 0) / 2)
             if http.wait(interval - (time.monotonic() - loaded)):
@@ -1232,6 +1234,7 @@ class HlsSource:
             playlist, url, _separate = _media_playlist(http, content, final)
             self._burst = float(playlist.target_duration or 0)
             self._finite = bool(playlist.is_endlist)
+            yield from self._emit(self._release())
 
     def _segment(self, segment: Any, sequence: int, base: str) -> Iterator[bytes | Discontinuity]:
         uri = _resolve(base, segment.uri)
@@ -1265,7 +1268,10 @@ class HlsSource:
                 blocks = _checked_ts(self._blocks(response, decryptor, self._capture))
             if self._audio_unknown or self._weaver is not None:
                 duration = float(segment.duration or 0)
-                blocks = iter([self._with_audio(b"".join(blocks), sequence, duration)])
+                before, woven = self._with_audio(b"".join(blocks), sequence, duration)
+                if before and (block := joiner.feed(before)):  # the timeline before the break
+                    yield block
+                blocks = iter([woven] if woven else [])
             for block in blocks:
                 if self._pending:  # only ever right before bytes that really arrive
                     self._pending = False
@@ -1314,7 +1320,7 @@ class HlsSource:
             raise _BadSegment(str(error)) from None
         return uri
 
-    def _with_audio(self, video: bytes, sequence: int, duration: float) -> bytes:
+    def _with_audio(self, video: bytes, sequence: int, duration: float) -> tuple[bytes, bytes]:
         """A whole video segment with its sound: the first one's program tables show whether
         the variant carries audio of its own (2.1: some multi-track restream servers name a
         separate default audio playlist and mux it too), which leaves the separate playlist
@@ -1324,17 +1330,24 @@ class HlsSource:
         other).
 
         The audio is matched by time, not by media sequence number (one packager numbers and
-        cuts its renditions each its own way): the audio segments are fetched in order and
-        queued until they reach the video segment's end (its first picture's time and EXTINF),
-        and the video segment takes what is due before that (`AudioWeaver.weave_due`). The
-        first audio segment, and the one after a break or one gone from the playlist, is found
-        by its place from the playlist's end, as far back as the video segment's
-        (`_audio_find`)."""
+        cuts its renditions each its own way): the audio segments listed are fetched in order
+        and queued (`_take_audio`), and the video segment takes what is due before its end (its
+        first picture's time and EXTINF; `AudioWeaver.weave_due`). Where the audio queued does
+        not reach that end yet (at the live edge, renditions cut apart publish their segments
+        apart), the video goes on as far as the audio covers it and the rest is held
+        (`_pass_covered`) until more audio is listed (`_release`, at each playlist reload) or
+        the next video segment comes, which takes it whatever audio there is: waiting for
+        the audio held 10 s segments back 5-8 s each, and VLC ran dry between them. The first
+        audio segment, and the one after a break or one gone from the playlist, is found by its
+        place from the playlist's end, as far back as the video segment's (`_audio_find`).
+
+        Returns (what of the timeline before a break was held, to go on before its marker;
+        what goes on now)."""
         if self._audio_unknown:
             if program_has_audio(video[:_AUDIO_LOOK]):
                 self._audio_unknown = False
                 log.info("The HLS variant carries audio of its own; its separate one is left out.")
-                return video
+                return b"", video
             self._load_audio()
             first = next(iter(self._audio_list.values()), None)
             if first is not None and first.init_section is not None:
@@ -1349,30 +1362,84 @@ class HlsSource:
             log.info("The HLS variant has no audio of its own; its separate playlist is woven in.")
         weaver = self._weaver
         assert weaver is not None
+        before = b""
+        if self._pending and self._held:  # a break: what was held goes on first, as it is
+            before = self._flush_held()
+        held, self._held = self._held, b""
         start = video_start(video)
         if start is None:  # no picture's time to match: the audio of the same number
             audio = self._audio_segment(sequence)
-            return weaver.weave(video, audio) if audio else video
+            return before, held + (weaver.weave(video, audio) if audio else video)
         end = (start + round(duration * 90000)) % (1 << 33)
         if self._pending or self._audio_next is None:  # a break, or the first: found by time
             weaver.reset()
             self._audio_next = self._audio_find(start, duration)
+        self._take_audio(start, end, duration)
+        video = held + video
+        weaver.drop(((video_start(video) or start) - _LEAD_TICKS) % (1 << 33))  # too late
+        return before, self._pass_covered(video, len(held), end)
+
+    def _take_audio(self, start: int, end: int, duration: float) -> None:
+        """Queue the audio segments listed in order until they reach `end` (a video segment
+        from `start`, `duration` long), a few at most; one that left the playlist is found
+        again (`_audio_find`)."""
+        weaver = self._weaver
+        assert weaver is not None
         fetches = 2 + math.ceil(duration / max(1.0, self._audio_target))
-        while self._audio_next is not None and fetches > 0:
-            if weaver.reaches(end):
-                break
+        while self._audio_next is not None and fetches > 0 and not weaver.reaches(end):
             audio = self._audio_segment(self._audio_next)
             fetches -= 1
             if audio is None:
                 if self._audio_list and self._audio_next < min(self._audio_list):
                     self._audio_next = self._audio_find(start, duration)  # fell behind it
                     continue
-                break  # not listed yet: the next video segment asks again
+                break  # not listed yet
             self._audio_next += 1
             if audio:
                 weaver.add(audio)
-        weaver.drop((start - _LEAD_TICKS) % (1 << 33))  # too late for VLC: left out
-        return weaver.weave_due(video, end)
+
+    def _pass_covered(self, video: bytes, since: int, end: int) -> bytes:
+        """`video` (a segment ending at `end`, after `since` bytes held before) with its sound,
+        as far as the audio queued covers it (`AudioWeaver.covered`); the rest is held for
+        more audio (`_held`). What was held before (`since`) goes on regardless: no tail waits
+        past the next video segment."""
+        weaver = self._weaver
+        assert weaver is not None
+        if weaver.reaches(end):
+            return weaver.weave_due(video, end)
+        cut, until = weaver.covered(video, since)
+        self._held, self._held_end = video[cut:], end
+        return weaver.weave_due(video[:cut], end if until is None else until) if cut else b""
+
+    def _release(self) -> bytes:
+        """At a playlist reload, while a tail is held: the audio listed since, and what of the
+        tail it covers, woven (`_pass_covered`)."""
+        if not self._held or self._weaver is None:
+            return b""
+        held, self._held = self._held, b""
+        start = video_start(held)
+        if start is not None:
+            self._take_audio(start, self._held_end, self._burst)
+        return self._pass_covered(held, 0, self._held_end)
+
+    def _flush_held(self) -> bytes:
+        """What is held, with what audio there is for it (a break, or the playlist's end)."""
+        held, self._held = self._held, b""
+        if not held or self._weaver is None:
+            return held
+        return self._weaver.weave_due(held, self._held_end)
+
+    def _emit(self, data: bytes) -> Iterator[bytes | Discontinuity]:
+        """Bytes between segments (a released tail), after a marker that is due."""
+        if not data:
+            return
+        if self._pending:
+            self._pending = False
+            self._joiner.discontinuity()
+            yield Discontinuity()
+        self._started = True
+        if block := self._joiner.feed(data):
+            yield block
 
     def _audio_find(self, start: int, duration: float) -> int | None:
         """The audio segment to follow on from for a video segment that starts at `start`
@@ -1440,24 +1507,17 @@ class HlsSource:
 
     def _audio_segment(self, sequence: int) -> bytes | None:
         """The audio segment of `sequence` (a live playlist that does not list it yet reloaded
-        up to `_AUDIO_RELOADS` times), decrypted and as TS or packed audio; None when the
-        playlist does not list it (not yet, or no more), b"" when it fails (the video plays
-        without it)."""
+        once: the video is held meanwhile, `_pass_covered`), decrypted and as TS or packed
+        audio; None when the playlist does not list it (not yet, or no more), b"" when it fails
+        (the video plays without it)."""
         segment = self._audio_list.get(sequence)
-        for attempt in range(_AUDIO_RELOADS):
-            if segment is not None or self._audio_ended:
-                break
-            if self._audio_list and sequence < min(self._audio_list):
-                break  # gone from its window already
-            # At the live edge the audio playlist may list a segment a little after the video's
-            # (another packager's): reloaded after a pause, up to a target duration in all.
-            if attempt and self._http.wait(max(0.5, self._burst / _AUDIO_RELOADS)):
-                raise _Closed()
-            try:
-                self._load_audio()
-            except _BadSegment:
-                return b""
-            segment = self._audio_list.get(sequence)
+        if segment is None and not self._audio_ended:
+            if not self._audio_list or sequence > min(self._audio_list):  # not gone from it
+                try:
+                    self._load_audio()
+                except _BadSegment:
+                    return b""
+                segment = self._audio_list.get(sequence)
         if segment is None:
             log.info("The HLS audio playlist does not list segment %d.", sequence)
             return None
