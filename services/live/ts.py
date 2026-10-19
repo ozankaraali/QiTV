@@ -16,6 +16,7 @@ form cannot import `ts_fixtures`).
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import logging
 import time
@@ -69,6 +70,14 @@ _NOT_KEY = -1
 # A segment start whose picture begins beyond the PES's first packet (behind large SEI, say)
 # is read on in the PES's next packets, up to this many ES bytes (16 packets).
 _LOOK_AHEAD = 16 * 184
+# RepeatTrimmer (a restart that re-sends media inside one connection):
+_TRIM_BURST_RATE = 1.25  # a burst has settled once a second brings at most this much media
+_TRIM_HOLD_S = 4.0  # a new run is held at most this long: VLC plays from its cushion meanwhile
+_TRIM_HOLD_BYTES = 48 * 1024 * 1024  # ... and at most this much: a 15 s burst of 25 Mbit/s 4K
+_TRIM_MARGIN_S = 0.25  # R is taken this much short: a frame or two repeated beats new ones lost
+_TRIM_MIN_S = 2.0  # a smaller R is a backlog that made up its silence (a control's 0.6 s)
+_TRIM_RUNS = 2  # a repeat reaches this many runs back: one upstream's crossed another's 9 s run
+_TRIMS_KEPT = 64  # the latest trims kept for a look (a memory bound)
 
 
 class Unsupported(Exception):
@@ -220,6 +229,11 @@ class Segmenter:
     @property
     def video_pid(self) -> int | None:
         return self._video_pid
+
+    @property
+    def video_type(self) -> int | None:
+        """The video PID's stream type from the PMT (H.264 0x1B, HEVC 0x24, ...)."""
+        return self._video_type
 
     @property
     def latest_pts(self) -> int | None:
@@ -849,11 +863,12 @@ class ContinuityJoiner:
     time base. A segment out of packet sync passes through from where it lost sync.
 
     Per segment: `segment()`, then `feed()` its bytes (whole packets come back; a partial one
-    is held), then `end()` (the partial packet held, as it came).
+    is held), then `end()` (the partial packet held, as it came). `counters` are each PID's
+    last counter already passed on before the first segment (a join in mid-stream).
     """
 
-    def __init__(self) -> None:
-        self._last: dict[int, int] = {}  # PID -> its last counter passed on
+    def __init__(self, counters: dict[int, int] | None = None) -> None:
+        self._last: dict[int, int] = dict(counters or {})  # PID -> its last counter passed on
         self._shift: dict[int, int] = {}  # PID -> what this segment adds to its counters
         self._held = b""
         self._lost = False  # out of packet sync: the rest of the segment passes through
@@ -912,6 +927,336 @@ class ContinuityJoiner:
         if self._flag_pcr and afc & 2 and out[at + 4] and out[at + 5] & 0x10:
             out[at + 5] |= 0x80
             self._flag_pcr = False
+
+
+@dataclass(frozen=True, slots=True)
+class Trim:
+    """A new run `RepeatTrimmer` held after a timestamp restart, and what became of it.
+
+    `offset` is the input offset of the run's first video PES; `held_at` and `released_at`
+    the clock then. `excess_s` is R (None without media before the restart to measure from).
+    `dropped_s` is the media left out from the run's start (to a keyframe), `dropped` the input
+    ranges left out ((offset, bytes): the run's start, then each other PID's packets before its
+    next unit start), both empty when it went on untouched. `reason`: "dropped", "small" (R
+    below `_TRIM_MIN_S`), "no keyframe" (none in reach), "reconnect" or "end" (released before
+    its burst settled, untouched).
+    """
+
+    offset: int
+    held_at: float
+    released_at: float
+    excess_s: float | None
+    dropped_s: float
+    dropped: tuple[tuple[int, int], ...]
+    reason: str
+
+    @property
+    def dropped_bytes(self) -> int:
+        return sum(size for _, size in self.dropped)
+
+
+class RepeatTrimmer:
+    """Drops what a raw TS source sends twice when it restarts its clock in one connection.
+
+    One provider's restream restarts its muxer every 15-60 s without closing the connection:
+    PTS and PCR start over, and after a silence of 1-3 s the new run arrives in a burst that
+    re-sends seconds already sent (byte for byte, or the same scenes from another encoder), so
+    the live edge runs ahead of the wall clock by up to 25 s a minute. On a video PTS step back
+    of more than `_REORDER_TICKS` the new run is held from its first video PES until its burst
+    settled (a second brought at most `_TRIM_BURST_RATE` s of media), `_TRIM_HOLD_S` passed or
+    `_TRIM_HOLD_BYTES` are held, all judged as input arrives. R, how far the restart moved the
+    media ahead of the wall clock, is media minus clock where the burst settled (else at the
+    release), less media minus clock where the old run last brought media (before the silence:
+    a burst that only makes up its silence is R 0), less `_TRIM_MARGIN_S`. When R is
+    at least `_TRIM_MIN_S`, the run is dropped up to its last keyframe at or before R, and no
+    further than the media of the last `_TRIM_RUNS` runs (a repeat reaches no further back): a
+    short repeat stays rather than new media go, so a run with a keyframe every 10 s may keep
+    most of it. Every other PID resumes at its next unit start, and what passes on from there
+    goes through `ContinuityJoiner`: counters run on and the first PCR gets the
+    discontinuity_indicator, as at an HLS discontinuity.
+
+    A reconnect (`discontinuity()`), a stall and backlog without a restart, and a forward jump
+    pass untouched. `feed`, `discontinuity` and `finish` return what passes on in pieces: a
+    run's start was dropped between two pieces (the segmenter is told so there). Whole packets
+    are judged as the segmenter does (a read's last packet waits for the next read), and a
+    packet cut short is dropped here already (`cut_short`), so the joiner never meets one.
+    Pure logic: the clock and the program's video PID and type (the segmenter's) are the
+    caller's.
+    """
+
+    def __init__(
+        self,
+        *,
+        program: Callable[[], tuple[int | None, int | None]],
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._program = program
+        self._clock = clock
+        self._buf = b""
+        self._pos = 0  # the input offset of _buf[0]
+        self._searching = True  # the next packet start must be proven by three sync bytes
+        self._last_pts: int | None = None
+        self._frame = _CLOCK // 25  # the shortest forward PTS step seen: a frame
+        # The run being read, passed on or held: its first and furthest PTS, after `_done`
+        # seconds of the runs before it.
+        self._first: int | None = None
+        self._top: int | None = None
+        self._done = 0.0
+        # Media minus clock where the run passed on last brought media (its furthest PTS).
+        self._ahead: float | None = None
+        self._noted: int | None = None  # the furthest PTS `_ahead` was taken at
+        self._counters: dict[int, int] = {}  # each PID's last counter passed on
+        self._joiner: ContinuityJoiner | None = None  # from the first drop on
+        # The held run: its bytes from its first video PES, where that was in the input, when.
+        self._held: bytearray | None = None
+        self._held_pos = 0
+        self._held_at = 0.0
+        self._held_counters: dict[int, int] = {}
+        self._keys: list[tuple[int, int]] = []  # (offset in the held bytes, PTS) of keyframes
+        self._samples: list[tuple[float, float]] = []  # (clock, media held)
+        self._before: float | None = None  # media minus clock before the silence
+        self._settle: tuple[float, float] | None = None  # (clock, media held) where it settled
+        self._runs: deque[float] = deque(maxlen=_TRIM_RUNS)  # the media of the latest runs
+        self.trims: deque[Trim] = deque(maxlen=_TRIMS_KEPT)
+        self.cut_short: deque[tuple[int, int]] = deque(maxlen=_TRIMS_KEPT)  # (offset, bytes)
+
+    @property
+    def holding(self) -> bool:
+        return self._held is not None
+
+    def feed(self, chunk: bytes) -> list[bytes]:
+        """Take input bytes; return what passes on (see the class docstring for the pieces)."""
+        now = self._clock()
+        pieces = [b""]
+        video_pid, video_type = self._program()
+        data = self._buf + chunk if self._buf else bytes(chunk)
+        n = len(data)
+        off = start = 0  # the next packet to read; the first byte not yet passed on or held
+        searching = self._searching
+        while off + PACKET <= n:
+            if searching or data[off] != SYNC:
+                found = _find_sync(data, off)
+                if found < 0:
+                    off, searching = max(off, n - 2 * PACKET), True
+                    break
+                off, searching = found, False
+                continue
+            end = off + PACKET
+            if end == n:
+                break  # the next input's first byte tells whether this packet is whole
+            if data[end] != SYNC:
+                found = _find_sync(data, off + 1)
+                if found < 0 and n - 2 * PACKET < end:
+                    break
+                if 0 <= found < end:  # cut short: dropped whole, as the segmenter would
+                    self._put(data[start:off], pieces)
+                    self.cut_short.append((self._pos + off, found - off))
+                    off = start = found
+                    continue
+            b1, b3 = data[off + 1], data[off + 3]
+            pid = ((b1 & 0x1F) << 8) | data[off + 2]
+            if not b1 & 0x80:  # with the transport error flag the header is untrusted
+                if b3 & 0x10 and pid != 0x1FFF:
+                    counters = self._counters if self._held is None else self._held_counters
+                    counters[pid] = b3 & 0x0F
+                if pid == video_pid and b1 & 0x40:
+                    pkt = data[off:end]
+                    rai, pts, es = _pes_start(pkt)
+                    if pts is not None:
+                        if self._restarts(pts):
+                            self._put(data[start:off], pieces)
+                            start = off
+                            if self._held is not None:  # a restart while one is held
+                                self._release(now, pieces)
+                            self._hold(now, self._pos + off, pts)
+                        else:
+                            self._advance(pts)
+                        if self._held is not None and _trim_key(pkt, rai, es, video_type):
+                            self._keys.append((len(self._held) + off - start, pts))
+            off = end
+        self._put(data[start:off], pieces)
+        self._buf = data[off:]
+        self._pos += off
+        self._searching = searching
+        if self._held is not None:
+            self._samples.append((now, self._run_media()))
+            if self._settled(now):
+                self._release(now, pieces)
+        elif self._first is not None:
+            self._note(now)
+        return pieces
+
+    def discontinuity(self) -> list[bytes]:
+        """A reconnect comes next: what is held passes on untouched, and so does the partial
+        packet left (the segmenter drops it); no restart is looked for across it."""
+        pieces = self._end("reconnect")
+        self._searching = True
+        self._last_pts = None
+        self._runs.append(self._run_media())
+        self._done += self._runs[-1]
+        self._first = self._top = None
+        if self._joiner is not None:
+            self._joiner.segment()  # the counters run on across it, too
+        return pieces
+
+    def finish(self) -> list[bytes]:
+        """The input ended: what is held passes on untouched."""
+        return self._end("end")
+
+    def _end(self, reason: str) -> list[bytes]:
+        pieces = [b""]
+        if self._held is not None:
+            self._release(self._clock(), pieces, reason)
+        self._put(self._buf, pieces)
+        self._pos += len(self._buf)
+        self._buf = b""
+        if self._joiner is not None:
+            pieces[-1] += self._joiner.end()
+        return pieces
+
+    def _restarts(self, pts: int) -> bool:
+        last, self._last_pts = self._last_pts, pts
+        return last is not None and pts_delta(last, pts) < -_REORDER_TICKS
+
+    def _advance(self, pts: int) -> None:
+        if self._first is None or self._top is None:
+            self._first = self._top = pts
+            return
+        step = pts_delta(self._top, pts)
+        if step > 0:
+            self._frame = min(self._frame, step) if step < _CLOCK else self._frame
+            self._top = pts
+
+    def _run_media(self) -> float:
+        """Seconds of the current run from its first PTS to its furthest, plus a frame."""
+        if self._first is None or self._top is None:
+            return 0.0
+        return (pts_delta(self._first, self._top) + self._frame) / _CLOCK
+
+    def _note(self, now: float) -> None:
+        """Media passed on minus clock, taken when the run's media went further (before a
+        silence it is where the old run last brought media)."""
+        if self._top is not None and self._top != self._noted:
+            self._noted = self._top
+            self._ahead = self._done + self._run_media() - now
+
+    def _hold(self, now: float, offset: int, pts: int) -> None:
+        """A restart: the old run ends, and the new one is held from this packet."""
+        self._note(now)
+        self._before = self._ahead
+        self._runs.append(self._run_media())
+        self._done += self._runs[-1]
+        self._first = self._top = pts
+        self._held = bytearray()
+        self._held_pos, self._held_at = offset, now
+        self._held_counters = {}
+        self._keys = []
+        self._samples = [(now, 0.0)]
+        self._settle = None
+
+    def _settled(self, now: float) -> bool:
+        """Whether to release now: the burst settled (where: `_settle`), or a cap was met."""
+        assert self._held is not None
+        if now - self._held_at >= _TRIM_HOLD_S or len(self._held) >= _TRIM_HOLD_BYTES:
+            return True
+        earlier = [sample for sample in self._samples if sample[0] <= now - 1.0]
+        if earlier and self._run_media() - earlier[-1][1] <= _TRIM_BURST_RATE:
+            self._settle = earlier[-1]
+            return True
+        return False
+
+    def _put(self, data: bytes, pieces: list[bytes]) -> None:
+        """Hold `data`, or pass it on (through the joiner once one runs)."""
+        if not data:
+            return
+        if self._held is not None:
+            self._held += data
+        else:
+            pieces[-1] += self._joiner.feed(data) if self._joiner is not None else data
+
+    def _release(self, now: float, pieces: list[bytes], reason: str | None = None) -> None:
+        """Pass the held run on: from its last keyframe in reach when R allows, else whole."""
+        held, first = self._held, self._first
+        assert held is not None and first is not None
+        self._held = None
+        excess = None
+        if self._before is not None:
+            settled, media = self._settle or (now, self._run_media())
+            excess = self._done + media - settled - self._before - _TRIM_MARGIN_S
+        drop: tuple[int, int] | None = None  # (offset in the held bytes, PTS) of the keyframe
+        if reason is None:
+            reach = min(excess or 0.0, sum(self._runs))
+            keys = [
+                (at, pts) for at, pts in self._keys if 0 < pts_delta(first, pts) <= reach * _CLOCK
+            ]
+            if excess is None or excess < _TRIM_MIN_S:
+                reason = "small"
+            elif not keys:
+                reason = "no keyframe"
+            else:
+                reason, drop = "dropped", keys[-1]
+        ranges: list[tuple[int, int]] = []
+        if drop is None:
+            self._put(bytes(held), pieces)
+            self._counters.update(self._held_counters)
+        else:
+            at, pts = drop
+            ranges.append((self._held_pos, at))
+            kept = _resume_at_unit_starts(bytes(held[at:]), self._held_pos + at, ranges)
+            joiner = self._joiner
+            if joiner is None:
+                joiner = self._joiner = ContinuityJoiner(self._counters)
+            else:
+                pieces[-1] += joiner.end()
+            joiner.segment()
+            joiner.discontinuity()
+            pieces.append(joiner.feed(kept))
+            self._first = pts  # what passed on of the run starts here
+        dropped_s = pts_delta(first, drop[1]) / _CLOCK if drop is not None else 0.0
+        # Where the run last brought media, as passed on: the baseline for the next restart.
+        final = self._samples[-1][1]
+        arrived = next(at for at, media in self._samples if media >= final)
+        self._ahead, self._noted = self._done + final - dropped_s - arrived, self._top
+        trim = Trim(self._held_pos, self._held_at, now, excess, dropped_s, tuple(ranges), reason)
+        self.trims.append(trim)
+        logger.info(
+            "A stream restart was held %.1f s: R %s s, %.1f s dropped (%s).",
+            now - self._held_at,
+            "-" if excess is None else f"{excess:.1f}",
+            dropped_s,
+            reason,
+        )
+
+
+def _trim_key(pkt: bytes, rai: bool, es: int, video_type: int | None) -> bool:
+    """Whether a video PES start is a picture VLC can start decoding at: an IDR or an open
+    intra picture, or with RAI one whose kind its first packet cannot tell."""
+    kind = _classify(pkt, es, video_type) if es < PACKET else _UNDECIDED
+    return kind in (_IDR, _OPEN) or (rai and kind in (_INTRA, _PARAM, _UNDECIDED))
+
+
+def _resume_at_unit_starts(data: bytes, offset: int, ranges: list[tuple[int, int]]) -> bytes:
+    """`data` (from a video keyframe's first packet) without each other PID's packets before
+    its next unit start: they continue a PES or section whose start was dropped. Each packet
+    left out is added to `ranges` at its input offset (`data` begins at `offset`)."""
+    kept: list[bytes] = []
+    started: set[int] = set()
+    at = 0
+    n = len(data)
+    while at + PACKET <= n and data[at] == SYNC:
+        b1, b3 = data[at + 1], data[at + 3]
+        pid = ((b1 & 0x1F) << 8) | data[at + 2]
+        if pid not in started and b3 & 0x10 and not b1 & 0x80 and pid != 0x1FFF:
+            if b1 & 0x40:
+                started.add(pid)
+            else:
+                ranges.append((offset + at, PACKET))
+                at += PACKET
+                continue
+        kept.append(data[at : at + PACKET])
+        at += PACKET
+    kept.append(data[at:])
+    return b"".join(kept)
 
 
 def program_has_audio(data: bytes) -> bool | None:

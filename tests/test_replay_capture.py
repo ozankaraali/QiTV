@@ -18,6 +18,7 @@ from tests.ts_fixtures import CLOCK, PMT_PID, VIDEO_PID, pat, pes_packets, pmt
 FPS = 25
 TICKS = CLOCK // FPS
 BACKLOG = 5.0  # media the source sends at connect
+SILENCE, REPEAT = 1.0, 5.0  # before a restart, and what the new run sends again
 FIRST = 0.1  # when the first byte arrives
 
 
@@ -87,9 +88,9 @@ class ReplayCaptureTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
-    def measure(self, runs, cut_last=None):
+    def measure(self, runs, cut_last=None, trim=True):
         path = write_capture(self.tmp.name, "capture", runs, cut_last)
-        return rc.measure(rc.load_capture(path))
+        return rc.measure(rc.load_capture(path), trim=trim)
 
     def test_a_steady_channel_shows_no_restart_no_repeat_and_a_flat_edge(self):
         result = self.measure([(range(40 * FPS), 900000, backlogged)])
@@ -102,21 +103,22 @@ class ReplayCaptureTests(unittest.TestCase):
         self.assertAlmostEqual(edge["ahead_at_backlog"], BACKLOG, delta=0.6)
         self.assertLess(abs(edge["drift_s_per_min"]), 0.5)
 
-    def test_a_restart_that_resends_the_last_seconds_is_measured(self):
+    def resend(self, trim):
         # Run A: 20 s from connect, its last byte at 15.1 s; one second of silence; run B
         # restarts its clock at 0 and first sends A's last 5 s again (the same pictures),
         # with the silence and the repeat at once, then new frames at real time.
-        silence, repeat = 1.0, 5.0
-        resume = backlogged(20.0) + silence
-        burst = repeat + silence
-        again = [*range(int((20 - repeat) * FPS), 20 * FPS), *range(20 * FPS, 35 * FPS)]
-        result = self.measure(
-            [
-                (range(20 * FPS), 900000, backlogged),
-                (again, 0, lambda media: resume + max(0.0, media - burst)),
-            ],
-            cut_last=144,
-        )
+        resume = backlogged(20.0) + SILENCE
+        burst = REPEAT + SILENCE
+        again = [*range(int((20 - REPEAT) * FPS), 20 * FPS), *range(20 * FPS, 35 * FPS)]
+        runs = [
+            (range(20 * FPS), 900000, backlogged),
+            (again, 0, lambda media: resume + max(0.0, media - burst)),
+        ]
+        return self.measure(runs, cut_last=144, trim=trim)
+
+    def test_a_restart_that_resends_the_last_seconds_is_measured(self):
+        silence, repeat = SILENCE, REPEAT
+        result = self.resend(trim=False)
         self.assertEqual(result["input"]["restarts"], 1)
         row = result["restarts"][0]
         self.assertTrue(row["provider_indicator"])
@@ -142,6 +144,24 @@ class ReplayCaptureTests(unittest.TestCase):
         ahead = [s["edge_minus_wall"] for s in edge["samples"]]
         self.assertAlmostEqual(ahead[-1] - ahead[10], repeat, delta=0.6)
         self.assertLess(abs(edge["drift_without_r_s_per_min"]), 1.0)
+        self.assertIsNone(row["trim"])
+
+    def test_the_trimmer_drops_that_repeat_to_a_keyframe(self):
+        result = self.resend(trim=True)
+        row = result["restarts"][0]
+        # R is the repeat less a quarter second: the keyframe at 4 s is the last in reach.
+        self.assertEqual(row["trim"]["reason"], "dropped")
+        self.assertAlmostEqual(row["trim"]["excess_s"], REPEAT - 0.25, delta=0.3)
+        self.assertEqual(row["trim"]["dropped_s"], 4.0)
+        self.assertGreaterEqual(row["trim"]["held_s"], 1.0)  # a second shows the burst ended
+        self.assertEqual(row["pipeline"]["cut_into_run_s"], 4.0)  # at the kept keyframe
+        self.assertTrue(row["ring"]["indicator_reaches_vlc"])
+        self.assertEqual(result["ring"]["cc_breaks_unannounced"], 0)
+        # A second of the repeat is left (less A's last picture, cut); the edge runs ahead by
+        # about that, not by the 5 s.
+        self.assertEqual(result["ring"]["frames_repeated"], FPS - 1)
+        ahead = [s["edge_minus_wall"] for s in result["edge"]["samples"]]
+        self.assertAlmostEqual(ahead[-1] - ahead[10], REPEAT - 4.0, delta=0.6)
 
     def test_a_restart_whose_burst_makes_up_its_silence_has_nothing_to_drop(self):
         # After a 3 s stall the new run sends what was missed, then real time: R is 0.

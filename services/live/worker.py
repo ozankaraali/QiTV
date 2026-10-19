@@ -76,7 +76,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from services.live.timeline import StartQuality, Timeline
-from services.live.ts import Data, Event, Opened, Segmenter, Unsupported
+from services.live.ts import Data, Event, Opened, RepeatTrimmer, Segmenter, Unsupported
 
 if TYPE_CHECKING:
     from services.live.ring import Ring
@@ -371,6 +371,8 @@ class _Session:
         self._ready = False
         self._ended = False
         self._segmenter = Segmenter()
+        # Raw TS only (`_ingest`): drops what a restart inside the connection sends twice.
+        self._trimmer: RepeatTrimmer | None = None
         self._timeline = Timeline()
         self._bursts = BurstMeter()  # raw TS that arrives in bursts (HLS reports its own)
         self._received = 0  # bytes from the source, those before the first keyframe too
@@ -442,10 +444,17 @@ class _Session:
             raise _Cancelled()
         self._adopt(self._make_ring())
         segmenter = self._segmenter
+        trimmer = None
+        if not source.hls:  # HLS has its own discontinuities and no such restarts
+            trimmer = self._trimmer = RepeatTrimmer(
+                program=lambda: (segmenter.video_pid, segmenter.video_type), clock=time.monotonic
+            )
         try:
             for item in source.chunks():
                 self._check()
                 if isinstance(item, Discontinuity):
+                    if trimmer is not None:  # a reconnect: what it holds passes on untouched
+                        self._pass_on(trimmer.discontinuity())
                     segmenter.discontinuity()
                 elif isinstance(item, CaughtUp):
                     # The batch's end, which the throttle may have held back, and the start's
@@ -455,11 +464,16 @@ class _Session:
                 else:
                     self._follow(source)  # before its bytes: where an HLS segment begins
                     self._received += len(item)
-                    self._apply(segmenter.feed(item))
+                    if trimmer is None:
+                        self._apply(segmenter.feed(item))
+                    else:
+                        self._pass_on(trimmer.feed(item))
                     self._measure()
                     if not self._ready:
                         self._notify()  # bytes flow, nothing playable yet: say so
             self._check()
+            if trimmer is not None:
+                self._pass_on(trimmer.finish())
             self._apply(segmenter.finish())
         except SourceError as error:
             self._fail(error.kind, str(error), error.status)
@@ -615,6 +629,8 @@ class _Session:
         if self._ring is not None:
             self._check()  # a cancelled session never touches its ring again
             try:
+                if self._trimmer is not None:
+                    self._pass_on(self._trimmer.finish())
                 self._apply(self._segmenter.finish())
             except _Cancelled:
                 raise
@@ -623,6 +639,15 @@ class _Session:
             self._ended = True  # readers stop at the end of the buffer instead of waiting
             self._notify(force=True)
         self._send(_error(self.sid, kind, message, status))
+
+    def _pass_on(self, pieces: list[bytes]) -> None:
+        """The trimmer's output to the segmenter: where it dropped a run's start (between two
+        pieces) the timestamps start over, a discontinuity."""
+        for k, piece in enumerate(pieces):
+            if k:
+                self._segmenter.discontinuity()
+            if piece:
+                self._apply(self._segmenter.feed(piece))
 
     def _follow(self, source: Source) -> None:
         """HLS: note the live edge where each segment's first bytes begin (`_backlog`), and

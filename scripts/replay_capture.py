@@ -1,13 +1,15 @@
 """Replay a captured raw MPEG-TS channel through the live helper's ingest, on a simulated clock.
 
     uv run python scripts/replay_capture.py <capture> [...] [--json F] [--decode] [--dump DIR]
+                                            [--no-trim]
 
 A capture is `<name>.ts` (the bytes as the connection delivered them) and `<name>.times` (one
 "<cumulative bytes> <seconds since connect>" line per read); `<capture>` names either file or
 their common prefix. Captures hold provider streams: keep them out of the repository.
 
 The bytes go through the helper's own session code (`services.live.worker._Session._ingest`:
-segmenter, RAM ring, timeline, burst meter and the state it sends the GUI), read by read, with
+repeat trimmer, segmenter, RAM ring, timeline, burst meter and the state it sends the GUI;
+with --no-trim, as if there were no `RepeatTrimmer`), read by read, with
 the clock set to each read's arrival time, so a three-minute capture replays in seconds. The
 seams this needs, which the product does not offer: `_Session` builds its `Segmenter()` on the
 real clock and calls `time.monotonic()` in `_measure` and `_notify`, so the replay swaps in a
@@ -25,7 +27,8 @@ Per capture it prints (and with --json writes):
   burst's end), on the input's video and on the pipeline's own live edge; the new run's first
   keyframes and D, the last at or before R; the byte-exact repeat of earlier video frames at
   the start of the new run;
-- how the pipeline took it: a segmenter discontinuity (its cut, how far into the new run, how
+- how the pipeline took it: what the trimmer did (why, R as it measured it, what it dropped and
+  how long it held the run), a segmenter discontinuity (its cut, how far into the new run, how
   cleanly that segment starts), a span only the timeline marked, or nothing; and its junction
   in the ring: a packet cut short passed on as a whole packet (its missing bytes taken from the
   next one), the indicator reaching VLC, continuity counter breaks no indicator announces;
@@ -72,6 +75,7 @@ from services.live.ts import (  # noqa: E402  (the segmenter's own picture readi
     Event,
     Opened,
     Segmenter,
+    Trim,
     _classify,
     _quality,
     pts_delta,
@@ -426,7 +430,8 @@ class _ReplaySource:
 
 
 class _ObservedSegmenter(Segmenter):
-    """The helper's segmenter, noting where each cut and each passed-on byte came from."""
+    """The helper's segmenter, noting where each cut and each passed-on byte came from (its
+    input offsets: the trimmer's output)."""
 
     def __init__(self, clock: _Clock) -> None:
         super().__init__(clock=clock)
@@ -434,20 +439,38 @@ class _ObservedSegmenter(Segmenter):
         # (stream offset, input offset, length) of each run of bytes passed on
         self.slices: list[tuple[int, int, int]] = []
         self.cuts: list[tuple[int, bool, int]] = []  # (seq, discontinuity, stream offset)
+        self._old: Optional[tuple[bytes, int]] = None  # what a discontinuity flushed from
+
+    def discontinuity(self) -> None:
+        self._old = (self._buf, self._pos)  # its last packet comes with the next events
+        super().discontinuity()
 
     def feed(self, chunk: bytes) -> list[Event]:
-        base = self._pos  # the input offset of the bytes it still holds (read only)
-        data = self._buf + chunk if self._buf else chunk
-        events = super().feed(chunk)
-        cursor = 0
+        held = (self._buf + chunk if self._buf else chunk, self._pos)
+        return self._note(super().feed(chunk), held)
+
+    def finish(self) -> list[Event]:
+        held = (self._buf, self._pos)
+        return self._note(super().finish(), held)
+
+    def _note(self, events: list[Event], held: tuple[bytes, int]) -> list[Event]:
+        """Each Data is a slice of the bytes held before (then flushed) or of these ones: find
+        where. One with a PCR flagged here is not found byte for byte: taken as following on."""
+        sources = [held] if self._old is None else [self._old, held]
+        self._old = None
+        source, cursor = 0, 0
         for event in events:
-            if isinstance(event, Data):  # always a slice of the held bytes plus this chunk
-                at = data.find(event.payload, cursor)
+            if isinstance(event, Data):
+                size = len(event.payload)
+                at = sources[source][0].find(event.payload, cursor)
+                while at < 0 and source + 1 < len(sources):
+                    source, cursor = source + 1, 0
+                    at = sources[source][0].find(event.payload, cursor)
                 if at < 0:
-                    raise RuntimeError("a passed-on payload is not in the input")
-                self.slices.append((self.passed, base + at, len(event.payload)))
-                self.passed += len(event.payload)
-                cursor = at + len(event.payload)
+                    at = cursor
+                self.slices.append((self.passed, sources[source][1] + at, size))
+                self.passed += size
+                cursor = at + size
             elif isinstance(event, Opened):
                 self.cuts.append((event.seq, event.discontinuity, self.passed))
         return events
@@ -475,6 +498,78 @@ class _ObservedSegmenter(Segmenter):
             if origin > input_offset:
                 return False
         return False
+
+
+class Positions:
+    """Where the stream VLC reads came from in the capture: through the trimmer (which left
+    out `Trim.dropped` ranges and the packets cut short) and the segmenter
+    (`_ObservedSegmenter.slices`)."""
+
+    def __init__(
+        self, segmenter: _ObservedSegmenter, trims: list[Trim], cut: list[tuple[int, int]]
+    ) -> None:
+        self._seg = segmenter
+        self._dropped = sorted([item for trim in trims for item in trim.dropped] + cut)
+
+    def _capture(self, out: int) -> int:
+        """The capture offset of the trimmer's output byte `out`."""
+        for start, size in self._dropped:
+            if start > out:
+                break
+            out += size
+        return out
+
+    def _out(self, offset: int) -> Optional[int]:
+        """The trimmer's output offset of capture byte `offset` (None: it was dropped)."""
+        shift = 0
+        for start, size in self._dropped:
+            if start + size <= offset:
+                shift += size
+            elif start <= offset:
+                return None
+            else:
+                break
+        return offset - shift
+
+    def dropped(self, offset: int, length: int) -> bool:
+        return any(s < offset + length and offset < s + n for s, n in self._dropped)
+
+    def to_input(self, stream_offset: int) -> Optional[int]:
+        """The capture offset of a byte VLC reads (stream offsets exclude the headers)."""
+        out = self._seg.to_input(stream_offset)
+        return None if out is None else self._capture(out)
+
+    def to_stream(self, offset: int) -> Optional[int]:
+        """The stream offset of the first byte passed on at or after capture byte `offset`."""
+        for start, size in self._dropped:
+            if start <= offset < start + size:
+                offset = start + size
+        out = self._out(offset)
+        return None if out is None else self._seg.to_stream(out)
+
+    def passed_whole(self, offset: int, length: int) -> bool:
+        """Whether capture bytes [offset, offset + length) reached VLC in one piece."""
+        out = self._out(offset)
+        if out is None or self.dropped(offset, length):
+            return False
+        return self._seg.passed_whole(out, length)
+
+
+class _Untrimmed:
+    """`RepeatTrimmer` as if there were none (--no-trim): everything passes on untouched."""
+
+    def __init__(self, **_: Any) -> None:
+        self.trims: list[Trim] = []
+        self.cut_short: list[tuple[int, int]] = []
+
+    def feed(self, chunk: bytes) -> list[bytes]:
+        return [chunk]
+
+    def discontinuity(self) -> list[bytes]:
+        return [b""]
+
+    def finish(self) -> list[bytes]:
+        return [b""]
 
 
 class _RecordingMeter(worker.BurstMeter):
@@ -517,6 +612,8 @@ class _Helper:
 @dataclass
 class Replay:
     segmenter: _ObservedSegmenter
+    positions: Positions
+    trims: list[Trim]
     spans: list[Span]
     stream: bytes  # what VLC reads from the oldest segment: its header, then every body
     header_len: int
@@ -525,8 +622,9 @@ class Replay:
     seconds: float  # how long the replay took
 
 
-def replay(capture: Capture) -> Replay:
-    """Run the capture through `_Session._ingest` on a simulated clock."""
+def replay(capture: Capture, trim: bool = True) -> Replay:
+    """Run the capture through `_Session._ingest` on a simulated clock (`trim` False: as if
+    there were no `RepeatTrimmer`)."""
     clock = _Clock()
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="qitv-replay-") as root:
@@ -537,13 +635,18 @@ def replay(capture: Capture) -> Replay:
         )
         segmenter = session._segmenter = _ObservedSegmenter(clock)
         meter = session._bursts = _RecordingMeter()
+        trimmer = worker.RepeatTrimmer if trim else _Untrimmed
         with (
             mock.patch.object(worker, "time", SimpleNamespace(monotonic=clock)),
+            mock.patch.object(worker, "RepeatTrimmer", trimmer),
             mock.patch.object(
                 source_module, "open_source", lambda *_, **__: _ReplaySource(capture, clock)
             ),
         ):
             session._ingest()
+        trimmer_used = session._trimmer
+        trims = list(trimmer_used.trims) if trimmer_used is not None else []
+        cut = list(trimmer_used.cut_short) if trimmer_used is not None else []
         kept = helper.server.ring
         parts: list[bytes] = []
         header_len = 0
@@ -557,6 +660,8 @@ def replay(capture: Capture) -> Replay:
             kept.close()
     return Replay(
         segmenter,
+        Positions(segmenter, trims, cut),
+        trims,
         session._timeline.spans(),
         b"".join(parts),
         header_len,
@@ -742,6 +847,22 @@ def _restart_row(
         "exact_repeat": _exact_repeat(source, media, restart.first, end, frame),
         "pipeline": _taken(rep, source, restart, following),
         "ring": _junction(rep, stream_scan, restart, cut_short),
+        "trim": _trim_of(rep, source.video[restart.first].offset),
+    }
+
+
+def _trim_of(rep: Replay, offset: int) -> Optional[dict[str, Any]]:
+    """What the trimmer did with the run starting at input `offset` (its first video PES)."""
+    near = [trim for trim in rep.trims if abs(trim.offset - offset) <= _FLAG_WINDOW * PACKET]
+    if not near:
+        return None
+    trim = near[0]
+    return {
+        "reason": trim.reason,
+        "held_s": round(trim.released_at - trim.held_at, 2),
+        "excess_s": _round(trim.excess_s),
+        "dropped_s": round(trim.dropped_s, 2),
+        "dropped_bytes": trim.dropped_bytes,
     }
 
 
@@ -751,7 +872,7 @@ def _taken(rep: Replay, source: Scan, restart: Restart, following: Optional[Rest
     spans = {span.seq: span for span in rep.spans}
     stop = following.junction if following else 1 << 62
     for seq, discontinuity, offset in seg.cuts:
-        origin = seg.to_input(offset)
+        origin = rep.positions.to_input(offset)
         if origin is None or not restart.junction <= origin < stop:
             continue
         span = spans.get(seq)
@@ -774,10 +895,10 @@ def _taken(rep: Replay, source: Scan, restart: Restart, following: Optional[Rest
 def _junction(rep: Replay, stream_scan: Scan, restart: Restart, cut_short: list) -> dict:
     """The junction as VLC reads it from the ring."""
     seg = rep.segmenter
-    at = seg.to_stream(restart.junction)
+    at = rep.positions.to_stream(restart.junction)
     result: dict[str, Any] = {
         "seq": None,
-        "cut_short_passed_on": [b for o, b in cut_short if seg.passed_whole(o, PACKET)],
+        "cut_short_passed_on": [b for o, b in cut_short if rep.positions.passed_whole(o, PACKET)],
         "indicator_reaches_vlc": None,
         "cc_breaks_unannounced": 0,
     }
@@ -841,10 +962,12 @@ def _decode(rep: Replay, junctions: set[int]) -> dict[str, Any]:
     }
 
 
-def measure(capture: Capture, decode: bool = False, dump: Optional[Path] = None) -> dict[str, Any]:
+def measure(
+    capture: Capture, decode: bool = False, dump: Optional[Path] = None, trim: bool = True
+) -> dict[str, Any]:
     """Replay one capture and measure it (see the module docstring); `dump` receives the
-    stream VLC reads from the oldest segment."""
-    rep = replay(capture)
+    stream VLC reads from the oldest segment; `trim` False replays without the trimmer."""
+    rep = replay(capture, trim)
     if dump is not None:
         dump.write_bytes(rep.stream)
     source = scan_ts(capture.data)
@@ -925,6 +1048,14 @@ def measure(capture: Capture, decode: bool = False, dump: Optional[Path] = None)
             "backlog_s_heard": sorted({str(s["backlog_s"]) for s in curve}),
             "samples": curve,
         },
+        "trims": {
+            "held": len(rep.trims),
+            "dropped": sum(1 for trim in rep.trims if trim.reason == "dropped"),
+            "dropped_s": round(sum(trim.dropped_s for trim in rep.trims), 1),
+            "dropped_bytes": sum(trim.dropped_bytes for trim in rep.trims),
+            "held_s": [round(trim.released_at - trim.held_at, 2) for trim in rep.trims],
+            "reasons": [trim.reason for trim in rep.trims],
+        },
         "restarts": rows,
     }
     if decode:
@@ -957,11 +1088,20 @@ def _row_line(row: dict[str, Any]) -> str:
     keys = ",".join(f"{k:g}" for k in row["new_run_keys_s"][:4])
     short = ",".join(map(str, row["cut_short_bytes"])) or "-"
     flag = {True: "yes", False: "no", None: "-"}[row["provider_indicator"]]
+    trim = row["trim"]
+    trimmed = (
+        "-"
+        if trim is None
+        else (
+            f"{trim['reason']} R {_fmt(trim['excess_s'])}, {trim['dropped_s']:.1f} s dropped,"
+            f" held {trim['held_s']:.2f} s"
+        )
+    )
     return (
         f"  {row['wall_s']:6.1f} {row['pts']:<13} {flag:<3} {short:<5} {row['silence_s']:5.2f}"
         f" {row['burst_s']:5.2f} {_fmt(row['r_burst_s']):>5} {_fmt(row['r_s']):>5}"
         f" {_fmt(row['r_edge_s']):>5}  {keys:<16} {row['d_s']:4.1f}  {exact:<20} {how:<22}"
-        f" {junction}"
+        f" {junction:<22} {trimmed}"
     )  # fmt: skip
 
 
@@ -993,10 +1133,17 @@ def report(result: dict[str, Any]) -> str:
         f"{ring['cc_breaks_unannounced']} counter breaks without an indicator "
         f"{ring['cc_break_pids'] or ''}; {ring['pcrs_flagged']} PCRs flagged discontinuous",
     ]
+    trims = result["trims"]
+    if trims["held"]:
+        lines.append(
+            f"trimmer: held {trims['held']} new runs ({', '.join(map(str, trims['held_s']))} s),"
+            f" dropped {trims['dropped']}: {trims['dropped_s']:.1f} s, "
+            f"{trims['dropped_bytes']} bytes"
+        )
     if result["restarts"]:
         lines.append(
             "  wall   pts           DI  short silen burst R@bst     R R@edg  keys of new run  "
-            "   D  exact repeat         pipeline               ring junction"
+            "   D  exact repeat         pipeline               ring junction          trimmer"
         )
         lines.extend(_row_line(row) for row in result["restarts"])
     decode = result.get("decode")
@@ -1026,13 +1173,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="write <DIR>/<name>.ring.ts, the stream VLC reads from the oldest segment (it holds "
         "the provider's stream: keep it out of the repository)",
     )
+    parser.add_argument(
+        "--no-trim", action="store_true", help="replay as if there were no RepeatTrimmer"
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     results = []
     for path in args.captures:
         capture = load_capture(path)
         dump = Path(args.dump) / f"{capture.name}.ring.ts" if args.dump else None
-        result = measure(capture, decode=args.decode, dump=dump)
+        result = measure(capture, decode=args.decode, dump=dump, trim=not args.no_trim)
         results.append(result)
         print(report(result) + "\n", flush=True)
     if args.json:
