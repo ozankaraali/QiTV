@@ -192,3 +192,16 @@ if __name__ == "__main__":
         churn()
     else:
         unittest.main()
+
+
+class ReEnabledCollectorTests(unittest.TestCase):
+    def test_a_collector_turned_back_on_is_turned_off_again(self):
+        from services.gc_guard import GcGuard
+
+        guard = GcGuard()
+        guard.start()
+        self.addCleanup(guard.stop)
+        gc.enable()  # e.g. a library calling gc.enable()
+        with self.assertLogs("services.gc_guard", level="WARNING"):
+            guard.collect()
+        self.assertFalse(gc.isenabled())
