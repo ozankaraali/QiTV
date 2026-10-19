@@ -11,9 +11,10 @@ public channels use are read: MPEG-TS (its audio stream's packets, under its own
 and descriptors) and packed ADTS AAC (raw frames after an ID3 tag whose PRIV
 com.apple.streaming.transportStreamTimestamp dates the first one; each frame becomes a PES).
 The renditions share the video's timestamps (HLS requires it), so nothing is re-timed. fMP4
-(CMAF) audio is not read here. Anything unreadable leaves the video segment as it came.
-A capture (``QITV_CAPTURE_DIR``) keeps the audio segments in a pair of their own;
-`weave_capture` weaves them in again, so it replays with sound.
+(CMAF) audio comes here remuxed to TS (`HlsSource`, `services.live.fmp4`). Anything
+unreadable leaves the video segment as it came. A capture (``QITV_CAPTURE_DIR``) keeps the
+audio segments in a pair of their own; `weave_capture` weaves them in again, so it replays
+with sound.
 """
 
 from __future__ import annotations

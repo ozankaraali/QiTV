@@ -25,10 +25,12 @@ from Cryptodome.Cipher import AES
 from Cryptodome.Util.Padding import pad
 from http_fixtures import LocalSource, leaf, tls_server_context
 import requests
+from test_fmp4 import FIXTURES, box, frames, movie, sound, trak, visual
 import ts_fixtures
 from urllib3.exceptions import InsecureRequestWarning
 
 from services.live import interruptible_http, source as source_module
+from services.live.fmp4 import Fmp4Remuxer
 from services.live.source import (
     STREAM_LIMIT,
     STREAM_REFUSED,
@@ -414,8 +416,9 @@ class LiveSourceTests(SourceTestCase):
             self.assertNotIn("Authorization", headers)
         self.assertIn("access=allowed", destination.requests[-1][1].get("Cookie", ""))
 
-    def test_fragmented_and_byte_range_hls_is_unsupported(self):
-        # Inverted from main, where FFmpeg played fMP4 and byte ranges.
+    def test_byte_range_hls_is_unsupported(self):
+        # Main's FFmpeg played byte ranges; fragmented MP4 is remuxed (`FragmentedMp4Tests`),
+        # but not from byte ranges of one file, a segment's or its init section's.
         fragmented = (
             "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:4\n"
             '#EXT-X-MAP:URI="movie.mp4",BYTERANGE="1000@0"\n'
@@ -427,7 +430,7 @@ class LiveSourceTests(SourceTestCase):
         ).encode()
         server = self.server(
             {
-                # A master whose variants are all fragmented MP4.
+                # A master whose variants are fragmented MP4 in byte ranges.
                 "/master.m3u8": (
                     200,
                     {},
@@ -590,29 +593,6 @@ video.m3u8
         self.assertEqual(server.counts["/audio.m3u8"], 2)  # once more for a1.ts, then listed
         self.assertEqual((server.counts["/a0.ts"], server.counts["/a1.ts"]), (1, 1))
         self.assertEqual(len(out), 2 * (len(video) + len(ts_fixtures.audio_only(4)) - 2 * 188))
-
-    def test_an_external_audio_playlist_of_fragmented_mp4_is_unsupported(self):
-        # 2.2 weaves MPEG-TS and packed ADTS audio; fMP4 (CMAF) audio leaves the channel to
-        # direct play, as before.
-        master = b"""#EXTM3U
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",DEFAULT=YES,URI="audio.m3u8"
-#EXT-X-STREAM-INF:BANDWIDTH=100000,AUDIO="a"
-video.m3u8
-"""
-        fmp4 = leaf("a1.m4s", extra='#EXT-X-MAP:URI="init.mp4"\n')
-        server = self.server(
-            {
-                "/master.m3u8": (200, {}, master),
-                "/video.m3u8": (200, {}, leaf("video.ts")),
-                "/audio.m3u8": (200, {}, fmp4),
-                "/video.ts": (200, {}, ts_fixtures.make_stream(4, audio=False)),
-            }
-        )
-        with self.assertRaises(SourceError) as raised:
-            media(server.url + "/master.m3u8")
-        self.assertEqual(raised.exception.kind, "unsupported")
-        self.assertIn("separate", str(raised.exception))
-        self.assertEqual(server.counts["/audio.m3u8"], 1)
 
     def test_live_leaf_reloads_real_redirect_url_and_tolerates_segment_gap(self):
         def playlist(_request, count):
@@ -2154,6 +2134,123 @@ video.m3u8
                         self.assertEqual(source.burst_s, burst)
                     finally:
                         source.close()
+
+
+class FragmentedMp4Tests(SourceTestCase):
+    """HLS of fragmented MP4 (CMAF): each segment remuxed to TS (`services.live.fmp4`), and a
+    separate fMP4 audio rendition remuxed and woven in. The media are tests/fixtures/fmp4's
+    (`tests/test_fmp4.py`)."""
+
+    @staticmethod
+    def routes(folder):
+        """Every file of a fixture folder, served from the root."""
+        root = FIXTURES / folder
+        return {
+            "/" + path.relative_to(root).as_posix(): (200, {}, path.read_bytes())
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    @staticmethod
+    def remuxed(folder, init, count, pcr=True):
+        """The first `count` segments of a fixture rendition, each remuxed."""
+        remuxer = Fmp4Remuxer(pcr=pcr)
+        remuxer.init((FIXTURES / folder / init).read_bytes())
+        return [
+            remuxer.remux((FIXTURES / folder / f"seg{k}.m4s").read_bytes()) for k in range(count)
+        ]
+
+    def test_a_fragmented_mp4_variant_plays_remuxed_to_ts(self):
+        server = self.server(self.routes("avc-aac"))
+        (out,) = media(server.url + "/index.m3u8")
+        self.assertEqual(plain(out), plain(b"".join(self.remuxed("avc-aac", "init.mp4", 3))))
+        self.assertEqual(server.counts["/init.mp4"], 1)  # read once for all its segments
+        self.assertEqual(len(frames(out)[0x100]), 150)
+
+    def test_a_separate_fmp4_audio_rendition_is_remuxed_and_woven_in(self):
+        server = self.server(self.routes("split"))
+        (out,) = media(server.url + "/master.m3u8")
+        self.assertTrue(ts_fixtures_has_audio(out))
+        found = frames(out)
+        video = [
+            f.payload for ts in self.remuxed("split/0", "init_0.mp4", 3) for f in frames(ts)[0x100]
+        ]
+        audio = [
+            f.payload
+            for ts in self.remuxed("split/1", "init_1.mp4", 3, pcr=False)
+            for f in frames(ts)[0x101]
+        ]
+        self.assertEqual([f.payload for f in found[0x100]], video)
+        self.assertEqual([f.payload for f in found[0x101]], audio)
+        self.assertTrue(all(f.pcr is None for f in found[0x101]))  # the video's PCR alone
+        self.assertEqual((server.counts["/0/init_0.mp4"], server.counts["/1/init_1.mp4"]), (1, 1))
+        self.assertEqual(server.counts["/1/seg3.m4s"], 0)  # no video segment of its sequence
+
+    def test_an_init_that_cannot_be_remuxed_leaves_the_channel_unsupported(self):
+        encrypted = movie(trak(1, b"vide", 90000, visual(b"encv")))
+        other = movie(trak(1, b"vide", 90000, visual(b"av01", box(b"av1C", b"\x81\x00\x0c\x00"))))
+        for init, words in ((encrypted, "encrypted"), (other, "unsupported codec")):
+            with self.subTest(words):
+                server = self.server(
+                    {
+                        "/index.m3u8": (
+                            200,
+                            {},
+                            leaf("a.m4s", extra='#EXT-X-MAP:URI="init.mp4"\n'),
+                        ),
+                        "/init.mp4": (200, {}, init),
+                        "/a.m4s": (200, {}, b"\x00" * 100),
+                    }
+                )
+                with self.assertRaises(SourceError) as raised:
+                    media(server.url + "/index.m3u8")
+                self.assertEqual(raised.exception.kind, "unsupported")
+                self.assertIn(words, str(raised.exception))
+                self.assertEqual(server.counts["/a.m4s"], 0)
+
+    def test_fmp4_audio_whose_init_cannot_be_remuxed_leaves_the_channel_unsupported(self):
+        master = b"""#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",DEFAULT=YES,URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=100000,AUDIO="a"
+video.m3u8
+"""
+        opus = movie(trak(2, b"soun", 48000, sound(b"Opus", box(b"dOps", bytes(11)))))
+        server = self.server(
+            {
+                "/master.m3u8": (200, {}, master),
+                "/video.m3u8": (200, {}, leaf("video.ts")),
+                "/audio.m3u8": (200, {}, leaf("a1.m4s", extra='#EXT-X-MAP:URI="init.mp4"\n')),
+                "/init.mp4": (200, {}, opus),
+                "/video.ts": (200, {}, ts_fixtures.make_stream(4, audio=False)),
+            }
+        )
+        with self.assertRaises(SourceError) as raised:
+            media(server.url + "/master.m3u8")
+        self.assertEqual(raised.exception.kind, "unsupported")
+        self.assertIn("separate", str(raised.exception))
+        self.assertEqual((server.counts["/audio.m3u8"], server.counts["/a1.m4s"]), (1, 0))
+
+    def test_a_new_init_section_is_read_where_the_playlist_names_it(self):
+        routes = {
+            "/aac.mp4": (200, {}, (FIXTURES / "avc-aac" / "init.mp4").read_bytes()),
+            "/aac.m4s": (200, {}, (FIXTURES / "avc-aac" / "seg0.m4s").read_bytes()),
+            "/ac3.mp4": (200, {}, (FIXTURES / "avc-ac3" / "init.mp4").read_bytes()),
+            "/ac3.m4s": (200, {}, (FIXTURES / "avc-ac3" / "seg0.m4s").read_bytes()),
+            "/index.m3u8": (
+                200,
+                {},
+                b"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n"
+                b'#EXT-X-MAP:URI="aac.mp4"\n#EXTINF:2,\naac.m4s\n#EXTINF:2,\naac.m4s\n'
+                b'#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI="ac3.mp4"\n#EXTINF:2,\nac3.m4s\n'
+                b"#EXT-X-ENDLIST\n",
+            ),
+        }
+        server = self.server(routes)
+        first, marker, second = media(server.url + "/index.m3u8")
+        self.assertIsInstance(marker, Discontinuity)
+        self.assertEqual(frames(first)[0x101][0].payload[:2], b"\xff\xf1")  # AAC in ADTS
+        self.assertEqual(frames(second)[0x101][0].payload[:2], b"\x0b\x77")  # AC-3
+        self.assertEqual((server.counts["/aac.mp4"], server.counts["/ac3.mp4"]), (1, 1))
 
 
 class SlicedTlsSocketTests(unittest.TestCase):

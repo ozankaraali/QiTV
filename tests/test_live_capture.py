@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from test_fmp4 import FIXTURES
 from test_hls_audio import packed
 from test_live_source import FAST_RETRIES, KEY, SourceTestCase, drain, encrypt, joined, leaf
 import ts_fixtures
@@ -24,6 +25,7 @@ import ts_fixtures
 from scripts import replay_capture
 from services.live import capture as capture_module, source as source_module
 from services.live.capture import CAPTURE_ENV
+from services.live.fmp4 import Fmp4Remuxer
 from services.live.hls_audio import weave_capture
 from services.live.source import Discontinuity, open_source
 from services.live.ts import program_has_audio
@@ -506,6 +508,22 @@ class CapturedSourceTests(SourceTestCase):
         data, (reads, _comments) = self.only_capture()
         self.assertEqual(data, self.video)
         self.assertEqual(reads[-1][0], len(self.video))
+
+    def test_an_fmp4_hls_segment_is_captured_as_its_remuxed_ts(self):
+        # The replay tool reads TS: a fragmented MP4 segment is saved as the TS it became.
+        folder = FIXTURES / "avc-aac"
+        server = self.server(
+            {"/" + path.name: (200, {}, path.read_bytes()) for path in folder.iterdir()}
+        )
+        stream(server.url + "/index.m3u8")
+        data, (reads, comments) = self.only_capture()
+        remuxer = Fmp4Remuxer()
+        remuxer.init((folder / "init.mp4").read_bytes())
+        names = ("seg0.m4s", "seg1.m4s", "seg2.m4s")
+        self.assertEqual(
+            data, b"".join(remuxer.remux((folder / name).read_bytes()) for name in names)
+        )
+        self.assertEqual([word for word, _at, _after in comments], ["segment"] * 3)
 
     def test_unset_captures_nothing(self):
         server = self.server({"/live.ts": (200, {}, self.video)})

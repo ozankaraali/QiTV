@@ -43,8 +43,9 @@ class _Capture:
     ``<stamp>-<hash>.ts`` holds the bytes as they were read, before any parsing, joining or
     segmenting: a raw TS body from its first byte on, and an HLS channel's media segments one
     after another in arrival order (an AES-128 segment decrypted, as it reaches the joiner;
-    no playlist). ``<stamp>-<hash>.times`` is text with one ``<cumulative bytes> <seconds>``
-    line per read: the bytes in the ``.ts`` file once that read was saved, and the seconds
+    an fMP4 one as the TS it is remuxed to; no playlist). ``<stamp>-<hash>.times`` is text
+    with one ``<cumulative bytes> <seconds>`` line per read: the bytes in the ``.ts`` file
+    once that read was saved, and the seconds
     since the open began, with 3 decimals. Lines starting with ``#`` are comments, which a
     reader skips: ``# reconnect <seconds>`` once a raw TS stream's new connection answered
     (its bytes go on in the same pair, as they go on in the stream the helper reads), and for

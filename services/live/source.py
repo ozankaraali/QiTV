@@ -1,10 +1,12 @@
-"""Network input for the live pipeline: raw MPEG-TS over HTTP(S), and HLS of TS segments.
+"""Network input for the live pipeline: raw MPEG-TS over HTTP(S), and HLS of TS or fragmented
+MP4 segments.
 
-A source yields the stream's bytes untouched (no remux) plus ``Discontinuity`` markers. HLS
-segments are fetched in media-sequence order, AES-128 is decrypted as a stream, and media
-playlists are reloaded live. Variant choice, redirect handling and error texts are ported
-from main's ``services/timeshift_source.py``; that version handed media to FFmpeg, which
-this pipeline never uses.
+A source yields the stream's bytes untouched plus ``Discontinuity`` markers; only fragmented
+MP4 (CMAF) segments are remuxed, to TS (`services.live.fmp4`). HLS segments are fetched in
+media-sequence order, AES-128 is decrypted as a stream, and media playlists are reloaded live.
+Variant choice, redirect handling and error texts are ported from main's
+``services/timeshift_source.py``; that version handed media to FFmpeg, which this pipeline
+never uses.
 
 Every request goes through one ``requests.Session`` per source, so cookies persist,
 cross-origin redirects drop ``Authorization`` and the SSL setting applies on every hop and
@@ -40,6 +42,7 @@ from urllib3.exceptions import NameResolutionError, ReadTimeoutError
 
 from services.live import interruptible_http
 from services.live.capture import _Capture
+from services.live.fmp4 import Fmp4Error, Fmp4Remuxer
 from services.live.hls_audio import AudioWeaver
 from services.live.interruptible_http import _Closed, _Interrupter, _InterruptibleAdapter
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED  # noqa: F401 (and here)
@@ -85,6 +88,7 @@ _STOP_POLL = 0.1
 _PLAYLIST_HOPS = 4
 _KEY_CACHE = 16
 _KEY_LIMIT = 1024
+_INIT_LIMIT = 4 * 1024 * 1024  # an fMP4 init segment (EXT-X-MAP): some kilobytes in practice
 # A live playlist without a new segment for this long is frozen.
 _FROZEN_TIMEOUT = 60.0
 # An older playlist copy that overlaps recent segments is waited out this many targets.
@@ -116,7 +120,7 @@ _TOO_LARGE = "The channel's HLS playlist is too large."
 _NO_VIDEO = "The HLS channel has no compatible video quality."
 _INVALID_PLAYLIST = "The channel supplied an invalid HLS playlist."
 _NON_HTTP = "The HLS channel references a non-HTTP resource."
-_FRAGMENTED = "The HLS channel uses fragmented MP4 or byte-range segments."
+_BYTE_RANGES = "The HLS channel uses byte-range segments."
 _SEPARATE_AUDIO = "The HLS channel carries its audio in a separate playlist."
 _ENCRYPTION = "The HLS channel uses an unsupported encryption method."
 _UNDECRYPTABLE = "The HLS channel could not be decrypted."
@@ -790,14 +794,18 @@ def _key_method(key: Any) -> str:
 
 
 def _check_media(playlist: Any, base: str) -> None:
-    """Reject what a TS-concatenating fetcher cannot play, before fetching any of it."""
+    """Reject what this fetcher cannot play, before fetching any of it: byte ranges (of a
+    segment or an init section), keys other than AES-128."""
     segments = playlist.segments
-    if playlist.segment_map or any(
-        segment.init_section is not None or segment.byterange for segment in segments
+    maps = [segment.init_section for segment in segments if segment.init_section is not None]
+    if any(segment.byterange for segment in segments) or any(
+        init.byterange for init in [*maps, *(playlist.segment_map or ())]
     ):
-        raise SourceError("unsupported", _FRAGMENTED)
+        raise SourceError("unsupported", _BYTE_RANGES)
     for segment in segments:
         _resolve(base, segment.uri)
+        if segment.init_section is not None:
+            _resolve(base, segment.init_section.uri)
         method = _key_method(segment.key)
         if method == "AES-128":
             if not segment.key.uri:
@@ -953,13 +961,18 @@ class HlsSource:
       window, resumes at the live start;
     - reloads that bring no new segment for 60 s (download time excluded) time out.
 
+    Fragmented MP4 (CMAF) segments, a playlist with an init section (EXT-X-MAP), are fetched
+    whole and remuxed to TS (`Fmp4Remuxer`), the init loaded whenever its URI changes: one
+    encrypted (CENC, SAMPLE-AES) or of a codec not remuxed leaves the channel unsupported
+    (direct play) at its first segment, as any segment that is not TS did before.
+
     A master that names a separate default audio playlist is followed to its variant. When the
     variant's first segment lists no audio of its own in its program tables, the separate
-    playlist (MPEG-TS or packed ADTS segments) is woven in (2.2, `_with_audio`): each video
-    segment waits for the audio segment of the same media sequence number, and passes on as
-    one TS with it (`AudioWeaver`); a missing audio segment leaves its video segment silent.
-    An audio playlist that cannot be read, or of fragmented MP4, leaves the channel
-    unsupported, as before.
+    playlist (MPEG-TS, packed ADTS or fMP4 segments, the last remuxed to TS first) is woven in
+    (2.2, `_with_audio`): each video segment waits for the audio segment of the same media
+    sequence number, and passes on as one TS with it (`AudioWeaver`); a missing audio segment
+    leaves its video segment silent. An audio playlist that cannot be read, or whose fMP4
+    init cannot be remuxed, leaves the channel unsupported, as before.
 
     Segments are joined with each PID's continuity counter running on (`ContinuityJoiner`):
     some CDNs package every segment on its own, its counters restarting at 0, and VLC took
@@ -994,6 +1007,12 @@ class HlsSource:
         self._audio_list: dict[int, Any] = {}  # the audio playlist's segments by sequence
         self._audio_base = ""
         self._audio_ended = False  # it is finished (ENDLIST): no reload lists more
+        # Fragmented MP4 remuxed to TS: the variant's, and the separate audio's (no PCR: its
+        # PES are woven into the video's TS), each with the URI of the init it read last.
+        self._remuxer = Fmp4Remuxer()
+        self._init: str | None = None
+        self._audio_remuxer = Fmp4Remuxer(pcr=False)
+        self._audio_init: str | None = None
         self._url = url
         self._live_delay = live_delay
         self._target = target  # the session's target (None: start at live_delay only)
@@ -1181,7 +1200,10 @@ class HlsSource:
         uri = _resolve(base, segment.uri)
         self._recent.append(_identity(uri))
         skipped: tuple[SourceError, bool] | None = None
+        fragmented = segment.init_section is not None
         try:
+            if fragmented:
+                self._init = self._load_init(self._remuxer, segment.init_section, base, self._init)
             decryptor = self._decryptor(segment.key, sequence, base)
             response = self._http.fetch(lambda: self._http.get(uri, headers=_IDENTITY))
         except Exception as error:
@@ -1200,7 +1222,10 @@ class HlsSource:
                 self._capture.mark("discontinuity")
             self._capture.mark("segment", sequence)
         try:
-            blocks = _checked_ts(self._blocks(response, decryptor, self._capture))
+            if fragmented:
+                blocks = iter([self._remuxed(response, decryptor)])
+            else:
+                blocks = _checked_ts(self._blocks(response, decryptor, self._capture))
             if self._audio_unknown or self._weaver is not None:
                 blocks = iter([self._with_audio(b"".join(blocks), sequence)])
             for block in blocks:
@@ -1226,19 +1251,53 @@ class HlsSource:
         else:
             self._skip(failure, content)
 
+    def _remuxed(self, response: Any, decryptor: _Decryptor | None) -> bytes:
+        """A whole fMP4 segment as TS (`Fmp4Remuxer`); captured as that TS, which the
+        replay tool reads."""
+        data = b"".join(self._blocks(response, decryptor, None))
+        try:
+            ts = self._remuxer.remux(data)
+        except Fmp4Error as error:
+            raise _BadSegment(str(error)) from None
+        if self._capture is not None:
+            self._capture.write(ts)
+        return ts
+
+    def _load_init(self, remuxer: Fmp4Remuxer, init: Any, base: str, loaded: str | None) -> str:
+        """Read an fMP4 init section into `remuxer` unless its URI is `loaded` (the one read
+        last); returns its URI. Raises `_BadSegment` when it cannot be remuxed."""
+        uri = _resolve(base, init.uri)
+        if uri == loaded:
+            return uri
+        data = self._http.fetch(lambda: self._fetch_small(uri, _INIT_LIMIT))
+        try:
+            remuxer.init(data)
+        except Fmp4Error as error:
+            raise _BadSegment(str(error)) from None
+        return uri
+
     def _with_audio(self, video: bytes, sequence: int) -> bytes:
         """A whole video segment with its sound: the first one's program tables show whether
         the variant carries audio of its own (2.1: some multi-track restream servers name a
         separate default audio playlist and mux it too), which leaves the separate playlist
-        out; else that playlist is read (`_load_audio`: unreadable or fragmented MP4, the
-        channel is unsupported) and from then on each segment's audio is woven in (2.2).
-        Asked of the first whole segment only (a missing one is skipped as any other)."""
+        out; else that playlist is read (`_load_audio`: unreadable, or fMP4 audio whose init
+        cannot be remuxed, the channel is unsupported) and from then on each segment's audio is
+        woven in (2.2). Asked of the first whole segment only (a
+        missing one is skipped as any other)."""
         if self._audio_unknown:
             if program_has_audio(video[:_AUDIO_LOOK]):
                 self._audio_unknown = False
                 log.info("The HLS variant carries audio of its own; its separate one is left out.")
                 return video
             self._load_audio()
+            first = next(iter(self._audio_list.values()), None)
+            if first is not None and first.init_section is not None:
+                try:
+                    self._audio_init = self._load_init(
+                        self._audio_remuxer, first.init_section, self._audio_base, None
+                    )
+                except _BadSegment:
+                    raise _BadSegment(_SEPARATE_AUDIO) from None
             self._audio_unknown = False
             self._weaver = AudioWeaver()
             log.info("The HLS variant has no audio of its own; its separate playlist is woven in.")
@@ -1257,12 +1316,12 @@ class HlsSource:
             raise
         except Exception:
             raise _BadSegment(_SEPARATE_AUDIO) from None
-        if (
-            playlist.is_variant
-            or playlist.segment_map
-            or any(segment.byterange for segment in playlist.segments)
-        ):
-            raise _BadSegment(_SEPARATE_AUDIO)  # fragmented MP4 (or byte ranges): not read
+        try:
+            if playlist.is_variant:
+                raise SourceError("unsupported")
+            _check_media(playlist, final)
+        except SourceError:
+            raise _BadSegment(_SEPARATE_AUDIO) from None  # byte ranges, other keys: not read
         first = playlist.media_sequence or 0
         self._audio_list = {first + k: segment for k, segment in enumerate(playlist.segments)}
         self._audio_base = final
@@ -1302,9 +1361,23 @@ class HlsSource:
         if capture is not None:  # its own pair: the video's stays a playable TS
             capture.mark("segment", sequence)
         try:
-            return b"".join(self._blocks(response, decryptor, capture))
-        except _ReadError, _BadSegment:
+            if segment.init_section is None:
+                return b"".join(self._blocks(response, decryptor, capture))
+            data = b"".join(self._blocks(response, decryptor, None))
+            self._audio_init = self._load_init(
+                self._audio_remuxer, segment.init_section, self._audio_base, self._audio_init
+            )
+            audio = self._audio_remuxer.remux(data)
+            if capture is not None:  # as the TS it became: the replay weaves TS
+                capture.write(audio)
+            return audio
+        except (_ReadError, _BadSegment, Fmp4Error) as error:
+            log.info("An HLS audio segment could not be read (%s); it plays silent.", error)
             return b""
+        except Exception as error:
+            if _skippable(error) is None:
+                raise
+            return b""  # its init section is missing: silent, as a missing segment
         finally:
             self._http.release(response)
 
@@ -1347,14 +1420,19 @@ class HlsSource:
         return _Decryptor(secret, _iv(key, sequence))
 
     def _fetch_key(self, uri: str) -> bytes:
-        response = self._http.get(uri, headers=_IDENTITY)
-        try:
-            secret = self._http.read_all(response, b"", _KEY_LIMIT)
-        finally:
-            self._http.release(response)
+        secret = self._fetch_small(uri, _KEY_LIMIT)
         if len(secret) != _BLOCK:
             raise _BadSegment(_UNDECRYPTABLE)
         return secret
+
+    def _fetch_small(self, uri: str, limit: int) -> bytes:
+        """A small resource (a key, an init section) whole, or just over `limit` bytes of it
+        when it is longer (`_Http.read_all`)."""
+        response = self._http.get(uri, headers=_IDENTITY)
+        try:
+            return self._http.read_all(response, b"", limit)
+        finally:
+            self._http.release(response)
 
 
 def _open_local(url: str, scheme: str) -> Source:

@@ -27,6 +27,7 @@ import warnings
 
 from http_fixtures import LocalSource, leaf, tls_server_context
 from process_fixtures import still_running, terminate
+from test_fmp4 import movie, trak, visual
 from ts_fixtures import PMT_PID, make_stream
 from urllib3.exceptions import InsecureRequestWarning
 
@@ -766,7 +767,7 @@ class LiveWorkerTests(unittest.TestCase):
             "192-byte-packets": make_stream(4, packet_size=192),
             "scrambled": make_stream(4, scrambled=True),
             "too-short": b"<html>nope</html>",
-            "fragmented-hls": fragmented,
+            "encrypted-fmp4-hls": fragmented,  # its init is CENC: fMP4 is remuxed, that not
             # Its audio only in a separate playlist: the video's segments carry none.
             "separate-audio-hls": (
                 b'#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="a",DEFAULT=YES,'
@@ -774,6 +775,11 @@ class LiveWorkerTests(unittest.TestCase):
             ),
         }
         routes = {f"/user/secret/{name}": (200, {}, body) for name, body in bodies.items()}
+        routes["/user/secret/movie.mp4"] = (
+            200,
+            {},
+            movie(trak(1, b"vide", 90000, visual(b"encv"))),
+        )
         routes["/user/secret/v.m3u8"] = (200, {}, leaf("v.ts"))
         routes["/user/secret/v.ts"] = (200, {}, make_stream(4, audio=False))
         # A live input that turns out scrambled: its upstream is released at the error.
