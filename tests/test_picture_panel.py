@@ -297,6 +297,12 @@ class PanelTests(PictureCase):
         self.assertFalse(self.panel.isVisible())
         self.assertEqual(self.transport.held(), "")
 
+    def test_the_first_down_lands_on_the_first_row_though_statistics_are_ticked(self):
+        self.controls.toggle_stats()
+        self.open()
+        self.controls.handle(Action.CH_NEXT, DOWN)
+        self.assertEqual(self.panel.focused(), 0)
+
     def test_another_key_closes_it_and_goes_on(self):
         self.open()
         self.assertFalse(self.controls.handle(Action.GUIDE))
@@ -709,6 +715,21 @@ class PictureSessionTests(unittest.TestCase):
         self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", None))
         self.assertFalse(self.session.set_deinterlace(picture.AUTO))
         self.assertEqual(self.session.deinterlace(), picture.AUTO)
+        self.session.set_deinterlace(picture.ON)
+        self.session.set_deinterlace(picture.AUTO)  # libVLC keeps On till a restart
+        self.session.set_aspect(WIDE)  # another call: deinterlacing is given again
+        self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", "yadif"))
+
+    def test_a_fill_crop_waiting_for_a_worker_follows_once_it_let_go(self):
+        self.session.set_video_size(1280, 720)
+        self.play(sessions.A)
+        self.session.set_aspect(FILL)
+        self.play(sessions.B)  # the old input is being joined
+        self.session.set_video_size(1000, 500)
+        elapse(400)
+        self.assertNotIn(("video_set_crop_geometry", "2:1"), self.picture_calls())
+        self.runner.finish()  # the new media opens: the crop follows the surface
+        self.assertEqual(self.picture_calls()[-1], ("video_set_crop_geometry", "2:1"))
 
 
 class _PicturePlayer(sessions._FakePlayer):
@@ -745,6 +766,14 @@ class OverlayTests(PictureCase):
         width = self.stats.width()
         self.stats.show_rows("Statistics", [("Video", "H.264"), ("Bitrate", "3 kb/s read")])
         self.assertEqual(self.stats.width(), width)  # it stands still as numbers change
+
+    def test_the_statistics_stay_under_what_covers_the_player(self):
+        drawer = QWidget(self.host)  # added later: above it (the channel list, the guide)
+        drawer.show()
+        self.stats.show_rows("Statistics", [("Video", "H.264")])
+        self.stats.show_rows("Statistics", [("Video", "HEVC")])  # each second's refresh
+        siblings = self.host.children()
+        self.assertLess(siblings.index(self.stats), siblings.index(drawer))
 
     def test_the_notice_names_its_key(self):
         self.notice.show_notice("Playback stops in 0:42")

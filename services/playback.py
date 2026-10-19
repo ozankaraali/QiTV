@@ -316,6 +316,9 @@ class PlaybackSession(QObject):
         self._video_size = (0, 0)
         self._deinterlace = picture.AUTO
         self._deinterlace_set = False  # libVLC was given on or off: Auto cannot come back
+        # What libVLC was given last: the method (on) or None (off); Auto chosen after either
+        # leaves it so, as this player then deinterlaces until QiTV starts again.
+        self._deinterlace_method: Optional[str] = None
         self._picture_due = False  # set again once this media's video output exists
         self._picture_set = False  # libVLC was given a shape or deinterlacing on this player
         self._shape_timer = QTimer(self, singleShot=True, interval=_SHAPE_SETTLE_MS)
@@ -787,8 +790,9 @@ class PlaybackSession(QObject):
             return False
         self._deinterlace = choice
         if choice == picture.AUTO:
-            return not self._deinterlace_set
+            return not self._deinterlace_set  # libVLC keeps what it was given last
         self._deinterlace_set = True
+        self._deinterlace_method = picture.deinterlace_method(choice)
         self._set_picture()
         return True
 
@@ -806,8 +810,12 @@ class PlaybackSession(QObject):
         return self._picture_set or self._aspect != picture.AUTO or self._deinterlace_set
 
     def _apply_shape(self) -> None:
-        if self._aspect == picture.FILL and self._player_free():
+        if self._aspect != picture.FILL:
+            return
+        if self._player_free():
             self._apply_picture()
+        else:
+            self._shape_timer.start()  # a worker ends an input: once it has let go
 
     def _apply_picture(self) -> None:
         """libVLC's aspect ratio, crop and deinterlacing, as asked for (only while no worker
@@ -817,7 +825,7 @@ class PlaybackSession(QObject):
         self._player.video_set_aspect_ratio(aspect)
         self._player.video_set_crop_geometry(crop)
         if self._deinterlace_set:
-            self._player.video_set_deinterlace(picture.deinterlace_method(self._deinterlace))
+            self._player.video_set_deinterlace(self._deinterlace_method)
 
     def video_stats(self) -> dict[str, Any]:
         """What the statistics overlay shows of the media playing ({} when none): its video and

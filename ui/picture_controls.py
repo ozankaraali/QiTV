@@ -211,7 +211,10 @@ class PictureControls(QObject):
         elif action is Action.CH_PREV and key == _UP:
             panel.move_focus(-1)
         elif action is Action.CH_NEXT and key == _DOWN:
-            panel.move_focus(1)
+            if panel.focused() is None:
+                panel.focus_row(0)  # the first row, though Statistics may be ticked
+            else:
+                panel.move_focus(1)
         elif action in (Action.SEEK_BACK, Action.SEEK_FWD):
             panel.step(-1 if action is Action.SEEK_BACK else 1)
         elif action is Action.OK:

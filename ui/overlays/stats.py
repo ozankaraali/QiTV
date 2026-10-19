@@ -40,14 +40,15 @@ class StatsOverlay(Overlay):
         self.hide()
 
     def show_rows(self, title: str, rows: list[tuple[str, str]]) -> None:
-        """Show `rows` ((name, value), in the active language) under `title`."""
+        """Show `rows` ((name, value), in the active language) under `title`. It keeps its
+        place among the host's overlays (never raised): the channel list and the guide cover
+        it while they show."""
         if self.isHidden() or (title, rows) != (self._title, self._rows):
             self._title, self._rows = title, list(rows)
             self._layout()
             self.update()
         if self.isHidden():
             self.show()
-        self.raise_()
 
     def rows(self) -> list[tuple[str, str]]:
         return list(self._rows)
