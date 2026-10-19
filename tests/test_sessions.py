@@ -876,6 +876,32 @@ class GridMixTests(_Tiles):
         self.assertEqual(levels, [MAIN_LEVEL, 45, 20])
         self.assertEqual(self.mixes, [True])
 
+    def test_a_tile_focused_untouched_in_a_mix_never_leaves_its_level_as_the_main_one(self):
+        self.manager.set_level("main", 80)  # the main sound
+        self.manager.set_muted("t2", False)  # a mix
+        self.manager.set_large("t3")  # never touched: its own default level
+        self.assertEqual(self.manager.level("t3"), PIP_LEVEL)
+        self.assertEqual(self.manager.role_levels()[0], 80)  # what is remembered meanwhile
+        self.manager.end_mix()
+        self.assertEqual((self.manager.level("t3"), self.manager.role_levels()[0]), (80, 80))
+
+    def test_a_level_set_on_the_focused_tile_in_a_mix_stays_as_the_main_one(self):
+        self.manager.set_level("main", 80)
+        self.manager.set_muted("t2", False)  # a mix
+        self.manager.set_large("t3")
+        self.manager.set_level("t3", 50)  # what the user hears now
+        self.manager.end_mix()
+        self.assertEqual((self.manager.level("t3"), self.manager.role_levels()[0]), (50, 50))
+
+    def test_follow_focus_gives_the_main_level_back_too(self):
+        self.manager.set_level("main", 70)
+        self.manager.set_level("t2", 40)  # a mix
+        self.manager.set_large("t2")  # set by the user in the mix: its own level stays
+        self.manager.follow_focus()
+        self.assertEqual(self.manager.level("t2"), 40)
+        self.manager.set_large("main")  # the sound and the main level follow the focus
+        self.assertEqual(self.manager.level("main"), 40)
+
     def test_a_tiles_speaker_mixes_too(self):
         self.manager.set_muted("t3", False)
         self.assertTrue(self.manager.mixed())
