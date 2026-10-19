@@ -12,14 +12,13 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 import logging
-import os
-import tempfile
 import threading
 import time
 from typing import Any, Callable, Optional
 
 import orjson as json
 
+from services.atomic_write import atomic_write
 from services.redact import safe_message
 
 
@@ -107,24 +106,9 @@ class ChannelStore:
         with self._lock:
             if generation != self._generation:
                 return
-        path = self._path
-        assert path is not None
-        temporary = None
+        assert self._path is not None
         try:
-            fd, temporary = tempfile.mkstemp(
-                dir=os.path.dirname(path) or ".",
-                prefix="." + self.WHAT.replace(" ", "_") + "-",
-                suffix=".tmp",
-            )
-            with os.fdopen(fd, "wb") as f:
+            with atomic_write(self._path) as f:
                 f.write(json.dumps(snapshot))
-            os.replace(temporary, path)
-            temporary = None
         except Exception as e:  # anything else would stay in the Future, unseen
             self.LOG.warning("Couldn't save the %s: %s", self.WHAT, safe_message(e))
-        finally:
-            if temporary is not None:
-                try:
-                    os.remove(temporary)
-                except OSError:
-                    pass

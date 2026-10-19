@@ -6,12 +6,12 @@ from pathlib import Path
 import platform
 import shutil
 import sys
-import tempfile
 import time
 import tomllib
 
 import orjson as json
 
+from services.atomic_write import atomic_write
 from services.free_channels import ALL_NAME, ALL_URL
 from services.multikeydict import MultiKeyDict
 from services.redact import safe_message
@@ -568,24 +568,15 @@ class ConfigManager:
         finally:
             self.xmltv_channel_map = MultiKeyDict.deserialize(self.xmltv_channel_map)
 
-        # Write a sibling file and swap it in: a failed or interrupted write never
-        # truncates the saved settings.
-        directory = os.path.dirname(self.config_path) or "."
-        fd, temporary = tempfile.mkstemp(dir=directory, prefix=".config-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(serialized_config)
-            if os.path.exists(self.config_path):
-                shutil.copymode(self.config_path, temporary)
-            self._replace_config(temporary, retries)
-        except BaseException:
-            try:
-                os.remove(temporary)
-            except OSError as e:
-                logger.debug("Could not remove %s: %s", temporary, e)
-            raise
+        with atomic_write(
+            self.config_path, lambda temporary, path: self._replace_config(temporary, retries)
+        ) as f:
+            f.write(serialized_config)
 
     def _replace_config(self, temporary, retries):
+        """Swap the written settings in, keeping the file's permissions."""
+        if os.path.exists(self.config_path):
+            shutil.copymode(self.config_path, temporary)
         for attempt in range(retries + 1):
             try:
                 os.replace(temporary, self.config_path)

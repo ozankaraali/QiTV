@@ -154,7 +154,7 @@ class LiveTuningTests(unittest.TestCase):
         store = self.store()
         with (
             mock.patch(
-                "services.channel_store.os.replace", side_effect=PermissionError(13, "No", "/x")
+                "services.atomic_write.os.replace", side_effect=PermissionError(13, "No", "/x")
             ),
             self.assertLogs("services.live.tuning", "WARNING") as logs,
         ):

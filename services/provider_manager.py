@@ -4,7 +4,6 @@ import logging
 import os
 import random
 import string
-import tempfile
 import threading
 import time
 from typing import Optional
@@ -14,6 +13,7 @@ from PySide6.QtCore import QObject, Signal
 import orjson as json
 import tzlocal
 
+from services.atomic_write import atomic_write
 from services.lazy_import import lazy_module
 from services.m3u import split_cached_groups
 from services.provider_api import provider_prefers_https
@@ -327,21 +327,18 @@ class ProviderManager(QObject):
         self._cache_writer.submit(self._write_provider_cache, cache_path, generation, snapshot)
 
     def _write_provider_cache(self, cache_path, generation, snapshot):
-        temporary_path = None
+        def replace_if_newest(temporary, path):  # a newer snapshot queued meanwhile wins
+            with self._cache_lock:
+                if self._cache_generations.get(cache_path, 0) == generation:
+                    os.replace(temporary, path)
+
         try:
             with self._cache_lock:
                 if self._cache_generations.get(cache_path, 0) != generation:
                     return
             serialized = json.dumps(snapshot)
-            with tempfile.NamedTemporaryFile(
-                mode="wb", dir=self.provider_dir, suffix=".tmp", delete=False
-            ) as f:
-                temporary_path = f.name
+            with atomic_write(cache_path, replace_if_newest) as f:
                 f.write(serialized)
-            with self._cache_lock:
-                if self._cache_generations.get(cache_path, 0) == generation:
-                    os.replace(temporary_path, cache_path)
-                    temporary_path = None
         except OSError, TypeError:
             logger.exception("Failed to save provider cache")
         finally:
@@ -349,11 +346,6 @@ class ProviderManager(QObject):
                 pending = self._pending_cache_snapshots.get(cache_path)
                 if pending is not None and pending[0] == generation:
                     del self._pending_cache_snapshots[cache_path]
-            if temporary_path is not None:
-                try:
-                    os.remove(temporary_path)
-                except FileNotFoundError:
-                    pass
 
     def do_handshake(
         self,

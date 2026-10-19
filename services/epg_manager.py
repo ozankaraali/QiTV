@@ -8,7 +8,6 @@ import itertools
 import logging
 import os
 import pickle
-import tempfile
 import threading
 from typing import Any, Dict, Generator, Iterator, List, Optional, Set, Tuple, cast
 import xml.etree.ElementTree as ET
@@ -17,6 +16,7 @@ import zipfile
 import orjson as json
 import tzlocal  # the GUI thread's guide lookups use it: loaded with the window
 
+from services.atomic_write import atomic_write
 from services.content_loader import ContentLoader
 from services.epg_store import PackedGuide, read_guide, write_guide
 from services.epg_time import parse_stb, parse_xmltv, parse_xmltv_as
@@ -570,20 +570,8 @@ class EpgManager:
             for key in self._index_base:
                 if key not in self.index:
                     merged.pop(key, None)
-            index_file = self._index_file()
-            handle, temporary = tempfile.mkstemp(
-                dir=os.path.dirname(index_file), prefix="index-", suffix=".tmp"
-            )
-            try:
-                with os.fdopen(handle, "w", encoding="utf-8") as f:
-                    f.write(json.dumps(merged, option=json.OPT_INDENT_2).decode("utf-8"))
-                os.replace(temporary, index_file)
-            except BaseException:
-                try:
-                    os.remove(temporary)
-                except OSError:
-                    pass
-                raise
+            with atomic_write(self._index_file()) as f:
+                f.write(json.dumps(merged, option=json.OPT_INDENT_2))
         self._index_base = copy.deepcopy(merged)
         for key, value in merged.items():  # other providers' entries are known here now
             self.index.setdefault(key, value)
