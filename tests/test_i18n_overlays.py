@@ -1,23 +1,73 @@
 """The painted overlays in Turkish (i18n/tr.json) and French (i18n/fr.json) at the default
 window size: their texts are in the language, and QiTV's own words are never cut short (the
 player controls' layout checks run in each language too). The Stay live indicator is checked in
-every language."""
+every language.
+
+Widths are measured with the font in use: Linux's (DejaVu Sans on CI) is wider than macOS's,
+and the indicator then gives way sooner, as designed. QITV_TEST_FONTS=<a folder of .ttf files>
+paints with the family most of them are (DejaVu Sans), to see CI's widths on another system.
+"""
 
 from datetime import datetime, timedelta, timezone
 import os
+from pathlib import Path
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtGui import QFontMetrics, QFontMetricsF, QPainter
+from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics, QFontMetricsF, QPainter
 from PySide6.QtWidgets import QApplication, QWidget
 
 from services import failure_reasons, i18n
 from services.epg_view import Programme
 from tests import test_drawer, test_track_panel, test_transport
 from ui.overlays import guide
+from ui.overlays.painting import Units
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import BannerInfo, ZapBanner
+
+
+def setUpModule() -> None:
+    folder = os.environ.get("QITV_TEST_FONTS")
+    if not folder:
+        return
+    app = QApplication.instance() or QApplication([])
+    families: list[str] = []
+    for font in sorted(Path(folder).resolve().glob("*.ttf")):
+        loaded = QFontDatabase.addApplicationFont(str(font))
+        if loaded < 0:
+            raise RuntimeError(f"{font} is not a font")
+        families += QFontDatabase.applicationFontFamilies(loaded)
+    if families:  # the family most of the files are (DejaVu Sans, its bold, …)
+        app.setFont(QFont(max(set(families), key=families.count)))
+
+
+def local_clock(moment: datetime) -> str:
+    """A fixture's time as the overlays show it: local wall-clock time, whatever the zone."""
+    return moment.astimezone().strftime("%H:%M")
+
+
+def indicator_variants(t) -> list[str]:
+    """The Stay live indicator's readings, longest first, as indicator_text() writes them."""
+    return [
+        f"{head} \u25cf {tail}" if head else f"\u25cf {tail}"
+        for head, tail in t._indicator_variants()
+    ]
+
+
+def designed_indicator(t) -> str | None:
+    """What the indicator must read in its room, measured with the font in use: the first
+    reading that fits whole (all, then without "adjusted", then without the name), else None
+    (it is cut). The room is the one the player bar's layout gives it."""
+    un = Units(t.width())
+    rects = t._layout()
+    left_end = rects["back10"].right() + un.px(1.5)  # ◀10 and its gap, at the live edge
+    room = rects["live"].left() - un.px(0.8) - left_end
+    fm = QFontMetricsF(t._indicator_font(un))
+    for (head, tail), reading in zip(t._indicator_variants(), indicator_variants(t)):
+        if t._indicator_bare(un, fm, head) + fm.horizontalAdvance(tail) <= room:
+            return reading
+    return None
 
 
 def turkish(case: unittest.TestCase) -> None:
@@ -63,9 +113,30 @@ class Painted:
         case.addCleanup(setattr, QPainter, "drawText", original)
 
 
-class TurkishTransportLayoutTests(test_transport.SmallWidthLayoutTests):
-    """The player controls' layout checks (no overlaps at any width, the whole Stay live
-    indicator at 1280), in Turkish."""
+class LanguageLayoutChecks:
+    """test_transport's layout checks in another language: at 1280 the Stay live indicator
+    reads whole, or (a wider font, a longer language) gives way as designed, never cut."""
+
+    def test_a_wide_transport_shows_the_whole_indicator(self):
+        t = test_transport.Transport(idle_ms=3000)
+        self.addCleanup(t.close)
+        t.setGeometry(0, 0, 1280, 720)
+        t.set_pip_state(True, False)
+        t.show_timeshift("One", "")
+        t.update_timeline(self.state("live", 12.5, 1.05), [])
+        shown = designed_indicator(t)
+        self.assertIsNotNone(shown)
+        self.assertEqual(t.indicator_text(), shown)
+        box = t._layout()["indicator"]
+        head, tail, _width = t._indicator_fit(Units(1280), box.width() + 0.01)
+        fm = QFontMetricsF(t._indicator_font(Units(1280)))
+        bare = t._indicator_bare(Units(1280), fm, head)
+        self.assertGreaterEqual(box.width() + 0.01, bare + fm.horizontalAdvance(tail))
+
+
+class TurkishTransportLayoutTests(LanguageLayoutChecks, test_transport.SmallWidthLayoutTests):
+    """The player controls' layout checks (no overlaps at any width, the Stay live indicator
+    never cut at 1280), in Turkish."""
 
     def setUp(self):
         turkish(self)
@@ -78,8 +149,11 @@ class TurkishTransportLayoutTests(test_transport.SmallWidthLayoutTests):
         t.show_timeshift("Liman Haber", "")
         t.update_timeline(self.state("live", 12.5, 1.05), [])
         self.assertEqual(
-            t.indicator_text(), "Canlıda kal ● ≈ kaynağın 12,5 sn gerisinde · yetişiyor 1,05×"
+            indicator_variants(t)[0], "Canlıda kal ● ≈ kaynağın 12,5 sn gerisinde · yetişiyor 1,05×"
         )
+        shown = designed_indicator(t)
+        self.assertIsNotNone(shown)  # one reading fits whole at 1280
+        self.assertEqual(t.indicator_text(), shown)
         cut = Elisions(self)
         t.grab()
         self.assertEqual(cut.cut, [])
@@ -173,7 +247,8 @@ class TurkishCardsTests(unittest.TestCase):
         self.assertEqual(cut.cut, [])
         self.assertIn("CANLI", painted.texts)
         self.assertIn("Şimdi", painted.texts)
-        self.assertIn("Sonra  22:00 Dev Balinalar", painted.texts)
+        later = local_clock(now + timedelta(minutes=18))
+        self.assertIn(f"Sonra  {later} Dev Balinalar", painted.texts)
 
     def test_dates_and_numbers(self):
         when = datetime(2026, 10, 3)
@@ -186,8 +261,8 @@ class TurkishCardsTests(unittest.TestCase):
 
 class StayLiveIndicatorLanguagesTests(unittest.TestCase):
     """The Stay live indicator's busiest states in every language, at 1280\u00d7720 and 960 wide:
-    its text is never cut; with less room it leaves out "adjusted", then its name (at 1280 it
-    keeps its name)."""
+    with less room it leaves out "adjusted", then its name, measured with the font in use; its
+    text is never cut at 1280, and English keeps its name there."""
 
     LANGUAGES = ("en", "tr", "de", "es", "fr")
 
@@ -217,25 +292,35 @@ class StayLiveIndicatorLanguagesTests(unittest.TestCase):
                 for label, timeline in states.items():
                     with self.subTest(language=language, width=width, state=label):
                         t.update_timeline(timeline, [])
+                        readings = indicator_variants(t)
+                        # The designed order: all, then without "adjusted", then without the name.
+                        self.assertTrue(readings[0].startswith(f"{name} \u25cf "), readings)
+                        self.assertNotIn(adjusted, readings[-1])
+                        self.assertTrue(readings[-1].startswith("\u25cf "), readings)
                         text = t.indicator_text()
+                        designed = designed_indicator(t)
+                        if designed is not None:
+                            self.assertEqual(text, designed)
                         rate = i18n.decimal(f"{timeline['rate']:g}")
                         self.assertTrue(text.endswith(f"{rate}\u00d7"), text)
                         self.assertIn(i18n.decimal("12.5"), text)
                         if adjusted in text:  # left out before the name
                             self.assertTrue(text.startswith(f"{name} \u25cf "), text)
                         if width == 1280:
-                            self.assertTrue(text.startswith(f"{name} \u25cf "), text)
-                        cut.cut.clear()
-                        t.grab()
-                        self.assertEqual(cut.cut, [])
+                            self.assertIsNotNone(designed, "cut at 1280")
+                            if language == "en":
+                                self.assertTrue(text.startswith(f"{name} \u25cf "), text)
+                            cut.cut.clear()
+                            t.grab()
+                            self.assertEqual(cut.cut, [])
 
 
 NNBSP = "\u202f"  # French digit grouping (Qt's)
 
 
-class FrenchTransportLayoutTests(test_transport.SmallWidthLayoutTests):
-    """The player controls' layout checks in French, and the whole Stay live indicator at
-    1280 in each of its states."""
+class FrenchTransportLayoutTests(LanguageLayoutChecks, test_transport.SmallWidthLayoutTests):
+    """The player controls' layout checks in French, and the Stay live indicator at 1280 in
+    each of its states, never cut."""
 
     def setUp(self):
         french(self)
@@ -264,7 +349,10 @@ class FrenchTransportLayoutTests(test_transport.SmallWidthLayoutTests):
         for state, text in states:
             with self.subTest(text):
                 t.update_timeline(state, [])
-                self.assertEqual(t.indicator_text(), text)
+                self.assertEqual(indicator_variants(t)[0], text)
+                shown = designed_indicator(t)
+                self.assertIsNotNone(shown)
+                self.assertEqual(t.indicator_text(), shown)
                 cut = Elisions(self)
                 t.grab()
                 self.assertEqual(cut.cut, [])
@@ -364,7 +452,8 @@ class FrenchCardsTests(unittest.TestCase):
         self.assertEqual(cut.cut, [])
         self.assertIn("DIRECT", painted.texts)
         self.assertIn("En cours", painted.texts)
-        self.assertIn("À suivre  22:00 Les baleines géantes", painted.texts)
+        later = local_clock(now + timedelta(minutes=18))
+        self.assertIn(f"À suivre  {later} Les baleines géantes", painted.texts)
 
     def test_dates_and_numbers(self):
         when = datetime(2026, 10, 3)
