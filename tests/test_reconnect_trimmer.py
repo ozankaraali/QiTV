@@ -171,6 +171,39 @@ class ReconnectTrimmerTests(unittest.TestCase):
         self.assert_once_each(out, list(range(250)))
         self.assertEqual(len(trimmer.rejoins), 2)
 
+    def test_without_a_keyframe_in_reach_the_picture_goes_on_past_the_old_end(self):
+        # A 10 s GOP, and a GOP longer than the stream (intra refresh): the old connection
+        # ended inside it, and no keyframe comes within 2 s past its end. The pictures go on
+        # from the first one past it (the decoder has the ones before): each frame once, no
+        # gap, and the wait ended.
+        for gop_s in (10.0, 100.0):
+            with self.subTest(gop_s=gop_s):
+                stream = make_stream(20, gop_s=gop_s)
+                old = b"".join(packets(stream)[: frame_at(stream, 160) + 2])
+                out, trimmer = run(old, new_connection(stream, frame_at(stream, 0)), chunk=5000)
+                self.assert_once_each(out, list(range(500)))
+                (rejoin,) = trimmer.rejoins
+                self.assertLess(rejoin.dropped_bytes, len(old))
+
+    def test_a_pcr_on_a_pid_of_its_own_never_steps_back(self):
+        # The program's clock on PID 0x1f0, ahead of each picture: the new connection's PCRs
+        # up to the old one's last go with the pictures they time.
+        def with_pcr_pid(data: bytes) -> bytes:
+            out = []
+            for p in packets(data):
+                if pid_of(p) == VIDEO_PID and p[3] & 0x20 and p[4] >= 7 and p[5] & 0x10:
+                    pcr = p[6:12]
+                    out.append(bytes([0x47, 0x01, 0xF0, 0x20, 183, 0x10]) + pcr + b"\xff" * 176)
+                out.append(p)
+            return b"".join(out)
+
+        stream = with_pcr_pid(make_stream(10))
+        old = b"".join(packets(stream)[: frame_at(stream, 150)])
+        out, _ = run(old, new_connection(stream, frame_at(stream, 75)))
+        clock = [ts._pcr_base(p, 6) for p in packets(out) if pid_of(p) == 0x1F0]
+        self.assertTrue(all(pts_delta(a, b) > 0 for a, b in zip(clock, clock[1:])))
+        self.assert_once_each(out, list(range(250)))
+
 
 if __name__ == "__main__":
     unittest.main()

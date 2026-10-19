@@ -85,6 +85,8 @@ _CLOCK_PENDING_PACKETS = 4096
 # ReconnectTrimmer
 _REJOIN_TAIL_BYTES = 8 * 1024 * 1024  # output kept to read the last PTS and pictures from
 _REJOIN_WINDOW_TICKS = 60 * _CLOCK  # a new connection's PTS this near the old's: one timebase
+_REJOIN_KEY_WAIT_TICKS = 2 * _CLOCK  # past the old connection's end, a keyframe is waited for
+_REJOIN_WAIT_PACKETS = 4 * _CLOCK_PENDING_PACKETS  # ... with this many packets held at most
 
 
 class Unsupported(Exception):
@@ -971,22 +973,27 @@ class ReconnectTrimmer:
     `_REJOIN_WINDOW_TICKS` before the furthest video PTS passed on (modulo 2**33) and its first
     packet's picture bytes are those of the picture passed on with that PTS (a restart's new
     clock may land there too, its picture never matches). Then the picture is dropped up to
-    its first keyframe after the furthest PTS, every other PES PID (the sound) up to its first
-    PES after that PID's furthest PTS, and the tables pass; from the first such drop on, what
-    passes goes through `ContinuityJoiner`, so the counters run on. A new connection that
-    resumes after the old one, one in another timebase (a reset: `RepeatTrimmer`'s and the
-    segmenter's, as before), one that re-sends further back than the tail holds, and a program
-    without a picture pass untouched, as does everything before the first reconnect. The PTS,
-    pictures and counters before a reconnect are read from the last `_REJOIN_TAIL_BYTES` passed
-    on, so between reconnects bytes pass as they come, at no cost per packet. The program's
-    video PID and type are the caller's (the segmenter's).
+    the furthest PTS; past it, it goes on at a keyframe that comes within
+    `_REJOIN_KEY_WAIT_TICKS` (the pictures before it dropped too), else at the first picture
+    past it (a long GOP or intra refresh: the decoder goes on from the old connection's
+    pictures, the same ones), the packets after that picture held meanwhile. Every other PES
+    PID (the sound) goes on at its first PES after that PID's furthest PTS, a PCR on a PID of
+    its own only once past that PID's furthest one, and the tables pass. What a cut
+    connection passes goes through `ContinuityJoiner` until the next reconnect, so the
+    counters run on (about a microsecond a packet). A new connection that resumes after the
+    old one, one in another timebase (a reset: `RepeatTrimmer`'s and the segmenter's, as
+    before), one that re-sends further back than the tail holds, and a program without a
+    picture pass untouched, as does everything before the first reconnect: the PTS, PCRs,
+    pictures and counters before a reconnect are read from the last `_REJOIN_TAIL_BYTES`
+    passed on, so bytes pass as they come, at no cost per packet. The program's video PID and
+    type are the caller's (the segmenter's).
     """
 
     def __init__(self, *, program: Callable[[], tuple[int | None, int | None]]) -> None:
         self._program = program
         self._tail: deque[bytes] = deque()  # the latest output, `_REJOIN_TAIL_BYTES` or more
         self._tail_size = 0
-        self._joiner: ContinuityJoiner | None = None  # from the first drop on
+        self._joiner: ContinuityJoiner | None = None  # for a cut connection
         self._pos = 0  # the input offset of the next byte fed
         self._armed = False  # a reconnect came: its connection is judged
         self._buf = b""  # while armed: bytes not yet judged (a partial packet)
@@ -996,9 +1003,14 @@ class ReconnectTrimmer:
         self._video_type: int | None = None
         self._top: dict[int, int] = {}  # each PES PID's furthest PTS before the reconnect
         self._counters: dict[int, int] = {}  # each PID's last counter before it
+        self._pcr_top: dict[int, int] = {}  # each PID's furthest PCR before it
         self._pictures: dict[int, bytes] = {}  # the picture bytes of each video PES start, by PTS
         self._keep: dict[int, bool] = {}  # PES PIDs: whether the PES being read passes
         self._resumed: set[int] = set()  # PIDs that pass for good
+        # From the first picture past the furthest PTS (its PTS: `_past`) while a keyframe is
+        # waited for: (offset, packet, passes; None: a video packet, decided by the wait).
+        self._waiting: list[tuple[int, bytes, bool | None]] | None = None
+        self._past = 0
         self._after = 0  # packets judged since the picture resumed
         self._at = 0  # where the connection began
         self._step = 0.0
@@ -1049,14 +1061,17 @@ class ReconnectTrimmer:
         return self._release()
 
     def _release(self) -> bytes:
-        held = b"".join(packet for _, packet in self._pending or ()) + self._buf
+        kept: list[bytes] = []
+        if self._waiting is not None:
+            self._end_wait(True, kept)
+        held = b"".join(kept) + b"".join(p for _, p in self._pending or ()) + self._buf
         self._pending, self._buf = None, b""
         if self._armed:
             self._close()
         out = self._out(held)
-        if self._joiner is not None:
+        if self._joiner is not None:  # the next connection's counters are its own again
             out += self._joiner.end()
-            self._joiner.segment()
+            self._joiner = None
         return out
 
     def _out(self, data: bytes) -> bytes:
@@ -1072,12 +1087,13 @@ class ReconnectTrimmer:
 
     def _arm(self) -> None:
         video, video_type = self._program()
-        self._top, self._counters, self._pictures = _last_times(b"".join(self._tail), video)
+        times = _last_times(b"".join(self._tail), video)
+        self._top, self._counters, self._pictures, self._pcr_top = times
         self._armed = video is not None and video in self._top
         self._video, self._video_type = video, video_type
         self._pending = [] if self._armed else None
         self._searching = True
-        self._keep, self._resumed = {}, set()
+        self._keep, self._resumed, self._waiting = {}, set(), None
         self._after = 0
         self._at, self._step, self._dropped = self._pos, 0.0, []
 
@@ -1096,7 +1112,7 @@ class ReconnectTrimmer:
                 self._armed = False
                 kept.extend(packet for _, packet in pending)
             return
-        self._place(pkt, at, self._passes(pkt), kept)
+        self._cut(pkt, at, kept)
         if self._video in self._resumed:
             self._after += 1
             dropping = any(not keep for pid, keep in self._keep.items() if pid not in self._resumed)
@@ -1119,20 +1135,35 @@ class ReconnectTrimmer:
             return
         if step > 0:
             self._resumed.add(self._video)  # the picture goes on after the old one's
-        judged = [(at, packet, self._passes(packet)) for at, packet in pending]
-        if self._video in self._resumed and all(keep for _, _, keep in judged):
-            self._armed = False  # it resumes where the old connection ended: untouched
-            kept.extend(packet for _, packet in pending)
-            return
-        if self._joiner is None:
+            judged = [self._passes(packet) for _, packet in pending]
+            if all(judged):
+                self._armed = False  # it resumes where the old connection ended: untouched
+                kept.extend(packet for _, packet in pending)
+                return
             self._joiner = ContinuityJoiner(self._counters)
-        for at, packet, keep in judged:
-            self._place(packet, at, keep, kept)
+            for (at, packet), keep in zip(pending, judged):
+                self._place(packet, at, keep, kept)
+            return
+        self._joiner = ContinuityJoiner(self._counters)
+        for at, packet in pending:
+            self._cut(packet, at, kept)
+
+    def _cut(self, pkt: bytes, at: int, kept: list[bytes]) -> None:
+        """Pass or drop a packet of a connection that re-sends (or hold it: `_wait`)."""
+        if self._waiting is not None:
+            self._wait(pkt, at, kept)
+            return
+        keep = self._passes(pkt)
+        if self._waiting is not None:  # this picture, the first past the furthest, begins it
+            self._waiting.append((at, pkt, None))
+        else:
+            self._place(pkt, at, keep, kept)
 
     def _passes(self, pkt: bytes) -> bool:
-        """Whether a packet of the new connection passes: the picture from its first keyframe
-        after the old connection's furthest PTS, other PES from their first after theirs, and
-        everything else (the tables, null packets)."""
+        """Whether a packet of the new connection passes: other PES from their first after
+        their PID's furthest PTS, a PCR of its own PID past that PID's furthest, everything
+        else (the tables, null packets); the picture from a keyframe after its furthest PTS
+        (the first picture after it begins the wait for one: `_wait`)."""
         b1 = pkt[1]
         pid = ((b1 & 0x1F) << 8) | pkt[2]
         if pid in self._resumed or b1 & 0x80 or pid == 0x1FFF:
@@ -1145,8 +1176,11 @@ class ReconnectTrimmer:
             after = pts is not None and top is not None and pts_delta(top, pts) > 0
             if pid == self._video:
                 if after:
+                    assert pts is not None
                     rai, _, es = _pes_start(pkt)
-                    after = _trim_key(pkt, rai, es, self._video_type)
+                    if not _trim_key(pkt, rai, es, self._video_type):
+                        self._waiting, self._past = [], pts  # `_judge` holds it from here
+                        return False
             elif top is None:
                 after = True  # a PID without a PTS before: nothing to repeat
             elif pts is None:
@@ -1156,7 +1190,45 @@ class ReconnectTrimmer:
                 return True
             self._keep[pid] = False
             return False
+        if pid not in self._top and pkt[3] & 0x20 and pkt[4] >= 7 and pkt[5] & 0x10:
+            top = self._pcr_top.get(pid)  # a PCR of its own: the old connection's clock again?
+            if top is not None and self._video not in self._resumed:
+                return pts_delta(top, _pcr_base(pkt, 6)) > 0
         return self._keep.get(pid, pid not in self._top)  # as its PES (a section passes)
+
+    def _wait(self, pkt: bytes, at: int, kept: list[bytes]) -> None:
+        """Past the furthest PTS: hold the packets until a keyframe comes in time (the
+        pictures before it go) or none did (from the first picture past it on, they pass)."""
+        waiting = self._waiting
+        assert waiting is not None and self._video is not None
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        if pid != self._video:
+            waiting.append((at, pkt, self._passes(pkt)))
+        else:
+            pts = _pes_times(pkt, 0)[0] if (pkt[1] & 0xC0) == 0x40 else None
+            if pts is not None:
+                rai, _, es = _pes_start(pkt)
+                after = pts_delta(self._top[self._video], pts) > 0
+                if after and _trim_key(pkt, rai, es, self._video_type):
+                    self._end_wait(False, kept)  # a keyframe in time: the pictures before go
+                    kept.append(pkt)
+                    return
+                if pts_delta(self._past, pts) > _REJOIN_KEY_WAIT_TICKS:
+                    self._end_wait(True, kept)  # none in time: from the first past it on
+                    kept.append(pkt)
+                    return
+            waiting.append((at, pkt, None))
+        if len(waiting) >= _REJOIN_WAIT_PACKETS:
+            self._end_wait(True, kept)
+
+    def _end_wait(self, pictures: bool, kept: list[bytes]) -> None:
+        """The wait ends: the held packets pass or go as judged, the pictures as `pictures`
+        says; the picture passes from here."""
+        waiting, self._waiting = self._waiting or [], None
+        assert self._video is not None
+        self._resumed.add(self._video)
+        for at, packet, keep in waiting:
+            self._place(packet, at, pictures if keep is None else keep, kept)
 
     def _place(self, pkt: bytes, at: int, keep: bool, kept: list[bytes]) -> None:
         if keep:
@@ -1189,13 +1261,15 @@ class ReconnectTrimmer:
 
 def _last_times(
     data: bytes, video: int | None
-) -> tuple[dict[int, int], dict[int, int], dict[int, bytes]]:
+) -> tuple[dict[int, int], dict[int, int], dict[int, bytes], dict[int, int]]:
     """Each PES PID's furthest PTS (of its latest run: a step back over `_REORDER_TICKS`
-    starts it over), each PID's last continuity counter, and the picture bytes in the first
-    packet of each `video` PES, by PTS, in `data` from its first sync."""
+    starts it over), each PID's last continuity counter, the picture bytes in the first packet
+    of each `video` PES by PTS, and each PID's furthest PCR (as the PTS), in `data` from its
+    first sync."""
     top: dict[int, int] = {}
     counters: dict[int, int] = {}
     pictures: dict[int, bytes] = {}
+    pcrs: dict[int, int] = {}
     n = len(data)
     off = _find_sync(data, 0)
     while 0 <= off and off + PACKET <= n:
@@ -1207,6 +1281,11 @@ def _last_times(
             pid = ((b1 & 0x1F) << 8) | data[off + 2]
             if b3 & 0x10 and pid != 0x1FFF:
                 counters[pid] = b3 & 0x0F
+            if b3 & 0x20 and data[off + 4] >= 7 and data[off + 5] & 0x10:
+                pcr = _pcr_base(data, off + 6)
+                last = pcrs.get(pid)
+                if last is None or not -_REORDER_TICKS <= pts_delta(last, pcr) <= 0:
+                    pcrs[pid] = pcr
             if b1 & 0x40:
                 pts = _pes_times(data, off)[0]
                 if pts is not None:
@@ -1217,7 +1296,7 @@ def _last_times(
                         pkt = data[off : off + PACKET]
                         pictures[pts] = pkt[_pes_start(pkt)[2] :]
         off += PACKET
-    return top, counters, pictures
+    return top, counters, pictures, pcrs
 
 
 @dataclass(frozen=True, slots=True)
