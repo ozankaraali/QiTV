@@ -61,4 +61,5 @@ dev = [
   "mypy==2.4.0",
   "flake8==7.4.1",
   "types-requests==2.33.0.20260906",
+  "dmgbuild>=1.6.7",
 ]
