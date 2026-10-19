@@ -15,6 +15,9 @@ the controls stay drawn over the cards and the labels, and a label the controls'
 would cover hides while they show. A press asks for the tile's focus at once (`tilePressed`);
 the click follows after the double-click interval (`tileClicked`), or a double-click asks to
 leave the grid (`leaveRequested`).
+
+While a channel is dragged from the channel list (`set_drop`), the tile under the pointer is
+lit as where it would play, and the channel's name follows the pointer.
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter, QPaintEvent, QPen, QRegion
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -99,6 +102,7 @@ class GridTiles(Overlay):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)  # `hits` take them
         self._tiles: list[TileView] = []
         self._avoided: Optional[QWidget] = None  # the player controls
+        self._drop: Optional[tuple[Optional[str], str, QPoint]] = None  # a drag (set_drop)
         self._click = QTimer(self, singleShot=True)
         self._click.timeout.connect(self._clicked)
         self._pressed = ""  # the tile of the press whose click waits
@@ -117,6 +121,19 @@ class GridTiles(Overlay):
 
     def tiles(self) -> list[TileView]:
         return list(self._tiles)
+
+    def set_drop(self, name: Optional[str], title: str, point: QPoint) -> None:
+        """A channel dragged from the channel list: tile `name` (None: no tile under the
+        pointer) is lit as where it would play, and `title` follows the pointer at `point`
+        (this widget's coordinates). None and "" end it."""
+        drop = (name, title, QPoint(point)) if title else None
+        if drop != self._drop:
+            self._drop = drop
+            self._refresh()
+
+    def drop(self) -> Optional[tuple[Optional[str], str, QPoint]]:
+        """The drag shown now: (the tile lit, the title, where), else None."""
+        return self._drop
 
     def avoid(self, controls: QWidget) -> None:
         """Leave `controls`' own buttons and bar (`hole_claims()`) theirs while they show."""
@@ -223,8 +240,26 @@ class GridTiles(Overlay):
             return None
         return pill
 
+    def _ghost(self) -> QRectF:
+        """Where the dragged channel's name is drawn, beside the pointer (empty: no drag)."""
+        drop = self._drop
+        if drop is None:
+            return QRectF()
+        un = self._units()
+        font = un.font(1.1, QFont.Weight.DemiBold)
+        width = QFontMetrics(font).horizontalAdvance(drop[1]) + 2 * un.px(1.0)
+        height = QFontMetrics(font).height() + 2 * un.px(0.5)
+        point = drop[2]
+        return QRectF(point.x() + un.px(1.2), point.y() + un.px(1.2), width, height)
+
     def _drawn(self) -> QRegion:
         region = QRegion()
+        drop = self._drop
+        if drop is not None:
+            region = region.united(QRegion(self._ghost().toAlignedRect()))
+            for tile in self._tiles:
+                if tile.name == drop[0]:
+                    region = region.united(QRegion(tile.rect))
         for tile in self._tiles:
             if tile.state in CARDS:
                 region = region.united(QRegion(tile.rect))
@@ -290,7 +325,31 @@ class GridTiles(Overlay):
                 half = width / 2
                 p.drawRect(QRectF(tile.rect).adjusted(half, half, -half, -half))
                 p.restore()
+        if self._drop is not None:
+            self._paint_drop(p, un)
         p.end()
+
+    def _paint_drop(self, p: QPainter, un: Units) -> None:
+        """A channel dragged over the grid: the tile it would play in, and its name."""
+        drop = self._drop
+        assert drop is not None
+        name, title, _point = drop
+        for tile in self._tiles:
+            if tile.name == name:
+                rect = QRectF(tile.rect)
+                p.fillRect(rect, qcolor(PALETTE.accent, 0.22))
+                width = un.px(RING_UNITS) * 2
+                p.save()
+                pen = QPen(qcolor(PALETTE.accent), width, Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(rect.adjusted(width / 2, width / 2, -width / 2, -width / 2))
+                p.restore()
+        ghost = self._ghost()
+        paint_backdrop(p, ghost)
+        p.setFont(un.font(1.1, QFont.Weight.DemiBold))
+        p.setPen(qcolor(PALETTE.text))
+        p.drawText(ghost, Qt.AlignmentFlag.AlignCenter, title)
 
     def _paint_card(self, p: QPainter, un: Units, tile: TileView) -> None:
         rect = QRectF(tile.rect)

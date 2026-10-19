@@ -16,7 +16,8 @@ Left of fullscreen sit the mini player (the whole window small in a corner, Alt+
 TV while the window offers picture in picture the second channel (P) and the multiview (V,
 lit while its grid shows; the second channel gives way then), then "Open in external player"
 (the shell's VLC/MPV menu for what plays now). Hovering those names them and their keys.
-While the grid shows, a chip left of them names its layout ("2×2"): a click changes it.
+While the grid shows, a chip left of them names its layout ("2×2"): a click changes it; and
+while the last grid's channels can come back, a "Last grid" chip brings them.
 Left of the sound (♫) a speaker opens the volume mixer on the large picture's row; it shows
 whether that picture is muted. ♫ opens the Sound panel above it and the subtitles button
 the Subtitles panel (ui/track_controls.py): the controls stay up while one shows (`hold`).
@@ -79,6 +80,7 @@ RECONNECTING = "Reconnecting…"  # the helper opens a new connection to it
 TOOLTIPS = {
     "pip": "Second channel (P)",
     "layout": "Tiles: 2, 4, 6 or 9",
+    "restore": "The channels of the last grid",
     "mini": "Mini player (Alt+P)",
     "fullscreen": "Fullscreen (F)",
     "mini_back": "Back to the full window (Alt+P)",
@@ -90,6 +92,7 @@ TOOLTIPS = {
     "faster": "Faster",
 }
 LIBRARY_LABEL = "‹ Library"
+RESTORE_LABEL = "Last grid"  # the multiview's chip: the last grid's channels again
 # Controls for a key of the player's (ui.keymap.SHORTCUTS): what they do, and that key.
 KEY_HINTS = {
     "play": ("Play / pause", "Space"),
@@ -219,6 +222,7 @@ class Transport(Overlay):
     pipRequested = Signal()  # the second channel: open picture in picture, or close it
     gridRequested = Signal()  # the multiview: its grid, or back to one picture
     layoutRequested = Signal()  # the grid's layout chip: the next layout
+    restoreRequested = Signal()  # the grid's "Last grid" chip: the last grid's channels
     miniPlayerRequested = Signal()
     # "Open in external player": the shell's menu opens from this point (the button's
     # top-left, global coordinates).
@@ -257,6 +261,7 @@ class Transport(Overlay):
         self._grid_available = False  # the window can show the multiview's grid
         self._grid_shown = False
         self._grid_layout = ""  # the grid's layout, as its chip names it ("2×2")
+        self._grid_restorable = False  # the last grid can come back: its chip shows
         self._pip_rect = QRect()  # the small picture: the shades leave it alone
         self._muted = False  # the large picture's mute: the speaker shows it
         self._mini = self._fullscreen = False  # their buttons then show the way back
@@ -383,12 +388,26 @@ class Transport(Overlay):
             self.update()
             self._controls_changed()
 
-    def set_grid_state(self, available: bool, shown: bool, layout: str = "") -> None:
+    def set_grid_state(
+        self, available: bool, shown: bool, layout: str = "", restorable: bool = False
+    ) -> None:
         """The multiview's button: shown on live TV when `available`; lit while its grid
-        shows, with the layout chip naming `layout` ("2×2") beside it."""
-        state = (available, shown, layout if shown else "")
-        if state != (self._grid_available, self._grid_shown, self._grid_layout):
-            self._grid_available, self._grid_shown, self._grid_layout = state
+        shows, with the layout chip naming `layout` ("2×2") beside it, and while the last
+        grid's channels can come back (`restorable`), a "Last grid" chip."""
+        state = (available, shown, layout if shown else "", restorable and shown)
+        current = (
+            self._grid_available,
+            self._grid_shown,
+            self._grid_layout,
+            self._grid_restorable,
+        )
+        if state != current:
+            (
+                self._grid_available,
+                self._grid_shown,
+                self._grid_layout,
+                self._grid_restorable,
+            ) = state
             self.update()
             self._controls_changed()
 
@@ -821,7 +840,12 @@ class Transport(Overlay):
         width = 2 * un.px(1.0) + fm.horizontalAdvance(self._grid_layout)
         h = self._chip_h(un)
         rects["layout"] = QRectF(x - width, cy - h / 2, width, h)
-        return x - width - un.px(1.2)
+        x -= width + un.px(1.2)
+        if self._grid_restorable:
+            width = 2 * un.px(1.0) + fm.horizontalAdvance(RESTORE_LABEL)
+            rects["restore"] = QRectF(x - width, cy - h / 2, width, h)
+            x -= width + un.px(1.2)
+        return x
 
     def _right_buttons(self, *rest: str) -> tuple[str, ...]:
         """The icon buttons from the right edge inwards: the window's and the picture's, the
@@ -899,12 +923,13 @@ class Transport(Overlay):
                     or name == self._held
                 )
                 draw_icon(p, self.icon(name), rects[name], qcolor(PALETTE.accent) if lit else text)
-        chip = rects.get("layout")
-        if chip is not None:
-            fill_round(p, chip, qcolor(PALETTE.text, 0.14), chip.height() / 2)
-            p.setFont(self._chip_font(un))
-            p.setPen(text)
-            p.drawText(chip, Qt.AlignCenter, self._grid_layout)
+        for name, label in (("layout", self._grid_layout), ("restore", RESTORE_LABEL)):
+            chip = rects.get(name)
+            if chip is not None:
+                fill_round(p, chip, qcolor(PALETTE.text, 0.14), chip.height() / 2)
+                p.setFont(self._chip_font(un))
+                p.setPen(text)
+                p.drawText(chip, Qt.AlignCenter, label)
         p.end()
 
     def _paint_scrims(self, p: QPainter) -> None:
@@ -1296,6 +1321,8 @@ class Transport(Overlay):
                 self.gridRequested.emit()
             elif name == "layout":
                 self.layoutRequested.emit()
+            elif name == "restore":
+                self.restoreRequested.emit()
             elif name == "mini":
                 self.miniPlayerRequested.emit()
             elif name == "external":

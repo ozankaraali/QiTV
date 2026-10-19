@@ -245,7 +245,8 @@ Picture-in-picture is for live TV, and it needs two streams: a provider that all
 
 Watch several live channels side by side: press <kbd>V</kbd>, choose **View → Multiview** (<kbd>Ctrl/⌘+4</kbd>) or click the grid button on the player controls. The channel you are watching becomes the first tile and an open picture-in-picture the second; the others show **+**.
 
-- Click a tile to give it the focus: its sound plays, and the player controls, the channel list, zapping and the banner act on it. Click **+** to choose a channel for that tile.
+- Click a tile to give it the focus: its sound plays, and the player controls, the channel list, zapping and the banner act on it. Click **+** to choose a channel for that tile, or drag a channel from the channel list onto any tile.
+- The grid you leave is kept: next time, the **Last grid** chip beside the layout chip (or **View → Restore Last Multiview**) brings its channels back.
 - The chip beside the grid button switches between 2 and 4 tiles, and also 6 and 9 when hardware decoding is on (**Settings**).
 - Each tile asks your provider for a stream of its own. When a provider has no stream to spare, the tile says so and keeps the channel: click it to try again. QiTV never retries by itself.
 - <kbd>V</kbd>, <kbd>Esc</kbd> or a double-click on a tile goes back to one picture: the focused tile becomes the big picture and the tile you had before it stays as picture-in-picture.

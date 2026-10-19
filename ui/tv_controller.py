@@ -250,6 +250,7 @@ class TVController(QObject):
             logo=self._logo,
             show_transport=self._show_transport,
             explain=self._explain_item,
+            may_reopen=self._may_reopen,
             parent=self,
         )
         # Provider setups: the loading and welcome hints, the last channel, the Library's
@@ -413,12 +414,16 @@ class TVController(QObject):
                 closed=lambda: self._closed,
                 toast=self._toast,
                 reopen=self._reopen_tile,
+                restore=self._restore_tile,
                 parent=self,
             )
             self._grid.changed.connect(self._mixer.refresh)
             self._grid.changed.connect(self._update_guides)
         # The links of tiles opened beside the focused one, on the side lane (one at a time).
         self._tile_links: dict[str, Target] = {}
+        # A restored grid's tiles waiting for their provider's setup: (tile, channel,
+        # provider, group).
+        self._waiting_tiles: list[tuple[str, dict, str, str]] = []
         self._column_wheel = PointerInput(self)
         # While a live link resolves, the banner is shown again before it fades (Minor 11).
         self._tuning = QTimer(self, interval=TUNING_KEEP_MS)
@@ -502,6 +507,13 @@ class TVController(QObject):
             gridded = getattr(transport, "gridRequested", None)
             if gridded is not None:
                 gridded.connect(partial(self.handle, Action.MULTIVIEW))
+            # A channel dragged from the channel list onto a tile plays there.
+            dragged = getattr(drawer, "channelDragged", None)
+            if dragged is not None:
+                drawer.set_drag_enabled(self.multiview_shown)
+                dragged.connect(self._on_channel_dragged)
+                drawer.channelDropped.connect(self._on_channel_dropped)
+                drawer.dragEnded.connect(self._grid.drag_ended)
         if self._logos is not None:
             self._logos.logoReady.connect(self._on_logo_ready)
         # The column's list would scroll on its own; wheel over it zaps instead.
@@ -1667,6 +1679,73 @@ class TVController(QObject):
             grid.open_tile(name, item, play_direct, provider=provider_name, limit=limit)
         self._tracks.prepare_small(slot.playback, item)  # its sound sync, kept per channel
 
+    def _may_reopen(self, target: Target) -> bool:
+        """An ended direct stream opens again (a reconnect): in the multiview only while its
+        tile holds its provider's slot, or takes one within the limit; else its card says so
+        and nothing opens."""
+        grid = self._grid
+        if grid is None or not grid.shown():
+            return True
+        item = target.item
+        provider = item_provider.provider_name(self.catalog, item)
+        if self._tuner.ensure_held(provider, self._live_controls.limit(item)):
+            return True
+        grid.refuse(item)  # the card: no stream to spare
+        self._current, self._cid = None, None
+        return False
+
+    def restore_multiview(self) -> None:
+        """View → Restore Last Multiview: the grid (shown first), with the last grid's
+        channels."""
+        if self._grid is None or self._closed:
+            return
+        if not self._grid.shown():
+            self.toggle_multiview()
+        self._grid.restore_last()
+
+    def _restore_tile(self, name: str, channel: dict, provider: str, group: str) -> None:
+        """A restored grid's tile: its channel opens once its provider is ready (as the last
+        channel at start), saying "Connecting…" meanwhile."""
+        hub = getattr(self.catalog, "catalogs", None)
+        if hub is not None and not hub.is_ready(provider):
+            self._waiting_tiles = [entry for entry in self._waiting_tiles if entry[0] != name]
+            self._waiting_tiles.append((name, channel, provider, group))
+            if self._grid is not None:
+                self._grid.linking(name, channel)
+            hub.ensure(provider)
+            return
+        self._play_restored(name, channel, group)
+
+    def _play_restored(self, name: str, channel: dict, group: str) -> None:
+        """A restored tile's channel, zapping through its group when the list has it, else
+        through every channel."""
+        listed = list(self.catalog.items("live", group) or []) if group else []
+        if not any(ZapContext.same(channel, other) for other in listed):
+            group, listed = ALL_GROUP_ID, self._all_live()
+        self.play_in_tile(name, channel, group_key=group, channels=listed)
+
+    def _on_channel_dragged(self, node: NavNode, point: QPoint) -> None:
+        if self._grid is not None and not self._closed:
+            self._grid.drag_over(point, node.payload)
+
+    def _on_channel_dropped(self, node: NavNode, point: QPoint) -> None:
+        """A channel row let go over a tile: it plays there (the focused one as a tune; any
+        other beside it, the focus staying), and the list closes."""
+        grid = self._grid
+        if grid is None or self._closed:
+            return
+        grid.drag_ended()
+        name = grid.tile_at(point)
+        if name is None:
+            return
+        group = next((n for n in reversed(self.nav.path) if n.layer == "group"), None)
+        channels = payloads(self.nav.children(group) or []) if group is not None else []
+        key = group.key if group is not None else ALL_GROUP_ID
+        if not any(ZapContext.same(node.payload, other) for other in channels):
+            key, channels = ALL_GROUP_ID, self._all_live()  # a found channel: every one
+        self.overlays.drawer.close_drawer()
+        self.play_in_tile(name, node.payload, group_key=key, channels=channels)
+
     def _reopen_tile(self, name: str, channel: dict) -> None:
         """A tile without the focus failed on an STB portal: a fresh link, once (its portal's
         session may have expired; the grid says when)."""
@@ -1715,13 +1794,13 @@ class TVController(QObject):
         channel = self._channel
         transport = self.overlays.transport
         transport.set_paused(self._state == "paused")
-        grid = self.multiview_shown()  # a tile took the focus: no swap, nothing recorded yet
+        grid = self.multiview_shown()  # a tile took the focus: the grid shows it
         if channel is not None:
             self.zap.tuned(channel)
             current = self._current
             if current is not None:
-                if not grid:
-                    self._record_watched(current, view.url)  # Recent, the next start's channel
+                # Recent and the next start's channel: a swap's, and a tile's taking the focus.
+                self._record_watched(current, view.url)
                 # The transport takes the large picture's last timeline at once; the banner
                 # then announces the channel (they share the bottom of the video).
                 self._live_controls.show_live_transport(current)
@@ -1842,6 +1921,11 @@ class TVController(QObject):
                 self._ask_again(queued)
         if self._pip is not None:
             self._pip.provider_settled(name, self._link_owner, ask_again=True)
+        waiting = [entry for entry in self._waiting_tiles if entry[2] == name]
+        self._waiting_tiles = [entry for entry in self._waiting_tiles if entry[2] != name]
+        for tile, channel, _provider, group in waiting:  # a restored grid's: it opens now
+            if self._grid is not None and self._grid.awaits(tile, channel):
+                self._play_restored(tile, channel, group)
 
     def _on_links_provider_failed(self, name: str, message: str) -> None:
         """Provider `name` failed: the link requests it dropped never settle, so they are
@@ -1867,6 +1951,11 @@ class TVController(QObject):
             name, self._link_owner, ask_again=False
         ):
             lost = True
+        for tile, channel, provider, _group in list(self._waiting_tiles):
+            if provider == name:  # a restored grid's tile: its provider failed
+                self._waiting_tiles.remove((tile, channel, provider, _group))
+                if self._grid is not None:
+                    self._grid.link_failed(tile, channel)
         if not lost and not side_lost:
             return
         if lost:

@@ -30,7 +30,10 @@ it to live when it fell far behind (`SessionManager.set_large`). Its label says 
 
 Esc (with nothing else open), V or a double-click leaves: the focused tile is the big
 picture, the tile focused before it stays as the picture-in-picture if it plays, and the
-other tiles stop. The Library, films, files, the mini player and external players leave the
+other tiles stop. Leaving keeps the grid (config `multiview`, versioned; older builds ignore
+it): the next grid offers a "Last grid" chip (and View → Restore Last Multiview) that brings
+its channels back into their tiles, each once its provider is ready, and its focus. A
+channel dragged from the channel list onto a tile plays there (`drag_over`, `tile_at`). The Library, films, files, the mini player and external players leave the
 grid first (the shell calls `leave`).
 """
 
@@ -41,11 +44,13 @@ from functools import partial
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QPoint, Signal
 
 from services.config_manager import ConfigManager
 from services.live.refusals import REFUSALS
 from services.live.stay_live import TARGETS
+from services.provider_ids import with_provider
+from services.redact import safe_message
 from services.sessions import SessionManager, Slot
 from services.zapping import ZapContext
 from ui import item_provider
@@ -57,6 +62,7 @@ from ui.overlays.transport import fmt_behind
 logger = logging.getLogger(__name__)
 
 CELLS = (2, 4, 6, 9)
+SAVED_VERSION = 1  # config `multiview`'s format
 SOFTWARE_CELLS = (2, 4)  # without hardware decoding (Settings)
 DEFAULT_CELLS = 4
 LAYOUT_NAMES = {2: "1×2", 4: "2×2", 6: "3×2", 9: "3×3"}
@@ -113,6 +119,7 @@ class GridControls(QObject):
         closed: Callable[[], bool],
         toast: Callable[..., None],
         reopen: Optional[Callable[[str, dict], None]] = None,
+        restore: Optional[Callable[[str, dict, str, str], None]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` lays the surfaces out and `tiles` (the GridTiles overlay; None in tests)
@@ -124,7 +131,9 @@ class GridControls(QObject):
         tile's stream was refused (the shell forgets what it opened there); `close_pip()`
         drops a picture-in-picture still on its way; `vod()` and `external()` say a film
         plays or channels play in an external player; `reopen(name, channel)` makes a tile's
-        link again (an STB portal's, once: `_may_retry`) and opens it in that tile."""
+        link again (an STB portal's, once: `_may_retry`) and opens it in that tile;
+        `restore(name, channel, provider, group)` opens a saved tile's channel there once its
+        provider is ready."""
         super().__init__(parent)
         self.sessions = sessions
         self.frame = frame
@@ -147,6 +156,8 @@ class GridControls(QObject):
         self._closed = closed
         self._toast = toast
         self._reopen = reopen
+        self._restore = restore
+        self._restored = False  # the last grid came back since the grid showed
         self._shown = False
         self._cells = DEFAULT_CELLS
         self._names: list[str] = []  # the tiles, in order
@@ -177,6 +188,9 @@ class GridControls(QObject):
         transport = self._transport
         if transport is not None:
             transport.layoutRequested.connect(self.next_layout)
+            restored = getattr(transport, "restoreRequested", None)
+            if restored is not None:
+                restored.connect(self.restore_last)
             transport.set_grid_state(True, False)
         if self._tiles_view is not None and transport is not None:
             self._tiles_view.avoid(transport)
@@ -293,6 +307,7 @@ class GridControls(QObject):
         self._previous = small.name if small is not None else None
         self._cards.clear()
         self._wanted.clear()
+        self._restored = False
         full, tile = self.ring_sizes()
         sessions.enter_grid(full_bytes=full, tile_bytes=tile)
         self._shown = True
@@ -317,6 +332,7 @@ class GridControls(QObject):
             return
         sessions = self.sessions
         large = sessions.large().name
+        self._save()  # the grid as it is now, for "Last grid" next time
         keep = self._kept() if keep_pip else None
         for name in self._names:
             if name not in (large, keep):
@@ -720,4 +736,158 @@ class GridControls(QObject):
     def _update_transport(self) -> None:
         if self._transport is not None:
             layout = LAYOUT_NAMES.get(len(self._names), "") if self._shown else ""
-            self._transport.set_grid_state(True, self._shown, layout)
+            self._transport.set_grid_state(True, self._shown, layout, self.restorable())
+
+    # ---- the last grid ------------------------------------------------------------------
+
+    def saved(self) -> Optional[dict[str, Any]]:
+        """The last grid (config `multiview`) as this build reads it: its layout, the focused
+        tile's place, and per tile (channel, provider, group) or None. None when there is
+        none, it is another version's, or none of its providers is still listed."""
+        saved = getattr(self.config, "multiview", None)
+        if not isinstance(saved, dict) or saved.get("version") != SAVED_VERSION:
+            return None
+        cells, records = saved.get("cells"), saved.get("tiles")
+        if cells not in CELLS or not isinstance(records, list):
+            return None
+        tiles = [self._channel_of(record) for record in records[:cells]]
+        if not any(tiles):
+            return None
+        focus = saved.get("focus")
+        return {"cells": cells, "focus": focus if isinstance(focus, int) else 0, "tiles": tiles}
+
+    def _channel_of(self, record: Any) -> Optional[tuple[dict, str, str]]:
+        """A saved tile's channel (stamped with its provider unless the list shows that
+        one), the provider and the group; None for an empty tile or a provider gone."""
+        if not isinstance(record, dict):
+            return None
+        item, provider = record.get("item"), record.get("provider_name")
+        if not isinstance(item, dict) or not isinstance(provider, str) or not provider:
+            return None
+        if provider not in self.catalog.provider_names():
+            return None
+        if provider != self.catalog.current_provider_name():
+            item = with_provider(item, provider)
+        return item, provider, str(record.get("group_id") or "")
+
+    def restorable(self) -> bool:
+        """The grid shows, and the last grid has a channel no tile shows yet."""
+        if not self._shown or self._restored:
+            return False
+        saved = self.saved()
+        if saved is None:
+            return False
+        return any(
+            entry is not None and not self._shown_anywhere(entry[0]) for entry in saved["tiles"]
+        )
+
+    def restore_last(self) -> None:
+        """The "Last grid" chip (and View → Restore Last Multiview): the last grid's layout
+        (as large as offered, never fewer tiles than show now), its channels in their tiles
+        (or the next free ones), each once its provider is ready, and its focus."""
+        saved = self.saved()
+        if not self._shown or saved is None or self._restore is None:
+            return
+        self._restored = True
+        offered = [cells for cells in self.choices() if cells <= saved["cells"]]
+        cells = max(offered[-1] if offered else self.choices()[0], len(self._names))
+        if cells != len(self._names):
+            self.set_cells(cells)
+        names = self._names
+        taken = {name for name in names if self.state(name) in _SHOWING}
+        placed: list[tuple[str, dict, str, str]] = []
+        for index, entry in enumerate(saved["tiles"]):
+            if entry is None or self._shown_anywhere(entry[0]):
+                continue
+            free = [name for name in names if name not in taken]
+            if not free:
+                break
+            name = names[index] if index < len(names) and names[index] in free else free[0]
+            taken.add(name)
+            placed.append((name, *entry))
+        focus = saved["focus"]
+        if 0 <= focus < len(names) and any(name == names[focus] for name, *_ in placed):
+            self._focus(names[focus])  # it opens as zapping does, the others beside it
+        for name, channel, provider, group in placed:
+            self._restore(name, channel, provider, group)
+        self._update_transport()
+        self.changed.emit()
+
+    def _shown_anywhere(self, channel: dict) -> bool:
+        for name in self._names:
+            slot = self._slot(name)
+            if self._linking.get(name) is not None and ZapContext.same(
+                self._linking[name], channel
+            ):
+                return True
+            if (
+                slot is not None
+                and self.state(name) in _SHOWING
+                and ZapContext.same(slot.channel, channel)
+            ):
+                return True
+        return False
+
+    def _save(self) -> None:
+        """Keep the grid as it is (config `multiview`, versioned; older builds ignore it):
+        its layout, the focused tile's place and each tile's channel (a card's too)."""
+        records: list[Optional[dict[str, Any]]] = []
+        for name in self._names:
+            card, slot = self._cards.get(name), self._slot(name)
+            if card is not None:
+                channel: Optional[dict] = card.channel
+            elif name in self._linking:
+                channel = self._linking[name]
+            elif slot is not None and self.state(name) in _SHOWING:
+                channel = slot.channel
+            else:
+                channel = None
+            if channel is None:
+                records.append(None)
+                continue
+            group = slot.group_key if slot is not None and slot.group_key else ""
+            records.append(
+                {
+                    "provider_name": item_provider.provider_name(self.catalog, channel),
+                    "group_id": str(group),
+                    "item": dict(channel),
+                }
+            )
+        if not any(records):
+            return  # nothing to bring back: the grid before stays
+        large = self.sessions.large().name
+        self.config.multiview = {
+            "version": SAVED_VERSION,
+            "cells": len(self._names),
+            "focus": self._names.index(large) if large in self._names else 0,
+            "tiles": records,
+        }
+        try:
+            self.config.save_config()
+        except Exception as e:
+            logger.warning("Couldn't save the multiview: %s", safe_message(e))
+
+    # ---- a channel dragged from the channel list ----------------------------------------
+
+    def tile_at(self, point: QPoint) -> Optional[str]:
+        """The tile under `point` (global coordinates), else None."""
+        if not self._shown:
+            return None
+        local = self.frame.map_from_global(point)
+        for name, rect in self.frame.tiles():
+            if rect.contains(local):
+                return name
+        return None
+
+    def drag_over(self, point: QPoint, channel: dict) -> None:
+        """A channel dragged from the channel list is over `point` (global): the tile under
+        it is lit, and the channel's name follows the pointer."""
+        view = self._tiles_view
+        if view is None or not self._shown:
+            return
+        name = self.tile_at(point)
+        view.set_drop(name, str(channel.get("name") or ""), view.mapFromGlobal(point))
+
+    def drag_ended(self) -> None:
+        if self._tiles_view is not None:
+            self._tiles_view.set_drop(None, "", QPoint())

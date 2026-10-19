@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from typing import Mapping, Optional
 
-from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QWidget
 from shiboken6 import isValid
@@ -129,6 +129,10 @@ class GridFrame(QObject):
     def area(self) -> QRect:
         """The page the grid covers (its own coordinates: the overlay host's too)."""
         return self._container.rect()
+
+    def map_from_global(self, point: QPoint) -> QPoint:
+        """`point` (global) in the page's coordinates, as `tiles()` gives the rects."""
+        return self._container.mapFromGlobal(point)
 
     def tiles(self) -> list[tuple[str, QRect]]:
         """Each tile's name and rect (container coordinates), in order; none while hidden."""

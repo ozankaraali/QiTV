@@ -440,6 +440,9 @@ class ConfigManager:
     pip_volume = _config_property(
         "pip_volume", DEFAULT_OPTION_PIP_VOLUME, coerce=int, clamp=(0, 100)
     )
+    # The last multiview grid (2.2, optional; older builds ignore it): {"version": 1, "cells",
+    # "focus", "tiles": [a last_live_channel-style record, or None per tile]}.
+    multiview = _config_property("multiview", None)
     multiview_tile_ram_mib = _config_property(
         "multiview_tile_ram_mib",
         DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB,

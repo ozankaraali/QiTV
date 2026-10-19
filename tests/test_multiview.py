@@ -16,6 +16,7 @@ from timer_fixtures import wait_until
 
 from services.connection_budget import ConnectionBudget
 from services.live.refusals import STREAM_LIMIT
+from services.navigation import NavNode
 from services.sessions import SessionManager, Slot
 from services.zapping import ZapContext
 from tests.test_tv_controller import CHANNELS, FakeLiveSession, FakeSession
@@ -237,6 +238,19 @@ class GridTilesTests(FrameCase):
         QTest.qWait(QApplication.doubleClickInterval() + 50)
         self.assertIn(("leave", "pip"), self.events)
         self.assertNotIn(("clicked", "pip"), self.events)
+
+    def test_a_dragged_channel_lights_its_tile_and_its_name_follows_the_pointer(self):
+        point = self.rects[3].center()
+        self.view.set_drop("t3", "Channel Nine", point)
+        mask = self.view.mask_region()
+        self.assertTrue(mask.contains(self.rects[3].center() + QPoint(-100, 40)))  # the tile
+        self.assertTrue(mask.contains(point + QPoint(30, 25)))  # the name beside the pointer
+        self.assertEqual(self.view.drop(), ("t3", "Channel Nine", point))
+        self.view.set_drop(None, "", QPoint())
+        self.assertIsNone(self.view.drop())
+        self.assertFalse(
+            self.view.mask_region().contains(self.rects[3].center() + QPoint(-100, 40))
+        )
 
     def test_the_controls_buttons_stay_the_controls_drawn_over_the_cards(self):
         controls = Avoided(self.page, QRect(self.rects[2].center(), QSize(40, 40)))
@@ -774,6 +788,172 @@ class OneStreamMultiviewTests(MultiviewCase):
         t2 = self.sessions.slot("t2")
         self.assertTrue(wait_until(lambda: t2.live.running and t2.live.url == "http://stream/2"))
         self.assertEqual(self.budget.holders("Home"), ["t2"])
+
+
+class LastGridTests(MultiviewCase):
+    """Stage 4: the grid left is kept (config `multiview`) and comes back on a click."""
+
+    def setUp(self):
+        super().setUp()
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.catalog.names.append("Harbor IPTV")
+        self.catalog.catalogs.ready = {"Home"}
+
+    def test_leaving_keeps_the_layout_the_focus_and_each_tiles_channel(self):
+        self.start_large(0)
+        self.v()
+        self.pick_in("t2", CHANNELS[2], "http://stream/3")  # focused now
+        self.v()
+        saved = self.config.multiview
+        self.assertEqual((saved["version"], saved["cells"], saved["focus"]), (1, 4, 2))
+        tiles = saved["tiles"]
+        self.assertEqual(tiles[0]["item"]["name"], "One")
+        self.assertEqual(tiles[0]["provider_name"], "Home")
+        self.assertIsNone(tiles[1])  # the PiP's player played nothing
+        self.assertEqual((tiles[2]["item"]["name"], tiles[2]["group_id"]), ("Three", "10"))
+        self.assertIsNone(tiles[3])
+        self.assertGreater(self.config.saves, 0)
+
+    def test_the_last_grid_comes_back_each_tile_once_its_provider_is_ready(self):
+        self.config.multiview = {
+            "version": 1,
+            "cells": 4,
+            "focus": 0,
+            "tiles": [
+                {"provider_name": "Home", "group_id": "10", "item": CHANNELS[0]},  # plays
+                {"provider_name": "Home", "group_id": "10", "item": CHANNELS[2]},
+                {"provider_name": "Harbor IPTV", "group_id": "", "item": HARBOR_NINE},
+                {"provider_name": "Gone provider", "group_id": "", "item": CHANNELS[3]},
+            ],
+        }
+        self.start_large(0)
+        self.v()
+        self.assertTrue(self.transport.restorable)  # the "Last grid" chip
+        links = len(self.catalog.links)
+        self.transport.restoreRequested.emit()
+        self.assertFalse(self.transport.restorable)
+        self.assertEqual(len(self.catalog.links), links + 1)  # Three, beside tile 1
+        self.assertEqual(self.catalog.links[-1][1], CHANNELS[2])
+        self.assertIn("Harbor IPTV", self.catalog.catalogs.ensured)
+        self.assertEqual(self.grid.label("t2"), ("Nine", CONNECTING))  # waits for Harbor
+        self.assertEqual(self.grid.state("t3"), EMPTY)  # a provider gone: nothing
+        self.ready("http://stream/3")
+        pip = self.sessions.slot("pip")
+        self.assertTrue(wait_until(lambda: pip.live.running and pip.live.url.endswith("/3")))
+        self.catalog.catalogs.ready.add("Harbor IPTV")
+        self.catalog.hub_ready("Harbor IPTV")
+        self.assertEqual(self.catalog.links[-1][1]["name"], "Nine")
+        self.ready("http://harbor/9")
+        t2 = self.sessions.slot("t2")
+        self.assertTrue(wait_until(lambda: t2.live.running and t2.live.url.endswith("/9")))
+        self.assertIs(self.sessions.large(), self.main_slot)  # the saved focus: tile 1
+
+    def test_a_grid_of_another_version_is_never_read(self):
+        self.config.multiview = {"version": 2, "cells": 4, "tiles": [{"anything": 1}]}
+        self.start_large(0)
+        self.v()
+        self.assertIsNone(self.grid.saved())
+        self.assertFalse(self.transport.restorable)
+
+    def test_a_channel_dropped_on_a_tile_plays_there_and_the_focus_stays(self):
+        self.start_large(0)
+        self.v()
+        self.drawer.visible = True
+        node = NavNode("item", "3", "Three", CHANNELS[2])
+        point = self.page.mapToGlobal(self.grid_frame.rect_of("t3").center())
+        self.assertEqual(self.grid.tile_at(point), "t3")
+        links = len(self.catalog.links)
+        self.controller._on_channel_dropped(node, point)
+        self.assertFalse(self.drawer.visible)
+        self.assertEqual(len(self.catalog.links), links + 1)
+        self.ready("http://stream/3")
+        t3 = self.sessions.slot("t3")
+        self.assertTrue(wait_until(lambda: t3.live.running))
+        self.assertIs(self.sessions.large(), self.main_slot)
+        outside = self.page.mapToGlobal(QPoint(-50, -50))
+        self.controller._on_channel_dropped(node, outside)  # on no tile: nothing
+        self.assertEqual(len(self.catalog.links), links + 1)
+
+    def test_a_tile_taking_the_focus_is_recorded_as_watched(self):
+        self.two_pictures()
+        self.grid_frame.focusRequested.emit("pip")
+        self.assertEqual(self.watch.plays[-1][1]["name"], "Two")
+
+    def test_a_reconnecting_tile_without_a_stream_to_spare_shows_the_card(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 2}
+        self.catalog.ptype = "XTREAM"
+        self.start_large(0)
+        self.v()
+        self.grid_frame.tileClicked.emit("t2")
+        self.controller.tune(CHANNELS[2], group_key="10", channels=CHANNELS)
+        self.ready("rtsp://stream/3")  # played directly: its ended stream reconnects
+        t2 = self.sessions.slot("t2")
+        self.assertEqual(t2.playback.plays[-1][0], "rtsp://stream/3")
+        t2.tuner._held.give_back()  # its slot went (as the provider may count it gone) ...
+        self.budget.request("Home", 2, purpose="pip")  # ... and another stream took it
+        controls = self.controller._live_controls
+        self.assertTrue(controls.reconnect(self.controller._current))
+        plays = len(t2.playback.plays)
+        controls._reopen()
+        self.assertEqual(len(t2.playback.plays), plays)  # nothing opens over the limit
+        self.assertEqual(self.grid.state("t2"), DENIED)
+
+
+class DrawerDragTests(unittest.TestCase):
+    """A channel row dragged out of the channel list (the multiview's grid shows)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from types import SimpleNamespace
+
+        from services.navigation import NavModel
+        from tests.test_navigation import FakeCatalog as NavCatalog
+        from ui.overlays.drawer import Drawer
+
+        self.host = QWidget()
+        self.host.resize(PAGE)
+        self.host.show()
+        self.addCleanup(self.host.close)
+        nav = NavModel(NavCatalog(), SimpleNamespace(favorites=[], watch_history=[]))
+        self.drawer = Drawer(nav, None, lambda item: None, self.host)
+        nav.reset_to("live", "10")
+        self.drawer.open_drawer()
+        self.events = []
+        self.drawer.channelDragged.connect(lambda node, at: self.events.append(("drag", node)))
+        self.drawer.channelDropped.connect(lambda node, at: self.events.append(("drop", node)))
+        self.drawer.dragEnded.connect(lambda: self.events.append(("ended",)))
+        self.drawer.playRequested.connect(lambda *args: self.events.append(("play",)))
+        view = self.drawer._columns["right"].view
+        self.viewport = view.viewport()
+        self.row = view.visualRect(view.model().index(0, 0)).center()
+        self.node = self.drawer._columns["right"].nodes[0]
+
+    def mouse(self, kind, point, buttons=LEFT):
+        global_point = QPointF(self.viewport.mapToGlobal(point))
+        event = QMouseEvent(kind, QPointF(point), global_point, LEFT, buttons, Qt.NoModifier)
+        QApplication.sendEvent(self.viewport, event)
+
+    def drag(self):
+        self.mouse(QEvent.Type.MouseButtonPress, self.row)
+        self.mouse(QEvent.Type.MouseMove, self.row + QPoint(60, 0))
+        self.mouse(QEvent.Type.MouseMove, self.row + QPoint(300, 40))
+        self.mouse(QEvent.Type.MouseButtonRelease, self.row + QPoint(300, 40), Qt.NoButton)
+
+    def test_with_the_grid_a_channel_row_drags_out_and_drops_without_a_click(self):
+        self.drawer.set_drag_enabled(lambda: True)
+        self.drag()
+        kinds = [event[0] for event in self.events]
+        self.assertEqual(kinds, ["drag", "drag", "ended", "drop"])
+        self.assertIs(self.events[0][1], self.node)
+        self.assertIsNone(self.drawer.graphicsEffect())  # the list is whole again
+        self.assertIsNone(self.drawer.dragging())
+
+    def test_without_the_grid_nothing_drags(self):
+        self.drag()
+        self.assertNotIn("drag", [event[0] for event in self.events])
 
 
 class HardwareMultiviewTests(MultiviewCase):

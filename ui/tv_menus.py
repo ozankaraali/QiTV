@@ -117,6 +117,7 @@ class TVMenus(QObject):
         add(view, "Series", "Ctrl+3", lambda: screens.open_library("series"))
         # The multiview's grid over live TV (V on the player), or back to one picture.
         add(view, "Multiview", "Ctrl+4", screens.toggle_multiview)
+        add(view, "Restore Last Multiview", "", screens.restore_multiview)
         add(view, "Search", "Ctrl+F", screens.open_search)
         add(view, "Refresh Channels and Guide", "Ctrl+R", self.refresh_content)
         player = self._player_actions  # the player's keys: off while the Library shows

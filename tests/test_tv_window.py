@@ -483,6 +483,7 @@ class TVWindowTests(WindowCase):
                 ("Movies", "Ctrl+2"),
                 ("Series", "Ctrl+3"),
                 ("Multiview", "Ctrl+4"),
+                ("Restore Last Multiview", ""),
                 ("Search", "Ctrl+F"),
                 ("Refresh Channels and Guide", "Ctrl+R"),
                 ("Guide", "G"),

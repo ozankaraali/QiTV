@@ -20,9 +20,15 @@ count), the channels found, and a last row that looks for films and series in th
 genre opens as if walked to (`NavModel.open_found_group`), a channel plays (`channelFound`),
 the last row asks for the Library's search (`libraryFindRequested`). Esc, ✕ or ← end the find:
 the right column is back where it was, its highlight and its scroll position too.
+
+While the multiview's grid shows (`set_drag_enabled`), a channel row can be dragged out onto
+a tile: once the pointer moved a drag distance with the button down, the list fades (the
+tiles behind it show), the pointer's moves come as `channelDragged`, and the release as
+`channelDropped` (never a click on the row); a drawer hidden meanwhile ends it
+(`dragEnded`).
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import logging
 
@@ -50,7 +56,14 @@ from PySide6.QtGui import (
     QPen,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QToolTip
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QGraphicsOpacityEffect,
+    QStyle,
+    QStyledItemDelegate,
+    QToolTip,
+)
 
 from services.find import FoundChannel, FoundGenre
 from services.navigation import (
@@ -87,6 +100,7 @@ logger = logging.getLogger(__name__)
 
 _CONTEXT_LAYERS = ("item", "episode")  # rows with a context menu (channels are items)
 _RIGHT_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
+DRAG_OPACITY = 0.25  # the list while a channel is dragged out of it onto the grid
 LEFT_FRACTION = 0.25
 RIGHT_FRACTION = 0.58
 FADE_U = 7.0
@@ -595,6 +609,11 @@ class Drawer(Overlay):
     channelFound = Signal(object, str)
     libraryFindRequested = Signal(str)  # the find's text, for the Library's search
     closed = Signal()
+    # A channel row dragged out (the multiview): the node and the pointer (global), as it
+    # moves, where it is let go; dragEnded once it is over, dropped or not.
+    channelDragged = Signal(object, QPoint)
+    channelDropped = Signal(object, QPoint)
+    dragEnded = Signal()
 
     def __init__(self, nav: NavModel, logos, now_provider, parent=None) -> None:
         super().__init__(parent)
@@ -622,6 +641,9 @@ class Drawer(Overlay):
         self._preview_timer.timeout.connect(self._flush_preview)
         self._laid_out_for: tuple[int, int] | None = None  # the host size _relayout last fitted
         self._hover: str | None = None  # the header button under the pointer
+        self._drag_enabled: Callable[[], bool] = lambda: False  # set_drag_enabled
+        self._drag_from: tuple[str, int, QPoint] | None = None  # a press on a row (global)
+        self._dragging: NavNode | None = None  # the channel being dragged out
         # Hover over the header buttons (a move elsewhere goes on to the host, as without it).
         self.setMouseTracking(True)
         nav.changed.connect(self._on_nav_changed)
@@ -645,6 +667,14 @@ class Drawer(Overlay):
         self._refresh()
         self.show()
         self.raise_()
+
+    def set_drag_enabled(self, enabled: Callable[[], bool]) -> None:
+        """Whether a channel row may be dragged out now (the multiview's grid shows)."""
+        self._drag_enabled = enabled
+
+    def dragging(self) -> NavNode | None:
+        """The channel being dragged out of the list, else None."""
+        return self._dragging
 
     def close_drawer(self) -> None:
         self._flush_preview()
@@ -1276,6 +1306,8 @@ class Drawer(Overlay):
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj is self.parentWidget() and event.type() == QEvent.Resize:
             self._relayout()
+        elif isinstance(event, QMouseEvent) and self._drag_event(obj, event):
+            return True  # a channel row dragged out: neither a selection nor a click
         elif (
             event.type() in _RIGHT_PRESSES
             and isinstance(event, QMouseEvent)
@@ -1284,6 +1316,70 @@ class Drawer(Overlay):
         ):
             return True  # not a selection: the context menu follows, the highlight stays
         return False
+
+    def _drag_event(self, obj: QObject, event: QMouseEvent) -> bool:
+        """A list's mouse event, as a drag of a channel row out of the list; True when the
+        event is the drag's."""
+        side = next((s for s, c in self._columns.items() if obj is c.view.viewport()), None)
+        if side is None:
+            return False
+        kind, left = event.type(), Qt.MouseButton.LeftButton
+        where = event.globalPosition().toPoint()
+        if kind == QEvent.Type.MouseButtonPress and event.button() == left:
+            row = self._columns[side].view.indexAt(event.position().toPoint()).row()
+            self._drag_from = (side, row, where)
+            return False  # the list selects the row, as ever
+        if kind == QEvent.Type.MouseMove and event.buttons() & left:
+            if self._dragging is not None:
+                self.channelDragged.emit(self._dragging, where)
+                return True
+            node = self._drag_node(where)
+            if node is None:
+                return False
+            self._dragging = node
+            effect = QGraphicsOpacityEffect(self)
+            effect.setOpacity(DRAG_OPACITY)  # the tiles behind the list show
+            self.setGraphicsEffect(effect)
+            self.channelDragged.emit(node, where)
+            return True
+        if kind == QEvent.Type.MouseButtonRelease and event.button() == left:
+            self._drag_from = None
+            node = self._dragging
+            if node is None:
+                return False
+            self._end_drag()
+            self.channelDropped.emit(node, where)
+            return True
+        return False
+
+    def _drag_node(self, where: QPoint) -> NavNode | None:
+        """The channel a press began on, once the pointer moved a drag distance (and the
+        grid shows); else None."""
+        start = self._drag_from
+        if start is None or not self._drag_enabled():
+            return None
+        side, row, origin = start
+        if (where - origin).manhattanLength() < QApplication.startDragDistance():
+            return None
+        nodes = self._columns[side].nodes
+        node = nodes[row] if 0 <= row < len(nodes) else None
+        live = self.finding() or (node is not None and self._nav.section_of(node) == "live")
+        if node is None or node.layer != "item" or not isinstance(node.payload, dict) or not live:
+            self._drag_from = None  # not a channel's row: a plain press and move
+            return None
+        return node
+
+    def _end_drag(self) -> None:
+        if self._dragging is None:
+            return
+        self._dragging = None
+        self._drag_from = None
+        self.setGraphicsEffect(None)  # type: ignore[arg-type]  # None removes it (Qt's API)
+        self.dragEnded.emit()
+
+    def hideEvent(self, event) -> None:
+        self._end_drag()  # hidden mid-drag: no release comes to it
+        super().hideEvent(event)
 
     def _relayout(self) -> None:
         parent = self.parentWidget()

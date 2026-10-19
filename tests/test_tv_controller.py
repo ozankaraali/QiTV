@@ -459,6 +459,7 @@ class FakeTransport(FakeOverlay):
     pipRequested = Signal()
     gridRequested = Signal()
     layoutRequested = Signal()
+    restoreRequested = Signal()
     miniPlayerRequested = Signal()
     externalRequested = Signal(QPoint)
     volumeRequested = Signal()
@@ -481,8 +482,9 @@ class FakeTransport(FakeOverlay):
     def set_pip_state(self, available, open_):
         self.record("set_pip_state", available, open_)
 
-    def set_grid_state(self, available, shown, layout=""):
+    def set_grid_state(self, available, shown, layout="", restorable=False):
         self.record("set_grid_state", available, shown, layout)
+        self.restorable = restorable
 
     def follow_pip(self, rect):
         self.record("follow_pip", rect)

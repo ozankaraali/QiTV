@@ -221,6 +221,16 @@ class TVPages(QObject):
             self.back_to_tv()
         window.controller.handle(Action.MULTIVIEW)
 
+    def restore_multiview(self) -> None:
+        """View → Restore Last Multiview: the grid over live TV with the last grid's channels
+        (from the Library, live TV first)."""
+        window = self._window
+        if window.closing():
+            return
+        if self.library_shown():
+            self.back_to_tv()
+        window.controller.restore_multiview()
+
     def escape_to_library(self) -> bool:
         """Esc on a movie from the Library, with nothing open on the player: back to it.
 
