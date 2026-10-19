@@ -398,6 +398,11 @@ class ShippedCatalogTests(unittest.TestCase):
         self.assertEqual(extract.missing(catalog, self.entries), [])
         self.assertEqual(i18n.native_name("tr", catalog), "Türkçe")
 
+    def test_spanish_translates_every_text(self):
+        catalog = extract.read_json(extract.CATALOGS / "es.json")
+        self.assertEqual(extract.missing(catalog, self.entries), [])
+        self.assertEqual(i18n.native_name("es", catalog), "Español")
+
     def test_the_packaged_apps_carry_the_catalogs(self):
         for spec in ("qitv-macos.spec", "qitv-windows.spec", "qitv-linux.spec"):
             with self.subTest(spec):

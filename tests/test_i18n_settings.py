@@ -28,7 +28,12 @@ class LanguageSettingTests(base.WindowCase):
             dialog = self.dialog()
         self.assertEqual(
             self.choices(dialog),
-            [("", "System default (Türkçe)"), ("en", "English"), ("tr", "Türkçe")],
+            [
+                ("", "System default (Türkçe)"),
+                ("en", "English"),
+                ("es", "Español"),
+                ("tr", "Türkçe"),
+            ],
         )
         self.assertEqual(dialog.language_combo.currentData(), "")  # no key: the system's
         self.assertIn("starts again", dialog.language_note.text())
