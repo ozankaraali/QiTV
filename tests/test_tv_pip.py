@@ -14,6 +14,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMenu
 
 from services.connection_budget import ConnectionBudget
+from services.live.live_session import CRAWLING, LOADING, RECONNECTING, UNAVAILABLE
 from services.live.refusals import STREAM_LIMIT
 from services.live.tuning import channel_key
 from services.provider_ids import with_provider
@@ -39,6 +40,7 @@ from ui.page_stack import PageStack
 from ui.pip_controls import (
     ALREADY_LARGE,
     NO_PREVIOUS,
+    NOTICE_MS,
     OPEN_PIP_FIRST,
     PIP_EXTERNAL,
     PIP_LIVE_ONLY,
@@ -418,6 +420,33 @@ class PipTests(PipCase):
         self.label.swapRequested.emit()  # refused meanwhile: it says so
         self.assertIs(self.sessions.large(), self.pip_slot)
         self.assertEqual(self.toast.named("show_message")[-1], (SWITCHING, "info", SWITCHING_MS))
+
+    def test_the_small_pictures_stream_notices_are_said_once_after_its_name(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        before = len(self.toast.named("show_message"))
+        for text in (RECONNECTING, LOADING, UNAVAILABLE, RECONNECTING, CRAWLING):
+            self.pip_live.notice.emit(text)
+        self.assertEqual(
+            self.toast.named("show_message")[before:],
+            [
+                ("Two: Reconnecting…", "info", NOTICE_MS),
+                ("Two: Plays without rewind for smoother playback", "info", NOTICE_MS),
+            ],
+        )
+        self.live.notice.emit(RECONNECTING)  # the large picture's, as before: unnamed
+        self.assertEqual(self.toast.messages()[-1], ("Reconnecting…", "info"))
+        self.open_small(CHANNELS[2])  # another channel small: its notices are said again
+        self.pip_live.notice.emit(RECONNECTING)
+        self.assertEqual(self.toast.messages()[-1], ("Three: Reconnecting…", "info"))
+
+    def test_a_closed_small_picture_says_nothing(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.PIP)  # closed
+        before = len(self.toast.named("show_message"))
+        self.pip_live.notice.emit(RECONNECTING)
+        self.assertEqual(len(self.toast.named("show_message")), before)
 
     def test_denied_toasts_the_providers_limit(self):
         self.catalog.current_provider = lambda: {"name": "Home", "type": "STB"}  # one stream

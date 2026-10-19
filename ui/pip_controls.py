@@ -40,7 +40,8 @@ from typing import Any, Callable, Optional
 from PySide6.QtCore import QObject, Signal
 
 from services.catalog import ALL_GROUP_ID
-from services.i18n import N_, tr_n, translate
+from services.i18n import N_, tr, tr_n, translate
+from services.live.live_session import LOADING, UNAVAILABLE
 from services.live.refusals import STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
@@ -70,6 +71,10 @@ SWITCHING = N_("Switching…")  # i18n: a toast: the two pictures are about to s
 SWITCHING_MS = 1500
 SHIFTED_MARGIN_S = 1.0  # the label says "−MM:SS" once the lag is this far beyond the target
 ERROR_MS = 6000
+NOTICE_MS = 3000  # a small picture's stream notice, after its channel's name
+# Not said for the small picture: its label says "Connecting…" while it loads, and the large
+# picture keeps "no time-shift" for a rewind too.
+_QUIET_NOTICES = (LOADING, UNAVAILABLE)
 
 
 @dataclass
@@ -160,6 +165,8 @@ class PipControls(QObject):
         self._closed_view: Optional[SlotView] = None  # what the small picture showed last
         self._ended: set[str] = set()  # the slots whose player's title ended
         self._room: Optional[_Room] = None  # what a title on its way closes when it comes
+        # Per slot: the channel it showed small and the notices said for it (once each).
+        self._said: dict[str, tuple[Optional[dict], set[str]]] = {}
 
     def wire(self) -> None:
         sessions = self.sessions
@@ -185,6 +192,7 @@ class PipControls(QObject):
         multiview adds it): the label shows the state of whichever is small."""
         slot.live.modeChanged.connect(self._refresh_label)
         slot.live.recordingChanged.connect(self._refresh_label)  # REC (2.2)
+        slot.live.notice.connect(partial(self._on_notice, slot.name))
         slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
 
     # ---- state --------------------------------------------------------------------------------
@@ -519,6 +527,7 @@ class PipControls(QObject):
         self._views[slot.name] = SlotView(target, context, url)
         self._closed_view = None
         self._timelines.pop(slot.name, None)
+        self._said.pop(slot.name, None)  # its new channel's notices are said again
         # The small picture keeps its time-shift in memory: one disk ring at most (M5 ruling).
         kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
         sessions.open_pip(
@@ -618,6 +627,25 @@ class PipControls(QObject):
         small = self.sessions.small()
         if small is not None and small.name == name:
             self._refresh_label()
+
+    def _on_notice(self, name: str, text: str) -> None:
+        """The small picture's stream notice ("Reconnecting…", "Plays without rewind…"):
+        toasted after its channel's name, each text once per channel shown small. The large
+        picture's are LiveControls'."""
+        small = self.sessions.small()
+        if self._closed() or small is None or small.name != name or text in _QUIET_NOTICES:
+            return
+        said = self._said.get(name)
+        if said is None or said[0] is not small.channel:
+            said = self._said[name] = (small.channel, set())
+        if text in said[1]:
+            return
+        said[1].add(text)
+        target = self.view(name).target
+        title = target.title if target is not None else str((small.channel or {}).get("name", ""))
+        message = translate(text)  # LiveSession's notices are English (N_) texts
+        shown = tr("{name}: {message}", name=title, message=message) if title else message
+        self._toast(shown, "info", NOTICE_MS)
 
     def _on_timeline(self, name: str, state: dict) -> None:
         self._timelines[name] = state
