@@ -636,6 +636,24 @@ class UrlGuideDateTests(_GuideCase):
         self.assertEqual(self.titles(manager), ["Served"])
         self.assert_download_time(self.stored_date(manager))
 
+    def test_a_stale_guide_is_checked_by_its_status_alone_then_fetched(self):
+        seen = self.serve(None)  # this server ignores If-Modified-Since: always the guide
+        manager = self.manager()
+        manager.set_current_epg()
+        self.config.epg_expiration = -1  # the saved guide is out of date at once
+        get, asked = requests.get, []
+
+        def recording(url, **kwargs):
+            asked.append(kwargs)
+            return get(url, **kwargs)
+
+        with patch("services.epg_manager.requests.get", side_effect=recording):
+            manager.set_current_epg()
+        self.assertEqual(seen, ["/guide.xml"] * 3)  # the first load, the check, the fetch
+        # Neither answer is read into memory whole (a guide can take hundreds of MB).
+        self.assertEqual([kwargs.get("stream") for kwargs in asked], [True, True])
+        self.assertEqual(self.titles(manager), ["Served"])
+
     def test_the_servers_last_modified_is_the_guides_date(self):
         self.serve("Sun, 18 Oct 2026 02:00:00 GMT")
         manager = self.manager()

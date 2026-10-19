@@ -657,9 +657,16 @@ class EpgManager:
                     **CLIENT_HEADERS,
                     "If-Modified-Since": _http_date(epg_date),
                 }
+                # Only the status is read: a server that ignores the header sends the whole
+                # guide, which the fetch below streams to disk.
                 r = requests.get(
-                    url, headers=headers, timeout=5, verify=self.config_manager.ssl_verify
+                    url,
+                    headers=headers,
+                    timeout=5,
+                    verify=self.config_manager.ssl_verify,
+                    stream=True,
                 )
+                r.close()
                 if r.status_code == 304:
                     # EPG is still fresh
                     epg_info["last_access"] = current_time.strftime(_INDEX_TIME_FORMAT)
