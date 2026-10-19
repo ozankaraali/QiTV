@@ -17,7 +17,10 @@ its own (↑/↓, ←/→, Enter, Esc); another key closes it and goes on.
 Everything acts on the large picture (a multiview's focused tile is the large one). A live
 channel's aspect ratio is kept for the channel (`services.picture.ChannelPictures`, written off
 the GUI thread): it applies whenever a player opens the channel, large or small (`prepare`,
-`prepare_small`), and the player keeps it through each reopen of the same channel. A film's
+`prepare_small`), and the player keeps it through each reopen of the same channel. It is kept
+under the channel's key as the channel opened in that player: a channel without its
+provider's stamp is the browsed provider's, and the channel list may browse another one by the
+time A is pressed (as for the sound's sync, ui/track_controls.py). A film's
 stays with its player while it plays; the next title starts on Auto. Fill crops to the shape of
 the player's own surface, which the window reports to the player. Deinterlacing is one setting
 for every player, kept in the config (`deinterlace`, optional: older builds ignore it); libVLC 3
@@ -48,6 +51,7 @@ from services import picture, sleep_manager
 from services.i18n import N_, tr, translate
 from services.picture import ASPECTS, DEINTERLACING, aspect_name, deinterlace_name
 from services.sleep_timer import PRESETS_MIN, SleepTimer, clock_text
+from services.zapping import ZapContext
 from ui.keymap import Action, key_hint
 from ui.link_lanes import Target
 from ui.overlays.track_panel import PanelModel, PanelRow
@@ -123,6 +127,9 @@ class PictureControls(QObject):
         self._playing = playing
         self._players = players
         self._key = channel_key
+        # Per player: the live channel it opened last and that channel's key then (a channel
+        # without its provider's stamp is the browsed provider's, which may change meanwhile).
+        self._keys: dict[Any, tuple[dict, str]] = {}
         self._store = store
         self._config = config
         self._toast = toast
@@ -171,12 +178,28 @@ class PictureControls(QObject):
         again (a retry) keeps what the player has."""
         if previous is not None and previous.same_as(target):
             return
-        live = target.live
-        session.set_aspect(self._store.aspect(self._key(target.item)) if live else picture.AUTO)
+        if not target.live:
+            self._keys.pop(session, None)
+            session.set_aspect(picture.AUTO)
+        else:
+            session.set_aspect(self._store.aspect(self._opens(session, target.item)))
 
     def prepare_small(self, session, channel: dict) -> None:
         """A channel opens in a small picture's player (PiP, a tile): its shape as chosen."""
-        session.set_aspect(self._store.aspect(self._key(channel)))
+        session.set_aspect(self._store.aspect(self._opens(session, channel)))
+
+    def _opens(self, session, channel: dict) -> str:
+        """`channel` opens in `session`: its key, kept for the choices made while it plays."""
+        key = self._key(channel)
+        self._keys[session] = (channel, key)
+        return key
+
+    def _key_of(self, session, channel: dict) -> str:
+        """`channel`'s key: the one it opened with in `session`, else as it is now."""
+        kept = self._keys.get(session)
+        if kept is not None and (kept[0] is channel or ZapContext.same(kept[0], channel)):
+            return kept[1]
+        return self._key(channel)
 
     def add_player(self, player) -> None:
         """A player (a multiview's tile made now): deinterlacing as the config says."""
@@ -386,10 +409,11 @@ class PictureControls(QObject):
 
     def _set_aspect(self, aspect: str) -> None:
         """The large picture in `aspect`'s shape; a live channel's is kept for the channel."""
-        self._session().set_aspect(aspect)
+        session = self._session()
+        session.set_aspect(aspect)
         target = self._current()
         if target is not None and target.live:
-            self._store.set_aspect(self._key(target.item), aspect)
+            self._store.set_aspect(self._key_of(session, target.item), aspect)
 
     def _deinterlacing(self) -> str:
         choice = getattr(self._config, "deinterlace", picture.AUTO)

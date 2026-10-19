@@ -43,6 +43,17 @@ class PictureKeysTests(ControllerTestCase):
         self.play(0)
         self.assertEqual(self.session.shape, "4:3")  # set before its play
 
+    def test_browsing_another_provider_keeps_the_channels_shape_its_own(self):
+        # CHANNELS carry no provider stamp: they are the provider browsed when they opened.
+        self.store.set_aspect(ONE, "4:3")
+        self.play(0)
+        self.assertEqual(self.session.shape, "4:3")
+        self.catalog.provider = "Backup"  # the channel list browses another provider meanwhile
+        self.controller.handle(Action.PICTURE)
+        self.assertEqual(self.session.shape, "fill")
+        self.assertEqual(self.store.aspect(ONE), "fill")
+        self.assertEqual(self.store.aspect(channel_key("Backup", CHANNELS[0])), "auto")
+
     def test_a_film_opens_in_its_own_shape(self):
         self.play(0)
         self.controller.handle(Action.PICTURE)
