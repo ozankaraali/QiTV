@@ -437,6 +437,11 @@ def shown(view, row):
     return rect.isValid() and view.viewport().rect().contains(rect)
 
 
+def placed(view, row):
+    """Whether the layout reached the row (it has its place, in sight or not)."""
+    return view.visualRect(view.model().index(row)).isValid()
+
+
 class FarRowTests(unittest.TestCase):
     """A row far down a list is scrolled to right after the list is set (2.1.0 laid the rows
     out 100 at a time, and a scroll to a row past them did nothing: the list showed its top)."""
@@ -487,15 +492,34 @@ class FarRowTests(unittest.TestCase):
         count = SINGLE_PASS_ROWS * 2
         self.model.set_channels(items(count))
         self.go_to(count - 10)
-        self.assertFalse(self.view.visualRect(self.model.index(count - 10)).isValid())
+        self.assertFalse(placed(self.view, count - 10))
         center = QPointF(self.view.viewport().rect().center())
         QTest.wheelEvent(self.view.window().windowHandle(), center, QPoint(0, -120))
-        laid_out = lambda: self.view.visualRect(
-            self.model.index(count - 10)
-        ).isValid()  # noqa: E731
-        self.assertTrue(wait_until(laid_out, 5000))
+        self.assertTrue(wait_until(lambda: placed(self.view, count - 10), 5000))
         elapse(20)
         self.assertFalse(shown(self.view, count - 10))  # not pulled down there after the turn
+
+    def test_a_list_hidden_while_its_row_waits_is_not_pulled_there_later(self):
+        count = SINGLE_PASS_ROWS * 2
+        self.model.set_channels(items(count))
+        self.go_to(count - 10)
+        self.view.hide()  # e.g. the drawer closed
+        self.assertTrue(wait_until(lambda: placed(self.view, count - 1), 5000))
+        self.view.show()
+        elapse(20)
+        self.assertEqual(self.view.verticalScrollBar().value(), 0)
+
+    def test_a_row_left_without_a_place_is_not_scrolled_to_later(self):
+        count = SINGLE_PASS_ROWS * 2
+        self.model.set_channels(items(count))
+        self.go_to(count - 10)
+        self.view.setRowHidden(count - 10, True)  # the layout ends without a place for it
+        self.assertTrue(wait_until(lambda: placed(self.view, count - 1), 5000))
+        elapse(20)
+        self.view.setRowHidden(count - 10, False)  # a later layout, and its timers
+        self.assertTrue(wait_until(lambda: placed(self.view, count - 10), 5000))
+        elapse(20)
+        self.assertEqual(self.view.verticalScrollBar().value(), 0)
 
     def test_the_fast_zap_column_opens_centred_on_a_channel_far_down(self):
         host = QWidget()

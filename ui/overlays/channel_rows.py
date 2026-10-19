@@ -64,6 +64,9 @@ def tag_layout(
 
 LOGO_ROWS_MAX = 5000  # past this many rows the model does not index them by logo
 SINGLE_PASS_ROWS = 5000  # a list this long is laid out at once at a reset (a few ms)
+# A longer one, this many rows per event (~3 ms): row 150,000 of 200,000 has its place
+# ~0.5 s after a reset; at Qt's 100 rows per event, ~0.7 s.
+BATCH_ROWS = 1000
 
 
 class LazyNumbers:
@@ -334,6 +337,7 @@ class ChannelListView(QListView):
         # thread at each reset), so a longer list than SINGLE_PASS_ROWS is laid out in batches
         # between events (see reset). Until its batch comes a row has no place: scrollTo waits.
         self.setLayoutMode(QListView.LayoutMode.Batched)
+        self.setBatchSize(BATCH_ROWS)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -345,8 +349,8 @@ class ChannelListView(QListView):
 
     def reset(self) -> None:
         """A new list (and a new model): laid out at once when short. In batches a row past
-        the first hundred would have no place yet when the highlight is scrolled to it, and
-        the scroll position would be cut back to the first batch."""
+        the first batch would have no place yet when the highlight is scrolled to it, and the
+        scroll position would be cut back to the first batch."""
         self._scroll_due = None
         model = self.model()
         rows = model.rowCount() if model is not None else 0
@@ -375,10 +379,23 @@ class ChannelListView(QListView):
             self._scroll_due = None
             self.updateGeometries()  # the scroll range grows only at the layout's end otherwise
             super().scrollTo(index, hint)
+        elif self._laid_out(model) or self.viewport().rect().isEmpty():
+            # Every row has its place but this one, or there is no room: it never will. A
+            # later timer must not pull the list there.
+            self._scroll_due = None
+
+    def _laid_out(self, model) -> bool:
+        """Whether the layout reached the last row (no batch to come)."""
+        rows = model.rowCount(self.rootIndex())
+        return rows == 0 or self.visualRect(model.index(rows - 1, 0, self.rootIndex())).isValid()
 
     def wheelEvent(self, event) -> None:
         self._scroll_due = None  # the user scrolls: a scroll still waiting would undo it
         super().wheelEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self._scroll_due = None  # shown again, the list is scrolled anew (or stays as it was)
+        super().hideEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() in NAV_BUTTONS:
