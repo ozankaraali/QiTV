@@ -272,6 +272,57 @@ class EpgRefreshTests(_GuideCase):
         self.assertEqual(self.titles(manager), [])
 
 
+class SourceTests(_GuideCase):
+    """Each configured source is fetched by its kind's fetch, with its own arguments."""
+
+    def setUp(self):
+        super().setUp()
+        self.config.epg_file = os.path.join(self.config.get_config_dir(), "guide.xml")
+        self.config.epg_url = "http://g.test/guide.xml"
+        self.fetched = []
+        for kind in ("stb", "xtream", "file", "url"):
+            fetch = self.recorder(kind)
+            self.enterContext(patch.object(EpgManager, f"_fetch_epg_from_{kind}", fetch))
+
+    def recorder(self, kind):
+        return lambda manager, *args: self.fetched.append((kind, args))
+
+    def cases(self):
+        xtream = self.providers.current_provider
+        portal = {"type": "STB", "name": "S", "url": "http://s/c/"}
+        path, url = self.config.epg_file, self.config.epg_url
+        return [
+            ("STB", portal, "stb", _cache_key("http://s/c/"), ("http://s/c/",)),
+            ("STB", xtream, "xtream", self.key, ("http://h", "u", "p")),
+            ("Local File", xtream, "file", _cache_key(path), (path,)),
+            ("URL", xtream, "url", _cache_key(url), (url,)),
+        ]
+
+    def test_each_source_is_fetched_by_its_kind(self):
+        for epg_source, provider, kind, key, args in self.cases():
+            with self.subTest(kind):
+                self.config.epg_source, self.providers.current_provider = epg_source, provider
+                manager = self.manager()
+                self.assertEqual(manager._source(), (kind, key, args))
+                manager.set_current_epg()
+                manager.index[key] = None  # a source without a guide is not fetched again
+                manager.set_current_epg()
+                manager.force_refresh_current_epg()  # unless asked to
+                # A URL's fetch also gets how many guides of it were stored when the load began
+                # (None: when the fetch begins).
+                seen, now = ((0,), (None,)) if kind == "url" else ((), ())
+                self.assertEqual(self.fetched, [(kind, args + seen), (kind, args + now)])
+                self.fetched.clear()
+
+    def test_without_a_source_nothing_is_fetched(self):
+        self.providers.current_provider = {"type": "M3UPLAYLIST", "name": "M", "url": "http://m"}
+        manager = self.manager()
+        self.assertIsNone(manager._source())
+        manager.set_current_epg()
+        manager.force_refresh_current_epg()
+        self.assertEqual(self.fetched, [])
+
+
 class SavedGuideTests(_GuideCase):
     """The saved guide is read in pieces, and only when the one shown is not it already."""
 

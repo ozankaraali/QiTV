@@ -206,7 +206,7 @@ def child(mode: str, path: str, trace: bool) -> dict[str, Any]:
     if mode == "index":
         guide = manager._index_programs(path)
     elif mode == "refresh":
-        manager._fetch_epg_from_file(epg._cache_key(path), path)
+        manager._fetch_epg_from_file(path)
         guide = manager.epg
     else:
         manager._download_epg_from_url("http://127.0.0.1:9/guide.xml.gz")

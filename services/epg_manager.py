@@ -429,29 +429,37 @@ class EpgManager:
         self.index[cache_key] = None
         self._publish(cache_key, MultiKeyDict())
 
-    def _source_key(self):
-        """The cache key of the configured guide source, or None when there is none."""
+    def _source(self) -> Optional[tuple[str, str, tuple]]:
+        """The configured guide source as (kind, cache key, its fetch's arguments), or None
+        when there is none. The kinds: "stb" and "xtream", the provider's own guide; "file"
+        and "url", every provider's (see _take_shared_entry)."""
         epg_source = self.config_manager.epg_source
-        provider = self.provider_manager.current_provider
         if epg_source == "STB":
+            provider = self.provider_manager.current_provider
             provider_type = provider.get("type", "").upper()
+            url = provider.get("url", "")
             if provider_type == "STB":
-                return _cache_key(provider.get("url", ""))
+                return "stb", _cache_key(url), (url,)
             if provider_type == "XTREAM":
-                return _xtream_cache_key(provider.get("url", ""), provider.get("username", ""))
+                username = provider.get("username", "")
+                password = provider.get("password", "")
+                return "xtream", _xtream_cache_key(url, username), (url, username, password)
         elif epg_source == "Local File":
-            return _cache_key(self.config_manager.epg_file)
+            path = self.config_manager.epg_file
+            return "file", _cache_key(path), (path,)
         elif epg_source == "URL":
-            return _cache_key(self.config_manager.epg_url)
+            url = self.config_manager.epg_url
+            return "url", _cache_key(url), (url,)
         return None
 
-    def _forget_other_source(self):
-        """Drop a guide loaded from another source (a provider switch or a settings change).
-
-        A reload of the same source keeps its guide visible until the new one is swapped in.
-        """
-        if self._epg_source != self._source_key():
+    def _switch_source(self):
+        """The configured source (see _source). A guide loaded from another source (a provider
+        switch or a settings change) is dropped; a reload of the same source keeps its guide
+        visible until the new one is swapped in."""
+        source = self._source()
+        if self._epg_source != (source[1] if source else None):
             self._publish(None, MultiKeyDict())
+        return source
 
     def _load_index(self):
         self.index.clear()
@@ -605,147 +613,76 @@ class EpgManager:
         for key, value in merged.items():  # other providers' entries are known here now
             self.index.setdefault(key, value)
 
-    # The _refresh_epg_* helpers refetch a cached source once it is out of date and
-    # return True when they did so.
-
-    def _refresh_epg_stb(self, provider_url, headers):
-        epg_info = self.index.get(_cache_key(provider_url))
-        if epg_info and self._is_expired(epg_info):
-            self._fetch_epg_from_stb(provider_url, headers)
-            return True
-        return False
-
-    def _refresh_epg_xtream(self, provider_url, username, password):
-        epg_info = self.index.get(_xtream_cache_key(provider_url, username))
-        if epg_info and self._is_expired(epg_info):
-            self._fetch_epg_from_xtream(provider_url, username, password)
-            return True
-        return False
-
-    def _refresh_epg_file(self, xmltv_file):
-        xmltv_filehash = _cache_key(xmltv_file)
-        epg_info = self.index.get(xmltv_filehash)
-        if epg_info:
-            # Check modified time
-            epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
-            if (
-                datetime.fromtimestamp(os.path.getmtime(xmltv_file)) - epg_date
-            ).total_seconds() > 2:
-                self._fetch_epg_from_file(xmltv_filehash, xmltv_file)
-                return True
-        return False
-
-    def _refresh_epg_url(self, url, seen=None):
-        url_hash = _cache_key(url)
-        epg_info = self.index.get(url_hash)
-        if epg_info:
-            # Check expiration time first, if expired check header for last-modified
-            last_access = datetime.strptime(epg_info["last_access"], _INDEX_TIME_FORMAT)
-            current_time = datetime.now()
-            if (current_time - last_access).total_seconds() > self.config_manager.epg_expiration:
-                epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
-                # Request the URL with "If-Modified-Since" header
-                headers = {
-                    **CLIENT_HEADERS,
-                    "If-Modified-Since": _http_date(epg_date),
-                }
-                # Only the status is read: a server that ignores the header sends the whole
-                # guide, which the fetch below streams to disk.
-                r = requests.get(
-                    url,
-                    headers=headers,
-                    timeout=5,
-                    verify=self.config_manager.ssl_verify,
-                    stream=True,
-                )
-                r.close()
-                if r.status_code == 304:
-                    # EPG is still fresh
-                    epg_info["last_access"] = current_time.strftime(_INDEX_TIME_FORMAT)
-                    return False
-                # EPG is not fresh, fetch it
-                self._fetch_epg_from_url(url, seen)
-                return True
-        return False
-
     def set_current_epg(self):
+        """Show the configured source's guide: a source indexed as None has none; an outdated
+        one is fetched again; otherwise its saved guide is shown. A source never indexed, or
+        whose guide file is gone, is fetched."""
         if not self.config_manager.channel_epg:
             self._publish(None, MultiKeyDict())
             return
-        self._forget_other_source()
+        source = self._switch_source()
+        if source is None:
+            return
+        kind, key, args = source
+        seen = None
+        if kind in ("file", "url"):  # every provider's: another's manager may have stored it
+            seen = _stored(self._where(key))[0]  # before the entry is taken: none is missed
+            self._take_shared_entry(key)
+        if key in self.index:
+            epg_info = self.index[key]
+            if epg_info is None:
+                return
+            if epg_info and self._out_of_date(kind, args, epg_info):
+                self._fetch(kind, args, seen)
+                return
+            if self._load_cached_epg(key):
+                return
+        self._fetch(kind, args, seen)
 
-        epg_source = self.config_manager.epg_source
-        if epg_source == "STB":
-            provider_type = self.provider_manager.current_provider.get("type", "").upper()
-            if provider_type == "STB":
-                self._set_epg_from_stb(
-                    self.provider_manager.current_provider["url"],
-                    self.provider_manager.headers,
-                )
-            elif provider_type == "XTREAM":
-                self._set_epg_from_xtream(
-                    self.provider_manager.current_provider["url"],
-                    self.provider_manager.current_provider.get("username", ""),
-                    self.provider_manager.current_provider.get("password", ""),
-                )
-        elif epg_source == "Local File":
-            self._set_epg_from_file(self.config_manager.epg_file)
-        elif epg_source == "URL":
-            self._set_epg_from_url(self.config_manager.epg_url)
+    def _fetch(self, kind, args, seen=None):
+        """Fetch the source's guide (see _source) whatever its index entry says; `seen`: see
+        _fetch_epg_from_url."""
+        if kind == "stb":
+            self._fetch_epg_from_stb(*args)
+        elif kind == "xtream":
+            self._fetch_epg_from_xtream(*args)
+        elif kind == "file":
+            self._fetch_epg_from_file(*args)
+        else:
+            self._fetch_epg_from_url(args[0], seen)
 
-    # Each _set_epg_from_* loader follows the same steps (set_current_epg has already
-    # dropped a guide of another source): a source indexed as None has no EPG; an
-    # outdated one is refetched; otherwise its saved guide is used. Sources that were
-    # never indexed, or whose guide file is gone, are fetched.
+    def _out_of_date(self, kind, args, epg_info):
+        """Whether a cached source's guide is fetched again: a provider's once it is older
+        than the update period, a local file's once the file changed, a URL's once the period
+        passed since it was last checked and the server has a newer one."""
+        if kind == "file":
+            epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
+            modified = datetime.fromtimestamp(os.path.getmtime(args[0]))
+            return (modified - epg_date).total_seconds() > 2
+        if kind == "url":
+            return self._url_changed(args[0], epg_info)
+        return self._is_expired(epg_info)
 
-    def _set_epg_from_stb(self, provider_url, headers):
-        provider_hash = _cache_key(provider_url)
-        if provider_hash in self.index:
-            if self.index[provider_hash] is None:
-                return
-            if self._refresh_epg_stb(provider_url, headers):
-                return
-            if self._load_cached_epg(provider_hash):
-                return
-        self._fetch_epg_from_stb(provider_url, headers)
+    def _url_changed(self, url, epg_info) -> bool:
+        last_access = datetime.strptime(epg_info["last_access"], _INDEX_TIME_FORMAT)
+        current_time = datetime.now()
+        if (current_time - last_access).total_seconds() <= self.config_manager.epg_expiration:
+            return False
+        epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
+        headers = {**CLIENT_HEADERS, "If-Modified-Since": _http_date(epg_date)}
+        # Only the status is read: a server that ignores the header sends the whole guide,
+        # which the fetch streams to disk.
+        r = requests.get(
+            url, headers=headers, timeout=5, verify=self.config_manager.ssl_verify, stream=True
+        )
+        r.close()
+        if r.status_code == 304:  # still fresh
+            epg_info["last_access"] = current_time.strftime(_INDEX_TIME_FORMAT)
+            return False
+        return True
 
-    def _set_epg_from_xtream(self, provider_url, username, password):
-        provider_hash = _xtream_cache_key(provider_url, username)
-        if provider_hash in self.index:
-            if self.index[provider_hash] is None:
-                return
-            if self._refresh_epg_xtream(provider_url, username, password):
-                return
-            if self._load_cached_epg(provider_hash):
-                return
-        self._fetch_epg_from_xtream(provider_url, username, password)
-
-    def _set_epg_from_file(self, xmltv_file):
+    def _fetch_epg_from_file(self, xmltv_file):
         xmltv_filehash = _cache_key(xmltv_file)
-        self._take_shared_entry(xmltv_filehash)
-        if xmltv_filehash in self.index:
-            if self.index[xmltv_filehash] is None:
-                return
-            if self._refresh_epg_file(xmltv_file):
-                return
-            if self._load_cached_epg(xmltv_filehash):
-                return
-        self._fetch_epg_from_file(xmltv_filehash, xmltv_file)
-
-    def _set_epg_from_url(self, url):
-        url_hash = _cache_key(url)
-        seen = _stored(self._where(url_hash))[0]  # before the entry is taken: none is missed
-        self._take_shared_entry(url_hash)
-        if url_hash in self.index:
-            if self.index[url_hash] is None:
-                return
-            if self._refresh_epg_url(url, seen):
-                return
-            if self._load_cached_epg(url_hash):
-                return
-        self._fetch_epg_from_url(url, seen)
-
-    def _fetch_epg_from_file(self, xmltv_filehash, xmltv_file):
         guide = self._index_programs(xmltv_file)
         if guide:
             modified = datetime.fromtimestamp(os.path.getmtime(xmltv_file))
@@ -754,7 +691,8 @@ class EpgManager:
             self._source_failed(xmltv_filehash)
         self.save_index()
 
-    def _fetch_epg_from_stb(self, provider_url, headers):
+    def _fetch_epg_from_stb(self, provider_url):
+        headers = self.provider_manager.headers
         provider_hash = _cache_key(provider_url)
         base = base_from_url(provider_url)
         prefer_https = provider_prefers_https(
@@ -927,27 +865,9 @@ class EpgManager:
         subsequent lookups use freshly indexed data. The current guide stays visible until
         the new one is swapped in, and stays when the refresh fails.
         """
-        self._forget_other_source()
-        epg_source = self.config_manager.epg_source
-        provider_type = self.provider_manager.current_provider.get("type", "").upper()
-
-        if epg_source == "STB":
-            if provider_type == "STB":
-                self._fetch_epg_from_stb(
-                    self.provider_manager.current_provider.get("url", ""),
-                    self.provider_manager.headers,
-                )
-            elif provider_type == "XTREAM":
-                self._fetch_epg_from_xtream(
-                    self.provider_manager.current_provider.get("url", ""),
-                    self.provider_manager.current_provider.get("username", ""),
-                    self.provider_manager.current_provider.get("password", ""),
-                )
-        elif epg_source == "Local File":
-            xmltv_file = self.config_manager.epg_file
-            self._fetch_epg_from_file(_cache_key(xmltv_file), xmltv_file)
-        elif epg_source == "URL":
-            self._fetch_epg_from_url(self.config_manager.epg_url)
+        source = self._switch_source()
+        if source is not None:
+            self._fetch(source[0], source[2])
 
     def guide_offset(self) -> timedelta:
         """The provider's guide time offset (epg_view.GUIDE_OFFSET_KEY): its programmes move by
