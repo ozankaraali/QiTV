@@ -619,6 +619,32 @@ video.m3u8
         self.assertEqual(server.counts["/live/first.ts"], 1)
         self.assertEqual(server.counts["/live/second.ts"], 1)
 
+    def test_a_low_latency_playlists_unfinished_segment_waits_until_it_is_listed_whole(self):
+        # LL-HLS lists the segment still being made as its parts alone: no URI of its own.
+        # Taken for a segment, the playlist itself was fetched in its place, a break marked
+        # and that sequence number passed over: every reload left a segment out.
+        head = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-PART-INF:PART-TARGET=1.0\n"
+        head += "#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:2,\nfirst.ts\n"
+        parts = '#EXT-X-PART:DURATION=1.0,INDEPENDENT=YES,URI="{0}-0.ts"\n'
+        parts += '#EXT-X-PART:DURATION=1.0,URI="{0}-1.ts"\n'
+
+        def playlist(_request, count):
+            if count == 1:
+                return 200, {}, (head + parts.format("second")).encode()
+            text = head + parts.format("second") + "#EXTINF:2,\nsecond.ts\n#EXT-X-ENDLIST\n"
+            return 200, {}, text.encode()
+
+        server = self.server(
+            {
+                "/live.m3u8": playlist,
+                "/first.ts": (200, {}, self.video),
+                "/second.ts": (200, {}, self.next_video),
+            }
+        )
+        self.assertEqual(media(server.url + "/live.m3u8"), joined(self.video, self.next_video))
+        self.assertEqual(server.counts["/live.m3u8"], 2)
+        self.assertEqual((server.counts["/first.ts"], server.counts["/second.ts"]), (1, 1))
+
     def test_a_media_sequence_gap_on_reload_marks_a_discontinuity(self):
         def playlist(_request, count):
             if count == 1:

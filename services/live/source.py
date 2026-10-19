@@ -736,11 +736,18 @@ def _video_compatible(variant):
     return False
 
 
+def _whole_segments(playlist: Any) -> Any:
+    """A media playlist without the segment a low-latency (LL-HLS) playlist lists only as its
+    parts, still being made: it has no URI of its own, and a later reload lists it whole."""
+    playlist.segments[:] = [segment for segment in playlist.segments if segment.uri]
+    return playlist
+
+
 def _select_manifest(content, url):
     try:
         playlist = m3u8.loads(content.decode("utf-8-sig"), uri=url)
         if not playlist.is_variant:
-            return playlist
+            return _whole_segments(playlist)
         candidates = [item for item in playlist.playlists if _video_compatible(item)]
         if not candidates:
             raise SourceError("unsupported", _NO_VIDEO)
@@ -1391,7 +1398,7 @@ class HlsSource:
         url = self._audio_url
         try:
             content, final = self._http.fetch(lambda: _load_playlist(self._http, url))
-            playlist = m3u8.loads(content.decode("utf-8-sig"), uri=final)
+            playlist = _whole_segments(m3u8.loads(content.decode("utf-8-sig"), uri=final))
         except _Closed:
             raise
         except Exception:
