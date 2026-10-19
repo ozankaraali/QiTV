@@ -405,6 +405,7 @@ class StbHandshake:
         prefer_https_override: bool | None = None,
         ssl_verify_override: bool | None = None,
         _prefer_attempted: bool = False,
+        _quiet: bool = False,
     ):
         self.token = self.token if self.token else self.random_token()
         self.headers = self.create_headers(url, mac, self.token, serial_number, device_id)
@@ -454,20 +455,26 @@ class StbHandshake:
                 _HANDSHAKE_FAILURE_RANK[reason] > _HANDSHAKE_FAILURE_RANK[self.failure]
             ):
                 self.failure = reason
-            if serverload != "/server/load.php" and "handshake" in fetchurl:
-                serverload = "/server/load.php"
-                return self.run(
-                    url,
-                    mac,
-                    serverload,
-                    serial_number,
-                    device_id,
-                    prefer_https_override=prefer_https_override,
-                    ssl_verify_override=ssl_verify_override,
-                    _prefer_attempted=_prefer_attempted,
-                )
+            http_retry = (
+                prefer_https and not _prefer_attempted and original_url.startswith("http://")
+            )
+            load_retry = serverload != "/server/load.php" and "handshake" in fetchurl
+            # The other portal path on the same scheme first; when that fails too, the HTTP
+            # fallback below still runs (both paths again, over HTTP).
+            if load_retry and self.run(
+                url,
+                mac,
+                "/server/load.php",
+                serial_number,
+                device_id,
+                prefer_https_override=prefer_https_override,
+                ssl_verify_override=ssl_verify_override,
+                _prefer_attempted=_prefer_attempted,
+                _quiet=http_retry,
+            ):
+                return True
             # If HTTPS attempt failed and we preferred HTTPS, fall back to HTTP once
-            if prefer_https and not _prefer_attempted and original_url.startswith("http://"):
+            if http_retry:
                 logger.info("HTTPS handshake failed; retrying over HTTP")
                 return self.run(
                     original_url,
@@ -479,7 +486,8 @@ class StbHandshake:
                     ssl_verify_override=ssl_verify_override,
                     _prefer_attempted=True,
                 )
-            logger.warning("STB handshake failed (%s): %s", self.failure, safe_exc(e))
+            if not load_retry and not _quiet:
+                logger.warning("STB handshake failed (%s): %s", self.failure, safe_exc(e))
             return False
 
     @staticmethod
