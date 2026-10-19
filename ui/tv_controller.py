@@ -67,6 +67,7 @@ from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
 from services.live.live_session import LiveSession
+from services.live.tuning import channel_key
 from services.navigation import (
     FAVORITES_GROUP,
     RECENT_GROUP,
@@ -79,6 +80,7 @@ from services.next_episode import play_context
 from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of, split_group_id
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot
+from services.sound_sync import SoundSync
 from services.vlc_profile import classify
 from services.zapping import ZapContext
 from ui import item_provider
@@ -102,6 +104,7 @@ from ui.overlays.zap_banner import BannerInfo, ZapBanner
 from ui.pip_controls import PipControls
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
+from ui.track_controls import TrackControls
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +137,7 @@ class Overlays:
     welcome: WelcomeCard
     pip_label: Any = None  # the PipLabel (Phase 4), with picture in picture only
     mixer: Any = None  # the volume mixer (Phase 4)
+    sound_panel: Any = None  # the Sound panel above ♫ (2.2)
     library_toast: Any = None  # the Library page's toast: the menus' messages while it shows
 
 
@@ -156,10 +160,12 @@ class TVController(QObject):
         budget: Optional[ConnectionBudget] = None,
         sessions: Optional[SessionManager] = None,
         pip_frame=None,
+        sound_sync: Optional[SoundSync] = None,
         parent: Optional[QObject] = None,
     ):
         """With `sessions` (picture in picture), its large slot's player, live session and
-        tuner stand for `session`, `live` and `budget`."""
+        tuner stand for `session`, `live` and `budget`. `sound_sync` keeps each channel's
+        sound sync (None: for this run only)."""
         super().__init__(parent)
         self.config = config
         self.catalog = catalog
@@ -254,7 +260,6 @@ class TVController(QObject):
         self._digits = ""  # number entry under way
         self._state = "idle"
         self._tuning_since = 0.0  # when the banner's keep-alive started (TUNING_CAP_S)
-        self._audio_id: Optional[int] = None
         self._subtitle_id: Optional[int] = None
         self._guide = GuideController(overlays.guide, parent=self)
         self._autoplay = Autoplay(
@@ -291,6 +296,19 @@ class TVController(QObject):
             audio_changed=self._on_audio_changed,
             parent=self,
         )
+        # The sound's tracks and sync (J/K, the Sound panel); a channel's sync is kept.
+        self._tracks = TrackControls(
+            sound_panel=overlays.sound_panel,
+            transport=overlays.transport,
+            session=lambda: self.session,
+            current=lambda: self._current,
+            playing=self._has_media,
+            channel_key=self._sync_key,
+            store=sound_sync if sound_sync is not None else SoundSync(None),
+            toast=self._toast,
+            show_transport=self._show_transport,
+            parent=self,
+        )
         self._pip: Optional[PipControls] = None
         if sessions is not None:
             self._pip = PipControls(
@@ -314,6 +332,7 @@ class TVController(QObject):
                 toast=self._toast,
                 swap=self.swap,
                 toggle_mute=self._mixer.toggle_small_mute,
+                sound=self._tracks.prepare_small,
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
@@ -387,7 +406,6 @@ class TVController(QObject):
         transport.fullscreenRequested.connect(self.window_actions.toggle_fullscreen)
         transport.miniPlayerRequested.connect(self.window_actions.toggle_mini_player)
         transport.externalRequested.connect(self._on_external_requested)
-        transport.audioRequested.connect(self._cycle_audio)
         transport.volumeRequested.connect(self._mixer.open_main)
         transport.subtitleRequested.connect(self._cycle_subtitles)
         # The buttons for the player's keys (the owner's mouse-only rule): they act as the keys.
@@ -397,6 +415,7 @@ class TVController(QObject):
         transport.favoriteRequested.connect(self._favorite_playing)
         self._live_controls.wire()
         self._mixer.wire()
+        self._tracks.wire()
         if self._pip is not None:
             self._pip.wire()
         if self._logos is not None:
@@ -476,6 +495,7 @@ class TVController(QObject):
         overlays.drawer.close_drawer()
         overlays.banner.dismiss()
         overlays.transport.dismiss()
+        self._tracks.close()
         try:
             self.watch.flush()  # a movie's last position
         except Exception as e:
@@ -519,6 +539,7 @@ class TVController(QObject):
         overlays.banner.dismiss()
         overlays.transport.dismiss()
         self._mixer.hide()
+        self._tracks.close()
         self._autoplay.drop()  # the Next card, and a wait for the next season
 
     def leave_library_playing(self) -> None:
@@ -557,13 +578,14 @@ class TVController(QObject):
         self._lanes.supersede()
         self._lanes.drop_tune()  # a channel or movie still on its way never opens over it
         self._autoplay.drop()
-        self._audio_id = self._subtitle_id = None
+        self._subtitle_id = None
         self._live_controls.new_target()
-        self._current, self._cid = target, None
+        previous, self._current, self._cid = self._current, target, None
 
         session = self.session  # the large picture's, whatever swaps before it opens
 
         def open_file() -> None:
+            self._tracks.prepare(session, target, previous)
             session.play(url, kind=classify(url, False), start_ms=0)
             self._reset_speed(session)
 
@@ -600,6 +622,7 @@ class TVController(QObject):
         return bool(
             self._guide.is_open()
             or self._mixer.visible()
+            or self._tracks.visible()
             or overlays.drawer.isVisible()
             or self._autoplay.card_open()
             or self._autoplay.waiting()
@@ -629,6 +652,8 @@ class TVController(QObject):
         if self._guide.is_open() and self._guide.handle(action, payload):
             return
         drawer = self.overlays.drawer
+        if not drawer.isVisible() and self._tracks.handle(action, key):
+            return  # the Sound panel shows: the arrows, Enter and Esc are its own
         if not drawer.isVisible() and self._mixer.handle(action, key):
             return  # the mixer shows: the arrows, M, Tab and Esc are its own
         if action in (Action.CH_NEXT, Action.CH_PREV):
@@ -692,6 +717,8 @@ class TVController(QObject):
                 self._pip.swap_key()
         elif action is Action.MUTE:
             self._mixer.mute()
+        elif action in (Action.SOUND_EARLIER, Action.SOUND_LATER):
+            self._tracks.nudge_sound(-1 if action is Action.SOUND_EARLIER else 1)
         elif action in (Action.VOL_UP, Action.VOL_DOWN):
             self._change_volume(VOLUME_STEP if action is Action.VOL_UP else -VOLUME_STEP)
         elif action is Action.ESCAPE:
@@ -754,6 +781,7 @@ class TVController(QObject):
             overlays.next_card,
             overlays.welcome,
             overlays.mixer,
+            overlays.sound_panel,
         )
         return not any(menu is not None and menu.isVisible() for menu in menus)
 
@@ -1118,8 +1146,9 @@ class TVController(QObject):
         launcher = self._external_launcher()
         # Direct plays book the slot under the item's own provider, as pipeline tunes do.
         provider_name = item_provider.provider_name(self.catalog, item)
-        self._audio_id = self._subtitle_id = None
+        self._subtitle_id = None
         self._live_controls.new_target()  # the old channel's ticks and held notice
+        previous = self._current  # what the large picture played: a retry keeps its sync
         if launcher is not None:
             self._close_pip()  # an external player is outside the budget: the PiP gives way
             if target.live and target.zapped:
@@ -1135,6 +1164,8 @@ class TVController(QObject):
             if self._live_controls.through_pipeline(url, kind):
                 if not self._live_controls.tune_pipeline(target, url):
                     return  # over the provider's stream limit: nothing opens
+                # The old stream is stopped: the channel's sync waits for its player's open.
+                self._tracks.prepare(self.session, target, previous)
                 self._current, self._cid = target, None
                 self.overlays.transport.set_speed(1.0)  # LiveSession starts every tune at 1x
             else:
@@ -1142,6 +1173,7 @@ class TVController(QObject):
                 session = self.session  # the large picture's, whatever swaps before it opens
 
                 def play_direct() -> None:
+                    self._tracks.prepare(session, target, previous)
                     session.play(
                         url, kind=kind, latency=self.config.live_latency, **stream_options(item)
                     )
@@ -1159,6 +1191,7 @@ class TVController(QObject):
             session = self.session
 
             def open_vod() -> None:
+                self._tracks.prepare(session, target, previous)
                 session.play(url, kind=classify(url, False), start_ms=start)
                 self._reset_speed(session)
 
@@ -1332,7 +1365,7 @@ class TVController(QObject):
         self._current, self._cid, self._current_url = view.target, view.cid, view.url
         self._restore_channel()
         self._state = self._states.get(new.name, "idle")
-        self._audio_id = self._subtitle_id = None
+        self._subtitle_id = None
         self._tuning.stop()
         self._autoplay.drop()  # the Next card, and its wait, were the other picture's
         self._freed_for = None  # a title on its way for the large picture was dropped
@@ -1361,6 +1394,7 @@ class TVController(QObject):
             if self._state == "ended":
                 self._autoplay.on_ended(current)  # it ended small: what follows, as at its end
         pip.after_swap()
+        self._tracks.refresh()  # an open Sound panel shows the large picture's sound
         if self._tuner_of(old).idle():
             pip.close()  # the old large picture was between two channels: nothing to show
 
@@ -1405,6 +1439,10 @@ class TVController(QObject):
         tuner = slot.tuner
         assert isinstance(tuner, LiveTuner)
         return tuner
+
+    def _sync_key(self, item: dict) -> str:
+        """A channel's key for its sound sync: its provider's and its own (as live_tuning's)."""
+        return channel_key(item_provider.provider_name(self.catalog, item), item)
 
     def _toggle_pause(self) -> None:
         self._tuner.toggle_pause()
@@ -1715,17 +1753,6 @@ class TVController(QObject):
         return target is self._current and not self._lanes.busy()
 
     # ---- tracks -------------------------------------------------------------------------------
-
-    def _cycle_audio(self) -> None:
-        tracks = [t for t in self.session.audio_tracks() if t[0] != -1]  # mute disables audio
-        if not tracks:
-            self._toast("No audio tracks")
-            return
-        current = self._audio_id if self._audio_id is not None else tracks[0][0]
-        track_id, name = self._next_track(tracks, current)
-        self.session.set_audio_track(track_id)
-        self._audio_id = track_id
-        self._toast(f"Audio: {name}")
 
     def _cycle_subtitles(self) -> None:
         tracks = self.session.subtitle_tracks()

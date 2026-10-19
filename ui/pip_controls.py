@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import partial
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 
@@ -110,6 +110,7 @@ class PipControls(QObject):
         toast: Callable[..., None],
         swap: Callable[[], bool],
         toggle_mute: Callable[[], None],
+        sound: Optional[Callable[[Any, dict], None]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
@@ -119,7 +120,8 @@ class PipControls(QObject):
         channel); `all_live()` every live channel; `large_channel()` what the large picture
         plays; `vod()` whether a movie or an episode is current; `external()` whether channels
         play in an external player (it holds the provider's stream); `swap()` the shell's swap
-        (False when it has to wait); `toggle_mute()` mutes or unmutes the small picture.
+        (False when it has to wait); `toggle_mute()` mutes or unmutes the small picture;
+        `sound(player, channel)` gives a channel opening small its sound sync (2.2).
         """
         super().__init__(parent)
         self.sessions = sessions
@@ -142,6 +144,7 @@ class PipControls(QObject):
         self._toast = toast
         self._swap = swap
         self._toggle_mute = toggle_mute
+        self._sound = sound
         self._views: dict[str, SlotView] = {}
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
@@ -501,6 +504,8 @@ class PipControls(QObject):
             xtream_max=item_provider.max_connections(self.catalog, target.item),
             start_kwargs=kwargs,
         )
+        if self._sound is not None:  # its old stream stopped: the new one opens with it
+            self._sound(slot.playback, target.item)
         slot.group_key = target.group_key
         if sessions.pip_open():
             self._refresh_label()  # the small picture's channel changed

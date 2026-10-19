@@ -105,6 +105,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>+</kbd> / <kbd>-</kbd> | Volume up / down (the mixer) |
 | <kbd>M</kbd> | Mute |
 | <kbd>Tab</kbd> | The mixer's other row (while it shows) |
+| <kbd>J</kbd> / <kbd>K</kbd> | Sound 50 ms earlier / later (sync with the picture) |
 | <kbd>F</kbd> / <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>Ctrl/⌘+D</kbd> | Add or remove a favorite channel |
@@ -170,6 +171,10 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 
 In the channel list, plain <kbd>P</kbd> types into the filter, so picture-in-picture there is <kbd>Ctrl/⌘+P</kbd>.
 
+### Sound in step with the picture
+
+On some channels the sound slowly drifts out of step with the picture. The **♫** button in the player controls opens the **Sound** panel: pick another sound track there when the channel or film has more than one, and use the **Sync** row to move the sound: **−** makes it play earlier and **+** later, 50 milliseconds at a time (up to 5 seconds either way). It reads, for example, "Sound 150 ms later", or "In sync"; **Reset** puts it back. <kbd>J</kbd> and <kbd>K</kbd> do the same from anywhere on the player. QiTV remembers the setting for each live channel, also after a restart, and uses it whenever that channel plays, big or small. For a film or an episode it lasts while that title plays.
+
 ### Pause and rewind live TV (time-shift)
 
 QiTV keeps the last few minutes of every live channel you watch, so you can pause, rewind and catch up like with a TV recorder. Press <kbd>Space</kbd> to pause and again to go on from where you paused; <kbd>←</kbd> and <kbd>→</kbd> jump 10 seconds; <kbd>L</kbd> (or **Go live**) goes back to live. The bar shows how far behind live you are. While you are behind, **−** and **+** beside the speed play slower or faster (0.5× to 2×), say faster to catch up; click the speed for normal again. Movies and episodes have the same control.
@@ -195,7 +200,7 @@ Watch a second channel in a small picture in the bottom-right corner:
 - <kbd>P</kbd> (or the player controls' second-channel button) opens the channel you watched before, small; press <kbd>P</kbd> again to close it;
 - in the channel list, right-click a channel and choose **Open in picture-in-picture**, or highlight it and press <kbd>Ctrl/⌘+P</kbd>; the channel can come from any of your providers;
 - click the small picture or its **⇄**, or press <kbd>S</kbd>, to swap the two: the small one becomes big;
-- the sound follows the big picture. The speaker on the small picture turns its sound on or off. <kbd>+</kbd> and <kbd>-</kbd> (or the speaker in the player controls, beside ♪) show the mixer, which sets each picture's volume (<kbd>Tab</kbd> moves to the other row) and hides after a few seconds; without picture-in-picture it shows only the main volume;
+- the sound follows the big picture. The speaker on the small picture turns its sound on or off. <kbd>+</kbd> and <kbd>-</kbd> (or the speaker in the player controls, beside ♫) show the mixer, which sets each picture's volume (<kbd>Tab</kbd> moves to the other row) and hides after a few seconds; without picture-in-picture it shows only the main volume;
 - the **×** on the small picture closes it.
 
 Picture-in-picture is for live TV, and it needs two streams: a provider that allows two at a time, or one stream each from two providers. A film or an episode from the Library is the one exception: it takes the big picture and keeps the channel you were watching small (see [Keep watching while you browse](#keep-watching-while-you-browse)).

@@ -1198,6 +1198,30 @@ class VlcWindowTests(WindowCase):
         self.assertIs(window.pip_live._tuning, tuning)
         self.assertEqual(tuning._path, os.path.join(self.config_dir, "live_tuning.json"))
 
+    def test_k_and_j_move_the_channels_sound_and_the_panel_shows_it(self):
+        # 2.2: on the large picture's player, kept for the channel in sound_sync.json.
+        window = self.window
+        self.assertEqual(window.sound_sync._path, os.path.join(self.config_dir, "sound_sync.json"))
+        self.open_first_channel()
+        self.assertTrue(wait_until(self.session_on(channel_urls()[0])))
+        for key in (Qt.Key.Key_K, Qt.Key.Key_K, Qt.Key.Key_K, Qt.Key.Key_J):
+            QTest.keyClick(window, key)
+        self.assertEqual(window.session.audio_delay(), 100)
+        self.assertIn(("Sound 100 ms later", "info"), self.toasts)
+        channel = window.controller._current.item
+        self.assertEqual(window.sound_sync.audio_ms(window.controller._sync_key(channel)), 100)
+        window.controller.mouse_moved()  # the player controls, then ♫
+        transport = window.overlays.transport
+        self.assertTrue(transport.isVisible())
+        transport.audioRequested.emit()
+        panel = window.sound_panel
+        self.assertTrue(panel.isVisible())
+        self.assertIn(panel, window.host.visible_overlays())
+        self.assertEqual(panel.model().sync.text, "Sound 100 ms later")
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertFalse(panel.isVisible())
+        self.assertTrue(transport.isVisible())  # Esc closed the panel only
+
     def test_down_tunes_the_second_channel(self):
         self.open_first_channel()
         self.assertTrue(wait_until(self.session_on(channel_urls()[0])))

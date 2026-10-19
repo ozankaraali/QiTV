@@ -232,10 +232,15 @@ class FakeSession(QObject):
         self.audio = [(-1, "Disable"), (1, "English"), (2, "Deutsch")]
         self.subtitles = [(-1, "Disable"), (3, "Français")]
         self.audio_set, self.subtitle_set = [], []
+        self.audio_playing = 1  # audio_track(): the track libVLC plays
+        self.delay = 0  # audio_delay(): the sound's sync, in ms
+        self.delays = []  # every set_audio_delay()
+        self.play_delays = []  # the sync each play() opened with (PlaybackSession sets it then)
         self.url, self.kind = None, None  # what plays, as PlaybackSession.url and .kind
 
     def play(self, url, **kwargs):
         self.plays.append((url, kwargs))
+        self.play_delays.append(self.delay)
         self.url, self.kind = url, kwargs.get("kind")
         self.stateChanged.emit("opening")
 
@@ -284,6 +289,17 @@ class FakeSession(QObject):
 
     def set_audio_track(self, track_id):
         self.audio_set.append(track_id)
+        self.audio_playing = track_id
+
+    def audio_track(self):
+        return self.audio_playing
+
+    def audio_delay(self):
+        return self.delay
+
+    def set_audio_delay(self, ms):
+        self.delay = ms
+        self.delays.append(ms)
 
     def subtitle_tracks(self):
         return list(self.subtitles)
@@ -423,6 +439,7 @@ class FakeTransport(FakeOverlay):
     previousRequested = Signal()
     infoRequested = Signal()
     favoriteRequested = Signal()
+    bandChanged = Signal()
 
     def set_muted(self, muted):
         self.record("set_muted", muted)

@@ -12,6 +12,8 @@ Screens and their controls:
   (the channel's name and logo) and "favorite" (the star after it);
 - "picture": the video's own "click", "double-click" and "wheel";
 - "mixer": each row's "speaker" and "slider", and the "row" itself;
+- "sound": the Sound panel ♫ opens: its track "rows", its sync's "earlier" (−), "later" (+)
+  and "reset";
 - "pip_label": the small picture's "swap", "speaker" and "close";
 - "drawer": the top row's "back", "names", "search", "refresh" and "settings", the ⌕ "find" box,
   its "rows", and the rows of its sources and sections columns by title ("Settings", "Movies" …);
@@ -42,6 +44,7 @@ from ui.overlays.drawer import Drawer
 from ui.overlays.guide import Guide
 from ui.overlays.mixer import Mixer, MixerRow
 from ui.overlays.pip_label import PipLabel
+from ui.overlays.track_panel import PanelModel, PanelRow, PanelSync, TrackPanel
 from ui.overlays.transport import Transport
 from ui.pip import corner_rect
 from ui.video_surface import VideoSurface
@@ -67,6 +70,8 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("player", "+, -"): (("transport", "volume"), ("mixer", "slider")),
     ("player", "M"): (("transport", "volume"), ("mixer", "speaker"), ("pip_label", "speaker")),
     ("player", "Tab"): (("mixer", "row"),),
+    # ♫ opens the Sound panel: its − and + are J and K.
+    ("player", "J, K"): (("transport", "audio"), ("sound", "earlier"), ("sound", "later")),
     ("player", "F, F11, Ctrl+Meta+F"): (("transport", "fullscreen"), ("picture", "double-click")),
     ("player", "Ctrl+F"): (("transport", "search"),),
     ("player", "Ctrl+D"): (("transport", "favorite"),),
@@ -195,6 +200,16 @@ def _mixer(host: QWidget) -> set[str]:
     return found
 
 
+def _sound(host: QWidget) -> set[str]:
+    panel = TrackPanel(host)
+    rows = (PanelRow(1, "English", True), PanelRow(2, "Deutsch"))
+    sync = PanelSync("Sound 150 ms later", "Sound 5,000 ms earlier", reset=True)
+    panel.show_panel(PanelModel("Sound", rows, sync))
+    found = {"rows"} if not panel.row_rect(0).isEmpty() else set()
+    found.update(n for n in ("earlier", "later", "reset") if not panel.control_rect(n).isEmpty())
+    return found
+
+
 def _pip_label(host: QWidget) -> set[str]:
     label = PipLabel(host)
     label.follow(corner_rect(QSize(1280, 720), "br"))
@@ -281,6 +296,7 @@ class MouseOnlyAuditTests(unittest.TestCase):
             "transport": _transport(_child(host)),
             "picture": _picture(),
             "mixer": _mixer(_child(host)),
+            "sound": _sound(_child(host)),
             "pip_label": _pip_label(_child(host)),
             "drawer": drawer,
             "context": context,

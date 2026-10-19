@@ -14,8 +14,9 @@ chosen speed); a drag keeps the bar.
 Left of fullscreen sit the mini player (the whole window small in a corner, Alt+P), on live
 TV while the window offers picture in picture the second channel (P), then "Open in external
 player" (the shell's VLC/MPV menu for what plays now). Hovering those names them and their keys.
-Left of the audio track (♪) a speaker opens the volume mixer on the large picture's row; it
-shows whether that picture is muted.
+Left of the sound (♫) a speaker opens the volume mixer on the large picture's row; it shows
+whether that picture is muted. ♫ opens the Sound panel above it (ui/track_controls.py): the
+controls stay up while it shows (`hold`).
 Without a keyboard every key of the player has a control here too (the owner's mouse-only
 rule): left of the speaker sit Search, and on live TV the guide and the previous channel; a
 time-shifted channel at its live edge has ◀10 beside play; on live TV the channel's name (and
@@ -78,7 +79,7 @@ TOOLTIPS = {
     "fullscreen_back": "Exit fullscreen (F)",
     "external": "Open in external player",
     "volume": "Volume (+/−, M)",
-    "audio": "Audio track",
+    "audio": "Sound: track and sync (J, K)",
     "subtitles": "Subtitles",
     "slower": "Slower",
     "speed": "Normal speed",
@@ -103,7 +104,7 @@ _ICONS = {"mini": "mini_player", "pip": "pip", "previous": "recent"}
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
 # A quick second click (a double-click) repeats these steps; on any other control it counts
 # once: a toggle (★, ⛶, ▶) would undo itself, a jump (⟲, Next) go one further.
-_REPEATS = ("back10", "fwd10", "fwd60", "slower", "faster", "audio", "subtitles")
+_REPEATS = ("back10", "fwd10", "fwd60", "slower", "faster", "subtitles")
 _ICON_BUTTONS = (  # painted as icons
     "previous",
     "guide",
@@ -245,6 +246,7 @@ class Transport(Overlay):
         self._mini = self._fullscreen = False  # their buttons then show the way back
         self._favorite = False  # the live channel is a favorite: its star is lit
         self._library = False  # the title came from the Library: ‹ Library shows
+        self._held = ""  # the button whose panel is open: no fade meanwhile, and it is lit
         self._hand = False  # the pointer is over the title row's controls
         self._timeline: _Timeline | None = None
         self._claimed: tuple[object, ...] = ()  # what hole_claims() covered last
@@ -489,7 +491,26 @@ class Transport(Overlay):
         if self.isHidden():
             self._fit()
             self.show()  # paints, and the host takes the new mask
-        self._idle.start()
+        self._fade_later()
+
+    def hold(self, button: str) -> None:
+        """Stay up while `button`'s panel is open, the button lit (no fade); "": let go, the
+        fade starts again."""
+        if button != self._held:
+            self._held = button
+            self.update()
+        if button:
+            self._idle.stop()
+        elif self.isVisible():
+            self._idle.start()
+
+    def held(self) -> str:
+        """The button whose panel is open ("": none)."""
+        return self._held
+
+    def _fade_later(self) -> None:
+        if not self._held:
+            self._idle.start()
 
     def dismiss(self) -> None:
         if self._drag is not None:
@@ -823,7 +844,7 @@ class Transport(Overlay):
             self._paint_vod(p, un, rects, text)
         for name in _ICON_BUTTONS:
             if name in rects:
-                lit = name == "pip" and self._pip_open
+                lit = (name == "pip" and self._pip_open) or name == self._held
                 draw_icon(p, self.icon(name), rects[name], qcolor(PALETTE.accent) if lit else text)
         p.end()
 
@@ -1150,7 +1171,7 @@ class Transport(Overlay):
             return
         self._drag = None
         self.update()
-        self._idle.start()
+        self._fade_later()
         self._controls_changed()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
@@ -1161,7 +1182,7 @@ class Transport(Overlay):
             target_ms = 0 if timeshift else self._shown_ms()
             self._drag = None
             self.update()
-            self._idle.start()
+            self._fade_later()
             self._controls_changed()  # the bar may go with the drag
             if timeshift:
                 self.seekToRequested.emit(target_t)

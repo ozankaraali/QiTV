@@ -113,6 +113,19 @@ class PlaybackSessionTests(unittest.TestCase):
         self.session._tick()
         elapse(200)
 
+    def test_the_sound_delay_reaches_each_media_libvlc_opens(self):
+        # Measured with 3.0.20: audio_set_delay without an input is dropped (-1), and a new
+        # media starts at zero; set right after play(), the new input keeps it.
+        self.session.set_audio_delay(150)
+        self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)
+        self.assertTrue(wait_for(lambda: self.session.state() is PlaybackState.PLAYING))
+        self.assertEqual(self.session._player.audio_get_delay(), 150_000)
+        self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)  # opened again
+        self.assertTrue(wait_for(lambda: self.session.state() is PlaybackState.PLAYING))
+        self.assertEqual(self.session._player.audio_get_delay(), 150_000)
+        self.session.set_audio_delay(-100)
+        self.assertEqual(self.session._player.audio_get_delay(), -100_000)
+
     def test_seekable_false_when_media_is_replaced(self):
         flags = []
         self.session.seekableChanged.connect(flags.append)
@@ -384,6 +397,11 @@ class _FakePlayer:
     def audio_get_track(self):
         self._call("audio_get_track")
         return 1
+
+    def audio_set_delay(self, us):
+        # libVLC sets it on the input: none, and it is dropped (-1), as with 3.0.20.
+        self._call("audio_set_delay", us)
+        return 0 if self.has_input else -1
 
     def video_get_spu_description(self):
         self._call("video_get_spu_description")
@@ -699,6 +717,54 @@ class PlayerJobTests(unittest.TestCase):
         self.assertEqual(self.opened(), [A])
         self.runner.finish()
         self.assertEqual(self.opened(), [A, A])
+
+
+class SoundDelayTests(unittest.TestCase):
+    """The sound's sync (2.2) lives on libVLC's input, which each media starts at zero: the
+    session sets it after each play() and keeps it for the next media."""
+
+    setUpClass = PlayerJobTests.setUpClass
+    setUp = PlayerJobTests.setUp
+    play = PlayerJobTests.play
+    opened = PlayerJobTests.opened
+
+    def delays(self):
+        return [call for call in self.player.calls if call[0] == "audio_set_delay"]
+
+    def test_a_delay_set_before_anything_plays_comes_with_the_first_media(self):
+        self.session.set_audio_delay(150)
+        self.assertEqual(self.player.calls, [])  # no input: libVLC would drop it
+        self.play(A)
+        self.assertEqual(
+            self.player.calls, [("set_media", A), ("play",), ("audio_set_delay", 150_000)]
+        )
+        self.assertEqual(self.session.audio_delay(), 150)
+
+    def test_a_delay_set_while_it_plays_applies_at_once(self):
+        self.play(A)
+        self.session.set_audio_delay(-200)
+        self.assertEqual(self.delays(), [("audio_set_delay", -200_000)])
+
+    def test_every_media_the_player_opens_after_it_takes_it_again(self):
+        self.session.set_audio_delay(100)
+        self.play(A)
+        self.play(B)  # a zap, a reopen of the same channel (a seek, a reconnect) alike
+        self.session.set_audio_delay(250)  # the old input is being joined: nothing now
+        self.runner.finish()
+        self.assertEqual(
+            self.delays(), [("audio_set_delay", 100_000), ("audio_set_delay", 250_000)]
+        )
+        self.assertEqual(self.opened(), [A, B])
+
+    def test_in_sync_sets_nothing_on_a_new_media(self):
+        self.play(A)
+        self.assertEqual(self.delays(), [])
+        self.assertEqual(self.session.audio_delay(), 0)
+
+    def test_after_release_nothing_reaches_libvlc(self):
+        self.session.release()
+        self.session.set_audio_delay(50)
+        self.assertEqual((self.delays(), self.session.audio_delay()), ([], 0))
 
 
 class _AudioPlayer(_FakePlayer):

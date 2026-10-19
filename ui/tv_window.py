@@ -72,6 +72,7 @@ from services.playback import (
 )
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
+from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.thread_cleanup import has_pending_threads
 from services.update_checker import call_before_update
 from services.watch_state import WatchState
@@ -94,6 +95,7 @@ from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
 from ui.overlays.pip_label import PipLabel
 from ui.overlays.toast import Toast
+from ui.overlays.track_panel import TrackPanel
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import ZapBanner
@@ -421,6 +423,8 @@ class TVWindow(QMainWindow):
             one_disk_ring(main_tuner, pip_tuner)  # the user's disk cap is the total
             wait_for_each_other(main_tuner, pip_tuner)  # a closing PiP may hold the last slot
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
+        # Each channel's sound sync (J/K, the Sound panel), written off the GUI thread.
+        self.sound_sync = SoundSync(os.path.join(config_manager.get_config_dir(), SOUND_SYNC_FILE))
 
         # The drawer and column ask the controller for "now" titles, and the controller
         # needs the overlays: a closure breaks the cycle.
@@ -435,6 +439,7 @@ class TVWindow(QMainWindow):
         host = self.host
         self.pip_label = PipLabel(host)
         self.mixer = Mixer(host)
+        self.sound_panel = TrackPanel(host)
         self.corner_controls = CornerControls(host)
         self.overlays = Overlays(
             banner=ZapBanner(host),
@@ -447,19 +452,22 @@ class TVWindow(QMainWindow):
             welcome=WelcomeCard(host),
             pip_label=self.pip_label,
             mixer=self.mixer,
+            sound_panel=self.sound_panel,
             library_toast=self.library_toast,
         )
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
         # bottom corner's PiP: its pill, ⇄, speaker and × stay within reach; elsewhere on the
         # PiP the transport keeps only its own buttons and bar, and other clicks reach the
         # small picture (OverlayHost.set_hole). The mixer shows over both (it sits above the
-        # transport's controls and beside the PiP). The drawer and the guide cover them all.
+        # transport's controls and beside the PiP), and the Sound panel over it (above its
+        # button). The drawer and the guide cover them all.
         for overlay in (
             self.overlays.banner,
             self.overlays.column,
             self.overlays.transport,
             self.pip_label,
             self.mixer,
+            self.sound_panel,
             self.overlays.drawer,
             self.overlays.guide,
             self.overlays.next_card,
@@ -502,6 +510,7 @@ class TVWindow(QMainWindow):
             budget=self.budget,
             sessions=self.sessions,
             pip_frame=self.pip_frame,
+            sound_sync=self.sound_sync,
             parent=self,
         )
         self.controller = controller

@@ -429,6 +429,13 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             dot = QPainterPath()
             dot.addEllipse(QRectF(0.25, 0.25, 0.5, 0.5))
             fill(dot)
+        elif name == "check":  # ✓: the track that plays
+            tick = QPainterPath(QPointF(0.2, 0.52))
+            tick.lineTo(0.42, 0.74)
+            tick.lineTo(0.82, 0.28)
+            p.setPen(QPen(color, 0.12, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(tick)
         else:
             raise KeyError(f"Unknown icon: {name!r}")
     finally:

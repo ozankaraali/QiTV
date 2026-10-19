@@ -16,6 +16,13 @@ asked for and applies it again once each media's output is open: it looks every
 _AUDIO_POLL_MS for _AUDIO_WATCH_MS, then at each regular poll while playing. Without an output
 `volume()` reports what was asked for, else the last level an open output reported.
 
+The sound's delay against the picture (`set_audio_delay`, 2.2: a channel whose sound drifts)
+lives on libVLC's input, which every media starts afresh at zero; libVLC drops it while no
+input exists (measured with 3.0.20). So the session keeps it and sets it again right after
+each media's play(), where the new input takes it and keeps it through its start: a reopen
+(a reconnect, a time-shift seek, the frozen picture's software reopen) keeps the delay, and
+so does the next media until it is set again.
+
 With hardware decoding (Settings; `hardware`), each tick while a stream plays reads libVLC's
 media statistics: once its picture stood still while its sound played (`FrozenPicture`, which
 has the lab) where pictures can show (`_can_show`: on a window system, or once VLC made a video
@@ -259,6 +266,7 @@ class PlaybackSession(QObject):
         self._audio_timer = QTimer(self, singleShot=True, interval=_AUDIO_POLL_MS)
         self._audio_timer.timeout.connect(self._look_for_audio)
         self._audio_watch = QElapsedTimer()  # since the wanted audio began waiting
+        self._audio_delay_ms = 0  # the sound's delay against the picture: set on each media
 
     def _player_free(self) -> bool:
         """The GUI thread may call into libVLC: not released, and no job holds its input lock.
@@ -382,6 +390,8 @@ class PlaybackSession(QObject):
             self._fail("VLC could not start playback")
             return
         self._has_input = True
+        if self._audio_delay_ms:  # the new input exists now and starts at zero
+            self._player.audio_set_delay(self._audio_delay_ms * 1000)
         self._poll.start()
         self._watch_audio()
 
@@ -546,6 +556,25 @@ class PlaybackSession(QObject):
     def set_audio_track(self, track_id: int) -> None:
         if self._player_free():
             self._player.audio_set_track(int(track_id))
+
+    def audio_track(self) -> int:
+        """The audio track playing (-1: none, or no media)."""
+        if not self._player_free() or not self._has_input:
+            return -1
+        return int(self._player.audio_get_track())
+
+    def audio_delay(self) -> int:
+        """How many milliseconds the sound plays after the picture (before it: negative)."""
+        return self._audio_delay_ms
+
+    def set_audio_delay(self, ms: int) -> None:
+        """Play the sound `ms` milliseconds after the picture (before it when negative): the
+        media playing now and every one this player opens after it, until set again."""
+        if self._released:
+            return
+        self._audio_delay_ms = int(ms)
+        if self._has_input and self._player_free():
+            self._player.audio_set_delay(self._audio_delay_ms * 1000)
 
     def subtitle_tracks(self) -> list[tuple[int, str]]:
         if not self._player_free():
@@ -833,6 +862,12 @@ class Session(Protocol):
 
     def set_audio_track(self, track_id: int) -> None: ...
 
+    def audio_track(self) -> int: ...
+
+    def audio_delay(self) -> int: ...
+
+    def set_audio_delay(self, ms: int) -> None: ...
+
     def subtitle_tracks(self) -> list[tuple[int, str]]: ...
 
     def set_subtitle_track(self, track_id: int) -> None: ...
@@ -928,6 +963,15 @@ class NullSession(QObject):
         return []
 
     def set_audio_track(self, track_id: int) -> None:
+        pass
+
+    def audio_track(self) -> int:
+        return -1
+
+    def audio_delay(self) -> int:
+        return 0
+
+    def set_audio_delay(self, ms: int) -> None:
         pass
 
     def subtitle_tracks(self) -> list[tuple[int, str]]:

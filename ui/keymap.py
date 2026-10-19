@@ -49,6 +49,8 @@ class Action(str, Enum):
     PIP = "pip"  # picture in picture: open (the previous or highlighted channel) or close
     SWAP = "swap"  # the large and the small picture trade places
     TAB = "tab"  # the mixer's other row
+    SOUND_EARLIER = "sound_earlier"  # J: the sound 50 ms earlier against the picture
+    SOUND_LATER = "sound_later"  # K: 50 ms later (VLC's keys)
 
 
 CONTEXTS = ("player", "drawer", "library", "guide")
@@ -99,6 +101,8 @@ _PLAYER_CHARS = {
     _K.Key_Minus.value: Action.VOL_DOWN,
     _K.Key_P.value: Action.PIP,
     _K.Key_S.value: Action.SWAP,
+    _K.Key_J.value: Action.SOUND_EARLIER,
+    _K.Key_K.value: Action.SOUND_LATER,
 }
 # Remote channel keys (drawer closed, like the arrows they stand in for).
 _CHANNEL_KEYS = {
@@ -255,6 +259,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("+, -", "Volume up / down (the mixer)"),
         ("M", "Mute"),
         ("Tab", "The mixer's other row (while it shows)"),
+        ("J, K", "Sound 50 ms earlier / later (sync with the picture)"),
         ("F, F11, Ctrl+Meta+F", "Fullscreen"),
         ("Ctrl+F", "Search"),
         ("Ctrl+D", "Add or remove a favorite channel"),
