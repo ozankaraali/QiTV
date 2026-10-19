@@ -12,6 +12,7 @@ import subprocess
 import sys
 from typing import Any, Mapping, Optional, Tuple
 
+from services.i18n import N_, tr, translate
 from services.vlc_bundle import ENV_LIB, ENV_MODULES, ENV_PLUGINS
 
 logger = logging.getLogger(__name__)
@@ -20,20 +21,35 @@ logger = logging.getLogger(__name__)
 _external_mpv_player: Optional[Any] = None
 
 PYTHON_MPV = "python-mpv"  # find_mpv(): mpv plays through the python-mpv module
-VLC_MISSING = (
-    "VLC Media Player is not installed.\n\n"
+# A missing player's message: its first line (the headline) is what a toast shows; the rest,
+# how to install it, is only logged and stays English. vlc_missing() and mpv_missing() give the
+# headline in the active language; translate() shows one taken from VLC_MISSING or MPV_MISSING.
+VLC_MISSING_HEADLINE = N_("VLC Media Player is not installed.")  # i18n: a toast
+VLC_INSTALL_HELP = (
     "Please install VLC:\n"
     "• macOS: Download from https://www.videolan.org/vlc/\n"
     "• Linux: Use your package manager (apt install vlc)\n"
     "• Windows: Download from https://www.videolan.org/vlc/"
 )
-MPV_MISSING = (
-    "MPV Media Player is not installed.\n\n"
+VLC_MISSING = VLC_MISSING_HEADLINE + "\n\n" + VLC_INSTALL_HELP
+MPV_MISSING_HEADLINE = N_("MPV Media Player is not installed.")  # i18n: a toast
+MPV_INSTALL_HELP = (
     "Please install MPV:\n"
     "• macOS: brew install mpv\n"
     "• Linux: Use your package manager (apt install mpv)\n"
     "• Windows: Download from https://mpv.io/installation/"
 )
+MPV_MISSING = MPV_MISSING_HEADLINE + "\n\n" + MPV_INSTALL_HELP
+
+
+def vlc_missing() -> str:
+    """VLC_MISSING, its headline in the active language."""
+    return translate(VLC_MISSING_HEADLINE) + "\n\n" + VLC_INSTALL_HELP
+
+
+def mpv_missing() -> str:
+    """MPV_MISSING, its headline in the active language."""
+    return translate(MPV_MISSING_HEADLINE) + "\n\n" + MPV_INSTALL_HELP
 
 
 def player_env(
@@ -94,7 +110,7 @@ def launch_vlc(url: str) -> Tuple[bool, str]:
     """Launch VLC with platform-specific handling."""
     vlc_cmd = find_vlc()
     if not vlc_cmd:
-        return False, VLC_MISSING
+        return False, vlc_missing()
     if platform.system() == "Darwin":
         # "--": a URL that starts with "-" must not be read as an option.
         argv = ["open", "-a", vlc_cmd, "--", url]
@@ -105,7 +121,8 @@ def launch_vlc(url: str) -> Tuple[bool, str]:
         subprocess.Popen(argv, env=player_env())
         return True, ""
     except Exception as e:
-        return False, f"Failed to launch VLC: {str(e)}"
+        # i18n: the first line shows in a toast; {error} is the system's reason
+        return False, tr("Failed to launch VLC: {error}", error=str(e))
 
 
 def _python_mpv_loads() -> bool:
@@ -239,10 +256,11 @@ def launch_mpv(url: str) -> Tuple[bool, str]:
 
     mpv_cmd = _mpv_executable()
     if not mpv_cmd:
-        return False, MPV_MISSING
+        return False, mpv_missing()
 
     try:
         subprocess.Popen([mpv_cmd, "--", url], env=player_env())
         return True, ""
     except Exception as e:
-        return False, f"Failed to launch MPV: {str(e)}"
+        # i18n: the first line shows in a toast; {error} is the system's reason
+        return False, tr("Failed to launch MPV: {error}", error=str(e))

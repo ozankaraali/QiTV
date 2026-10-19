@@ -69,6 +69,7 @@ from services.browsed_catalog import BrowsedCatalog
 from services.catalogs import Catalogs
 from services.connection_budget import ConnectionBudget
 from services.find import Preferences, preferences_for
+from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
 from services.live.engine import LiveEngine
@@ -132,7 +133,7 @@ logger = logging.getLogger(__name__)
 
 WINDOW_NAME = "tv_window"
 TIMESHIFT_DIR = "timeshift"  # the live buffers' root, in the config directory
-CLOSING_TEXT = "Closing after background requests finish…"
+CLOSING_TEXT = N_("Closing after background requests finish…")  # i18n: a toast while QiTV quits
 CLOSE_RETRY_MS = 50
 CLOSE_THREAD_WAIT_MS = 30_000  # then quit anyway: a stuck worker must not keep QiTV open
 CLOSING_NOTICE_AFTER = 10  # close retries (half a second) before the notice shows
@@ -144,7 +145,7 @@ MINI_MARGIN = 10
 FULLSCREEN_EXIT_MS = 1500  # the longest wait for the platform to finish leaving fullscreen
 FULLSCREEN_SETTLE_MS = 5000  # the longest wait for macOS to report a fullscreen change
 # config.json could not be written (locked by antivirus, read-only, a full disk).
-SAVE_FAILED_TEXT = "Couldn't save the settings; changes will be lost when QiTV closes"
+SAVE_FAILED_TEXT = N_("Couldn't save the settings; changes will be lost when QiTV closes")
 ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
 # The Qt platform whose window ids libVLC can draw into (NSView, HWND, X11 window).
 _NATIVE_PLATFORMS = {"Darwin": "cocoa", "Windows": "windows", "Linux": "xcb"}
@@ -712,7 +713,8 @@ class TVWindow(QMainWindow):
         """The Subtitles panel's "Load a file…": a subtitle file, from `folder` ("": none)."""
         if self._closing:
             return ""
-        path, _filter = QFileDialog.getOpenFileName(self, "Load subtitles", folder, SUBTITLE_FILTER)
+        title = tr("Load subtitles")  # i18n: the title of the dialog that picks a subtitle file
+        path, _filter = QFileDialog.getOpenFileName(self, title, folder, translate(SUBTITLE_FILTER))
         return path if not self._closing else ""
 
     def _on_corner_sound(self) -> None:
@@ -1162,9 +1164,10 @@ class TVWindow(QMainWindow):
             self._show_provider((added or known)[-1])
             if added:
                 names = ", ".join(added)
-                self.screens.notify(f"Added {names} to your providers")
+                # i18n: a toast; {names} is one or more provider names, joined with ", "
+                self.screens.notify(tr("Added {names} to your providers", names=names))
             else:
-                self.screens.notify(f"{known[-1]} is already in your providers")
+                self.screens.notify(tr("{name} is already in your providers", name=known[-1]))
         if form is not None:
             self.add_provider(form)
 
@@ -1225,7 +1228,7 @@ class TVWindow(QMainWindow):
             self.config_manager.save_config()
         except Exception as e:
             logger.warning("Couldn't save the settings: %s", safe_message(e))
-            self.screens.notify(SAVE_FAILED_TEXT, "error", ERROR_MS)
+            self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
         self.controller.settings_saved()
 
     def set_provider(self, force_update: bool = False) -> None:
@@ -1253,7 +1256,7 @@ class TVWindow(QMainWindow):
         self.controller.start()
         self.epg_refresh.start()
         if self.config_manager.save_failed():  # e.g. the defaults patched in at start
-            self.screens.notify(SAVE_FAILED_TEXT, "error", ERROR_MS)
+            self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
 
     def _fit_restored(self) -> None:
         """Bring the saved geometry onto a screen: its monitor may be gone (Minor 13).
@@ -1334,7 +1337,7 @@ class TVWindow(QMainWindow):
                 self._close_retries += 1
                 toast = self.overlays.toast
                 if self._close_retries >= CLOSING_NOTICE_AFTER and not toast.isVisible():
-                    toast.show_message(CLOSING_TEXT, "info", CLOSING_NOTICE_MS)
+                    toast.show_message(translate(CLOSING_TEXT), "info", CLOSING_NOTICE_MS)
                 self._close_later(event)
                 return
             self._abandon_threads()

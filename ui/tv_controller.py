@@ -68,10 +68,11 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QAbstractScrollArea
 
 from services import external_players, favorites
-from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
+from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, shown_label
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
-from services.failure_reasons import LIMIT, Reason, own_streams_text
+from services.failure_reasons import LIMIT, Reason, own_streams_text, shown_message
+from services.i18n import N_, tr, translate
 from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
 from services.navigation import (
@@ -123,15 +124,20 @@ SEEK_STEP_MS = 10_000
 TUNING_KEEP_MS = 3000  # under the banner's 4 s: it is shown again while a link resolves
 TUNING_CAP_S = 20.0  # and while the channel opens, up to this long after the tune
 EXTERNAL_SETTLE_MS = 1000  # the zap burst window: an external player opens once zapping stops
-FAVORITES_SAVE_FAILED_TEXT = "Couldn't save your favorites; they will be lost when QiTV closes"
+FAVORITES_SAVE_FAILED_TEXT = N_("Couldn't save your favorites; they will be lost when QiTV closes")
 _ACTIVE_STATES = frozenset({"opening", "buffering", "playing", "paused"})
 _ON_DEMAND_STOPS = frozenset({"ended", "error"})  # a movie or episode still current after them
 _VOLUME_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier.value | Qt.KeyboardModifier.MetaModifier.value
 )
 _DRAWER_ROWS = 40  # rows of a mixed list whose providers load their guides
-MULTIVIEW_TITLE = "Multiview"  # the controls' title over a focused tile with no channel
-_PINNED_TITLES = {FAVORITES_GROUP: "Favorites", RECENT_GROUP: "Recent"}
+# The controls' title over a focused tile with no channel (the feature's name).
+MULTIVIEW_TITLE = N_("Multiview")  # i18n: the player controls' title over the multiview's grid
+# The fast-zap column's titles of the pinned groups.
+_PINNED_TITLES = {
+    FAVORITES_GROUP: N_("Favorites"),  # i18n: the group of your favorite channels (a title)
+    RECENT_GROUP: N_("Recent"),  # i18n: the group of the channels watched lately (a title)
+}
 
 
 @dataclass
@@ -1180,7 +1186,7 @@ class TVController(QObject):
             self._current = previous  # whatever was playing before is still the current one
             self._log_failure(f"play {target.title}", e)
             self._restore_channel()
-            self._error(f"{target.title}: {e}")
+            self._error(self._named(target.title, str(e)))
 
     def _on_tune_failed(self, target: Target, message: str) -> None:
         if self._closed:
@@ -1200,7 +1206,7 @@ class TVController(QObject):
         self._forget_room(target)
         self._give_large_back(target)
         self._restore_channel()
-        self._error(f"{target.title}: {message}")
+        self._error(self._named(target.title, message))
         self._explain_item(target.item, target.title)
 
     def _on_tune_dropped(self, _target: Target) -> None:
@@ -1222,7 +1228,7 @@ class TVController(QObject):
                 del self._tile_links[name]
                 if self._grid is not None:
                     self._grid.link_failed(name, target.item)
-        self._menu_error(f"{target.title}: {message}")
+        self._menu_error(self._named(target.title, message))
 
     def _keep_tuning_banner(self) -> None:
         """Show the banner again while the channel it announces is on its way: its link
@@ -1352,7 +1358,8 @@ class TVController(QObject):
             if self._current is not None and self._current is not target:
                 return  # its open failed at once: the channel kept small took the picture back
             if start:
-                self._toast(f"Resumed at {fmt_duration(start)}")
+                # i18n: a toast; {time} is where the film resumes, e.g. 1:02:05
+                self._toast(tr("Resumed at {time}", time=fmt_duration(start)))
             self.overlays.banner.dismiss()  # the transport takes the bottom of the video
             self.overlays.transport.set_next_available(self._autoplay.has_next(target))
             self.overlays.transport.show_vod(target.title, target.subtitle)
@@ -1372,7 +1379,7 @@ class TVController(QObject):
                 if not target.live:
                     self._give_small_channel_large()
                 self._restore_channel()
-                self._error(f"{target.title}: {e}")
+                self._error(self._named(target.title, str(e)))
 
         return run
 
@@ -1391,7 +1398,10 @@ class TVController(QObject):
             if rest.strip():
                 logger.info("External player: %s", scrub(rest))
             self._restore_channel()
-            self._menu_error(first.strip() or "The external player could not start")
+            first = first.strip()
+            self._menu_error(
+                translate(first) if first else tr("The external player could not start")
+            )
             return
         self._current, self._cid = target, None
         self._delivered(target, url)
@@ -1980,7 +1990,7 @@ class TVController(QObject):
             self._give_large_back(newest)
             self._restore_channel()
         if not self._flow.shows_failure(name):
-            self._error(f"{name}: {message}" if name else message)
+            self._error(self._named(name, message))
             self._explain(name, name)
 
     def _ask_again(self, newest: Target) -> None:
@@ -2079,11 +2089,14 @@ class TVController(QObject):
 
     def _group_title(self, group_key: str) -> str:
         if group_key in _PINNED_TITLES:
-            return _PINNED_TITLES[group_key]
+            return translate(_PINNED_TITLES[group_key])
         for group in self.catalog.groups("live"):
             if group.id == group_key:
-                return str(group.title)
-        return "All channels" if group_key == ALL_GROUP_ID else group_key
+                # QiTV's own group names ("All", "Uncategorized") show translated; a
+                # provider's keep theirs.
+                return shown_label(str(group.title))
+        # i18n: the fast-zap column's title over every live channel
+        return tr("All channels") if group_key == ALL_GROUP_ID else group_key
 
     # ---- zap events ---------------------------------------------------------------------------
 
@@ -2127,7 +2140,8 @@ class TVController(QObject):
 
     def _on_number_not_found(self, number: str) -> None:
         if not self._closed:
-            self._toast(f"No channel {number}")
+            # i18n: a toast after a channel number was typed that no channel has
+            self._toast(tr("No channel {number}", number=number))
 
     def _on_column_row(self, row: int) -> None:
         context = self.zap.context
@@ -2173,7 +2187,7 @@ class TVController(QObject):
         it (a channel's player errors are its live session's to recover or report)."""
         target = self._pip.small_title(name) if self._pip is not None else None
         if not self._closed and target is not None:
-            self._error(f"{target.title}: {message}")
+            self._error(self._named(target.title, message))
             self._explain_item(target.item, target.title)
 
     def _on_error(self, message: str) -> None:
@@ -2186,7 +2200,7 @@ class TVController(QObject):
         title = current.title if current is not None else ""
         if current is not None and not current.live:
             self._give_small_channel_large()
-        self._error(f"{title}: {message}" if title else message)
+        self._error(self._named(title, message))
         if current is not None:
             self._explain_item(current.item, title)
 
@@ -2213,14 +2227,14 @@ class TVController(QObject):
                 return
             if self._live_controls.reconnect(current):
                 return  # "Reconnecting…": the same stream opens again, in the same slot
-            self._toast("The stream ended")
+            self._toast(tr("The stream ended"))  # i18n: a toast
             return
         try:
             self.watch.flush()
         except Exception as e:
             self._log_failure("save the watch state", e)
         if not self._autoplay.on_ended(current):
-            self._toast(FINISHED_TEXT)
+            self._toast(translate(FINISHED_TEXT))
 
     def _on_next_requested(self) -> None:
         """The transport's Next: what follows the movie or episode plays at once."""
@@ -2399,9 +2413,10 @@ class TVController(QObject):
         elif self.live is not None and current is not None and current.live:
             # Played directly: there is no buffer to seek in. Say why when it was the channel's
             # own choice (it crawled through the time-shift buffer; back in a day).
-            self._toast(self.live.no_rewind_reason)
+            self._toast(translate(self.live.no_rewind_reason))
         else:
-            self._toast("Rewind arrives with time-shift")
+            # i18n: a toast when a channel is rewound with no time-shift buffer to rewind in
+            self._toast(tr("Rewind arrives with time-shift"))
 
     def _show_transport(self) -> None:
         target = self._current
@@ -2426,7 +2441,7 @@ class TVController(QObject):
         if self._digits:
             return  # the banner shows the number being typed
         self.overlays.banner.dismiss()
-        self.overlays.transport.show_live(MULTIVIEW_TITLE, "")
+        self.overlays.transport.show_live(translate(MULTIVIEW_TITLE), "")
 
     def _change_volume(self, delta: int) -> None:
         self._mixer.change(delta)
@@ -2482,9 +2497,9 @@ class TVController(QObject):
         if self._channel is not None:  # the star of the channel playing (by name, as the list)
             self.overlays.transport.set_favorite(favorites.is_favorite(self.config, self._channel))
         if not favorites.save(self.config):
-            self._toast(FAVORITES_SAVE_FAILED_TEXT, "error", ERROR_MS)
+            self._toast(translate(FAVORITES_SAVE_FAILED_TEXT), "error", ERROR_MS)
             return
-        self._toast("Added to favorites" if added else "Removed from favorites")
+        self._toast(tr("Added to favorites") if added else tr("Removed from favorites"))
 
     def _on_context(self, node: NavNode, global_pos: QPoint) -> None:
         """A right-click on a drawer row: its context menu."""
@@ -2550,7 +2565,9 @@ class TVController(QObject):
             toast = self.overlays.toast
         self._toasts += 1
         self._toasted_at = time.monotonic()
-        toast.show_message(text, kind, ms)
+        # The helpers' texts: one marked where it was written (a catalog's failure among them)
+        # shows in the active language.
+        toast.show_message(shown_message(text), kind, ms)
 
     # ---- why a failure happened ----------------------------------------------------------------
 
@@ -2602,11 +2619,21 @@ class TVController(QObject):
             # The streams in use are QiTV's own (its other picture): no other device's.
             text = own_streams_text(reason.limit)
         if text:
-            self._error(f"{title}: {text}" if title else text)
+            self._error(self._named(title, text))
 
     def _notify(self, text: str, kind: str) -> None:
         """A toast for the shell's helpers: errors stay up longer."""
         self._toast(text, kind, ERROR_MS if kind == "error" else INFO_MS)
+
+    @staticmethod
+    def _named(name: str, message: str) -> str:
+        """An error's text after what failed (a channel, a film or a provider), when named.
+        `message` may come marked from a service: it shows in the active language."""
+        message = shown_message(message)
+        if not name:
+            return message
+        # i18n: an error toast: a channel's, a film's or a provider's name, then what went wrong
+        return tr("{name}: {message}", name=name, message=message)
 
     def _error(self, text: str) -> None:
         """Toast an error; addresses and query strings never reach the toast or any log."""

@@ -22,6 +22,8 @@ from PySide6.QtCore import QObject, QPoint
 from PySide6.QtWidgets import QFileDialog, QWidget
 
 from services.exporter import ExportKind
+from services.failure_reasons import shown_message
+from services.i18n import tr
 from services.library import LibraryModel
 from ui.keymap import Action
 from ui.library_controller import LibraryController
@@ -31,10 +33,18 @@ from ui.tv_controller import ERROR_MS, INFO_MS, scrub
 
 logger = logging.getLogger(__name__)
 
-MEDIA_FILTER = (
-    "Media files (*.mp4 *.m4v *.mkv *.avi *.mov *.webm *.ts *.m2ts *.mts *.mpg *.mpeg *.flv"
-    " *.wmv *.ogv *.mp3 *.m4a *.aac *.flac *.ogg *.opus *.wav *.m3u8);;All files (*)"
+# File → Open File…'s files (the dialog's filter, after its name).
+MEDIA_PATTERNS = (
+    "*.mp4 *.m4v *.mkv *.avi *.mov *.webm *.ts *.m2ts *.mts *.mpg *.mpeg *.flv"
+    " *.wmv *.ogv *.mp3 *.m4a *.aac *.flac *.ogg *.opus *.wav *.m3u8"
 )
+
+
+def media_filter() -> str:
+    """Open File's filters: media files, then every file."""
+    media = tr("Media files")  # i18n: a file type in the Open File dialog
+    every = tr("All files")  # i18n: a file type in the Open File dialog
+    return f"{media} ({MEDIA_PATTERNS});;{every} (*)"
 
 
 class TVPages(QObject):
@@ -282,7 +292,8 @@ class TVPages(QObject):
         window = self._window
         if window.closing():
             return
-        path, _filter = QFileDialog.getOpenFileName(window, "Open File", "", MEDIA_FILTER)
+        title = tr("Open File")  # i18n: the title of the dialog that picks a media file
+        path, _filter = QFileDialog.getOpenFileName(window, title, "", media_filter())
         if not path or window.closing():
             return
         self._show_page(window.player_page)
@@ -301,13 +312,16 @@ class TVPages(QObject):
     # ---- messages -----------------------------------------------------------------------------
 
     def notify(self, text: str, kind: str = "info", ms: int = INFO_MS) -> None:
-        """A message on whichever page shows (each page has its toast)."""
+        """A message on whichever page shows (each page has its toast). A text marked where it
+        was written (the Library's, the exports') shows in the active language."""
         window = self._window
+        text = shown_message(text)
         for toast in (window.overlays.toast, window.library_toast):
             toast.show_message(text, kind, ms)
 
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self.library_shown():  # the player's toast says it too, but its page is hidden
-            self._window.library_toast.show_message(
-                scrub(f"{name}: {message}" if name else message), "error", ERROR_MS
-            )
+            message = shown_message(message)
+            if name:
+                message = tr("{name}: {message}", name=name, message=message)
+            self._window.library_toast.show_message(scrub(message), "error", ERROR_MS)
