@@ -334,7 +334,7 @@ class FoundTests(unittest.TestCase):
         self.assertTrue(same_title("ISTANBUL ışıkları", "İstanbul Işıkları"))
         self.assertTrue(same_title("Harbour Lights", "2019 - Harbour Lights"))
         self.assertTrue(same_title("The Harbour Lights", "Harbour Lights: The Return"))
-        self.assertFalse(same_title("6 Süper Kahraman", "Six Brave Lanterns 6"))
+        self.assertFalse(same_title("6 Cesur Fener", "Six Brave Lanterns 6"))
         self.assertFalse(same_title("The Harbour", "The Lighthouse"))  # "the" tells nothing
         self.assertFalse(same_title("Up", "Up and Away Over the Northern Harbour Lights"))
         self.assertFalse(same_title("", "Harbour"))
