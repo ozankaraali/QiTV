@@ -54,7 +54,9 @@ JUMP_S = 3.0
 _JUMP_TICKS = round(JUMP_S * _CLOCK)
 _PCR_RUN = 0x2000  # added to a PID (13 bits): the key of its PCRs' run (`Segmenter._cover`)
 _SCRAMBLED_PACKETS = 8  # scrambled cut-PID packets that prove scrambling ...
-_SCRAMBLED_WINDOW_S = 2.0  # ... in total within this first wall time, later in a row
+# ... in total within this much real time from the first input (stalls included: under bursty
+# input the stall-free clock barely moves), later in a row
+_SCRAMBLED_WINDOW_S = 2.0
 _STALL_S = 5.0  # a longer pause between feeds is a stalled source: removed from the clock
 # A segment's PTS span may pass the forced cut by this much: the cut lands on the first frame at
 # or past it (10.01 s at 29.97 fps).
@@ -233,7 +235,7 @@ class Segmenter:
         self._flushed: list[Event] = []  # the old input's last packet, after `discontinuity()`
         self._pcrs: dict[int, int] = {}  # the latest PCR base by PID
         self._probe: bytearray | None = bytearray()
-        self._start_wall: float | None = None
+        self._started: float | None = None  # the injected clock at the first input
         self._feed_wall: float | None = None  # the injected clock at the latest input
         self._stalled = 0.0  # stalls so far: removed from every wall time used and reported
         self._wall = 0.0  # the stall-free time of the latest input
@@ -383,7 +385,9 @@ class Segmenter:
     def _tick(self) -> float:
         """The stall-free wall time now (see `wall`)."""
         now = self._clock()
-        if self._feed_wall is not None and now - self._feed_wall > _STALL_S:
+        if self._feed_wall is None:
+            self._started = now
+        elif now - self._feed_wall > _STALL_S:
             self._stalled += now - self._feed_wall
         self._feed_wall = now
         self._wall = now - self._stalled
@@ -416,8 +420,6 @@ class Segmenter:
         discontinuity_indicator gets it, so VLC takes the new clock (ContinuityJoiner does the
         same at an HLS discontinuity). The segmenter rewrites no timestamp (for raw TS,
         `ClockJoiner` re-bases a restarted run's before it)."""
-        if self._start_wall is None:
-            self._start_wall = wall
         # The cut PID went quiet while other packets flow: cut at the next PES start of any PID.
         silent = self._open and wall - self._pusi_wall >= self._forced_s
         n = len(data)
@@ -496,7 +498,7 @@ class Segmenter:
                     if b3 & 0xC0:
                         scrambled += 1
                         self._scrambled_total += 1
-                        self._check_scrambled(scrambled, wall)
+                        self._check_scrambled(scrambled)
                     else:
                         scrambled = 0
                         if b1 & 0x40:
@@ -584,10 +586,12 @@ class Segmenter:
             return True
         return step <= _JUMP_MAX_TICKS and step - (wall - since) * _CLOCK <= _JUMP_TICKS
 
-    def _check_scrambled(self, run: int, wall: float) -> None:
-        """Isolated scrambling bits are corruption; many mean the stream is encrypted."""
-        start = wall if self._start_wall is None else self._start_wall
-        early = wall - start < _SCRAMBLED_WINDOW_S
+    def _check_scrambled(self, run: int) -> None:
+        """Isolated scrambling bits are corruption; many mean the stream is encrypted: `run` in
+        a row, or as many in total within the first `_SCRAMBLED_WINDOW_S` of real time (stalls
+        included: bursty HLS barely moves the stall-free clock)."""
+        started, now = self._started, self._feed_wall
+        early = started is None or now is None or now - started < _SCRAMBLED_WINDOW_S
         if run >= _SCRAMBLED_PACKETS or (early and self._scrambled_total >= _SCRAMBLED_PACKETS):
             raise Unsupported("scrambled")
 

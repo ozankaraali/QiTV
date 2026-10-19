@@ -974,6 +974,43 @@ class SegmenterTests(unittest.TestCase):
                     expected = [3 * CLOCK, TARGET] if key in marked else [TARGET] * 2
                     self.assertEqual(deltas(events), expected)
 
+    def test_the_first_seconds_of_scrambling_are_real_time_under_bursty_feeding(self):
+        # HLS-like: each 6 s of media arrives in one burst, and the pauses between them are
+        # stalls the stall-free clock removes. The first 2 s of real time end with the first
+        # burst all the same: isolated scrambled packets after it are damage (the stream goes
+        # on), while 8 within it, or 8 in a row later, still prove scrambling.
+        clean = fx.make_stream(30)
+        starts = by_pts(clean)
+        points = [(off, int(t // 6) * 6.0) for off, t in starts]  # the first burst at 0 s
+        media = {}  # packet index -> media time of the PES start before it
+        for k, (off, t) in enumerate(starts):
+            end = starts[k + 1][0] if k + 1 < len(starts) else len(clean)
+            for i in range(off // PACKET, end // PACKET):
+                media[i] = t
+        video = [i for i, p in enumerate(split_packets(clean)) if pid_of(p) == fx.VIDEO_PID]
+        inner = [i for i in video if not clean[i * PACKET + 1] & 0x40]  # inside a PES
+        later = [i for i in inner if media[i] >= 6.5]  # after the first burst
+        spread = later[:: len(later) // 10][:10]
+        first = [i for i in inner if media[i] < 5.5]
+        in_a_row = [i for i in video if media[i] >= 20.1][:8]
+        cases = {
+            "10 apart in later bursts": (spread, False),
+            "8 apart in the first burst": (first[::9][:8], True),
+            "8 in a row later": (in_a_row, True),
+        }
+        for name, (marked, raises) in cases.items():
+            with self.subTest(name):
+                data = bytearray(clean)
+                for i in marked:
+                    data[i * PACKET + 3] |= 0x80
+                if raises:
+                    with self.assertRaises(Unsupported) as raised:
+                        run_at(bytes(data), points)
+                    self.assertEqual(str(raised.exception), "scrambled")
+                else:
+                    _, events = run_at(bytes(data), points)
+                    self.assertEqual(deltas(events), [TARGET] * 14)
+
     # 10
     def test_gop_longer_than_ten_seconds_is_force_cut_at_ten_seconds(self):
         _, events = run(fx.make_stream(24, gop_s=15.0))
