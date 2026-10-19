@@ -92,6 +92,11 @@ _CLOCK_PENDING_PACKETS = 4096
 #   measured against its highest within this much arrival (a raw TS burst of 10 s every 10 s,
 #   or a whole HLS segment's EXTINF, raised to 1.5 times it for longer segments);
 _JUMP_WINDOW_S = 15.0
+# - no step is judged before the pictures went on this much since the window began (the start,
+#   a junction, a discontinuity, a step back): their cadence is known by then, and the window
+#   holds a whole 10 s HLS segment or raw TS burst to measure arrival against (a still every
+#   5 s without sound, in one burst or in 6 s HLS segments, read as a 5 s jump at its first);
+_JUMP_HISTORY_TICKS = 10 * _CLOCK
 # - any other timestamp that lands more than `JUMP_S` past where its own last one leads (a PCR,
 #   sound, a picture's PTS ahead of its DTS) holds what follows for a picture that jumps, while
 #   the pictures advance at most this much (the capture's PTS leapt three pictures, 0.08 s,
@@ -2502,11 +2507,12 @@ class ClockJoiner:
     source, and every PID's timestamps stepped 13 s on between two pictures inside one HLS
     segment, no discontinuity tag near. VLC 3 resets its clock only past a 60 s gap, so it
     waited for the timestamps: a 15 s still. With an arrival clock (`clock`, raw TS) or once
-    HLS segments `arrive`, such a jump is looked for (the `_JUMP_*` constants say how): a
-    picture whose DTS steps on by more than `JUMP_S` that arrival does not explain (raw TS: by
-    the wall clock, as after a stalled source whose timestamps went on in real time; HLS: by
-    the EXTINF of the segments begun) is re-based like a junction, onto the last picture by a
-    frame, by its DTS (a picture's PTS may sit seconds ahead of it). Where a timestamp leaps
+    HLS segments `arrive`, such a jump is looked for (the `_JUMP_*` constants say how), once
+    the pictures went on 10 s: a picture whose DTS steps on by more than `JUMP_S` that arrival
+    does not explain (raw TS: by the wall clock, as after a stalled source whose timestamps
+    went on in real time; HLS: by the EXTINF of the segments begun) is re-based like a
+    junction, onto the last picture by a frame, by its DTS (a picture's PTS may sit seconds
+    ahead of it). Where a timestamp leaps
     before that picture (a PCR, sound, the PTS of pictures decoded before the jump and shown
     after it), what follows is held until a picture jumps (or the pictures moved on
     `_JUMP_WAIT_TICKS` without one: then it passes on as it came). For a while after the jump
@@ -2849,7 +2855,7 @@ class ClockJoiner:
                     return _JUMP, b""
                 self._begin()
                 return _REWRITE, self._settled(data[off : off + PACKET], pid, places, ref)
-        leapt = not held and self._leaps(pid, places, ref, offset)
+        leapt = not held and self._seasoned() and self._leaps(pid, places, ref, offset)
         if leapt:
             self._held = (self._watch.copy(), self._follow_state())
             self._held_at = last
@@ -2860,6 +2866,8 @@ class ClockJoiner:
         """Of a picture's step, in seconds, what arrival does not explain, when that makes it a
         jump (see `_JUMP_WINDOW_S`); else None."""
         watch = self._watch
+        if not self._seasoned():
+            return None
         if step <= max(_JUMP_TICKS, 2 * (watch.cadence or 0)) or step > _JUMP_MAX_TICKS:
             return None
         if step - watch.covered <= _JUMP_TICKS:  # the sound (or the PCR) went on through it
@@ -2872,6 +2880,11 @@ class ClockJoiner:
         highest = leads[0][1] if leads else watch.progress / _CLOCK - self._credit
         unexplained = lead - highest
         return unexplained if unexplained > JUMP_S else None
+
+    def _seasoned(self) -> bool:
+        """Whether the pictures went on long enough for a step to be judged (see
+        `_JUMP_HISTORY_TICKS`)."""
+        return self._watch.progress >= _JUMP_HISTORY_TICKS
 
     def _leaps(
         self, pid: int, places: list[tuple[int, int, int]], ref: tuple[int, int] | None, offset: int

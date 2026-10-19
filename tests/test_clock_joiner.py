@@ -347,9 +347,9 @@ class ForwardJumpTests(unittest.TestCase):
         self.assertFalse(any(event.discontinuity for event in opened[1:]))
 
     def test_a_jump_inside_a_raw_ts_burst_runs_on_a_frame_after(self):
-        # Every PID 13 s ahead from 5 s on, the whole stream in one burst (as a provider's
+        # Every PID 13 s ahead from 12 s on, the whole stream in one burst (as a provider's
         # backlog): nothing in its arrival explains the step.
-        data = make_stream(10, jumps=((5.0, 13.0),))
+        data = make_stream(20, jumps=((12.0, 13.0),))
         for chunk in (None, 187, 5000):
             with self.subTest(chunk=chunk):
                 out, joiner, splits = watched([data], chunk=chunk)
@@ -366,7 +366,7 @@ class ForwardJumpTests(unittest.TestCase):
         # with the decode time, so a P picture decoded before the leap shows after it (its PTS
         # leapt, its DTS not) and the next B picture is the other way round. Each timestamp
         # takes the offset that keeps its own kind running on.
-        data = make_stream(10, bframes=True, jumps=((136 / 25, 13.0),))
+        data = make_stream(20, bframes=True, jumps=((311 / 25, 13.0),))
         straddles = [
             (pts, dts)
             for pts, dts in video_times(data)
@@ -383,7 +383,7 @@ class ForwardJumpTests(unittest.TestCase):
     def test_sound_muxed_ahead_of_the_jump_moves_with_it(self):
         # The sound comes 0.3 s ahead of its pictures: its first frames past the leap arrive
         # before the picture that jumps, and wait for it.
-        data = make_stream(10, jumps=((5.0, 13.0),), audio_ahead_s=0.3)
+        data = make_stream(20, jumps=((12.0, 13.0),), audio_ahead_s=0.3)
         for chunk in (None, 187):
             with self.subTest(chunk=chunk):
                 out, joiner, _ = watched([data], chunk=chunk)
@@ -392,13 +392,13 @@ class ForwardJumpTests(unittest.TestCase):
                 self.assertEqual(len(joiner.jumps), 1)
 
     def test_a_jump_inside_an_hls_segment_runs_on(self):
-        # The measured case: 4 s segments, the clock 13 s ahead from 6 s on, inside the
-        # second: it holds 4 s of media over 17 s of timestamps.
-        data = make_stream(12, bframes=True, jumps=((6.0, 13.0),))
-        segments = at_seconds(data, 4.0, 8.0)
+        # The measured case: 4 s segments, the clock 13 s ahead from 14 s on, inside the
+        # fourth: it holds 4 s of media over 17 s of timestamps.
+        data = make_stream(24, bframes=True, jumps=((14.0, 13.0),))
+        segments = at_seconds(data, 4.0, 8.0, 12.0, 16.0, 20.0)
         for chunk in (None, 187):
             with self.subTest(chunk=chunk):
-                out, joiner, splits = watched(segments, chunk=chunk, extinf=[4.0, 4.0, 4.0])
+                out, joiner, splits = watched(segments, chunk=chunk, extinf=[4.0] * 6)
                 self.assertEqual((len(out), splits), (len(data), 0))
                 self.assert_runs_on(out)
                 self.assertEqual(len(joiner.jumps), 1)
@@ -407,12 +407,12 @@ class ForwardJumpTests(unittest.TestCase):
         # The same 4 s step: within the segment's EXTINF (it lists 8 s, with 4 s of media)
         # it stays, and so it does where a raw TS source paused as long; in one raw burst
         # nothing explains it, and it runs on.
-        data = make_stream(10, jumps=((6.0, 4.0),))
-        segments = at_seconds(data, 4.0, 8.0)
-        out, joiner, _ = watched(segments, extinf=[4.0, 8.0, 2.0])
+        data = make_stream(20, jumps=((14.0, 4.0),))
+        segments = at_seconds(data, 4.0, 8.0, 12.0, 16.0)
+        out, joiner, _ = watched(segments, extinf=[4.0, 4.0, 4.0, 8.0, 4.0])
         self.assertEqual((out, list(joiner.jumps)), (data, []))
-        before, after = at_seconds(data, 6.0)
-        out, joiner, _ = watched([before, after], chunk=5000, times=[6.0, 14.0])
+        before, after = at_seconds(data, 14.0)
+        out, joiner, _ = watched([before, after], chunk=5000, times=[14.0, 22.0])
         self.assertEqual((out, list(joiner.jumps)), (data, []))
         out, joiner, _ = watched([data], chunk=5000)
         self.assertEqual(len(joiner.jumps), 1)
@@ -423,12 +423,12 @@ class ForwardJumpTests(unittest.TestCase):
         # gap in the pictures that the sound fills, a 2 s step (under JUMP_S): all in one
         # burst, the hardest case for arrival, and nothing is rewritten.
         streams = {
-            "plain": make_stream(8),
-            "b frames": make_stream(8, bframes=True),
-            "29.97": make_stream(8, fps=30000 / 1001),
+            "plain": make_stream(20),
+            "b frames": make_stream(20, bframes=True),
+            "29.97": make_stream(20, fps=30000 / 1001),
             "slideshow": make_stream(30, fps=0.2),
-            "picture gap": make_stream(12, video_gaps=((5.0, 9.0),)),
-            "2 s step": make_stream(8, jumps=((4.0, 2.0),)),
+            "picture gap": make_stream(24, video_gaps=((14.0, 18.0),)),
+            "2 s step": make_stream(20, jumps=((14.0, 2.0),)),
         }
         for name, data in streams.items():
             for chunk in (None, 187, 5000):
@@ -437,18 +437,42 @@ class ForwardJumpTests(unittest.TestCase):
                     self.assertEqual((out, splits), (data, 0))
                     self.assertEqual(list(joiner.jumps), [])
 
+    def test_stills_without_sound_pass_byte_for_byte(self):
+        # A still every 5 s and no sound PID (nothing goes on through the gaps): its first
+        # steps come before its cadence is known, and in one raw burst, or in 6 s HLS
+        # segments, the first read as a 5 s jump (its first still flashed for a frame). No
+        # step is judged before the pictures went on 10 s; by then each is its cadence.
+        data = make_stream(60, fps=0.2, audio=False)
+        for chunk in (None, 187, 5000):
+            with self.subTest(arrival="raw burst", chunk=chunk):
+                out, joiner, splits = watched([data], chunk=chunk)
+                self.assertEqual((out, splits, list(joiner.jumps)), (data, 0, []))
+        segments = at_seconds(data, *range(6, 60, 6))
+        out, joiner, splits = watched(segments, extinf=[6.0] * len(segments))
+        self.assertEqual((out, splits, list(joiner.jumps)), (data, 0, []))
+
+    def test_no_step_is_judged_before_the_pictures_went_on_ten_seconds(self):
+        # The same 13 s jump 5 s into a burst passes as it came (the segmenter leaves it out
+        # of the timeline, as before); 12 s in, it runs on.
+        early = make_stream(20, jumps=((5.0, 13.0),))
+        out, joiner, _ = watched([early], chunk=5000)
+        self.assertEqual((out, list(joiner.jumps)), (early, []))
+        late = make_stream(20, jumps=((12.0, 13.0),))
+        out, joiner, _ = watched([late], chunk=5000)
+        self.assertEqual(len(joiner.jumps), 1)
+
     def test_backward_steps_are_left_to_the_junctions(self):
         # A restart nobody reported (a step back) is no forward jump: it passes as it came.
-        data = make_stream(4) + make_stream(4)
+        data = make_stream(12) + make_stream(12)
         out, joiner, _ = watched([data], chunk=5000)
         self.assertEqual((out, list(joiner.jumps)), (data, []))
 
     def test_a_discontinuity_keeps_what_a_jump_added_while_the_clock_goes_on(self):
         # An HLS ad break marked as a discontinuity whose timestamps go on: what the jump took
         # out stays taken out, so the clock does not leap there again.
-        data = make_stream(16, jumps=((6.0, 13.0),))
-        segments = at_seconds(data, 4.0, 8.0, 12.0)
-        out, joiner, _ = watched(segments, extinf=[4.0] * 4, marks=(3,))
+        data = make_stream(24, jumps=((12.0, 13.0),))
+        segments = at_seconds(data, 4.0, 8.0, 12.0, 16.0, 20.0)
+        out, joiner, _ = watched(segments, extinf=[4.0] * 6, marks=(5,))
         self.assert_runs_on(out)
         self.assertEqual(len(joiner.jumps), 1)
         self.assertAlmostEqual(joiner.offset_s, -13.0)
@@ -456,12 +480,13 @@ class ForwardJumpTests(unittest.TestCase):
     def test_a_discontinuity_onto_another_clock_passes_as_it_comes(self):
         # After a jump, a discontinuity whose content starts on a clock of its own: from there
         # the bytes pass as they came, as without a jump (the segmenter cuts there).
-        first = make_stream(12, jumps=((6.0, 13.0),))
+        first = make_stream(20, jumps=((12.0, 13.0),))
         other = make_stream(4, pts_start=5_000_000_000)
-        segments = [*at_seconds(first, 4.0, 8.0), other]
-        out, joiner, _ = watched(segments, extinf=[4.0] * 4, marks=(3,))
+        segments = [*at_seconds(first, 4.0, 8.0, 12.0, 16.0), other]
+        out, joiner, _ = watched(segments, extinf=[4.0] * 6, marks=(5,))
         self.assertTrue(out.endswith(other))
         self.assertEqual(joiner.offset_s, 0.0)
+        self.assertEqual(len(joiner.jumps), 1)
         self.assert_runs_on(out[: len(out) - len(other)])
 
 

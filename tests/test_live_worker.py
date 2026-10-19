@@ -462,11 +462,14 @@ class LiveWorkerTests(unittest.TestCase):
         # A public news channel's clock leapt 13 s inside one 10 s HLS segment (no tag near):
         # VLC sat out 15 s. In a raw TS burst, as inside an HLS segment, the stream VLC reads
         # runs on a frame after the last picture, and the timeline leaves nothing out.
-        data = make_stream(12, jumps=((6.0, 13.0),))
+        # 22 s in: a step is judged once the pictures went on 10 s since the program was known
+        data = make_stream(30, jumps=((22.0, 13.0),))
         third = len(data) // 3 - len(data) // 3 % 188
+        playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        playlist += "".join(f"#EXTINF:10,\n{name}.ts\n" for name in "abc") + "#EXT-X-ENDLIST\n"
         routes = {
             "/user/secret/leap.ts": (200, {}, data),
-            "/user/secret/leap.m3u8": (200, {}, leaf("a.ts", "b.ts", "c.ts")),
+            "/user/secret/leap.m3u8": (200, {}, playlist.encode()),
             "/user/secret/a.ts": (200, {}, data[:third]),
             "/user/secret/b.ts": (200, {}, data[third : 2 * third]),
             "/user/secret/c.ts": (200, {}, data[2 * third :]),
@@ -479,7 +482,7 @@ class LiveWorkerTests(unittest.TestCase):
                 helper.wait_for(lambda message, sid=sid: message == ("ended", sid))
                 snapshot = helper.of(sid, "state")[-1][2]
                 self.assertEqual(snapshot["breaks"], [])
-                self.assertAlmostEqual(snapshot["end"], 12.0, delta=0.1)
+                self.assertAlmostEqual(snapshot["end"], 30.0, delta=0.1)
                 with urlopen(helper.stream_url(sid, 0), timeout=10) as response:
                     media = split_header(response.read())[1]
                 self.assertEqual(set(video_steps(media)), {3600})  # a frame: the leap is gone
