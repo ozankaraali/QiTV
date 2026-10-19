@@ -32,6 +32,7 @@ from urllib3.exceptions import InsecureRequestWarning
 
 from services.live import interruptible_http, source as source_module, worker
 from services.live.ring import RamRing
+from services.live.ts import Unsupported
 from services.live.worker import helper_main
 
 REPO = Path(__file__).resolve().parents[1]
@@ -1665,9 +1666,11 @@ class HeardEdgeTests(unittest.TestCase):
         self.assertEqual(heard, [False, True])
         self.assertFalse(states[-1])
 
-    def test_a_held_restart_goes_on_while_the_source_pauses(self):
-        # A raw TS restart's burst lands, then the source sends nothing for a while: the hold
-        # is let go during the pause (its media stood still), not with the next read.
+    def paused_restart(self, pause, *, restart=True):
+        """A raw TS session whose source sends a run, then (with `restart`) a restart's burst
+        that repeats its last 5 s, then nothing for `pause` s, then the rest. Returns what it
+        sent, the trimmer's state seen before and after the pause, and the threads that took
+        the pipeline during it."""
         from tests.test_repeat_trimmer import backlogged, repeat_runs, stream
 
         timed = stream(repeat_runs(5.0, 1.0))
@@ -1675,13 +1678,27 @@ class HeardEdgeTests(unittest.TestCase):
         before = b"".join(p for at, p in timed if at < resume)
         burst = b"".join(p for at, p in timed if resume <= at <= resume + 1e-9)
         rest = b"".join(p for at, p in timed if at > resume + 1e-9)
+        if not restart:
+            burst, rest = b"", make_stream(4)[188 * 20 :]
+        sent = []
         helper = SimpleNamespace(
             root="",
-            send=lambda *args, **kwargs: None,
+            send=lambda message, session=None: sent.append(message),
             server=SimpleNamespace(add_session=lambda *a: None),
         )
         session = worker._Session(helper, "h", "http://provider.test/h.ts", {}, True, RAM, 6.0)
-        seen = {}
+        seen = {"takers": set()}
+        moving = session._moving
+
+        class Watched:
+            """The pipeline's lock, noting the threads that take it."""
+
+            def __enter__(self):
+                moving.acquire()
+                seen["takers"].add(threading.current_thread().name)
+
+            def __exit__(self, *exc):
+                moving.release()
 
         class Source:
             hls = False
@@ -1691,9 +1708,13 @@ class HeardEdgeTests(unittest.TestCase):
             def chunks(self):
                 yield before[: 188 * 20]  # the tables: the segmenter knows the picture's PID
                 yield before[188 * 20 :]
-                yield burst
+                if burst:
+                    yield burst
                 seen["held"] = session._trimmer.holding
-                time.sleep(1.8)  # the source pauses
+                seen["takers"].clear()
+                session._moving = Watched()
+                time.sleep(pause)  # the source pauses
+                session._moving = moving
                 seen["after"] = session._trimmer.holding
                 seen["trims"] = [trim.reason for trim in session._trimmer.trims]
                 yield rest
@@ -1706,8 +1727,36 @@ class HeardEdgeTests(unittest.TestCase):
 
         with patch.object(source_module, "open_source", lambda *args, **kwargs: Source()):
             session._ingest()
+        return sent, seen
+
+    def test_a_held_restart_goes_on_while_the_source_pauses(self):
+        # A raw TS restart's burst lands, then the source sends nothing for a while: the hold
+        # is let go during the pause (its media stood still), not with the next read.
+        _, seen = self.paused_restart(1.8)
         self.assertEqual((seen["held"], seen["after"]), (True, False))
         self.assertEqual(seen["trims"], ["dropped"])
+
+    def test_a_pause_with_nothing_held_leaves_the_pipeline_to_the_session(self):
+        # Review M4: the ticker looks at the trimmer and takes the pipeline only while
+        # something is held.
+        _, seen = self.paused_restart(1.3, restart=False)
+        self.assertFalse(seen["held"])
+        self.assertFalse(any(name.startswith("qitv-live-hold") for name in seen["takers"]))
+
+    def test_a_tick_that_fails_ends_the_session_with_its_failure(self):
+        # Review I3: what a tick failed with is logged and raised in the session thread with
+        # its next item: the session ends as that item would have ended it.
+        def failing(_self):
+            raise Unsupported("scrambled")
+
+        with (
+            patch.object(worker.RepeatTrimmer, "tick", failing),
+            self.assertLogs("services.live.worker", "WARNING") as logs,
+        ):
+            sent, seen = self.paused_restart(1.3)
+        self.assertTrue(seen["after"])  # still held: its tick failed
+        self.assertIn("unsupported", [m[2] for m in sent if m[0] == "error"])
+        self.assertTrue(any("could not be passed on" in line for line in logs.output))
 
 
 if __name__ == "__main__":

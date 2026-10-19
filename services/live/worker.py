@@ -378,6 +378,8 @@ class _Session:
         # Raw TS: held by whatever moves bytes down the pipeline (the session thread with each
         # item of the source, the hold ticker while the source is silent: `_hold_ticker`).
         self._moving = threading.RLock()
+        # What a tick failed with: the session thread raises it with its next item (`_take`).
+        self._tick_failed: BaseException | None = None
         self.released = threading.Event()  # the session holds no upstream connection anymore
         self._helper = helper
         self._url = url
@@ -513,6 +515,7 @@ class _Session:
                 if ticking is not None:
                     ticking.set()
             with self._moving:
+                self._raise_tick_failure()
                 self._check()
                 if trimmer is not None and rejoiner is not None:
                     self._pass_on(trimmer.feed(rejoiner.finish()))
@@ -678,6 +681,7 @@ class _Session:
         """One item of the source down the pipeline: bytes, or a marker."""
         from services.live.source import CaughtUp, Discontinuity, Reconnecting
 
+        self._raise_tick_failure()
         self._check()
         if isinstance(item, Reconnecting):
             self._reconnecting = True
@@ -713,24 +717,41 @@ class _Session:
         stall timeout), a restart the trimmer holds is still judged every `_HOLD_TICK_S`
         (`RepeatTrimmer.tick`), so a pause in its burst lets it go then, not with the next
         read: VLC plays its cushion meanwhile, and what was held would be missing from it.
-        Each tick takes the pipeline as the session thread does (`_moving`); returns the event
-        that stops it."""
+        Each tick takes the pipeline as the session thread does (`_moving`), only while
+        something is held; returns the event that stops it. A tick that fails (a ring that
+        cannot take a segment, say) ends the ticker: what it failed with is logged and the
+        session thread raises it with its next item, as if that item had met it, so the
+        session ends the way it would have (`_fail`)."""
         stop = threading.Event()
 
         def tick() -> None:
             while not stop.wait(_HOLD_TICK_S):
+                if not trimmer.holding:
+                    continue  # nothing held: the pipeline is left to the session thread
                 with self._moving:
                     if stop.is_set() or self.cancelled or not trimmer.holding:
                         continue
                     try:
                         self._pass_on(trimmer.tick())
                         self._measure()
-                    except Exception as error:  # the session thread meets it with its next item
-                        _LOG.debug("A held restart's tick failed (%s).", type(error).__name__)
+                    except _Cancelled:
+                        return
+                    except Exception as error:
+                        _LOG.warning(
+                            "A held restart could not be passed on (%s); the session ends.",
+                            type(error).__name__,
+                        )
+                        self._tick_failed = error
                         return
 
         threading.Thread(target=tick, name=f"qitv-live-hold-{self.sid}", daemon=True).start()
         return stop
+
+    def _raise_tick_failure(self) -> None:
+        """What a hold tick failed with, raised in the session thread (`_hold_ticker`)."""
+        failed, self._tick_failed = self._tick_failed, None
+        if failed is not None:
+            raise failed
 
     def _fail(self, kind: str, message: str, status: int | None = None) -> None:
         """Report a failure that ends the input; the buffered part stays playable."""
