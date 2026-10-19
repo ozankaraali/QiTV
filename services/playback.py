@@ -27,9 +27,11 @@ works the same way.
 A subtitle file (`add_subtitle_file`, 2.2: .srt, .ass, .vtt …) is added to the input that
 plays as a libVLC slave and chosen. libVLC names its track "Track N", so the track that comes
 with it is told by its id, new since the file was added (the one chosen, else the newest),
-and `subtitle_tracks()` names it after the file. The files stay with this playback: a reopen
-adds them again once it plays, the chosen one chosen again. `clear_subtitles()` forgets them
-and the subtitles' delay (another title).
+and `subtitle_tracks()` names it after the file. A file that cannot be read is refused (it
+would show nothing). The files stay with this playback: a reopen adds them again once it
+plays, the chosen one chosen again, each once (one added meanwhile is not added twice), and
+one that is gone by then is forgotten. `clear_subtitles()` forgets them and the subtitles'
+delay (another title).
 
 With hardware decoding (Settings; `hardware`), each tick while a stream plays reads libVLC's
 media statistics: once its picture stood still while its sound played (`FrozenPicture`, which
@@ -70,6 +72,13 @@ except (ImportError, OSError) as e:  # libVLC missing or broken
 
 _STALL_AUDIO_RETRIES = 2
 _SUBTITLE_NAME_WAIT_MS = 10_000  # an added file's track not seen by then keeps libVLC's name
+
+
+def _readable(path: str) -> bool:
+    """A file there that this process may read (a subtitle file before libVLC gets it)."""
+    return os.path.isfile(path) and os.access(path, os.R_OK)
+
+
 _AUDIO_RESTORE_MS = 500
 _RESTART_DELAY_MS = 300
 _RESUME_GIVE_UP_MS = 3000
@@ -278,11 +287,12 @@ class PlaybackSession(QObject):
         self._audio_watch = QElapsedTimer()  # since the wanted audio began waiting
         self._audio_delay_ms = 0  # the sound's delay against the picture: set on each media
         self._subtitle_delay_ms = 0  # the subtitles' (later when positive), alike
-        # The subtitle files of this playback (uri, file name), added again on a reopen.
-        self._subtitle_files: list[tuple[str, str]] = []
-        self._subtitle_on: Optional[str] = None  # the file whose track is chosen (its uri)
+        # The subtitle files of this playback (their paths), added again on a reopen.
+        self._subtitle_files: list[str] = []
+        self._subtitle_on: Optional[str] = None  # the file whose track is chosen
         self._files_due = False  # this media plays the files once it plays
-        self._spu_files: dict[int, tuple[str, str]] = {}  # a file's track id: (uri, name)
+        self._media_files: set[str] = set()  # the files added to this media
+        self._spu_files: dict[int, tuple[str, str]] = {}  # a file's track id: (path, name)
         self._spu_known: set[int] = set()  # the tracks before the files on their way
         self._spu_waiting: list[tuple[str, str]] = []  # files added, their tracks not seen
         self._spu_wait = QElapsedTimer()
@@ -414,6 +424,7 @@ class PlaybackSession(QObject):
         if self._subtitle_delay_ms:
             self._player.video_set_spu_delay(self._subtitle_delay_ms * 1000)
         self._spu_files, self._spu_known, self._spu_waiting = {}, set(), []
+        self._media_files = set()
         self._files_due = bool(self._subtitle_files)  # added once it plays
         self._poll.start()
         self._watch_audio()
@@ -637,33 +648,46 @@ class PlaybackSession(QObject):
             self._player.video_set_spu_delay(self._subtitle_delay_ms * 1000)
 
     def add_subtitle_file(self, path: str) -> bool:
-        """Show the subtitle file at `path` with what plays, chosen; False when nothing plays
-        (or libVLC refused it). Its track takes the file's name once libVLC has read it."""
+        """Show the subtitle file at `path` with what plays, chosen; False when nothing plays,
+        it cannot be read or libVLC refused it. Its track takes the file's name once libVLC has
+        read it; a file this media has already is chosen again."""
         if vlc is None or not self._has_input or not self._player_free():
             return False
-        file = Path(path).absolute()
-        uri, name = file.as_uri(), file.name
-        if not self._add_file(uri, name, select=True):
+        file = str(Path(path).absolute())
+        if file in self._media_files:
+            tracks = [i for i, (added, _name) in self._spu_files.items() if added == file]
+            if tracks:
+                self._player.video_set_spu(tracks[-1])
+            self._subtitle_on = file
+            return True
+        if not _readable(file):
+            logger.info("Can't read the subtitle file %s", Path(file).name)
             return False
-        self._subtitle_files = [f for f in self._subtitle_files if f[0] != uri] + [(uri, name)]
-        self._subtitle_on = uri
+        if not self._add_file(file, select=True):
+            return False
+        self._subtitle_files = [f for f in self._subtitle_files if f != file] + [file]
+        self._subtitle_on = file
         return True
 
     def clear_subtitles(self) -> None:
         """Another title: no subtitle file, and the subtitles in sync, from its first media."""
         self._subtitle_files, self._subtitle_on, self._files_due = [], None, False
         self._spu_files, self._spu_waiting = {}, []
+        if self._subtitle_delay_ms and self._has_input and self._player_free():
+            self._player.video_set_spu_delay(0)
         self._subtitle_delay_ms = 0
 
-    def _add_file(self, uri: str, name: str, *, select: bool) -> bool:
+    def _add_file(self, path: str, *, select: bool) -> bool:
+        name = Path(path).name
         if not self._spu_waiting:  # the tracks there now are not the file's
             ids = self._player.video_get_spu_description() or []
             self._spu_known = {int(i) for i, _ in ids}
             self._spu_wait.start()
-        if self._player.add_slave(vlc.MediaSlaveType.subtitle, uri, select) != 0:
+        if self._player.add_slave(vlc.MediaSlaveType.subtitle, Path(path).as_uri(), select) != 0:
             logger.info("libVLC did not take the subtitle file %s", name)
             return False
-        self._spu_waiting.append((uri, name))
+        self._media_files.add(path)
+        self._spu_waiting.append((path, name))
         return True
 
     def _name_files(self, ids: list[int]) -> None:
@@ -685,10 +709,20 @@ class PlaybackSession(QObject):
         self._spu_known.update(new)
 
     def _replay_files(self) -> None:
-        """A reopened media plays: its files again, the chosen one chosen."""
+        """A reopened media plays: its files again, the chosen one chosen, each once (one may
+        have been added since it opened); a file gone meanwhile is forgotten."""
         self._files_due = False
-        for uri, name in self._subtitle_files:
-            self._add_file(uri, name, select=uri == self._subtitle_on)
+        kept = []
+        for path in self._subtitle_files:
+            if not _readable(path):
+                logger.info("The subtitle file %s is gone", Path(path).name)
+                continue
+            kept.append(path)
+            if path not in self._media_files:
+                self._add_file(path, select=path == self._subtitle_on)
+        self._subtitle_files = kept
+        if self._subtitle_on not in kept:
+            self._subtitle_on = None
 
     @staticmethod
     def _decode(name) -> str:

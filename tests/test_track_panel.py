@@ -6,10 +6,12 @@ import os
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QPoint, QPointF, Qt, Signal
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
@@ -212,6 +214,7 @@ class SoundPanelTests(PanelCase):
         self.assertEqual(self.player.delay, 100)
 
     def test_the_sync_stops_at_five_seconds(self):
+        self.store.set_audio_ms("key-1", 4950)
         self.player.delay = 4950
         self.click_button("audio")
         self.click_panel(self.panel.control_rect("later"))
@@ -228,14 +231,27 @@ class SoundPanelTests(PanelCase):
 
     def test_a_click_elsewhere_closes_it_and_does_nothing_more(self):
         self.click_button("audio")
-        spy = QSignalSpy(self.transport.playPauseRequested)
         closed = QSignalSpy(self.panel.closed)
-        self.click_button("play")
+        middle = self.transport.rect().center()  # the picture: no control there
+        self.assertIsNone(self.transport.control_at(QPointF(middle)))
+        with mock.patch.object(Transport, "mousePressEvent") as press:
+            self.click(self.transport, middle)
+        press.assert_not_called()
         self.assertFalse(self.panel.isVisible())
-        self.assertEqual((spy.count(), closed.count()), (0, 1))
+        self.assertEqual(closed.count(), 1)
         self.assertEqual(self.transport.held(), "")  # the fade runs again
-        self.click_button("play")
-        self.assertEqual(spy.count(), 1)
+
+    def test_a_click_on_another_button_closes_it_and_that_button_acts(self):
+        for name, signal in (
+            ("play", self.transport.playPauseRequested),
+            ("volume", self.transport.volumeRequested),
+        ):
+            with self.subTest(name=name):
+                self.click_button("audio")
+                spy = QSignalSpy(signal)
+                self.click_button(name)
+                self.assertFalse(self.panel.isVisible())
+                self.assertEqual(spy.count(), 1)  # one click
 
     def test_a_click_on_its_button_again_closes_it(self):
         self.click_button("audio")
@@ -461,6 +477,42 @@ class SubtitlesPanelTests(PanelCase):
         self.assertFalse(self.controls.drop([self.srt]))
         self.assertEqual(self.player.files, [])
 
+    def test_one_click_goes_from_the_sound_panel_to_the_subtitles(self):
+        self.click_button("audio")
+        self.click_button("subtitles")
+        self.assertFalse(self.panel.isVisible())
+        self.assertTrue(self.subtitle_panel.isVisible())
+        self.assertEqual(self.transport.held(), "subtitles")
+        self.click_button("audio")  # and back
+        self.assertTrue(self.panel.isVisible())
+        self.assertFalse(self.subtitle_panel.isVisible())
+        self.click_button("audio")  # its own button: it closes, and stays closed
+        self.assertFalse(self.panel.isVisible())
+        self.assertEqual(self.transport.held(), "")
+
+    def test_a_zap_while_the_dialog_is_open_drops_its_file(self):
+        def zap_meanwhile(folder):
+            self.current = CHANNEL  # the dialog's event loop ran a zap
+            return self.srt
+
+        self.controls._pick_file = zap_meanwhile
+        self.click_button("subtitles")
+        self.click(self.subtitle_panel, self.subtitle_panel.row_rect(3).center().toPoint())
+        self.assertEqual(self.player.files, [])
+        self.assertFalse(self.subtitle_panel.isVisible())
+
+    def test_a_swap_while_the_dialog_is_open_drops_its_file(self):
+        other = FakePlayer()
+
+        def swap_meanwhile(folder):
+            self.player = other  # the large picture is the other player's now
+            return self.srt
+
+        self.controls._pick_file = swap_meanwhile
+        self.click_button("subtitles")
+        self.click(self.subtitle_panel, self.subtitle_panel.row_rect(3).center().toPoint())
+        self.assertEqual(other.files, [])
+
     def test_one_panel_at_a_time(self):
         self.click_button("audio")
         self.controls.open_subtitles()
@@ -484,6 +536,73 @@ class SubtitlesPanelTests(PanelCase):
         self.assertEqual(self.player.clears, 1)
         self.controls.prepare_small(self.player, OTHER.item)
         self.assertEqual(self.player.clears, 2)
+
+
+class ManyTracksTests(PanelCase):
+    """A stream with many subtitle tracks in a small window: the panel never grows past the
+    room above the player controls; its rows scroll and its title and Sync row stay."""
+
+    def setUp(self):
+        super().setUp()
+        self.host.resize(480, 270)  # a small window (the mini player's is about this)
+        self.current = FILM
+        self.transport.show_vod("Lighthouse", "")
+        self.transport.update_position(0, 100_000)
+        self.player.subtitles = [(-1, "Disable")] + [(i, f"Language {i}") for i in range(1, 21)]
+        self.player.spu = 12
+        self.click_button("subtitles")
+        self.panel = self.subtitle_panel
+
+    def test_it_fits_above_the_controls_with_its_title_and_sync(self):
+        geometry = self.panel.geometry()
+        self.assertGreaterEqual(geometry.top(), 0)
+        self.assertLessEqual(geometry.bottom(), self.transport.controls_top())
+        self.assertLess(len(self.panel.shown_rows()), len(self.panel.model().rows))
+        title, sync = self.panel.control_rect("title"), self.panel.control_rect("later")
+        self.assertGreaterEqual(title.top(), 0)
+        self.assertLessEqual(sync.bottom(), self.panel.height())
+        self.assertIn(12, self.panel.shown_rows())  # the track showing
+        self.assertTrue(self.panel.row_rect(0).isEmpty())  # Off: scrolled up out of sight
+
+    def wheel(self, notches):
+        pos = QPointF(self.panel.rect().center())
+        event = QWheelEvent(
+            pos,
+            QPointF(self.panel.mapToGlobal(pos.toPoint())),
+            QPoint(),
+            QPoint(0, 120 * notches),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
+        QApplication.sendEvent(self.panel, event)
+
+    def test_the_wheel_scrolls_its_rows(self):
+        self.wheel(30)  # up to the top
+        self.assertEqual(self.panel.shown_rows().start, 0)
+        self.assertFalse(self.panel.row_rect(0).isEmpty())
+        self.wheel(-1)
+        self.assertEqual(self.panel.shown_rows().start, 1)
+        self.wheel(-30)  # to the bottom: "Load a file…" shows
+        self.assertEqual(self.panel.shown_rows().stop, len(self.panel.model().rows))
+        self.assertFalse(self.panel.row_rect(len(self.panel.model().rows) - 1).isEmpty())
+
+    def test_the_keys_scroll_to_their_row_and_reach_the_sync_row(self):
+        rows = len(self.panel.model().rows)
+        for _ in range(rows + 2):
+            self.controls.handle(Action.CH_NEXT, DOWN)
+        self.assertEqual(self.panel.focused(), rows)  # the Sync row, below the list
+        self.assertIn(rows - 1, self.panel.shown_rows())
+        for _ in range(rows + 2):
+            self.controls.handle(Action.CH_PREV, UP)
+        self.assertEqual(self.panel.focused(), 0)
+        self.assertIn(0, self.panel.shown_rows())
+
+    def test_a_click_reaches_a_row_scrolled_into_sight(self):
+        self.wheel(30)
+        self.click(self.panel, self.panel.row_rect(2).center().toPoint())
+        self.assertEqual(self.player.spu, 2)
 
 
 class PanelWidgetTests(PanelCase):

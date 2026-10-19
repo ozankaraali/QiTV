@@ -120,6 +120,31 @@ class DirectReopenTests(ControllerTestCase):
         self.assertEqual(self.session.delays, [0, 50])  # the player kept it: never set again
 
 
+class DirectWaitTests(ControllerTestCase):
+    """A direct play opens only once libVLC let go of the stream before (LiveTuner)."""
+
+    def setUp(self):
+        super().setUp()
+        self.catalog.ptype = "XTREAM"
+        self.controller.start()
+
+    def test_a_nudge_while_the_next_channel_waits_is_that_channels_alone(self):
+        self.play(0)
+        for _ in range(3):
+            self.controller.handle(Action.SOUND_LATER)  # One: 150 ms later
+        store = self.controller._tracks._store
+        self.session.holding = True  # libVLC still holds One's input
+        self.play(1)
+        self.assertEqual(len(self.session.plays), 1)  # Two waits
+        self.assertEqual(self.session.delay, 150)  # the player still has One's
+        self.controller.handle(Action.SOUND_LATER)
+        self.assertEqual(self.toast.messages()[-1], ("Sound 50 ms later", "info"))
+        self.assertEqual((store.audio_ms(ONE), store.audio_ms(TWO)), (150, 50))
+        self.session.let_go()
+        self.assertEqual(len(self.session.plays), 2)
+        self.assertEqual(self.session.play_delays[-1], 50)
+
+
 class PipelineSyncTests(PipelineCase):
     def test_a_time_shift_channel_opens_with_its_sync_and_keeps_it_through_reopens(self):
         self.start_pipeline(0)

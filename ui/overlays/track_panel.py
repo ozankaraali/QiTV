@@ -7,9 +7,15 @@ then a Sync row: [ − ]  Sound 150 ms later  [ + ], with Reset beside "Sync" wh
 in sync. A click on a row chooses it; − and + step (a quick second
 click steps again); hovering them names their keys. The keys reach it through the shell
 while it shows (ui/track_controls.py): ↑/↓ move between its rows, Enter chooses, ←/→ step,
-Esc closes it. A click anywhere else in the window closes it (and does nothing more; the
-mouse's Back and Forward buttons go on to the shell, which closes it as any key would), and
-so does IDLE_MS without a touch; `closed` says so.
+Esc closes it. A click anywhere else in the window closes it and does nothing more, but on
+another of the player controls' buttons (`set_controls`) it closes it and that button acts
+(one click goes from Sound to Subtitles); its own button only closes it. The mouse's Back and
+Forward buttons go on to the shell, which closes it as any key would, and IDLE_MS without a
+touch closes it too; `closed` says so.
+
+It never grows taller than the room above the player controls (a small window, the mini
+player): beyond what fits, its rows scroll (the wheel, ↑/↓, a small arrow at each end that
+has more), and the title and the Sync row always show.
 
 It is painted as the mixer is (ui/overlays/mixer.py): the same panel, outline and radius, the
 same unit-based metrics and focus fill, and the speed chip's round − and + (transport).
@@ -19,7 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import (
     QElapsedTimer,
@@ -38,8 +44,10 @@ from PySide6.QtGui import (
     QHelpEvent,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPaintEvent,
     QPen,
+    QWheelEvent,
 )
 from PySide6.QtWidgets import QApplication, QToolTip, QWidget
 
@@ -64,7 +72,9 @@ _GAP_U = 0.6
 _SECTION_U = 1.0  # between the rows and the Sync row
 _FLOOR_GAP_U = 1.0  # above the transport's controls
 _BOTTOM_U = 4.0  # from the bottom, without them
-_EDGE_U = 1.0  # from the host's sides
+_EDGE_U = 1.0  # from the host's sides, and its top
+_ARROW_U = 1.0  # the "more rows" arrows
+_WHEEL_STEP = 120  # one notch: one row
 _EVENTS_OUTSIDE = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 
 
@@ -124,6 +134,13 @@ class TrackPanel(Overlay):
         self._hover: Optional[int] = None  # the row under the pointer
         self._shown = QElapsedTimer()  # since it showed: a double-click's second press
         self._filtering = False
+        self._fit = 0  # how many rows fit (0: not laid out yet, all of them)
+        self._scroll = 0  # the first row shown
+        self._wheel = 0  # a wheel's turn not yet a whole row
+        self._button = ""  # the player controls' button it belongs to
+        # The player controls and what is under a point of them (see set_controls).
+        self._controls: Optional[QWidget] = None
+        self._controls_hit: Optional[Callable[[QPointF], Optional[str]]] = None
         self._idle_ms = idle_ms
         self._idle = QTimer(self, singleShot=True, interval=idle_ms)
         self._idle.timeout.connect(self.dismiss)
@@ -134,20 +151,31 @@ class TrackPanel(Overlay):
     # ---- public API ---------------------------------------------------------------------
 
     def show_panel(
-        self, model: PanelModel, anchor: Optional[QRectF] = None, floor: Optional[int] = None
+        self,
+        model: PanelModel,
+        anchor: Optional[QRectF] = None,
+        floor: Optional[int] = None,
+        button: Optional[str] = None,
     ) -> None:
-        """Show `model` above `anchor` (a button, host coordinates) and `floor` (where the
-        player controls start; None: near the bottom), or update it in place."""
+        """Show `model` above `anchor` (`button`'s rect, host coordinates) and `floor` (where
+        the player controls start; None: near the bottom), or update it in place."""
         keys = [row.key for row in model.rows]
-        if keys != [row.key for row in self._model.rows] or (model.sync is None) != (
-            self._model.sync is None
-        ):
+        fresh = self.isHidden() or keys != [row.key for row in self._model.rows]
+        if fresh or (model.sync is None) != (self._model.sync is None):
             self._focus = self._hover = None  # other rows: the keys start again
         self._model = model
         if anchor is not None:
             self._anchor_x = anchor.center().x()
         self._floor = floor if anchor is not None else self._floor
+        if button is not None:
+            self._button = button
         self._layout()
+        if fresh:  # the row ticked shows
+            self._scroll = 0
+            ticked = [i for i, row in enumerate(model.rows) if row.checked]
+            if ticked:
+                self._scroll_to(ticked[0])
+        self._scroll = self._clamped(self._scroll)
         if self.isHidden():
             self._shown.start()
             self.show()
@@ -176,6 +204,14 @@ class TrackPanel(Overlay):
             self.hide()
             self.closed.emit()
 
+    def set_controls(
+        self, controls: QWidget, control_at: Callable[[QPointF], Optional[str]]
+    ) -> None:
+        """The player controls (the transport) and its control at a point of it (None: none):
+        a press on one of them closes the panel and goes on to it, but on the panel's own
+        button (`show_panel`'s), which only closes it."""
+        self._controls, self._controls_hit = controls, control_at
+
     def set_floor(self, top: Optional[int]) -> None:
         """Sit just above `top` (host coordinates), or with None near the bottom."""
         if top != self._floor:
@@ -197,8 +233,37 @@ class TrackPanel(Overlay):
             self._focus = ticked[0] if ticked else (0 if delta > 0 else stops - 1)
         else:
             self._focus = max(0, min(stops - 1, self._focus + delta))
+        if self._focus < len(self._model.rows):
+            self._scroll_to(self._focus)
         self._touch()
         self.update()
+
+    def scroll_by(self, rows: int) -> None:
+        """Show rows further down (positive) or up, when not all fit."""
+        scroll = self._clamped(self._scroll + rows)
+        if scroll != self._scroll:
+            self._scroll = scroll
+            self._hover = None
+            self.update()
+
+    def shown_rows(self) -> range:
+        """The rows on show (all of them when they fit)."""
+        return range(self._scroll, self._scroll + self._shown_count())
+
+    def _shown_count(self) -> int:
+        rows = len(self._model.rows)
+        return min(rows, self._fit) if self._fit else rows
+
+    def _clamped(self, scroll: int) -> int:
+        return max(0, min(scroll, len(self._model.rows) - self._shown_count()))
+
+    def _scroll_to(self, index: int) -> None:
+        shown = self._shown_count()
+        if index < self._scroll:
+            self._scroll = index
+        elif index >= self._scroll + shown:
+            self._scroll = index - shown + 1
+        self._scroll = self._clamped(self._scroll)
 
     def activate(self) -> None:
         """Enter: choose the keys' row (the Sync row has nothing to choose)."""
@@ -215,6 +280,7 @@ class TrackPanel(Overlay):
             self.syncStepped.emit(-1 if delta < 0 else 1)
 
     def row_rect(self, index: int) -> QRectF:
+        """Where row `index` is; empty while it is scrolled out of sight."""
         return self._rects().rows[index]
 
     def control_rect(self, name: str) -> QRectF:
@@ -248,6 +314,14 @@ class TrackPanel(Overlay):
             "sync": max(float(un.px(_CHIP_U)), height["sync"] + un.px(0.8)),
         }
 
+    def _fixed_height(self, un: Units) -> float:
+        """Its height without the rows: the padding, the title and the Sync row."""
+        heights = self._heights(un)
+        height = 2 * un.px(_PAD_U) + heights["title"]
+        if self._model.sync is not None:
+            height += un.px(_SECTION_U) + heights["label"] + heights["sync"]
+        return height
+
     def _size(self) -> tuple[int, int]:
         un = self._units()
         fonts, heights = self._fonts(un), self._heights(un)
@@ -261,8 +335,10 @@ class TrackPanel(Overlay):
             ),
             default=0.0,
         )
+        if self._shown_count() < len(model.rows):
+            rows += un.px(_ARROW_U) + un.px(_GAP_U)  # the arrows keep their room
         content = max(title, rows, float(un.px(_MIN_WIDTH_U - 2 * _PAD_U)))
-        height = 2 * un.px(_PAD_U) + heights["title"] + len(model.rows) * heights["row"]
+        height = self._fixed_height(un) + self._shown_count() * heights["row"]
         sync = model.sync
         if sync is not None:
             label_fm = QFontMetricsF(fonts["label"])
@@ -274,7 +350,6 @@ class TrackPanel(Overlay):
             text = QFontMetricsF(fonts["sync"]).horizontalAdvance(sync.widest)
             controls = 2 * un.px(_CHIP_U) + 4 * un.px(_GAP_U) + text
             content = max(content, label, controls)
-            height += un.px(_SECTION_U) + heights["label"] + heights["sync"]
         return math.ceil(content + 2 * un.px(_PAD_U)) + 2, math.ceil(height)
 
     def _layout(self) -> None:
@@ -282,17 +357,21 @@ class TrackPanel(Overlay):
         if parent is None:
             return
         un = Units(parent.width())
-        width, height = self._size()
         edge = un.px(_EDGE_U)
-        width = min(width, parent.width())
-        center = self._anchor_x if self._anchor_x is not None else parent.width() / 2
-        x = round(center - width / 2)
-        x = max(min(x, parent.width() - width - edge), min(edge, parent.width() - width))
         bottom = (
             parent.height() - un.px(_BOTTOM_U)
             if self._floor is None
             else self._floor - un.px(_FLOOR_GAP_U)
         )
+        # As many rows as fit between the host's top and the controls (at least one).
+        room = bottom - edge - self._fixed_height(un)
+        self._fit = max(1, math.floor(room / self._heights(un)["row"]))
+        self._scroll = self._clamped(self._scroll)
+        width, height = self._size()
+        width = min(width, parent.width())
+        center = self._anchor_x if self._anchor_x is not None else parent.width() / 2
+        x = round(center - width / 2)
+        x = max(min(x, parent.width() - width - edge), min(edge, parent.width() - width))
         rect = QRect(x, max(0, bottom - height), width, height)
         if rect != self.geometry():
             self.setGeometry(rect)
@@ -305,7 +384,11 @@ class TrackPanel(Overlay):
         y = pad
         rects = _Rects(QRectF(left, y, right - left, heights["title"]))
         y += heights["title"]
-        for _row in self._model.rows:
+        shown = self.shown_rows()
+        for index in range(len(self._model.rows)):
+            if index not in shown:
+                rects.rows.append(QRectF())  # scrolled out of sight
+                continue
             rects.rows.append(QRectF(pad / 2, y, self.width() - pad, heights["row"]))
             y += heights["row"]
         sync = self._model.sync
@@ -357,7 +440,12 @@ class TrackPanel(Overlay):
         lit = self._hover if self._hover is not None else self._focus
         row_fm = QFontMetricsF(fonts["row"])
         tick_w, icon = float(un.px(_TICK_U)), float(un.px(_ICON_U))
+        shown = self.shown_rows()
+        scrolls = len(shown) < len(model.rows)
+        arrow = float(un.px(_ARROW_U)) if scrolls else 0.0
         for index, (row, rect) in enumerate(zip(model.rows, rects.rows)):
+            if rect.isEmpty():
+                continue
             if index == lit:
                 self._paint_focus(p, un, rect, outline=index == self._focus)
             x = rect.left() + un.px(_PAD_U) / 2
@@ -367,13 +455,37 @@ class TrackPanel(Overlay):
                 draw_icon(p, "plus" if row.action else "check", box, qcolor(PALETTE.accent))
             p.setFont(fonts["row"])
             p.setPen(qcolor(PALETTE.accent) if row.action else text)
-            room = rect.right() - un.px(_PAD_U) / 2 - (x + tick_w)
-            shown = row_fm.elidedText(row.text, Qt.TextElideMode.ElideRight, max(0.0, room))
-            p.drawText(QRectF(x + tick_w, rect.top(), room, rect.height()), left, shown)
+            room = rect.right() - un.px(_PAD_U) / 2 - (x + tick_w) - arrow
+            label = row_fm.elidedText(row.text, Qt.TextElideMode.ElideRight, max(0.0, room))
+            p.drawText(QRectF(x + tick_w, rect.top(), room, rect.height()), left, label)
+        if scrolls:
+            self._paint_arrows(p, un, rects, shown, muted)
         sync = model.sync
         if sync is not None:
             self._paint_sync(p, un, fonts, rects, sync, text, muted)
         p.end()
+
+    def _paint_arrows(self, p: QPainter, un: Units, rects: _Rects, shown: range, color) -> None:
+        """A small ▴ on the first row shown when rows are above it, ▾ on the last for below."""
+        size = float(un.px(_ARROW_U))
+        for index, up in ((shown.start, True), (shown.stop - 1, False)):
+            if (up and index == 0) or (not up and index == len(self._model.rows) - 1):
+                continue
+            rect = rects.rows[index]
+            cx, cy = rect.right() - un.px(_PAD_U) / 2 - size / 2, rect.center().y()
+            half = size / 2
+            tip, base = (
+                (cy - half * 0.6, cy + half * 0.6) if up else (cy + half * 0.6, cy - half * 0.6)
+            )
+            path = QPainterPath(QPointF(cx - half, base))
+            path.lineTo(cx + half, base)
+            path.lineTo(cx, tip)
+            path.closeSubpath()
+            p.save()
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color)
+            p.drawPath(path)
+            p.restore()
 
     @staticmethod
     def _paint_focus(p: QPainter, un: Units, rect: QRectF, *, outline: bool) -> None:
@@ -473,8 +585,15 @@ class TrackPanel(Overlay):
             self.update()
         super().leaveEvent(event)
 
-    def wheelEvent(self, event) -> None:
-        event.accept()  # never the host's channel change under an open panel
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Its rows scroll, when not all fit; never the host's channel change under it."""
+        event.accept()
+        self._touch()
+        self._wheel += event.angleDelta().y()
+        rows = int(self._wheel / _WHEEL_STEP)  # towards zero: a notch up shows the rows above
+        if rows:
+            self._wheel -= rows * _WHEEL_STEP
+            self.scroll_by(-rows)
 
     def event(self, event: QEvent) -> bool:
         if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
@@ -528,9 +647,17 @@ class TrackPanel(Overlay):
                 and self._shown.elapsed() < QApplication.doubleClickInterval()
             ):
                 return True  # the second press of the double-click that opened it
+            control = self._control_under(obj, event)
             self.dismiss()
-            return True  # it only closes the panel
+            # Another of the player controls' buttons acts; its own button only closes it.
+            return control is None or control == self._button
         return False
+
+    def _control_under(self, obj: QObject, event: QMouseEvent) -> Optional[str]:
+        """The player controls' control under a press on them (None: elsewhere)."""
+        if obj is not self._controls or self._controls_hit is None:
+            return None
+        return self._controls_hit(event.position())
 
     def _outside(self, obj: QObject) -> bool:
         """A press on another widget of this window (its overlays, the video): not on the

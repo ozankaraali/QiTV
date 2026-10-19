@@ -1115,6 +1115,11 @@ class Transport(Overlay):
             return
         self.mousePressEvent(event)  # as Qt's own: one more press
 
+    def control_at(self, pos: QPointF) -> str | None:
+        """The control under `pos` (this widget's coordinates), as `_control_at`: a press there
+        acts (an open Sound or Subtitles panel lets it through)."""
+        return self._control_at(pos)
+
     def _control_at(self, pos: QPointF) -> str | None:
         """The control under `pos`: a title row's, a button's, or None (the bar by its hit area)."""
         for name, rect in self.title_rects().items():

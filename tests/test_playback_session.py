@@ -857,7 +857,10 @@ class SubtitleFileTests(unittest.TestCase):
             _FakeInstance(self.player), runner=self.runner, poll_ms=60_000
         )
         self.addCleanup(self.session.release)
-        self.film = Path("/films/Lighthouse.en.srt")
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.film = Path(directory.name) / "Lighthouse.en.srt"
+        self.film.write_text("1\n00:00:01,000 --> 00:00:04,000\nHello\n", encoding="utf-8")
 
     def play(self):
         self.session.play(A, kind=PlayKind.VOD_FILE)
@@ -926,6 +929,47 @@ class SubtitleFileTests(unittest.TestCase):
             self.session._tick()
         self.player.read(9)  # far too late: maybe the media's own
         self.assertEqual(self.session.subtitle_tracks()[-1], (9, "Track 2"))
+
+    def test_a_file_that_cannot_be_read_is_refused(self):
+        self.play()
+        self.assertFalse(self.session.add_subtitle_file(str(self.film.with_name("gone.srt"))))
+        self.assertFalse(self.session.add_subtitle_file(str(self.film.parent)))  # a folder
+        self.assertEqual(self.slaves(), [])
+
+    def test_a_file_added_while_a_reopen_waits_to_play_is_added_once(self):
+        self.play()
+        self.session.add_subtitle_file(str(self.film))
+        self.player.read(4)
+        other = self.film.with_name("Lighthouse.fr.srt")
+        other.write_text("1\n00:00:01,000 --> 00:00:04,000\nBonjour\n", encoding="utf-8")
+        self.play()  # reopened: the files go to it once it plays
+        self.runner.finish()
+        self.assertTrue(self.session.add_subtitle_file(str(other)))  # before it plays
+        self.session._tick()
+        self.assertEqual(
+            self.slaves(),
+            [(self.film.as_uri(), True), (other.as_uri(), True), (self.film.as_uri(), False)],
+        )
+
+    def test_a_file_this_media_has_is_chosen_again_not_added_twice(self):
+        self.play()
+        self.session.add_subtitle_file(str(self.film))
+        self.player.read(4)
+        self.session.subtitle_tracks()
+        self.session.set_subtitle_track(-1)
+        self.assertTrue(self.session.add_subtitle_file(str(self.film)))
+        self.assertEqual(len(self.slaves()), 1)
+        self.assertEqual(self.session.subtitle_track(), 4)
+
+    def test_a_file_gone_before_a_reopen_is_forgotten(self):
+        self.play()
+        self.session.add_subtitle_file(str(self.film))
+        self.film.unlink()
+        with self.assertLogs("services.playback", "INFO"):
+            self.reopen()
+        self.assertEqual(len(self.slaves()), 1)
+        self.reopen()  # nothing to add any more
+        self.assertEqual(len(self.slaves()), 1)
 
     def test_the_gui_never_waits_on_the_player_for_them(self):
         self.play()

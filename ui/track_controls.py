@@ -16,11 +16,14 @@ panel shows, its button lit, and it closes with them.
 Everything acts on the large picture. A live channel's sound sync is kept for that channel
 (`services.sound_sync`, written off the GUI thread): it applies whenever a player opens the
 channel, large or small (`prepare`, `prepare_small`), and the player keeps it through each
-reopen of the same channel (a reconnect, a time-shift seek, a go-live). A swap moves
-nothing: each player keeps playing its channel with its sync, so the sync follows the
-channel. A film's or an episode's stays with its player while that title plays (a retry of
-it keeps it too) and is never stored: the next title starts in sync. Subtitle files and the
-subtitles' sync are the playback's alone: another title or channel starts without them.
+reopen of the same channel (a reconnect, a time-shift seek, a go-live). A channel's sync is
+always read from the store, never from the player: while a tune waits for the old stream to
+let go, the player still has the old channel's. A swap moves nothing: each player keeps
+playing its channel with its sync, so the sync follows the channel. A film's or an episode's
+stays with its player while that title plays (a retry of it keeps it too) and is never
+stored: the next title starts in sync. Subtitle files and the subtitles' sync are the
+playback's alone: another title or channel starts without them, and a file chosen in the
+dialog is dropped when a zap or a swap came while it was open.
 Without the panels (tests), the buttons cycle the tracks with a toast, as before 2.2.
 """
 
@@ -129,6 +132,7 @@ class TrackControls(QObject):
         transport.bandChanged.connect(self._follow_band)  # its controls moved (the bar came)
         transport.installEventFilter(self)  # its hide closes the panels
         for name, panel in self._panels.items():
+            panel.set_controls(transport, transport.control_at)  # another button acts at once
             panel.rowChosen.connect(partial(self._on_row, name))
             panel.syncStepped.connect(partial(self._step, name))
             panel.syncReset.connect(partial(self._reset, name))
@@ -183,7 +187,7 @@ class TrackControls(QObject):
         """J (-1) and K (+1): the large picture's sound 50 ms earlier or later, with a toast
         (the panel shows it instead while it is open)."""
         if self._playing() and self._current() is not None:
-            ms = self._set_delay(AUDIO, self._session().audio_delay() + steps * STEP_MS)
+            ms = self._set_delay(AUDIO, self._delay(AUDIO) + steps * STEP_MS)
             self._said(AUDIO, toast_text(SOUND, ms))
 
     def nudge_subtitles(self, steps: int) -> None:
@@ -244,9 +248,11 @@ class TrackControls(QObject):
             return
         self.close()
         folder = str(getattr(self._config, "subtitle_folder", "") or "")
-        path = pick(folder)
-        if not path or not self._playing():
-            return
+        target, session = self._current(), self._session()
+        path = pick(folder)  # the dialog's own event loop: a zap or a swap may come meanwhile
+        moved = self._current() is not target or self._session() is not session
+        if not path or not self._playing() or moved:
+            return  # the file was for what played when it was asked for
         if self.load_subtitle_file(path, say=False):
             self._show_transport()  # it faded during the dialog
             self.open_subtitles()
@@ -285,7 +291,7 @@ class TrackControls(QObject):
             if other != name:
                 shown.dismiss()
         self._transport.hold(name)
-        panel.show_panel(self._model(name), self._anchor(name), self._floor())
+        panel.show_panel(self._model(name), self._anchor(name), self._floor(), name)
         self._refresh.start()
 
     def _shown(self) -> Optional[tuple[str, Any]]:
@@ -316,7 +322,7 @@ class TrackControls(QObject):
         playing = session.audio_track()
         rows = tuple(PanelRow(i, name, i == playing) for i, name in tracks)
         return PanelModel(
-            SOUND, rows if len(rows) > 1 else (), self._sync(AUDIO, session.audio_delay())
+            SOUND, rows if len(rows) > 1 else (), self._sync(AUDIO, self._delay(AUDIO))
         )
 
     def _subtitle_model(self) -> PanelModel:
@@ -393,8 +399,15 @@ class TrackControls(QObject):
     # ---- the sync -----------------------------------------------------------------------------
 
     def _delay(self, name: str) -> int:
+        """The large picture's sync now: a live channel's sound as its store keeps it (its
+        player may still have the channel before's while it opens), else its player's."""
         session = self._session()
-        return int(session.audio_delay() if name == AUDIO else session.subtitle_delay())
+        if name == SUBTITLES:
+            return int(session.subtitle_delay())
+        target = self._current()
+        if target is not None and target.live:
+            return self._store.audio_ms(self._key(target.item))
+        return int(session.audio_delay())
 
     def _set_delay(self, name: str, ms: int) -> int:
         """The large picture's sound (or subtitles) `ms` later, clamped. Its player keeps it
