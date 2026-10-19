@@ -54,6 +54,7 @@ EXTERNAL_PLAYERS_HINT = (
 
 VERIFIED_TEXT = "Provider verified successfully."
 VERIFY_FAILED_TEXT = "Failed to verify provider"
+WARNING_COLOR = "#b26a00"  # verified, with a note (a portal profile dated in the past)
 PASTE_LINK_TEXT = "Paste link"
 PASTE_LINK_TIP = (
     "Fill in this provider from one link your provider gave you: an Xtream link with the"
@@ -115,10 +116,12 @@ class ProviderVerificationWorker(QObject):
                 found = check_account(
                     provider, prefer_https=self.prefer_https, ssl_verify=self.ssl_verify
                 )
-                # An account at its stream limit is still a working account.
-                verified = found is not None and found.kind in (reasons.OK, reasons.LIMIT)
-                if found is not None and not verified and found.plain:
-                    why = found.text
+                # An account at its stream limit is still a working account, and a portal
+                # profile dated in the past alone is only warned of (such dates go stale).
+                working = (reasons.OK, reasons.LIMIT, reasons.DATED)
+                verified = found is not None and found.kind in working
+                if found is not None and found.kind != reasons.LIMIT and found.plain:
+                    why = found.text  # why it failed, or (DATED) the warning
             elif provider["type"] in ("M3UPLAYLIST", "M3USTREAM"):
                 verified = self.verify_url(
                     provider["url"],
@@ -1127,11 +1130,13 @@ class OptionsDialog(QDialog):
             return
         if verified:
             self._refresh_provider_ids.add(id(self.edited_provider))
-            text = VERIFIED_TEXT
+            text = f"{VERIFIED_TEXT} Note: {why}." if why else VERIFIED_TEXT
+            color = WARNING_COLOR if why else "green"
         else:
             text = f"{VERIFY_FAILED_TEXT}: {why}." if why else f"{VERIFY_FAILED_TEXT}."
+            color = "red"
         self.verify_result.setText(text)
-        self.verify_result.setStyleSheet("color: green;" if verified else "color: red;")
+        self.verify_result.setStyleSheet(f"color: {color};")
 
     def done(self, result):
         self._verification_closed = True

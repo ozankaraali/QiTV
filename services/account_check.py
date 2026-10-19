@@ -2,14 +2,17 @@
 
 When a channel or a film fails to open, or a provider can't be reached, the account itself is
 asked: Xtream's Player API sign-in (`player_api.php` without an action: its `user_info` has
-the status, the expiry, the stream limit and the streams in use), an STB portal's handshake and
-profile. Neither opens a stream, so the check never takes one of the account's connections. An
-M3U playlist from an Xtream panel (its get.php link, services.provider_link) is asked as
-Xtream; another playlist has no account to ask.
+the status, the expiry, the stream limit and the streams in use), an STB portal's profile.
+Neither opens a stream, so the check never takes one of the account's connections. A portal
+signed in already is asked on that session's own token (a new handshake would take a new one,
+and portals bind one token to a MAC: the stream it plays would lose its own); one that is not
+gets a fresh handshake. An M3U playlist from an Xtream panel (its get.php link,
+services.provider_link) is asked as Xtream; another playlist has no account to ask.
 
 `check_account` runs on a worker thread (blocking, a few seconds at most). `AccountChecks`
-runs it on a `JobRunner` when the GUI asks, at most once a minute per provider: a failure
-within the minute gets the last answer (a check under way answers every caller). The answers
+runs it on a `JobRunner` when the GUI asks, at most once a minute per provider and account (a
+password or MAC fixed in Settings is asked again at once): a failure within the minute gets
+the last answer (a check under way answers every caller). The answers
 are `failure_reasons.Reason`s, plain data; their words are failure_reasons'. Nothing here logs
 a URL, a host or a credential: only the reason's kind.
 """
@@ -17,6 +20,7 @@ a URL, a host or a credential: only the reason's kind.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import logging
 import time
 from typing import Any, Callable, Optional
@@ -90,12 +94,19 @@ def check_stb(
     prefer_https: bool = False,
     ssl_verify: bool = True,
     now: Optional[datetime] = None,
+    session: Optional[dict] = None,
 ) -> Reason:
-    """The portal's answer to a fresh handshake and profile request (no play link is made)."""
+    """The portal's answer to a profile request (no play link is made). With `session` (the
+    headers of the provider's signed-in session, its token among them) only the profile is
+    asked for: a fresh handshake would take a new token, and portals bind one token to a MAC,
+    so the stream that session plays would lose its own. Without one, a fresh handshake."""
     from services.provider_manager import HANDSHAKE_REJECTED, HANDSHAKE_UNREACHABLE, StbHandshake
 
     now = now or datetime.now(timezone.utc)
     handshake = StbHandshake(prefer_https=prefer_https, ssl_verify=ssl_verify)
+    if session:
+        known = handshake.check_profile(url, mac, session)
+        return _from_profile(handshake, known, now)
     accepted = handshake.run(url, mac, serial_number=serial_number, device_id=device_id)
     found = reasons.stb_profile_reason(handshake.profile, now)
     if found is not None:
@@ -116,6 +127,25 @@ def check_stb(
     return Reason(reasons.UNEXPECTED, "")
 
 
+def _from_profile(handshake: Any, known: bool, now: datetime) -> Reason:
+    """What a profile request on the session's own token found. A profile that does not
+    know the device, a 401 or a 404 may only mean that token went stale or the path was the
+    other one: they say nothing."""
+    found = reasons.stb_profile_reason(handshake.profile, now)
+    if found is not None:
+        return found
+    if known:
+        return Reason(reasons.OK, "")
+    if handshake.profile is not None:
+        return Reason(reasons.UNEXPECTED, "")
+    by_status = reasons.status_reason(reasons.strongest_status(handshake.statuses))
+    if by_status is not None and by_status.kind not in (reasons.WRONG_LOGIN, reasons.NOT_FOUND):
+        return by_status
+    if handshake.statuses:
+        return Reason(reasons.UNEXPECTED, "")
+    return reasons.unreachable(handshake.timed_out)
+
+
 def _from_statuses(statuses: list[int], timed_out: bool) -> Reason:
     found = reasons.status_reason(reasons.strongest_status(statuses))
     if found is not None:
@@ -123,6 +153,15 @@ def _from_statuses(statuses: list[int], timed_out: bool) -> Reason:
     if statuses:
         return Reason(reasons.UNEXPECTED, "")
     return reasons.unreachable(timed_out)
+
+
+_ACCOUNT_FIELDS = ("type", "url", "username", "password", "mac", "serial_number", "device_id")
+
+
+def account_key(provider: dict) -> str:
+    """A digest of what signs `provider` in (its credentials among it, never kept as text)."""
+    fields = [str(provider.get(key) or "") for key in _ACCOUNT_FIELDS]
+    return hashlib.sha256("\0".join(fields).encode("utf-8")).hexdigest()
 
 
 def has_account(provider: dict) -> bool:
@@ -144,14 +183,16 @@ def check_account(
     prefer_https: bool = False,
     ssl_verify: bool = True,
     now: Optional[datetime] = None,
+    session: Optional[dict] = None,
 ) -> Optional[Reason]:
     """Ask `provider`'s account (blocking: run it on a worker). `prefer_https` and `ssl_verify`
-    are the global settings, which the provider's own override. None: nothing to ask."""
+    are the global settings, which the provider's own override; `session`, an STB portal's
+    signed-in headers (see check_stb). None: nothing to ask."""
     kind = str(provider.get("type", "")).upper()
     url = str(provider.get("url") or "").strip()
     if not url:
         return None
-    reason = _check(provider, kind, url, prefer_https, ssl_verify, now)
+    reason = _check(provider, kind, url, prefer_https, ssl_verify, now, session)
     if reason is not None:
         logger.debug("Account check (%s): %s", kind, reason.kind)
     return reason
@@ -164,6 +205,7 @@ def _check(
     prefer_https: bool,
     ssl_verify: bool,
     now: Optional[datetime],
+    session: Optional[dict],
 ) -> Optional[Reason]:
     https = provider_prefers_https(provider, prefer_https)
     verify = bool(provider.get("ssl_verify", ssl_verify))
@@ -183,6 +225,7 @@ def _check(
             prefer_https=https,
             ssl_verify=verify,
             now=now,
+            session=session,
         )
     link = parse_provider_link(url) if kind in ("M3UPLAYLIST", "M3USTREAM") else None
     if link is not None and link.type == XTREAM:  # a playlist from an Xtream panel
@@ -198,16 +241,26 @@ class AccountCheckWorker(QObject):
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, provider: dict, prefer_https: bool, ssl_verify: bool) -> None:
+    def __init__(
+        self,
+        provider: dict,
+        prefer_https: bool,
+        ssl_verify: bool,
+        session: Optional[dict] = None,
+    ) -> None:
         super().__init__()
         self._provider = dict(provider)
         self._prefer_https = prefer_https
         self._ssl_verify = ssl_verify
+        self._session = dict(session) if session else None  # copied on the GUI thread
 
     def run(self) -> None:
         try:
             reason = check_account(
-                self._provider, prefer_https=self._prefer_https, ssl_verify=self._ssl_verify
+                self._provider,
+                prefer_https=self._prefer_https,
+                ssl_verify=self._ssl_verify,
+                session=self._session,
             )
         except Exception as e:  # the text can carry the URL: its type only
             logger.info("The account check failed (%s)", type(e).__name__)
@@ -235,33 +288,38 @@ class AccountChecks(QObject):
         self._config = config
         self._runner = runner if runner is not None else JobRunner(self)
         self._clock = clock
-        self._checked: dict[str, tuple[float, Optional[Reason]]] = {}  # name -> (when, answer)
-        self._waiting: dict[str, list[Answer]] = {}  # a check under way, and who waits for it
+        # Keyed by the provider's name and account (`account_key`): an account fixed in
+        # Settings under the same name is asked again at once.
+        self._checked: dict[tuple[str, str], tuple[float, Optional[Reason]]] = {}
+        self._waiting: dict[tuple[str, str], list[Answer]] = {}  # under way, and who waits
         self._closed = False
 
-    def explain(self, provider: dict, answer: Answer) -> bool:
+    def explain(self, provider: dict, answer: Answer, session: Optional[dict] = None) -> bool:
         """Ask `provider`'s account why it failed; `answer(reason)` is called on the GUI
         thread (at once with the last answer when it was asked less than a minute ago).
-        False when there is nothing to ask (no name, or no account: a plain playlist)."""
+        `session`: an STB portal's signed-in headers, asked with (see check_stb). False when
+        there is nothing to ask (no name, or no account: a plain playlist)."""
         name = str(provider.get("name") or "")
         if self._closed or not name or not has_account(provider):
             return False
-        waiting = self._waiting.get(name)
+        key = (name, account_key(provider))
+        waiting = self._waiting.get(key)
         if waiting is not None:
             waiting.append(answer)
             return True
-        last = self._checked.get(name)
+        last = self._checked.get(key)
         if last is not None and self._clock() - last[0] < CHECK_EVERY_S:
             answer(last[1])
             return True
-        self._waiting[name] = [answer]
-        self._checked[name] = (self._clock(), None)  # the minute starts with the ask
+        self._waiting[key] = [answer]
+        self._checked[key] = (self._clock(), None)  # the minute starts with the ask
         worker = AccountCheckWorker(
             provider,
             bool(getattr(self._config, "prefer_https", False)),
             bool(getattr(self._config, "ssl_verify", True)),
+            session,
         )
-        self._runner.run_worker(worker, self._on_answer, self._on_error, context=name)
+        self._runner.run_worker(worker, self._on_answer, self._on_error, context=key)
         return True
 
     def close(self) -> None:
@@ -269,14 +327,14 @@ class AccountChecks(QObject):
         self._closed = True
         self._waiting.clear()
 
-    def _on_answer(self, name: str, reason: Optional[Reason]) -> None:
-        when = self._checked.get(name, (self._clock(), None))[0]
-        self._checked[name] = (when, reason)
+    def _on_answer(self, key: tuple[str, str], reason: Optional[Reason]) -> None:
+        when = self._checked.get(key, (self._clock(), None))[0]
+        self._checked[key] = (when, reason)
         if reason is not None:
             logger.info("Account check: %s", reason.kind)
-        for answer in self._waiting.pop(name, []):
+        for answer in self._waiting.pop(key, []):
             if not self._closed:
                 answer(reason)
 
-    def _on_error(self, name: str, _message: str) -> None:
-        self._on_answer(name, None)
+    def _on_error(self, key: tuple[str, str], _message: str) -> None:
+        self._on_answer(key, None)

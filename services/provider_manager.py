@@ -26,6 +26,7 @@ requests = lazy_module("requests")
 HANDSHAKE_UNREACHABLE = "unreachable"  # DNS, connection, timeout or a server error
 HANDSHAKE_REJECTED = "rejected"  # an explicit refusal (401/403, blocked) or no token
 HANDSHAKE_UNEXPECTED = "unexpected"  # any other answer: a wrong path, not JSON
+_PREHASH = "2614ddf9829ba9d284f389d88e8c669d81f6a5c2"
 # When attempts (portal paths, HTTPS then HTTP) fail differently, the stronger reason wins.
 _HANDSHAKE_FAILURE_RANK = {HANDSHAKE_UNREACHABLE: 0, HANDSHAKE_UNEXPECTED: 1, HANDSHAKE_REJECTED: 2}
 
@@ -425,8 +426,7 @@ class StbHandshake:
             if prefer_https and not _prefer_attempted and url.startswith("http://"):
                 url = "https://" + url[len("http://") :]
 
-            prehash = "2614ddf9829ba9d284f389d88e8c669d81f6a5c2"
-            fetchurl = f"{url}{serverload}?type=stb&action=handshake&prehash={prehash}&token=&JsHttpRequest=1-xml"
+            fetchurl = f"{url}{serverload}?type=stb&action=handshake&prehash={_PREHASH}&token=&JsHttpRequest=1-xml"
             handshake = requests.get(fetchurl, timeout=5, headers=self.headers, verify=ssl_verify)
             if handshake.status_code == 200:
                 body = handshake.json()
@@ -436,30 +436,7 @@ class StbHandshake:
             self.headers["Authorization"] = f"Bearer {self.token}"
 
             # Use get_profile request to detect blocked providers
-
-            params = {
-                "ver": "ImageDescription: 2.20.02-pub-424; ImageDate: Fri May 8 15:39:55 UTC 2020; PORTAL version: 5.3.0; API Version: JS API version: 343; STB API version: 146; Player Engine version: 0x588",
-                "num_banks": "2",
-                "sn": "062014N067770",
-                "stb_type": "MAG424",
-                "client_type": "STB",
-                "image_version": "220",
-                "video_out": "hdmi",
-                "device_id": "",
-                "device_id2": "",
-                "signature": "",
-                "auth_second_step": "1",
-                "hw_version": "1.7-BD-00",
-                "not_valid_token": "0",
-                "metrics": f'{{"mac":"{mac}", "sn":"062014N067770","model":"MAG424","type":"STB","uid":"","random":""}}',
-                "hw_version_2": "bb8b74cdcaa19c7f6a6bdfecc8e91b7e4b5ea556",
-                "timestamp": "1729441259",
-                "api_signature": "262",
-                "prehash": prehash,
-            }
-            encoded_params = urlencode(params)
-
-            fetchurl = f"{url}{serverload}?type=stb&action=get_profile&hd=1&{encoded_params}&JsHttpRequest=1-xml"
+            fetchurl = self.profile_url(url, serverload, mac)
             profile = requests.get(fetchurl, timeout=5, headers=self.headers, verify=ssl_verify)
             if profile.status_code == 200:
                 body = profile.json()
@@ -512,6 +489,68 @@ class StbHandshake:
                 )
             logger.warning("STB handshake failed (%s): %s", self.failure, safe_exc(e))
             return False
+
+    @staticmethod
+    def profile_url(url, serverload, mac):
+        """The portal's get_profile request, as a set-top box sends it after its handshake."""
+        params = {
+            "ver": "ImageDescription: 2.20.02-pub-424; ImageDate: Fri May 8 15:39:55 UTC 2020; PORTAL version: 5.3.0; API Version: JS API version: 343; STB API version: 146; Player Engine version: 0x588",
+            "num_banks": "2",
+            "sn": "062014N067770",
+            "stb_type": "MAG424",
+            "client_type": "STB",
+            "image_version": "220",
+            "video_out": "hdmi",
+            "device_id": "",
+            "device_id2": "",
+            "signature": "",
+            "auth_second_step": "1",
+            "hw_version": "1.7-BD-00",
+            "not_valid_token": "0",
+            "metrics": f'{{"mac":"{mac}", "sn":"062014N067770","model":"MAG424","type":"STB","uid":"","random":""}}',
+            "hw_version_2": "bb8b74cdcaa19c7f6a6bdfecc8e91b7e4b5ea556",
+            "timestamp": "1729441259",
+            "api_signature": "262",
+            "prehash": _PREHASH,
+        }
+        encoded_params = urlencode(params)
+        return f"{url}{serverload}?type=stb&action=get_profile&hd=1&{encoded_params}&JsHttpRequest=1-xml"
+
+    def check_profile(self, url, mac, headers):
+        """A profile request on a session that is signed in already (`headers`, with its
+        token): no handshake, so the portal keeps the token that session plays with (portals
+        bind one token to a MAC). True when the portal knows the device; `statuses`,
+        `timed_out` and `profile` record what came, as run() records them."""
+        self.headers = dict(headers)
+        bases = [url]
+        if self.prefer_https and url.startswith("http://"):
+            bases.insert(0, "https://" + url[len("http://") :])
+        for base in bases:
+            for serverload in ("/portal.php", "/server/load.php"):
+                try:
+                    response = requests.get(
+                        self.profile_url(base, serverload, mac),
+                        timeout=5,
+                        headers=self.headers,
+                        verify=self.ssl_verify,
+                    )
+                except requests.exceptions.Timeout:
+                    self.timed_out = True
+                    continue
+                except requests.RequestException:
+                    continue
+                if response.status_code != 200:
+                    self.statuses.append(response.status_code)
+                    continue
+                try:
+                    body = response.json()
+                except ValueError:
+                    continue
+                js = body.get("js") if isinstance(body, dict) else None
+                if isinstance(js, dict):
+                    self.profile = js
+                    return bool(js.get("id") or js.get("name"))
+        return False
 
     @staticmethod
     def random_token():

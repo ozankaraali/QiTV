@@ -10,6 +10,7 @@ import os
 import socket
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -22,8 +23,8 @@ from services import failure_reasons as reasons
 from services.account_check import AccountChecks, check_account, check_stb, check_xtream
 from services.failure_reasons import Reason
 from services.live.refusals import STREAM_LIMIT
-from tests import test_tv_controller as tv
-from ui.settings_dialog import ProviderVerificationWorker
+from tests import test_tv_controller as tv, test_tv_window as tv_window
+from ui.settings_dialog import WARNING_COLOR, OptionsDialog, ProviderVerificationWorker
 from ui.tv_controller import ERROR_MS
 
 NOW = datetime(2026, 10, 19, 20, 0, tzinfo=timezone.utc)
@@ -41,6 +42,7 @@ class _Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         query = {k: v[0] for k, v in parse_qs(url.query).items()}
         self.owner.requests.append((url.path, query.get("action", "")))
+        self.owner.authorizations.append(self.headers.get("Authorization", ""))
         status, body, delay = self.owner.answer(url.path, query)
         if delay:
             time.sleep(delay)
@@ -61,6 +63,7 @@ class _Handler(BaseHTTPRequestHandler):
 class ServerCase(unittest.TestCase):
     def setUp(self):
         self.requests = []
+        self.authorizations = []
         handler = type("Handler", (_Handler,), {"owner": self})
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         server.daemon_threads = True
@@ -226,10 +229,35 @@ class StbCheckTests(ServerCase):
     def test_a_blocked_or_expired_account(self):
         self.profile = {"id": 7, "name": "Fixture", "blocked": "1"}
         self.assertEqual(self.check().kind, reasons.DISABLED)
+        # A past date while the portal answers is the portal's word (such dates go stale).
         self.profile = {"id": 7, "name": "F", "expire_billing_date": "2026-10-03 00:00:00"}
-        self.assertEqual(self.check().text, "Your subscription expired on 3 Oct 2026")
+        self.assertEqual(
+            self.check(),
+            Reason(reasons.DATED, "The portal says your subscription ended on 3 Oct 2026"),
+        )
         self.profile = {"id": 7, "name": "F", "expire_billing_date": "0000-00-00 00:00:00"}
         self.assertEqual(self.check().kind, reasons.OK)  # no date: unlimited
+
+    def session_check(self):
+        session = {"Authorization": "Bearer PLAYING", "Cookie": "mac=00:1A:79:00:00:01;"}
+        return check_stb(self.base, self.MAC, now=NOW, session=session)
+
+    def test_a_signed_in_portal_is_asked_on_its_own_token(self):
+        # Portals bind one token to a MAC: a new handshake would cost the stream its own.
+        self.assertEqual(self.session_check().kind, reasons.OK)
+        self.assertNotIn("handshake", [action for _path, action in self.requests])
+        self.assertEqual(set(self.authorizations), {"Bearer PLAYING"})
+        self.profile = {"id": 7, "name": "F", "blocked": "1"}
+        self.assertEqual(self.session_check().kind, reasons.DISABLED)
+
+    def test_a_signed_in_portal_that_refuses_the_token_says_nothing_of_the_device(self):
+        self.profile = {"id": None, "name": None}  # a stale token, maybe: not the device
+        self.assertFalse(self.session_check().plain)
+        self.paths = {"/portal.php": (404, b""), "/server/load.php": (401, b"")}
+        self.assertFalse(self.session_check().plain)
+        self.paths = {"/portal.php": (404, b""), "/server/load.php": (458, b"")}
+        self.assertEqual(self.session_check().kind, reasons.BLOCKED)
+        self.assertNotIn("handshake", [action for _path, action in self.requests])
 
     def test_a_refusal_on_every_path_says_its_status(self):
         for status, kind in ((403, reasons.FORBIDDEN), (458, reasons.BLOCKED)):
@@ -259,6 +287,8 @@ class WordsTests(unittest.TestCase):
             reasons.limit_text(3, 3), "Your account allows 3 streams; all 3 are in use"
         )
         self.assertEqual(reasons.limit_text(4, 2), "Your account allows 4 streams; 2 are in use")
+        # A closed connection still counted: one stream allowed, two reported.
+        self.assertEqual(reasons.limit_text(1, 2), "Your account allows 1 stream; one is in use")
 
     def test_the_strongest_status(self):
         self.assertEqual(reasons.strongest_status([404, 403]), 403)
@@ -299,6 +329,21 @@ class AccountChecksTests(unittest.TestCase):
         )
         self.provider = {"name": "Harbor", "type": "XTREAM", "url": "http://panel.test"}
 
+    def test_an_account_fixed_in_settings_is_asked_again_at_once(self):
+        heard = []
+        self.checks.explain({**self.provider, "password": "old"}, heard.append)
+        self.runner.answer(0, Reason(reasons.WRONG_LOGIN, reasons.WRONG_LOGIN_MESSAGE))
+        self.checks.explain({**self.provider, "password": "new"}, heard.append)
+        self.assertEqual(len(self.runner.jobs), 2)  # same name, another account
+        self.checks.explain({**self.provider, "password": "old", "max_streams": 2}, heard.append)
+        self.assertEqual(len(self.runner.jobs), 2)  # the old account's answer, at once
+        self.assertEqual(heard[-1].kind, reasons.WRONG_LOGIN)
+
+    def test_the_session_goes_to_the_worker(self):
+        portal = {"name": "Portal", "type": "STB", "url": "http://portal.test/c/", "mac": "m"}
+        self.checks.explain(portal, print, session={"Authorization": "Bearer T"})
+        self.assertEqual(self.runner.jobs[0][0]._session, {"Authorization": "Bearer T"})
+
     def test_at_most_one_check_a_minute_per_provider(self):
         heard = []
         self.assertTrue(self.checks.explain(self.provider, heard.append))
@@ -337,9 +382,11 @@ class FakeChecks:
 
     def __init__(self):
         self.asks = []
+        self.sessions = []
 
-    def explain(self, provider, answer):
+    def explain(self, provider, answer, session=None):
         self.asks.append((provider, answer))
+        self.sessions.append(session)
         return True
 
     def close(self):
@@ -416,6 +463,20 @@ class ControllerReasonTests(ReasonCase, tv.ControllerTestCase):
         self.catalog.linkFailed.emit(self.catalog.links[-1][0], "Portal down")
         self.assertEqual(self.checks.asks[-1][0]["name"], "Harbor IPTV")
 
+    def test_a_signed_in_portal_is_asked_with_its_session(self):
+        manager = SimpleNamespace(token="T", headers={"Authorization": "Bearer T"})
+        hub = self.catalog.catalogs
+        hub.own["Portal B"] = SimpleNamespace(provider_manager=manager)
+        hub.created = lambda: ["Portal B"]
+        channel = {**tv.CHANNELS[1], "_provider": "Portal B"}
+        self.controller.tune(channel, group_key="10", channels=[channel])
+        self.catalog.linkFailed.emit(self.catalog.links[-1][0], "Portal down")
+        self.assertEqual(self.checks.sessions[-1], {"Authorization": "Bearer T"})
+        self.assertIsNot(self.checks.sessions[-1], manager.headers)  # a copy for the worker
+        manager.token = ""  # not signed in: a fresh handshake is fine
+        self.controller._explain("Portal B", "Two")
+        self.assertIsNone(self.checks.sessions[-1])
+
 
 class PipelineReasonTests(ReasonCase, tv.PipelineCase):
 
@@ -443,6 +504,31 @@ class PipelineReasonTests(ReasonCase, tv.PipelineCase):
             ],
         )
 
+    def limit(self, active):
+        text = reasons.limit_text(1, active)
+        return Reason(reasons.LIMIT, text, limit=1, active=active)
+
+    def test_streams_in_use_that_are_qitvs_own_are_said_so(self):
+        self.start_pipeline(0)
+        self.live.failed.emit(STREAM_LIMIT)
+        self.live.released.emit()  # the refused stream's slot goes back
+        self.budget.request("Home", None, purpose="pip")  # the other picture plays on
+        self.checks.answer(self.limit(1))
+        self.assertEqual(
+            self.toast.messages()[-1],
+            ("One: QiTV's other picture is using the account's only stream", "error"),
+        )
+
+    def test_streams_in_use_elsewhere_are_the_accounts(self):
+        self.start_pipeline(0)
+        self.live.failed.emit(STREAM_LIMIT)
+        self.live.released.emit()
+        self.budget.request("Home", None, purpose="pip")
+        self.checks.answer(self.limit(2))  # one more than QiTV's: another device's
+        self.assertEqual(
+            self.toast.messages()[-1], ("One: Your account allows 1 stream; one is in use", "error")
+        )
+
 
 class VerifyReasonTests(ServerCase):
     """Settings' Verify Provider says why in plain words."""
@@ -468,6 +554,38 @@ class VerifyReasonTests(ServerCase):
         self.reply = (200, {"user_info": info}, 0.0)
         provider = {"type": "XTREAM", "url": self.base, "username": "u", "password": "p"}
         self.assertEqual(self.verify(**provider), (True, ""))
+
+    def test_a_portal_profile_dated_in_the_past_verifies_with_a_note(self):
+        portal = {"type": "STB", "url": self.base, "mac": "00:1A:79:00:00:01"}
+        self.reply = (200, {"js": {"token": "T", "id": 7, "name": "F", "end_date": "2026-10-03"}})
+        self.reply += (0.0,)
+        verified, note = self.verify(**portal)
+        self.assertTrue(verified)
+        self.assertEqual(note, "The portal says your subscription ended on 3 Oct 2026")
+        self.reply = (200, {"js": {"token": "T", "id": 7, "name": "F", "blocked": "1"}}, 0.0)
+        self.assertEqual(self.verify(**portal), (False, reasons.DISABLED_MESSAGE))
+
+
+class SettingsNoteTests(tv_window.WindowCase):
+    def test_the_note_shows_in_the_settings(self):
+        dialog = OptionsDialog(self.window)
+        self.addCleanup(dialog.deleteLater)
+        request = dialog._verification_request = 3
+        dialog._verification_reason(
+            request, "The portal says your subscription ended on 3 Oct 2026"
+        )
+        dialog._provider_verified(request, dialog._verification_provider(), True)
+        self.assertEqual(
+            dialog.verify_result.text(),
+            "Provider verified successfully. "
+            "Note: The portal says your subscription ended on 3 Oct 2026.",
+        )
+        self.assertIn(WARNING_COLOR, dialog.verify_result.styleSheet())
+        dialog._verification_reason(request, "Your subscription has expired")
+        dialog._provider_verified(request, dialog._verification_provider(), False)
+        self.assertEqual(
+            dialog.verify_result.text(), "Failed to verify provider: Your subscription has expired."
+        )
 
 
 if __name__ == "__main__":

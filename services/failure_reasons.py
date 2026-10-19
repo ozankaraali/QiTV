@@ -16,7 +16,7 @@ text. Only a `plain` one says more than the failure already did (`OK`: the accou
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
@@ -41,6 +41,9 @@ DEVICE_MESSAGE = "The provider rejected this device (check the MAC address or su
 OK = "ok"
 UNEXPECTED = "unexpected"
 EXPIRED = "expired"
+# A portal's profile dated in the past while the portal still answers: such dates go stale on
+# some portals, so it is said as the portal's word (and Verify Provider only warns of it).
+DATED = "dated"
 LIMIT = "limit"
 WRONG_LOGIN = "wrong_login"
 DISABLED = "disabled"
@@ -69,6 +72,10 @@ _NO_DATE = ("", "0", "0000-00-00", "0000-00-00 00:00:00", "null", "none")
 class Reason:
     kind: str
     text: str
+    # A LIMIT's numbers, as the account reported them (the GUI compares them with QiTV's own
+    # streams at that provider, `own_streams_text`).
+    limit: Optional[int] = field(default=None, compare=False)
+    active: Optional[int] = field(default=None, compare=False)
 
     @property
     def plain(self) -> bool:
@@ -82,7 +89,7 @@ def _streams(count: int) -> str:
 
 def limit_text(limit: int, active: int) -> str:
     """ "Your account allows 1 stream; one is in use" (the account's own count)."""
-    if active <= 1:
+    if active <= 1 or limit == 1:
         used = "one is in use"
     elif limit == 2:
         used = "both are in use"
@@ -93,10 +100,28 @@ def limit_text(limit: int, active: int) -> str:
     return f"Your account allows {_streams(limit)}; {used}"
 
 
+def own_streams_text(limit: Optional[int]) -> Optional[str]:
+    """A LIMIT whose streams in use are all QiTV's own (its other picture, say): None when
+    the limit is not known (the failure's own words stay)."""
+    if not limit:
+        return None
+    if limit == 1:
+        return "QiTV's other picture is using the account's only stream"
+    return f"QiTV is already using all {limit} streams your account allows"
+
+
+def _day(when: datetime) -> str:
+    return f"{when.day} {when.strftime('%b %Y')}"
+
+
 def expired_text(when: Optional[datetime]) -> str:
     if when is None:
         return EXPIRED_MESSAGE
-    return f"Your subscription expired on {when.day} {when.strftime('%b %Y')}"
+    return f"Your subscription expired on {_day(when)}"
+
+
+def dated_text(when: datetime) -> str:
+    return f"The portal says your subscription ended on {_day(when)}"
 
 
 def blocked_text(status: int) -> str:
@@ -204,13 +229,14 @@ def xtream_reason(body: Any, now: datetime) -> Reason:
         return Reason(WRONG_LOGIN, WRONG_LOGIN_MESSAGE)
     limit, active = _int(user_info.get("max_connections")), _int(user_info.get("active_cons"))
     if limit and limit > 0 and active is not None and active >= limit:
-        return Reason(LIMIT, limit_text(limit, active))
+        return Reason(LIMIT, limit_text(limit, active), limit=limit, active=active)
     return Reason(OK, "")
 
 
 def stb_profile_reason(profile: Any, now: datetime) -> Optional[Reason]:
     """What a portal's get_profile answer (its "js") says beyond the device being known: a
-    blocked account, or an expiry in the past. None when it says nothing of either."""
+    blocked account, or an expiry date in the past (DATED: the portal's word, as such dates
+    go stale on some portals). None when it says nothing of either."""
     if not isinstance(profile, dict):
         return None
     if str(profile.get("blocked", "")).strip() == "1":
@@ -218,7 +244,7 @@ def stb_profile_reason(profile: Any, now: datetime) -> Optional[Reason]:
     for key in _EXPIRY_KEYS:
         expires = _date(profile.get(key))
         if expires is not None and expires <= now:
-            return Reason(EXPIRED, expired_text(expires))
+            return Reason(DATED, dated_text(expires))
     return None
 
 

@@ -71,7 +71,7 @@ from services import external_players, favorites
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
-from services.failure_reasons import Reason
+from services.failure_reasons import LIMIT, Reason, own_streams_text
 from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
 from services.navigation import (
@@ -2107,14 +2107,37 @@ class TVController(QObject):
             return  # gone from the list (or a catalog that cannot say)
         if not isinstance(entry, dict) or not entry.get("name"):
             return
-        checks.explain(entry, partial(self._on_reason, self._toasts, title))
+        answer = partial(self._on_reason, self._toasts, title, provider)
+        checks.explain(entry, answer, session=self._portal_session(provider))
 
-    def _on_reason(self, shown: int, title: str, reason: Optional[Reason]) -> None:
+    def _portal_session(self, provider: str) -> Optional[dict]:
+        """The signed-in session of `provider`'s portal (its headers, token among them), when
+        its catalog has one: the check asks with it instead of taking a new token, which
+        would cost the stream that session plays."""
+        hub = getattr(self.catalog, "catalogs", None)
+        try:
+            if hub is None or provider not in hub.created():
+                return None
+            manager = hub.catalog(provider).provider_manager
+        except Exception:
+            return None
+        headers = getattr(manager, "headers", None)
+        if not getattr(manager, "token", "") or not isinstance(headers, dict) or not headers:
+            return None
+        return dict(headers)
+
+    def _on_reason(self, shown: int, title: str, provider: str, reason: Optional[Reason]) -> None:
         if self._closed or reason is None or not reason.plain:
             return
         if shown != self._toasts or time.monotonic() - self._toasted_at > ERROR_MS / 1000:
             return  # another message came, or the failure's toast has gone: it is old news
-        self._error(f"{title}: {reason.text}" if title else reason.text)
+        text: Optional[str] = reason.text
+        own = self.budget.in_use(provider) if self.budget is not None else 0
+        if reason.kind == LIMIT and own and reason.active is not None and own >= reason.active:
+            # The streams in use are QiTV's own (its other picture): no other device's.
+            text = own_streams_text(reason.limit)
+        if text:
+            self._error(f"{title}: {text}" if title else text)
 
     def _notify(self, text: str, kind: str) -> None:
         """A toast for the shell's helpers: errors stay up longer."""
