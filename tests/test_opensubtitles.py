@@ -378,6 +378,29 @@ class FoundTests(unittest.TestCase):
         self.assertEqual([f.file_id for f in matching], [1, 2, 3])
         self.assertEqual([f.file_id for f in others], [4])
 
+    def test_a_word_two_titles_share_never_brings_another_film_along(self):
+        # One subtitle of another film shares a word and has no year: it may match, but its
+        # film's other subtitles (another year) are not claimed; nor when two films matched.
+        query = search_query("movies", "Harbour Lights (2019)")
+        other = dict(tmdb=2, imdb=None)
+        data = page(
+            entry(
+                1,
+                "en",
+                "harbour.night",
+                made_for=dict(feature("Harbour Night", 2003, **other), year=None),
+            ),
+            entry(2, "en", "crossing.2003", made_for=feature("Midnight Crossing", 2003, **other)),
+            entry(
+                3, "de", "crossing.2003.de", made_for=feature("Midnight Crossing", 2003, **other)
+            ),
+            entry(4, "en", "harbour.lights.2019", made_for=feature("Harbour Lights", 2019, tmdb=7)),
+        )
+        matching, others = split_matches(parse_search(data), query)
+        self.assertNotIn(2, [f.file_id for f in matching])
+        self.assertNotIn(3, [f.file_id for f in matching])
+        self.assertIn(4, [f.file_id for f in matching])
+
     def test_by_id_the_features_ids_count_and_the_year_checks_them(self):
         query = SearchQuery("Süper Liman Bekçileri", 2014, tmdb_id=4242)
         film = Feature("movie", "Brave Harbour Six", year=2014, tmdb_id=4242)

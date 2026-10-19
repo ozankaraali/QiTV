@@ -393,15 +393,22 @@ def feature_matches(feature: Feature, query: SearchQuery) -> bool:
     """Whether a subtitle made for `feature` is for what `query` asks: its ids (the ones
     asked for), else its title's words; the year within one when both are known, the season
     and episode when both are."""
+    if not _fits_besides_title(feature, query):
+        return False
+    ids = _same_ids(query, feature)
+    if ids is not None:
+        return ids
+    return any(same_title(query.text, name) for name in feature.names())
+
+
+def _fits_besides_title(feature: Feature, query: SearchQuery) -> bool:
+    """The year within one when both are known, the season and episode when both are."""
     if query.year and feature.year and abs(feature.year - query.year) > 1:
         return False
     for asked, theirs in ((query.season, feature.season), (query.episode, feature.episode)):
         if asked is not None and theirs is not None and asked != theirs:
             return False
-    ids = _same_ids(query, feature)
-    if ids is not None:
-        return ids
-    return any(same_title(query.text, name) for name in feature.names())
+    return True
 
 
 def split_matches(
@@ -415,14 +422,23 @@ def split_matches(
     fits = [file.feature is not None and feature_matches(file.feature, query) for file in files]
     # A film one subtitle's own name matched is that film wherever else it comes: a translated
     # title finds a few subtitles named so and many more under the film's original name, all
-    # with its ids (OpenSubtitles' film).
+    # with its ids (OpenSubtitles' film). Only when the words found that one film, and each
+    # subtitle it claims still has the year (and season and episode) asked: a word two titles
+    # share must not bring a whole other film along.
     films = {_film_of(f.feature) for f, ok in zip(files, fits) if ok and f.feature is not None}
     films.discard(None)
+    film = next(iter(films)) if len(films) == 1 else None
     matching: list[SubtitleFile] = []
     others: list[SubtitleFile] = []
     for file, ok in zip(files, fits):
-        ok = ok or (file.feature is not None and _film_of(file.feature) in films)
-        (matching if ok else others).append(file)
+        feature = file.feature
+        claimed = (
+            film is not None
+            and feature is not None
+            and _film_of(feature) == film
+            and _fits_besides_title(feature, query)
+        )
+        (matching if ok or claimed else others).append(file)
     return matching, others
 
 
