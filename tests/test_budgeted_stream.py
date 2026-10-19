@@ -156,6 +156,31 @@ class PurposeTests(_Fixture):
         self.assertEqual(self.budget.holders(P), [])
 
 
+class TryTakeTests(_Fixture):
+    """A multiview tile's direct play takes a slot only within the provider's limit."""
+
+    def test_it_takes_a_free_slot_in_place_of_its_own(self):
+        held = HeldSlot(self.budget, "t2")
+        self.assertTrue(held.try_take(P, 2))
+        self.assertTrue(held.try_take(P, 2))  # its own goes back first: still one
+        self.assertEqual(self.budget.holders(P), ["t2"])
+
+    def test_a_full_provider_denies_it_and_queues_nothing(self):
+        self.budget.request(P, 2, purpose="main")
+        self.budget.request(P, 2, purpose="pip")
+        held = HeldSlot(self.budget, "t2")
+        self.assertFalse(held.try_take(P, 2))
+        self.assertIsNone(held.ticket)
+        self.assertEqual(sorted(self.budget.holders(P)), ["main", "pip"])
+        self.assertEqual(self.budget._waiting, {})
+
+    def test_without_a_limit_it_always_takes_one(self):
+        held = HeldSlot(self.budget, "t3")
+        self.budget.request(P, None, purpose="main")
+        self.assertTrue(held.try_take(P, None))
+        self.assertEqual(sorted(self.budget.holders(P)), ["main", "t3"])
+
+
 class ReleaseCapTests(_Fixture):
     cap_ms = 50
 

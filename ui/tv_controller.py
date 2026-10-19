@@ -426,9 +426,7 @@ class TVController(QObject):
         zap.numberNotFound.connect(self._on_number_not_found)
         self._connect_session(session, True)
         for name, player in self._players():
-            player.stateChanged.connect(partial(self._states.__setitem__, name))
-            player.positionChanged.connect(partial(self._on_small_position, name))
-            player.errorOccurred.connect(partial(self._on_small_error, name))
+            self._watch_player(name, player)
         if self.sessions is not None:
             self.sessions.largeChanged.connect(self._on_large_changed)
             self.sessions.largeChanged.connect(lambda *_: self._update_guides())
@@ -1407,12 +1405,13 @@ class TVController(QObject):
         if self._pip is not None:
             self._pip.open_node(node)
 
-    def _on_large_changed(self, name: str) -> None:
-        """A swap: the large picture's player, stream and state are the other slot's now."""
+    def _on_large_changed(self, name: str, old_name: str) -> None:
+        """A swap: the large picture's player, stream and state are slot `name`'s now, and
+        slot `old_name` shows what the large picture showed."""
         sessions, pip = self.sessions, self._pip
         if sessions is None or pip is None or self._closed:
             return
-        new, old = sessions.large(), sessions.other()
+        new, old = sessions.slot(name), sessions.slot(old_name)
         view = pip.take_large(
             old.name, new.name, self._current, self.zap.context, self._current_url, self._cid
         )
@@ -1484,13 +1483,28 @@ class TVController(QObject):
         sessions = self.sessions
         if sessions is None:
             return [("main", self.session)]
-        return [(slot.name, slot.playback) for slot in (sessions.large(), sessions.other())]
+        return [(slot.name, slot.playback) for slot in sessions.slots()]
 
     def _tuners(self) -> list[LiveTuner]:
         sessions = self.sessions
         if sessions is None:
             return [self._tuner]
-        return [self._tuner_of(slot) for slot in (sessions.large(), sessions.other())]
+        return [self._tuner_of(slot) for slot in sessions.slots()]
+
+    def slot_added(self, slot: Slot) -> None:
+        """A multiview tile's slot was made: its player is followed as the others are (once
+        wired; wiring follows every slot there is)."""
+        if not self._wired or self._closed:
+            return
+        self._watch_player(slot.name, slot.playback)
+        if self._pip is not None:
+            self._pip.watch_slot(slot)
+
+    def _watch_player(self, name: str, player) -> None:
+        """Follow a player's state, a title's position and its errors (it may be small)."""
+        player.stateChanged.connect(partial(self._states.__setitem__, name))
+        player.positionChanged.connect(partial(self._on_small_position, name))
+        player.errorOccurred.connect(partial(self._on_small_error, name))
 
     @staticmethod
     def _tuner_of(slot: Slot) -> LiveTuner:

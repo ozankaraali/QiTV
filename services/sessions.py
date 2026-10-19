@@ -1,20 +1,24 @@
-"""Two playback slots, `main` and `pip`, and which of them is large (spec §7, Phase 4).
+"""Named playback slots and their roles: which is large, which is the PiP (spec §7, Phase 4).
 
-Each slot has its own player (`Session`) and `LiveSession`. Swapping exchanges the roles
-only: no slot is stopped, restarted or re-pointed, and the surfaces trade geometry (the UI
-does that on `largeChanged`). The slots are alike: the PiP is whichever is small, so after a
-swap "Open in picture-in-picture" changes the small picture's channel and closing PiP stops
-the small picture, the large one playing on.
+Each slot has its own player (`Session`) and `LiveSession`: "main" and "pip" from the start,
+and a multiview's tiles ("t2" … "t8", `add_slot`) once the grid wants them. One slot is
+large: the shell's controls act on it. Of the others, one is the PiP's (`other()`), shown
+small while picture in picture is open. Giving another slot the large role (`set_large`; a
+swap is that for the small slot) changes the roles only: no slot is stopped, restarted or
+re-pointed, and the surfaces trade geometry (the UI does that on `largeChanged`). The slots
+are alike: the PiP is whichever is small, so after a swap "Open in picture-in-picture"
+changes the small picture's channel and closing PiP stops the small picture, the large one
+playing on.
 
 Each slot's streams are its tuner's (`Slot.tuner`, the window's `ui.live_tuner.LiveTuner`
 for that player, or one the manager makes for a slot without one): the large slot's tunes
 are the shell's, and this manager opens, changes and closes the small one. A tuner keeps its
-stream across swaps; a swap gives each tuner its new role as the purpose of its budget slots
-("main" for the large picture, "pip" for the small one), so the provider's budget counts each
-stream once. Opening the small slot:
-- it asks the provider's connection budget for a slot with purpose "pip" and `queue=False`:
-  when none is free, `denied(limit)` and nothing opens (a PiP never waits behind the main
-  stream). The budget always grants later, so the slot starts once it is granted;
+stream across role changes, and its budget slots carry the slot's name as their purpose
+("main", "pip", "t2" …), so the provider's budget counts each stream once and "every stream
+but this slot's" is the holders under other names. Opening the small slot:
+- it asks the provider's connection budget for a slot with `queue=False`: when none is free,
+  `denied(limit)` and nothing opens (a PiP never waits behind the main stream). The budget
+  always grants later, so the slot starts once it is granted;
 - a stopped small slot (muted first, so nothing is heard while it stops) gives its tickets
   back once its streams are closed, and only then asks for a new one: the old stream is
   always released before the new one opens;
@@ -24,17 +28,18 @@ stream once. Opening the small slot:
 A swap waits for nothing: while the small slot's channel change is still on its way, it is
 refused (False).
 
-Audio follows the large picture: the PiP opens muted, and while the small slot stays muted
-a swap mutes the new small slot and moves the user's mute from the old large slot to the new
-one. Once the user makes the small slot audible (the mixer's PiP row raised above 0, or an
-explicit unmute), a swap changes no mute: each stream keeps its own, so both stay audible;
-muting the small slot again brings the default back. Each stream also has a volume level of
-its own, which always stays with it across swaps.
+Audio follows the large picture: the PiP (and a tile) opens muted, and while the slot taking
+the large role is muted it takes the user's mute from the old large slot, which is muted in
+its place. Once the user makes a small slot audible (the mixer's PiP row raised above 0, or
+an explicit unmute), giving it the large role changes no mute: each stream keeps its own, so
+both stay audible; muting it again brings the default back. Each stream also has a volume
+level of its own, which always stays with it across role changes.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 import logging
 from typing import Any, Optional, Protocol
 
@@ -49,8 +54,9 @@ from services.zapping import ZapContext
 
 logger = logging.getLogger(__name__)
 
-PURPOSE = "pip"  # the budget purpose of the small picture's slots
-MAIN_PURPOSE = "main"  # the large picture's (LiveTuner's default)
+# A slot's streams have its name as their budget purpose: these are the first two slots'.
+PURPOSE = "pip"  # the "pip" player's
+MAIN_PURPOSE = "main"  # the "main" player's (LiveTuner's default)
 MAIN_LEVEL = 100  # libVLC's default volume
 PIP_LEVEL = 30  # the PiP stream's level until the mixer sets one (config pip_volume's default)
 PIP_FAILED = "Couldn't open this channel in picture-in-picture"
@@ -77,12 +83,10 @@ class SlotTuner(Protocol):
 
     def releasing(self) -> bool: ...  # a stopped stream may still hold the provider
 
-    def set_purpose(self, purpose: str) -> None: ...  # its role: "main" or "pip"
-
 
 @dataclass
 class Slot:
-    name: str  # "main" | "pip"
+    name: str  # "main", "pip", or a tile's ("t2" … "t8"): its streams' budget purpose
     playback: Session
     live: LiveSession
     channel: Optional[dict] = None
@@ -117,10 +121,6 @@ class _StreamTuner(QObject):
     def releasing(self) -> bool:
         return self.stream is not None and self.stream.waiting()
 
-    def set_purpose(self, purpose: str) -> None:
-        if self.stream is not None:
-            self.stream.set_purpose(purpose)
-
 
 @dataclass
 class _Open:
@@ -133,7 +133,7 @@ class _Open:
 
 
 class SessionManager(QObject):
-    largeChanged = Signal(str)  # name of the slot that is now large
+    largeChanged = Signal(str, str)  # the slot that is large now, and the one that was
     pipStateChanged = Signal(bool)  # PiP open/closed
     pipStarted = Signal()  # the small slot's stream started: PiP opened, or its channel changed
     denied = Signal(int)  # limit (budget refused PiP)
@@ -153,48 +153,69 @@ class SessionManager(QObject):
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
-        self._main, self._pip = main, pip
         self._budget = budget
+        self._release_cap_ms = release_cap_ms
+        self._slots: dict[str, Slot] = {}
         self._large = main
+        self._small = pip  # the PiP's slot, open or not (never the large one)
         self._open = False  # pipStateChanged(True) was emitted, and no close since
         self._pending: Optional[_Open] = None
         self._limit: Optional[int] = None  # the provider limit of the PiP stream that starts
         # What the last pipFailed stood for: the small stream's own failure (LiveSession's
         # message, a refusal one of REFUSALS); "" when its start raised or the budget refused.
         self.failure = ""
-        self._levels = {main.name: MAIN_LEVEL, pip.name: PIP_LEVEL}
-        self._muted = {main.name: False, pip.name: True}
+        self._levels: dict[str, int] = {}
+        self._muted: dict[str, bool] = {}
         self._tuners: dict[str, SlotTuner] = {}
-        for slot, purpose in ((main, MAIN_PURPOSE), (pip, PURPOSE)):
-            tuner = slot.tuner
-            if tuner is None:
-                tuner = _StreamTuner(slot.live, budget, purpose, release_cap_ms, self)
-            stream = tuner.stream
-            if stream is None:
-                raise ValueError(f"The {slot.name} slot has no live session to open")
-            self._tuners[slot.name] = tuner
-            tuner.released.connect(self._proceed)  # a slot let go: a waiting open may go on
-            stream.granted.connect(self._on_granted)
+        self._add(main, MAIN_LEVEL, muted=False)
+        self._add(pip, PIP_LEVEL, muted=True)
         # A wanted level makes PlaybackSession apply it on every media it opens; without one
         # the main player takes whatever level its audio output opens at.
         main.playback.set_volume(self._levels[main.name])
-        main.live.failed.connect(self._on_main_failed)
-        pip.live.failed.connect(self._on_pip_failed)
-        main.live.timelineChanged.connect(self._on_main_timeline)
-        pip.live.timelineChanged.connect(self._on_pip_timeline)
+
+    def add_slot(self, slot: Slot) -> None:
+        """Another slot (a multiview tile's): muted, at the PiP's default level, until the
+        large role or the user makes it audible."""
+        if slot.name in self._slots:
+            raise ValueError(f"There is a {slot.name} slot already")
+        self._add(slot, PIP_LEVEL, muted=True)
+
+    def _add(self, slot: Slot, level: int, *, muted: bool) -> None:
+        tuner = slot.tuner
+        if tuner is None:
+            tuner = _StreamTuner(slot.live, self._budget, slot.name, self._release_cap_ms, self)
+        stream = tuner.stream
+        if stream is None:
+            raise ValueError(f"The {slot.name} slot has no live session to open")
+        self._slots[slot.name] = slot
+        self._tuners[slot.name] = tuner
+        self._levels[slot.name] = level
+        self._muted[slot.name] = muted
+        tuner.released.connect(self._proceed)  # a slot let go: a waiting open may go on
+        stream.granted.connect(self._on_granted)
+        slot.live.failed.connect(partial(self._on_failed, slot.name))
+        slot.live.timelineChanged.connect(partial(self._on_timeline, slot.name))
 
     # ---- roles --------------------------------------------------------------------------------
+
+    def slots(self) -> list[Slot]:
+        """Every slot, in the order they were made ("main", "pip", then the tiles')."""
+        return list(self._slots.values())
+
+    def slot(self, name: str) -> Slot:
+        """The slot named `name` (KeyError: there is none)."""
+        return self._slot(name)
 
     def large(self) -> Slot:
         return self._large
 
     def other(self) -> Slot:
-        """The slot that is not large: the PiP's, open or not."""
-        return self._pip if self._large is self._main else self._main
+        """The PiP's slot, open or not: the one a picture-in-picture opens in."""
+        return self._small
 
     def small(self) -> Optional[Slot]:
-        """The other slot while PiP is open; None when it is closed."""
-        return self.other() if self._open else None
+        """The PiP's slot while PiP is open; None when it is closed."""
+        return self._small if self._open else None
 
     def pip_open(self) -> bool:
         return self._open
@@ -215,28 +236,37 @@ class SessionManager(QObject):
                 return slot
         return None
 
-    def swap(self) -> bool:
-        """Exchange the large and small roles; False (and nothing changes) when PiP is closed
-        or its channel change is still on its way.
+    def set_large(self, name: str) -> bool:
+        """Give slot `name` the large role; False (and nothing changes) when it has it, or
+        the PiP's channel change is still on its way.
 
-        No stream is played, stopped or started, and no level changes; each tuner's slots
-        take its new role. A muted small slot takes the user's mute of the large one, which
-        is muted in its place; a small slot the user made audible keeps both streams' mutes
-        as they are (module docstring).
+        No stream is played, stopped or started, and no level changes. The slot that was
+        large becomes the PiP's when `name` was the PiP's (a swap); else the PiP's slot
+        stays. A muted slot taking the role takes the user's mute of the old large one,
+        which is muted in its place; one the user made audible leaves both mutes as they are
+        (module docstring).
         """
+        new = self._slot(name)
+        old = self._large
+        if new is old or self._pending is not None:
+            return False
+        self._large = new
+        if new is self._small:
+            self._small = old
+        if self._muted[new.name]:  # the default: audio follows the large picture
+            users_mute = self._muted[old.name]
+            self._set_mute(old, True)
+            self._set_mute(new, users_mute)
+        self.largeChanged.emit(new.name, old.name)
+        return True
+
+    def swap(self) -> bool:
+        """Exchange the large and small roles (`set_large` of the small slot); False (and
+        nothing changes) when PiP is closed or its channel change is still on its way."""
         small = self.small()
         if small is None or self._pending is not None:
             return False
-        large = self._large
-        self._large = small
-        self._tuners[small.name].set_purpose(MAIN_PURPOSE)
-        self._tuners[large.name].set_purpose(PURPOSE)
-        if self._muted[small.name]:  # the default: audio follows the large picture
-            users_mute = self._muted[large.name]
-            self._set_mute(large, True)  # the new small slot
-            self._set_mute(small, users_mute)
-        self.largeChanged.emit(small.name)
-        return True
+        return self.set_large(small.name)
 
     def demote_large(self) -> bool:
         """Make the large picture small while PiP is closed, without reopening its stream.
@@ -253,15 +283,13 @@ class SessionManager(QObject):
         stream = self._tuners[large.name].stream
         if stream is None or not stream.running():
             return False
-        freed = self.other()
-        self._large = freed
-        self._tuners[freed.name].set_purpose(MAIN_PURPOSE)
-        self._tuners[large.name].set_purpose(PURPOSE)
+        freed = self._small
+        self._large, self._small = freed, large
         users_mute = self._muted[large.name]
         self._set_mute(large, True)  # the PiP is small and muted, as it opens
         self._set_mute(freed, users_mute)
         self._open = True
-        self.largeChanged.emit(freed.name)  # the shell trades what each picture shows first
+        self.largeChanged.emit(freed.name, large.name)  # the shell trades what each shows first
         self.pipStateChanged.emit(True)
         return True
 
@@ -357,19 +385,14 @@ class SessionManager(QObject):
             self.pipStateChanged.emit(True)
         self.pipStarted.emit()
 
-    def _on_main_failed(self, message: str) -> None:
-        self._on_failed(self._main, message)
-
-    def _on_pip_failed(self, message: str) -> None:
-        self._on_failed(self._pip, message)
-
-    def _on_failed(self, slot: Slot, message: str) -> None:
-        """The small stream failed for good: LiveSession recovered what it could.
-
-        The large slot's failures are the shell's.
-        """
-        stream = self._tuners[slot.name].stream
-        if slot is self._large or stream is None or not stream.running():
+    def _on_failed(self, name: str, message: str) -> None:
+        """A slot's stream failed for good: LiveSession recovered what it could. The small
+        slot's closes PiP; the large slot's failures are the shell's."""
+        slot = self._slot(name)
+        stream = self._tuners[name].stream
+        if slot is self._large or slot is not self._small:
+            return
+        if stream is None or not stream.running():
             return
         self._fail(limit_message(self._limit) if message in REFUSALS else PIP_FAILED, message)
 
@@ -405,15 +428,9 @@ class SessionManager(QObject):
         slot.playback.set_muted(bool(muted))
 
     def _slot(self, name: str) -> Slot:
-        for slot in (self._main, self._pip):
-            if slot.name == name:
-                return slot
-        raise KeyError(name)
+        return self._slots[name]  # KeyError: there is no such slot
 
     # ---- timelines ----------------------------------------------------------------------------
 
-    def _on_main_timeline(self, state: dict) -> None:
-        self.slotTimeline.emit(self._main.name, state)
-
-    def _on_pip_timeline(self, state: dict) -> None:
-        self.slotTimeline.emit(self._pip.name, state)
+    def _on_timeline(self, name: str, state: dict) -> None:
+        self.slotTimeline.emit(name, state)

@@ -20,16 +20,16 @@ A direct play (`open(direct=True)`: a channel the pipeline cannot read, a movie,
 episode) holds a "main" slot too (a `HeldSlot`, under the provider the caller names: the
 catalog's, as for pipeline tunes), from its start until libVLC let go of its stream, so a
 PiP sees the slot taken. It never waits for one: this gate already orders the main player's
-streams. It waits for the other picture's tuner, though (`wait_for_each_other`): a closing
+streams. It waits for the other pictures' tuners, though (`wait_for_each_other`): a closing
 PiP's stream may still hold the provider's last slot, so the open runs at that tuner's
 `released`. A local file (`local=True`) is no provider's stream: it is stopped and waited for
 like a direct play, but holds no slot.
 
-Picture in picture (Phase 4) gives each player a tuner of its own. Its slots carry its role
-as their purpose: "main" for the large picture's, "pip" for the small one's
-(`set_purpose()`, which a swap calls), and a stream keeps its tuner across swaps, so a swap
-moves nothing. `released` says when nothing of the player is left open after a stop: the
-PiP's `SessionManager` waits for it before it opens another channel there.
+Picture in picture (Phase 4) and the multiview's tiles give each player a tuner of its own.
+Its budget slots carry the player's slot name as their purpose ("main", "pip", "t2" …): a
+stream keeps its tuner across swaps, so a swap moves nothing, and `refused` counts every
+other player's streams. `released` says when nothing of the player is left open after a
+stop: the PiP's `SessionManager` waits for it before it opens another channel there.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from services.playback import Session
 logger = logging.getLogger(__name__)
 
 RELEASE_CAP_MS = 2000  # the longest wait for libVLC to let go of a direct stream
-PURPOSE = "main"  # the budget purpose of the main live stream (Phase 4 adds "pip")
+PURPOSE = "main"  # the main player's budget purpose (each player's is its slot's name)
 DEFAULT_RAM_MIB = ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB  # a config without the key
 
 
@@ -97,18 +97,26 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
     return kwargs
 
 
-def one_disk_ring(first: "LiveTuner", second: "LiveTuner") -> None:
-    """The two pictures' tuners: while one keeps its time-shift on disk, the other's tunes
-    keep theirs in memory (the user's disk cap is the total; owner's M5 ruling)."""
-    first.set_disk_allowed(lambda: not second.on_disk())
-    second.set_disk_allowed(lambda: not first.on_disk())
+def one_disk_ring(*tuners: "LiveTuner") -> None:
+    """The pictures' tuners: while one keeps its time-shift on disk, the others' tunes keep
+    theirs in memory (the user's disk cap is the total; owner's M5 ruling). Called again with
+    every tuner when one is added (a multiview tile's)."""
+
+    def allowed(others: list[LiveTuner]) -> Callable[[], bool]:
+        return lambda: not any(other.on_disk() for other in others)
+
+    for tuner in tuners:
+        tuner.set_disk_allowed(allowed([other for other in tuners if other is not tuner]))
 
 
-def wait_for_each_other(first: "LiveTuner", second: "LiveTuner") -> None:
-    """The two pictures' tuners: a direct open on one that takes a provider slot (a movie, an
-    episode, a direct channel) waits while the other's stopped stream may still hold one."""
-    first.set_peer(second)
-    second.set_peer(first)
+def wait_for_each_other(*tuners: "LiveTuner") -> None:
+    """The pictures' tuners: a direct open on one that takes a provider slot (a movie, an
+    episode, a direct channel) waits while another's stopped stream may still hold one.
+    Called again with every tuner when one is added: each pair is joined once."""
+    for tuner in tuners:
+        for other in tuners:
+            if other is not tuner:
+                tuner.add_peer(other)
 
 
 class LiveTuner(QObject):
@@ -146,7 +154,7 @@ class LiveTuner(QObject):
         self._action_direct = False
         self._action_slot = False  # that open plays a provider stream: it holds a slot
         self._action_provider: Optional[str] = None  # whose slot it holds
-        self._peer: Optional[LiveTuner] = None  # the other picture's (wait_for_each_other)
+        self._peers: list[LiveTuner] = []  # the other pictures' (wait_for_each_other)
         self._input_cap = QTimer(self, singleShot=True, interval=RELEASE_CAP_MS)
         self._input_cap.timeout.connect(self._on_input_cap)
         session.inputEnded.connect(self._on_input_ended)
@@ -164,20 +172,23 @@ class LiveTuner(QObject):
         return self._stream
 
     def set_purpose(self, purpose: str) -> None:
-        """Take another role (a PiP swap): the slots this player holds or waits for follow."""
+        """Take another budget purpose: the slots this player holds or waits for follow."""
         self.purpose = purpose
         self._held.set_purpose(purpose)
         if self._stream is not None:
             self._stream.set_purpose(purpose)
 
     def set_disk_allowed(self, allowed: Callable[[], bool]) -> None:
-        """Whether a tune may keep its time-shift on disk now (False: the other picture
+        """Whether a tune may keep its time-shift on disk now (False: another picture
         does: the user's disk cap is the total, so this one stays in memory)."""
         self._disk_allowed = allowed
 
-    def set_peer(self, peer: "LiveTuner") -> None:
-        """The other picture's tuner: a slot-taking direct open waits for its `released`."""
-        self._peer = peer
+    def add_peer(self, peer: "LiveTuner") -> None:
+        """Another picture's tuner: a slot-taking direct open waits for its `released`
+        while it is releasing. Once per peer."""
+        if peer is self or peer in self._peers:
+            return
+        self._peers.append(peer)
         peer.released.connect(self._on_peer_released)
 
     def on_disk(self) -> bool:
@@ -218,7 +229,7 @@ class LiveTuner(QObject):
         self._stream.request(provider, limit)
 
     def refused(self, provider: str, limit: Optional[int]) -> bool:
-        """Whether other streams (Phase 4: picture in picture) take the whole limit."""
+        """Whether other players' streams (picture in picture, tiles) take the whole limit."""
         if limit is None:
             return False
         others = [p for p in self.budget.holders(provider) if p != self.purpose]
@@ -252,9 +263,8 @@ class LiveTuner(QObject):
         if self._input_wait or (stream is not None and stream.waiting()):
             return
         if self._action is not None:
-            peer = self._peer
-            if self._action_slot and peer is not None and peer.releasing():
-                return  # its closing stream may hold the provider's last slot (a PiP's)
+            if self._action_slot and any(peer.releasing() for peer in self._peers):
+                return  # a closing stream may hold the provider's last slot (a PiP's)
             action, self._action = self._action, None
             self._direct = self._action_direct
             if self._action_slot:

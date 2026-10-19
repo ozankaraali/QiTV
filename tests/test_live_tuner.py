@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse
 
 from services.connection_budget import ConnectionBudget
-from ui.live_tuner import LiveStart, LiveTuner, start_kwargs, wait_for_each_other
+from ui.live_tuner import LiveStart, LiveTuner, one_disk_ring, start_kwargs, wait_for_each_other
 
 app = QApplication.instance() or QApplication([])
 
@@ -102,6 +102,25 @@ class DirectSlotTests(unittest.TestCase):
         self.assertEqual((self.played, self.holders()), (["file"], ["pip"]))
         peer_session.let_go()
         self.assertEqual((self.played, self.holders()), (["file", "movie"], ["main"]))
+
+    def test_a_direct_play_waits_for_every_other_picture_closing(self):
+        # A multiview's tiles: any of them may hold the provider's last slot as it closes.
+        peers = []
+        for name in ("pip", "t2"):
+            session = FakeSession()
+            peer = LiveTuner(session, self.tuner.config, FakeLive(), self.budget, purpose=name)
+            peer.open(lambda: None, direct=True, provider=PROVIDER)
+            session.holding = True
+            peers.append((peer, session))
+        wait_for_each_other(self.tuner, *(peer for peer, _ in peers))
+        wait_for_each_other(self.tuner, *(peer for peer, _ in peers))  # joined once each
+        for peer, _session in peers:
+            peer.stop()
+        self.tuner.open(self.play("movie"), direct=True, provider=PROVIDER)
+        peers[0][1].let_go()
+        self.assertEqual(self.played, [])  # t2's stream still closes
+        peers[1][1].let_go()
+        self.assertEqual((self.played, self.holders()), (["movie"], ["main"]))
 
     def test_a_direct_play_holds_the_main_slot_until_vlc_let_go(self):
         self.tuner.open(self.play("movie"), direct=True)
@@ -292,6 +311,20 @@ class SlotRoleTests(unittest.TestCase):
         QTest.qWait(10)
         self.assertEqual(self.live.kwargs[-1]["disk"], True)
         self.assertTrue(self.tuner.on_disk())
+
+    def test_one_disk_ring_among_every_player(self):
+        names = ("main", "pip", "t2")
+        tuners = [
+            LiveTuner(FakeSession(), self.config, FakeLive(), self.budget, purpose=name)
+            for name in names
+        ]
+        disks = dict.fromkeys(names, False)
+        for tuner in tuners:
+            tuner.on_disk = lambda name=tuner.purpose: disks[name]  # type: ignore[method-assign]
+        one_disk_ring(*tuners)
+        self.assertEqual([t._disk_allowed() for t in tuners], [True, True, True])
+        disks["t2"] = True
+        self.assertEqual([t._disk_allowed() for t in tuners], [False, False, True])
 
 
 if __name__ == "__main__":

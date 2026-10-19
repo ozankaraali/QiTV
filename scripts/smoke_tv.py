@@ -113,8 +113,6 @@ from services.epg_manager import EpgManager  # noqa: E402
 from services.image_manager import ImageManager  # noqa: E402
 from services.playback import VLC_LOG_ENV, PlaybackSession, PlaybackState  # noqa: E402
 from services.provider_manager import ProviderManager  # noqa: E402
-from services.sessions import MAIN_PURPOSE  # noqa: E402
-from services.sessions import PURPOSE as PIP_PURPOSE  # noqa: E402
 from services.vlc_profile import PlayKind  # noqa: E402
 from tests.fixtures.audio_check import reading_matches, should_mute  # noqa: E402
 from tests.fixtures.live_source import LIVE_TS, LiveSource, opens_in, peak_of  # noqa: E402
@@ -1843,7 +1841,8 @@ class Driver:
             SWAP_TIMEOUT_MS,
         )
         released = yield from self._wait(
-            lambda: not tuner.releasing() and PIP_PURPOSE not in w.budget.holders(provider),
+            # A slot's tickets carry its name: the closed player's are gone.
+            lambda: not tuner.releasing() and closing.name not in w.budget.holders(provider),
             RELEASE_WAIT_MS,
         )
         frame, label = w.pip_frame, w.pip_label
@@ -1870,7 +1869,7 @@ class Driver:
         holders = w.budget.holders(provider)
         report.check(
             TICKET_CHECK,
-            released and holders == [MAIN_PURPOSE],
+            released and holders == [stays.name],
             f"the provider's budget holders: {holders}; the closed player still releasing: "
             f"{tuner.releasing()}",
         )

@@ -323,7 +323,8 @@ class TVWindow(QMainWindow):
         self._fs_settle.timeout.connect(self._fullscreen_settled)
         self._fit_fallback = QTimer(self, singleShot=True, interval=FULLSCREEN_EXIT_MS)
         self._fit_fallback.timeout.connect(self._fit_to_screen)
-        self._bound_pip: Optional[int] = None  # the PiP surface's native window, once bound
+        # Each other player's surface's native window, once bound (the PiP's, the tiles').
+        self._bound: dict[str, int] = {}
         self._drag: Optional[tuple[QPoint, QPoint]] = None  # (press, window position)
         self._dragged = False  # the last press on the video moved the mini player
         self._pressed = False  # the left button is down on the video
@@ -342,7 +343,9 @@ class TVWindow(QMainWindow):
         self.player_page.setAutoFillBackground(True)
         self.surface = VideoSurface(self.player_page)
         self.pip_surface = VideoSurface(self.player_page)
-        for surface in (self.surface, self.pip_surface):
+        # Every player's surface by its slot's name; a multiview's tiles add theirs.
+        self.surfaces: dict[str, VideoSurface] = {"main": self.surface, "pip": self.pip_surface}
+        for surface in self.surfaces.values():
             surface.installEventFilter(self)  # before the PiP frame's: it sees them first
         # The first frame: then the libraries background jobs need load (services.lazy_import).
         self._first_frame = False
@@ -415,34 +418,12 @@ class TVWindow(QMainWindow):
             self.pip_live = LiveSession(self.engine, self.pip_session, tuning=self.live_tuning)
             self.engine.start()
             self.sessions = SessionManager(
-                Slot(
-                    "main",
-                    self.session,
-                    self.live_session,
-                    tuner=LiveTuner(
-                        self.session, config_manager, self.live_session, self.budget, self
-                    ),
-                ),
-                Slot(
-                    "pip",
-                    self.pip_session,
-                    self.pip_live,
-                    tuner=LiveTuner(
-                        self.pip_session,
-                        config_manager,
-                        self.pip_live,
-                        self.budget,
-                        self,
-                        purpose="pip",
-                    ),
-                ),
+                self._slot("main", self.session, self.live_session),
+                self._slot("pip", self.pip_session, self.pip_live),
                 self.budget,
                 parent=self,
             )
-            main_tuner, pip_tuner = self.sessions.large().tuner, self.sessions.other().tuner
-            assert isinstance(main_tuner, LiveTuner) and isinstance(pip_tuner, LiveTuner)
-            one_disk_ring(main_tuner, pip_tuner)  # the user's disk cap is the total
-            wait_for_each_other(main_tuner, pip_tuner)  # a closing PiP may hold the last slot
+            self._join_tuners()
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
         # Each channel's sound sync (J/K, the Sound panel), written off the GUI thread.
         self.sound_sync = SoundSync(os.path.join(config_manager.get_config_dir(), SOUND_SYNC_FILE))
@@ -602,7 +583,7 @@ class TVWindow(QMainWindow):
         # A Windows self-update waits for background threads: the engine's must stop first,
         # and start again if the update cannot launch.
         call_before_update(self.stop_live, self.restart_live)
-        sources = (self.surface, self.pip_surface, self.host)
+        sources = (*self.surfaces.values(), self.host)
         # The pointer over the video goes with the player controls (and comes back on a move).
         self.pointer = PointerHider(
             sources,
@@ -611,18 +592,75 @@ class TVWindow(QMainWindow):
             parent=self,
         )
         for source in sources:
-            source.clicked.connect(self._on_video_clicked)
-            source.doubleClicked.connect(controller.video_double_clicked)
-            source.mouseMoved.connect(self.pointer.moved)
-            source.mouseMoved.connect(controller.mouse_moved)
-            source.wheelSteps.connect(controller.wheel)
-            source.backPressed.connect(controller.mouse_back)
-            source.forwardPressed.connect(controller.mouse_forward)
+            self._wire_source(source)
         self.epg_refresh = QTimer(self, interval=EPG_REFRESH_MS)  # the guide keeps moving
         self.epg_refresh.timeout.connect(lambda: self.catalog.refresh_epg())
 
         self.menus.build()
         config_manager.apply_window_settings(WINDOW_NAME, self)
+
+    # ---- the players --------------------------------------------------------------------------
+
+    def _slot(self, name: str, playback: PlaybackSession, live: LiveSession) -> Slot:
+        """A player's slot: its tuner's budget slots carry the slot's name."""
+        tuner = LiveTuner(playback, self.config_manager, live, self.budget, self, purpose=name)
+        return Slot(name, playback, live, tuner=tuner)
+
+    def _join_tuners(self) -> None:
+        """Every player's tuner: one disk ring among them (the user's disk cap is the total),
+        and a direct open waits for the others' closing streams (one may hold the last slot)."""
+        if self.sessions is None:
+            return
+        tuners = [slot.tuner for slot in self.sessions.slots()]
+        live_tuners = [t for t in tuners if isinstance(t, LiveTuner)]
+        one_disk_ring(*live_tuners)
+        wait_for_each_other(*live_tuners)
+
+    def _wire_source(self, source) -> None:
+        """A surface (or the host over them): its clicks, moves, wheel and side buttons."""
+        controller = self.controller
+        source.clicked.connect(self._on_video_clicked)
+        source.doubleClicked.connect(controller.video_double_clicked)
+        source.mouseMoved.connect(self.pointer.moved)
+        source.mouseMoved.connect(controller.mouse_moved)
+        source.wheelSteps.connect(controller.wheel)
+        source.backPressed.connect(controller.mouse_back)
+        source.forwardPressed.connect(controller.mouse_forward)
+
+    def _make_slot(self, name: str) -> Optional[Slot]:
+        """A multiview tile's player: a surface on the player page (hidden until the grid lays
+        it out), a player, a live session and a tuner, known to the session manager, the
+        frames, the pointer and the controller. None without libVLC."""
+        if (
+            self._closing
+            or self.sessions is None
+            or self.engine is None
+            or self._instance is None
+            or name in self.surfaces
+        ):
+            return None
+        surface = VideoSurface(self.player_page)
+        surface.hide()
+        surface.installEventFilter(self)  # before the frames': it sees them first
+        self.surfaces[name] = surface
+        hardware = self.config_manager.hardware_decoding
+        playback = PlaybackSession(self._instance, self, hardware=hardware)
+        live = LiveSession(self.engine, playback, tuning=self.live_tuning)
+        slot = self._slot(name, playback, live)
+        self.sessions.add_slot(slot)
+        self._join_tuners()
+        self.pip_frame.add_surface(name, surface)
+        self.pointer.add_widget(surface)
+        self._wire_source(surface)
+        self.controller.slot_added(slot)
+        self._bind_video()
+        return slot
+
+    def _players(self) -> list[tuple[str, Session]]:
+        """Every player by its slot's name (the main one alone without libVLC)."""
+        if self.sessions is None:
+            return [("main", self.session)]
+        return [(slot.name, slot.playback) for slot in self.sessions.slots()]
 
     # ---- state the menus and pages read -------------------------------------------------------
 
@@ -798,7 +836,7 @@ class TVWindow(QMainWindow):
             else:
                 self._on_drag(event)
             return True
-        if watched in (self.surface, self.pip_surface) and isinstance(event, QMouseEvent):
+        if isinstance(event, QMouseEvent) and watched in self.surfaces.values():
             if event.type() in _CLICK_EVENTS:
                 reclaim_first_responder(self)  # macOS: libVLC's view took the keys
             if event.type() in _MOUSE_EVENTS:
@@ -1241,11 +1279,13 @@ class TVWindow(QMainWindow):
         if handle != self._bound_handle:
             self._bound_handle = handle
             self.session.set_window(handle)
-        if self.pip_session is not None:
-            handle = self.pip_surface.native_handle()
-            if handle != self._bound_pip:
-                self._bound_pip = handle
-                self.pip_session.set_window(handle)
+        for name, player in self._players():
+            if name == "main":
+                continue
+            handle = self.surfaces[name].native_handle()
+            if handle != self._bound.get(name):
+                self._bound[name] = handle
+                player.set_window(handle)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Close in steps, each after the event loop ran again (`close_retry`).
@@ -1349,7 +1389,9 @@ class TVWindow(QMainWindow):
         self.controller.resume_stopped()  # what played before plays again
 
     def _lives(self) -> list[LiveSession]:
-        return [live for live in (self.live_session, self.pip_live) if live is not None]
+        if self.sessions is None:
+            return [live for live in (self.live_session,) if live is not None]
+        return [slot.live for slot in self.sessions.slots()]
 
     def _find_signature(self) -> tuple:
         """Changes when what the channel list's find reads may have: the providers, or the
@@ -1397,9 +1439,8 @@ class TVWindow(QMainWindow):
         self.config_manager.save_window_settings(_Geometry(self._normal_geometry()), WINDOW_NAME)
 
     def _release_video(self) -> None:
-        self.session.release()
-        if self.pip_session is not None:
-            self.pip_session.release()
+        for _name, player in self._players():
+            player.release()
         if self._owns_instance and self._instance is not None:
             instance, self._instance = self._instance, None
             instance.release()

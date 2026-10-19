@@ -16,7 +16,8 @@ own one):
 A `HeldSlot` is the slot of a stream that plays outside a `LiveSession`: the main player's
 direct channel, movie or episode. It is taken at once, whatever the limit (the player's own
 release gate already orders its streams), so that other consumers (Phase 4's PiP) see the
-slot taken; its owner gives it back once the player let go of that stream.
+slot taken; its owner gives it back once the player let go of that stream. A multiview tile
+takes it only within the limit (`try_take`): the other tiles' streams count against it.
 """
 
 from __future__ import annotations
@@ -159,6 +160,17 @@ class HeldSlot:
         """Hold a ticket for `provider` in place of any held one; never queued."""
         self.give_back()
         self.ticket = self.budget.request(provider, None, purpose=self.purpose)
+
+    def try_take(self, provider: str, limit: Optional[int]) -> bool:
+        """Hold a ticket for `provider` in place of any held one when its `limit` leaves one
+        free (a multiview tile's direct play); False, holding none, when it does not. Never
+        queued: a tile never waits for another's stream."""
+        self.give_back()
+        ticket = self.budget.request(provider, limit, purpose=self.purpose, queue=False)
+        if ticket == DENIED:
+            return False
+        self.ticket = ticket
+        return True
 
     def set_purpose(self, purpose: str) -> None:
         self.purpose = purpose

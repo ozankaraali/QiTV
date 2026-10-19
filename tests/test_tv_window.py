@@ -1487,7 +1487,8 @@ class LivePipelineWindowTests(WindowCase):
 
         QTest.keyClick(self.window, Qt.Key.Key_P)  # closes the small picture: Channel 2
         self.assertFalse(sessions.pip_open())
-        self.assertTrue(wait_until(lambda: window.budget.holders(PROVIDER_NAME) == ["main"]))
+        # Channel 1's stream, large on the "pip" player, carries that player's name.
+        self.assertTrue(wait_until(lambda: window.budget.holders(PROVIDER_NAME) == ["pip"]))
         self.assertTrue(playing(pip, pip_live)())  # Channel 1 plays on, large
         self.assertEqual(window.pip_surface.geometry(), page)
         self.assertTrue(window.pip_surface.isVisible())  # on screen, not black (review C1)

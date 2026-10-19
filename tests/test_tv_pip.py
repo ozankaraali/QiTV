@@ -461,7 +461,7 @@ class PipTests(PipCase):
         self.assertIs(self.controller.session, self.pip_session)
         self.assertEqual(self.frame.calls[-2:], [("set_large", "pip"), ("hide_pip",)])
         self.live.released.emit()
-        self.assertEqual(self.budget.holders("Home"), ["main"])  # Five's, as the large one
+        self.assertEqual(self.budget.holders("Home"), ["pip"])  # Five's: its player's name
         self.controller.handle(Action.CH_NEXT)  # zapping goes on in Five's group
         self.assertEqual(self.requested()[-1], "Six")
 
@@ -949,8 +949,9 @@ class LibraryPlayTests(PipCase):
         self.start_large(0)  # Home, two streams
         self.play_from_library({**MOVIE, "_provider": "Harbor IPTV"})
         self.assertTrue(self.sessions.pip_open())
-        self.assertEqual(self.budget.holders("Home"), ["pip"])
-        self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])
+        # Each stream carries its player's name: the channel stays the main player's, small.
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["pip"])
 
     def test_swapping_twice_keeps_the_movies_resume_point_and_controls(self):
         # Final review I1: S, then S again, while a film from the Library plays large.

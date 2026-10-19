@@ -43,7 +43,7 @@ from services.catalog import ALL_GROUP_ID
 from services.live.refusals import STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
-from services.sessions import PURPOSE, SessionManager, Slot, limit_message
+from services.sessions import SessionManager, Slot, limit_message
 from services.zapping import ZapContext
 from ui import item_provider
 from ui.autoplay import FINISHED_TEXT
@@ -161,9 +161,8 @@ class PipControls(QObject):
         sessions.denied.connect(self._on_denied)
         sessions.pipFailed.connect(self._on_failed)
         sessions.slotTimeline.connect(self._on_timeline)
-        for slot in (sessions.large(), sessions.other()):
-            slot.live.modeChanged.connect(self._refresh_label)
-            slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
+        for slot in sessions.slots():
+            self.watch_slot(slot)
         self._lanes.sideFailed.connect(self._on_link_failed)
         self._transport.pipRequested.connect(self.toggle_previous)
         self._transport.set_pip_state(True, False)
@@ -174,6 +173,12 @@ class PipControls(QObject):
             label.closeRequested.connect(self.close)
             label.muteRequested.connect(self._toggle_mute)
             label.swapRequested.connect(self.user_swap)
+
+    def watch_slot(self, slot: Slot) -> None:
+        """Follow a slot's player and live session (each slot's at wiring, a tile's when the
+        multiview adds it): the label shows the state of whichever is small."""
+        slot.live.modeChanged.connect(self._refresh_label)
+        slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
 
     # ---- state --------------------------------------------------------------------------------
 
@@ -440,7 +445,8 @@ class PipControls(QObject):
         if limit is None:
             return False
         name = str(provider.get("name", ""))
-        others = [p for p in self._budget.holders(name) if p != PURPOSE]  # its own go back
+        own = self.sessions.other().name  # the slot it would open in: its own go back
+        others = [p for p in self._budget.holders(name) if p != own]
         if limit > 0 and len(others) < limit:
             return False
         self._toast(limit_message(limit), "error", ERROR_MS)

@@ -149,6 +149,27 @@ class PipFrameTests(FrameCase):
         with self.assertRaises(ValueError):
             frame.set_large("other")
 
+    def test_a_third_surface_by_name_is_hidden_until_it_has_a_role(self):
+        frame = self.make()
+        tile = self.surface_type(self.container)
+        frame.add_surface("t2", tile)
+        frame.show_pip()
+        self.assertTrue(tile.isHidden())
+        frame.set_large("t2")  # not the PiP's: main is hidden, pip stays small
+        self.assertEqual(tile.geometry(), self.container.rect())
+        self.assertTrue(self.main.isHidden())
+        self.assertEqual(self.pip.geometry(), BOTTOM_RIGHT)
+        frame.set_roles("main", "t2")
+        self.assertEqual(self.main.geometry(), self.container.rect())
+        self.assertEqual(tile.geometry(), BOTTOM_RIGHT)
+        self.assertTrue(self.pip.isHidden())
+        frame.set_large("t2")  # the PiP's: a swap
+        self.assertEqual(self.main.geometry(), BOTTOM_RIGHT)
+        with self.assertRaises(ValueError):
+            frame.add_surface("t2", tile)
+        with self.assertRaises(ValueError):
+            frame.set_roles("main", "main")
+
     def test_hide_pip_leaves_the_large_surface_large(self):
         frame = self.make()
         frame.show_pip()

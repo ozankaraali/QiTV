@@ -1,7 +1,10 @@
 """Picture-in-picture frame: the second video surface, small in a corner of the player (spec §7).
 
-Both surfaces are native children of the player page and never change parent, so the windows
-libVLC draws into never change: a swap exchanges their geometry and stacking only.
+The surfaces are named as their players' slots ("main", "pip", and a multiview's tiles once
+added). Every surface is a native child of the player page and never changes parent, so the
+windows libVLC draws into never change: a swap exchanges two surfaces' geometry and stacking
+only. The large surface fills the page, the PiP's sits in a corner while it shows, and any
+other is hidden.
 
 The small surface takes the left button (the shell's click would open the drawer): a click
 asks for a swap, and a drag moves it and, on release, snaps it to the nearest corner. These
@@ -43,7 +46,6 @@ logger = logging.getLogger(__name__)
 
 CORNERS = ("br", "bl", "tr", "tl")
 DEFAULT_CORNER = "br"
-SURFACES = ("main", "pip")
 WIDTH_FRACTION = 0.25
 HEIGHT_PER_WIDTH = 9 / 16
 MARGIN_UNITS = 2.0  # from the nearest edges; u = 1% of the player width
@@ -111,9 +113,10 @@ class PipFrame(QObject):
     ) -> None:
         super().__init__(container)
         self._container = container
-        self._surfaces = {"main": main_surface, "pip": pip_surface}
+        self._surfaces: dict[str, QWidget] = {"main": main_surface, "pip": pip_surface}
         self._config = config
         self._large = "main"
+        self._small_name = "pip"  # the PiP's surface (in the corner while shown)
         self._shown = False
         self._corner = self._saved_corner()
         self._press: _Press | None = None
@@ -150,11 +153,34 @@ class PipFrame(QObject):
         self._shown = False
         self._layout()
 
+    def add_surface(self, name: str, surface: QWidget) -> None:
+        """Another player's surface (a multiview tile's): hidden until it is large or small."""
+        if name in self._surfaces:
+            raise ValueError(f"There is a {name!r} surface already")
+        self._surfaces[name] = surface
+        if not self._closed:
+            surface.installEventFilter(self)
+        self._layout()
+
     def set_large(self, name: str) -> None:
-        """Make "main" or "pip" fill the player; the other goes to the corner, on top."""
-        if name not in SURFACES:
+        """Make surface `name` fill the player. When it was the PiP's, the one that was large
+        becomes the PiP's (a swap: it goes to the corner, on top)."""
+        if name not in self._surfaces:
             raise ValueError(f"Unknown surface: {name!r}")
+        if name == self._small_name:
+            self._small_name = self._large
         self._large = name
+        self._layout()
+
+    def set_roles(self, large: str, small: str) -> None:
+        """Surface `large` fills the player and `small` is the PiP's (shown in the corner
+        while picture in picture shows)."""
+        for name in (large, small):
+            if name not in self._surfaces:
+                raise ValueError(f"Unknown surface: {name!r}")
+        if large == small:
+            raise ValueError("The large and the small surface are one")
+        self._large, self._small_name = large, small
         self._layout()
 
     def small_rect(self) -> QRect:
@@ -220,7 +246,7 @@ class PipFrame(QObject):
     # ---- layout -------------------------------------------------------------------------
 
     def _small(self) -> QWidget:
-        return self._surfaces["pip" if self._large == "main" else "main"]
+        return self._surfaces[self._small_name]
 
     def _saved_corner(self) -> str:
         return _valid_corner(getattr(self._config, "pip_corner", DEFAULT_CORNER))
@@ -249,6 +275,9 @@ class PipFrame(QObject):
         large.setGeometry(self._container.rect())
         large.show()  # it may have been the small one, hidden with PiP closed
         small = self._small()
+        for name, surface in self._surfaces.items():
+            if name not in (self._large, self._small_name):
+                surface.hide()  # a tile's, outside the multiview
         if self._shown:
             small.setGeometry(self._small_target())
             small.show()
