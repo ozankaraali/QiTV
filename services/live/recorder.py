@@ -17,11 +17,17 @@ It ends once, with one reason:
 - "ended": the session's input ended and everything it buffered was written;
 - "limit": `max_s` seconds passed since the start;
 - "space": the disk holding the file had less than `min_free` bytes free, or was full;
-- "failed": the file could not be created or written (or the session had no ring).
-`on_done(recorder)` is then called once from the recorder's thread, with its `reason`, its
-`path` (the file written: a unique name next to the one asked for when that one exists; ""
-when none was made) and `written`, the file's size. An empty file is removed. Nothing here
-logs a path or the stream's bytes.
+- "folder": the Recordings folder or the file in it could not be made (nothing was written);
+- "write": writing the file failed (what was written is kept);
+- "failed": the recording could not go on: the session had no ring, or reading the ring
+  failed twice in a row (once the session's next ring, its RAM fallback after a disk failure,
+  or the same one again, was tried).
+`on_progress(recorder)` is called from the recorder's thread once the file is made and every
+`PROGRESS_S` while it grows (its `path` and `written` so far: the parent can name the file
+should the helper die), and `on_done(recorder)` once at the end, with its `reason`, its `path`
+(the file written: a unique name next to the one asked for when that one exists; "" when none
+was made) and `written`, the file's size. An empty file is removed. Nothing here logs a path
+or the stream's bytes.
 """
 
 from __future__ import annotations
@@ -47,7 +53,10 @@ _UNIQUE_TRIES = 99
 _FULL = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
 
 STOPPED, ENDED, LIMIT, SPACE, FAILED = "stopped", "ended", "limit", "space", "failed"
-REASONS = (STOPPED, ENDED, LIMIT, SPACE, FAILED)
+FOLDER, WRITE = "folder", "write"
+REASONS = (STOPPED, ENDED, LIMIT, SPACE, FOLDER, WRITE, FAILED)
+PROGRESS_S = 5.0  # how often a growing recording tells its size (`on_progress`)
+_RETRY_S = 0.1  # before a failed read of the ring is tried again
 # A recording stops after this long and once the disk holding it has less than this free.
 MAX_SECONDS = 4 * 60 * 60.0
 MIN_FREE_BYTES = 2 * 1024**3
@@ -86,9 +95,12 @@ class Recorder:
         clock: Callable[[], float] = time.monotonic,
         free_bytes: Callable[[Path], int] = _free_bytes,
         open_new: Callable[[Path], BinaryIO] = _open_new,
+        on_progress: Callable[[Recorder], None] = lambda recorder: None,
     ) -> None:
         """`ring_of()`: the session's ring now (None once it is gone); `is_ended()`: its input
         ended (nothing more is appended)."""
+        self._on_progress = on_progress
+        self._told = 0.0  # when `on_progress` was last called
         self._ring_of = ring_of
         self._is_ended = is_ended
         self._asked = Path(path)
@@ -132,10 +144,10 @@ class Recorder:
         try:
             reason = self._record()
         except OSError as error:
-            reason = SPACE if error.errno in _FULL else FAILED
+            reason = SPACE if error.errno in _FULL else WRITE
             _LOG.warning("A recording could not be written (%s).", type(error).__name__)
-        except RingError:
-            _LOG.warning("A recording could not read the buffer.")  # a disk buffer's failure
+        except RingError:  # a disk buffer's read failed twice: the recording stops there
+            _LOG.warning("A recording could not read the buffer.")
         except Exception as error:  # a defect: the file is kept, the session goes on
             _LOG.warning("A recording failed unexpectedly (%s).", type(error).__name__)
         finally:
@@ -150,10 +162,24 @@ class Recorder:
         ring = self._ring_of()
         if ring is None:
             return FAILED
-        self._create()
+        try:
+            self._create()
+        except OSError as error:
+            _LOG.warning("A recording's file could not be made (%s).", type(error).__name__)
+            return SPACE if error.errno in _FULL else FOLDER
+        self._progress(force=True)
         if self._short_of_space():
             return SPACE
         return self._follow(ring, self._seq)
+
+    def _progress(self, *, force: bool = False) -> None:
+        now = self._clock()
+        if force or now - self._told >= PROGRESS_S:
+            self._told = now
+            try:
+                self._on_progress(self)
+            except Exception as error:
+                _LOG.warning("A recording's size was not told (%s).", type(error).__name__)
 
     def _create(self) -> None:
         self._asked.parent.mkdir(parents=True, exist_ok=True)
@@ -171,6 +197,7 @@ class Recorder:
         started = self._clock()
         offset = 0
         self._ring = ring
+        retried = False  # a failed read was tried again (on the session's ring now)
         while True:
             if self._clock() - started >= self._max_s:
                 return LIMIT
@@ -178,10 +205,28 @@ class Recorder:
                 before = _snapshot(ring)
             ended = self._is_ended()  # before the read: an ended session appends nothing more
             stopping = self._stop.is_set()
-            result = ring.read_at(number, offset, _CHUNK)
+            try:
+                result = ring.read_at(number, offset, _CHUNK)
+            except RingError:
+                if retried:
+                    raise
+                retried = True
+                # The session may have gone on in RAM after its disk failed: follow that ring;
+                # else read this one once more.
+                following = self._next_ring(ring)
+                if following is not None:
+                    at_least = number + 1 if offset else number
+                    ring, number, offset = following, self._oldest(following, at_least), 0
+                    self._ring = ring
+                else:
+                    self._stop.wait(_RETRY_S)
+                continue
+            retried = False
             if result is None:
                 # Evicted (a slow disk, a start the ring dropped), not opened yet, or closed.
                 status = ring.wait_for_seq(number, 0.0)
+                if status == "open":
+                    continue  # made between the read and now: read it
                 if status == "evicted":
                     number, offset = self._oldest(ring, number), 0  # a gap: with its header
                 elif status == "timeout":
@@ -201,6 +246,7 @@ class Recorder:
             if data:
                 self._write(data)
                 offset += len(data)
+                self._progress()
                 if self._short_of_space():
                     return SPACE
                 continue

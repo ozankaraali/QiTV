@@ -3,6 +3,7 @@ R, the controller's toggle and its toasts, and REC on the small picture's label.
 
 from datetime import datetime
 import os
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
@@ -12,7 +13,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QWidget
 
 from services import recording
-from services.live.recorder import ENDED, FAILED, LIMIT, SPACE, STOPPED
+from services.live.recorder import ENDED, FAILED, FOLDER, LIMIT, SPACE, STOPPED, WRITE, candidates
 from tests.test_tv_controller import NOW, PipelineCase
 from ui.keymap import Action, resolve
 from ui.overlays.pip_label import REC, PipLabel
@@ -46,8 +47,21 @@ class NamingTests(unittest.TestCase):
         self.assertEqual(recording.safe_name("lpt1.ts"), "_lpt1.ts")
         self.assertEqual(recording.safe_name("..."), "QiTV")
         self.assertEqual(recording.safe_name(""), "QiTV")
-        self.assertEqual(len(recording.safe_name("x" * 300)), recording.NAME_MAX)
+        self.assertEqual(len(recording.safe_name("x" * 300)), recording.NAME_BYTES)
         self.assertEqual(recording.safe_name("Çay  TV ★"), "Çay TV ★")
+
+    def test_a_long_name_is_cut_by_bytes_between_characters_and_stays_unique(self):
+        # Review 3: 255 bytes is the limit of most file systems, whatever the characters.
+        for long in ("ğ" * 200, "電視" * 100, "x" * 300, "é" * 59 + "x" + "é" * 100):
+            with self.subTest(long[:3]):
+                name = recording.file_name(long, self.WHEN)
+                channel = recording.safe_name(long)
+                self.assertLessEqual(len(channel.encode("utf-8")), recording.NAME_BYTES)
+                self.assertGreater(len(channel.encode("utf-8")), recording.NAME_BYTES - 4)
+                self.assertTrue(long.startswith(channel))  # no character was cut in two
+                taken = list(candidates(Path("/rec") / name))
+                self.assertLessEqual(len(taken[-1].name.encode("utf-8")), 255)
+                self.assertEqual(len({path.name for path in taken}), len(taken))
 
     def test_the_folder_is_settings_else_the_systems_movies_folder(self):
         default = recording.default_folder()
@@ -77,14 +91,36 @@ class NamingTests(unittest.TestCase):
         self.assertEqual(
             recording.ended_text(SPACE, "", 0), ("Can't record: the disk is almost full", "error")
         )
-        self.assertEqual(recording.ended_text(FAILED, path, 10)[1], "error")
         self.assertEqual(
-            recording.ended_text(FAILED, "", 0),
+            recording.ended_text(WRITE, path, 10),
+            (
+                "Recording stopped: the file couldn't be written. Saved: One 2026-10-19 21.30.ts",
+                "error",
+            ),
+        )
+        self.assertEqual(
+            recording.ended_text(FAILED, path, 10),
+            ("Recording stopped. Saved: One 2026-10-19 21.30.ts", "error"),
+        )
+        self.assertEqual(
+            recording.ended_text(FOLDER, "", 0),
             ("Can't record: the Recordings folder can't be written to", "error"),
         )
         self.assertEqual(
-            recording.ended_text("lost", path, -1)[0], "Recording stopped unexpectedly"
+            recording.ended_text("lost", path, 4096),
+            ("Recording stopped unexpectedly. Saved: One 2026-10-19 21.30.ts", "error"),
         )
+        self.assertEqual(
+            recording.ended_text("lost", "", -1), ("Recording stopped unexpectedly", "error")
+        )
+
+    def test_without_a_file_only_a_folder_error_blames_the_folder(self):
+        # Review 2: the helper restarting, a closed channel, a busy one, an empty recording.
+        for reason, kind in ((FAILED, "error"), (WRITE, "error"), (STOPPED, "info")):
+            with self.subTest(reason):
+                self.assertEqual(
+                    recording.ended_text(reason, "", 0), ("Nothing was recorded", kind)
+                )
 
     def test_the_elapsed_time_reads_minutes_then_hours(self):
         self.assertEqual(recording.elapsed_text(83.9), "REC 01:23")

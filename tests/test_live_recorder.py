@@ -19,8 +19,17 @@ from ts_fixtures import make_stream
 
 from services.live import engine as engine_module, recorder as recorder_module
 from services.live.engine import LiveEngine
-from services.live.recorder import ENDED, FAILED, LIMIT, SPACE, STOPPED, Recorder
-from services.live.ring import RamRing
+from services.live.recorder import (
+    ENDED,
+    FAILED,
+    FOLDER,
+    LIMIT,
+    SPACE,
+    STOPPED,
+    WRITE,
+    Recorder,
+)
+from services.live.ring import RamRing, RingError
 from tests.test_live_engine import URL_FOR_RING, wait_until
 from tests.test_live_server import Writer, header, payload
 from tests.test_live_worker import RAM, SECRET_PATH, InProcessHelper, paced_route
@@ -55,6 +64,36 @@ class FullDisk:
 
     def close(self):
         self.handle.close()
+
+
+class RacingRing(RamRing):
+    """A ring whose segment `seq` is made just after the recorder's first read of it: that
+    read misses it, the wait right after finds it open (the race of review 1)."""
+
+    def __init__(self, max_bytes, seq):
+        super().__init__(max_bytes)
+        self.racing = seq
+
+    def read_at(self, seq, offset, size):
+        if seq == self.racing:
+            self.racing = None
+            return None
+        return super().read_at(seq, offset, size)
+
+
+class FailingRing(RamRing):
+    """A disk ring whose reads fail `failures` times, from read number `after` on."""
+
+    def __init__(self, max_bytes, after, failures):
+        super().__init__(max_bytes)
+        self.reads, self.after, self.failures = 0, after, failures
+
+    def read_at(self, seq, offset, size):
+        self.reads += 1
+        if self.reads > self.after and self.failures:
+            self.failures -= 1
+            raise RingError("The temporary buffer could not be read.")
+        return super().read_at(seq, offset, size)
 
 
 class RecorderCase(unittest.TestCase):
@@ -191,6 +230,7 @@ class RecorderTests(RecorderCase):
         with self.assertLogs("services.live.recorder", "WARNING"):  # its type only, no path
             recorder = self.record(0, open_new=lambda path: FullDisk(path, 70_000))
             reason, path, written = self.finish(recorder)
+        self.assertEqual(Path(path).stat().st_size, written)
         self.assertEqual((reason, written), (SPACE, 70_000))
         self.assertEqual(Path(path).read_bytes(), self.writer.stream(0)[:70_000])
 
@@ -200,7 +240,7 @@ class RecorderTests(RecorderCase):
         self.segments(1)
         with self.assertLogs("services.live.recorder", "WARNING"):
             recorder = self.record(0)
-            self.assertEqual(self.finish(recorder), (FAILED, "", 0))
+            self.assertEqual(self.finish(recorder), (FOLDER, "", 0))  # the folder is why
 
     def test_an_existing_file_is_never_replaced(self):
         self.folder.mkdir(parents=True)
@@ -244,6 +284,86 @@ class RecorderTests(RecorderCase):
         self.assertEqual(reason, STOPPED)
         self.assertEqual(Path(path).stat().st_size, written)
 
+    def test_a_segment_made_between_a_read_and_its_wait_is_read(self):
+        # Review 1: "open" after a missed read is no closed ring (which ended it as saved).
+        racing = RacingRing(64 * SEGMENT, seq=1)
+        self.ring, self.writer = racing, Writer(racing)
+        self.segments(1)  # 0 closed, 1 open
+        recorder = self.record(1)
+        self.writer.append(3000)
+        self.writer.open()
+        self.writer.append(2000)
+        expected = self.writer.stream(1)
+        self.wait_written(recorder, len(expected))
+        self.assertFalse(self.done.is_set(), "it ended on its own")
+        recorder.stop()
+        reason, path, _ = self.finish(recorder)
+        self.assertEqual(reason, STOPPED)
+        self.assertEqual(Path(path).read_bytes(), expected)
+
+    def test_a_failed_read_is_tried_again_once(self):
+        flaky = FailingRing(64 * SEGMENT, after=1, failures=1)
+        self.ring, self.writer = flaky, Writer(flaky)
+        self.segments(3)
+        recorder = self.record(0)
+        expected = self.writer.stream(0)
+        self.wait_written(recorder, len(expected))
+        recorder.stop()
+        reason, path, _ = self.finish(recorder)
+        self.assertEqual(reason, STOPPED)
+        self.assertEqual(Path(path).read_bytes(), expected)
+
+    def test_a_failed_read_goes_on_in_the_sessions_ram_fallback(self):
+        failing = FailingRing(64 * SEGMENT, after=0, failures=99)
+        self.ring, self.writer = failing, Writer(failing)
+        self.segments(1)
+        fallback = RamRing(64 * SEGMENT)
+        fallback.open_segment(5, header(5))
+        fallback.append(payload(5, 0, 4000))
+        current = [failing]
+        recorder = self.record(0, ring_of=lambda: current[0])
+        current[0] = fallback  # the session went on in RAM after its disk failed
+        expected = header(5) + payload(5, 0, 4000)
+        self.wait_written(recorder, len(expected))
+        recorder.stop()
+        reason, path, _ = self.finish(recorder)
+        self.assertEqual(reason, STOPPED)
+        self.assertEqual(Path(path).read_bytes(), expected)
+
+    def test_a_read_that_fails_twice_stops_it_and_keeps_what_it_wrote(self):
+        flaky = FailingRing(64 * SEGMENT, after=2, failures=2)
+        self.ring, self.writer = flaky, Writer(flaky)
+        self.segments(3)
+        with self.assertLogs("services.live.recorder", "WARNING") as logs:
+            recorder = self.record(0)
+            reason, path, written = self.finish(recorder)
+        self.assertEqual(reason, FAILED)  # it could not go on: no write failed
+        self.assertGreater(written, 0)
+        self.assertEqual(Path(path).stat().st_size, written)
+        self.assertIn("could not read the buffer", logs.output[0])
+
+    def test_a_failed_write_says_so(self):
+        class Broken(FullDisk):
+            def write(self, data):
+                raise OSError(5, "Input/output error")
+
+        self.segments(1)
+        with self.assertLogs("services.live.recorder", "WARNING"):
+            recorder = self.record(0, open_new=lambda path: Broken(path, 0))
+            self.assertEqual(self.finish(recorder), (WRITE, "", 0))  # the empty file went
+
+    def test_its_file_and_size_are_told_as_it_grows(self):
+        told = []
+        self.segments(2)
+        with mock.patch.object(recorder_module, "PROGRESS_S", 0.0):
+            recorder = self.record(0, on_progress=lambda r: told.append((r.path, r.written)))
+            self.wait_written(recorder, len(self.writer.stream(0)))
+            recorder.stop()
+            _, path, written = self.finish(recorder)
+        self.assertEqual(told[0], (path, 0))  # once the file is made
+        self.assertEqual(told[-1], (path, written))
+        self.assertTrue(all(t[0] == path for t in told))
+
     def test_a_session_without_a_buffer_records_nothing(self):
         recorder = self.record(0, ring_of=lambda: None)
         self.assertEqual(self.finish(recorder), (FAILED, "", 0))
@@ -280,6 +400,8 @@ class HelperRecordingTests(unittest.TestCase):
     def test_a_recording_stops_and_keeps_its_file_without_another_connection(self):
         path = str(self.folder / "One.ts")
         self.helper.parent.send(("record_start", "s", "r1", path, 0, {}))
+        told = self.helper.wait_for(lambda m: m[0] == "recording" and m[2] == "r1")
+        self.assertEqual(told, ("recording", "s", "r1", path, 0))  # its file, once made
         time.sleep(1.0)
         self.helper.parent.send(("record_stop", "s"))
         message = self.recorded("r1")
@@ -370,9 +492,17 @@ class EngineRecordingTests(unittest.TestCase):
     def test_a_helper_death_loses_what_it_had_not_said(self):
         rid = self.start()
         self.engine._on_message(("down",))
-        self.assertEqual(self.ends, [(rid, "lost", "/r/One.ts", -1)])
+        self.assertEqual(self.ends, [(rid, "lost", "", -1)])  # no file was made yet
         self.engine._on_message(("recorded", self.sid, rid, STOPPED, "/r/One.ts", 1))
         self.assertEqual(len(self.ends), 1)
+
+    def test_a_helper_death_names_the_partial_file_it_left(self):
+        rid = self.start()
+        self.engine._on_message(("recording", self.sid, rid, "/r/One (2).ts", 0))
+        self.engine._on_message(("recording", self.sid, rid, "/r/One (2).ts", 8192))
+        self.engine._on_message(("closed", self.sid))  # a channel change, then the death
+        self.engine._on_message(("down",))
+        self.assertEqual(self.ends, [(rid, "lost", "/r/One (2).ts", 8192)])
 
     def test_nothing_follows_a_shutdown(self):
         self.start()
@@ -394,10 +524,17 @@ class EngineRecordingTests(unittest.TestCase):
             supervisor._send_next(SimpleNamespace(send=sent.append))
         self.assertEqual(sent, [start, ("record_stop", "s1")])
         self.assertEqual(relayed, [("recorded", "s2", "r2", FAILED, "", 0)])
-        # Its end is relayed whatever became of the session's record.
+        # Its file, its size and its end are relayed whatever became of the session's record.
         del supervisor._records["s1"]
+        supervisor._receive(("recording", "s1", "r1", "/r/One.ts", 5))
         supervisor._receive(("recorded", "s1", "r1", STOPPED, "/r/One.ts", 10))
-        self.assertEqual(relayed[-1], ("recorded", "s1", "r1", STOPPED, "/r/One.ts", 10))
+        self.assertEqual(
+            relayed[-2:],
+            [
+                ("recording", "s1", "r1", "/r/One.ts", 5),
+                ("recorded", "s1", "r1", STOPPED, "/r/One.ts", 10),
+            ],
+        )
 
     def test_without_a_helper_a_start_fails_and_a_stop_is_nothing(self):
         commands = queue.Queue()

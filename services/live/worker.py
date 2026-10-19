@@ -45,9 +45,10 @@ each addition a newly closed segment's `(seq, start, end, discontinuity, start_q
 (`Span`'s fields; an engine from before 2.1 would not take the fifth, but the helper and the
 engine always ship in one build, and the engine still takes four);
 `("ready", sid)` once the first segment is open (its state comes first);
-`("recorded", sid, rid, reason, path, written)` once recording `rid` ended (2.3: `reason` is
-one of `recorder.REASONS`; `path` the file written, "" when none was), also after "closed": a
-recording outlives its session's cancel, and this message is never dropped for it;
+`("recording", sid, rid, path, written)` once recording `rid` made its file and every few
+seconds while it grows (2.3), and `("recorded", sid, rid, reason, path, written)` once it ended
+(`reason` is one of `recorder.REASONS`; `path` the file written, "" when none was), both also
+after "closed": a recording outlives its session's cancel, and they are never dropped for it;
 `("error", sid, kind, message[, status])`, an HTTP failure's status last (2.1: the parent
 logs why a channel played directly); `("ended", sid)`; `("closed", sid)`. Error messages are
 fixed strings. `kind`, one meaning each:
@@ -445,7 +446,15 @@ class _Session:
             kwargs["max_s"] = float(limits["max_s"])
         if isinstance(limits.get("min_free"), int):
             kwargs["min_free"] = limits["min_free"]
-        recorder = Recorder(lambda: self._ring, self._is_ended, path, seq, self._recorded, **kwargs)
+        recorder = Recorder(
+            lambda: self._ring,
+            self._is_ended,
+            path,
+            seq,
+            self._recorded,
+            on_progress=self._recording,
+            **kwargs,
+        )
         recorder.name = rid
         with self.lock:
             busy = self.cancelled or self._recorder is not None
@@ -465,6 +474,12 @@ class _Session:
                 self._finishing.add(recorder)
         if recorder is not None:
             recorder.stop()
+
+    def _recording(self, recorder: Recorder) -> None:
+        """A recording's file and its size so far (its thread): the parent names the file
+        should the helper die."""
+        message = ("recording", self.sid, recorder.name, recorder.path, recorder.written)
+        self._helper.send(message)
 
     def _recorded(self, recorder: Recorder) -> None:
         """A recording's end (its own thread): the parent hears it, also after "closed"."""

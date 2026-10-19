@@ -52,8 +52,9 @@ recorder reads the ring), until `stop_recording(sid)`, the session's close, its 
 a limit. It returns the recording's id, and each is answered by one `recordingEnded(rid,
 reason, path, written)`, also after `sessionClosed`: `reason` is the helper's
 (`services.live.recorder.REASONS`), or the engine's "lost" when the helper died (or time-shift
-went off) before it said; then `path` is the one asked for and `written` -1 (not known). A
-start for a session no helper holds now is answered "failed". Nothing follows `shutdown()`.
+went off) before it said; then `path` is the partial file left behind as the helper last told
+it ("" while it had made none) and `written` its size then (-1 when not known). A start for a
+session no helper holds now is answered "failed". Nothing follows `shutdown()`.
 
 Known limits:
 - Commands are sent with a blocking write, one small command at a time between reads. Only
@@ -272,9 +273,9 @@ class _Supervisor(QThread):
             self._relay(("hello", message[1]))
             return
         sid = message[1]
-        if name == "recorded":
+        if name in ("recorded", "recording"):
             # A recording outlives its session's close: relayed whatever the record says.
-            if isinstance(sid, str) and len(message) == 6:
+            if isinstance(sid, str) and len(message) == (6 if name == "recorded" else 5):
                 self._relay(message)
             return
         record = self._records.get(sid) if isinstance(sid, str) else None
@@ -517,7 +518,9 @@ class LiveEngine(QObject):
         self._root = Path(root_dir)
         self._commands: queue.Queue[_Command | None] = queue.Queue()
         self._sessions: dict[str, _View] = {}
-        self._recordings: dict[str, str] = {}  # rid -> the path asked for, until it ends
+        # rid -> (its file, its size) as the helper last told them ("", -1 before), until it
+        # ends
+        self._recordings: dict[str, tuple[str, int]] = {}
         self._base_url = ""
         self._available = False
         self._started = False
@@ -611,7 +614,7 @@ class LiveEngine(QObject):
         if view is None or view.closing or self._shut:
             return ""
         rid = secrets.token_hex(6)
-        self._recordings[rid] = path
+        self._recordings[rid] = ("", -1)
         limits = {"max_s": float(max_s), "min_free": int(min_free)}
         self._commands.put(("record_start", sid, rid, path, int(seq), limits))
         return rid
@@ -659,8 +662,8 @@ class LiveEngine(QObject):
 
     def _lose_recordings(self) -> None:
         recordings, self._recordings = self._recordings, {}
-        for rid, path in recordings.items():
-            self.recordingEnded.emit(rid, _LOST, path, -1)
+        for rid, (path, written) in recordings.items():
+            self.recordingEnded.emit(rid, _LOST, path, written)
 
     @Slot(object)
     def _on_retired(self, _thread: object) -> None:
@@ -682,6 +685,11 @@ class LiveEngine(QObject):
                 self.available.emit(False)
             return
         sid = message[1]
+        if name == "recording":
+            _, _, rid, path, written = message
+            if rid in self._recordings:
+                self._recordings[rid] = (str(path), int(written))
+            return
         if name == "recorded":
             _, _, rid, reason, path, written = message
             if rid in self._recordings:

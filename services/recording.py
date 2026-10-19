@@ -5,7 +5,9 @@ The time-shift helper writes the file from its buffer (`services.live.recorder`)
 only names it. A recording goes to the Recordings folder: Settings' (the optional config key
 `recordings_dir`; older builds ignore it), else the system's Movies folder (Videos on Windows
 and Linux) and "QiTV" in it. A file is named "<channel> <YYYY-MM-DD HH.MM>.ts", with what file
-systems refuse in a name replaced. Nothing here touches the disk.
+systems refuse in a name replaced and the channel's part at most NAME_BYTES bytes of UTF-8, so a
+name stays well under the 255 bytes file systems allow; names stay unique because the helper
+never replaces a file (it adds " (2)" and on). Nothing here touches the disk.
 """
 
 from __future__ import annotations
@@ -18,11 +20,21 @@ from typing import Any
 from PySide6.QtCore import QStandardPaths
 
 from services.i18n import N_, tr, translate
-from services.live.recorder import ENDED, FAILED, LIMIT, MAX_SECONDS, SPACE, STOPPED
+from services.live.recorder import (
+    ENDED,
+    FOLDER,
+    LIMIT,
+    MAX_SECONDS,
+    SPACE,
+    STOPPED,
+    WRITE,
+)
 
 APP_FOLDER = "QiTV"
 SUFFIX = ".ts"
-NAME_MAX = 100  # characters of the channel's name kept in a file name
+# Bytes (UTF-8) of the channel's name kept in a file name: with " YYYY-MM-DD HH.MM", the
+# helper's " (99)" and ".ts" a name stays far under 255 bytes.
+NAME_BYTES = 120
 # Characters Windows, macOS or Linux refuse in a file name, and control characters.
 _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
 _RESERVED = re.compile(r"(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\..*)?", re.IGNORECASE)
@@ -38,11 +50,17 @@ SPACE_TEXT = N_("Recording stopped: the disk is almost full. Saved: {name}")
 # i18n: a toast: the disk is nearly full, so nothing could be recorded
 NO_SPACE_TEXT = N_("Can't record: the disk is almost full")
 # i18n: a toast: writing the recording's file failed; what was written is saved as this file
-FAILED_TEXT = N_("Recording stopped: the file couldn't be written. Saved: {name}")
+WRITE_TEXT = N_("Recording stopped: the file couldn't be written. Saved: {name}")
+# i18n: a toast: the recording could not go on (its buffer failed); what it has is this file
+STOPPED_TEXT = N_("Recording stopped. Saved: {name}")
 # i18n: a toast: the Recordings folder (Settings) cannot be written to
 NOT_STARTED = N_("Can't record: the Recordings folder can't be written to")
+# i18n: a toast: a recording ended before anything was written (no file was kept)
+NOTHING_TEXT = N_("Nothing was recorded")
 # i18n: a toast: the recording ended unexpectedly (the time-shift buffer stopped)
 LOST_TEXT = N_("Recording stopped unexpectedly")
+# i18n: a toast: the recording ended unexpectedly; what it had written is this file
+LOST_SAVED = N_("Recording stopped unexpectedly. Saved: {name}")
 # i18n: a message: the Recordings folder could not be opened (the first recording makes it)
 NO_RECORDINGS = N_("There are no recordings yet")
 
@@ -63,9 +81,10 @@ def folder(config: Any) -> str:
 
 def safe_name(text: str) -> str:
     """`text` as a file name: what file systems refuse is replaced by "_", spaces and dots at
-    its ends go, Windows' reserved names get a "_" first, and it is at most NAME_MAX long."""
-    name = _UNSAFE.sub("_", text)
-    name = " ".join(name.split())[:NAME_MAX].strip(" .")
+    its ends go, Windows' reserved names get a "_" first, and it is at most NAME_BYTES bytes
+    of UTF-8 (cut between characters)."""
+    name = " ".join(_UNSAFE.sub("_", text).split())
+    name = name.encode("utf-8")[:NAME_BYTES].decode("utf-8", "ignore").strip(" .")
     if _RESERVED.fullmatch(name):
         name = "_" + name
     return name or APP_FOLDER
@@ -83,23 +102,31 @@ def path_for(config: Any, channel: str, when: datetime) -> str:
 
 
 def ended_text(reason: str, path: str, written: int) -> tuple[str, str]:
-    """What a recording's end says (translated) and the toast's kind ("info" or "error")."""
+    """What a recording's end says (translated) and the toast's kind ("info" or "error"):
+    the file it kept by name; the folder is blamed only when it could not take the file
+    ("folder"); without a file for any other reason, that nothing was recorded (the helper
+    was restarting, the channel closed, an empty recording) or that it stopped unexpectedly
+    (the helper died)."""
     name = os.path.basename(path)
-    if reason in (STOPPED, ENDED):
-        if name:
-            return translate(SAVED, name=name), "info"
-        return translate(NOT_STARTED), "error"  # nothing was written
-    if reason == LIMIT:
-        return translate(LIMIT_TEXT, hours=round(MAX_SECONDS / 3600), name=name), "info"
+    if reason == FOLDER:
+        return translate(NOT_STARTED), "error"
     if reason == SPACE:
         if name:
             return translate(SPACE_TEXT, name=name), "error"
         return translate(NO_SPACE_TEXT), "error"
-    if reason == FAILED and name and written > 0:
-        return translate(FAILED_TEXT, name=name), "error"
     if reason == LOST:
+        if name:
+            return translate(LOST_SAVED, name=name), "error"
         return translate(LOST_TEXT), "error"
-    return translate(NOT_STARTED), "error"
+    if not name:
+        return translate(NOTHING_TEXT), "info" if reason in (STOPPED, ENDED) else "error"
+    if reason in (STOPPED, ENDED):
+        return translate(SAVED, name=name), "info"
+    if reason == LIMIT:
+        return translate(LIMIT_TEXT, hours=round(MAX_SECONDS / 3600), name=name), "info"
+    if reason == WRITE:
+        return translate(WRITE_TEXT, name=name), "error"
+    return translate(STOPPED_TEXT, name=name), "error"  # "failed": it could not go on
 
 
 def elapsed_text(seconds: float) -> str:
