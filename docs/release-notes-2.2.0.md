@@ -74,7 +74,8 @@ instead of using others' distributions, which may have malware.**
 - **No more repeated seconds.** Some providers restart their stream every minute or so and send
   the last seconds again, or resend them after a reconnect. QiTV now drops what it already played
   and keeps the picture's clock smooth across the restart, so you no longer see the same seconds
-  twice or a jump ahead to catch up.
+  twice or a jump ahead to catch up. When a provider loops the same few seconds because its own
+  source stopped, QiTV now shows "Waiting for the channel…" instead of the loop.
 - **Sound that went silent.** Some providers switch a channel's sound to another format midway
   but keep describing the old one, which left the sound silent. QiTV now notices and keeps the
   sound playing.
