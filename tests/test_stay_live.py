@@ -525,6 +525,21 @@ class RateLockTests(unittest.TestCase):
         _, rates = drive(stay, stay.target + 12, 5.0, clock=clock)
         self.assertNotEqual(rates[-1], 1.0)
 
+    def test_a_paused_tile_without_the_focus_is_never_jumped_to_live(self):
+        # The multiview's tile controls pause a tile without the focus: it keeps buffering
+        # behind live as the big picture does, and stay-live never takes it back to live.
+        stay, clock = live(), Clock()
+        stay.set_background(True)
+        stay.user_paused()
+        decisions = []
+        for lag in (T + 5, R + 1, R + 120, R + 600):
+            for _ in range(40):
+                decisions.append(stay.update(lag, False, now=clock.tick()))
+        self.assertEqual({d.rate for d in decisions}, {1.0})
+        self.assertFalse(any(d.reopen_live for d in decisions))
+        stay.user_go_live()  # its LIVE chip: back at live, and only jumps from then on
+        self.assertTrue(stay.update(R + 1, False, now=clock.tick()).reopen_live)
+
     def test_a_speed_the_user_chooses_still_applies(self):
         stay, clock = StayLive("normal"), Clock()
         stay.lock_rate()
