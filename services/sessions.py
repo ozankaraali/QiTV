@@ -58,6 +58,7 @@ from PySide6.QtCore import QObject, Signal, SignalInstance
 
 from services.budgeted_stream import RELEASE_CAP_MS, BudgetedStream
 from services.connection_budget import DENIED, ConnectionBudget
+from services.i18n import N_, tr_n, translate
 from services.live.live_session import LiveSession
 from services.live.refusals import REFUSALS
 from services.playback import PlaybackState, Session
@@ -70,15 +71,21 @@ PURPOSE = "pip"  # the "pip" player's
 MAIN_PURPOSE = "main"  # the "main" player's (LiveTuner's default)
 MAIN_LEVEL = 100  # libVLC's default volume
 PIP_LEVEL = 30  # the PiP stream's level until the mixer sets one (config pip_volume's default)
-PIP_FAILED = "Couldn't open this channel in picture-in-picture"
-LIMITED = "Your provider limits concurrent streams"  # a refusal when the limit is not known
+# `pipFailed` sends these translated; the English values name them (N_).
+PIP_FAILED = N_("Couldn't open this channel in picture-in-picture")  # i18n: error toast
+# A refusal when the limit is not known.
+LIMITED = N_("Your provider limits concurrent streams")  # i18n: error toast
 
 
 def limit_message(limit: Optional[int]) -> str:
     """The toast for a provider limit that leaves no stream for the PiP."""
     if not limit:
-        return LIMITED
-    return f"Your provider allows {limit} stream{'s' if limit != 1 else ''} at a time"
+        return translate(LIMITED)
+    return tr_n(
+        "Your provider allows {n} stream at a time",  # i18n: error toast
+        "Your provider allows {n} streams at a time",
+        limit,
+    )
 
 
 class SlotTuner(Protocol):
@@ -601,7 +608,7 @@ class SessionManager(QObject):
             stream.start(**pending.start_kwargs)
         except Exception as error:  # the stream gave its slot back and stopped the session
             logger.warning("Could not start the PiP channel (%s)", type(error).__name__)
-            self._fail(PIP_FAILED)
+            self._fail(translate(PIP_FAILED))
             return
         if not stream.running():
             return  # it failed inside start() (_on_failed closed it)
@@ -625,7 +632,8 @@ class SessionManager(QObject):
             return
         if stream is None or not stream.running():
             return
-        self._fail(limit_message(self._limit) if message in REFUSALS else PIP_FAILED, message)
+        shown = limit_message(self._limit) if message in REFUSALS else translate(PIP_FAILED)
+        self._fail(shown, message)
 
     def _fail(self, message: str, failure: str = "") -> None:
         self.failure = failure

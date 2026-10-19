@@ -217,6 +217,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from services.i18n import N_
 from services.live.learned_target import LearnedTarget, learned_target
 from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.stay_live import (
@@ -245,16 +246,21 @@ _LOG = logging.getLogger(__name__)
 
 # How far behind the provider's live point an HLS source starts, per latency (Phase 2A).
 LIVE_DELAY = {"low": 3.0, "normal": 6.0, "stable": 12.0, AUTO: 6.0}
-UNAVAILABLE = "Time-shift isn't available for this channel"
-LOST = "Lost the time-shift buffer; playing live"
-BUFFERED = "Lost the connection; playing what's buffered"
-DISK = "Disk time-shift isn't available; using memory"
-REWOUND = "Rewound past the buffer"
-CRAWLING = "Plays without rewind for smoother playback"
-RECONNECTING = "Reconnecting…"
+# The notices (`notice`, `no_rewind_reason`) stay English: the shell compares them, and
+# shows them with services.i18n.translate.
+UNAVAILABLE = N_("Time-shift isn't available for this channel")  # i18n: toast
+LOST = N_("Lost the time-shift buffer; playing live")  # i18n: toast
+BUFFERED = N_("Lost the connection; playing what's buffered")  # i18n: toast
+# i18n: toast: the time-shift buffer could not be kept on disk; it is kept in memory
+DISK = N_("Disk time-shift isn't available; using memory")
+# i18n: toast: the point rewound to is no longer buffered (it plays from the oldest one)
+REWOUND = N_("Rewound past the buffer")
+# i18n: toast and rewind hint: this channel plays without time-shift (rewind)
+CRAWLING = N_("Plays without rewind for smoother playback")
+RECONNECTING = N_("Reconnecting…")  # i18n: toast: the channel's stream is opened again
 _DIRECT_RETRIES_MS = (3000, 5000, 10000)  # a fallback's direct play, failing at once ...
 _DIRECT_QUICK_S = 5.0  # ... within this of its play call (a timeout is reported at once)
-LOADING = "Still loading…"
+LOADING = N_("Still loading…")  # i18n: toast: a channel takes long to start
 _CLOSE_CAP_MS = 2000  # a close not confirmed by then counts as done
 _RECOVERY_MS = 10_000  # a helper restart must bring the session back by then
 _EXPIRED_S = 0.5  # a position this far before the oldest buffered point is gone

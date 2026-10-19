@@ -28,6 +28,7 @@ from PySide6.QtGui import QPixmap
 
 from services import favorites
 from services.epg_view import Programme
+from services.i18n import N_, tr, tr_n, translate
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
@@ -41,11 +42,12 @@ logger = logging.getLogger(__name__)
 
 LIVE_SEEK_S = 10.0  # ←/→ while time-shifting (spec §6.7)
 TICK_PROGRAMMES = 6  # programme starts marked on the time-shift bar
-LIMITED_TEXT = "Your provider limits concurrent streams"  # when its limit is not known
-REFUSED_TEXT = "The provider refused the stream — it may"  # a plain 403: maybe the limit
+# When its limit is not known (shown with translate()).
+LIMITED_TEXT = N_("Your provider limits concurrent streams")  # i18n: error toast
 ERROR_MS = 6000
 RECONNECT_MS = (1000, 3000)  # the back-off before each reopen of a live stream that ended
-RECONNECTING_TEXT = "Reconnecting…"
+# i18n: toast: a live channel's stream ended and is opened again
+RECONNECTING_TEXT = N_("Reconnecting…")
 _PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
 # Never opened again: on-demand content, and a file listed as a channel ends for good.
 _NOT_LIVE = (PlayKind.VOD_FILE, PlayKind.VOD_STREAM, PlayKind.LIVE_PIPELINE)
@@ -58,10 +60,6 @@ def stream_options(item: dict) -> dict[str, Any]:
     if item.get("referrer"):
         options["referrer"] = item["referrer"]
     return options
-
-
-def _streams(count: int) -> str:
-    return f"{count} stream" if count == 1 else f"{count} streams"
 
 
 class LiveControls(QObject):
@@ -187,7 +185,13 @@ class LiveControls(QObject):
         return self._tuner.budget.limit_for(provider, reported)
 
     def limit_text(self, limit: Optional[int]) -> str:
-        return f"Your provider allows {_streams(limit)} at a time" if limit else LIMITED_TEXT
+        if not limit:
+            return translate(LIMITED_TEXT)
+        return tr_n(
+            "Your provider allows {n} stream at a time",  # i18n: error toast
+            "Your provider allows {n} streams at a time",
+            limit,
+        )
 
     def tune_pipeline(self, target: Target, url: str) -> bool:
         """Ask for a budget slot for `target` (spec §6.9); it starts once the old one is released.
@@ -253,7 +257,7 @@ class LiveControls(QObject):
         self._reopen_due = (current, url, kind)
         self._reopen_timer.start(RECONNECT_MS[self._reconnects])
         self._reconnects += 1
-        self._toast(RECONNECTING_TEXT)
+        self._toast(translate(RECONNECTING_TEXT))
         return True
 
     def _reopen(self) -> None:
@@ -285,6 +289,7 @@ class LiveControls(QObject):
 
     def _on_live_start_failed(self, message: str) -> None:
         if not self._closed():
+            message = translate(message)
             current = self._current()
             title = current.title if current is not None else ""
             self._error(f"{title}: {message}" if title else message)
@@ -322,7 +327,7 @@ class LiveControls(QObject):
             # Said when it matters, not at every tune: a rewind on a channel that plays
             # directly says it (the owner found the toast on load noise on slow channels).
             return
-        self._toast(text)
+        self._toast(translate(text))  # LiveSession's notices are English (N_) texts
 
     def on_playing(self) -> None:
         """The player plays (kept for the controller's call; nothing is held back now)."""
@@ -348,6 +353,7 @@ class LiveControls(QObject):
             self._toast(self._refusal_text(message), "error", ERROR_MS)
             self._explain_failure(current)
             return
+        message = translate(message)  # the player's, or LiveSession's N_ texts
         self._error(f"{title}: {message}" if title else message)
         self._explain_failure(current)
 
@@ -360,9 +366,14 @@ class LiveControls(QObject):
         limit = self.limit(current.item if current is not None else None)
         if message != STREAM_REFUSED:
             return self.limit_text(limit)
-        if limit:
-            return f"{REFUSED_TEXT} allow only {_streams(limit)} at a time"
-        return f"{REFUSED_TEXT} limit concurrent streams"
+        if limit:  # a plain 403: maybe the limit
+            return tr_n(
+                # i18n: error toast
+                "The provider refused the stream — it may allow only {n} stream at a time",
+                "The provider refused the stream — it may allow only {n} streams at a time",
+                limit,
+            )
+        return tr("The provider refused the stream — it may limit concurrent streams")
 
     # ---- the transport's time-shift controls --------------------------------------------------
 

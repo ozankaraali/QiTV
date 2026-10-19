@@ -4,6 +4,7 @@ from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QMouseEvent, QPainter, QPainterPath, QPaintEvent
 from PySide6.QtWidgets import QWidget
 
+from services.i18n import tr, tr_n
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, elided, fill_round
 from ui.theme import PALETTE, RADIUS_PANEL, qcolor
@@ -64,8 +65,12 @@ class NextCard(Overlay):
         return self._remaining
 
     def label(self) -> str:
-        what = "Next" if self._kind == "movie" else "Next episode"
-        return f"{what} in {self._remaining} s"
+        n = self._remaining
+        if self._kind == "movie":
+            # i18n: the Next card's countdown before the next movie plays; s = seconds
+            return tr_n("Next in {n} s", "Next in {n} s", n)
+        # i18n: the Next card's countdown before the next episode plays; s = seconds
+        return tr_n("Next episode in {n} s", "Next episode in {n} s", n)
 
     # ---- internals ----------------------------------------------------------------------
 
@@ -154,8 +159,8 @@ class NextCard(Overlay):
             Qt.AlignVCenter,
             elided(p, self._subtitle, inner),
         )
-        self._paint_button(p, un, "play", "▶ Play now", True)
-        self._paint_button(p, un, "cancel", "Cancel", False)
+        self._paint_button(p, un, "play", "▶ " + tr("Play now"), True)  # i18n: button; short
+        self._paint_button(p, un, "cancel", tr("Cancel"), False)  # i18n: button; short
         bar_h = max(2.0, un.px(0.35))
         frac = self._remaining / self._total
         clip = QPainterPath()

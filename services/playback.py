@@ -58,6 +58,7 @@ from typing import Any, Callable, Optional, Protocol
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 
+from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.picture_watch import Counters, FrozenPicture
 from services.vlc_profile import PlayKind, media_options
@@ -87,7 +88,8 @@ _STALL_BUDGET_RESET_MS = 30000  # healthy playback after a stall refills the ret
 _AUDIO_POLL_MS = 30  # how often to look for the audio output while mute/volume wait for it
 _AUDIO_WATCH_MS = 5000  # then only the regular poll looks (media without audio never opens one)
 _DEFAULT_VOLUME = 100  # libVLC's, until a level is read from an open audio output
-NO_VLC_MESSAGE = "Video needs VLC: install it from videolan.org and restart QiTV"
+# Sent translated (errorOccurred); the English value names it.
+NO_VLC_MESSAGE = N_("Video needs VLC: install it from videolan.org and restart QiTV")
 # A file for libVLC's verbose log (the smoke test sets it). For debugging only: libVLC logs
 # every stream URL, and provider URLs can carry credentials.
 VLC_LOG_ENV = "QITV_VLC_LOG"
@@ -416,7 +418,7 @@ class PlaybackSession(QObject):
         self._opened.start()
         self._stall_clock.start()
         if self._player.play() == -1:
-            self._fail("VLC could not start playback")
+            self._fail(tr("VLC could not start playback"))  # i18n: error toast
             return
         self._has_input = True
         if self._audio_delay_ms:  # the new input exists now and starts at zero
@@ -774,11 +776,11 @@ class PlaybackSession(QObject):
             return
         state = _map_state(self._player.get_state())
         if state is PlaybackState.ERROR:
-            self._fail("The stream could not be played")
+            self._fail(tr("The stream could not be played"))  # i18n: error toast
             return
         if state is PlaybackState.ENDED:
             if not self._ever_played:
-                self._fail("The stream could not be opened")
+                self._fail(tr("The stream could not be opened"))  # i18n: error toast
                 return
             self._poll.stop()
             self._set_state(PlaybackState.ENDED)
@@ -799,7 +801,7 @@ class PlaybackSession(QObject):
             self.subtitle_tracks()  # names the files' tracks once they show
         if state in (PlaybackState.OPENING, PlaybackState.BUFFERING) and not self._ever_played:
             if self._opened.elapsed() > self._open_timeout_ms:
-                self._fail("Timed out opening the stream")
+                self._fail(tr("Timed out opening the stream"))  # i18n: error toast
             return
         seekable = self.is_seekable()
         self._set_seekable(seekable)
@@ -1079,7 +1081,7 @@ class NullSession(QObject):
         referrer: Optional[str] = None,
         software: bool = False,
     ) -> None:
-        self.errorOccurred.emit(NO_VLC_MESSAGE)
+        self.errorOccurred.emit(translate(NO_VLC_MESSAGE))
 
     def stop(self) -> None:
         pass

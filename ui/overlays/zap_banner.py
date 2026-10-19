@@ -17,6 +17,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QGraphicsOpacityEffect, QWidget
 
 from services.epg_view import Programme
+from services.i18n import tr
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round, fmt_clock
 from ui.theme import PALETTE, qcolor
@@ -70,7 +71,8 @@ def banner_texts(info: BannerInfo) -> BannerTexts:
         now_span = f" · {fmt_clock(info.now.start)} – {fmt_clock(info.now.stop)}"
     parts = [f"{fmt_clock(q.start)} {q.title}" for q in ([info.next] if info.next else [])]
     parts += [f"{fmt_clock(q.start)} {q.title}" for q in info.upcoming[:1]]
-    next_line = "Next  " + "  ·  ".join(parts) if parts else ""
+    # i18n: the zapping banner's label before the next programmes ("Next  20:15 News")
+    next_line = tr("Next") + "  " + "  ·  ".join(parts) if parts else ""
     return BannerTexts(fmt_clock(info.clock), now_span, next_line)
 
 
@@ -242,7 +244,7 @@ class ZapBanner(Overlay):
         )
         pill_font = units.font(1.25, QFont.Weight.Bold)
         pill_w = 0.0
-        pill_text = "LIVE"
+        pill_text = tr("LIVE")  # i18n: red badge on the channel banner (live TV); max ~6 letters
         if info.is_live:
             pill_w = QFontMetrics(pill_font).horizontalAdvance(pill_text) + 1.4 * u + 1 * u
         p.setFont(name_font)
@@ -265,10 +267,11 @@ class ZapBanner(Overlay):
 
         # now line
         if has_epg and info.now is not None:
-            nw = QFontMetrics(now_font).horizontalAdvance("Now  ")
+            now_label = tr("Now")  # i18n: the zapping banner's label before the current programme
+            nw = QFontMetrics(now_font).horizontalAdvance(now_label + "  ")
             p.setFont(now_font)
             p.setPen(accent)
-            p.drawText(QRectF(bx, y, nw, lh(now_font)), Qt.AlignLeft | Qt.AlignVCenter, "Now")
+            p.drawText(QRectF(bx, y, nw, lh(now_font)), Qt.AlignLeft | Qt.AlignVCenter, now_label)
             span = texts.now_span
             span_w = QFontMetrics(now_font).horizontalAdvance(span)
             p.setFont(now_bold)
@@ -304,7 +307,7 @@ class ZapBanner(Overlay):
             p.drawText(
                 QRectF(bx, y, bw, lh(now_font)),
                 Qt.AlignLeft | Qt.AlignVCenter,
-                "No programme information",
+                tr("No programme information"),  # i18n: the zapping banner without a guide
             )
         p.end()
 

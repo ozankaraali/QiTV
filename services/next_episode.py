@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Optional, Union
 
+from services.i18n import tr
+
 Key = Callable[[dict], str]
 
 PLAY_CONTEXT_KEYS = ("start_over", "series", "season", "episodes", "genre_items")
@@ -139,7 +141,11 @@ def season_and_episode(season: Optional[dict], episode: dict) -> tuple[Any, Any]
 def episode_label(season: Optional[dict], episode: dict) -> str:
     """The Next card's "S2 · E1": the season's number (else the episode's) and the episode's."""
     number, position = season_and_episode(season, episode)
-    parts = [f"{tag}{value}" for tag, value in (("S", number), ("E", position)) if value]
+    parts: list[str] = []
+    if number:
+        parts.append(tr("S{n}", n=number))  # i18n: season number, abbreviated ("S2"); short
+    if position:
+        parts.append(tr("E{n}", n=position))  # i18n: episode number, abbreviated ("E1"); short
     return " · ".join(parts)
 
 
