@@ -86,6 +86,36 @@ class ParseTests(unittest.TestCase):
         link = parse_provider_link(f"{PANEL}/get.php?username=ann&password=pw1")
         self.assertNotIn("pw1", repr(link))
 
+    def test_a_playlist_under_a_c_folder_is_a_playlist(self):
+        link = parse_provider_link("https://lists.example.test/lists/c/news.m3u")
+        self.assertEqual(link, ProviderLink(M3U, "https://lists.example.test/lists/c/news.m3u"))
+
+    def test_a_panel_served_under_a_path_keeps_it(self):
+        for text in (
+            f"{PANEL}/xc/get.php?username=ann&password=pw1",
+            f"{PANEL}/xc/live/ann/pw1/123.ts",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    parse_provider_link(text), ProviderLink(XTREAM, f"{PANEL}/xc", "ann", "pw1")
+                )
+        timeshift = f"{PANEL}/timeshift/ann/pw1/60/2026-10-19:20-00/123.ts"
+        self.assertEqual(parse_provider_link(timeshift), ProviderLink(XTREAM, PANEL, "ann", "pw1"))
+        # A playlist under a folder named like a stream kind is still a playlist.
+        self.assertEqual(parse_provider_link(f"{PANEL}/live/lists/all/news.m3u").type, M3U)
+
+    def test_passwords_keep_their_characters(self):
+        cases = {
+            f"{PANEL}/get.php?username=ann&password=a+b%2Bc": "a+b+c",  # "+" is no space
+            f"{PANEL}/live/ann/p%40ss/7.m3u8": "p@ss",
+            f'{PANEL}/get.php?username=ann&password="quoted"': '"quoted"',
+            f"<{PANEL}/get.php?username=ann&password=<pw>>": "<pw>",  # brackets around the link
+            f"'{PANEL}/get.php?username=ann&password=it's'": "it's",
+        }
+        for text, password in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(parse_provider_link(text).password, password)
+
 
 class PasteLinkTests(base.WindowCase):
     def dialog(self):

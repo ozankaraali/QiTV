@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import os
 from typing import Optional
+from urllib.parse import urlsplit
 
 from services.provider_link import M3U, STB, XTREAM, ProviderLink, parse_provider_link
 
@@ -61,11 +62,32 @@ def same_provider(a: dict, b: dict) -> bool:
     def key(entry: dict) -> tuple[str, str, str]:
         return (
             str(entry.get("type", "")).upper(),
-            str(entry.get("url", "")).rstrip("/"),
+            normal_address(str(entry.get("url", "") or "")),
             str(entry.get("username", "") or ""),
         )
 
     return key(a) == key(b)
+
+
+def normal_address(address: str) -> str:
+    """A provider's address as compared: a web address without its scheme (http and https
+    reach one server), its host in lower case, no default port, no trailing slash; a file's
+    path as the system compares paths."""
+    address = address.strip()
+    if "://" not in address:
+        return os.path.normcase(os.path.normpath(address)) if address else ""
+    try:
+        parts = urlsplit(address)
+        port = parts.port
+    except ValueError:
+        return address.rstrip("/")
+    if parts.scheme.lower() not in ("http", "https"):
+        return address.rstrip("/")
+    host = (parts.hostname or "").lower()
+    if port is not None and port not in (80, 443):
+        host = f"{host}:{port}"
+    path = parts.path.rstrip("/")
+    return f"//{host}{path}" + (f"?{parts.query}" if parts.query else "")
 
 
 def unique_name(name: str, taken: Iterable[str]) -> str:

@@ -86,6 +86,24 @@ class HelperTests(unittest.TestCase):
             )
         )
 
+    def test_one_address_written_another_way_is_the_same_provider(self):
+        listed = {"type": "STB", "url": "http://Portal.Example.test/c/"}
+        for url in (
+            "http://portal.example.test/c",
+            "https://portal.example.test/c/",
+            "http://portal.example.test:80/c/",
+        ):
+            with self.subTest(url=url):
+                self.assertTrue(provider_drop.same_provider(listed, {"type": "STB", "url": url}))
+        other = {"type": "STB", "url": "http://portal.example.test:8080/c/"}
+        self.assertFalse(provider_drop.same_provider(listed, other))
+        self.assertTrue(
+            provider_drop.same_provider(
+                {"type": "M3UPLAYLIST", "url": "/x/lists/../a.m3u"},
+                {"type": "M3UPLAYLIST", "url": "/x/a.m3u"},
+            )
+        )
+
 
 class WindowDropTests(base.WindowCase):
     def setUp(self):
