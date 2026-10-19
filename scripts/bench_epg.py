@@ -214,9 +214,11 @@ def child(mode: str, path: str, trace: bool) -> dict[str, Any]:
     if trace:
         current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
-        out["traced_peak_mib"] = round(peak / (1 << 20), 1)
-        out["traced_kept_mib"] = round(current / (1 << 20), 1)
-        return out
+        return {
+            "traced_wall_s": out["wall_s"],  # slower under tracemalloc
+            "traced_peak_mib": round(peak / (1 << 20), 1),
+            "traced_kept_mib": round(current / (1 << 20), 1),
+        }
     out["rss_before_mib"] = rss_before
     out["peak_rss_mib"] = _peak_rss_mib()
     out["channels"] = len(guide)
