@@ -21,12 +21,14 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from services.catalog import CatalogService, WorkerFactory
 from services.epg_manager import EpgManager
 from services.epg_view import Programme
+from services.i18n import N_
 from services.provider_ids import provider_of
 from services.provider_manager import ProviderManager
 
 logger = logging.getLogger(__name__)
 
-UNKNOWN_PROVIDER_MESSAGE = "This provider is no longer in your list."
+# A link failure's message, like the catalog's: English here, shown with translate().
+UNKNOWN_PROVIDER_MESSAGE = N_("This provider is no longer in your list.")
 
 
 class _LinkIds(Iterator[int]):

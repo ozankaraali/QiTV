@@ -16,6 +16,7 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QFontMetricsF, QHelpEvent, QPainter
 from PySide6.QtWidgets import QToolTip, QWidget
 
+from services.i18n import N_, tr, translate
 from ui.brand import BRAND_NAME, logo_aspect, logo_available, logo_pixmap
 from ui.keymap import key_hint
 from ui.overlays.painting import Units, draw_icon, elided, fill_round
@@ -23,9 +24,9 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 HEIGHT_U = 6.0
 DEFAULT_HOST_WIDTH = 1280
-TAB_LABELS = {"live": "Live TV", "movies": "Movies", "series": "Series"}
+# The tabs' names (the search's section names), shown with translate().
+TAB_LABELS = {"live": N_("Live TV"), "movies": N_("Movies"), "series": N_("Series")}
 ALL_TABS = ["live", "movies", "series"]
-SEARCH_LABEL = "⌕ Search"
 PILL_H_U = 3.2
 MAX_SOURCE_U = 22.0
 BRAND_FONT_U = 1.6  # the old wordmark's size: the logo is sized from its capitals
@@ -33,6 +34,10 @@ LOGO_CAP_FACTOR = 1.6
 LOGO_LEFT_U = 2.0
 LOGO_GAP_U = 3.0  # between the logo and the first tab
 FULLSCREEN_KEYS = "Ctrl+Meta+F" if sys.platform == "darwin" else "F11"  # macOS keeps F11
+
+
+def _search_label() -> str:
+    return "⌕ " + tr("Search")  # i18n: pill button in the Library's top bar that opens search
 
 
 class TopNav(QWidget):
@@ -123,7 +128,8 @@ class TopNav(QWidget):
         return parent.width() if parent is not None and parent.width() > 0 else DEFAULT_HOST_WIDTH
 
     def _source_text(self) -> str:
-        return f"{self._source} ▾" if self._source else "Source ▾"
+        # i18n: pill button in the Library's top bar: choose the provider shown
+        return (self._source or tr("Source")) + " ▾"
 
     def _item_rects(self) -> dict[str, QRectF]:
         units = Units(self._host_width())
@@ -139,7 +145,7 @@ class TopNav(QWidget):
         source_w = (
             min(fm.horizontalAdvance(self._source_text()) + u, MAX_SOURCE_U * u - 2 * pad) + 2 * pad
         )
-        search_w = fm.horizontalAdvance(SEARCH_LABEL) + u + 2 * pad
+        search_w = fm.horizontalAdvance(_search_label()) + u + 2 * pad
         x = self.width() - 2.0 * u - pill_h
         rects["fullscreen"] = QRectF(x, top, pill_h, pill_h)  # a square pill
         x -= 1.0 * u + source_w
@@ -150,7 +156,7 @@ class TopNav(QWidget):
         x = self.logo_rect().right() + LOGO_GAP_U * u
         tab_fm = QFontMetrics(units.font(1.3, QFont.Weight.DemiBold))
         for tab in self._tabs:
-            width = tab_fm.horizontalAdvance(TAB_LABELS[tab])
+            width = tab_fm.horizontalAdvance(translate(TAB_LABELS[tab]))
             rects[tab] = QRectF(x, 0, width, height)
             x += width + 2.6 * u
         return rects
@@ -195,7 +201,8 @@ class TopNav(QWidget):
         if self.logo_rect().contains(pos):
             return BRAND_NAME
         if self._item_rects()["fullscreen"].contains(pos):
-            return key_hint("Fullscreen", FULLSCREEN_KEYS)
+            # i18n: tooltip of the Library's fullscreen button (before its key)
+            return key_hint(tr("Fullscreen"), FULLSCREEN_KEYS)
         return ""
 
     def event(self, event) -> bool:
@@ -256,7 +263,7 @@ class TopNav(QWidget):
                 )
             p.setFont(units.font(1.3, QFont.Weight.DemiBold))
             p.setPen(qcolor(PALETTE.text, 1.0 if active else PALETTE.text_muted_alpha))
-            p.drawText(rect, Qt.AlignCenter, TAB_LABELS[tab])
+            p.drawText(rect, Qt.AlignCenter, translate(TAB_LABELS[tab]))
             if active:
                 p.fillRect(
                     QRectF(rect.x(), height - 1.25 * u, rect.width(), 0.25 * u),
@@ -264,7 +271,7 @@ class TopNav(QWidget):
                 )
         p.setFont(units.font(1.1))
         pad = 1.4 * u
-        for item, text in (("search", SEARCH_LABEL), ("source", self._source_text())):
+        for item, text in (("search", _search_label()), ("source", self._source_text())):
             rect = rects[item]
             radius = 1.6 * u
             if self._focused and self._focus_item == item:

@@ -13,6 +13,7 @@ from services.failure_reasons import (
     UNEXPECTED_ANSWER_MESSAGE,
     UNREACHABLE_MESSAGE,
 )
+from services.i18n import N_
 from services.lazy_import import lazy_module
 from services.m3u import decode_playlist, parse_m3u
 from services.provider_api import (
@@ -32,7 +33,8 @@ from services.redact import safe_exc, safe_traceback
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
 
-NO_PORTAL_DATA_MESSAGE = "The portal returned no data"
+# Sent from the worker's thread in English (a catalog message), shown with translate().
+NO_PORTAL_DATA_MESSAGE = N_("The portal returned no data")
 STB_DEVICE_REJECTED_MESSAGE = DEVICE_MESSAGE
 
 
@@ -150,13 +152,14 @@ def _xtream_categories(
     get: Callable[..., Any], worker: Any, base: str, action: str
 ) -> List[Dict[str, str]]:
     """A catalog's categories, "All" first: only it when the panel lists none or fails."""
-    categories = [{"id": "*", "title": "All"}]
+    # The loaders' labels stay English in the lists (catalog.shown_label shows them).
+    categories = [{"id": "*", "title": N_("All")}]
     url = xtream_player_api_url(base, worker.username, worker.password, action=action)
     try:
         response = get(url, timeout=10, verify=worker.verify_ssl)
         if response.ok and response.content:
             for c in response.json() or []:
-                name = c.get("category_name") or "Unknown"
+                name = c.get("category_name") or N_("Unknown")
                 categories.append({"id": str(c.get("category_id")), "title": name})
     except Exception as e:
         logger.warning("Failed to fetch categories: %s", safe_exc(e))
@@ -287,7 +290,7 @@ class XtreamLoaderWorker(QObject):
 
             # Add "None" category if there are uncategorized items
             if "None" in sorted_channels:
-                categories.append({"id": "None", "title": "Unknown Category"})
+                categories.append({"id": "None", "title": N_("Unknown Category")})
 
             result = {
                 "categories": categories,
@@ -462,7 +465,7 @@ class STBCategoriesWorker(QObject):
                     category_id = str(channel.get("tv_genre_id"))
                     sorted_channels.setdefault(category_id, []).append(index)
                 if "None" in sorted_channels:
-                    categories.append({"id": "None", "title": "Unknown Category"})
+                    categories.append({"id": "None", "title": N_("Unknown Category")})
                 result["contents"] = all_channels
                 result["sorted_channels"] = sorted_channels
             self.finished.emit(result)

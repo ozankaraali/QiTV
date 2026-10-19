@@ -5,13 +5,15 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Qt, QThread, Slot
 
+from services.i18n import N_
 from services.redact import safe_exc, safe_traceback
 from services.thread_cleanup import ThreadCleanup
 
 logger = logging.getLogger(__name__)
 
-FAILED_MESSAGE = "The background task failed"
-NO_RESULT_MESSAGE = "The background task ended without a result"
+# A job's error messages: sent from its thread in English, shown with translate().
+FAILED_MESSAGE = N_("The background task failed")
+NO_RESULT_MESSAGE = N_("The background task ended without a result")
 
 
 class Cancelled(Exception):

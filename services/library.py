@@ -19,7 +19,8 @@ from typing import Any, Callable, Optional, TypeVar, cast
 from PySide6.QtCore import QObject, Signal
 
 from services import favorites
-from services.catalog import ALL_GROUP_ID
+from services.catalog import ALL_GROUP_ID, shown_label
+from services.i18n import N_, tr, translate
 from services.provider_ids import (
     ALL_PROVIDERS,
     PROVIDER_KEY,
@@ -35,14 +36,19 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 CONTINUE, NEW, MY_LIST = "@continue", "@new", "@mylist"
-PINNED_TITLES = {CONTINUE: "Continue", NEW: "New", MY_LIST: "My list"}
+# The shelves' names, shown with translate() (the genres carry them translated).
+PINNED_TITLES = {
+    CONTINUE: N_("Continue"),  # i18n: Library shelf (genre column): titles to continue watching
+    NEW: N_("New"),  # i18n: Library shelf (genre column): the newest titles
+    MY_LIST: N_("My list"),  # i18n: Library shelf (genre column): the titles starred with ★
+}
 # Provider groups that are no genre: every title ("All"), and the loaders' group for titles
 # without a category ("Unknown Category").
 _NOT_GENRES = frozenset({ALL_GROUP_ID, "None"})
 NEW_LIMIT = 48
 MIN_YEAR = 1800
 MEMO_SIZE = 64
-SAVE_FAILED_NOTICE = "Couldn't save your list; it will be lost when QiTV closes"
+SAVE_FAILED_NOTICE = N_("Couldn't save your list; it will be lost when QiTV closes")
 
 
 @dataclass(frozen=True)
@@ -61,11 +67,12 @@ class Sort(str, Enum):
     RATING = "rating"
 
 
+# The sort chips above the poster grid, shown with translate().
 SORT_LABELS = {
-    Sort.ADDED: "Recently added",
-    Sort.AZ: "A–Z",
-    Sort.YEAR: "Year",
-    Sort.RATING: "Rating",
+    Sort.ADDED: N_("Recently added"),  # i18n: sort chip above the Library's posters
+    Sort.AZ: N_("A–Z"),  # i18n: sort chip (alphabetical order); keep it short
+    Sort.YEAR: N_("Year"),  # i18n: sort chip (by release year)
+    Sort.RATING: N_("Rating"),  # i18n: sort chip (by rating)
 }
 
 
@@ -180,7 +187,9 @@ def _format_duration(minutes: Optional[int]) -> str:
     if not minutes or minutes <= 0:
         return ""
     hours, mins = divmod(minutes, 60)
-    return f"{hours}h {mins}m" if hours else f"{mins}m"
+    if hours:
+        return tr("{h}h {m}m", h=hours, m=mins)  # i18n: a running time, abbreviated (1h 5m)
+    return tr("{m}m", m=mins)  # i18n: a running time in minutes, abbreviated (45m)
 
 
 # --- sort keys (module level so tests can spy on them) -------------------------------------
@@ -587,7 +596,7 @@ class LibraryModel(QObject):
         for gid in (CONTINUE, NEW, MY_LIST):
             items = self._pinned_items(gid)
             if items:
-                out.append(Genre(gid, PINNED_TITLES[gid], len(items), True))
+                out.append(Genre(gid, translate(PINNED_TITLES[gid]), len(items), True))
         return out
 
     # --- genres -----------------------------------------------------------------------
@@ -597,8 +606,9 @@ class LibraryModel(QObject):
         needle = fold(filter_text)
 
         def build() -> list[Genre]:
+            # A genre's title as shown: the loaders' own ("All") in the active language.
             found = self._pinned_genres() + [
-                Genre(str(g.id), g.title, g.count, header=g.header)
+                Genre(str(g.id), shown_label(g.title), g.count, header=g.header)
                 for g in self._catalog.groups(self._section)
             ]
             if needle:
@@ -732,7 +742,7 @@ class LibraryModel(QObject):
     def toggle_favorite(self, item: dict) -> bool:
         now = favorites.toggle(self._config, item)
         if not favorites.save(self._config):
-            self.notice.emit(SAVE_FAILED_NOTICE)
+            self.notice.emit(translate(SAVE_FAILED_NOTICE))
         self._ensure_selection()
         self.changed.emit()
         return now

@@ -2,6 +2,8 @@ import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+from services.i18n import N_
+
 
 def decode_playlist(response) -> str:
     """Decode an HTTP playlist response.
@@ -126,7 +128,8 @@ def _build_categorized_structure(items: List[Dict]) -> Dict:
     # across refreshes/processes and cannot collide. A channel of several groups is listed
     # in each, as one item: "All" (the contents) has it once.
     for idx, item in enumerate(items):
-        category_ids = split_group_title(item.get("group")) or ["Uncategorized"]
+        # The group's id and title, stored in English (catalog.shown_label shows it)
+        category_ids = split_group_title(item.get("group")) or [N_("Uncategorized")]
         # Add tv_genre_id for compatibility with STB/Xtream structure
         item["tv_genre_id"] = category_ids[0]
         item["number"] = str(idx + 1)
@@ -134,7 +137,7 @@ def _build_categorized_structure(items: List[Dict]) -> Dict:
             sorted_channels.setdefault(category_id, []).append(idx)
 
     # Build categories list
-    categories = [{"id": "*", "title": "All"}]
+    categories = [{"id": "*", "title": N_("All")}]
     categories.extend({"id": group, "title": group} for group in sorted(sorted_channels))
 
     return {

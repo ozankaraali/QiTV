@@ -20,6 +20,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, CatalogService, Group
 from services.catalogs import Catalogs
 from services.epg_view import Programme
+from services.i18n import N_
 from services.provider_ids import (
     ALL_PROVIDERS,
     mixed_group_id,
@@ -504,7 +505,7 @@ class BrowsedCatalog(QObject):
                     Group(section, mixed_group_id(name, group.id), group.title, group.count, name)
                 )
         if any_all:
-            rows.insert(0, Group(section, ALL_GROUP_ID, "All", total))
+            rows.insert(0, Group(section, ALL_GROUP_ID, N_("All"), total))  # catalog.shown_label
         self._memo[("groups", section)] = (versions, rows)
         return rows
 

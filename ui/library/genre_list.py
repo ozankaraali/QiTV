@@ -13,6 +13,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QFont, QFontMetricsF, QPainter
 from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QWidget
 
+from services import i18n
+from services.i18n import tr
 from services.library import CONTINUE, MY_LIST, NEW, Genre
 from ui.overlays.channel_rows import ChannelListView
 from ui.overlays.painting import Units, draw_icon, elided, fill_round
@@ -24,7 +26,6 @@ FIELD_H_U = 3.2
 FIELD_RADIUS_U = 0.8
 ROW_H_U = 3.2
 PREVIEW_DEBOUNCE_MS = 250
-FILTER_PLACEHOLDER = "⌕ Find a genre…"
 DEFAULT_HOST_WIDTH = 1280
 
 KindRole = Qt.UserRole + 20
@@ -38,7 +39,7 @@ GENRE = "genre"
 
 
 def format_count(count: int | None) -> str:
-    return "" if count is None else f"{count:,}"
+    return "" if count is None else i18n.number(count)
 
 
 class _GenreModel(QAbstractListModel):
@@ -53,10 +54,13 @@ class _GenreModel(QAbstractListModel):
         rest = [g for g in genres if not g.pinned]
         rows: list[tuple[str, str, int | None, str | None]] = []
         if pinned:
-            rows.append((HEADER, "PINNED", None, None))
+            # i18n: header above the Library's shelves (Continue, New, My list); shown in capitals
+            rows.append((HEADER, i18n.upper(tr("Pinned")), None, None))
             rows += [(GENRE, g.title, g.count, g.id) for g in pinned]
         if rest:
-            rows.append((HEADER, f"GENRES · {sum(1 for g in rest if not g.header)}", None, None))
+            count = sum(1 for g in rest if not g.header)
+            # i18n: header above the Library's genres, with their number; shown in capitals
+            rows.append((HEADER, i18n.upper(tr("Genres · {n}", n=count)), None, None))
             # All providers: each provider's name heads its genres (a row that cannot be chosen)
             rows += [
                 (HEADER, g.title, None, None) if g.header else (GENRE, g.title, g.count, g.id)
@@ -351,6 +355,6 @@ class GenreList(QWidget):
             text = "⌕ " + self.filter_text + "▏"
         else:
             p.setPen(qcolor(PALETTE.text, 0.45))
-            text = FILTER_PLACEHOLDER
+            text = "⌕ " + tr("Find a genre…")  # i18n: placeholder of the Library's genre filter
         p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))
         p.end()

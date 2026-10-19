@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from services.i18n import N_
+
 PROVIDER_KEY = "_provider"
 ALL_PROVIDERS = "@all"
-ALL_PROVIDERS_TITLE = "All providers"
+# The source that mixes every provider, as it is named: shown with translate().
+ALL_PROVIDERS_TITLE = N_("All providers")
 
 _GROUP_SEPARATOR = "\x1f"
 

@@ -27,6 +27,7 @@ from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as
     UNREACHABLE_MESSAGE,
     status_message,
 )
+from services.i18n import N_, tr, translate
 from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
 from services.provider_api import (
     provider_prefers_https,
@@ -42,12 +43,14 @@ logger = logging.getLogger(__name__)
 
 SECTION_CONTENT_TYPES = {"live": "itv", "movies": "vod", "series": "series"}
 ALL_GROUP_ID = "*"
-NO_SERIES_MESSAGE = "This provider has no series"
-PROVIDER_LOADING_MESSAGE = "The provider is still loading"
-GROUP_UNAVAILABLE_MESSAGE = "This group isn't available"
-SECTION_UNAVAILABLE_MESSAGE = "This provider doesn't offer this section"
-NO_STREAM_MESSAGE = "This item has no stream address"
-EMPTY_LINK_MESSAGE = "The portal returned an empty link"
+# The failure messages are compared as they are and leave the service in English; the screens
+# show them with translate().
+NO_SERIES_MESSAGE = N_("This provider has no series")
+PROVIDER_LOADING_MESSAGE = N_("The provider is still loading")
+GROUP_UNAVAILABLE_MESSAGE = N_("This group isn't available")
+SECTION_UNAVAILABLE_MESSAGE = N_("This provider doesn't offer this section")
+NO_STREAM_MESSAGE = N_("This item has no stream address")
+EMPTY_LINK_MESSAGE = N_("The portal returned an empty link")
 # Catalog network jobs (sections, groups, seasons, episodes) running at once per service:
 # portals rate-limit, and some ban a MAC that opens many connections.
 MAX_CATALOG_JOBS = 2
@@ -127,6 +130,35 @@ def friendly_error(message: object) -> str:
     else:
         logger.info("Provider request failed: %s", friendly)
     return friendly
+
+
+# The labels the loaders write into a provider's lists when the provider gives none: stored
+# and compared in English, shown by `shown_label`.
+_LOADER_LABELS = frozenset(
+    {
+        N_("All"),  # i18n: the group of every channel or title
+        N_("Unknown Category"),  # i18n: the group of channels or titles without a category
+        N_("Unknown"),  # i18n: a provider's category without a name
+        N_("Uncategorized"),  # i18n: a playlist's group of the channels without a group
+        N_("Stream"),  # i18n: the only channel of a provider that is a single stream
+    }
+)
+_NUMBERED_LABEL = re.compile(r"(Season|Episode|Stream) (\d+)")
+
+
+def shown_label(text: str) -> str:
+    """A group, season, episode or channel name as shown: the labels the loaders make up when
+    a provider names none ("All", "Unknown Category", "Season 2", "Episode 5") in the active
+    language; a provider's own name as it is."""
+    match = _NUMBERED_LABEL.fullmatch(text)
+    if match is not None:
+        kind, number = match.groups()
+        if kind == "Season":
+            return tr("Season {n}", n=number)  # i18n: a season without a name of its own
+        if kind == "Episode":
+            return tr("Episode {n}", n=number)  # i18n: an episode without a name of its own
+        return tr("Stream {n}", n=number)  # i18n: a channel or film without a name (its number)
+    return translate(text) if text in _LOADER_LABELS else text
 
 
 def _status(text: str) -> Optional[int]:
@@ -640,13 +672,13 @@ class CatalogService(QObject):
         if ptype == "M3USTREAM":
             item = {
                 "id": 1,
-                "name": provider.get("name") or "Stream",
+                "name": provider.get("name") or N_("Stream"),
                 "cmd": provider.get("url", ""),
             }
             self._store_section(
                 ct,
                 {
-                    "categories": [{"id": ALL_GROUP_ID, "title": "All"}],
+                    "categories": [{"id": ALL_GROUP_ID, "title": N_("All")}],
                     "contents": [item],
                     "sorted_channels": {ALL_GROUP_ID: [0]},
                 },
@@ -745,7 +777,7 @@ class CatalogService(QObject):
         if isinstance(content, list):
             if not content:
                 return []
-            return [Group(section, ALL_GROUP_ID, "All", len(content), self._pinned or "")]
+            return [Group(section, ALL_GROUP_ID, N_("All"), len(content), self._pinned or "")]
         if not isinstance(content, dict):
             return []
         contents = content.get("contents")

@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, QRectF, Qt, Signal
 from PySide6.QtGui import QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
+from services.i18n import tr
 from ui.library.genre_list import GenreList
 from ui.library.poster_grid import HEADER_H_U, PAD_U, PosterGrid
 from ui.library.series_view import SeriesView
@@ -28,7 +29,6 @@ FIELD_RADIUS_U = 0.8
 FIELD_FONT_U = 1.15
 COUNT_FONT_U = 1.0
 FOCUS_RING_PX = 1.5
-SEARCH_PLACEHOLDER = "⌕ Search movies, series and channels"
 
 
 class GridPosters(QObject):
@@ -141,7 +141,8 @@ class SearchField(QWidget):
             text = "⌕ " + self.query + ("▏" if self._focused else "")
         else:
             p.setPen(qcolor(PALETTE.text, 0.45))
-            text = SEARCH_PLACEHOLDER
+            # i18n: placeholder of the Library's search field
+            text = "⌕ " + tr("Search movies, series and channels")
         p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))
         if self.count_text:
             p.setFont(units.font(COUNT_FONT_U))
