@@ -12,23 +12,30 @@ multiview's grid shows or an external player plays the channels. Then:
   sends that channel's target with `archive_at`).
 
 Opening: the archive's addresses are built for the moment (an Xtream panel's in its time
-zone), from the asked moment to now (a programme: to its end, plus `AFTER_S`). An address form
+zone; a playlist's xc channel's in that of an Xtream provider of the user's on its server;
+without one a UTC guess, whose answers teach nothing), from the asked moment to now (a
+programme: to its end, plus `AFTER_S`), at most `MAX_MINUTES` (the next stretch opens after
+it). An address form
 that answered within the day opens at once. Else, when the provider leaves a stream to spare
 beside the one playing and one more (its limit less what is open is two or more, or it has
 none: a closed connection may stay counted for a while), a probe reads its first bytes on a
 worker, holding a "probe" slot of the connection budget meanwhile, while the channel plays
-on; a form that plays opens, else the toast says why and the channel plays on (and an archive
-that answered "nothing there" is remembered as failed). Without a stream to spare it opens
-unprobed; VLC failing within `QUICK_S` of that open (a timeout, or anything later, teaches
-nothing) has the same address probed in the slot VLC's stream left (`_diagnose`: VLC does
-not say why): "nothing there" is remembered, a refusal is not (a 1-stream account may still
-count the live stream closed a moment ago), and an archive that plays opens again once.
+on; a form that plays opens, else the toast says why and the channel plays on ("nothing
+there" from every form is a strike, `CatchupMemory.strike`: two for different moments make
+the archive failed). Go live, and a seek within the buffer, drop a probe still running
+(`cancel`: its slot goes back when it ends). Without a stream to spare it opens unprobed;
+VLC failing within `QUICK_S` of that open (a timeout, or anything later, teaches nothing)
+has the same address probed (`_diagnose`: VLC does not say why) when the provider's limit
+leaves a "probe" slot beside the archive's, else the channel goes live: "nothing there" is a
+strike, a refusal is not (a 1-stream account may still count the live stream closed a
+moment ago), and an archive that plays opens again once.
 
 The archive plays in the large picture's player as an on-demand stream through the tuner's
 `open(direct=True)`: the live stream is stopped first and its connection released before
 the archive's opens (the budget's slot passes from one to the other), so a 1-stream account
 never has both. Go live (L, the chip) tunes the channel again (`request`), which opens its
-live stream once the archive's is let go. While it plays, the transport shows its own bar
+live stream once the archive's is let go (the tuner stops the archive first, an archive
+still waiting to open included). While it plays, the transport shows its own bar
 (`timeline`): timeline seconds are Unix seconds, from `EXTEND_S` before the moment asked (at
 most the archive's depth) to now; the bubble over the knob is the moment playing. A seek on
 it (or ← → ◀10 ⏮) moves within the opened address when VLC can seek it, else opens the
@@ -51,11 +58,13 @@ from typing import Any, Callable, Optional
 from PySide6.QtCore import QObject, QTimer
 
 from services.catchup import (
+    MAX_MINUTES,
     Answer,
     Archive,
     address_start,
     archive_of,
     archive_urls,
+    wall_clock,
 )
 from services.catchup_memory import CatchupMemory
 from services.connection_budget import DENIED
@@ -104,6 +113,7 @@ class _Ask:
     ends: float  # where its addresses end
     urls: list[str]
     live_playing: bool  # the channel plays live meanwhile (a rewind): it plays on if it fails
+    guessed: bool = False  # its addresses' time zone is a UTC guess: their answers teach nothing
 
 
 @dataclass
@@ -162,6 +172,7 @@ class CatchUp(QObject):
         self._generation = 0  # asks and probes before a newer one are dropped
         self._probing = False
         self._asked: Optional[_Ask] = None  # the newest ask a running probe answers
+        self._key: tuple[Optional[dict], str, str] = (None, "", "")  # item, provider, its key
         self._timer = QTimer(self, interval=TICK_MS)
         self._timer.timeout.connect(self._tick)
         self._connect(session, True)
@@ -214,7 +225,21 @@ class CatchUp(QObject):
     # ---- what a channel offers ------------------------------------------------------------
 
     def key(self, target: Target) -> str:
-        return channel_key(item_provider.provider_name(self.catalog, target.item), target.item)
+        """The channel's key in the memory (the last one is kept: the bar asks at each tick)."""
+        provider = item_provider.provider_name(self.catalog, target.item)
+        item, name, key = self._key
+        if item is target.item and name == provider:
+            return key
+        key = channel_key(provider, target.item)
+        self._key = (target.item, provider, key)
+        return key
+
+    def cancel(self) -> None:
+        """A probe still running is dropped (Go live, a seek within the buffer); its slot
+        goes back when it ends."""
+        if self._probing:
+            self._generation += 1
+            self._probing, self._asked = False, None
 
     def offered(self, target: Optional[Target]) -> Optional[Archive]:
         """The channel's archive when it may be played now; else None."""
@@ -265,21 +290,29 @@ class CatchUp(QObject):
         archive = self.offered(target)
         if archive is None:
             return False
+        item = target.item
+        if archive.kind in ("default", "append") and not archive.source:
+            source = item_provider.playlist_source(self.catalog, item)  # its #EXTM3U line's
+            archive = replace(archive, source=source)
         now = self._now().timestamp()
         moment = min(max(moment, now - archive.seconds + EDGE_S), now - MIN_AGE_S)
         when = datetime.fromtimestamp(moment, timezone.utc)
-        cmd = str(target.item.get("cmd") or link)
-        begins = address_start(archive, when, cmd)
+        cmd = str(item.get("cmd") or link)
+        begins = address_start(archive, when, cmd).timestamp()
         ends = now if until is None or until <= moment else min(until + AFTER_S, now)
-        ends = max(ends, moment + 60.0)
-        provider = item_provider.provider_dict(self.catalog, target.item)
+        ends = min(max(ends, moment + 60.0), begins + MAX_MINUTES * 60.0)
+        zone = item_provider.archive_zone(self.catalog, item)
+        if zone is None and archive.kind in ("xc", "auto"):
+            zone = item_provider.xtream_zone_at(self.catalog, cmd)  # an Xtream provider's
+        guessed = zone is None and wall_clock(archive, cmd)
+        provider = item_provider.provider_dict(self.catalog, item)
         urls = archive_urls(
             archive,
             cmd,
-            begins,
-            ends - begins.timestamp(),
+            datetime.fromtimestamp(begins, timezone.utc),
+            ends - begins,
             self._now(),
-            zone=item_provider.archive_zone(self.catalog, target.item),
+            zone=zone or timezone.utc,
             username=str(provider.get("username") or ""),
             password=str(provider.get("password") or ""),
         )
@@ -287,7 +320,7 @@ class CatchUp(QObject):
             logger.info("No archive address for %s", target.title)
             return False
         key = self.key(target)
-        ask = _Ask(target, archive, key, moment, begins.timestamp(), ends, urls, live_playing)
+        ask = _Ask(target, archive, key, moment, begins, ends, urls, live_playing, guessed)
         asked = self._asked
         if self._probing and asked is not None and asked.key == key:
             # A probe of this channel's archive runs: its answer serves this newer ask (← held
@@ -340,7 +373,7 @@ class CatchUp(QObject):
         """A probe ended: its slot goes back (its connection is closed by now); the ask it
         answers, unless a zap, a swap or another channel's ask came meanwhile."""
         generation, ticket, _forms = context
-        self._tuner.budget.release(ticket)  # DENIED (a diagnosis has none) is ignored
+        self._tuner.budget.release(ticket)
         if generation != self._generation or self._asked is None:
             return None
         ask, self._asked = self._asked, None
@@ -358,7 +391,7 @@ class CatchUp(QObject):
             self._play(ask, forms[index], probed=True)
             return
         if answer == Answer.NONE.value:
-            self._learn_failure(ask)
+            self._learn_failure(ask)  # every form had nothing (a guessed zone's teaches nothing)
             self._failed(ask, NO_ANSWER_TEXT)
         elif answer == Answer.REFUSED.value:
             self._failed(ask, REFUSED_TEXT)
@@ -371,8 +404,14 @@ class CatchUp(QObject):
             self._failed(ask, NO_ANSWER_TEXT)
 
     def _learn_failure(self, ask: _Ask) -> None:
-        if self._now().timestamp() - ask.begins >= NO_LEARN_S:
-            self.memory.remember(ask.key, False)  # not asked again for a while
+        """Every form had nothing for the ask's moment: a strike (two make it failed), unless
+        the moment is too recent for the archive to have it, or its time zone was a guess."""
+        if ask.guessed or self._now().timestamp() - ask.begins < NO_LEARN_S:
+            return
+        if self.memory.strike(ask.key, ask.moment):
+            logger.info(
+                "The archive of %s did not answer twice: not asked for a while", ask.target.title
+            )
 
     def _failed(self, ask: _Ask, text: str) -> None:
         """The archive did not open: say why; the channel plays live (it does, or it opens)."""
@@ -485,9 +524,13 @@ class CatchUp(QObject):
         if playing is None:
             return
         self._generation += 1
+        self._probing, self._asked = False, None
         self._set_playing(None)
         target = playing.ask.target
         logger.info("Back to live on %s", target.title)
+        # The archive stops now, one still waiting for the live stream's release included: a
+        # slow live link can't let it open meanwhile.
+        self._tuner.stop()
         self._request(replace(target, archive_at=None, archive_until=None, zapped=False))
 
     def _reopen(self, playing: _Playing, moment: float) -> None:
@@ -529,12 +572,20 @@ class CatchUp(QObject):
 
     def _diagnose(self, playing: _Playing) -> None:
         """VLC could not open an archive it opened unprobed, and does not say why: its address
-        is probed in the slot VLC's stream left (nothing else plays meanwhile)."""
+        is probed on a "probe" slot when the provider's limit leaves one beside the archive's
+        (still held), else the channel goes live and nothing is learned."""
+        target = playing.ask.target
+        name = item_provider.provider_name(self.catalog, target.item)
+        limit = self._limit(target.item)
+        ticket = self._tuner.budget.request(name, limit, purpose=PURPOSE, queue=False)
+        if ticket == DENIED:
+            self._toast(translate(NO_ANSWER_TEXT))
+            self.go_live()
+            return
         self._generation += 1
         self._probing, self._asked = True, playing.ask
-        target = playing.ask.target
         worker = ArchiveProbeWorker([playing.url], self._headers(target), self._verify(target))
-        context = (self._generation, DENIED, [playing.form])  # no slot of its own
+        context = (self._generation, ticket, [playing.form])
         self._runner.run_worker(worker, self._on_probed, self._on_probe_failed, context=context)
 
     def on_ended(self) -> bool:

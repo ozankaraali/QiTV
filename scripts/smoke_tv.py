@@ -23,9 +23,10 @@ segment's length (the starts it can land on are a segment apart) + 0.5 s (VLC's 
 and at the end of the 6 s it holds there or closes in (2.1's stay-live keeps 1x inside its dead
 band and nudges only after 15 s outside it: not drifting away is enough); ← moves
 the position back 8-12 s; 1.5x is applied and returns to 1x once stay-live is back at live;
-Catch-up (2.3): Channel 3 is given an archive (an M3U "append" type its source serves); a seek
-5 minutes before its buffer probes the archive, closes the live stream and plays the archive
-(an on-demand stream, the transport's archive bar), and L tunes the channel live again; its
+Catch-up (2.3): Channel 3 is given an archive (an M3U "append" type its source serves, starting
+mid-packet and mid-GOP as a real panel's does); a seek 5 minutes before its buffer probes the
+archive, closes the live stream and plays the archive (VLC plays its address itself, an
+on-demand stream, on the transport's archive bar), and L tunes the channel live again; its
 source sees one connection at a time (the probe beside the live stream is counted apart).
 R records Channel 3 from the buffer into <out>/recordings for 3 s and R stops it: the file is
 saved (MPEG-TS from its first byte), the controls showed REC meanwhile and the toast says

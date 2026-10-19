@@ -212,13 +212,15 @@ class ControllerCatchupTests(CatchupCase):
         self.live.released.emit()
         links = len(self.catalog.links)
         self.session.errorOccurred.emit("The stream could not be opened")
-        self.runner.answer(-1, "none")  # probed once VLC let go: nothing there
-        self.assertTrue(self.memory.failed(channel_key("Home", ARCHIVED)))
+        self.assertEqual(self.runner.jobs, [])  # 1 stream: no slot to probe it beside
+        self.assertFalse(self.memory.failed(channel_key("Home", ARCHIVED)))  # nothing learned
         self.assertEqual(len(self.catalog.links), links + 1)
         self.catalog.linkReady.emit(self.catalog.links[-1][0], ARCHIVED["cmd"])
         self.session.stateChanged.emit("idle")
         self.assertTrue(wait_until(lambda: self.live.running))
         self.assertEqual(self.starts()[-1][0], ARCHIVED["cmd"])  # live through the buffer
+        self.assertEqual(self.controller.archive_days(ARCHIVED), 3)  # still offered
+        self.memory.remember(channel_key("Home", ARCHIVED), False)  # failed lately
         self.assertEqual(self.controller.archive_days(ARCHIVED), 0)  # the guide offers none
         self.assertEqual(self.controller.archive_days(PLAIN), 0)
 

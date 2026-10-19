@@ -22,10 +22,12 @@ start), served beside it as `seg<n>.ts`. With `cc_reset`, each segment is packag
 own, as some CDNs do: every PID's continuity counter, PAT's and PMT's too, restarts at 0.
 
 A request for `url` with a query (`…/1.ts?archive=…`, catch-up's "append" type) is the
-channel's provider archive (2.3): the clip from its start, `ARCHIVE_S` of it, as fast as the
-client reads, as an on-demand stream. QiTV's probe of it (a Range request for its first
-16 KB, beside the live stream) is recorded in `archive_requests` only; the archive's playback
-(VLC asks for "bytes=0-") counts as a connection like the live one.
+channel's provider archive (2.3): the clip, `ARCHIVE_S` of it, as fast as the client reads, as
+an on-demand stream. It starts as a real panel's archive was seen to: in the middle of a
+packet (152 bytes of one's tail before the first sync byte) and of a GOP (`ARCHIVE_SKIP`).
+QiTV's probe of it (a Range request for its first 16 KB, beside the live stream) is recorded
+in `archive_requests` only; the archive's playback (VLC asks for "bytes=0-") counts as a
+connection like the live one.
 
 `connections` counts the requests; `events` records when each connection opened (+1) and
 closed (-1), and `peak` is the most open at once. A client going away is seen at once (the
@@ -59,6 +61,7 @@ PLAYLIST = "/live/index.m3u8"
 HLS_WINDOW = 6  # segments in the live playlist
 ARCHIVE_S = 300.0  # how much of the clip an archive request gets
 PACKET = 188
+ARCHIVE_SKIP = 20 * PACKET + 36  # an archive's first bytes: mid-GOP, then 152 bytes mid-packet
 CHUNK_PACKETS = 64
 CLOCK = 90_000
 _WRAP = 1 << 33
@@ -315,7 +318,11 @@ class LiveSource:
                     self.send_header("Content-Type", "video/mp2t")
                     self.send_header("Connection", "close")
                     self.end_headers()
+                    skip = ARCHIVE_SKIP
                     for due, chunk in owner.stream.chunks():
+                        if skip:
+                            cut = min(skip, len(chunk))
+                            chunk, skip = chunk[cut:], skip - cut
                         if due > ARCHIVE_S or owner._stop.is_set():
                             return
                         try:

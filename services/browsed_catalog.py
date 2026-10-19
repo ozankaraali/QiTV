@@ -11,7 +11,7 @@ from the hub, whichever provider an item belongs to.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, tzinfo
 import logging
 from typing import Any, Callable, Optional
 
@@ -264,9 +264,18 @@ class BrowsedCatalog(QObject):
         """What provider `name` reported as its simultaneous streams (None: unknown)."""
         return self._catalogs.max_connections(name)
 
-    def archive_zone_of(self, name: str) -> tzinfo:
-        """The time zone provider `name`'s archive addresses are in (catch-up)."""
+    def archive_zone_of(self, name: str) -> Optional[tzinfo]:
+        """The time zone provider `name`'s archive addresses are in (catch-up; None: not
+        known)."""
         return self._catalogs.archive_zone(name)
+
+    def xtream_zone_at(self, host: str) -> Optional[tzinfo]:
+        """The time zone of a signed-in provider whose streams are at `host` (catch-up)."""
+        return self._catalogs.xtream_zone_at(host)
+
+    def catchup_source_of(self, name: str) -> str:
+        """Provider `name`'s playlist-wide catch-up template ("" for none)."""
+        return self._catalogs.catchup_source(name)
 
     def sign_in_again(self, name: str) -> None:
         """Sign provider `name` in again: a link asked next waits for it (an STB retry)."""
@@ -593,6 +602,10 @@ class BrowsedCatalog(QObject):
         catalog = self._cat()
         return catalog.max_connections() if catalog is not None else None
 
-    def archive_zone(self) -> tzinfo:
+    def archive_zone(self) -> Optional[tzinfo]:
         catalog = self._cat()
-        return catalog.archive_zone() if catalog is not None else timezone.utc
+        return catalog.archive_zone() if catalog is not None else None
+
+    def catchup_source(self) -> str:
+        catalog = self._cat()
+        return catalog.catchup_source() if catalog is not None else ""

@@ -7,8 +7,9 @@ item (a local file, a test's channel) belongs to the browsed provider, as before
 
 from __future__ import annotations
 
-from datetime import timezone, tzinfo
+from datetime import tzinfo
 from typing import Optional
+from urllib.parse import urlsplit
 
 from services.catalog import ALL_GROUP_ID
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP
@@ -61,13 +62,34 @@ def max_connections(catalog, item: dict) -> Optional[int]:
     return catalog.max_connections_of(provider_of(item))
 
 
-def archive_zone(catalog, item: dict) -> tzinfo:
-    """The time zone the item's provider's archive addresses are in (catch-up; UTC if none)."""
+def archive_zone(catalog, item: dict) -> Optional[tzinfo]:
+    """The time zone the item's provider's archive addresses are in (catch-up; None: not
+    known)."""
     if _browsed(catalog, item):
         zone = getattr(catalog, "archive_zone", None)
-        return zone() if zone is not None else timezone.utc
+        return zone() if zone is not None else None
     zone_of = getattr(catalog, "archive_zone_of", None)
-    return zone_of(provider_of(item)) if zone_of is not None else timezone.utc
+    return zone_of(provider_of(item)) if zone_of is not None else None
+
+
+def xtream_zone_at(catalog, url: str) -> Optional[tzinfo]:
+    """The time zone of a signed-in provider whose streams are on `url`'s server (an M3U
+    playlist's xc channel's), when one knows it."""
+    find = getattr(catalog, "xtream_zone_at", None)
+    try:
+        host = urlsplit(str(url or "")).netloc.lower()
+    except ValueError:
+        return None
+    return find(host) if find is not None and host else None
+
+
+def playlist_source(catalog, item: dict) -> str:
+    """The item's playlist's catch-up template for every channel ("" for none)."""
+    if _browsed(catalog, item):
+        source = getattr(catalog, "catchup_source", None)
+        return str(source() or "") if source is not None else ""
+    source_of = getattr(catalog, "catchup_source_of", None)
+    return str(source_of(provider_of(item)) or "") if source_of is not None else ""
 
 
 def sign_in_again(catalog, item: dict) -> None:

@@ -5,7 +5,7 @@ A fake LiveSession and player (tests/test_tv_controller.py's) with a real connec
 probes run through a fake runner the tests answer. Channels and addresses are fictional.
 """
 
-from datetime import timedelta
+from datetime import timedelta, timezone
 import os
 import unittest
 
@@ -14,6 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from test_tv_controller import NOW, PipelineCase
 from timer_fixtures import wait_until
 
+from services.catchup import provider_zone
 from services.catchup_memory import CatchupMemory
 from services.epg_view import Programme
 from services.live.tuning import channel_key
@@ -96,6 +97,8 @@ class CatchupCase(PipelineCase):
         self.catchup = catchup
         self.session.time_ms = lambda: self.played_ms
         self.played_ms = 0
+        # The Xtream panel's zone, as its sign-in gave it (UTC, to read the addresses easily).
+        self.catalog.archive_zone = lambda: timezone.utc
 
     def tune_channel(self, channel):
         self.controller.tune(channel, group_key="10", channels=CHANNELS)
@@ -260,28 +263,39 @@ class ArchiveModeTests(CatchupCase):
 
 
 class FailureTests(CatchupCase):
-    def fail_unprobed(self):
-        """A 1-stream account's archive opened unprobed, and VLC failed at once."""
-        self.start_archived()
-        self.transport.seekToRequested.emit(1000.0)  # 43 min ago
+    def fail_unprobed(self, moment_t=1000.0):
+        """A 2-stream account's archive opened unprobed (no stream to spare beside live and one
+        more), and VLC failed at once: the address is probed on a slot of its own."""
+        self.catalog.max_connections = lambda: 2
+        self.live.timelineChanged.emit(dict(STATE))
+        self.transport.seekToRequested.emit(moment_t)
         self.live.released.emit()
         self.session.errorOccurred.emit("The stream could not be opened")
         [(worker, *_rest)] = self.runner.jobs  # VLC says no more: the address is probed
         self.assertEqual(worker.urls, [self.archive_plays()[-1][0]])
-        self.assertEqual(self.budget.holders("Home"), ["main"])  # in the archive's own slot
+        self.assertEqual(sorted(self.budget.holders("Home")), ["main", "probe"])
 
-    def test_an_unprobed_archive_failing_at_once_is_remembered_and_live_comes_back(self):
-        self.fail_unprobed()
-        links = len(self.catalog.links)
-        self.runner.answer(-1, "none")  # nothing there
-        self.assertIn((NO_ANSWER_TEXT, "info"), self.toast.messages())
-        self.assertNotIn(("The stream could not be opened", "error"), self.toast.messages())
-        self.assertTrue(self.memory.failed(channel_key("Home", ARCHIVED)))
-        self.assertEqual(len(self.catalog.links), links + 1)  # the channel live again
+    def back_live(self):
         self.catalog.linkReady.emit(self.catalog.links[-1][0], ARCHIVED["cmd"])
         self.session.stateChanged.emit("idle")
         self.assertTrue(wait_until(lambda: self.live.running))
         self.live.play_pipeline()
+
+    def test_nothing_there_twice_is_remembered_and_live_comes_back(self):
+        self.start_archived()
+        self.fail_unprobed()  # 43 min ago
+        links = len(self.catalog.links)
+        self.runner.answer(-1, "none")  # nothing there
+        self.assertNotIn("probe", self.budget.holders("Home"))  # the probe's slot is back
+        self.assertIn((NO_ANSWER_TEXT, "info"), self.toast.messages())
+        self.assertNotIn(("The stream could not be opened", "error"), self.toast.messages())
+        self.assertFalse(self.memory.failed(channel_key("Home", ARCHIVED)))  # once is no proof
+        self.assertEqual(len(self.catalog.links), links + 1)  # the channel live again
+        self.back_live()
+        self.fail_unprobed(1700.0)  # another moment, 32 min ago: nothing there again
+        self.runner.answer(-1, "none")
+        self.assertTrue(self.memory.failed(channel_key("Home", ARCHIVED)))
+        self.back_live()
         self.live.timelineChanged.emit(dict(STATE))
         self.controller.mouse_moved()
         state, _ticks = self.transport.named("update_timeline")[-1]
@@ -290,7 +304,20 @@ class FailureTests(CatchupCase):
         self.assertIn((NOT_AVAILABLE_TEXT, "info"), self.toast.messages())
         self.assertEqual(self.live.named("seek_relative")[-1], (-10.0,))  # the buffer only
 
+    def test_a_1_stream_account_goes_live_without_a_probe_and_learns_nothing(self):
+        self.start_archived()
+        self.transport.seekToRequested.emit(1000.0)
+        self.live.released.emit()
+        links = len(self.catalog.links)
+        self.session.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.runner.jobs, [])  # no slot for a probe beside the archive's
+        self.assertIn((NO_ANSWER_TEXT, "info"), self.toast.messages())
+        self.assertFalse(self.catchup.active())
+        self.assertEqual(len(self.catalog.links), links + 1)
+        self.assertFalse(self.memory.failed(channel_key("Home", ARCHIVED)))
+
     def test_a_refusal_after_vlc_failed_teaches_nothing(self):
+        self.start_archived()
         self.fail_unprobed()
         links = len(self.catalog.links)
         self.runner.answer(-1, "refused")  # the live stream closed a moment ago still counts
@@ -300,6 +327,7 @@ class FailureTests(CatchupCase):
         self.assertEqual(len(self.catalog.links), links + 1)  # live again
 
     def test_an_archive_that_plays_when_probed_opens_again_once(self):
+        self.start_archived()
         self.fail_unprobed()
         plays = len(self.archive_plays())
         self.runner.answer(0, "plays")
@@ -309,6 +337,60 @@ class FailureTests(CatchupCase):
         self.assertEqual(self.runner.jobs, [])
         self.assertFalse(self.catchup.active())
         self.assertFalse(self.memory.failed(channel_key("Home", ARCHIVED)))
+
+    def test_an_answer_to_a_guessed_time_zone_teaches_nothing(self):
+        del self.catalog.archive_zone  # an Xtream catalog loaded before 2.3: no zone known
+        self.start_archived()
+        self.fail_unprobed()
+        self.runner.answer(-1, "none")
+        self.back_live()
+        self.fail_unprobed(1700.0)
+        self.runner.answer(-1, "none")
+        self.assertFalse(self.memory.failed(channel_key("Home", ARCHIVED)))
+
+
+class GoLiveTests(CatchupCase):
+    def test_go_live_while_the_archive_waits_for_live_to_let_go_never_opens_it(self):
+        self.start_archived()
+        self.transport.seekToRequested.emit(1000.0)
+        self.assertEqual(self.live.calls[-1], ("stop",))  # the archive waits for the release
+        self.controller.handle(Action.GO_LIVE)
+        self.live.released.emit()
+        self.assertEqual(self.archive_plays(), [])  # the tuner dropped it
+        self.catalog.linkReady.emit(self.catalog.links[-1][0], ARCHIVED["cmd"])
+        self.assertTrue(wait_until(lambda: self.live.running))
+        self.assertEqual(self.archive_plays(), [])
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_a_stretch_is_at_most_six_hours_and_a_seek_past_it_opens_the_next(self):
+        self.start_archived()
+        current = self.controller._current
+        seven_hours = NOW.timestamp() - 7 * 3600
+        self.assertTrue(self.catchup.open(current, seven_hours))
+        self.live.released.emit()
+        self.assertIn("/360/2026-10-15:13-30/1.ts", self.archive_plays()[-1][0])
+        self.session.stateChanged.emit("playing")
+        self.session.seekable = True
+        plays = len(self.archive_plays())
+        self.transport.seekToRequested.emit(NOW.timestamp() - 3600)  # beyond the 6 hours
+        self.assertEqual(self.session.seeks, [])  # not within the opened stretch
+        self.assertEqual(len(self.archive_plays()), plays + 1)
+        self.assertIn("/2026-10-15:19-30/1.ts", self.archive_plays()[-1][0])
+
+
+class ZoneTests(CatchupCase):
+    def test_a_playlists_xc_channel_takes_the_zone_of_the_xtream_provider_on_its_server(self):
+        self.catalog.ptype = "M3UPLAYLIST"
+        del self.catalog.archive_zone  # an M3U provider: no zone of its own
+        berlin = provider_zone("Europe/Berlin")
+        self.catalog.xtream_zone_at = lambda host: berlin if host == "panel.test" else None
+        channel = dict(ARCHIVED, catchup="xc")
+        self.start_archived(channel)
+        self.transport.seekToRequested.emit(1000.0)
+        self.runner.answer(0, "plays")
+        self.live.released.emit()
+        # 19:46:40 UTC is 21:46 in the panel's zone (summer time).
+        self.assertIn("/2026-10-15:21-46/1.ts", self.archive_plays()[-1][0])
 
 
 class ProbeTests(CatchupCase):
@@ -335,15 +417,31 @@ class ProbeTests(CatchupCase):
         self.assertEqual(self.archive_plays()[-1][0], worker.urls[0])
         self.assertEqual(self.memory.answered(channel_key("Home", APPENDED)), 0)
 
-    def test_nothing_there_is_said_remembered_and_the_channel_plays_on(self):
+    def test_nothing_there_is_said_and_the_channel_plays_on(self):
         self.live.timelineChanged.emit(dict(STATE))
         self.transport.seekToRequested.emit(1000.0)  # 43 min ago
         self.runner.answer(-1, "none")
         self.assertEqual(self.budget.holders("Home"), ["main"])
         self.assertIn((NO_ANSWER_TEXT, "info"), self.toast.messages())
-        self.assertTrue(self.memory.failed(channel_key("Home", APPENDED)))
+        self.assertFalse(self.memory.failed(channel_key("Home", APPENDED)))  # one: no proof
         self.assertTrue(self.live.running)
         self.assertEqual(self.archive_plays(), [])
+        self.transport.seekToRequested.emit(1700.0)  # another moment: nothing there again
+        self.runner.answer(-1, "none")
+        self.assertTrue(self.memory.failed(channel_key("Home", APPENDED)))
+
+    def test_go_live_and_a_seek_within_the_buffer_drop_a_probe(self):
+        self.live.timelineChanged.emit(dict(STATE))
+        self.transport.seekToRequested.emit(1000.0)  # a probe runs
+        self.controller.handle(Action.GO_LIVE)
+        self.runner.answer(0, "plays")
+        self.assertEqual(self.archive_plays(), [])
+        self.assertEqual(self.budget.holders("Home"), ["main"])  # its slot went back
+        self.transport.seekToRequested.emit(1000.0)
+        self.transport.seekToRequested.emit(3200.0)  # within the buffer
+        self.runner.answer(0, "plays")
+        self.assertEqual(self.archive_plays(), [])
+        self.assertEqual(self.live.named("seek_to")[-1], (3200.0,))
 
     def test_a_refusal_teaches_nothing(self):
         self.controller.handle(Action.SEEK_BACK)

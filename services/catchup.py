@@ -10,33 +10,39 @@ that has one (a catalog can hold 200,000 items; older builds ignore the keys):
 - `archive_days`: its depth in days (Xtream: `tv_archive_duration` where `tv_archive` is 1; M3U:
   `catchup-days`, else `timeshift` or `tvg-rec`);
 - M3U only: `catchup`, its type (default, append, shift, flussonic, xc, or auto for days
-  given without a type), and
-  `catchup_source`, the template the type fills in, when the playlist gives one. A playlist's
-  `#EXTM3U` line may set them for every channel.
+  given without a type), and `catchup_source`, the template the type fills in, when the
+  channel's line gives one. A playlist's `#EXTM3U` line may set them for every channel; its
+  template is kept once, beside the channels (the catalog's `catchup_source`, `archive_of`'s
+  `playlist_source`), not on each of them.
 A catalog saved before 2.3 has none of them: its channels have no archive until it refreshes.
 
 Addresses (`archive_urls`):
 - Xtream: `{base}/timeshift/{user}/{pass}/{minutes}/{YYYY-MM-DD:HH-MM}/{id}.ts`, then the
   `{base}/streaming/timeshift.php?username=…&password=…&stream=…&start=…&duration=…` form. The
   start is a whole minute in the panel's time zone (`provider_zone`: Player API server_info's
-  `timezone`, else the offset its `time_now` shows against `timestamp_now`, else UTC).
+  `timezone`, else the offset its `time_now` shows against `timestamp_now`). Without one
+  (a catalog loaded before 2.3, or a playlist's xc channel whose server is no Xtream provider
+  of the user's) it is a UTC guess, and an answer to a guess teaches nothing.
 - M3U, by its type: default (the template is the address), append (the template goes after
   the channel's address), shift (`utc=` and `lutc=` go after it), flussonic
   (`…/index-{start}-{duration}.m3u8`, `…/timeshift_abs-{start}.ts`) and xc (the Xtream form,
-  built from the channel's address, in UTC: a playlist names no time zone); auto (days with
+  built from the channel's address, in the panel's time zone when an Xtream provider of the
+  user's is on its server, else a UTC guess: a playlist names none); auto (days with
   no type, as playlists made by Xtream panels give them) is xc for an Xtream stream's address
   (`…/live/U/P/123.ts`, or `…/U/P/123`), else shift. Templates take the
   common placeholders, as the public documentation of catch-up playlists names them:
   {utc} ${start} {start}, {utcend} ${end} {end}, {lutc} ${now} {now} ${timestamp}
   {timestamp} (Unix seconds); {duration} ${duration} (seconds), {duration:60} (divided);
   {offset} ${offset} {offset:N} (now less the start); {Y} {m} {d} {H} {M} {S} (the start in
-  UTC); and a format after a time's name, {utc:Y-m-d:H-M} or ${start:YmdHMS}.
+  UTC); and a format after a time's name, {utc:Y-m-d:H-M} or ${start:YmdHMS}. A template
+  that still has a placeholder after that (one QiTV doesn't know) makes no address.
 
 The probe (`probe`, run on a worker; `judge` decides) reads the first 16 KB of an address and
-closes it: MPEG-TS packets or an HLS playlist mean the archive plays (`PLAYS`); 404, 410 or
-400, an empty answer, or an HTML, JSON or text page mean there is nothing (`NONE`); a refusal
-that may be the provider's connection limit (401, 403, 407, 429, 458) is `REFUSED`; anything
-else, a network failure included, proves nothing (`UNKNOWN`).
+closes it: MPEG-TS packets (found wherever the first sync byte is: an archive may start in the
+middle of a packet) or an HLS playlist mean the archive plays (`PLAYS`); only a 404, 410 or
+400 means there is nothing (`NONE`); a refusal that may be the provider's connection limit
+(401, 403, 407, 429, 458) is `REFUSED`; anything else, an empty answer, an HTML, JSON or text
+page and a network failure included, proves nothing (`UNKNOWN`).
 """
 
 from __future__ import annotations
@@ -150,20 +156,36 @@ def m3u_archive_fields(
     return fields
 
 
-def archive_of(item: Mapping[str, Any]) -> Optional[Archive]:
-    """The channel's archive as the loaders kept it on the item; None without one."""
+def archive_of(item: Mapping[str, Any], playlist_source: str = "") -> Optional[Archive]:
+    """The channel's archive as the loaders kept it on the item; None without one. A default
+    or append type without a template of its own takes the playlist's (`playlist_source`,
+    the catalog's `catchup_source`); its source is "" when that is not given."""
     days = item.get(ARCHIVE_KEY)
     if not isinstance(days, int) or isinstance(days, bool) or days <= 0:
         return None
     kind = item.get(TYPE_KEY)
     if kind is None:
         return Archive(min(days, MAX_DAYS), XTREAM)
-    source = item.get(SOURCE_KEY) or ""
+    source = item.get(SOURCE_KEY) or playlist_source or ""
     if kind not in TYPES or not isinstance(source, str):
         return None
-    if kind in ("default", "append") and not source:
-        return None
     return Archive(min(days, MAX_DAYS), kind, source)
+
+
+def playlist_fields(attributes: Mapping[str, str], defaults: Mapping[str, str]) -> dict[str, Any]:
+    """`m3u_archive_fields` for a channel of a playlist whose `#EXTM3U` line has `defaults`,
+    without the line's template (kept once, beside the channels: `archive_of`'s
+    `playlist_source`) when the channel takes it from there."""
+    fields = m3u_archive_fields(attributes, defaults)
+    if SOURCE_KEY in fields and not str(attributes.get("catchup-source") or "").strip():
+        del fields[SOURCE_KEY]
+    return fields
+
+
+def wall_clock(archive: Archive, cmd: str) -> bool:
+    """Whether the archive's address names its start as a panel's local date and time (an
+    Xtream one), not as Unix seconds."""
+    return archive.kind in (XTREAM, "xc") or (archive.kind == "auto" and _xtream_like(cmd))
 
 
 # ---- the panel's time zone -----------------------------------------------------------------
@@ -201,6 +223,11 @@ def _offset_minutes(time_now: Any, timestamp_now: Any) -> Optional[int]:
 
 def provider_zone(name: Any = None, offset: Any = None) -> tzinfo:
     """The panel's time zone: by its name when this system knows it, else its offset, else UTC."""
+    return known_zone(name, offset) or timezone.utc
+
+
+def known_zone(name: Any = None, offset: Any = None) -> Optional[tzinfo]:
+    """`provider_zone`, or None when neither its name nor its offset is known."""
     if isinstance(name, str) and name.strip():
         try:
             from zoneinfo import ZoneInfo
@@ -210,7 +237,7 @@ def provider_zone(name: Any = None, offset: Any = None) -> tzinfo:
             logger.debug("Unknown panel time zone; using its offset")
     if isinstance(offset, int) and not isinstance(offset, bool) and abs(offset) <= 15 * 60:
         return timezone(timedelta(minutes=offset))
-    return timezone.utc
+    return None
 
 
 # ---- addresses -----------------------------------------------------------------------------
@@ -391,16 +418,26 @@ def _flussonic(cmd: str, start: datetime, duration_s: float) -> Optional[str]:
 
 
 def m3u_archive_url(
-    archive: Archive, cmd: str, start: datetime, duration_s: float, now: datetime
+    archive: Archive,
+    cmd: str,
+    start: datetime,
+    duration_s: float,
+    now: datetime,
+    zone: tzinfo = timezone.utc,
 ) -> Optional[str]:
-    """An M3U channel's archive from `start` for `duration_s`, as its type makes it; None
-    when its address does not fit the type."""
+    """An M3U channel's archive from `start` for `duration_s`, as its type makes it (an xc
+    one in `zone`); None when its address does not fit the type, or its template has a
+    placeholder QiTV doesn't know."""
     end = start + timedelta(seconds=max(0.0, duration_s))
     kind = archive.kind
-    if kind == "default":
-        return expand(archive.source, start, end, now)
-    if kind == "append":
-        return f"{cmd}{expand(archive.source, start, end, now)}"
+    if kind in ("default", "append"):
+        if not archive.source:
+            return None
+        filled = expand(archive.source, start, end, now)
+        if "{" in filled:
+            logger.info("A catch-up template with a placeholder QiTV doesn't know")
+            return None
+        return filled if kind == "default" else f"{cmd}{filled}"
     if kind == "auto":
         kind = "xc" if _xtream_like(cmd) else "shift"
     if kind == "shift":
@@ -409,7 +446,7 @@ def m3u_archive_url(
     if kind == "flussonic":
         return _flussonic(cmd, start, duration_s)
     if kind == "xc":
-        urls = xtream_archive_urls(cmd, start, duration_s, timezone.utc)
+        urls = xtream_archive_urls(cmd, start, duration_s, zone)
         return urls[0] if urls else None
     return None
 
@@ -430,15 +467,14 @@ def archive_urls(
         return xtream_archive_urls(
             cmd, start, duration_s, zone, username=username, password=password
         )
-    url = m3u_archive_url(archive, cmd, start, duration_s, now)
+    url = m3u_archive_url(archive, cmd, start, duration_s, now, zone)
     return [url] if url and url.lower().startswith(("http://", "https://")) else []
 
 
 def address_start(archive: Archive, start: datetime, cmd: str = "") -> datetime:
     """Where an address for `start` really starts: an Xtream one (`cmd`'s, for auto) at the
     whole minute."""
-    minute = archive.kind in (XTREAM, "xc") or (archive.kind == "auto" and _xtream_like(cmd))
-    if minute:
+    if wall_clock(archive, cmd):
         return start.replace(second=0, microsecond=0)
     return start.replace(microsecond=0)
 
@@ -479,9 +515,21 @@ def judge(status: int, content_type: str, head: bytes) -> Answer:
     if head.lstrip(b"\xef\xbb\xbf \r\n\t").startswith(b"#EXTM3U") or _ts_sync(head):
         return Answer.PLAYS
     if not head or kind.startswith(_PAGES):
-        return Answer.NONE
+        return Answer.UNKNOWN  # an empty answer or a page: a server's mood, not proof
     if kind.startswith(_MEDIA) or "mpegurl" in kind:
         return Answer.PLAYS
+    return Answer.UNKNOWN
+
+
+def overall(answers: list[Answer]) -> Answer:
+    """The answer of an archive's address forms together: it plays when one plays, it was
+    refused when one was, there is nothing only when every form said so; else unknown."""
+    if Answer.PLAYS in answers:
+        return Answer.PLAYS
+    if Answer.REFUSED in answers:
+        return Answer.REFUSED
+    if answers and all(answer is Answer.NONE for answer in answers):
+        return Answer.NONE
     return Answer.UNKNOWN
 
 

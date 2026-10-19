@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 
 from services.catchup import (
     Answer,
+    overall,
     probe,
     xtream_archive_fields,
     xtream_zone_fields,
@@ -630,10 +631,11 @@ class StbListWorker(QObject):
 
 class ArchiveProbeWorker(QObject):
     """Probe a channel's archive addresses in turn (catch-up, 2.3): `finished` carries
-    (the index of the first that plays, or -1; the last answer's value, an Answer).
+    (the index of the first that plays, or -1; the forms' answer together, `catchup.overall`).
 
     A refusal stops there (it may be the provider's connection limit: asking the next form
-    would only be refused too); a "nothing there" or no clear answer tries the next form.
+    would only be refused too); a "nothing there" or no clear answer tries the next form, and
+    "nothing there" is the answer only when every form said so.
     """
 
     finished = Signal(object)
@@ -646,12 +648,13 @@ class ArchiveProbeWorker(QObject):
         self.verify_ssl = verify_ssl
 
     def run(self):
-        answer = Answer.UNKNOWN
+        answers: List[Answer] = []
         for index, url in enumerate(self.urls):
             answer = probe(url, headers=self.headers, verify=self.verify_ssl)
             if answer is Answer.PLAYS:
                 self.finished.emit((index, answer.value))
                 return
+            answers.append(answer)
             if answer is Answer.REFUSED:
                 break
-        self.finished.emit((-1, answer.value))
+        self.finished.emit((-1, overall(answers).value))

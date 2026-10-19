@@ -10,7 +10,7 @@ each catalog gets its own pinned `ProviderManager` (and `EpgManager`) over that 
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, tzinfo
 import gc
 import itertools
 import logging
@@ -273,10 +273,24 @@ class Catalogs(QObject):
         catalog = self._by_name.get(name)
         return catalog.max_connections() if catalog is not None else None
 
-    def archive_zone(self, name: str) -> tzinfo:
-        """The time zone provider `name`'s archive addresses are in (UTC when unknown)."""
+    def archive_zone(self, name: str) -> Optional[tzinfo]:
+        """The time zone provider `name`'s archive addresses are in (None: not known)."""
         catalog = self._by_name.get(name)
-        return catalog.archive_zone() if catalog is not None else timezone.utc
+        return catalog.archive_zone() if catalog is not None else None
+
+    def xtream_zone_at(self, host: str) -> Optional[tzinfo]:
+        """The time zone of a signed-in provider whose streams are at `host` (an M3U
+        playlist's xc channels on an Xtream provider's server), when one knows it."""
+        for catalog in self._by_name.values():
+            zone = catalog.archive_zone()
+            if zone is not None and host in catalog.stream_hosts():
+                return zone
+        return None
+
+    def catchup_source(self, name: str) -> str:
+        """Provider `name`'s playlist-wide catch-up template ("" for none)."""
+        catalog = self._by_name.get(name)
+        return catalog.catchup_source() if catalog is not None else ""
 
     def use_guides(self, names: set[str]) -> None:
         """Keep the guides of `names` loaded; the others give their memory back."""

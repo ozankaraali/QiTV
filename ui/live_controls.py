@@ -496,6 +496,7 @@ class LiveControls(QObject):
         if not self.pipeline_live() or self.live is None:
             return False
         if not (back and self._rewind_to_archive(step)):
+            self.catchup.cancel()  # within the buffer: a probe for the archive is dropped
             self.live.seek_relative(step)
         self._show_transport()
         return True
@@ -506,6 +507,7 @@ class LiveControls(QObject):
             self.catchup.seek_relative(seconds)
         elif self.pipeline_live() and self.live is not None:
             if not (seconds < 0 and self._rewind_to_archive(seconds)):
+                self.catchup.cancel()
                 self.live.seek_relative(seconds)
         else:
             self.session.seek_relative(delta_ms)
@@ -515,10 +517,11 @@ class LiveControls(QObject):
             self.catchup.seek_to(seconds)  # the archive's bar is in Unix seconds
         elif self.pipeline_live() and self.live is not None:
             state = self._tuner.timeline
-            if state is None or seconds >= float(state["start"]) - _PAST_BUFFER_S:
-                self.live.seek_to(seconds)
-            elif not self._open_archive_at(state, seconds):
-                self.live.seek_to(seconds)
+            if state is not None and seconds < float(state["start"]) - _PAST_BUFFER_S:
+                if self._open_archive_at(state, seconds):
+                    return
+            self.catchup.cancel()  # within the buffer: a probe for the archive is dropped
+            self.live.seek_to(seconds)
 
     def _rewind_to_archive(self, seconds: float) -> bool:
         """A step back from where the buffer plays that lands before its start opens the
@@ -554,6 +557,7 @@ class LiveControls(QObject):
             self.catchup.go_live()  # the channel tunes again
             self._show_transport()
         elif current is not None and current.live and self._tuner.go_live():
+            self.catchup.cancel()  # a probe for the archive is dropped
             self._show_transport()
 
     def _programme_start(self) -> None:
@@ -577,6 +581,7 @@ class LiveControls(QObject):
             elif programme.is_on(watching) and self._open_archive_at(state, start):
                 self._show_transport()
                 return
+        self.catchup.cancel()
         self.live.seek_to(target)
         self._show_transport()
 

@@ -7,15 +7,16 @@ generation so results that arrive after a provider switch are dropped.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, tzinfo
 import itertools
 import logging
 import re
 from typing import Any, Callable, Iterator, Optional, cast
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services.catchup import provider_zone
+from services.catchup import known_zone
 from services.epg_view import Programme, programmes_for_channel
 from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as before)
     BLOCKED_PREFIX,
@@ -101,6 +102,18 @@ _UNREACHABLE = re.compile(
     r"|invalid url|no (?:scheme|host) supplied|no connection adapters|^failed to parse:",
     re.IGNORECASE,
 )
+
+
+def _host(url: Any) -> str:
+    """A web address's host and port, lower case ("" for none); one typed without its scheme
+    ("panel.example:8080") is read as http."""
+    text = str(url or "").strip()
+    if text and "://" not in text:
+        text = f"http://{text}"
+    try:
+        return urlsplit(text).netloc.lower()
+    except ValueError:
+        return ""
 
 
 def friendly_error(message: object) -> str:
@@ -642,13 +655,28 @@ class CatalogService(QObject):
                 return int(content["max_connections"])
         return None
 
-    def archive_zone(self) -> tzinfo:
+    def archive_zone(self) -> Optional[tzinfo]:
         """The time zone an Xtream panel's archive addresses are in (catch-up, 2.3): what its
-        sign-in said when the live channels loaded; UTC for any other provider."""
+        sign-in said when the live channels loaded; None when it is not known (another
+        provider, or live channels loaded before 2.3)."""
         content = self.provider_manager.current_provider_content.get("itv")
         if not isinstance(content, dict):
-            return timezone.utc
-        return provider_zone(content.get("timezone"), content.get("tz_offset"))
+            return None
+        return known_zone(content.get("timezone"), content.get("tz_offset"))
+
+    def stream_hosts(self) -> set[str]:
+        """The hosts (with their ports) the provider's address and its streams are at."""
+        hosts = {_host(self.current_provider().get("url"))}
+        content = self.provider_manager.current_provider_content.get("itv")
+        if isinstance(content, dict):
+            hosts |= {_host(content.get(key)) for key in ("resolved_base", "stream_base")}
+        return {host for host in hosts if host}
+
+    def catchup_source(self) -> str:
+        """An M3U playlist's catch-up template for every channel (its #EXTM3U line's), or ""."""
+        content = self.provider_manager.current_provider_content.get("itv")
+        source = content.get("catchup_source") if isinstance(content, dict) else None
+        return source if isinstance(source, str) else ""
 
     # --- sections --------------------------------------------------------------------
     def sections(self) -> list[str]:

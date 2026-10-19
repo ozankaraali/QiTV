@@ -1,14 +1,24 @@
 import re
+import sys
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from services.catchup import m3u_archive_fields
+from services.catchup import SOURCE_KEY, TYPE_KEY, m3u_archive_fields, playlist_fields
 from services.i18n import N_
 
 _ATTRIBUTE = re.compile(r'([A-Za-z][\w-]*)="([^"]*)"')
 # The attributes catch-up reads (services.catchup.m3u_archive_fields); the #EXTM3U line's set
-# them for every channel.
-_CATCHUP_ATTRIBUTES = ("catchup", "catchup-type", "catchup-days", "catchup-source", "timeshift")
+# them for every channel. A categorized playlist keeps that line's template once
+# (`catchup_source` beside its channels), not on each channel that takes it.
+_CATCHUP_ATTRIBUTES = (
+    "catchup",
+    "catchup-type",
+    "catchup-days",
+    "catchup-source",
+    "timeshift",
+    "tvg-rec",
+)
+PLAYLIST_SOURCE_KEY = "catchup_source"  # the #EXTM3U line's template, beside the channels
 
 
 def _attributes(line: str) -> Dict[str, str]:
@@ -79,8 +89,16 @@ def parse_m3u(data: str, categorize: bool = False):
             if referrer_match:  # only then: a channel without one stays as it was
                 item["referrer"] = referrer_match.group(1)
             if "catchup" in line or "timeshift" in line or "tvg-rec" in line or defaults:
-                # Only a channel with an archive gets its keys (catch-up, 2.3).
-                item.update(m3u_archive_fields(_attributes(line), defaults))
+                # Only a channel with an archive gets its keys (catch-up, 2.3), each type's
+                # name kept once in memory.
+                archive = (playlist_fields if categorize else m3u_archive_fields)(
+                    _attributes(line), defaults
+                )
+                if TYPE_KEY in archive:
+                    archive[TYPE_KEY] = sys.intern(archive[TYPE_KEY])
+                if SOURCE_KEY in archive:
+                    archive[SOURCE_KEY] = sys.intern(archive[SOURCE_KEY])
+                item.update(archive)
 
         elif line.startswith("#EXTVLCOPT:http-user-agent="):
             user_agent = line.split("=", 1)[1]
@@ -100,7 +118,10 @@ def parse_m3u(data: str, categorize: bool = False):
         return items
 
     # Build categorized structure
-    return _build_categorized_structure(items)
+    result = _build_categorized_structure(items)
+    if defaults.get("catchup-source"):
+        result[PLAYLIST_SOURCE_KEY] = defaults["catchup-source"]
+    return result
 
 
 def split_group_title(title: Optional[str]) -> List[str]:
