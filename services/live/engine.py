@@ -210,6 +210,16 @@ class _Supervisor(QThread):
                 self._send_open(conn, opened)  # otherwise on the helper's hello
             return
         record = self._records.get(sid)
+        if name == "resize":
+            if record is None or record.closing or record.command[5].get("kind") != "ram":
+                return  # a disk session keeps the user's size; a closed one is gone
+            ring = record.command[5]
+            # A reopen after a helper's death takes the new size too.
+            resized = dict(ring, max_bytes=command[2])
+            record.command = (*record.command[:5], resized, *record.command[6:])
+            if record.sent:
+                conn.send(command)
+            return
         if record is None:
             self._relay(("closed", sid))
         elif record.sent:
@@ -555,6 +565,15 @@ class LiveEngine(QObject):
             return
         view.closing = True
         self._commands.put(("close", sid))
+
+    def resize_session(self, sid: str, max_bytes: int) -> None:
+        """A RAM session holds up to `max_bytes` from now on (the multiview: the focused
+        tile's buffer grows, the others' shrink), also when a helper restart reopens it. A
+        disk session keeps the user's size."""
+        view = self._sessions.get(sid)
+        if view is None or view.closing or self._shut or max_bytes <= 0:
+            return
+        self._commands.put(("resize", sid, int(max_bytes)))
 
     def spans(self, sid: str) -> list[Span]:
         """The session's closed segments, oldest first; each says how cleanly playback starts

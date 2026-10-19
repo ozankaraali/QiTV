@@ -155,6 +155,10 @@ class ConfigManager:
     DEFAULT_OPTION_CORNER_PLAYER_CORNER = "bottom-right"  # what plays, small, over the Library
     CORNER_PLAYER_CORNER_CHOICES = ("top-left", "top-right", "bottom-left", "bottom-right")
     DEFAULT_OPTION_PIP_VOLUME = 30  # the small picture's own level once it is made audible
+    # 2.2, the multiview: a tile's time-shift buffer while it has no focus (an optional key,
+    # never written by default). 48 MiB holds one keyframe interval of a 4K channel.
+    DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB = 64
+    MULTIVIEW_TILE_RAM_RANGE = (48, 512)
     TV_DEFAULTS_VERSION = 2
     DEFAULT_TV_WINDOW = {"x": 80, "y": 80, "width": 1280, "height": 720}
     # A 1.x window smaller than this, or not landscape, does not size the TV window.
@@ -435,6 +439,12 @@ class ConfigManager:
     )
     pip_volume = _config_property(
         "pip_volume", DEFAULT_OPTION_PIP_VOLUME, coerce=int, clamp=(0, 100)
+    )
+    multiview_tile_ram_mib = _config_property(
+        "multiview_tile_ram_mib",
+        DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB,
+        coerce=int,
+        clamp=MULTIVIEW_TILE_RAM_RANGE,
     )
     subtitle_folder = _config_property("subtitle_folder", "", coerce=str)  # 2.2: Load a file…
     # 2.2: OpenSubtitles. Optional keys (older builds ignore them); the key and the password

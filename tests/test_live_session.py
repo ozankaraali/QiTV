@@ -62,6 +62,7 @@ class FakeEngine(QObject):
         self.gave_up = False  # an engine that gave up before this LiveSession existed
         self.opened = []  # (sid, url, keyword arguments)
         self.closed = []
+        self.resizes = []  # (sid, max_bytes): a multiview tile's buffer grew or shrank
         self.events = []  # ("open", sid) as sessions open
         self._answered = set()
         self._spans = {}
@@ -88,6 +89,9 @@ class FakeEngine(QObject):
         self.closed.append(sid)
         if self.gave_up:
             QTimer.singleShot(0, self.answer)
+
+    def resize_session(self, sid, max_bytes):
+        self.resizes.append((sid, max_bytes))
 
     def answer(self):
         """The helper confirms every close so far."""
@@ -594,6 +598,28 @@ class LiveSessionCase(unittest.TestCase):
         self.assertEqual(self.notices[-1], notice)
         self.assertEqual(self.modes[-1], "direct")
         self.assertFalse(self.live.is_pipeline())
+
+
+class ResizeTests(LiveSessionCase):
+    """2.2, the multiview: a tile's memory buffer grows with the focus and shrinks without."""
+
+    def test_a_running_memory_buffer_is_resized_and_a_later_open_takes_the_size(self):
+        sid = self.start(max_bytes=256 * MiB)
+        self.live.resize(64 * MiB)
+        self.assertEqual(self.engine.resizes, [(sid, 64 * MiB)])
+        self.live.resize(0)  # never an empty buffer
+        self.assertEqual(len(self.engine.resizes), 1)
+        self.assertEqual(self.live._open_args["max_bytes"], 64 * MiB)
+
+    def test_a_disk_buffer_keeps_the_users_size(self):
+        self.start(disk=True, max_bytes=4096 * MiB)
+        self.live.resize(64 * MiB)
+        self.assertEqual(self.engine.resizes, [])
+        self.assertEqual(self.live._open_args["max_bytes"], 4096 * MiB)
+
+    def test_before_a_start_only_the_size_is_kept(self):
+        self.live.resize(64 * MiB)
+        self.assertEqual(self.engine.resizes, [])
 
 
 class NoRewindReasonTests(LiveSessionCase):

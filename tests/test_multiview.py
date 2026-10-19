@@ -36,6 +36,7 @@ from ui.overlays.grid_tiles import (
 from ui.overlays.pip_label import LIVE
 
 LEFT = Qt.MouseButton.LeftButton
+MIB = 1024 * 1024
 # Another provider's channel, with an address of its own (not One to Four's at Home).
 HARBOR_NINE = {"id": 9, "name": "Nine", "number": "9", "cmd": "ffrt http://harbor/9"}
 HARBOR_NINE["_provider"] = "Harbor IPTV"
@@ -300,6 +301,28 @@ class TileSlotTests(unittest.TestCase):
             "t2", lambda: played.append("t2"), channel=CHANNELS[2], provider="P", limit=limit
         )
 
+    def test_a_time_shifted_tile_asks_for_its_slot_once_released_and_never_queues(self):
+        started, denied = [], []
+        self.sessions.slotDenied.connect(lambda n, limit: denied.append((n, limit)))
+        kwargs = {"url": "http://p/2", "headers": {}, "verify_ssl": True, "disk": False}
+        kwargs.update(latency="low", user_agent="QiTV", max_bytes=64 * MIB)
+        self.budget.request("P", 2, purpose="main")
+        self.sessions.open_slot(
+            "t2", channel=CHANNELS[2], provider="P", limit=2, start_kwargs=kwargs
+        )
+        self.assertTrue(wait_until(lambda: self.tile.live.running))
+        started.append(self.tile.live.url)
+        self.assertEqual(sorted(self.budget.holders("P")), ["main", "t2"])
+        self.budget.request("P", 3, purpose="pip")  # a third stream: P is full now
+        self.sessions.open_slot(
+            "t2", channel=CHANNELS[3], provider="P", limit=2, start_kwargs=kwargs
+        )
+        self.tile.live.released.emit()  # its first stream closed: then it asks
+        self.assertEqual(denied, [("t2", 2)])
+        self.assertIsNone(self.tile.channel)
+        self.assertEqual(self.budget._waiting, {})
+        self.assertEqual(started, ["http://p/2"])
+
     def test_a_tile_plays_within_the_limit_holding_a_stream_under_its_name(self):
         played = []
         self.budget.request("P", 2, purpose="main")
@@ -406,11 +429,15 @@ class MultiviewCase(PipCase):
         self.v()
 
     def pick_in(self, name, channel, url):
-        """A click on tile `name` ("+": the channel list opens), then `channel` picked there."""
+        """A click on tile `name` ("+": the channel list opens), then `channel` picked there
+        and played from its time-shift buffer."""
         self.grid_frame.tileClicked.emit(name)
         self.controller.tune(channel, group_key="10", channels=CHANNELS)
         self.ready(url)
-        return self.sessions.slot(name)
+        slot = self.sessions.slot(name)
+        self.assertTrue(wait_until(lambda: slot.live.running and slot.live.url == url))
+        slot.live.play_pipeline()
+        return slot
 
 
 class MultiviewTests(MultiviewCase):
@@ -464,14 +491,14 @@ class MultiviewTests(MultiviewCase):
         self.start_large(0)
         self.v()
         t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
-        self.assertEqual(t2.playback.plays[-1][0], "http://stream/3")
         t3 = self.pick_in("t3", CHANNELS[3], "http://stream/4")
         self.grid_frame.focusRequested.emit("main")
         self.v()
         self.assertIs(self.sessions.large(), self.main_slot)
         self.assertIs(self.sessions.small(), t3)  # focused just before
-        self.assertEqual(t2.playback.stops, 1)
-        self.assertEqual(t3.playback.stops, 0)
+        self.assertEqual(t2.live.calls[-1], ("stop",))
+        self.assertTrue(t3.live.running)
+        t2.live.released.emit()  # its upstream closed
         self.assertEqual(sorted(self.budget.holders("Home")), ["main", "t3"])
 
     def test_a_plus_tile_takes_the_focus_opens_the_channel_list_and_plays_the_pick(self):
@@ -484,13 +511,16 @@ class MultiviewTests(MultiviewCase):
         self.controller.tune(CHANNELS[2], group_key="10", channels=CHANNELS)
         self.ready("http://stream/3")
         t2 = self.sessions.slot("t2")
-        url, kwargs = t2.playback.plays[-1]
-        self.assertEqual(url, "http://stream/3")  # directly: no time-shift in a tile yet
-        self.assertEqual(t2.live.calls, [])
+        self.assertTrue(wait_until(lambda: t2.live.named("start")))
+        url, kwargs = t2.live.named("start")[-1]
+        self.assertEqual(url, "http://stream/3")  # through its time-shift buffer
+        self.assertEqual((kwargs["disk"], kwargs["max_bytes"]), (False, 256 * MIB))  # focused
+        self.assertEqual(t2.playback.plays, [])  # never directly
         self.assertTrue(ZapContext.same(t2.channel, CHANNELS[2]))
         self.assertEqual(sorted(self.budget.holders("Home")), ["main", "t2"])
         self.assertEqual(len(self.live.calls), live_calls)  # tile 1 plays on
         self.assertEqual(self.grid.state("t2"), OPENING)
+        t2.live.play_pipeline()
         t2.playback.stateChanged.emit("playing")
         self.assertEqual(self.grid.state("t2"), PLAYING)
         self.assertEqual(self.watch.plays[-1][1]["name"], "Three")
@@ -559,14 +589,58 @@ class MultiviewTests(MultiviewCase):
         self.v()
         t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
         self.grid_frame.focusRequested.emit("main")
-        t2.playback.errorOccurred.emit("the stream broke")
+        t2.live.failed.emit("The stream broke")
         self.assertEqual(self.grid.state("t2"), FAILED)
-        self.assertEqual(t2.playback.stops, 1)
+        self.assertEqual(t2.live.calls[-1], ("stop",))
+        t2.live.released.emit()
         self.assertEqual(self.budget.holders("Home"), ["main"])
         links = len(self.catalog.links)
         self.grid_frame.tileClicked.emit("t2")  # focus and try again
         self.assertEqual(self.sessions.large().name, "t2")
         self.assertEqual(len(self.catalog.links), links + 1)
+
+    def test_a_channel_that_cannot_be_time_shifted_plays_directly_and_says_when_it_fails(self):
+        self.start_large(0)
+        self.v()
+        self.grid_frame.tileClicked.emit("t2")
+        self.controller.tune(CHANNELS[2], group_key="10", channels=CHANNELS)
+        self.ready("rtsp://stream/3")  # not a stream the time-shift buffer reads
+        t2 = self.sessions.slot("t2")
+        self.assertEqual(t2.playback.plays[-1][0], "rtsp://stream/3")
+        self.assertEqual(t2.live.calls, [])
+        self.grid_frame.focusRequested.emit("main")
+        t2.playback.errorOccurred.emit("the stream broke")
+        self.assertEqual(self.grid.state("t2"), FAILED)
+        self.assertEqual(t2.playback.stops, 1)
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_the_focused_tiles_buffer_is_the_full_one_and_the_others_small(self):
+        # Stage 2: a tile out of focus keeps 64 MiB; the focus grows it to the memory per
+        # stream (and shrinks the one that had it); leaving gives the PiP its full buffer.
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.two_pictures()
+        self.assertEqual(self.pip_live.resizes, [64 * MIB])
+        self.assertEqual(self.live.resizes, [])
+        self.grid_frame.focusRequested.emit("pip")
+        self.assertEqual(self.pip_live.resizes[-1], 256 * MIB)
+        self.assertEqual(self.live.resizes[-1], 64 * MIB)
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.assertEqual(t2.live.named("start")[-1][1]["max_bytes"], 256 * MIB)
+        self.assertEqual(self.pip_live.resizes[-1], 64 * MIB)
+        self.grid_frame.focusRequested.emit("main")
+        self.assertEqual(t2.live.resizes[-1], 64 * MIB)
+        self.v()  # tile 2 (t2, focused before) stays small: a PiP's full buffer again
+        self.assertEqual(t2.live.resizes[-1], 256 * MIB)
+        self.assertEqual(self.live.resizes[-1], 256 * MIB)
+
+    def test_the_tiles_buffer_follows_the_optional_setting_never_under_48_mib(self):
+        self.config.multiview_tile_ram_mib = 96
+        self.assertEqual(self.grid.ring_sizes(), (256 * MIB, 96 * MIB))
+        self.config.multiview_tile_ram_mib = 16  # a 4K keyframe interval needs 48
+        self.assertEqual(self.grid.ring_sizes()[1], 48 * MIB)
+        self.config.timeshift_ram_mib = 128
+        self.config.multiview_tile_ram_mib = 512
+        self.assertEqual(self.grid.ring_sizes(), (128 * MIB, 128 * MIB))
 
     def test_the_guides_of_every_tiles_channel_are_in_use(self):
         self.start_large(0)
@@ -605,7 +679,7 @@ class OneStreamMultiviewTests(MultiviewCase):
         t2 = self.sessions.slot("t2")
         self.controller.tune(HARBOR_NINE, group_key="10", channels=[HARBOR_NINE])
         self.ready("http://harbor/9")
-        self.assertEqual(t2.playback.plays[-1][0], "http://harbor/9")
+        self.assertTrue(wait_until(lambda: t2.live.running and t2.live.url == "http://harbor/9"))
         self.assertEqual(self.budget.holders("Harbor IPTV"), ["t2"])
         self.assertEqual(self.grid.state("t2"), OPENING)
 
@@ -621,12 +695,13 @@ class OneStreamMultiviewTests(MultiviewCase):
         self.controller.tune(HARBOR_NINE, group_key="10", channels=[HARBOR_NINE])
         self.ready("http://harbor/9")
         self.live.released.emit()  # tile 1's time-shifted stream let go
-        self.assertTrue(wait_until(lambda: self.session.plays[-1][0] == "http://harbor/9"))
+        self.assertTrue(wait_until(lambda: self.live.running and self.live.url.endswith("/9")))
         self.assertEqual(self.budget.holders("Home"), [])
         self.grid_frame.tileClicked.emit("t2")
         self.assertEqual(len(self.catalog.links), links + 2)
         self.ready("http://stream/2")
-        self.assertEqual(self.sessions.slot("t2").playback.plays[-1][0], "http://stream/2")
+        t2 = self.sessions.slot("t2")
+        self.assertTrue(wait_until(lambda: t2.live.running and t2.live.url == "http://stream/2"))
         self.assertEqual(self.budget.holders("Home"), ["t2"])
 
 

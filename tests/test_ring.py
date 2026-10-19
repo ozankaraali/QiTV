@@ -125,6 +125,30 @@ class RamRingTests(unittest.TestCase):
         with self.assertRaisesRegex(RingError, "must be positive"):
             RamRing(0)
 
+    def test_a_smaller_cap_evicts_the_oldest_at_once_and_keeps_the_open_segment(self):
+        # A multiview tile's ring shrinks when it loses the focus, and grows when it has it.
+        ring = RamRing(1000)
+        for seq in range(5):
+            ring.open_segment(seq, b"")
+            ring.append(b"x" * 100)
+            ring.complete(seq)
+        ring.open_segment(5, b"")
+        ring.append(b"y" * 150)
+        ring.set_max_bytes(320)
+        self.assertIsNone(ring.read_at(0, 0, 1))  # gone, as a reader of it learns
+        self.assertEqual(ring.wait_for_seq(3, 0.1), "evicted")
+        self.assertEqual((ring.oldest_seq, ring.open_seq, ring.max_bytes), (4, 5, 320))
+        self.assertLessEqual(ring.charged, 320)
+        ring.set_max_bytes(100)  # the open segment alone is larger: it stays, nothing else
+        self.assertEqual((ring.oldest_seq, ring.charged), (5, 150))
+        ring.set_max_bytes(1000)
+        ring.append(b"z" * 500)  # room again
+        self.assertEqual(ring.charged, 650)
+        with self.assertRaisesRegex(RingError, "must be positive"):
+            ring.set_max_bytes(0)
+        ring.close()
+        ring.set_max_bytes(10)  # a closed ring changes nothing
+
     def test_open_segment_is_read_progressively(self):
         ring = RamRing(1000)
         ring.open_segment(0, b"HDR")

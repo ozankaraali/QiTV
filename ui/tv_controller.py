@@ -97,7 +97,7 @@ from ui.guide_controller import GuideController
 from ui.keymap import Action, as_int
 from ui.link_lanes import LinkLanes, Target
 from ui.live_controls import LiveControls, stream_options
-from ui.live_tuner import LiveTuner
+from ui.live_tuner import LiveTuner, start_kwargs as tune_kwargs
 from ui.mixer_controls import MixerControls
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.drawer import Drawer
@@ -1537,14 +1537,27 @@ class TVController(QObject):
     def _open_in_tile(
         self, target: Target, url: str, previous: Optional[Target], provider_name: str
     ) -> None:
-        """A live channel for the multiview's focused tile: it plays directly (no time-shift
-        in the grid's first stage), within its provider's limit."""
-        grid = self._grid
-        assert grid is not None
+        """A live channel for the multiview's focused tile, within its provider's limit:
+        through the time-shift pipeline in memory (the focused tile's buffer), as a PiP
+        opens, or directly when it cannot be time-shifted."""
+        grid, sessions = self._grid, self.sessions
+        assert grid is not None and sessions is not None
         item = target.item
         kind = classify(url, self.catalog.is_live("live"))
         self._current, self._cid = target, None
         session = self.session  # the focused tile's, whatever has the focus when it opens
+        limit = self._live_controls.limit(item)
+        if self._live_controls.through_pipeline(url, kind):
+            start = self._live_controls.live_start(target, url)
+            kwargs = tune_kwargs(start, self.config, disk=False)
+            size = sessions.tile_bytes(True)
+            if size is not None:
+                kwargs["max_bytes"] = size
+            grid.open_focused(item, provider=provider_name, limit=limit, start_kwargs=kwargs)
+            # The old stream is stopped: the channel's sync waits for its player's open.
+            self._tracks.prepare(session, target, previous)
+            self.overlays.transport.set_speed(1.0)  # LiveSession starts every tune at 1x
+            return
 
         def play_direct() -> None:
             self._tracks.prepare(session, target, previous)
@@ -1552,10 +1565,7 @@ class TVController(QObject):
             self._reset_speed(session)
 
         grid.open_focused(
-            item,
-            self._guarded(target, play_direct),
-            provider=provider_name,
-            limit=self._live_controls.limit(item),
+            item, self._guarded(target, play_direct), provider=provider_name, limit=limit
         )
 
     def _on_tile_denied(self, name: str) -> None:

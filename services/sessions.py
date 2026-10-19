@@ -30,8 +30,10 @@ refused (False).
 
 While a multiview's grid shows (`enter_grid` … `leave_grid`), picture in picture stands
 aside: the slots are tiles, the large one is the focused tile, and a tile opens a channel
-directly (`open_slot`: no time-shift) only when its provider's other streams leave it one;
-else `slotDenied` and nothing opens: a tile never waits, nor asks again by itself. A tile's
+(`open_slot`: through the time-shift pipeline as a PiP does, else directly) only when its
+provider's other streams leave it one; else `slotDenied` and nothing opens: a tile never
+waits, nor asks again by itself. A tile's memory buffer is small and the focused tile's the
+user's memory per stream (`set_large` grows the new focus and shrinks the old one). A tile's
 stream that fails says so (`slotFailed`); `close_slot` stops one. Leaving the grid keeps one
 tile as the PiP, or none.
 
@@ -131,7 +133,7 @@ class _StreamTuner(QObject):
 
 @dataclass
 class _Open:
-    """A PiP channel waiting for the old stream's release or for its budget slot."""
+    """A PiP's (or a tile's) channel waiting for the old stream's release or its slot."""
 
     slot: str  # the name of the slot it opens in (the small one when it was asked for)
     provider: str
@@ -180,7 +182,9 @@ class SessionManager(QObject):
         self._muted: dict[str, bool] = {}
         self._tuners: dict[str, SlotTuner] = {}
         self._grid = False  # the multiview's grid shows (enter_grid)
-        self._direct: set[str] = set()  # the tiles open_slot opened, until they stop
+        self._sizes: Optional[tuple[int, int]] = None  # (focused, other) tile buffers
+        self._direct: set[str] = set()  # the tiles open_slot opened directly, until they stop
+        self._tile_opens: dict[str, _Open] = {}  # tiles waiting for a release or a slot
         self._add(main, MAIN_LEVEL, muted=False)
         self._add(pip, PIP_LEVEL, muted=True)
         # A wanted level makes PlaybackSession apply it on every media it opens; without one
@@ -277,6 +281,9 @@ class SessionManager(QObject):
             users_mute = self._muted[old.name]
             self._set_mute(old, True)
             self._set_mute(new, users_mute)
+        if self._grid:  # the buffer and stay-live follow the focus
+            self._as_tile(new, focused=True)
+            self._as_tile(old, focused=False)
         self.largeChanged.emit(new.name, old.name)
         return True
 
@@ -319,47 +326,95 @@ class SessionManager(QObject):
         """The multiview's grid shows."""
         return self._grid
 
-    def enter_grid(self) -> None:
+    def enter_grid(self, *, full_bytes: int = 0, tile_bytes: int = 0) -> None:
         """The multiview's grid shows: picture in picture stands aside, its slot a tile that
         plays on (no pipStateChanged: the shell hides the PiP's frame and label itself). The
-        PiP's open or change on its way, if any, is the caller's to close first."""
+        PiP's open or change on its way, if any, is the caller's to close first.
+
+        With both sizes: a tile's memory buffer holds `tile_bytes` and the focused tile's
+        `full_bytes` (the user's memory per stream); `set_large` moves them with the focus
+        (a disk buffer keeps the user's size)."""
         self._grid = True
         self._open = False
+        self._sizes = (full_bytes, tile_bytes) if full_bytes > 0 and tile_bytes > 0 else None
+        for slot in self._slots.values():
+            if slot is not self._large:
+                self._as_tile(slot, focused=False)
 
     def leave_grid(self, keep: Optional[str] = None) -> None:
         """Back from the grid: slot `keep` (one that plays, not the large one) is the PiP's and
         PiP opens; None: PiP stays closed. pipStateChanged says which either way. The other
-        tiles are the caller's to close first."""
+        tiles are the caller's to close first. The kept tile's buffer grows back to the
+        memory per stream, as a PiP's."""
+        sizes = self._sizes
         self._grid = False
         self._direct.clear()
+        self._tile_opens.clear()
         if keep is not None and keep != self._large.name:
             self._small = self._slot(keep)
+            if sizes is not None:
+                self._resize(self._small, sizes[0])
+            self._sizes = None
             self._open = True
             self.pipStateChanged.emit(True)
             return
+        self._sizes = None
         if self._small is self._large:  # never: set_large keeps them apart
             self._small = next(s for s in self._slots.values() if s is not self._large)
         self._open = False
         self.pipStateChanged.emit(False)
 
+    def tile_bytes(self, focused: bool) -> Optional[int]:
+        """The memory buffer a tile opens with (None: as outside the grid)."""
+        sizes = self._sizes
+        if sizes is None:
+            return None
+        return sizes[0] if focused else sizes[1]
+
+    def _as_tile(self, slot: Slot, *, focused: bool) -> None:
+        """A tile's buffer follows its focus: the focused one's is the full one, the others'
+        small."""
+        size = self.tile_bytes(focused)
+        if size is not None:
+            self._resize(slot, size)
+
+    @staticmethod
+    def _resize(slot: Slot, size: int) -> None:
+        resize = getattr(slot.live, "resize", None)
+        if resize is not None:
+            resize(size)
+
     def open_slot(
         self,
         name: str,
-        action: Callable[[], None],
+        action: Optional[Callable[[], None]] = None,
         *,
         channel: dict,
         provider: str,
         limit: Optional[int],
+        start_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Open `channel` in tile `name` directly: what it played stops, and once that is
-        released `action` plays the channel, if `provider`'s other streams leave one within
-        `limit`; else slotDenied(name, limit) and nothing plays. The tile's tuner holds the
-        stream's budget slot, under the tile's name, until it stops."""
+        """Open `channel` in tile `name`: what it played stops first. Within `provider`'s
+        `limit`, never waiting for a stream (none free: slotDenied(name, limit), nothing
+        plays). The tile's streams hold their budget slots under its name.
+
+        With `start_kwargs` through the time-shift pipeline, as a PiP opens: its slot is
+        asked for once what the tile played is released, and `LiveSession.start()` follows
+        the grant. Without, directly: `action` plays the channel once that is released."""
         slot = self._slot(name)
         tuner = self._tuners[name]
+        self._tile_opens.pop(name, None)
+        if start_kwargs is not None:
+            self._stop(slot)
+            self._direct.discard(name)
+            slot.channel = channel
+            self._tile_opens[name] = _Open(name, provider, limit, dict(start_kwargs))
+            self.slotState.emit(name, True)
+            self._proceed()
+            return
         open_ = getattr(tuner, "open", None)
-        if open_ is None:
-            raise TypeError(f"The {name} slot's tuner cannot open a channel directly")
+        if open_ is None or action is None:
+            raise TypeError(f"The {name} slot cannot open a channel directly")
         slot.channel = channel
         self._direct.add(name)
         slot.playback.set_volume(self._levels[name])
@@ -371,12 +426,27 @@ class SessionManager(QObject):
         """Stop tile `name` (muted first, so nothing is heard while it stops); its stream's
         budget slot goes back once it is released."""
         slot = self._slot(name)
+        self._tile_opens.pop(name, None)
         slot.playback.set_muted(True)  # its next start applies its own mute again
         self._tuners[name].stop()
         slot.channel = slot.group_key = None
         slot.ticket = None
         self._direct.discard(name)
         self.slotState.emit(name, False)
+
+    def _start_tile(self, opening: _Open) -> None:
+        """A tile's budget slot was granted: its live session starts (muted unless focused or
+        made audible)."""
+        slot = self._slot(opening.slot)
+        stream = self._tuners[slot.name].stream
+        assert stream is not None
+        slot.playback.set_volume(self._levels[slot.name])
+        self._set_mute(slot, self._muted[slot.name])
+        try:
+            stream.start(**opening.start_kwargs)
+        except Exception as error:  # the stream gave its slot back and stopped the session
+            logger.warning("Could not start a tile's channel (%s)", type(error).__name__)
+            self.slotFailed.emit(slot.name, "")
 
     def _on_slot_denied(self, name: str, limit: int) -> None:
         if name in self._direct:
@@ -432,7 +502,20 @@ class SessionManager(QObject):
         slot.ticket = None
 
     def _proceed(self) -> None:
-        """Ask for the pending channel's slot once its player let go of what it played."""
+        """Ask for the pending channels' slots (the PiP's, the tiles') once their player let
+        go of what it played; never queued."""
+        for name, opening in list(self._tile_opens.items()):
+            slot = self._slot(name)
+            tuner = self._tuners[name]
+            stream = tuner.stream
+            if stream is None or tuner.releasing() or stream.ticket is not None:
+                continue
+            ticket = stream.request(opening.provider, opening.limit, queue=False)
+            slot.ticket = stream.ticket
+            if ticket == DENIED:  # only a limit denies, so it is a number
+                del self._tile_opens[name]
+                slot.channel = None  # it shows nothing
+                self.slotDenied.emit(name, opening.limit)
         pending = self._pending
         if pending is None:
             return
@@ -451,6 +534,11 @@ class SessionManager(QObject):
                 self.denied.emit(pending.limit)
 
     def _on_granted(self) -> None:
+        for name, tile in list(self._tile_opens.items()):
+            stream = self._tuners[name].stream
+            if stream is not None and stream.is_granted() and not stream.running():
+                del self._tile_opens[name]
+                self._start_tile(tile)
         pending = self._pending
         if pending is None:
             return

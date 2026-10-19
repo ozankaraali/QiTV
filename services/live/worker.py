@@ -22,6 +22,10 @@ Commands (parent to helper):
   HLS source starts far enough back for a start at that target (`HlsSource._depth`);
 - `("close", sid)`, always answered by `("closed", sid)`, once the session's upstream
   connection is closed but at most 0.5 s later;
+- `("resize", sid, max_bytes)` (2.2, the multiview): a RAM session holds up to `max_bytes`
+  from now on, its open ring at once (a smaller size evicts the oldest segments) and a ring
+  made later too; a disk session's size stays the user's. Unanswered; an unknown sid is
+  ignored;
 - `("shutdown",)`.
 
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
@@ -406,6 +410,22 @@ class _Session:
         self._last_notify = 0.0
         self._heard_edge = 0.0  # the live edge the latest state reported
         self.thread = threading.Thread(target=self._run, name="qitv-live-session", daemon=True)
+
+    def resize(self, max_bytes: int) -> None:
+        """Called by the command loop: a RAM session's size from now on (see "resize"). A
+        disk session's, or one that fell back to RAM after its disk failed, stays."""
+        from services.live.ring import RamRing, RingError
+
+        with self.lock:
+            if self.cancelled or self._ring_spec.get("kind") != "ram":
+                return
+            self._ring_spec = dict(self._ring_spec, max_bytes=max_bytes)  # a ring made later
+            ring = self._ring
+        if isinstance(ring, RamRing):
+            try:
+                ring.set_max_bytes(max_bytes)
+            except RingError:
+                _LOG.warning("A live buffer could not change its size.")
 
     def cancel(self) -> None:
         """Called by the command loop; never blocks and never joins the session thread."""
@@ -919,6 +939,13 @@ class _Helper:
                     self._open(*command[1:])
                 else:
                     self._close(command[1])
+            elif name == "resize":
+                size = command[2] if len(command) == 3 else None
+                if not isinstance(command[1], str) or type(size) is not int or size <= 0:
+                    raise ValueError("a resize needs a session and a positive size")
+                session = self._sessions.get(command[1])
+                if session is not None:
+                    session.resize(size)
             elif name == "shutdown":
                 return False
             else:

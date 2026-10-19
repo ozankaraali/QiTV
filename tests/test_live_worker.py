@@ -1309,6 +1309,39 @@ class OutboxTests(unittest.TestCase):
         parent.close()
         child.close()
 
+    def test_resize_sets_a_ram_sessions_size_now_and_for_a_ring_made_later(self):
+        # The multiview: the focused tile's buffer grows, the others' shrink (2.2).
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-live-worker-test-")
+        self.addCleanup(temporary.cleanup)
+        parent, child = multiprocessing.Pipe(duplex=True)
+        self.addCleanup(parent.close)
+        self.addCleanup(child.close)
+        helper = worker._Helper(child, temporary.name)
+        self.addCleanup(helper.server.stop)
+        url = "http://127.0.0.1:9" + SECRET_PATH
+        later = worker._Session(helper, "later", url, {}, True, dict(RAM), 6.0)
+        ram = worker._Session(helper, "ram", url, {}, True, dict(RAM), 6.0)
+        ram._ring = RamRing(RAM["max_bytes"])
+        for seq in range(4):
+            ram._ring.open_segment(seq, b"")
+            ram._ring.append(b"x" * 1000)
+            ram._ring.complete(seq)
+        disk_spec = {"kind": "disk", "dir": "d", "max_bytes": 1 << 30}
+        disk = worker._Session(helper, "disk", url, {}, True, disk_spec, 6.0)
+        helper._sessions.update(later=later, ram=ram, disk=disk)
+        self.assertTrue(helper._dispatch(("resize", "ram", 2500)))
+        self.assertEqual((ram._ring.max_bytes, ram._ring.oldest_seq), (2500, 2))
+        helper._dispatch(("resize", "later", 48 * 1024 * 1024))
+        self.assertEqual(later._make_ring().max_bytes, 48 * 1024 * 1024)
+        helper._dispatch(("resize", "disk", 1024))  # the user's disk size stays
+        self.assertEqual(disk._ring_spec["max_bytes"], 1 << 30)
+        helper._dispatch(("resize", "gone", 1024))  # a closed session: nothing
+        with self.assertLogs("services.live.worker", "WARNING"):
+            for bad in (("resize", "ram", 0), ("resize", "ram"), ("resize", "ram", "2")):
+                self.assertTrue(helper._dispatch(bad))  # the loop goes on
+        self.assertEqual(ram._ring.max_bytes, 2500)
+        self.assertFalse(parent.poll(0.1))  # unanswered
+
     def test_one_bad_message_never_stops_the_writer(self):
         parent, child = multiprocessing.Pipe(duplex=True)
         self.addCleanup(parent.close)

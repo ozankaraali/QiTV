@@ -10,8 +10,10 @@ One tile has the focus: it is the session manager's large slot, so the player co
 banner, zapping, the channel list, rewind and Go live act on it as on the big picture, and
 its sound plays (the others are muted, unless the mixer made one heard). A press on a tile
 focuses it; a click on the focused one opens the channel list, as on the big picture. A "+"
-tile focuses and opens the channel list: the channel picked plays there. Tiles play directly
-(no time-shift yet; a tile 1 or 2 that was time-shifted before keeps its buffer).
+tile focuses and opens the channel list: the channel picked plays there. Tiles play through
+the time-shift pipeline as a picture-in-picture does, in memory (a channel that cannot be
+time-shifted plays directly): the focused tile's buffer is the memory per stream, the
+others' a small one (`ring_sizes`), and the focus moves them (`SessionManager.set_large`).
 
 Before the focused tile asks for a link, its provider's limit is checked (an STB portal mints
 one per request): when the provider's other streams take all of it, the tile shows "No
@@ -35,6 +37,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 
+from services.config_manager import ConfigManager
 from services.live.stay_live import TARGETS
 from services.sessions import SessionManager, Slot
 from services.zapping import ZapContext
@@ -61,6 +64,8 @@ NO_PLAYERS = "Multiview needs more video players than this computer could open"
 LEAVE_FIRST = "Leave the multiview first (V)"
 TILE_TITLE = "Tile {number}"
 SHIFTED_MARGIN_S = 1.0  # a label says "−MM:SS" once the lag is this far beyond the target
+MIB = 1024 * 1024
+DEFAULT_RAM_MIB = ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB  # a config without the key
 _SHOWING = (OPENING, PLAYING)
 _PLAYING_STATES = ("playing", "paused")
 
@@ -274,7 +279,8 @@ class GridControls(QObject):
         self._previous = small.name if small is not None else None
         self._cards.clear()
         self._wanted.clear()
-        sessions.enter_grid()
+        full, tile = self.ring_sizes()
+        sessions.enter_grid(full_bytes=full, tile_bytes=tile)
         self._shown = True
         if self._pip_frame is not None:
             self._pip_frame.suspend()
@@ -387,15 +393,45 @@ class GridControls(QObject):
         return True
 
     def open_focused(
-        self, channel: dict, action: Callable[[], None], *, provider: str, limit: Optional[int]
+        self,
+        channel: dict,
+        action: Optional[Callable[[], None]] = None,
+        *,
+        provider: str,
+        limit: Optional[int],
+        start_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Play `channel` in the focused tile directly (`action` plays it once what it played
-        is released), within `provider`'s `limit`."""
+        """Play `channel` in the focused tile within `provider`'s `limit`: through the
+        time-shift pipeline with `start_kwargs` (`LiveSession.start`'s), else directly
+        (`action` plays it once what the tile played is released)."""
         name = self.sessions.large().name
         self._cards.pop(name, None)
         self._wanted[name] = (channel, provider)
-        self.sessions.open_slot(name, action, channel=channel, provider=provider, limit=limit)
+        self.sessions.open_slot(
+            name,
+            action,
+            channel=channel,
+            provider=provider,
+            limit=limit,
+            start_kwargs=start_kwargs,
+        )
         self._refresh()
+
+    def ring_sizes(self) -> tuple[int, int]:
+        """The focused tile's time-shift buffer (the memory per stream) and the others' (the
+        optional `multiview_tile_ram_mib`, 64 MiB by default, never under 48), in bytes."""
+        full = int(getattr(self.config, "timeshift_ram_mib", DEFAULT_RAM_MIB)) * MIB
+        low, high = ConfigManager.MULTIVIEW_TILE_RAM_RANGE
+        wanted = getattr(
+            self.config,
+            "multiview_tile_ram_mib",
+            ConfigManager.DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB,
+        )
+        try:
+            tile = max(low, min(high, int(wanted))) * MIB
+        except TypeError, ValueError:
+            tile = ConfigManager.DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB * MIB
+        return full, min(tile, full)
 
     def retry(self, name: str) -> None:
         """A click on a card: its channel again, in its tile (focused by then)."""

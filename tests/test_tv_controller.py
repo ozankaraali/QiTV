@@ -658,6 +658,7 @@ class FakeLiveSession(QObject):
         self.mode = ""
         self.running = False
         self.no_rewind_reason = UNAVAILABLE
+        self.resizes = []  # the memory buffer sizes the multiview gave it
 
     def named(self, name):
         return [c[1:] for c in self.calls if c[0] == name]
@@ -709,6 +710,10 @@ class FakeLiveSession(QObject):
 
     def set_latency(self, name):
         self.calls.append(("set_latency", name))
+
+    def resize(self, max_bytes):
+        """The multiview: its memory buffer grows with the focus or shrinks without it."""
+        self.resizes.append(max_bytes)
 
 
 class FakeWindow:

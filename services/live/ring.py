@@ -128,6 +128,27 @@ class Ring(ABC):
         with self._state_lock:
             return self._charged
 
+    @property
+    def max_bytes(self) -> int:
+        with self._state_lock:
+            return self._max_bytes
+
+    def set_max_bytes(self, max_bytes: int) -> None:
+        """Hold up to `max_bytes` from now on (a multiview tile's ring grows with the focus and
+        shrinks without it): a smaller cap evicts the oldest completed segments at once until
+        what is held fits; the open segment always stays, as the eviction keeps it."""
+        if max_bytes <= 0:
+            raise RingError("The temporary buffer size must be positive.")
+        with self._disk_lock:
+            with self._state_lock:
+                if self.closed:
+                    return
+                self._max_bytes = max_bytes
+            while self._charged > max_bytes and self._completed:
+                self._retire_oldest_locked()
+            with self.changed:
+                self.changed.notify_all()
+
     # ---- writer side ------------------------------------------------------------------
     def open_segment(self, seq: int, header: _Bytes) -> None:
         with self._disk_lock:

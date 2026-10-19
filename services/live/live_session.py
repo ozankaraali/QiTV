@@ -812,6 +812,17 @@ class LiveSession(QObject):
             self._steered, self._steer_burst = SteeredTarget(), None
             self._forget_feed()
 
+    def resize(self, max_bytes: int) -> None:
+        """A memory buffer's size from now on (2.2, the multiview: the focused tile's grows to
+        the memory per stream, the others' shrink): the running session's at once (a smaller
+        one lets its oldest minutes go), and a session reopened later. A disk buffer keeps
+        the user's size."""
+        if max_bytes <= 0 or self._open_args.get("disk"):
+            return
+        self._open_args["max_bytes"] = int(max_bytes)
+        if self._sid is not None:
+            self._engine.resize_session(self._sid, int(max_bytes))
+
     def buffered_range(self) -> tuple[float, float]:
         """The buffered timeline seconds, from the oldest point to the live edge."""
         if self._phase is not _Phase.PIPELINE:
