@@ -21,32 +21,24 @@ counts as expired.
 
 `LiveTuning` keeps the entries in memory and in `live_tuning.json` beside the config, at
 most `MAX_ENTRIES` (beyond it the least recently learned go first, a locked rate, direct
-play or software decoding still in force last). The file is read once; each change writes
-it on one background thread, the newest state only, through a temporary file swapped in. A
-missing, unreadable or corrupt file, or one of another version, counts as empty, and a bad
-entry is left out. The learned target is an optional field of version 1, so 2.0.x reads
-2.1's file (it ignores the field): one that makes no sense, or would not change the next
-tune (`Learned.informative`), is left out on its own, and an entry left with nothing is
-none. A 2.0.2 `extra` stays as it was: `LearnedTarget` reads it as a prior. Software
+play or software decoding still in force last), as `services.channel_store` keeps them: read
+once, written in the background, a bad entry left out. The learned target is an optional
+field of version 1, so 2.0.x reads 2.1's file (it ignores the field): one that makes no
+sense, or would not change the next tune (`Learned.informative`), is left out on its own,
+and an entry left with nothing is none. A 2.0.2 `extra` stays as it was: `LearnedTarget` reads it as a prior. Software
 decoding (2.1) is an optional field too, written only when it is so: 2.0.x reads an entry
 with it as without it. A write that fails is logged (without its path or any address).
 """
 
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
 import logging
 import math
-import os
-import tempfile
-import threading
-import time
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Mapping, Optional
 
-import orjson as json
-
+from services.channel_store import ChannelStore
 from services.live.learned_target import (
     EVENTS_MAX,
     FLOOR_S,
@@ -55,7 +47,6 @@ from services.live.learned_target import (
     NEED_MAX_S,
     Learned,
 )
-from services.redact import safe_message
 
 _LOG = logging.getLogger(__name__)
 
@@ -170,24 +161,14 @@ def _in_force(entry: Mapping[str, Any], now: float) -> tuple[bool, bool, bool]:
     return flags[0], flags[1], flags[2]
 
 
-class LiveTuning:
-    def __init__(
-        self,
-        path: Optional[str],
-        *,
-        max_entries: int = MAX_ENTRIES,
-        now: Callable[[], float] = time.time,
-    ) -> None:
-        """`path` None keeps what is learned for this run only."""
-        self._path = path
-        self._max = max_entries
-        self._now = now
-        self._lock = threading.Lock()  # the newest state's number, read by the writer
-        self._generation = 0
-        self._writer: Optional[ThreadPoolExecutor] = None
-        self._written: Optional[Future] = None
-        self._entries: dict[str, dict[str, Any]] = self._load()
-        self._trim()
+class LiveTuning(ChannelStore):
+    """`LiveTuning(path)`; `path` None keeps what is learned for this run only."""
+
+    WHAT = "live tuning"
+    VERSION = _VERSION
+    MAX_ENTRIES = MAX_ENTRIES
+    LOG = _LOG
+    _entry = staticmethod(_entry)
 
     def get(self, key: str) -> Tuning:
         """What the channel taught; a lock from `RATE_LOCK_S` ago or longer reads as none,
@@ -250,38 +231,6 @@ class LiveTuning:
             self._trim(now)
         self._save()
 
-    def flush(self, timeout: float = 5.0) -> None:
-        """Wait for the writes asked for so far (tests; at exit the pool waits by itself)."""
-        written = self._written
-        if written is not None:
-            written.result(timeout=timeout)
-
-    # ---- the file ------------------------------------------------------------------------
-    def _load(self) -> dict[str, dict[str, Any]]:
-        if self._path is None:
-            return {}
-        try:
-            with open(self._path, "rb") as f:
-                data = json.loads(f.read())
-        except FileNotFoundError:
-            return {}
-        except (OSError, json.JSONDecodeError) as e:
-            _LOG.info("Ignoring the saved live tuning: %s", safe_message(e))
-            return {}
-        channels = data.get("channels") if isinstance(data, dict) else None
-        if not isinstance(channels, dict):
-            _LOG.info("Ignoring the saved live tuning: it is not QiTV's")
-            return {}
-        if data.get("version") != _VERSION:
-            _LOG.info("Ignoring the saved live tuning: it is of another version")
-            return {}
-        entries = {}
-        for key, value in channels.items():
-            entry = _entry(value)
-            if isinstance(key, str) and key and entry is not None:
-                entries[key] = entry
-        return entries
-
     def _trim(self, now: Optional[float] = None) -> None:
         """Drop the entries beyond the cap: the least recently learned first, those with a
         locked rate, direct play or software decoding still in force last."""
@@ -295,39 +244,3 @@ class LiveTuning:
 
             for key in sorted(self._entries, key=worth)[:excess]:
                 del self._entries[key]
-
-    def _save(self) -> None:
-        if self._path is None:
-            return
-        snapshot = {"version": _VERSION, "channels": dict(self._entries)}
-        with self._lock:
-            self._generation += 1
-            generation = self._generation
-        if self._writer is None:
-            self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-tuning")
-        self._written = self._writer.submit(self._write, generation, snapshot)
-
-    def _write(self, generation: int, snapshot: dict[str, Any]) -> None:
-        """On the writer thread: write `snapshot` unless a newer one is queued."""
-        with self._lock:
-            if generation != self._generation:
-                return
-        path = self._path
-        assert path is not None
-        temporary = None
-        try:
-            fd, temporary = tempfile.mkstemp(
-                dir=os.path.dirname(path) or ".", prefix=".live_tuning-", suffix=".tmp"
-            )
-            with os.fdopen(fd, "wb") as f:
-                f.write(json.dumps(snapshot))
-            os.replace(temporary, path)
-            temporary = None
-        except Exception as e:  # anything else would stay in the Future, unseen
-            _LOG.warning("Couldn't save the live tuning: %s", safe_message(e))
-        finally:
-            if temporary is not None:
-                try:
-                    os.remove(temporary)
-                except OSError:
-                    pass
