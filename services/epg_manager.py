@@ -452,7 +452,7 @@ class EpgManager:
             with open(index_file, "r", encoding="utf-8") as f:
                 data = json.loads(f.read())
         except (json.JSONDecodeError, IOError) as e:
-            logger.warning(f"Error loading index file: {e}")
+            logger.warning("Error loading index file: %s", e)
             return {}
         return data if isinstance(data, dict) else {}
 
@@ -521,7 +521,7 @@ class EpgManager:
             # Keep tuple stable: channel id first, then sorted others
             other_keys = sorted(k for k in key_set if k != ch_id)
             multikeys = (ch_id, *other_keys)
-            programs.setdefault(multikeys, []).extend(plist)
+            programs[multikeys] = plist  # each channel id makes its own keys
 
         return programs
 
