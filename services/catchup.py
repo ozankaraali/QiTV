@@ -8,13 +8,21 @@ judges what a probe of that address read. No Qt.
 What a channel's archive is, as the loaders keep it on the catalog item, and only on a channel
 that has one (a catalog can hold 200,000 items; older builds ignore the keys):
 - `archive_days`: its depth in days (Xtream: `tv_archive_duration` where `tv_archive` is 1; M3U:
-  `catchup-days`, else `timeshift` or `tvg-rec`);
+  `catchup-days`, else `timeshift` or `tvg-rec`; STB: see `stb_archive_fields`);
 - M3U only: `catchup`, its type (default, append, shift, flussonic, xc, or auto for days
   given without a type), and `catchup_source`, the template the type fills in, when the
   channel's line gives one. A playlist's `#EXTM3U` line may set them for every channel; its
   template is kept once, beside the channels (the catalog's `catchup_source`, `archive_of`'s
-  `playlist_source`), not on each of them.
-A catalog saved before 2.2 has none of them: its channels have no archive until it refreshes.
+  `playlist_source`), not on each of them;
+- STB only: `catchup` "stb" (`STB`). Builds before it read no archive there: "stb" is no type
+  they know, so the channel has none for them.
+A catalog saved before 2.2 has none of them: its channels have no archive until it refreshes
+(an STB portal's cached channels gain theirs as the cache loads: `mark_stb_archives`).
+
+An STB portal's archive has no address QiTV can build: the portal makes a link to the recording
+of one programme of its guide (the programme's id there, `epg_view.Recording`), as it makes a
+channel's live link (`provider_api.stb_archive_link_url`). A moment inside a programme plays
+from that programme's link, sought to the moment; past its end the next programme's link plays.
 
 Addresses (`archive_urls`):
 - Xtream: `{base}/timeshift/{user}/{pass}/{minutes}/{YYYY-MM-DD:HH-MM}/{id}.ts`, then the
@@ -54,7 +62,7 @@ import logging
 import math
 import re
 import time
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from services.lazy_import import lazy_module
@@ -63,11 +71,21 @@ logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
 
 ARCHIVE_KEY = "archive_days"  # days of archive, on a channel that has one (not STB's "archive")
-TYPE_KEY = "catchup"  # M3U: its catch-up type
+TYPE_KEY = "catchup"  # M3U: its catch-up type; STB: STB
 SOURCE_KEY = "catchup_source"  # M3U: the template its type fills in
 XTREAM = "xtream"  # an Xtream panel's channel: its archive's type
+STB = "stb"  # an STB portal's channel: its archive's type (the portal makes each link)
 TYPES = ("default", "append", "shift", "flussonic", "xc", "auto")
 MAX_DAYS = 31  # a longer archive reads as this long
+# The channel fields an STB portal marks an archived channel with (1 or "1"): `tv_archive` as
+# portals commonly send it, `enable_tv_archive` and `archive` as some name it. `allow_pvr` is
+# the portal's own recorder, not an archive: it is not read.
+_STB_MARKS = ("tv_archive", "enable_tv_archive", "archive")
+# An STB portal's `tv_archive_duration` is in hours on many portals (a week, 168, is a common
+# default) and in days on others; the field does not say which. A depth above a month, or one
+# that is a whole number of days in hours (24, 48, 72…), is read as hours: no portal keeps 24
+# days where it means one, and a depth in days is a few of them.
+_STB_HOURS_OVER = MAX_DAYS
 MAX_MINUTES = 6 * 60  # the longest stretch one address asks for
 PROBE_BYTES = 16 * 1024
 PROBE_TIMEOUT_S = 8.0
@@ -115,6 +133,51 @@ def xtream_archive_fields(stream: Mapping[str, Any]) -> dict[str, Any]:
     if _days(stream.get("tv_archive")) != 1:
         return {}
     return {ARCHIVE_KEY: _days(stream.get("tv_archive_duration")) or 1}
+
+
+def _marked(value: Any) -> bool:
+    """A portal's yes: 1, "1", True or "true"."""
+    return str(value).strip().lower() in ("1", "true")
+
+
+def stb_archive_fields(channel: Mapping[str, Any]) -> dict[str, Any]:
+    """The archive keys of an STB portal's channel: `archive_days` and `catchup` STB where the
+    portal marks it archived (`_STB_MARKS`), else none. Its depth is `tv_archive_duration`:
+    hours when it is more than 31 or a whole number of days (24 is a day, 168 a week), else
+    days; a channel marked without one keeps a day."""
+    if not any(_marked(channel.get(name)) for name in _STB_MARKS):
+        return {}
+    try:
+        depth = float(str(channel.get("tv_archive_duration")).strip())
+    except TypeError, ValueError:
+        depth = 0.0
+    if not math.isfinite(depth) or depth <= 0:
+        days = 1
+    elif depth > _STB_HOURS_OVER or depth % 24 == 0:
+        days = math.ceil(depth / 24.0)
+    else:
+        days = math.ceil(depth)
+    return {ARCHIVE_KEY: max(1, min(days, MAX_DAYS)), TYPE_KEY: STB}
+
+
+def mark_stb_archives(channels: Any) -> None:
+    """Give an STB portal's live channels their archive keys (`stb_archive_fields`), in place:
+    a list of them, or a dict of such lists by group; keys a channel the portal no longer
+    marks had from here are dropped."""
+    lists = channels.values() if isinstance(channels, Mapping) else (channels,)
+    for listed in lists:
+        if not isinstance(listed, list):
+            continue
+        for channel in listed:
+            if not isinstance(channel, dict):
+                continue
+            fields = stb_archive_fields(channel)
+            if fields:
+                if any(channel.get(key) != value for key, value in fields.items()):
+                    channel.update(fields)  # a channel marked already is left as it is
+            elif channel.get(TYPE_KEY) == STB:
+                channel.pop(TYPE_KEY, None)
+                channel.pop(ARCHIVE_KEY, None)
 
 
 def m3u_archive_fields(
@@ -166,6 +229,8 @@ def archive_of(item: Mapping[str, Any], playlist_source: str = "") -> Optional[A
     kind = item.get(TYPE_KEY)
     if kind is None:
         return Archive(min(days, MAX_DAYS), XTREAM)
+    if kind == STB:
+        return Archive(min(days, MAX_DAYS), STB)
     source = item.get(SOURCE_KEY) or playlist_source or ""
     if kind not in TYPES or not isinstance(source, str):
         return None
@@ -180,6 +245,32 @@ def playlist_fields(attributes: Mapping[str, str], defaults: Mapping[str, str]) 
     if SOURCE_KEY in fields and not str(attributes.get("catchup-source") or "").strip():
         del fields[SOURCE_KEY]
     return fields
+
+
+def programme_in_archive(item: Mapping[str, Any], programme: Any) -> bool:
+    """Whether the channel's archive may hold `programme` (a guide's `epg_view.Programme`), its
+    depth aside: an STB portal's only one its guide lists with an id there (`recording`) and
+    does not mark as not recorded; any other archive, any programme."""
+    archive = archive_of(item)
+    if archive is None or archive.kind != STB:
+        return True
+    recording = getattr(programme, "recording", None)
+    return recording is not None and recording.marked is not False
+
+
+def recording_at(programmes: Iterable[Any], moment: datetime) -> Optional[Any]:
+    """The STB portal's recording (`epg_view.Recording`) of the guide's programme on at
+    `moment`, when the guide lists one not marked as not recorded; None otherwise."""
+    for programme in programmes:
+        recording = getattr(programme, "recording", None)
+        if (
+            recording is not None
+            and recording.marked is not False
+            and programme.is_on(moment)
+            and recording.start <= moment < recording.stop
+        ):
+            return recording
+    return None
 
 
 def wall_clock(archive: Archive, cmd: str) -> bool:
@@ -462,7 +553,10 @@ def archive_urls(
     username: str = "",
     password: str = "",
 ) -> list[str]:
-    """The addresses to try for the channel's archive from `start`, best first ([]: none)."""
+    """The addresses to try for the channel's archive from `start`, best first ([]: none, and
+    always for an STB portal's: the portal makes its links)."""
+    if archive.kind == STB:
+        return []
     if archive.kind == XTREAM:
         return xtream_archive_urls(
             cmd, start, duration_s, zone, username=username, password=password

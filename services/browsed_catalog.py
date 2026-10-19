@@ -579,6 +579,11 @@ class BrowsedCatalog(QObject):
     def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
         return self._catalogs.request_link(item, section=section, is_episode=is_episode)
 
+    def request_archive_link(self, item: dict, programme: str) -> int:
+        """The link of a programme's recording in the item's STB portal's archive (catch-up;
+        see Catalogs.request_archive_link)."""
+        return self._catalogs.request_archive_link(item, programme)
+
     def holds(self, request_id: int) -> bool:
         """Whether a link request waits for its provider's setup (see Catalogs.holds)."""
         return self._catalogs.holds(request_id)

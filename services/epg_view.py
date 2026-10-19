@@ -45,11 +45,26 @@ def guide_offset(provider: Any) -> timedelta:
 
 
 @dataclass(frozen=True)
+class Recording:
+    """A programme of an STB portal's guide as its archive knows it (catch-up): its id there
+    (the portal makes the recording's link from it) and the programme's own times (a programme
+    the guide shows in pieces is recorded whole). `marked`: the guide's `mark_archive`, True
+    when it says the programme is recorded, False when it says it is not, None when it says
+    nothing."""
+
+    id: str
+    start: datetime  # timezone-aware
+    stop: datetime  # timezone-aware
+    marked: Optional[bool] = None
+
+
+@dataclass(frozen=True)
 class Programme:
     title: str
     start: datetime  # timezone-aware
     stop: datetime  # timezone-aware
     description: str = ""
+    recording: Optional[Recording] = None  # an STB portal's guide's: its archive's entry
 
     def is_on(self, now: datetime) -> bool:
         return self.start <= now < self.stop
@@ -96,19 +111,37 @@ def _parse_stb_time(value: Any) -> Optional[datetime]:
         return None
 
 
+def _mark(value: Any) -> Optional[bool]:
+    """An STB guide's `mark_archive`: 1 recorded, 0 not, anything else unsaid."""
+    text = str(value).strip() if value is not None else ""
+    return {"1": True, "0": False}.get(text)
+
+
+def _recording(raw: dict, start: datetime, stop: datetime) -> Optional[Recording]:
+    """An STB guide entry's archive entry: its `id` (digits: the portal's archive link names
+    the programme by it) and `mark_archive`; None without an id."""
+    ident = str(raw.get("id") if raw.get("id") is not None else "").strip()
+    if not (ident.isascii() and ident.isdigit()):
+        return None
+    return Recording(ident, start, stop, _mark(raw.get("mark_archive")))
+
+
 def parse_programme(raw: dict) -> Optional[Programme]:
+    recording = None
     if "@start" in raw:
         start, stop = _parse_xmltv_time(raw.get("@start")), _parse_xmltv_time(raw.get("@stop"))
         title, description = _text(raw.get("title")), _text(raw.get("desc"))
     elif "time" in raw:
         start, stop = _parse_stb_time(raw.get("time")), _parse_stb_time(raw.get("time_to"))
         title, description = _text(raw.get("name")), _text(raw.get("descr"))
+        if start is not None and stop is not None:
+            recording = _recording(raw, start, stop)
     else:
         return None
     if start is None or stop is None or stop <= start:
         return None
     # i18n: a guide programme that has no title
-    return Programme(title or tr("Untitled"), start, stop, description)
+    return Programme(title or tr("Untitled"), start, stop, description, recording)
 
 
 def _piece(programme: Programme, start: datetime, stop: datetime) -> Programme:
@@ -170,10 +203,15 @@ def timeline(programmes: Iterable[Programme]) -> list[Programme]:
 
 
 def shifted(programme: Programme, offset: timedelta) -> Programme:
-    """`programme` moved by a guide time offset."""
+    """`programme` moved by a guide time offset (its recording's times too)."""
     if not offset:
         return programme
-    return replace(programme, start=programme.start + offset, stop=programme.stop + offset)
+    recording = programme.recording
+    if recording is not None:
+        recording = replace(recording, start=recording.start + offset, stop=recording.stop + offset)
+    return replace(
+        programme, start=programme.start + offset, stop=programme.stop + offset, recording=recording
+    )
 
 
 def normalize(

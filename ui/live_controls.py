@@ -19,7 +19,8 @@ records. A channel played directly, or one still opening, says why it cannot rec
 Provider catch-up (2.3, `ui.catchup_controls.CatchUp`): on a channel with an archive the bar
 reaches further back than the buffer; seeking there, stepping back past the buffer's start or
 ⏮ to a programme that began before it plays the provider's archive, and the transport's
-controls then act on it (Go live returns to the live channel).
+controls then act on it (Go live returns to the live channel). An STB portal's archive plays
+the recording of a programme of its guide, whose link the portal makes (asked in the side lane).
 
 TVController owns the target and the LiveTuner and hands this unit what it needs. With
 picture in picture it is the large picture's: a swap hands it the other player's tuner, live
@@ -187,6 +188,7 @@ class LiveControls(QObject):
             prepare=prepare,
             allowed=archive_allowed,
             runner=runner,
+            lanes=lanes,  # an STB portal makes its recordings' links
             parent=self,
         )
 

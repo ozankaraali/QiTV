@@ -12,6 +12,10 @@ calls it for a tune or a movie, and a side request that will play (an external p
 its own and drops the queued tune. A side play whose generation is no longer the newest when
 its link lands is dropped (one still waiting in line is never even asked for), and so is a
 tune in flight that it overtook (`tuneDropped`); a copied link is never superseded.
+
+The side lane also asks an STB portal for the link of a programme's recording in its archive
+(catch-up, `request_archive`): its answer, or its failure, goes to its asker, which drops
+one that comes too late itself; the lanes never supersede it.
 """
 
 from __future__ import annotations
@@ -71,6 +75,9 @@ class _SideJob:
     target: Target
     then: Callable[[str], None] = field(repr=False)  # takes the link
     generation: Optional[int]  # the choice it plays for; None: a copy, never superseded
+    programme: str = ""  # an STB archive's programme: the link asked is its recording's
+    # Takes the failure's message (an archive link's asker); None: sideFailed says it.
+    failed: Optional[Callable[[str], None]] = field(default=None, repr=False)
 
 
 class LinkLanes(QObject):
@@ -162,6 +169,22 @@ class LinkLanes(QObject):
         self._side_queue.append(_SideJob(target, then, generation))
         self._next_side()
 
+    def request_archive(
+        self,
+        target: Target,
+        programme: str,
+        then: Callable[[str], None],
+        failed: Callable[[str], None],
+    ) -> None:
+        """Ask, after the side requests before it, for the link of programme `programme`'s
+        recording in the archive of `target`'s STB portal (catch-up); `then` takes the link,
+        `failed` the failure's message (also when its provider's setup fails meanwhile:
+        "")."""
+        if self._closed:
+            return
+        self._side_queue.append(_SideJob(target, then, None, programme, failed))
+        self._next_side()
+
     def _side_pending(self, target: Target) -> bool:
         jobs = [self._side[1]] if self._side is not None else []
         return any(job.target is target for job in [*jobs, *self._side_queue])
@@ -173,9 +196,12 @@ class LinkLanes(QObject):
         if job is None:
             return
         section = job.target.section
-        request_id = self.catalog.request_link(
-            job.target.item, section=section, is_episode=section == "series"
-        )
+        if job.programme:
+            request_id = self.catalog.request_archive_link(job.target.item, job.programme)
+        else:
+            request_id = self.catalog.request_link(
+                job.target.item, section=section, is_episode=section == "series"
+            )
         self._side = (request_id, job)
 
     def _next_current_job(self) -> Optional[_SideJob]:
@@ -234,17 +260,23 @@ class LinkLanes(QObject):
             dropped = inflight[1]
             self._inflight = None
         lost = False
+        dropped_jobs: list[_SideJob] = []
         side = self._side
         if side is not None and owner(side[1].target.item) == name:
             self._side = None
-            lost = not self._superseded(side[1])
+            dropped_jobs.append(side[1])
         kept: deque[_SideJob] = deque()
         for job in self._side_queue:
             if owner(job.target.item) != name:
                 kept.append(job)
+            else:
+                dropped_jobs.append(job)
+        self._side_queue = kept
+        for job in dropped_jobs:
+            if job.failed is not None:
+                self._tell_failed(job, "")  # its asker says it
             elif not self._superseded(job):
                 lost = True
-        self._side_queue = kept
         self._next_side()
         return dropped, lost
 
@@ -286,8 +318,13 @@ class LinkLanes(QObject):
     def _on_failed(self, request_id: int, message: str) -> None:
         job = self._take_side(request_id)
         if job is not None:
-            self.sideFailed.emit(job.target, message)
-            self._next_side()
+            try:
+                if job.failed is not None:
+                    self._tell_failed(job, message)
+                else:
+                    self.sideFailed.emit(job.target, message)
+            finally:
+                self._next_side()
             return
         target = self._take_tune(request_id)
         if target is not None:
@@ -303,6 +340,21 @@ class LinkLanes(QObject):
             # The message can carry the link: logs get the type and the frames only.
             logger.warning("Could not use the link of %s (%s)", job.target.title, type(e).__name__)
             logger.debug("%s", safe_traceback(e))
-            self.sideFailed.emit(job.target, str(e))
+            if job.failed is not None:
+                self._tell_failed(job, "")
+            else:
+                self.sideFailed.emit(job.target, str(e))
         finally:
             self._next_side()
+
+    def _tell_failed(self, job: _SideJob, message: str) -> None:
+        """An archive link's failure, to its asker (whose own failure is logged here)."""
+        if job.failed is None:
+            return
+        try:
+            job.failed(message)
+        except Exception as e:
+            logger.warning(
+                "Could not report the archive link of %s (%s)", job.target.title, type(e).__name__
+            )
+            logger.debug("%s", safe_traceback(e))

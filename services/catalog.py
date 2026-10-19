@@ -1106,6 +1106,33 @@ class CatalogService(QObject):
         self._start(worker, "link", request_id, self._on_link_ready, self._on_link_error)
         return request_id
 
+    def request_archive_link(self, item: dict, programme: str) -> int:
+        """Ask the STB portal for the link of a programme's recording in its archive
+        (catch-up): `programme` is its id in the portal's guide (`epg_view.Recording`). Answered
+        as `request_link` is (linkReady, or linkFailed: EMPTY_LINK_MESSAGE when the portal
+        gave no link); a provider that is not an STB portal makes none."""
+        request_id = next(self._link_ids)
+        if self._closed:
+            return request_id
+        if self._setup_active():
+            self._fail_later(self.linkFailed, request_id, PROVIDER_LOADING_MESSAGE)
+            return request_id
+        if self.provider_type() != "STB" or not programme:
+            self._fail_later(self.linkFailed, request_id, NO_STREAM_MESSAGE)
+            return request_id
+        provider = self.current_provider()
+        worker = self.factory.link(
+            base_url=provider.get("url", ""),
+            headers=self.provider_manager.headers,
+            content_type="tv_archive",
+            cmd="",
+            verify_ssl=provider.get("ssl_verify", self.config.ssl_verify),
+            prefer_https=provider_prefers_https(provider, self.config.prefer_https),
+            programme=programme,
+        )
+        self._start(worker, "link", request_id, self._on_link_ready, self._on_link_error)
+        return request_id
+
     def _on_link_ready(self, job: _Job, payload) -> None:
         if not self._current(job):
             return

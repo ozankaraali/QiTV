@@ -1,6 +1,7 @@
 from copy import deepcopy
 import logging
 import os
+import sys
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QGuiApplication
@@ -435,6 +436,22 @@ class OptionsDialog(QDialog):
         )
         self.hardware_decoding_checkbox.setChecked(self.config_manager.hardware_decoding)
         self.settings_layout.addRow(self.hardware_decoding_checkbox)
+
+        # macOS only: another desktop than the fullscreen player's floats its picture.
+        self.desktop_pip_checkbox = QCheckBox(
+            tr("Float the picture when you leave a fullscreen desktop"), self.settings_tab
+        )
+        self.desktop_pip_checkbox.setToolTip(
+            tr(
+                "In fullscreen, switching to another desktop or app shows the picture in a small"
+                " window on every desktop; back on the player's desktop it fills the screen again."
+            )
+        )
+        self.desktop_pip_checkbox.setChecked(bool(self.config_manager.desktop_pip))
+        if sys.platform == "darwin":
+            self.settings_layout.addRow(self.desktop_pip_checkbox)
+        else:
+            self.desktop_pip_checkbox.hide()
 
         self.mouse_wheel_combo = QComboBox(self.settings_tab)
         for label, value in (
@@ -1219,6 +1236,8 @@ class OptionsDialog(QDialog):
         self.config_manager.ssl_verify = self.ssl_verify_checkbox.isChecked()
         self.config_manager.live_latency = self.live_latency_combo.currentData()
         self.config_manager.hardware_decoding = self.hardware_decoding_checkbox.isChecked()
+        if sys.platform == "darwin":
+            self.config_manager.desktop_pip = self.desktop_pip_checkbox.isChecked()
         self.config_manager.mouse_wheel_action = self.mouse_wheel_combo.currentData()
         self.config_manager.start_with_last_channel = self.start_last_channel_checkbox.isChecked()
         self.config_manager.play_in_vlc = self.play_in_vlc_checkbox.isChecked()

@@ -362,6 +362,45 @@ class FoundTests(unittest.TestCase):
         plain = parse_search(page(entry(7, "en", "a"), entry(8, "tr", "b")))
         self.assertEqual(split_matches(plain, query), (plain, []))
 
+    def test_a_film_one_subtitle_names_claims_its_others_under_the_original_name(self):
+        # Searched by a translated title without an id: one subtitle carries the translated
+        # name, the rest the film's original one, all with the film's ids; another film of the
+        # same year stays apart.
+        query = search_query("movies", "TR - Yaşayan Ölü Ovası (1968)")
+        film = dict(tmdb=4321, imdb=63350)
+        data = page(
+            entry(1, "tr", "olu.ovasi.tr", made_for=feature("Yaşayan Ölü Ovası", 1968, **film)),
+            entry(2, "en", "dead.plain.1968", made_for=feature("Plain of the Dead", 1968, **film)),
+            entry(3, "de", "dead.plain.de", made_for=feature("Plain of the Dead", 1968, **film)),
+            entry(4, "en", "other.1968", made_for=feature("Harbour Night", 1968, tmdb=99)),
+        )
+        matching, others = split_matches(parse_search(data), query)
+        self.assertEqual([f.file_id for f in matching], [1, 2, 3])
+        self.assertEqual([f.file_id for f in others], [4])
+
+    def test_a_word_two_titles_share_never_brings_another_film_along(self):
+        # One subtitle of another film shares a word and has no year: it may match, but its
+        # film's other subtitles (another year) are not claimed; nor when two films matched.
+        query = search_query("movies", "Harbour Lights (2019)")
+        other = dict(tmdb=2, imdb=None)
+        data = page(
+            entry(
+                1,
+                "en",
+                "harbour.night",
+                made_for=dict(feature("Harbour Night", 2003, **other), year=None),
+            ),
+            entry(2, "en", "crossing.2003", made_for=feature("Midnight Crossing", 2003, **other)),
+            entry(
+                3, "de", "crossing.2003.de", made_for=feature("Midnight Crossing", 2003, **other)
+            ),
+            entry(4, "en", "harbour.lights.2019", made_for=feature("Harbour Lights", 2019, tmdb=7)),
+        )
+        matching, others = split_matches(parse_search(data), query)
+        self.assertNotIn(2, [f.file_id for f in matching])
+        self.assertNotIn(3, [f.file_id for f in matching])
+        self.assertIn(4, [f.file_id for f in matching])
+
     def test_by_id_the_features_ids_count_and_the_year_checks_them(self):
         query = SearchQuery("Süper Liman Bekçileri", 2014, tmdb_id=4242)
         film = Feature("movie", "Brave Harbour Six", year=2014, tmdb_id=4242)

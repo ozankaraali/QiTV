@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 
 from services.catchup import (
     Answer,
+    mark_stb_archives,
     overall,
     probe,
     xtream_archive_fields,
@@ -27,6 +28,7 @@ from services.provider_api import (
     base_from_url,
     https_fallback_candidates,
     remember_xtream_root,
+    stb_archive_link_url,
     stb_create_link_url,
     stb_portal_base,
     stb_request_url,
@@ -500,6 +502,7 @@ class STBCategoriesWorker(QObject):
                 )
                 resp.raise_for_status()
                 all_channels = resp.json()["js"]["data"]
+                mark_stb_archives(all_channels)  # catch-up: the channels marked archived
                 sorted_channels: Dict[str, List[int]] = {}
                 for index, channel in enumerate(all_channels):
                     category_id = str(channel.get("tv_genre_id"))
@@ -511,6 +514,39 @@ class STBCategoriesWorker(QObject):
             self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
+
+
+# The `js.error` a portal answers a tv_archive create_link with when the programme has no
+# recording; any other ("limit", "link_fault", …) is the portal's own trouble.
+_NO_RECORDING_ERRORS = frozenset({"nothing_to_play"})
+# Raised (and so the worker's error) when the portal answered a recording's link with neither
+# a link nor "no recording": it says nothing of the recording.
+ARCHIVE_LINK_ERROR = "The portal answered the archive link with an error"
+
+
+def stb_archive_link(answer: Any) -> str:
+    """The link in an STB portal's answer to a tv_archive create_link: the last word of its
+    `js.cmd` ("ffrt http://…", or the address alone), as a channel's; "" when the portal says
+    the programme has no recording (an empty `cmd`, alone or with the `error`
+    "nothing_to_play"). Any other answer (another `error`, such as "limit"; no `js` dict, as
+    a portal without an archive to ask answers; a `cmd` that is no address, the
+    "/media/….mpg" asked for, unmade) raises ValueError: it says nothing of the recording."""
+    js = answer.get("js") if isinstance(answer, dict) else None
+    if not isinstance(js, dict):
+        raise ValueError(ARCHIVE_LINK_ERROR)
+    error = js.get("error")
+    error = error.strip() if isinstance(error, str) else ""
+    cmd = js.get("cmd")
+    cmd = cmd.strip() if isinstance(cmd, str) else ""
+    if error and error not in _NO_RECORDING_ERRORS:
+        logger.info("The portal made no archive link: %s", error[:40])
+        raise ValueError(ARCHIVE_LINK_ERROR)
+    if error or not cmd:
+        return ""  # no recording
+    link = cmd.split(" ")[-1]
+    if "://" not in link:
+        raise ValueError(ARCHIVE_LINK_ERROR)
+    return link
 
 
 class LinkCreatorWorker(QObject):
@@ -527,7 +563,10 @@ class LinkCreatorWorker(QObject):
         series_param: Optional[str] = None,
         verify_ssl: bool = True,
         prefer_https: bool = False,
+        programme: str = "",
     ):
+        """`programme`: the id of a programme in the portal's guide: the link made is its
+        recording's in the portal's archive (catch-up; `content_type` and `cmd` unused)."""
         super().__init__()
         self.base_url = base_url
         self.headers = headers
@@ -537,22 +576,30 @@ class LinkCreatorWorker(QObject):
         self.series_param = series_param
         self.verify_ssl = verify_ssl
         self.prefer_https = prefer_https
+        self.programme = programme
 
     def run(self):
         try:
-            fetchurl = stb_create_link_url(
-                stb_portal_base(self.base_url, self.prefer_https),
-                self.content_type,
-                self.cmd,
-                is_episode=self.is_episode,
-                series=self.series_param,
-            )
+            base = stb_portal_base(self.base_url, self.prefer_https)
+            if self.programme:
+                fetchurl = stb_archive_link_url(base, self.programme)
+            else:
+                fetchurl = stb_create_link_url(
+                    base,
+                    self.content_type,
+                    self.cmd,
+                    is_episode=self.is_episode,
+                    series=self.series_param,
+                )
             response = requests.get(
                 fetchurl, headers=self.headers, timeout=10, verify=self.verify_ssl
             )
             response.raise_for_status()
             result = response.json()
-            link = result["js"]["cmd"].split(" ")[-1]
+            if self.programme:
+                link = stb_archive_link(result)  # "": no recording (EMPTY_LINK_MESSAGE)
+            else:
+                link = result["js"]["cmd"].split(" ")[-1]
             self.finished.emit({"link": link})
         except Exception as e:
             self.error.emit(str(e))
