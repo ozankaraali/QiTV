@@ -76,7 +76,15 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from services.live.timeline import StartQuality, Timeline
-from services.live.ts import Data, Event, Opened, RepeatTrimmer, Segmenter, Unsupported
+from services.live.ts import (
+    ClockJoiner,
+    Data,
+    Event,
+    Opened,
+    RepeatTrimmer,
+    Segmenter,
+    Unsupported,
+)
 
 if TYPE_CHECKING:
     from services.live.ring import Ring
@@ -376,6 +384,8 @@ class _Session:
         self._segmenter = Segmenter()
         # Raw TS only (`_ingest`): drops what a restart inside the connection sends twice.
         self._trimmer: RepeatTrimmer | None = None
+        # Raw TS only: re-bases a restarted run's timestamps so its clock runs on.
+        self._clock_joiner: ClockJoiner | None = None
         self._timeline = Timeline()
         self._bursts = BurstMeter()  # raw TS that arrives in bursts (HLS reports its own)
         self._received = 0  # bytes from the source, those before the first keyframe too
@@ -450,15 +460,19 @@ class _Session:
         segmenter = self._segmenter
         trimmer = None
         if not source.hls:  # HLS has its own discontinuities and no such restarts
-            trimmer = self._trimmer = RepeatTrimmer(
-                program=lambda: (segmenter.video_pid, segmenter.video_type), clock=time.monotonic
-            )
+
+            def program() -> tuple[int | None, int | None]:
+                return segmenter.video_pid, segmenter.video_type
+
+            trimmer = self._trimmer = RepeatTrimmer(program=program, clock=time.monotonic)
+            self._clock_joiner = ClockJoiner(program=program)
         try:
             for item in source.chunks():
                 self._check()
                 if isinstance(item, Discontinuity):
-                    if trimmer is not None:  # a reconnect: what it holds passes on untouched
+                    if trimmer is not None:  # a reconnect: what they hold passes on untouched
                         self._pass_on(trimmer.discontinuity())
+                        self._clock_end(reconnect=True)
                     segmenter.discontinuity()
                 elif isinstance(item, CaughtUp):
                     # The batch's end, which the throttle may have held back, and the start's
@@ -478,6 +492,7 @@ class _Session:
             self._check()
             if trimmer is not None:
                 self._pass_on(trimmer.finish())
+                self._clock_end(reconnect=False)
             self._apply(segmenter.finish())
         except SourceError as error:
             self._fail(error.kind, str(error), error.status)
@@ -635,6 +650,7 @@ class _Session:
             try:
                 if self._trimmer is not None:
                     self._pass_on(self._trimmer.finish())
+                    self._clock_end(reconnect=False)
                 self._apply(self._segmenter.finish())
             except _Cancelled:
                 raise
@@ -645,13 +661,26 @@ class _Session:
         self._send(_error(self.sid, kind, message, status))
 
     def _pass_on(self, pieces: list[bytes]) -> None:
-        """The trimmer's output to the segmenter: where it dropped a run's start (between two
-        pieces) the timestamps start over, a discontinuity."""
+        """The trimmer's output, through the clock joiner, to the segmenter. Between two pieces
+        a new run starts (the trimmer dropped its start, or the clock joiner re-based it): the
+        segmenter cuts it a segment of its own. Without a clock joiner its timestamps start
+        over there; with one they run on."""
+        clock = self._clock_joiner
         for k, piece in enumerate(pieces):
-            if k:
-                self._segmenter.discontinuity()
-            if piece:
-                self._apply(self._segmenter.feed(piece))
+            parts = [piece] if clock is None else clock.feed(piece)
+            for j, part in enumerate(parts):
+                if (j if clock is not None else k) > 0:
+                    self._segmenter.discontinuity()
+                if part:
+                    self._apply(self._segmenter.feed(part))
+
+    def _clock_end(self, reconnect: bool) -> None:
+        """The clock joiner's input ends (a reconnect follows, or the end): what it holds."""
+        clock = self._clock_joiner
+        if clock is not None:
+            tail = clock.discontinuity() if reconnect else clock.finish()
+            if tail:
+                self._apply(self._segmenter.feed(tail))
 
     def _follow(self, source: Source) -> None:
         """HLS: note the live edge where each segment's first bytes begin (`_backlog`), and

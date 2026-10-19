@@ -1,15 +1,16 @@
 """Replay a captured raw MPEG-TS channel through the live helper's ingest, on a simulated clock.
 
     uv run python scripts/replay_capture.py <capture> [...] [--json F] [--decode] [--dump DIR]
-                                            [--no-trim]
+                                            [--stages none|trim|all]
 
 A capture is `<name>.ts` (the bytes as the connection delivered them) and `<name>.times` (one
 "<cumulative bytes> <seconds since connect>" line per read); `<capture>` names either file or
 their common prefix. Captures hold provider streams: keep them out of the repository.
 
 The bytes go through the helper's own session code (`services.live.worker._Session._ingest`:
-repeat trimmer, segmenter, RAM ring, timeline, burst meter and the state it sends the GUI;
-with --no-trim, as if there were no `RepeatTrimmer`), read by read, with
+repeat trimmer, clock joiner, segmenter, RAM ring, timeline, burst meter and the state it
+sends the GUI; --stages trim: without the `ClockJoiner`, none: without the `RepeatTrimmer`
+either), read by read, with
 the clock set to each read's arrival time, so a three-minute capture replays in seconds. The
 seams this needs, which the product does not offer: `_Session` builds its `Segmenter()` on the
 real clock and calls `time.monotonic()` in `_measure` and `_notify`, so the replay swaps in a
@@ -556,7 +557,7 @@ class Positions:
 
 
 class _Untrimmed:
-    """`RepeatTrimmer` as if there were none (--no-trim): everything passes on untouched."""
+    """`RepeatTrimmer` as if there were none (--stages none): everything passes on untouched."""
 
     def __init__(self, **_: Any) -> None:
         self.trims: list[Trim] = []
@@ -619,12 +620,13 @@ class Replay:
     header_len: int
     messages: list[tuple[float, tuple[Any, ...]]]  # (sim time, message) the GUI heard
     edges: list[tuple[float, float]]  # (sim time, live edge) after every read
+    junctions: list[tuple[float, float]]  # the clock joiner's (step before, step after) in s
     seconds: float  # how long the replay took
 
 
-def replay(capture: Capture, trim: bool = True) -> Replay:
-    """Run the capture through `_Session._ingest` on a simulated clock (`trim` False: as if
-    there were no `RepeatTrimmer`)."""
+def replay(capture: Capture, stages: str = "all") -> Replay:
+    """Run the capture through `_Session._ingest` on a simulated clock (`stages` "trim": as if
+    there were no `ClockJoiner`, "none": no `RepeatTrimmer` either)."""
     clock = _Clock()
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="qitv-replay-") as root:
@@ -635,16 +637,20 @@ def replay(capture: Capture, trim: bool = True) -> Replay:
         )
         segmenter = session._segmenter = _ObservedSegmenter(clock)
         meter = session._bursts = _RecordingMeter()
-        trimmer = worker.RepeatTrimmer if trim else _Untrimmed
+        trimmer = worker.RepeatTrimmer if stages != "none" else _Untrimmed
+        clock_joiner = worker.ClockJoiner if stages == "all" else (lambda **_: None)
         with (
             mock.patch.object(worker, "time", SimpleNamespace(monotonic=clock)),
             mock.patch.object(worker, "RepeatTrimmer", trimmer),
+            mock.patch.object(worker, "ClockJoiner", clock_joiner),
             mock.patch.object(
                 source_module, "open_source", lambda *_, **__: _ReplaySource(capture, clock)
             ),
         ):
             session._ingest()
         trimmer_used = session._trimmer
+        joined = session._clock_joiner
+        junctions = list(joined.junctions) if joined is not None else []
         trims = list(trimmer_used.trims) if trimmer_used is not None else []
         cut = list(trimmer_used.cut_short) if trimmer_used is not None else []
         kept = helper.server.ring
@@ -667,6 +673,7 @@ def replay(capture: Capture, trim: bool = True) -> Replay:
         header_len,
         helper.messages,
         meter.edges,
+        junctions,
         time.monotonic() - started,
     )
 
@@ -748,6 +755,17 @@ def _settled(ahead: Any, start: float, stop: float) -> Optional[float]:
     values = [ahead(start + k * _STEP_S) for k in range(int((stop - start) / _STEP_S) + 1)]
     known = [v for v in values if v is not None]
     return statistics.median(known) if known else None
+
+
+def _pcr_steps(scan: Scan) -> list[float]:
+    """PCR steps on the first PCR PID back by more than 0.1 s or on by more than 1 s."""
+    steps = []
+    pcrs = scan.pcrs
+    for (_, a, _), (_, b, _) in zip(pcrs, pcrs[1:]):
+        step = pts_delta(a, b) / CLOCK
+        if step < -0.1 or step > 1.0:
+            steps.append(round(step, 2))
+    return steps
 
 
 def _round(value: Optional[float], digits: int = 2) -> Optional[float]:
@@ -963,11 +981,11 @@ def _decode(rep: Replay, junctions: set[int]) -> dict[str, Any]:
 
 
 def measure(
-    capture: Capture, decode: bool = False, dump: Optional[Path] = None, trim: bool = True
+    capture: Capture, decode: bool = False, dump: Optional[Path] = None, stages: str = "all"
 ) -> dict[str, Any]:
     """Replay one capture and measure it (see the module docstring); `dump` receives the
-    stream VLC reads from the oldest segment; `trim` False replays without the trimmer."""
-    rep = replay(capture, trim)
+    stream VLC reads from the oldest segment; `stages` as for `replay`."""
+    rep = replay(capture, stages)
     if dump is not None:
         dump.write_bytes(rep.stream)
     source = scan_ts(capture.data)
@@ -1034,6 +1052,11 @@ def measure(
             "cc_breaks_unannounced": len(stream_scan.cc_breaks),
             "cc_break_pids": sorted({f"{pid:#x}" for _, pid in stream_scan.cc_breaks}),
             "pcrs_flagged": sum(1 for _, _, flag in stream_scan.pcrs if flag),
+            # The clock as VLC reads it: video timestamp restarts, and PCR steps back or
+            # forward by more than a second.
+            "restarts": len(find_restarts(stream_scan)),
+            "pcr_steps": _pcr_steps(stream_scan),
+            "junctions_rebased": [(round(a, 2), round(b, 2)) for a, b in rep.junctions],
         },
         "edge": {
             "ahead_at_backlog": next((e for t, e in late[:1]), None),
@@ -1132,6 +1155,9 @@ def report(result: dict[str, Any]) -> str:
         f"earlier one byte for byte; {ring['input_bytes_left_out']} input bytes left out; "
         f"{ring['cc_breaks_unannounced']} counter breaks without an indicator "
         f"{ring['cc_break_pids'] or ''}; {ring['pcrs_flagged']} PCRs flagged discontinuous",
+        f"  clock in the ring: {ring['restarts']} timestamp restarts, PCR steps "
+        f"{ring['pcr_steps'] or 'none'}; re-based junctions (step before, after): "
+        f"{ring['junctions_rebased'] or 'none'}",
     ]
     trims = result["trims"]
     if trims["held"]:
@@ -1174,7 +1200,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         "the provider's stream: keep it out of the repository)",
     )
     parser.add_argument(
-        "--no-trim", action="store_true", help="replay as if there were no RepeatTrimmer"
+        "--stages",
+        choices=("none", "trim", "all"),
+        default="all",
+        help="all (the default), trim (no ClockJoiner), none (no RepeatTrimmer either)",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -1182,7 +1211,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     for path in args.captures:
         capture = load_capture(path)
         dump = Path(args.dump) / f"{capture.name}.ring.ts" if args.dump else None
-        result = measure(capture, decode=args.decode, dump=dump, trim=not args.no_trim)
+        result = measure(capture, decode=args.decode, dump=dump, stages=args.stages)
         results.append(result)
         print(report(result) + "\n", flush=True)
     if args.json:

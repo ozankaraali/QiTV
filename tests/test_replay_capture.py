@@ -88,9 +88,9 @@ class ReplayCaptureTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
-    def measure(self, runs, cut_last=None, trim=True):
+    def measure(self, runs, cut_last=None, stages="all"):
         path = write_capture(self.tmp.name, "capture", runs, cut_last)
-        return rc.measure(rc.load_capture(path), trim=trim)
+        return rc.measure(rc.load_capture(path), stages=stages)
 
     def test_a_steady_channel_shows_no_restart_no_repeat_and_a_flat_edge(self):
         result = self.measure([(range(40 * FPS), 900000, backlogged)])
@@ -103,7 +103,7 @@ class ReplayCaptureTests(unittest.TestCase):
         self.assertAlmostEqual(edge["ahead_at_backlog"], BACKLOG, delta=0.6)
         self.assertLess(abs(edge["drift_s_per_min"]), 0.5)
 
-    def resend(self, trim):
+    def resend(self, stages):
         # Run A: 20 s from connect, its last byte at 15.1 s; one second of silence; run B
         # restarts its clock at 0 and first sends A's last 5 s again (the same pictures),
         # with the silence and the repeat at once, then new frames at real time.
@@ -114,11 +114,11 @@ class ReplayCaptureTests(unittest.TestCase):
             (range(20 * FPS), 900000, backlogged),
             (again, 0, lambda media: resume + max(0.0, media - burst)),
         ]
-        return self.measure(runs, cut_last=144, trim=trim)
+        return self.measure(runs, cut_last=144, stages=stages)
 
     def test_a_restart_that_resends_the_last_seconds_is_measured(self):
         silence, repeat = SILENCE, REPEAT
-        result = self.resend(trim=False)
+        result = self.resend("none")
         self.assertEqual(result["input"]["restarts"], 1)
         row = result["restarts"][0]
         self.assertTrue(row["provider_indicator"])
@@ -147,7 +147,7 @@ class ReplayCaptureTests(unittest.TestCase):
         self.assertIsNone(row["trim"])
 
     def test_the_trimmer_drops_that_repeat_to_a_keyframe(self):
-        result = self.resend(trim=True)
+        result = self.resend("trim")
         row = result["restarts"][0]
         # R is the repeat less a quarter second: the keyframe at 4 s is the last in reach.
         self.assertEqual(row["trim"]["reason"], "dropped")
@@ -184,15 +184,22 @@ class ReplayCaptureTests(unittest.TestCase):
         self.assertAlmostEqual(edge["ahead_at_end"], edge["ahead_at_backlog"], delta=0.6)
 
     def test_the_report_prints_every_restart(self):
-        result = self.measure(
-            [
-                (range(10 * FPS), 900000, backlogged),
-                (range(10 * FPS, 20 * FPS), 0, lambda media: backlogged(10.0) + 1.0 + media),
-            ]
-        )
-        text = rc.report(result)
+        runs = [
+            (range(10 * FPS), 900000, backlogged),
+            (range(10 * FPS, 20 * FPS), 0, lambda media: backlogged(10.0) + 1.0 + media),
+        ]
+        text = rc.report(self.measure(runs, stages="none"))
         self.assertIn("1 timestamp restarts", text)
         self.assertIn("disc. seg", text)
+        # With the clock joiner the ring's clock runs on: the step back (from PTS 19.96 s to 0)
+        # becomes a frame on, and the new run still starts a segment of its own.
+        result = self.measure(runs)
+        self.assertEqual(result["ring"]["restarts"], 0)
+        self.assertEqual(result["ring"]["junctions_rebased"], [(-19.96, 0.04)])
+        self.assertEqual(result["restarts"][0]["pipeline"]["how"], "segmenter discontinuity")
+        self.assertIn(
+            "re-based junctions (step before, after): [(-19.96, 0.04)]", rc.report(result)
+        )
 
 
 if __name__ == "__main__":

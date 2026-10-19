@@ -78,6 +78,9 @@ _TRIM_MARGIN_S = 0.25  # R is taken this much short: a frame or two repeated bea
 _TRIM_MIN_S = 2.0  # a smaller R is a backlog that made up its silence (a control's 0.6 s)
 _TRIM_RUNS = 2  # a repeat reaches this many runs back: one upstream's crossed another's 9 s run
 _TRIMS_KEPT = 64  # the latest trims kept for a look (a memory bound)
+# ClockJoiner: a junction's packets wait at most this many for its first picture (a few
+# hundred milliseconds at 25 Mbit/s); then they pass on as they are.
+_CLOCK_PENDING_PACKETS = 4096
 
 
 class Unsupported(Exception):
@@ -1257,6 +1260,322 @@ def _resume_at_unit_starts(data: bytes, offset: int, ranges: list[tuple[int, int
         at += PACKET
     kept.append(data[at:])
     return b"".join(kept)
+
+
+class ClockJoiner:
+    """Re-bases each run after a restart inside one connection, so its clock runs on (raw TS).
+
+    A restarted muxer starts PTS, DTS and PCR over (its PCR 0.7 s below zero, wrapping 0.7 s
+    in). VLC 3 takes a long step back well, but one onto timestamps it has just played (a few
+    seconds back, as after a trim) makes it drop the new pictures as late, and the picture
+    stands still that long (measured: a 2 s step stood 1.6 s, an 8 s one 5-8 s). From the first
+    such junction on, every PTS and DTS (the PES headers of every PID) and every PCR base is
+    moved by one offset, modulo 2**33, chosen so that the new run's first picture follows the
+    old run's last (its furthest PTS, and its last DTS) by a frame: the new run keeps its own
+    audio to video alignment, and the offsets add up over restarts. The junction leaves no
+    trace: each PID's first discontinuity_indicator after it (the provider's, or the one
+    `RepeatTrimmer` set) is cleared, and the counters run on (`ContinuityJoiner`). The
+    ring then holds rewritten bytes after a restart: the original-bytes rule gives way there,
+    for raw TS only.
+
+    A junction is a video PES start whose PTS steps back by more than `_REORDER_TICKS`, or one
+    on a keyframe after a PCR flagged discontinuous whose PTS does not follow the last by a
+    frame or two (a trimmed run kept from a keyframe ahead of the old run's end). Its packets
+    from the first flagged one wait for that picture (`_CLOCK_PENDING_PACKETS` at most), so the
+    tables and sound sent before it move with it. Until the first junction nothing is
+    rewritten: each packet's header is read (its counter, its flag, a video PES's timestamps).
+    `feed` returns what passes on in pieces: a junction it re-based lies between two (a new
+    run starts there: the segmenter cuts it a segment of its own and learns afresh whether it
+    flags its keyframes). `discontinuity()` (a reconnect) ends the re-basing: what follows
+    passes on as it comes, as before. Pure logic: the program's video PID and type are the
+    caller's.
+    """
+
+    def __init__(self, *, program: Callable[[], tuple[int | None, int | None]]) -> None:
+        self._program = program
+        self._buf = b""
+        self._searching = True  # the next packet start must be proven by three sync bytes
+        self._offset = 0  # added to every PTS, DTS and PCR base once active (modulo 2**33)
+        self._active = False
+        self._last_pts: int | None = None  # the latest video PTS as it came
+        self._top: int | None = None  # the furthest video PTS passed on (re-based)
+        self._last_dts: int | None = None  # the latest video DTS passed on (re-based)
+        self._frame = _CLOCK // 25  # the shortest forward PTS step seen: a frame
+        self._counters: dict[int, int] = {}  # each PID's last counter passed on, until active
+        self._joiner: ContinuityJoiner | None = None  # once active: the counters run on
+        self._pending: list[bytes] | None = None  # a possible junction's packets so far
+        self._pending_flagged = False  # among them a PCR flagged discontinuous
+        self._unflagged: set[int] = set()  # PIDs whose first flag after the junction went
+        self._unflag_left = 0  # packets after a junction in which those are looked for
+        # (step it came with, step it goes on with), in seconds, per junction re-based
+        self.junctions: deque[tuple[float, float]] = deque(maxlen=_TRIMS_KEPT)
+
+    @property
+    def offset_s(self) -> float:
+        """What the re-basing adds to every timestamp now, in seconds."""
+        return self._offset / _CLOCK
+
+    def feed(self, data: bytes) -> list[bytes]:
+        """Take input bytes; return what passes on, in pieces (see the class docstring)."""
+        video_pid, video_type = self._program()
+        data = self._buf + data if self._buf else data
+        out: list[bytes | None] = []  # None: a junction
+        n = len(data)
+        off = run = 0  # the next packet; the first byte not yet passed on or pending
+        while off + PACKET <= n:
+            if self._searching or data[off] != SYNC:
+                found = _find_sync(data, off)
+                if found < 0:
+                    off, self._searching = max(off, n - 2 * PACKET), True
+                    break
+                off, self._searching = found, False
+                continue
+            end = off + PACKET
+            b1 = data[off + 1]
+            pid = ((b1 & 0x1F) << 8) | data[off + 2]
+            flagged = bool(data[off + 3] & 0x20 and data[off + 4] and data[off + 5] & 0x80)
+            video = bool(pid == video_pid and b1 & 0x40 and not b1 & 0x80)
+            if self._pending is None and not (flagged or video and self._steps_back(data, off)):
+                # No junction in sight: the packet joins the run passed on as one.
+                if not self._active:
+                    self._count(data, off)
+                if video:
+                    self._follow(data, off)
+                off = end
+                continue
+            if run < off:
+                self._place(data[run:off], out)
+            self._packet(data[off:end], out, video_type, flagged, video)
+            off = run = end
+        if run < off:
+            self._place(data[run:off], out)
+        self._buf = data[off:]
+        pieces: list[bytes] = []
+        piece: list[bytes] = []
+        for item in out:
+            if item is None:
+                pieces.append(b"".join(piece))
+                piece = []
+            else:
+                piece.append(item)
+        pieces.append(b"".join(piece))
+        return pieces
+
+    def discontinuity(self) -> bytes:
+        """A reconnect comes next: what waits passes on as it is, and the re-basing ends."""
+        out = self._end()
+        self._active, self._offset, self._joiner = False, 0, None
+        self._unflag_left = 0
+        self._last_pts = self._top = self._last_dts = None
+        self._searching = True
+        return out
+
+    def finish(self) -> bytes:
+        """The input ended: what waits passes on as it is."""
+        return self._end()
+
+    def _end(self) -> bytes:
+        out: list[bytes | None] = []
+        self._flush_pending(out)
+        self._place(self._buf, out)
+        self._buf = b""
+        if self._joiner is not None:
+            out.append(self._joiner.end())
+        return b"".join(item for item in out if item is not None)
+
+    def _steps_back(self, data: bytes, off: int) -> bool:
+        """Whether the video PES starting in the packet at `off` steps back (a restart)."""
+        pts = _pes_times(data, off)[0]
+        last = self._last_pts
+        return pts is not None and last is not None and pts_delta(last, pts) < -_REORDER_TICKS
+
+    def _count(self, data: bytes, off: int) -> None:
+        """Until active: note a packet's counter as it passes on (the joiner's start)."""
+        b1, b3 = data[off + 1], data[off + 3]
+        pid = ((b1 & 0x1F) << 8) | data[off + 2]
+        if b3 & 0x10 and pid != 0x1FFF and not b1 & 0x80:
+            self._counters[pid] = b3 & 0x0F
+
+    def _packet(
+        self,
+        pkt: bytes,
+        out: list[bytes | None],
+        video_type: int | None,
+        flagged: bool,
+        video: bool,
+    ) -> None:
+        """A possible junction's packet: it waits for the junction's first picture."""
+        if self._pending is None:
+            self._pending, self._pending_flagged = [], False
+        self._pending.append(pkt)
+        self._pending_flagged |= flagged and bool(pkt[5] & 0x10)
+        if video and _pes_times(pkt, 0)[0] is not None:
+            self._decide(out, video_type)
+        elif len(self._pending) >= _CLOCK_PENDING_PACKETS:
+            self._flush_pending(out)
+
+    def _decide(self, out: list[bytes | None], video_type: int | None) -> None:
+        """The pending packets end with a video PES start: a junction, or none."""
+        pending = self._pending
+        assert pending is not None
+        self._pending = None
+        first = pending[-1]
+        pts, dts = _pes_times(first, 0)
+        last = self._last_pts
+        if pts is None or last is None or self._top is None:
+            self._pass_pending(pending, out)
+            return
+        step = pts_delta(last, pts)
+        rai, _, es = _pes_start(first)
+        if not (
+            step < -_REORDER_TICKS
+            or (
+                self._pending_flagged
+                and _trim_key(first, rai, es, video_type)
+                and not 0 <= step <= 2 * self._frame
+            )
+        ):
+            self._pass_pending(pending, out)
+            return
+        # The new run's first picture follows the old run's last by a frame, in PTS and DTS.
+        last_dts = self._top if self._last_dts is None else self._last_dts
+        by_pts = (self._top + self._frame - pts) % _PTS_MODULO
+        by_dts = (last_dts + self._frame - (pts if dts is None else dts)) % _PTS_MODULO
+        offset = by_pts if pts_delta(by_dts, by_pts) >= 0 else by_dts
+        moved = pts_delta(self._offset, offset)
+        self._offset = offset
+        if self._joiner is None:
+            self._joiner = ContinuityJoiner(self._counters)
+        else:
+            out.append(self._joiner.end())
+        out.append(None)  # the junction: a new run starts
+        self._active = True
+        self._joiner.segment()  # the counters run on across the junction
+        self._unflagged = set()
+        self._unflag_left = _CLOCK_PENDING_PACKETS
+        self.junctions.append((step / _CLOCK, (step + moved) / _CLOCK))
+        logger.debug("a restart's clock re-based by %.2f s", moved / _CLOCK)
+        for pkt in pending:
+            self._place(pkt, out)
+        self._follow(first, 0)
+
+    def _pass_pending(self, pending: list[bytes], out: list[bytes | None]) -> None:
+        """No junction: the pending packets pass on as any would."""
+        for pkt in pending:
+            if not self._active:
+                self._count(pkt, 0)
+            self._place(pkt, out)
+        self._follow(pending[-1], 0)
+
+    def _flush_pending(self, out: list[bytes | None]) -> None:
+        """No picture came after a flag: its packets pass on as they are."""
+        pending, self._pending = self._pending, None
+        for pkt in pending or ():
+            if not self._active:
+                self._count(pkt, 0)
+            self._place(pkt, out)
+
+    def _follow(self, data: bytes, off: int) -> None:
+        """A video PES start (as it came) passes on: its PTS, and re-based the furthest PTS
+        and the DTS."""
+        pts, dts = _pes_times(data, off)
+        if pts is None:
+            return
+        if self._last_pts is not None and 0 < pts_delta(self._last_pts, pts) < self._frame:
+            self._frame = pts_delta(self._last_pts, pts)
+        self._last_pts = pts
+        shifted = (pts + self._offset) % _PTS_MODULO
+        if self._top is None or pts_delta(self._top, shifted) > 0:
+            self._top = shifted
+        self._last_dts = shifted if dts is None else (dts + self._offset) % _PTS_MODULO
+
+    def _place(self, data: bytes, out: list[bytes | None]) -> None:
+        """Pass bytes on: as they are, or once active re-based, unflagged after a junction,
+        with the counters running on."""
+        if not data:
+            return
+        if not self._active:
+            out.append(data)
+            return
+        assert self._joiner is not None
+        buf = bytearray(data)
+        at, n = 0, len(buf)
+        while at + PACKET <= n and buf[at] == SYNC:
+            if self._unflag_left > 0:  # each PID's first flag after the junction goes
+                self._unflag_left -= 1
+                if buf[at + 3] & 0x20 and buf[at + 4] and buf[at + 5] & 0x80:
+                    pid = ((buf[at + 1] & 0x1F) << 8) | buf[at + 2]
+                    if pid not in self._unflagged:
+                        self._unflagged.add(pid)
+                        buf[at + 5] &= 0x7F
+            if buf[at + 1] & 0x40 or buf[at + 3] & 0x20:
+                _shift_packet(buf, at, self._offset)
+            at += PACKET
+        out.append(self._joiner.feed(bytes(buf)))
+
+
+def _pes_times(pkt: bytes, off: int) -> tuple[int | None, int | None]:
+    """(PTS, DTS) of the PES starting in the packet at `off`, None where it has none."""
+    afc = (pkt[off + 3] >> 4) & 3
+    start = off + 4
+    if afc & 2:
+        start = off + 5 + pkt[off + 4]
+    end = off + PACKET
+    if not afc & 1 or start + 14 > end or pkt[start : start + 3] != _START_CODE:
+        return None, None
+    if pkt[start + 6] & 0xC0 != 0x80:  # no optional PES header
+        return None, None
+    flags = pkt[start + 7] >> 6
+    pts = dts = None
+    if flags & 2:
+        pts = _timestamp(pkt, start + 9)
+        if flags == 3 and start + 19 <= end:
+            dts = _timestamp(pkt, start + 14)
+    return pts, dts
+
+
+def _timestamp(data: bytes, at: int) -> int:
+    b = data[at : at + 5]
+    return ((b[0] >> 1) & 7) << 30 | b[1] << 22 | (b[2] >> 1) << 15 | b[3] << 7 | b[4] >> 1
+
+
+def _write_timestamp(buf: bytearray, at: int, value: int) -> None:
+    """Write a 33-bit PTS or DTS at `at`, keeping its 4-bit prefix and the marker bits."""
+    buf[at] = (buf[at] & 0xF0) | ((value >> 29) & 0x0E) | 1
+    buf[at + 1] = (value >> 22) & 0xFF
+    buf[at + 2] = ((value >> 14) & 0xFE) | 1
+    buf[at + 3] = (value >> 7) & 0xFF
+    buf[at + 4] = ((value << 1) & 0xFE) | 1
+
+
+def _shift_packet(buf: bytearray, at: int, offset: int) -> None:
+    """Move the PCR base and the PES header's PTS and DTS of the packet at `at` by `offset`."""
+    b1, b3 = buf[at + 1], buf[at + 3]
+    if b1 & 0x80:  # the transport error flag: the header is untrusted
+        return
+    start = at + 4
+    if b3 & 0x20:
+        length = buf[at + 4]
+        start = at + 5 + length
+        if length >= 7 and buf[at + 5] & 0x10:
+            base = (_pcr_base(bytes(buf[at + 6 : at + 11]), 0) + offset) % _PTS_MODULO
+            buf[at + 6] = base >> 25
+            buf[at + 7] = (base >> 17) & 0xFF
+            buf[at + 8] = (base >> 9) & 0xFF
+            buf[at + 9] = (base >> 1) & 0xFF
+            buf[at + 10] = ((base & 1) << 7) | (buf[at + 10] & 0x7F)
+    end = at + PACKET
+    if not b1 & 0x40 or not b3 & 0x10 or start + 14 > end:
+        return
+    if buf[start : start + 3] != _START_CODE or buf[start + 6] & 0xC0 != 0x80:
+        return
+    flags = buf[start + 7] >> 6
+    if flags & 2:
+        pts = (_timestamp(bytes(buf[start + 9 : start + 14]), 0) + offset) % _PTS_MODULO
+        _write_timestamp(buf, start + 9, pts)
+        if flags == 3 and start + 19 <= end:
+            dts = (_timestamp(bytes(buf[start + 14 : start + 19]), 0) + offset) % _PTS_MODULO
+            _write_timestamp(buf, start + 14, dts)
 
 
 def program_has_audio(data: bytes) -> bool | None:
