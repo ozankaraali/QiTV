@@ -6,6 +6,7 @@ destructor waits for the GIL while it holds a signal-slot mutex the GUI thread w
 """
 
 import gc
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -19,9 +20,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QApplication
+from gc_fixtures import CollectingResult
 from timer_fixtures import wait_until
 
 from services.gc_guard import FULL_EVERY, GcGuard
+
+AUTOMATIC_GC = True  # its tests turn the collector on and off themselves (gc_fixtures)
 
 
 class Owner(QObject):
@@ -205,3 +209,48 @@ class ReEnabledCollectorTests(unittest.TestCase):
         with self.assertLogs("services.gc_guard", level="WARNING"):
             guard.collect()
         self.assertFalse(gc.isenabled())
+
+
+class RunnerPolicyTests(unittest.TestCase):
+    """scripts/run_tests.py runs each test module as main() runs the app, once the module has
+    made its QApplication: the collector on the GUI thread only (gc_fixtures)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        # The runner running this module has its own state: kept aside meanwhile.
+        kept = CollectingResult._guard, CollectingResult._automatic
+        CollectingResult._guard, CollectingResult._automatic = None, False
+        self.addCleanup(self.restore, kept)
+
+    @staticmethod
+    def restore(kept):
+        guard = CollectingResult._guard
+        if guard is not None:
+            guard.stop()
+        CollectingResult._guard, CollectingResult._automatic = kept
+
+    def run_case(self, module: str) -> list[bool]:
+        """Run one test of `module` through the runner's results: whether the automatic
+        collector was on while it ran."""
+        seen: list[bool] = []
+
+        class Case(unittest.TestCase):
+            def test(self) -> None:
+                seen.append(gc.isenabled())
+
+        Case.__module__ = module
+        runner = unittest.TextTestRunner(stream=io.StringIO(), resultclass=CollectingResult)
+        self.assertTrue(runner.run(Case("test")).wasSuccessful())
+        return seen
+
+    def test_a_module_with_a_qapplication_collects_on_the_gui_thread(self):
+        self.assertEqual(self.run_case("a_module_without_a_say"), [False])
+        self.assertIsNotNone(CollectingResult._guard)
+        self.assertFalse(gc.isenabled())  # between tests too
+
+    def test_a_module_may_keep_the_automatic_collector(self):
+        self.assertEqual(self.run_case(__name__), [True])  # this one sets AUTOMATIC_GC
+        self.assertIsNone(CollectingResult._guard)
