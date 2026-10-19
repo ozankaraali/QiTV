@@ -39,6 +39,8 @@ from typing import Any, Callable, Iterable, Optional
 
 from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
 
+from services import i18n
+from services.i18n import N_, tr, translate
 from services.sound_sync import LIMIT_MS, STEP_MS, SoundSync, clamp
 from ui.keymap import Action, key_hint
 from ui.link_lanes import Target
@@ -47,19 +49,22 @@ from ui.overlays.track_panel import PanelModel, PanelRow, PanelSync
 logger = logging.getLogger(__name__)
 
 AUDIO, SUBTITLES = "audio", "subtitles"  # the transport's buttons, and their panels
-SOUND, SUBTITLES_TITLE = "Sound", "Subtitles"
-IN_SYNC = "In sync"
-OFF = "Off"
+# The panels' titles (English: sync_text() tells them apart; translate() shows them).
+SOUND = N_("Sound")  # i18n: the Sound panel's title (the audio tracks and their sync)
+SUBTITLES_TITLE = N_("Subtitles")  # i18n: the Subtitles panel's title
+IN_SYNC = N_("In sync")  # i18n: the Sound or Subtitles panel's sync row: no delay
+OFF = N_("Off")  # i18n: the Subtitles panel's row that shows no subtitles
 LOAD_FILE = "load_file"  # the Subtitles panel's "Load a file…" row
-LOAD_TEXT = "Load a file…"
+LOAD_TEXT = N_("Load a file…")  # i18n: the Subtitles panel's row that opens a file dialog
 SEARCH_ONLINE = "search_online"  # its "Search OpenSubtitles…" row
-SEARCH_ONLINE_TEXT = "Search OpenSubtitles…"
+SEARCH_ONLINE_TEXT = N_("Search OpenSubtitles…")  # i18n: the Subtitles panel's row
 REMEMBERED = "remembered"  # the title's pick from OpenSubtitles, at its top
-NO_AUDIO_TRACKS = "No audio tracks"
-NO_SUBTITLES = "No subtitles"
-SUBTITLES_OFF = "Subtitles are off"
+NO_AUDIO_TRACKS = N_("No audio tracks")  # i18n: a toast
+NO_SUBTITLES = N_("No subtitles")  # i18n: a toast
+SUBTITLES_OFF = N_("Subtitles are off")  # i18n: a toast
 SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")
-SUBTITLE_FILTER = "Subtitles (*.srt *.ass *.ssa *.vtt *.sub)"
+# i18n: the file dialog's filter; keep the part in brackets as it is
+SUBTITLE_FILTER = N_("Subtitles (*.srt *.ass *.ssa *.vtt *.sub)")
 REFRESH_MS = 500  # a panel follows what libVLC reports meanwhile (a track that came)
 ERROR_MS = 6000
 _UP, _DOWN = Qt.Key.Key_Up.value, Qt.Key.Key_Down.value
@@ -73,15 +78,33 @@ _KEYS = {AUDIO: ("J", "K"), SUBTITLES: ("Shift+J", "Shift+K")}  # earlier, later
 
 
 def sync_text(noun: str, ms: int) -> str:
-    """The Sync row's words: "In sync", "Sound 150 ms later" or "Sound 1,050 ms earlier"."""
+    """The Sync row's words: "In sync", "Sound 150 ms later" or "Sound 1,050 ms earlier".
+
+    `noun` is SOUND or SUBTITLES_TITLE (in English)."""
     if not ms:
-        return IN_SYNC
-    return f"{noun} {abs(ms):,} ms {'later' if ms > 0 else 'earlier'}"
+        return translate(IN_SYNC)
+    amount = i18n.number(abs(ms))
+    if noun == SUBTITLES_TITLE:
+        if ms > 0:
+            return tr("Subtitles {ms} ms later", ms=amount)  # i18n: ms: milliseconds
+        return tr("Subtitles {ms} ms earlier", ms=amount)  # i18n: ms: milliseconds
+    if ms > 0:
+        return tr("Sound {ms} ms later", ms=amount)  # i18n: ms: milliseconds
+    return tr("Sound {ms} ms earlier", ms=amount)  # i18n: ms: milliseconds
 
 
 def toast_text(noun: str, ms: int) -> str:
     """A sync key's toast: "Sound in sync", else as the Sync row says it."""
-    return f"{noun} in sync" if not ms else sync_text(noun, ms)
+    if ms:
+        return sync_text(noun, ms)
+    if noun == SUBTITLES_TITLE:
+        return tr("Subtitles in sync")  # i18n: a toast
+    return tr("Sound in sync")  # i18n: a toast
+
+
+def _subtitles_text(name: str) -> str:
+    """A toast naming the subtitles that show: a file's or a track's name, or Off."""
+    return tr("Subtitles: {name}", name=name)  # i18n: a toast
 
 
 def subtitle_paths(paths: Iterable[str]) -> list[str]:
@@ -208,7 +231,7 @@ class TrackControls(QObject):
             return
         session = self._session()
         if session.subtitle_track() == -1:
-            self._toast(SUBTITLES_OFF)
+            self._toast(translate(SUBTITLES_OFF))
             return
         ms = self._set_delay(SUBTITLES, session.subtitle_delay() + steps * STEP_MS)
         self._said(SUBTITLES, toast_text(SUBTITLES_TITLE, ms))
@@ -231,12 +254,12 @@ class TrackControls(QObject):
             return False
         name = os.path.basename(path)
         if not self._session().add_subtitle_file(path):
-            self._toast(f"Couldn't load the subtitles {name}", "error", ERROR_MS)
+            self._toast(tr("Couldn't load the subtitles {name}", name=name), "error", ERROR_MS)
             return False
         if remember_folder and self._config is not None:  # the dialog opens there next time
             self._config.subtitle_folder = os.path.dirname(os.path.abspath(path))
         if say:
-            self._toast(f"Subtitles: {name}")
+            self._toast(_subtitles_text(name))
         return True
 
     def accepts_drop(self, paths: Iterable[str]) -> bool:
@@ -251,7 +274,7 @@ class TrackControls(QObject):
             return False
         loaded = [path for path in files if self.load_subtitle_file(path, say=False)]
         if loaded:
-            self._said(SUBTITLES, f"Subtitles: {os.path.basename(loaded[-1])}")
+            self._said(SUBTITLES, _subtitles_text(os.path.basename(loaded[-1])))
         return bool(loaded)
 
     def _choose_file(self) -> None:
@@ -323,12 +346,12 @@ class TrackControls(QObject):
         earlier, later = _KEYS[name]
         return PanelSync(
             sync_text(noun, ms),
-            sync_text(noun, -LIMIT_MS),
+            max(sync_text(noun, -LIMIT_MS), sync_text(noun, LIMIT_MS), key=len),  # the widest
             earlier=ms > -LIMIT_MS,
             later=ms < LIMIT_MS,
             reset=ms != 0,
-            earlier_tip=key_hint(f"{noun} {STEP_MS} ms earlier", earlier),
-            later_tip=key_hint(f"{noun} {STEP_MS} ms later", later),
+            earlier_tip=key_hint(sync_text(noun, -STEP_MS), earlier),
+            later_tip=key_hint(sync_text(noun, STEP_MS), later),
         )
 
     def _sound_model(self) -> PanelModel:
@@ -337,7 +360,7 @@ class TrackControls(QObject):
         playing = session.audio_track()
         rows = tuple(PanelRow(i, name, i == playing) for i, name in tracks)
         return PanelModel(
-            SOUND, rows if len(rows) > 1 else (), self._sync(AUDIO, self._delay(AUDIO))
+            translate(SOUND), rows if len(rows) > 1 else (), self._sync(AUDIO, self._delay(AUDIO))
         )
 
     def _subtitle_model(self) -> PanelModel:
@@ -353,14 +376,15 @@ class TrackControls(QObject):
                 rows.append(
                     PanelRow(REMEMBERED, online.row_text(pick), action=True, icon="subtitles")
                 )
-        rows.append(PanelRow(-1, OFF, shown == -1))
+        rows.append(PanelRow(-1, translate(OFF), shown == -1))
         rows += [PanelRow(i, name, i == shown) for i, name in tracks]
         if self._pick_file is not None:
-            rows.append(PanelRow(LOAD_FILE, LOAD_TEXT, action=True))
+            rows.append(PanelRow(LOAD_FILE, translate(LOAD_TEXT), action=True))
         if searchable:
-            rows.append(PanelRow(SEARCH_ONLINE, SEARCH_ONLINE_TEXT, action=True, icon="search"))
+            text = translate(SEARCH_ONLINE_TEXT)
+            rows.append(PanelRow(SEARCH_ONLINE, text, action=True, icon="search"))
         sync = None if shown == -1 else self._sync(SUBTITLES, session.subtitle_delay())
-        return PanelModel(SUBTITLES_TITLE, tuple(rows), sync)
+        return PanelModel(translate(SUBTITLES_TITLE), tuple(rows), sync)
 
     def _anchor(self, button: str) -> Optional[QRectF]:
         """The transport's button, in the host's coordinates (None: it is not shown)."""
@@ -468,14 +492,14 @@ class TrackControls(QObject):
         else:
             tracks, playing = session.subtitle_tracks(), session.subtitle_track()
         if not tracks:
-            self._toast(NO_AUDIO_TRACKS if name == AUDIO else NO_SUBTITLES)
+            self._toast(translate(NO_AUDIO_TRACKS if name == AUDIO else NO_SUBTITLES))
             return
         ids = [t[0] for t in tracks]
         index = ids.index(playing) if playing in ids else -1
         track_id, track = tracks[(index + 1) % len(tracks)]
         if name == AUDIO:
             session.set_audio_track(track_id)
-            self._toast(f"Audio: {track}")
+            self._toast(tr("Audio: {track}", track=track))  # i18n: a toast; track: its name
         else:
             session.set_subtitle_track(track_id)
-            self._toast(f"Subtitles: {OFF if track_id == -1 else track}")
+            self._toast(_subtitles_text(translate(OFF) if track_id == -1 else track))

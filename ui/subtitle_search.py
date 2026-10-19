@@ -28,6 +28,8 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject
 
+from services import i18n
+from services.i18n import N_, tr, tr_n, translate
 from services.opensubtitles import (
     BAD_KEY,
     CONSUMERS_URL,
@@ -48,6 +50,8 @@ from services.opensubtitles import (
     parse_query,
     ranked,
     search_query,
+    shown_release,
+    shown_reset,
     system_language,
 )
 from services.redact import safe_message
@@ -58,13 +62,16 @@ from ui.overlays.subtitle_search import LanguageRow, SubtitleSearchPage
 
 logger = logging.getLogger(__name__)
 
-SEARCHING_TEXT = "Searching OpenSubtitles…"
-DOWNLOADING_TEXT = "Downloading {name}…"
+SEARCHING_TEXT = N_("Searching OpenSubtitles…")  # i18n: the OpenSubtitles page's status line
+# i18n: the OpenSubtitles page's status line; {name}: the subtitle's release
+DOWNLOADING_TEXT = N_("Downloading {name}…")
 LOADING_TEXT = "Loading {name}…"
-NOTHING_FOUND_TEXT = 'No subtitles found for "{query}". Try another spelling, or fewer words.'
-NOTHING_TO_SEARCH_TEXT = "Type a title to search for."
-FAILED_TEXT = "Something went wrong. Try again."
-SAVED_ONLY_TEXT = "Subtitles saved: {name}. They show when it plays again."
+# i18n: the OpenSubtitles page's status line; {query}: what was searched for
+NOTHING_FOUND_TEXT = N_('No subtitles found for "{query}". Try another spelling, or fewer words.')
+NOTHING_TO_SEARCH_TEXT = N_("Type a title to search for.")  # i18n: the search field was empty
+FAILED_TEXT = N_("Something went wrong. Try again.")
+# i18n: a toast; {name}: the subtitle file's name; "it": the film or episode
+SAVED_ONLY_TEXT = N_("Subtitles saved: {name}. They show when it plays again.")
 REMEMBERED_SUFFIX = " (OpenSubtitles)"
 INFO_MS, ERROR_MS = 5000, 8000
 # Keys that still reach the player while the page shows; the others are its own.
@@ -95,18 +102,27 @@ class OnlineSetup:
 
 
 def found_text(count: int, languages: int) -> str:
-    noun = "subtitle" if count == 1 else "subtitles"
-    places = "language" if languages == 1 else "languages"
-    return f"{count:,} {noun} in {languages} {places}"
+    """ "4 subtitles in 3 languages"."""
+    # i18n: the OpenSubtitles page's status line: "4 subtitles in 3 languages"
+    return tr(
+        "{subtitles} in {languages}",
+        subtitles=tr_n("{n} subtitle", "{n} subtitles", count, n=i18n.number(count)),
+        languages=tr_n("{n} language", "{n} languages", languages),
+    )
 
 
 def remaining_text(remaining: Optional[int], reset: str = "") -> str:
     """ "4 downloads left today, more in 23 hours" ("" when OpenSubtitles did not say)."""
     if remaining is None:
         return ""
-    noun = "download" if remaining == 1 else "downloads"
-    text = f"{remaining} {noun} left today"
-    return f"{text}, more in {reset}" if reset else text
+    if reset:
+        return tr_n(
+            "{n} download left today, more in {time}",
+            "{n} downloads left today, more in {time}",
+            remaining,
+            time=shown_reset(reset),
+        )  # i18n: {time}: a time span, "8 hours and 38 minutes"
+    return tr_n("{n} download left today", "{n} downloads left today", remaining)
 
 
 def _same(a: Optional[Target], b: Optional[Target]) -> bool:
@@ -255,9 +271,9 @@ class OnlineSubtitles(QObject):
         return [code for code in dict.fromkeys((last, system_language())) if code]
 
     def _search(self, query: SearchQuery) -> None:
-        self._page.show_search(query.label(), SEARCHING_TEXT)
+        self._page.show_search(query.label(), translate(SEARCHING_TEXT))
         if not query.text:
-            self._page.set_status(NOTHING_TO_SEARCH_TEXT, "error")
+            self._page.set_status(translate(NOTHING_TO_SEARCH_TEXT), "error")
             return
         client = self.client()
         if client is None:
@@ -302,7 +318,8 @@ class OnlineSubtitles(QObject):
             return
         if not result.files:
             label = result.query.label()
-            self._page.set_results([], {}, NOTHING_FOUND_TEXT.format(query=label), kind="error")
+            text = translate(NOTHING_FOUND_TEXT, query=label)
+            self._page.set_results([], {}, text, kind="error")
             return
         prefer_hi = bool(getattr(self._config, "opensubtitles_hearing_impaired", False))
         groups = group_languages(result.files, self._preferred())
@@ -318,12 +335,12 @@ class OnlineSubtitles(QObject):
     def _on_search_failed(self, generation: int, message: str) -> None:
         logger.info("An OpenSubtitles search failed: %s", message)
         if generation == self._generation:
-            self._show_problem(Problem("failed", FAILED_TEXT))
+            self._show_problem(Problem("failed", translate(FAILED_TEXT)))
 
     def _on_download_failed(self, _context: object, message: str) -> None:
         logger.info("An OpenSubtitles download failed: %s", message)
         self._downloading = False
-        self._show_problem(Problem("failed", FAILED_TEXT))
+        self._show_problem(Problem("failed", translate(FAILED_TEXT)))
 
     def _show_problem(self, problem: Problem) -> None:
         """On the page while it shows (a refused key brings the key page back), else in a
@@ -342,7 +359,7 @@ class OnlineSubtitles(QObject):
         target = self._target
         if target is None or self._downloading:
             return
-        self._page.set_busy(DOWNLOADING_TEXT.format(name=file.release))
+        self._page.set_busy(translate(DOWNLOADING_TEXT, name=shown_release(file.release)))
         self._download(target, file)
 
     def _download(self, target: Target, file: SubtitleFile, *, saved: str = "") -> None:
@@ -372,9 +389,9 @@ class OnlineSubtitles(QObject):
         if not shown:
             if _same(self._current(), target) and self._playing():
                 return  # it could not be loaded: the panel's own toast said so
-            self._toast(SAVED_ONLY_TEXT.format(name=result.name), "info", INFO_MS)
+            self._toast(translate(SAVED_ONLY_TEXT, name=result.name), "info", INFO_MS)
             return
-        text = f"Subtitles: {result.name}"
+        text = tr("Subtitles: {name}", name=result.name)  # i18n: a toast
         left = remaining_text(result.remaining, result.reset) if not result.reused else ""
         self._toast(f"{text} · {left}" if left else text, "info", INFO_MS)
 

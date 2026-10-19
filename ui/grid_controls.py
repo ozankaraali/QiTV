@@ -49,6 +49,7 @@ from typing import Any, Callable, Optional
 from PySide6.QtCore import QObject, QPoint, Signal
 
 from services.config_manager import ConfigManager
+from services.i18n import N_, tr, translate
 from services.live.refusals import REFUSALS
 from services.live.stay_live import TARGETS
 from services.provider_ids import with_provider
@@ -72,18 +73,29 @@ LAYOUT_NAMES = {2: "1×2", 4: "2×2", 6: "3×2", 9: "3×3"}
 # picture in picture already has; a tile's player is made when it first takes the focus or a
 # channel, one at a time: a "+" tile has none).
 TILE_NAMES = ("main", "pip", "t2", "t3", "t4", "t5", "t6", "t7", "t8")
-NO_STREAM = "No stream to spare at {provider}"
-TILE_FAILED = "Couldn't play this channel"
-LIVE_ONLY = "Multiview is for live TV"
-EXTERNAL_ONLY = "Multiview is off while channels play in an external player"
-NO_PLAYERS = "Multiview needs more video players than this computer could open"
-LEAVE_FIRST = "Leave the multiview first (V)"
-TILE_TITLE = "Tile {number}"
+# The texts are kept in English and shown translated (no_stream_text for NO_STREAM).
+# i18n: a multiview tile's card and a toast: the provider's connections are all in use
+NO_STREAM = N_("No stream to spare at {provider}")
+TILE_FAILED = N_("Couldn't play this channel")  # i18n: a multiview tile's card
+LIVE_ONLY = N_("Multiview is for live TV")  # i18n: a toast
+EXTERNAL_ONLY = N_("Multiview is off while channels play in an external player")  # i18n: a toast
+# i18n: a toast: no player could be made for another tile
+NO_PLAYERS = N_("Multiview needs more video players than this computer could open")
+LEAVE_FIRST = N_("Leave the multiview first (V)")  # i18n: a toast; V is the key
+TILE_TITLE = N_("Tile {number}")  # i18n: the sound mixer's row for a multiview tile; short
 SHIFTED_MARGIN_S = 1.0  # a label says "−MM:SS" once the lag is this far beyond the target
 MIB = 1024 * 1024
 DEFAULT_RAM_MIB = ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB  # a config without the key
 _SHOWING = (OPENING, PLAYING)
 _PLAYING_STATES = ("playing", "paused")
+
+
+def no_stream_text(provider: str) -> str:
+    """A tile's card (and toast) when `provider` has no stream to spare."""
+    if provider:
+        return translate(NO_STREAM, provider=provider)
+    # i18n: a multiview tile's card and a toast, as "No stream to spare at {provider}"
+    return tr("No stream to spare at your provider")
 
 
 @dataclass
@@ -92,7 +104,7 @@ class _Card:
 
     state: str  # DENIED or FAILED
     channel: dict
-    detail: str
+    detail: str  # why, as shown (translated)
 
 
 class GridControls(QObject):
@@ -264,7 +276,7 @@ class GridControls(QObject):
         for number, name in enumerate(self._names, 1):
             if name != large and self.state(name) not in _SHOWING:
                 continue
-            row = (name, TILE_TITLE.format(number=number), self._title(name))
+            row = (name, translate(TILE_TITLE, number=number), self._title(name))
             if name == large:
                 rows.insert(0, row)
             else:
@@ -294,10 +306,10 @@ class GridControls(QObject):
         if self._closed() or self._shown:
             return self._shown
         if self._vod():
-            self._toast(LIVE_ONLY)
+            self._toast(translate(LIVE_ONLY))
             return False
         if self._external():
-            self._toast(EXTERNAL_ONLY)
+            self._toast(translate(EXTERNAL_ONLY))
             return False
         sessions = self.sessions
         self._close_pip()  # a picture-in-picture on its way never opens
@@ -428,7 +440,7 @@ class GridControls(QObject):
         self._stop(tile)
         self._deny(tile, channel, provider_name)
         if again:  # a click on the card: say it still holds
-            self._toast(NO_STREAM.format(provider=provider_name or "your provider"), "error")
+            self._toast(no_stream_text(provider_name), "error")
         return True
 
     def _taking(self, provider: str) -> set[str]:
@@ -516,7 +528,7 @@ class GridControls(QObject):
             return
         del self._linking[name]
         if self._shown and name in self._names:
-            self._cards[name] = _Card(FAILED, channel, TILE_FAILED)
+            self._cards[name] = _Card(FAILED, channel, translate(TILE_FAILED))
             self._refresh()
 
     def label(self, name: str) -> tuple[str, str]:
@@ -619,7 +631,7 @@ class GridControls(QObject):
             return
         logger.info("A tile's stream failed: %s", channel.get("name") or "")
         self._stop(name)
-        self._cards[name] = _Card(FAILED, channel, TILE_FAILED)
+        self._cards[name] = _Card(FAILED, channel, translate(TILE_FAILED))
         self._refresh()
         if self._may_retry(name, channel, message):
             # Its play token, or its portal's session, may have expired (as the big
@@ -673,7 +685,7 @@ class GridControls(QObject):
         if slot is None:
             slot = self._make_slot(name)
             if slot is None:
-                self._toast(NO_PLAYERS, "error")
+                self._toast(translate(NO_PLAYERS), "error")
         return slot
 
     def _kept(self) -> Optional[str]:
@@ -708,8 +720,7 @@ class GridControls(QObject):
         self.sessions.close_slot(name)
 
     def _deny(self, name: str, channel: dict, provider: str) -> None:
-        detail = NO_STREAM.format(provider=provider or "your provider")
-        self._cards[name] = _Card(DENIED, channel, detail)
+        self._cards[name] = _Card(DENIED, channel, no_stream_text(provider))
         self._refresh()
 
     def _title(self, name: str) -> str:

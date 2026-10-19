@@ -42,44 +42,53 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QToolTip, QWidget
 
-from services.opensubtitles import SubtitleFile
+from services import i18n
+from services.i18n import N_, tr_n, translate
+from services.opensubtitles import SubtitleFile, shown_release
 from ui.keymap import Action, key_hint
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, draw_icon, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 KEY_PAGE, RESULTS_PAGE = "key", "results"
-TITLE_TEXT = "Subtitles from OpenSubtitles"
-KEY_INTRO = (
+# The texts are kept in English (N_) and shown translated (translate).
+TITLE_TEXT = N_("Subtitles from OpenSubtitles")  # i18n: the OpenSubtitles page's title
+# i18n: the OpenSubtitles page without an API key: its first words, before the two steps
+KEY_INTRO = N_(
     "QiTV finds subtitles on OpenSubtitles.com. It needs a free OpenSubtitles account and an "
     "API key, which takes a minute:"
 )
 KEY_STEPS = (
-    "1.  Get a free key opens the OpenSubtitles website: sign up there, then create an API key "
-    "on its API consumers page.",
-    "2.  Copy the key, Paste it below and Save.",
+    # i18n: a step on the OpenSubtitles key page; "Get a free key" is its button's label
+    N_(
+        "1.  Get a free key opens the OpenSubtitles website: sign up there, then create an API "
+        "key on its API consumers page."
+    ),
+    # i18n: a step on the OpenSubtitles key page; "Paste" and "Save" are its buttons' labels
+    N_("2.  Copy the key, Paste it below and Save."),
 )
-KEY_LATER = "You can change it later in Settings → Subtitles."
-KEY_WORDS = "\n".join((KEY_INTRO, *KEY_STEPS, "", KEY_LATER))
-KEY_PLACEHOLDER = "Paste your API key here"
-KEY_EMPTY_TEXT = "Paste the key first."
-QUERY_PLACEHOLDER = "Film or series title"
-LANGUAGES_TITLE = "Languages"
-FILES_TITLE = "Subtitles"
-HI_TEXT = "Hearing impaired"
-MACHINE_TEXT = "Machine translated"
-TRUSTED_TEXT = "Trusted uploader"
+KEY_LATER = N_("You can change it later in Settings → Subtitles.")  # i18n: the key page's end
+KEY_PLACEHOLDER = N_("Paste your API key here")  # i18n: the key's empty field
+KEY_EMPTY_TEXT = N_("Paste the key first.")  # i18n: Save was pressed with no key
+QUERY_PLACEHOLDER = N_("Film or series title")  # i18n: the OpenSubtitles search's empty field
+# i18n: the OpenSubtitles page's list titles, shown in capitals; max ~16 letters
+LANGUAGES_TITLE = N_("Languages")
+FILES_TITLE = N_("Subtitles")  # i18n: shown in capitals; max ~16 letters
+HI_TEXT = N_("Hearing impaired")  # i18n: a mark on a subtitle (for the hearing impaired)
+MACHINE_TEXT = N_("Machine translated")  # i18n: a mark on a subtitle
+TRUSTED_TEXT = N_("Trusted uploader")  # i18n: a mark on a subtitle
 # The buttons: their label, what they do and their key (ui.keymap.SHORTCUTS["subtitles"]).
 BUTTONS = {
-    "get_key": ("Get a free key", "Open the OpenSubtitles website", ""),
-    "paste": ("Paste", "Paste", "Ctrl+V"),
-    "save": ("Save", "Save the key", "Return"),
-    "search": ("Search", "Search", "Return"),
+    # i18n: the key page's button that opens the OpenSubtitles website, then its tooltip
+    "get_key": (N_("Get a free key"), N_("Open the OpenSubtitles website"), ""),
+    "paste": (N_("Paste"), N_("Paste"), "Ctrl+V"),  # i18n: a button and its tooltip (verb)
+    "save": (N_("Save"), N_("Save the key"), "Return"),  # i18n: a button, then its tooltip
+    "search": (N_("Search"), N_("Search"), "Return"),  # i18n: a button and its tooltip (verb)
 }
 KEY_BUTTONS = ("get_key", "paste", "save")
 SEARCH_ROW = ("field", "paste", "search")  # the search's top row, left to right
-CLOSE_TIP = ("Close", "Esc")
-CLEAR_TIP = ("Clear", "Backspace")
+CLOSE_TIP = (N_("Close"), "Esc")  # i18n: a tooltip (verb)
+CLEAR_TIP = (N_("Clear"), "Backspace")  # i18n: a tooltip: empties the field (verb)
 
 _EDGE_U = 2.0  # from the host's sides
 _WIDTH_U = 66.0
@@ -101,6 +110,12 @@ _ICON_U = 1.4
 _WHEEL_STEP = 120
 _MASK = "•"
 _MASK_MAX = 24
+
+
+def key_words() -> str:
+    """The key page's words, in the app's language."""
+    steps = (translate(step) for step in KEY_STEPS)
+    return "\n".join((translate(KEY_INTRO), *steps, "", translate(KEY_LATER)))
 
 
 def masked(key: str) -> str:
@@ -395,7 +410,7 @@ class SubtitleSearchPage(Overlay):
                 if key:
                     self.saveKeyRequested.emit(key)
                 else:
-                    self._message = KEY_EMPTY_TEXT
+                    self._message = translate(KEY_EMPTY_TEXT)
                     self.update()
             elif name == "get_key":
                 self.getKeyRequested.emit()
@@ -473,12 +488,12 @@ class SubtitleSearchPage(Overlay):
         """How tall the key page's words are, wrapped to `width`."""
         flags = int(Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap)
         bound = QFontMetricsF(self._fonts(un)["body"]).boundingRect(
-            QRectF(0, 0, max(1.0, width), 10_000), flags, KEY_WORDS
+            QRectF(0, 0, max(1.0, width), 10_000), flags, key_words()
         )
         return math.ceil(bound.height())
 
     def _button_width(self, un: Units, name: str) -> float:
-        label = BUTTONS[name][0]
+        label = translate(BUTTONS[name][0])
         advance = QFontMetricsF(self._fonts(un)["button"]).horizontalAdvance(label)
         return advance + 2 * un.px(_BUTTON_PAD_U)
 
@@ -619,7 +634,8 @@ class SubtitleSearchPage(Overlay):
         left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         p.setFont(fonts["title"])
         p.setPen(text)
-        p.drawText(rects.title, left, self._elided(fonts["title"], TITLE_TEXT, rects.title.width()))
+        title = self._elided(fonts["title"], translate(TITLE_TEXT), rects.title.width())
+        p.drawText(rects.title, left, title)
         self._paint_icon_button(p, un, rects.close, "close", self._hover == ("close", 0))
         if self._page == KEY_PAGE:
             self._paint_key_page(p, un, fonts, rects, text, muted)
@@ -704,7 +720,7 @@ class SubtitleSearchPage(Overlay):
             p.restore()
         p.setFont(fonts["button"])
         p.setPen(qcolor(PALETTE.canvas) if accent else qcolor(PALETTE.text))
-        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, BUTTONS[name][0])
+        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, translate(BUTTONS[name][0]))
 
     def _paint_key_page(self, p, un, fonts, rects: _Rects, text, muted) -> None:
         p.setFont(fonts["body"])
@@ -714,9 +730,9 @@ class SubtitleSearchPage(Overlay):
         )
         p.save()
         p.setClipRect(rects.text)
-        p.drawText(rects.text, flags, KEY_WORDS)
+        p.drawText(rects.text, flags, key_words())
         p.restore()
-        self._paint_field(p, un, fonts, rects, masked(self._key), KEY_PLACEHOLDER)
+        self._paint_field(p, un, fonts, rects, masked(self._key), translate(KEY_PLACEHOLDER))
         if self._message:
             p.setFont(fonts["status"])
             p.setPen(qcolor(PALETTE.warn))
@@ -729,7 +745,7 @@ class SubtitleSearchPage(Overlay):
             self._paint_button(p, un, fonts, rects.buttons[name], name, accent=name == "save")
 
     def _paint_results(self, p, un, fonts, rects: _Rects, text, muted) -> None:
-        self._paint_field(p, un, fonts, rects, self._query, QUERY_PLACEHOLDER)
+        self._paint_field(p, un, fonts, rects, self._query, translate(QUERY_PLACEHOLDER))
         self._paint_button(p, un, fonts, rects.buttons["paste"], "paste", accent=False)
         self._paint_button(p, un, fonts, rects.buttons["search"], "search", accent=True)
         if self._status:
@@ -749,7 +765,7 @@ class SubtitleSearchPage(Overlay):
             p.drawText(
                 rects.titles[name],
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                title.upper(),
+                i18n.upper(translate(title)),
             )
         self._paint_languages(p, un, fonts, rects, text, muted)
         self._paint_files(p, un, fonts, rects, text, muted)
@@ -764,7 +780,7 @@ class SubtitleSearchPage(Overlay):
                 self._paint_focus(
                     p, un, rect, outline=selected and self._focus == "languages", fill=True
                 )
-            count = f"{row.count:,}"
+            count = i18n.number(row.count)
             p.setFont(fonts["row"])
             fm = QFontMetricsF(fonts["row"])
             count_w = fm.horizontalAdvance(count)
@@ -802,7 +818,7 @@ class SubtitleSearchPage(Overlay):
             p.drawText(
                 top,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                self._elided(fonts["row"], file.release, top.width()),
+                self._elided(fonts["row"], shown_release(file.release), top.width()),
             )
             p.setFont(fonts["meta"])
             x = bottom.left()
@@ -823,14 +839,15 @@ class SubtitleSearchPage(Overlay):
     @staticmethod
     def _meta(file: SubtitleFile, muted) -> list[tuple[str, object]]:
         """A subtitle's second line: its downloads, then its marks (each in its colour)."""
-        noun = "download" if file.downloads == 1 else "downloads"
-        pieces: list[tuple[str, object]] = [(f"{file.downloads:,} {noun}", muted)]
+        count = i18n.number(file.downloads)
+        downloads = tr_n("{n} download", "{n} downloads", file.downloads, n=count)
+        pieces: list[tuple[str, object]] = [(downloads, muted)]
         if file.hearing_impaired:
-            pieces += [("  ·  ", muted), (HI_TEXT, qcolor(PALETTE.accent))]
+            pieces += [("  ·  ", muted), (translate(HI_TEXT), qcolor(PALETTE.accent))]
         if file.machine_translated:
-            pieces += [("  ·  ", muted), (MACHINE_TEXT, qcolor(PALETTE.warn))]
+            pieces += [("  ·  ", muted), (translate(MACHINE_TEXT), qcolor(PALETTE.warn))]
         if file.trusted:
-            pieces += [("  ·  ", muted), (TRUSTED_TEXT, qcolor(PALETTE.ok))]
+            pieces += [("  ·  ", muted), (translate(TRUSTED_TEXT), qcolor(PALETTE.ok))]
         return pieces
 
     def _paint_more(self, p, un, name: str, rects: _Rects, color) -> None:
@@ -963,15 +980,15 @@ class SubtitleSearchPage(Overlay):
             return ""
         name = hit[0]
         if name == "close":
-            return key_hint(*CLOSE_TIP)
+            return key_hint(translate(CLOSE_TIP[0]), CLOSE_TIP[1])
         if name == "clear":
-            return CLEAR_TIP[0]
+            return translate(CLEAR_TIP[0])
         if name in BUTTONS:
             _label, what, keys = BUTTONS[name]
-            return key_hint(what, keys) if keys else what
+            return key_hint(translate(what), keys) if keys else translate(what)
         if name == "files":
             files = self.files_shown()
-            return files[hit[1]].release if hit[1] < len(files) else ""
+            return shown_release(files[hit[1]].release) if hit[1] < len(files) else ""
         return ""
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:

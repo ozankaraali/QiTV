@@ -29,6 +29,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, 
 from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter, QPaintEvent, QPen, QRegion
 from PySide6.QtWidgets import QApplication, QWidget
 
+from services.i18n import N_, translate
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, draw_icon
 from ui.overlays.pip_label import LIVE, paint_backdrop, paint_pill
@@ -37,8 +38,8 @@ from ui.theme import PALETTE, qcolor
 
 EMPTY, OPENING, PLAYING, DENIED, FAILED = "empty", "opening", "playing", "denied", "failed"
 CARDS = (EMPTY, DENIED, FAILED)  # drawn whole: the tile's video shows nothing
-CHOOSE = "Choose a channel"
-RETRY = "Click to try again"
+CHOOSE = N_("Choose a channel")  # i18n: under the "+" of an empty multiview tile
+RETRY = N_("Click to try again")  # i18n: on a multiview tile's card (no stream, or it failed)
 _FALLBACK_HOST_WIDTH = 1280
 RING_UNITS = 0.35  # the focus ring's width
 
@@ -51,7 +52,9 @@ class TileView:
     rect: QRect
     state: str  # EMPTY, OPENING, PLAYING, DENIED or FAILED
     title: str = ""  # the channel's name
-    detail: str = ""  # the label's state (LIVE, "Connecting…", "−MM:SS") or the card's why
+    # The label's state (LIVE, "Connecting…", "−MM:SS", in English: painted translated) or
+    # the card's why (translated already).
+    detail: str = ""
     focused: bool = False
 
 
@@ -219,9 +222,9 @@ class GridTiles(Overlay):
         dot = max(6, round(states.height() * 0.42))
         dot_gap = un.px(0.4)
         if tile.detail == LIVE:
-            state_w = dot + dot_gap + states.horizontalAdvance(LIVE)
+            state_w = dot + dot_gap + states.horizontalAdvance(translate(LIVE))
         else:
-            state_w = states.horizontalAdvance(tile.detail)
+            state_w = states.horizontalAdvance(translate(tile.detail))
         room = max(0.0, tile.rect.width() - 2 * inset)
         between = gap if tile.detail else 0
         name_room = int(room - 2 * pad - between - state_w)
@@ -308,7 +311,7 @@ class GridTiles(Overlay):
                     p,
                     pill.rect,
                     pill.name,
-                    tile.detail,
+                    tile.detail if tile.detail == LIVE else translate(tile.detail),
                     pill.name_font,
                     pill.state_font,
                     pill.pad,
@@ -366,12 +369,13 @@ class GridTiles(Overlay):
             p.setFont(un.font(1.0, QFont.Weight.DemiBold))
             p.setPen(muted)
             caption = QRectF(inner.x(), plus.bottom() + un.px(0.6), inner.width(), un.px(2.4))
-            p.drawText(caption, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, CHOOSE)
+            top = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+            p.drawText(caption, top, translate(CHOOSE))
             return
         lines = (
             (tile.title, un.font(1.3, QFont.Weight.Bold), text),
             (tile.detail, un.font(1.0, QFont.Weight.DemiBold), qcolor(PALETTE.accent)),
-            (RETRY, un.font(0.9), muted),
+            (translate(RETRY), un.font(0.9), muted),
         )
         heights = [QFontMetrics(font).height() for _, font, _ in lines]
         spacing = un.px(0.5)

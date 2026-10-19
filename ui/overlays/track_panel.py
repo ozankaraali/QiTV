@@ -51,6 +51,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QToolTip, QWidget
 
+from services.i18n import N_, translate
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, draw_icon, fill_round
 from ui.pointer import NAV_BUTTONS
@@ -58,8 +59,10 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 IDLE_MS = 10_000  # after the last touch
 MINUS = "−"
-SYNC_LABEL = "Sync"
-RESET_LABEL = "Reset"
+# i18n: the Sound and Subtitles panels' label above the sync row (noun); max ~10 letters
+SYNC_LABEL = N_("Sync")
+# i18n: a button beside "Sync" that puts the sound or subtitles back in sync (verb); max ~10 letters
+RESET_LABEL = N_("Reset")
 _FALLBACK_HOST_WIDTH = 1280
 _PAD_U = 1.0
 _MIN_WIDTH_U = 24.0
@@ -344,9 +347,9 @@ class TrackPanel(Overlay):
         if sync is not None:
             label_fm = QFontMetricsF(fonts["label"])
             label = (
-                label_fm.horizontalAdvance(SYNC_LABEL)
+                label_fm.horizontalAdvance(translate(SYNC_LABEL))
                 + 4 * un.px(_GAP_U)
-                + label_fm.horizontalAdvance(RESET_LABEL)
+                + label_fm.horizontalAdvance(translate(RESET_LABEL))
             )
             text = QFontMetricsF(fonts["sync"]).horizontalAdvance(sync.widest)
             controls = 2 * un.px(_CHIP_U) + 4 * un.px(_GAP_U) + text
@@ -400,7 +403,7 @@ class TrackPanel(Overlay):
         rects.label = QRectF(left, y, right - left, heights["label"])
         if sync.reset:
             fm = QFontMetricsF(self._fonts(un)["label"])
-            width = fm.horizontalAdvance(RESET_LABEL) + 2 * gap
+            width = fm.horizontalAdvance(translate(RESET_LABEL)) + 2 * gap
             rects.reset = QRectF(right - width + gap, y, width, heights["label"])
         y += heights["label"]
         row_h = heights["sync"]
@@ -509,11 +512,13 @@ class TrackPanel(Overlay):
         p.setFont(fonts["label"])
         p.setPen(muted)
         p.drawText(
-            rects.label, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, SYNC_LABEL
+            rects.label,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            translate(SYNC_LABEL),
         )
         if not rects.reset.isEmpty():
             p.setPen(qcolor(PALETTE.accent))
-            p.drawText(rects.reset, Qt.AlignmentFlag.AlignCenter, RESET_LABEL)
+            p.drawText(rects.reset, Qt.AlignmentFlag.AlignCenter, translate(RESET_LABEL))
         dim = qcolor(PALETTE.text, 0.35)
         for rect, glyph, able in (
             (rects.earlier, MINUS, sync.earlier),

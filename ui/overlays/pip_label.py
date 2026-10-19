@@ -32,22 +32,26 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QToolTip, QWidget
 
+from services.i18n import N_, translate
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, draw_icon, fill_round
 from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
 
-LIVE = "LIVE"
-CONNECTING = "Connecting…"
+# The states (`set_info`) are kept in English, and painted translated.
+LIVE = N_("LIVE")  # i18n: badge on a small picture or a multiview tile (live TV); max ~6 letters
+# i18n: a small picture's or a multiview tile's state until its channel plays
+CONNECTING = N_("Connecting…")
 BUTTONS = ("swap", "speaker", "close")  # after the pill, left to right
 MIN_HIT_PX = 28  # each button takes clicks over this square at least, room permitting
 TOOLTIPS = {
-    "pill": "Swap (S) · drag to move",
-    "swap": "Swap (S)",
-    "close": "Close picture-in-picture (P)",
+    # i18n: tooltip of the small picture's label; S is the key
+    "pill": N_("Swap (S) · drag to move"),
+    "swap": N_("Swap (S)"),  # i18n: tooltip: swap the small and the large picture; S is the key
+    "close": N_("Close picture-in-picture (P)"),  # i18n: tooltip; P is the key
 }
-MUTE_TOOLTIP = "Mute the small picture"
-UNMUTE_TOOLTIP = "Unmute the small picture"
+MUTE_TOOLTIP = N_("Mute the small picture")  # i18n: tooltip of the small picture's speaker
+UNMUTE_TOOLTIP = N_("Unmute the small picture")  # i18n: tooltip of the small picture's speaker
 _SHIFTED_PREFIXES = ("−", "-")  # "−MM:SS" behind live
 _BEHIND = re.compile(r"^[−-]\d+(:\d\d){1,2}$")  # "−MM:SS" or "−H:MM:SS"
 _FALLBACK_HOST_WIDTH = 1280
@@ -82,7 +86,8 @@ def paint_pill(
 ) -> None:
     """A channel's name and its state in a pill, as the PiP label shows them (a multiview
     tile's label too): LIVE after a red dot, a time behind live in the accent colour, any
-    other state muted. `name` and `state` fit already (elided)."""
+    other state muted. `name` and `state` fit already (elided); `state` is LIVE (in
+    English) or the text to show."""
     paint_backdrop(p, pill)
     p.save()
     p.setClipRect(pill)
@@ -105,7 +110,7 @@ def paint_pill(
             p, QRectF(x, pill.center().y() - dot / 2, dot, dot), qcolor(PALETTE.live), dot / 2
         )
         p.setPen(qcolor(PALETTE.text, 0.9))
-        p.drawText(rest.adjusted(dot + dot_gap, 0, 0, 0), align, LIVE)
+        p.drawText(rest.adjusted(dot + dot_gap, 0, 0, 0), align, translate(LIVE))
     else:
         shifted = state.startswith(_SHIFTED_PREFIXES)
         p.setPen(
@@ -155,8 +160,8 @@ class PipLabel(Overlay):
     # ---- public API ---------------------------------------------------------------------
 
     def set_info(self, name: str, state: str) -> None:
-        """`state` is "LIVE", "−MM:SS" (behind live), "Connecting…", or "" (a movie or an
-        episode: the name alone)."""
+        """`state` is "LIVE", "−MM:SS" (behind live), "Connecting…", "Finished", or "" (a
+        movie or an episode: the name alone); in English: it is painted translated."""
         if (name, state) != (self._name, self._state):
             self._name, self._state = name, state
             self._refresh()
@@ -217,8 +222,9 @@ class PipLabel(Overlay):
         """What hovering `pos` says (label coordinates): the part and its key, or nothing."""
         name = self._part_at(pos)
         if name == "speaker":
-            return MUTE_TOOLTIP if self._audible else UNMUTE_TOOLTIP
-        return TOOLTIPS.get(name or "", "")
+            return translate(MUTE_TOOLTIP if self._audible else UNMUTE_TOOLTIP)
+        text = TOOLTIPS.get(name or "", "")
+        return translate(text) if text else ""
 
     def _part_at(self, pos: QPointF) -> str | None:
         """The button or the pill at `pos` (label coordinates), else None."""
@@ -259,7 +265,7 @@ class PipLabel(Overlay):
             state_font.setPixelSize(state_font.pixelSize() - 1)
         states = QFontMetrics(state_font)
         dot = max(6, round(states.height() * 0.42))
-        state = self._state
+        state = translate(self._state)
         if not whole and states.horizontalAdvance(state) > state_room:
             state = states.elidedText(state, Qt.TextElideMode.ElideRight, max(0, int(state_room)))
         state_w = self._state_width(state_font, dot_gap, state)
@@ -304,12 +310,14 @@ class PipLabel(Overlay):
     def _live_width(self, font: QFont, dot_gap: float) -> float:
         """LIVE and its dot in `font`, as the pill paints them."""
         metrics = QFontMetrics(font)
-        return max(6, round(metrics.height() * 0.42)) + dot_gap + metrics.horizontalAdvance(LIVE)
+        live = metrics.horizontalAdvance(translate(LIVE))
+        return max(6, round(metrics.height() * 0.42)) + dot_gap + live
 
     def _state_width(self, font: QFont, dot_gap: float, text: str | None = None) -> float:
         if self._state == LIVE:
             return self._live_width(font, dot_gap)
-        return QFontMetrics(font).horizontalAdvance(self._state if text is None else text)
+        shown = translate(self._state) if text is None else text
+        return QFontMetrics(font).horizontalAdvance(shown)
 
     def _region(self) -> QRegion:
         """The pill and buttons, in label coordinates (empty with nothing to cover)."""

@@ -40,6 +40,7 @@ from typing import Any, Callable, Optional
 from PySide6.QtCore import QObject, Signal
 
 from services.catalog import ALL_GROUP_ID
+from services.i18n import N_, tr_n, translate
 from services.live.refusals import STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
@@ -55,12 +56,17 @@ from ui.overlays.transport import fmt_behind
 
 logger = logging.getLogger(__name__)
 
-PIP_LIVE_ONLY = "Picture-in-picture is for live TV"
-PIP_EXTERNAL = "Picture-in-picture is off while channels play in an external player"
-NO_PREVIOUS = "No previous channel yet"
-OPEN_PIP_FIRST = "Open picture-in-picture first (P)"
-ALREADY_LARGE = "This channel is already playing"
-SWITCHING = "Switching…"  # a swap asked for while the large picture's channel opens
+# The toasts (kept in English; shown translated).
+PIP_LIVE_ONLY = N_("Picture-in-picture is for live TV")  # i18n: a toast
+PIP_EXTERNAL = N_(
+    "Picture-in-picture is off while channels play in an external player"
+)  # i18n: a toast
+# i18n: a toast: there is no channel watched before this one to open small
+NO_PREVIOUS = N_("No previous channel yet")
+OPEN_PIP_FIRST = N_("Open picture-in-picture first (P)")  # i18n: a toast; P is the key
+ALREADY_LARGE = N_("This channel is already playing")  # i18n: a toast
+# A swap asked for while the large picture's channel opens.
+SWITCHING = N_("Switching…")  # i18n: a toast: the two pictures are about to swap
 SWITCHING_MS = 1500
 SHIFTED_MARGIN_S = 1.0  # the label says "−MM:SS" once the lag is this far beyond the target
 ERROR_MS = 6000
@@ -255,7 +261,7 @@ class PipControls(QObject):
     def swap_key(self) -> None:
         """S: swap, or say how to open picture in picture."""
         if not self.sessions.pip_open():
-            self._toast(OPEN_PIP_FIRST)
+            self._toast(translate(OPEN_PIP_FIRST))
         else:
             self.user_swap()
 
@@ -263,7 +269,7 @@ class PipControls(QObject):
         """S, a click on the PiP or its ⇄: a swap that has to wait says so."""
         swapped = self._swap()
         if not swapped and self.sessions.pip_open():
-            self._toast(SWITCHING, "info", SWITCHING_MS)
+            self._toast(translate(SWITCHING), "info", SWITCHING_MS)
         return swapped
 
     def open_node(self, node) -> None:
@@ -306,7 +312,7 @@ class PipControls(QObject):
             return
         previous, context = self._previous_channel()
         if previous is None:
-            self._toast(NO_PREVIOUS)
+            self._toast(translate(NO_PREVIOUS))
             return
         self.open_channel(previous, context)
 
@@ -317,7 +323,7 @@ class PipControls(QObject):
         if self._refused():
             return
         if ZapContext.same(channel, self._large_channel()):
-            self._toast(ALREADY_LARGE)
+            self._toast(translate(ALREADY_LARGE))
             return
         if self.small_showing(channel) is not None:
             return  # already small
@@ -335,10 +341,10 @@ class PipControls(QObject):
     def _refused(self) -> bool:
         """A movie plays, or channels play in an external player: no PiP (toasted)."""
         if self._vod():
-            self._toast(PIP_LIVE_ONLY)
+            self._toast(translate(PIP_LIVE_ONLY))
             return True
         if self._external():
-            self._toast(PIP_EXTERNAL)
+            self._toast(translate(PIP_EXTERNAL))
             return True
         return False
 
@@ -434,11 +440,14 @@ class PipControls(QObject):
             or item_provider.provider_name(self.catalog, channel) != name
         ):
             return ""
-        plural = "s" if limit != 1 else ""
-        return (
-            f"Closed {channel.get('name') or ''} to play {title}: "
-            f"{name} allows {limit} stream{plural}"
-        )
+        return tr_n(
+            "Closed {channel} to play {title}: {provider} allows {n} stream",
+            "Closed {channel} to play {title}: {provider} allows {n} streams",
+            limit,
+            channel=channel.get("name") or "",
+            title=title,
+            provider=name,
+        )  # i18n: a toast; {channel} closed for the film or episode {title}
 
     def _limit_reached(self, channel: dict) -> bool:
         """The limit of the channel's own provider leaves no stream for a small picture: say
@@ -567,7 +576,7 @@ class PipControls(QObject):
         if view is not None and self._may_retry(view.target):
             self._retry(view)
             return
-        self._toast(message, "error", ERROR_MS)
+        self._toast(translate(message), "error", ERROR_MS)  # one kept in English shows translated
         target = view.target if view is not None else None
         if target is not None:
             self._explain(target.item, target.title)  # why, at its provider

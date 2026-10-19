@@ -30,6 +30,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Qt
 
+from services.i18n import N_, tr, translate
 from services.redact import safe_message
 from services.sessions import PIP_LEVEL, SessionManager, Slot
 from ui.keymap import Action
@@ -39,9 +40,16 @@ logger = logging.getLogger(__name__)
 
 VOLUME_STEP = 5
 MAIN_ROW = 0  # the mixer's first row; the PiP's is the second
-MAIN_TITLE, PIP_TITLE = "Main", "PiP"
+# i18n: the mixer's row for the large picture; max ~8 letters
+MAIN_TITLE = N_("Main")
+# i18n: the mixer's row for the small picture (picture in picture); max ~8 letters
+PIP_TITLE = N_("PiP")
 _UP, _DOWN = Qt.Key.Key_Up.value, Qt.Key.Key_Down.value
 _OTHER_ROW = (Action.SEEK_BACK, Action.SEEK_FWD, Action.TAB)
+
+
+def _volume_text(level: int) -> str:
+    return tr("Volume {level}%", level=level)  # i18n: a toast; the sound's level in percent
 
 
 class MixerControls(QObject):
@@ -99,7 +107,7 @@ class MixerControls(QObject):
         level = max(0, min(100, self._level(row) + delta))
         self._set_level(row, level)
         if self._overlay is None:
-            self._toast(f"Volume {level}%")
+            self._toast(_volume_text(level))
         self._show(row)
 
     def mute(self) -> None:
@@ -110,12 +118,13 @@ class MixerControls(QObject):
             muted = session.toggle_mute()
             self._main_muted = bool(muted)
             self._audio_changed()
-            self._toast("Muted" if muted else f"Volume {session.volume()}%")
+            # i18n: a toast: the sound is off (adjective)
+            self._toast(tr("Muted") if muted else _volume_text(session.volume()))
             return
         muted = not self._muted(row)
         self._set_muted(row, muted)
         if self._overlay is None:
-            self._toast("Muted" if muted else f"Volume {self._level(row)}%")
+            self._toast(tr("Muted") if muted else _volume_text(self._level(row)))
         self._show(row)
 
     def handle(self, action: Action, key: Optional[int] = None) -> bool:
@@ -143,7 +152,7 @@ class MixerControls(QObject):
         """The transport's speaker: the mixer on the large picture's row, changing nothing."""
         if self._overlay is None:
             muted = self._muted(MAIN_ROW)
-            self._toast("Muted" if muted else f"Volume {self._level(MAIN_ROW)}%")
+            self._toast(tr("Muted") if muted else _volume_text(self._level(MAIN_ROW)))
         self._show(MAIN_ROW)
 
     def main_muted(self) -> bool:
@@ -220,14 +229,14 @@ class MixerControls(QObject):
         sessions = self.sessions
         names = self._names()
         if sessions is None:
-            return [(None, MAIN_TITLE, names[0])]
+            return [(None, translate(MAIN_TITLE), names[0])]
         tiles = self._tiles() if self._tiles is not None else None
         if tiles:
             return [(sessions.slot(name), title, channel) for name, title, channel in tiles]
         small = sessions.small()
         slots = [sessions.large()] if small is None else [sessions.large(), small]
         return [
-            (slot, title, names[index])
+            (slot, translate(title), names[index])
             for index, (slot, title) in enumerate(zip(slots, (MAIN_TITLE, PIP_TITLE)))
         ]
 

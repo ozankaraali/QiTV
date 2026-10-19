@@ -35,8 +35,9 @@ from urllib.parse import urljoin, urlsplit
 
 from PySide6.QtCore import QLocale, QObject, Signal, Slot
 
-from services import _build_keys
+from services import _build_keys, i18n
 from services.config_manager import get_app_version
+from services.i18n import N_, tr, tr_n, translate
 from services.jobs import cancel_requested
 from services.lazy_import import lazy_module
 from services.next_episode import season_and_episode
@@ -55,6 +56,9 @@ _CHUNK = 64 * 1024
 _REDIRECTS = (301, 302, 303, 307, 308)
 ANONYMOUS_DAILY = 5  # downloads a day without signing in, per connection
 SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")
+# A subtitle's release when OpenSubtitles names neither it nor its file: kept in English (it
+# may name the file), translated where the page shows it.
+UNTITLED = N_("Untitled")  # i18n: a subtitle on the OpenSubtitles page whose release has no name
 
 # What went wrong (`Problem.kind`).
 NO_KEY = "no_key"
@@ -67,19 +71,20 @@ SERVER = "server"
 GONE = "gone"
 DISK = "disk"
 
-NO_KEY_TEXT = "OpenSubtitles needs an API key."
-BAD_KEY_TEXT = "OpenSubtitles didn't accept the API key. Check it, or paste a new one."
-BAD_LOGIN_TEXT = (
+# What to tell the viewer (`Problem.text`: translated where the problem is made).
+NO_KEY_TEXT = N_("OpenSubtitles needs an API key.")
+BAD_KEY_TEXT = N_("OpenSubtitles didn't accept the API key. Check it, or paste a new one.")
+BAD_LOGIN_TEXT = N_(
     "OpenSubtitles didn't accept your username or password. Check them in Settings → Subtitles."
 )
-SIGN_IN_AGAIN_TEXT = (
+SIGN_IN_AGAIN_TEXT = N_(
     "OpenSubtitles ended your sign-in. Sign in to OpenSubtitles again in Settings → Subtitles."
 )
-NETWORK_TEXT = "Couldn't reach OpenSubtitles. Check your internet connection and try again."
-SERVER_TEXT = "OpenSubtitles is having trouble right now. Try again in a while."
-UNREADABLE_TEXT = "OpenSubtitles sent an answer QiTV couldn't read. Try again in a while."
-GONE_TEXT = "That subtitle file is no longer on OpenSubtitles. Pick another one."
-DISK_TEXT = "Couldn't save the subtitles on this computer."
+NETWORK_TEXT = N_("Couldn't reach OpenSubtitles. Check your internet connection and try again.")
+SERVER_TEXT = N_("OpenSubtitles is having trouble right now. Try again in a while.")
+UNREADABLE_TEXT = N_("OpenSubtitles sent an answer QiTV couldn't read. Try again in a while.")
+GONE_TEXT = N_("That subtitle file is no longer on OpenSubtitles. Pick another one.")
+DISK_TEXT = N_("Couldn't save the subtitles on this computer.")
 
 
 def built_in_key() -> str:
@@ -94,6 +99,11 @@ def api_key(user_key: str) -> str:
 
 def user_agent() -> str:
     return f"QiTV v{get_app_version()}"
+
+
+def shown_release(release: str) -> str:
+    """A subtitle's release as the page shows it ("Untitled" translated)."""
+    return translate(UNTITLED) if release == UNTITLED else release
 
 
 # ---- what was found -----------------------------------------------------------------------
@@ -191,7 +201,7 @@ def parse_search(data: Any, start: int = 0) -> list[SubtitleFile]:
             SubtitleFile(
                 file_id=int(first["file_id"]),
                 language=str(attributes.get("language") or "").strip() or "und",
-                release=str(attributes.get("release") or "").strip() or file_name or "Untitled",
+                release=str(attributes.get("release") or "").strip() or file_name or UNTITLED,
                 file_name=file_name,
                 downloads=_int(attributes.get("download_count")) or 0,
                 hearing_impaired=attributes.get("hearing_impaired") is True,
@@ -219,33 +229,63 @@ def _int(value: Any) -> Optional[int]:
 # ---- languages and ranking ----------------------------------------------------------------
 
 _UNRANKED = frozenset({"", "anonymous", "sub leecher", "new member"})
-# OpenSubtitles' own codes that are no ISO language.
+# OpenSubtitles' own codes that are no ISO language: their names on the OpenSubtitles page
+# (where, in a language other than English, the other languages show in their own names:
+# "Deutsch", "Español").
 _SPECIAL_LANGUAGES = {
-    "ea": "Spanish (Latin America)",
-    "ze": "Chinese (bilingual)",
-    "zh-ca": "Chinese (Cantonese)",
-    "pm": "Portuguese (Mozambique)",
-    "me": "Montenegrin",
-    "ma": "Manipuri",
-    "sy": "Syriac",
-    "und": "Unknown language",
+    "ea": N_("Spanish (Latin America)"),  # i18n: a subtitle language
+    "ze": N_("Chinese (bilingual)"),  # i18n: a subtitle language
+    "zh-ca": N_("Chinese (Cantonese)"),  # i18n: a subtitle language
+    "pm": N_("Portuguese (Mozambique)"),  # i18n: a subtitle language
+    "me": N_("Montenegrin"),  # i18n: a subtitle language
+    "ma": N_("Manipuri"),  # i18n: a subtitle language
+    "sy": N_("Syriac"),  # i18n: a subtitle language
+    "und": N_("Unknown language"),  # i18n: a subtitle's language, when it has none
 }
 
 
 def language_name(code: str) -> str:
-    """A language's name in English: "English", "Portuguese (Brazil)"."""
+    """A language's name: in English "English", "Portuguese (Brazil)"; in another of the
+    app's languages the language's own name, "Deutsch", "Português (Brasil)" (Qt names a
+    language in English or in itself only)."""
     key = code.strip().lower()
     if key in _SPECIAL_LANGUAGES:
-        return _SPECIAL_LANGUAGES[key]
+        return translate(_SPECIAL_LANGUAGES[key])
     locale = QLocale(code.replace("-", "_"))
     if locale.language() in (QLocale.Language.C, QLocale.Language.AnyLanguage):
-        return code.upper() or "Unknown language"
+        return code.upper() or translate(_SPECIAL_LANGUAGES["und"])
+    if i18n.language() != i18n.SOURCE_LANGUAGE:
+        own = _own_name(locale, with_territory="-" in code)
+        if own:
+            return own
     name = QLocale.languageToString(locale.language())
     if "-" in code:
         territory = QLocale.territoryToString(locale.territory())
         if territory and locale.territory() != QLocale.Country.AnyTerritory:
             name = f"{name} ({territory})"
     return name
+
+
+def _own_name(locale: QLocale, *, with_territory: bool) -> str:
+    """The language's name in itself ("Português (Brasil)"); "" when Qt has none.
+
+    Qt names some languages after a region ("American English" for en_US): without a
+    region, the shorter of its names and its name for the whole world ("English"); with one,
+    the region's name follows, unless the language's own name says it already ("português
+    europeu", "繁體中文")."""
+    own = str(locale.nativeLanguageName() or "")
+    if not own:
+        return ""
+    plain = str(QLocale(locale.language()).nativeLanguageName() or "")  # its first region's
+    if not with_territory:
+        world = QLocale(locale.language(), QLocale.Country.World)
+        if world.territory() == QLocale.Country.World and world.nativeLanguageName():
+            own = min((own, str(world.nativeLanguageName())), key=len)
+    elif own == plain and locale.territory() != QLocale.Country.AnyTerritory:
+        territory = str(locale.nativeTerritoryName() or "")
+        if territory:
+            own = f"{own} ({territory})"
+    return str(locale.toUpper(own[:1])) + own[1:]
 
 
 def system_language(locale: Optional[QLocale] = None) -> str:
@@ -503,21 +543,71 @@ def _reset_text(value: Any) -> str:
     return re.sub(r"\b0(\d)\b", r"\1", text)
 
 
+_RESET = re.compile(r"(\d+) hours? and (\d+) minutes?|(\d+) hours?|(\d+) minutes?")
+
+
+def shown_reset(reset: str) -> str:
+    """When today's downloads come back, as OpenSubtitles says it ("8 hours and 38 minutes"),
+    in the app's language; as it is in English, or when it says it some other way."""
+    match = _RESET.fullmatch(reset)
+    if i18n.language() == i18n.SOURCE_LANGUAGE or match is None:
+        return reset
+    hours, minutes, hours_only, minutes_only = match.groups()
+    if hours is not None:
+        return tr(
+            "{hours} and {minutes}",  # i18n: a time span: "8 hours and 38 minutes"
+            hours=tr_n("{n} hour", "{n} hours", int(hours)),
+            minutes=tr_n("{n} minute", "{n} minutes", int(minutes)),
+        )
+    if hours_only is not None:
+        return tr_n("{n} hour", "{n} hours", int(hours_only))
+    return tr_n("{n} minute", "{n} minutes", int(minutes_only))
+
+
 def quota_text(reset: str, *, signed_in: bool) -> str:
     """Today's downloads are used, in plain words."""
-    back = f"They come back in {reset}." if reset else "They come back within a day."
+    time = shown_reset(reset)
     if signed_in:
-        return f"You've used today's downloads on your OpenSubtitles account. {back}"
-    return (
-        f"You've used today's downloads: without signing in, OpenSubtitles allows "
-        f"{ANONYMOUS_DAILY} a day per connection. {back} Signing in to OpenSubtitles in "
-        "Settings → Subtitles raises the limit."
-    )
+        if reset:
+            return tr(
+                "You've used today's downloads on your OpenSubtitles account. "
+                "They come back in {time}.",  # i18n: {time}: a time span, "8 hours and 38 minutes"
+                time=time,
+            )
+        return tr(
+            "You've used today's downloads on your OpenSubtitles account. "
+            "They come back within a day."
+        )
+    if reset:
+        return tr_n(
+            "You've used today's downloads: without signing in, OpenSubtitles allows {n} a day "
+            "per connection. They come back in {time}. Signing in to OpenSubtitles in "
+            "Settings → Subtitles raises the limit.",
+            "You've used today's downloads: without signing in, OpenSubtitles allows {n} a day "
+            "per connection. They come back in {time}. Signing in to OpenSubtitles in "
+            "Settings → Subtitles raises the limit.",
+            ANONYMOUS_DAILY,
+            time=time,
+        )  # i18n: {n}: downloads; {time}: a time span, "8 hours and 38 minutes"
+    return tr_n(
+        "You've used today's downloads: without signing in, OpenSubtitles allows {n} a day "
+        "per connection. They come back within a day. Signing in to OpenSubtitles in "
+        "Settings → Subtitles raises the limit.",
+        "You've used today's downloads: without signing in, OpenSubtitles allows {n} a day "
+        "per connection. They come back within a day. Signing in to OpenSubtitles in "
+        "Settings → Subtitles raises the limit.",
+        ANONYMOUS_DAILY,
+    )  # i18n: {n}: downloads
 
 
 def busy_text(seconds: Optional[int]) -> str:
-    wait = f"in {seconds} seconds" if seconds and seconds > 1 else "in a moment"
-    return f"OpenSubtitles is getting too many requests. Try again {wait}."
+    if seconds and seconds > 1:
+        return tr_n(
+            "OpenSubtitles is getting too many requests. Try again in {n} second.",
+            "OpenSubtitles is getting too many requests. Try again in {n} seconds.",
+            seconds,
+        )
+    return tr("OpenSubtitles is getting too many requests. Try again in a moment.")
 
 
 def _retry_seconds(response: Any) -> Optional[int]:
@@ -582,12 +672,12 @@ class OpenSubtitlesClient:
         if response.status_code in (400, 401, 403):
             logger.info("OpenSubtitles refused the sign-in (%s)", response.status_code)
             if _refuses_the_key(response):
-                raise OpenSubtitlesError(BAD_KEY, BAD_KEY_TEXT)
-            raise OpenSubtitlesError(BAD_LOGIN, BAD_LOGIN_TEXT)
+                raise OpenSubtitlesError(BAD_KEY, translate(BAD_KEY_TEXT))
+            raise OpenSubtitlesError(BAD_LOGIN, translate(BAD_LOGIN_TEXT))
         data = self._checked(response, signed_in=False)
         token = data.get("token") if isinstance(data, dict) else None
         if not isinstance(token, str) or not token:
-            raise OpenSubtitlesError(SERVER, UNREADABLE_TEXT)
+            raise OpenSubtitlesError(SERVER, translate(UNREADABLE_TEXT))
         base = self._base_from(data.get("base_url"))
         with self._lock:
             self._token, self._base = token, base
@@ -679,15 +769,15 @@ class OpenSubtitlesClient:
             token = self._token_now()
             response = self._call("POST", "/download", json={"file_id": int(file_id)}, token=token)
         if response.status_code == 404:
-            raise OpenSubtitlesError(GONE, GONE_TEXT)
+            raise OpenSubtitlesError(GONE, translate(GONE_TEXT))
         if response.status_code in (401, 403) and token is not None:
             # Refused again with a fresh sign-in: the sign-in, not the key (anonymous
             # downloads take the key alone).
-            raise OpenSubtitlesError(BAD_LOGIN, SIGN_IN_AGAIN_TEXT)
+            raise OpenSubtitlesError(BAD_LOGIN, translate(SIGN_IN_AGAIN_TEXT))
         info = self._checked(response, signed_in=token is not None)
         link = info.get("link") if isinstance(info, dict) else None
         if not isinstance(link, str) or not link.startswith("https://"):
-            raise OpenSubtitlesError(SERVER, UNREADABLE_TEXT)
+            raise OpenSubtitlesError(SERVER, translate(UNREADABLE_TEXT))
         return self._fetch(link), info
 
     def _fetch(self, link: str) -> bytes:
@@ -697,7 +787,7 @@ class OpenSubtitlesClient:
         for _hop in range(MAX_REDIRECTS + 1):
             if not url.startswith("https://"):
                 logger.info("A subtitle file's link led away from https")
-                raise OpenSubtitlesError(SERVER, UNREADABLE_TEXT)
+                raise OpenSubtitlesError(SERVER, translate(UNREADABLE_TEXT))
             try:
                 file = self._http_module().request(
                     "GET",
@@ -709,7 +799,7 @@ class OpenSubtitlesClient:
                 )
             except (requests.RequestException, OSError) as e:  # never the link: it is a key
                 logger.info("Couldn't fetch the subtitle file: %s", safe_exc(e))
-                raise OpenSubtitlesError(NETWORK, NETWORK_TEXT) from None
+                raise OpenSubtitlesError(NETWORK, translate(NETWORK_TEXT)) from None
             if file.status_code in _REDIRECTS:
                 location = str((getattr(file, "headers", None) or {}).get("Location") or "")
                 _close(file)
@@ -720,27 +810,27 @@ class OpenSubtitlesClient:
             finally:
                 _close(file)
         logger.info("A subtitle file's link redirected too often")
-        raise OpenSubtitlesError(SERVER, UNREADABLE_TEXT)
+        raise OpenSubtitlesError(SERVER, translate(UNREADABLE_TEXT))
 
     @staticmethod
     def _body(file: Any) -> bytes:
         if file.status_code in (404, 410):
-            raise OpenSubtitlesError(GONE, GONE_TEXT)
+            raise OpenSubtitlesError(GONE, translate(GONE_TEXT))
         if not 200 <= file.status_code < 300:
             logger.info("The subtitle file's link answered %s", file.status_code)
-            raise OpenSubtitlesError(SERVER, SERVER_TEXT)
+            raise OpenSubtitlesError(SERVER, translate(SERVER_TEXT))
         content = bytearray()
         try:
             for chunk in file.iter_content(chunk_size=_CHUNK):
                 content += chunk
                 if len(content) > MAX_FILE_BYTES:
                     logger.info("A subtitle file was larger than %s bytes", MAX_FILE_BYTES)
-                    raise OpenSubtitlesError(SERVER, UNREADABLE_TEXT)
+                    raise OpenSubtitlesError(SERVER, translate(UNREADABLE_TEXT))
         except (requests.RequestException, OSError) as e:
             logger.info("The subtitle file stopped coming: %s", safe_exc(e))
-            raise OpenSubtitlesError(NETWORK, NETWORK_TEXT) from None
+            raise OpenSubtitlesError(NETWORK, translate(NETWORK_TEXT)) from None
         if not content:
-            raise OpenSubtitlesError(SERVER, UNREADABLE_TEXT)
+            raise OpenSubtitlesError(SERVER, translate(UNREADABLE_TEXT))
         return bytes(content)
 
     # -- HTTP --------------------------------------------------------------------------------
@@ -761,7 +851,7 @@ class OpenSubtitlesClient:
         token: Optional[str] = None,
     ) -> Any:
         if not self.credentials.api_key:
-            raise OpenSubtitlesError(NO_KEY, NO_KEY_TEXT)
+            raise OpenSubtitlesError(NO_KEY, translate(NO_KEY_TEXT))
         if path.startswith("/"):
             with self._lock:
                 base = self._base if token is not None else API_URL
@@ -788,7 +878,7 @@ class OpenSubtitlesClient:
             )
         except (requests.RequestException, OSError) as e:  # the type and host only: the
             logger.info("OpenSubtitles could not be reached: %s", safe_exc(e))  # URL may tell
-            raise OpenSubtitlesError(NETWORK, NETWORK_TEXT) from None
+            raise OpenSubtitlesError(NETWORK, translate(NETWORK_TEXT)) from None
 
     def _checked(self, response: Any, *, signed_in: bool) -> Any:
         """The answer's JSON, or the problem its status says."""
@@ -796,20 +886,20 @@ class OpenSubtitlesClient:
         if 200 <= status < 300:
             data = _json(response)
             if data is None:
-                raise OpenSubtitlesError(SERVER, UNREADABLE_TEXT)
+                raise OpenSubtitlesError(SERVER, translate(UNREADABLE_TEXT))
             return data
         logger.info("OpenSubtitles answered %s", status)
         if status in (401, 403):
             if signed_in:  # with a sign-in's token: the sign-in ended
-                raise OpenSubtitlesError(BAD_LOGIN, SIGN_IN_AGAIN_TEXT)
-            raise OpenSubtitlesError(BAD_KEY, BAD_KEY_TEXT)
+                raise OpenSubtitlesError(BAD_LOGIN, translate(SIGN_IN_AGAIN_TEXT))
+            raise OpenSubtitlesError(BAD_KEY, translate(BAD_KEY_TEXT))
         if status == 406:
             data = _json(response)
             reset = _reset_text(data.get("reset_time")) if isinstance(data, dict) else ""
             raise OpenSubtitlesError(QUOTA, quota_text(reset, signed_in=signed_in))
         if status == 429:
             raise OpenSubtitlesError(BUSY, busy_text(_retry_seconds(response)))
-        raise OpenSubtitlesError(SERVER, SERVER_TEXT)
+        raise OpenSubtitlesError(SERVER, translate(SERVER_TEXT))
 
 
 # ---- saving -------------------------------------------------------------------------------
@@ -905,7 +995,7 @@ class DownloadWorker(QObject):
             )
             return
         if self._client is None:
-            self.finished.emit(Problem(NO_KEY, NO_KEY_TEXT))
+            self.finished.emit(Problem(NO_KEY, translate(NO_KEY_TEXT)))
             return
         try:
             content, info = self._client.download(file.file_id)
@@ -918,7 +1008,7 @@ class DownloadWorker(QObject):
             save_subtitle(path, content)
         except OSError as e:
             logger.warning("Couldn't save the subtitles: %s", safe_message(e))
-            self.finished.emit(Problem(DISK, DISK_TEXT))
+            self.finished.emit(Problem(DISK, translate(DISK_TEXT)))
             return
         remaining = _int(info.get("remaining"))
         self.finished.emit(
