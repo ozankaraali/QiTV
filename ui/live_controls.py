@@ -8,7 +8,8 @@ fresh link once per tune (its play token may have expired) before the error show
 refusal for the provider's connection limit is never retried and says so. A live channel
 played directly whose stream ends (an on-demand restream may show a placeholder and end)
 opens again in the same player, so in the same budget slot, twice per tune at most, after
-RECONNECT_MS: "Reconnecting…", and only then "The stream ended".
+RECONNECT_MS: "Reconnecting…", and only then "The stream ended"; once it has played for
+HEALTHY_S since it last opened, it may open again twice more.
 
 Recording (2.2): R and the record button record the time-shifted channel being watched from
 where it plays (rewound or not) into the Recordings folder (`services.recording`), or stop
@@ -30,6 +31,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import logging
+import time
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
@@ -60,6 +62,7 @@ TICK_PROGRAMMES = 6  # programme starts marked on the time-shift bar
 LIMITED_TEXT = N_("Your provider limits concurrent streams")  # i18n: error toast
 ERROR_MS = 6000
 RECONNECT_MS = (1000, 3000)  # the back-off before each reopen of a live stream that ended
+HEALTHY_S = 60.0  # a stream that played this long before it ended has its reopens back
 # i18n: toast: a live channel's stream ended and is opened again
 RECONNECTING_TEXT = N_("Reconnecting…")
 # i18n: a toast: R or the record button was pressed while the channel is still opening
@@ -145,6 +148,7 @@ class LiveControls(QObject):
         self._ticks: list[tuple[float, str]] = []
         self._wired = False
         self._reconnects = 0  # reopens of the current tune's ended stream so far
+        self._playing_since: Optional[float] = None  # the player's last "playing" (monotonic)
         self._reopen_due: Optional[tuple[Target, str, PlayKind]] = None  # after the back-off
         self._reopen_timer = QTimer(self, singleShot=True)
         self._reopen_timer.timeout.connect(self._reopen)
@@ -216,6 +220,7 @@ class LiveControls(QObject):
     def _forget_channel(self) -> None:
         self._ticks = []
         self._reconnects = 0
+        self._playing_since = None
         self._cancel_reopen()
 
     def open_archive(self, target: Target, url: str) -> bool:
@@ -329,6 +334,9 @@ class LiveControls(QObject):
         url, kind = self.session.url, self.session.kind
         if not url or kind is None or kind in _NOT_LIVE:
             return False
+        since, self._playing_since = self._playing_since, None
+        if since is not None and time.monotonic() - since >= HEALTHY_S:
+            self._reconnects = 0  # it played well since it last opened: the back-off anew
         if self._reconnects >= len(RECONNECT_MS):
             return False
         self._reopen_due = (current, url, kind)
@@ -421,7 +429,8 @@ class LiveControls(QObject):
         self._toast(translate(text))  # LiveSession's notices are English (N_) texts
 
     def on_playing(self) -> None:
-        """The player plays (kept for the controller's call; nothing is held back now)."""
+        """The player plays: an ended stream counts how long it played since (HEALTHY_S)."""
+        self._playing_since = time.monotonic()
 
     def _on_live_failed(self, message: str) -> None:
         """Playback of the live channel failed for good (LiveSession recovered what it could)."""

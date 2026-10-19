@@ -25,6 +25,11 @@ again, the Next card offers what follows, as at its end). The label's × closes 
 picture, its speaker mutes or unmutes it, and its ⇄, like a click on the small picture,
 swaps (the shell's `swap`).
 
+A channel the small picture plays directly (its live session fell back) whose stream ends
+opens again in the same player, so in its budget slot, as the large picture's does
+(`ui.live_controls`): after RECONNECT_MS, twice per channel (twice more once it played for
+HEALTHY_S), then "The stream ended".
+
 What each slot shows (its target, the zap group it came from and, for a movie or an episode,
 its resume key) is kept here, so a swap can give the shell the new large picture's
 (`take_large`).
@@ -35,19 +40,21 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import partial
 import logging
+import time
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from services.catalog import ALL_GROUP_ID
 from services.i18n import N_, tr, tr_n, translate
-from services.live.live_session import LOADING, UNAVAILABLE
+from services.live.live_session import LOADING, RECONNECTING, UNAVAILABLE
 from services.live.refusals import STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
 from services.sessions import SessionManager, Slot, limit_message
+from services.vlc_profile import PlayKind
 from services.zapping import ZapContext
-from ui import item_provider
+from ui import item_provider, live_controls
 from ui.autoplay import FINISHED_TEXT
 from ui.context_actions import is_channel
 from ui.link_lanes import LinkLanes, Target
@@ -167,6 +174,13 @@ class PipControls(QObject):
         self._room: Optional[_Room] = None  # what a title on its way closes when it comes
         # Per slot: the channel it showed small and the notices said for it (once each).
         self._said: dict[str, tuple[Optional[dict], set[str]]] = {}
+        # An ended direct stream of the small picture: reopens per slot since its channel
+        # opened, each player's last "playing" (monotonic), and the reopen after its back-off.
+        self._reopens: dict[str, int] = {}
+        self._playing_since: dict[str, float] = {}
+        self._reopen_due: Optional[tuple[str, Target, str]] = None
+        self._reopen_timer = QTimer(self, singleShot=True)
+        self._reopen_timer.timeout.connect(self._reopen)
 
     def wire(self) -> None:
         sessions = self.sessions
@@ -481,6 +495,7 @@ class PipControls(QObject):
             self._room = None  # closed already: nothing to close, or say, for the title
         self._wanted = None
         self._link = None  # a late link for it is ignored (it is no longer `_link`)
+        self._cancel_reopen()
         sessions = self.sessions
         if sessions.pip_open() or sessions.pip_opening():
             sessions.close_pip()
@@ -528,6 +543,8 @@ class PipControls(QObject):
         self._closed_view = None
         self._timelines.pop(slot.name, None)
         self._said.pop(slot.name, None)  # its new channel's notices are said again
+        self._reopens.pop(slot.name, None)
+        self._cancel_reopen()
         # The small picture keeps its time-shift in memory: one disk ring at most (M5 ruling).
         kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
         sessions.open_pip(
@@ -616,7 +633,12 @@ class PipControls(QObject):
         self._request(again)
 
     def _on_player_state(self, name: str, state: str) -> None:
-        """A player's state: a title that ended small says "Finished" on the label."""
+        """A player's state: a title that ended small says "Finished" on the label; a channel
+        played directly that ended small opens again."""
+        if state == "playing":
+            self._playing_since[name] = time.monotonic()
+        elif state == "ended":
+            self._reconnect_small(name)
         ended = state == "ended"
         if ended == (name in self._ended):
             return
@@ -641,11 +663,67 @@ class PipControls(QObject):
         if text in said[1]:
             return
         said[1].add(text)
+        self._say(name, translate(text))  # LiveSession's notices are English (N_) texts
+
+    def _say(self, name: str, message: str) -> None:
+        """Toast `message` (shown text) after the name of slot `name`'s channel."""
+        small = self.sessions.small()
         target = self.view(name).target
-        title = target.title if target is not None else str((small.channel or {}).get("name", ""))
-        message = translate(text)  # LiveSession's notices are English (N_) texts
+        channel = small.channel if small is not None else None
+        title = target.title if target is not None else str((channel or {}).get("name", ""))
         shown = tr("{name}: {message}", name=title, message=message) if title else message
         self._toast(shown, "info", NOTICE_MS)
+
+    def _reconnect_small(self, name: str) -> None:
+        """Slot `name`'s player ended: when it is the small picture's channel, played directly,
+        its stream opens again in the same player after the back-off (its budget slot is
+        kept: its live session still holds it); past the reopens, it says the stream ended."""
+        small = self.sessions.small()
+        if self._closed() or small is None or small.name != name:
+            return
+        if self._reopen_due is not None:
+            return  # already on its way
+        target = self.view(name).target
+        playback = small.playback
+        url = getattr(playback, "url", None)
+        if target is None or not target.live or small.live.mode != "direct" or not url:
+            return
+        if getattr(playback, "kind", None) is not PlayKind.LIVE:
+            return
+        count = self._reopens.get(name, 0)
+        since = self._playing_since.pop(name, None)
+        if since is not None and time.monotonic() - since >= live_controls.HEALTHY_S:
+            count = 0  # it played well since it last opened: the back-off anew
+        if count >= len(live_controls.RECONNECT_MS):
+            self._say(name, tr("The stream ended"))
+            return
+        self._reopens[name] = count + 1
+        self._reopen_due = (name, target, url)
+        self._reopen_timer.start(live_controls.RECONNECT_MS[count])
+        self._say(name, translate(RECONNECTING))
+
+    def _reopen(self) -> None:
+        due, self._reopen_due = self._reopen_due, None
+        if due is None or self._closed():
+            return
+        name, target, url = due
+        small = self.sessions.small()
+        if small is None or small.name != name or self.view(name).target is not target:
+            return  # closed, swapped or another channel small meanwhile
+        playback = small.playback
+        if small.live.mode != "direct" or getattr(playback, "url", None) != url:
+            return
+        logger.info("Opening %s small again after its stream ended", target.title)
+        playback.play(
+            url,
+            kind=PlayKind.LIVE,
+            latency=self.config.live_latency,
+            **live_controls.stream_options(target.item),
+        )
+
+    def _cancel_reopen(self) -> None:
+        self._reopen_due = None
+        self._reopen_timer.stop()
 
     def _on_timeline(self, name: str, state: dict) -> None:
         self._timelines[name] = state

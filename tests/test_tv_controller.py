@@ -3382,6 +3382,19 @@ class ReconnectTests(PipelineCase):
         self.assertEqual(self.live.named("stop"), [])
         self.assertEqual(self.budget.holders("Home"), ["main"])
 
+    def test_a_stream_that_played_a_while_since_may_reconnect_twice_again(self):
+        self.enterContext(mock.patch("ui.live_controls.HEALTHY_S", 0.05))
+        plays = self.fall_back()
+        self.end_and_reopen(plays)
+        self.end_and_reopen(plays + 1)
+        self.session.stateChanged.emit("playing")
+        QTest.qWait(80)  # it played HEALTHY_S since its last reopen
+        self.end_and_reopen(plays + 2)
+        self.session.stateChanged.emit("playing")  # too briefly this time
+        self.end_and_reopen(plays + 3)
+        self.session.ended.emit()
+        self.assertEqual(self.toast.messages()[-1], ("The stream ended", "info"))
+
     def test_each_tune_may_reconnect_twice(self):
         plays = self.fall_back(0)
         self.end_and_reopen(plays)

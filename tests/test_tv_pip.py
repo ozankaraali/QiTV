@@ -440,6 +440,59 @@ class PipTests(PipCase):
         self.pip_live.notice.emit(RECONNECTING)
         self.assertEqual(self.toast.messages()[-1], ("Three: Reconnecting…", "info"))
 
+    def test_an_ended_direct_stream_of_the_small_picture_opens_again_in_its_slot(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.enterContext(mock.patch("ui.live_controls.HEALTHY_S", 0.05))
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.pip_live.play_direct()  # its live session fell back: VLC plays the stream itself
+        url, kwargs = self.pip_session.plays[-1]
+        holders, stops = sorted(self.budget.holders("Home")), self.pip_session.stops
+
+        def end_and_reopen():
+            plays = len(self.pip_session.plays)
+            self.pip_session.stateChanged.emit("ended")
+            self.assertEqual(self.toast.messages()[-1], ("Two: Reconnecting…", "info"))
+            self.assertEqual(len(self.pip_session.plays), plays)  # after a back-off
+            self.assertTrue(wait_until(lambda: len(self.pip_session.plays) == plays + 1))
+            self.assertEqual(self.pip_session.plays[-1][0], url)
+            self.assertEqual(self.pip_session.plays[-1][1]["kind"], kwargs["kind"])
+
+        end_and_reopen()
+        end_and_reopen()
+        self.pip_session.stateChanged.emit("playing")
+        QTest.qWait(80)  # it played a while since: twice more
+        end_and_reopen()
+        end_and_reopen()
+        self.pip_session.stateChanged.emit("ended")
+        self.assertEqual(self.toast.messages()[-1], ("Two: The stream ended", "info"))
+        QTest.qWait(200)
+        self.assertEqual(len(self.pip_session.plays), 6)  # the first, then four reopens
+        # One slot, the same one, all along: nothing was stopped or given back.
+        self.assertEqual(self.pip_session.stops, stops)
+        self.assertEqual(sorted(self.budget.holders("Home")), holders)
+        self.assertEqual(self.pip_live.named("stop"), [])
+
+    def test_a_time_shifted_small_picture_is_not_reopened_here(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        plays = len(self.pip_session.plays)
+        self.pip_session.stateChanged.emit("ended")  # LiveSession reopens its buffer itself
+        QTest.qWait(100)
+        self.assertEqual(len(self.pip_session.plays), plays)
+
+    def test_closing_the_small_picture_cancels_its_reopen(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.pip_live.play_direct()
+        self.pip_session.stateChanged.emit("ended")
+        self.controller.handle(Action.PIP)  # closed during the back-off
+        plays = len(self.pip_session.plays)
+        QTest.qWait(100)
+        self.assertEqual(len(self.pip_session.plays), plays)
+
     def test_a_closed_small_picture_says_nothing(self):
         self.start_large(0)
         self.open_small(CHANNELS[1])
