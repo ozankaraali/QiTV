@@ -46,7 +46,7 @@ directly); each kind has one meaning:
 After `sessionEnded` or a final failure, only `sessionClosed` follows; `sessionClosed` always
 answers `close_session`.
 
-Recording (2.3): `start_recording(sid, path, seq)` has the helper write the session's buffer
+Recording (2.2): `start_recording(sid, path, seq)` has the helper write the session's buffer
 to a file from segment `seq` on, following the live edge (no second connection: the helper's
 recorder reads the ring), until `stop_recording(sid)`, the session's close, its input's end or
 a limit. It returns the recording's id, and each is answered by one `recordingEnded(rid,

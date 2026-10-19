@@ -56,7 +56,7 @@ class Action(str, Enum):
     SUBTITLES_EARLIER = "subtitles_earlier"  # Shift+J: the subtitles 50 ms earlier
     SUBTITLES_LATER = "subtitles_later"  # Shift+K (VLC's G and H: G is the guide here)
     PASTE = "paste"  # Ctrl/⌘+V: the clipboard into the subtitles search's field
-    RECORD = "record"  # R: record the channel being watched, or stop (2.3)
+    RECORD = "record"  # R: record the channel being watched, or stop (2.2)
 
 
 # "subtitles": the OpenSubtitles search over the player (2.2): it types like the drawer.

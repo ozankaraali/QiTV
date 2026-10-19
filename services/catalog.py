@@ -656,9 +656,9 @@ class CatalogService(QObject):
         return None
 
     def archive_zone(self) -> Optional[tzinfo]:
-        """The time zone an Xtream panel's archive addresses are in (catch-up, 2.3): what its
+        """The time zone an Xtream panel's archive addresses are in (catch-up, 2.2): what its
         sign-in said when the live channels loaded; None when it is not known (another
-        provider, or live channels loaded before 2.3)."""
+        provider, or live channels loaded before 2.2)."""
         content = self.provider_manager.current_provider_content.get("itv")
         if not isinstance(content, dict):
             return None

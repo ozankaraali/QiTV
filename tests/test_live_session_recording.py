@@ -1,4 +1,4 @@
-"""LiveSession's recording (2.3): where it starts, its stops, and the ends it reports."""
+"""LiveSession's recording (2.2): where it starts, its stops, and the ends it reports."""
 
 import os
 import unittest

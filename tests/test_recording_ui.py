@@ -1,4 +1,4 @@
-"""Recording on screen (2.3): file names and the folder, the record button and its REC chip,
+"""Recording on screen (2.2): file names and the folder, the record button and its REC chip,
 R, the controller's toggle and its toasts, and REC on the small picture's label."""
 
 from datetime import datetime

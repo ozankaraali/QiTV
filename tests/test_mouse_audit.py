@@ -72,7 +72,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("player", "Left, Right"): (("transport", "back10"), ("transport", "fwd10")),
     ("player", "Space"): (("transport", "play"),),
     ("player", "L"): (("transport", "golive"),),
-    # The record button after the channel's star (2.3): lit while it records, dimmed on a
+    # The record button after the channel's star (2.2): lit while it records, dimmed on a
     # channel played directly (a press says why).
     ("player", "R"): (("transport", "record"),),
     ("player", "G"): (("transport", "guide"),),

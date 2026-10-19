@@ -1,4 +1,4 @@
-"""Recording the live channel being watched (2.3): where the files go, what they are called,
+"""Recording the live channel being watched (2.2): where the files go, what they are called,
 and what a recording's end says.
 
 The time-shift helper writes the file from its buffer (`services.live.recorder`); the GUI

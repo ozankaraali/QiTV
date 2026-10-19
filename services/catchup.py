@@ -1,4 +1,4 @@
-"""Provider catch-up (2.3): a channel's archive of past programmes, played from the provider.
+"""Provider catch-up (2.2): a channel's archive of past programmes, played from the provider.
 
 Many providers keep the last days of some channels. QiTV's own time-shift buffer holds only
 the minutes it recorded since the tune; further back, the provider's archive plays instead.
@@ -14,14 +14,14 @@ that has one (a catalog can hold 200,000 items; older builds ignore the keys):
   channel's line gives one. A playlist's `#EXTM3U` line may set them for every channel; its
   template is kept once, beside the channels (the catalog's `catchup_source`, `archive_of`'s
   `playlist_source`), not on each of them.
-A catalog saved before 2.3 has none of them: its channels have no archive until it refreshes.
+A catalog saved before 2.2 has none of them: its channels have no archive until it refreshes.
 
 Addresses (`archive_urls`):
 - Xtream: `{base}/timeshift/{user}/{pass}/{minutes}/{YYYY-MM-DD:HH-MM}/{id}.ts`, then the
   `{base}/streaming/timeshift.php?username=…&password=…&stream=…&start=…&duration=…` form. The
   start is a whole minute in the panel's time zone (`provider_zone`: Player API server_info's
   `timezone`, else the offset its `time_now` shows against `timestamp_now`). Without one
-  (a catalog loaded before 2.3, or a playlist's xc channel whose server is no Xtream provider
+  (a catalog loaded before 2.2, or a playlist's xc channel whose server is no Xtream provider
   of the user's) it is a UTC guess, and an answer to a guess teaches nothing.
 - M3U, by its type: default (the template is the address), append (the template goes after
   the channel's address), shift (`utc=` and `lutc=` go after it), flussonic

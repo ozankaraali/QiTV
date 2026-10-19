@@ -1,4 +1,4 @@
-"""Recording from the time-shift ring (2.3): the helper's recorder on synthetic rings, and the
+"""Recording from the time-shift ring (2.2): the helper's recorder on synthetic rings, and the
 helper's record commands on a paced local source (no second connection, a close keeps the
 file)."""
 

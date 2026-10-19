@@ -1,4 +1,4 @@
-"""Whether each channel's provider archive answered (2.3), for the next time it is asked for.
+"""Whether each channel's provider archive answered (2.2), for the next time it is asked for.
 
 A channel may claim an archive and still have none (the provider answers 404). So QiTV keeps,
 per channel (`services.live.tuning.channel_key()`: the provider and the channel, hashed),

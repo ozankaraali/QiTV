@@ -1,4 +1,4 @@
-"""Provider catch-up on the large picture (2.3): further back than QiTV's buffer, the
+"""Provider catch-up on the large picture (2.2): further back than QiTV's buffer, the
 provider's archive plays.
 
 A channel whose provider keeps an archive of it (`services.catchup.archive_of`) offers it

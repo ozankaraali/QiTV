@@ -516,7 +516,7 @@ class TVController(QObject):
         transport.previousRequested.connect(partial(self.handle, Action.PREVIOUS))
         transport.infoRequested.connect(partial(self.handle, Action.INFO))
         transport.favoriteRequested.connect(self._favorite_playing)
-        self._live_controls.wire()  # its record button too (2.3)
+        self._live_controls.wire()  # its record button too (2.2)
         self._mixer.wire()
         self._tracks.wire()
         if self._pip is not None:
@@ -1345,7 +1345,7 @@ class TVController(QObject):
             self._tuner.open(self._guarded(target, lambda: self._launch(target, url)))
             return
         if target.live and target.archive_at is not None:
-            # Catch-up (2.3): the channel's archive from that moment, when it offers one now;
+            # Catch-up (2.2): the channel's archive from that moment, when it offers one now;
             # else the channel plays live.
             kept = self._current, self._cid
             self._current, self._cid = target, None
@@ -1948,7 +1948,7 @@ class TVController(QObject):
         return [slot.live for slot in sessions.slots()]
 
     def _watch_recordings(self, live) -> None:
-        """A recording of any player's channel says how it ended (2.3): saved, or why not."""
+        """A recording of any player's channel says how it ended (2.2): saved, or why not."""
         live.recordingEnded.connect(self._on_recording_ended)
 
     def _on_recording_ended(self, reason: str, path: str, written: int) -> None:
@@ -2437,7 +2437,7 @@ class TVController(QObject):
         self, channel: dict, programme: Programme, group_key: str, channels: list[dict]
     ) -> None:
         """The guide's "Watch from the start": the channel's archive from the programme's start
-        to its end (catch-up, 2.3); live when the archive does not play."""
+        to its end (catch-up, 2.2); live when the archive does not play."""
         if not self._closed:
             span = (programme.start.timestamp(), programme.stop.timestamp())
             self._tune(channel, group_key, channels, from_zap=False, archive=span)

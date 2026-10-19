@@ -15,7 +15,7 @@ The state is what the pill is for, so it is never cut: the channel name gives wa
 to nothing, then the state's font shrinks (LIVE and the time behind live to 9 px, then their
 letters get narrower before they shrink further). Only "Connecting…" may still be cut once its
 font shrank a little (a mini player's 90 px PiP); LIVE and the time behind live always show whole,
-and so does REC, which a channel that records shows instead (2.3), after a red dot as LIVE.
+and so does REC, which a channel that records shows instead (2.2), after a red dot as LIVE.
 """
 
 from dataclasses import dataclass

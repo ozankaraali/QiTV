@@ -10,7 +10,7 @@ played directly whose stream ends (an on-demand restream may show a placeholder 
 opens again in the same player, so in the same budget slot, twice per tune at most, after
 RECONNECT_MS: "Reconnecting…", and only then "The stream ended".
 
-Recording (2.3): R and the record button record the time-shifted channel being watched from
+Recording (2.2): R and the record button record the time-shifted channel being watched from
 where it plays (rewound or not) into the Recordings folder (`services.recording`), or stop
 it; the record button is lit and the REC chip counts while the large picture's channel
 records. A channel played directly, or one still opening, says why it cannot record.
@@ -456,7 +456,7 @@ class LiveControls(QObject):
             )
         return tr("The provider refused the stream — it may limit concurrent streams")
 
-    # ---- recording (2.3) ----------------------------------------------------------------------
+    # ---- recording (2.2) ----------------------------------------------------------------------
 
     def toggle_recording(self) -> None:
         """R and the record button: record the channel being watched from where it plays, or

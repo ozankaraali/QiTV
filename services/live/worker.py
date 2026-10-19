@@ -26,7 +26,7 @@ Commands (parent to helper):
   from now on, its open ring at once (a smaller size evicts the oldest segments) and a ring
   made later too; a disk session's size stays the user's. Unanswered; an unknown sid is
   ignored;
-- `("record_start", sid, rid, path, seq, limits)` (2.3): recording `rid` (the parent's name for
+- `("record_start", sid, rid, path, seq, limits)` (2.2): recording `rid` (the parent's name for
   it) writes the session's ring to a new file at `path` (a unique name next to it when that
   exists) from segment `seq` on, following the live edge, until "record_stop", the session's
   close or the helper's shutdown, the end of its input, or `limits` (`{"max_s": seconds,
@@ -46,7 +46,7 @@ each addition a newly closed segment's `(seq, start, end, discontinuity, start_q
 engine always ship in one build, and the engine still takes four);
 `("ready", sid)` once the first segment is open (its state comes first);
 `("recording", sid, rid, path, written)` once recording `rid` made its file and every few
-seconds while it grows (2.3), and `("recorded", sid, rid, reason, path, written)` once it ended
+seconds while it grows (2.2), and `("recorded", sid, rid, reason, path, written)` once it ended
 (`reason` is one of `recorder.REASONS`; `path` the file written, "" when none was), both also
 after "closed": a recording outlives its session's cancel, and they are never dropped for it;
 `("error", sid, kind, message[, status])`, an HTTP failure's status last (2.1: the parent

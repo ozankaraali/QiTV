@@ -1,4 +1,4 @@
-"""Catch-up in the guide (2.3): on a channel with a provider archive the window goes back, a
+"""Catch-up in the guide (2.2): on a channel with a provider archive the window goes back, a
 past programme is chosen (the window's left edge, or a click), and Enter, a double-click or
 the footer's "Watch from the start" play it from its start; the controller opens its archive.
 """

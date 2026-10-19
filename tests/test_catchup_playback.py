@@ -1,4 +1,4 @@
-"""Provider catch-up in the player (2.3): rewinding past the buffer opens the provider's
+"""Provider catch-up in the player (2.2): rewinding past the buffer opens the provider's
 archive, the connection budget orders the streams, Go live comes back, failures are learned.
 
 A fake LiveSession and player (tests/test_tv_controller.py's) with a real connection budget;
@@ -339,7 +339,7 @@ class FailureTests(CatchupCase):
         self.assertFalse(self.memory.failed(channel_key("Home", ARCHIVED)))
 
     def test_an_answer_to_a_guessed_time_zone_teaches_nothing(self):
-        del self.catalog.archive_zone  # an Xtream catalog loaded before 2.3: no zone known
+        del self.catalog.archive_zone  # an Xtream catalog loaded before 2.2: no zone known
         self.start_archived()
         self.fail_unprobed()
         self.runner.answer(-1, "none")

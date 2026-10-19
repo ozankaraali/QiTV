@@ -1,4 +1,4 @@
-"""Provider catch-up's services (2.3): which channels have an archive, its addresses in the
+"""Provider catch-up's services (2.2): which channels have an archive, its addresses in the
 panel's time zone, the probe against local fake servers, and what QiTV remembers."""
 
 from datetime import datetime, timedelta, timezone
@@ -193,7 +193,7 @@ class CatalogZoneTests(unittest.TestCase):
 
         provider = {"name": "X", "type": "XTREAM", "url": "h:1", "username": "u", "password": "p"}
         service, providers, _factory, _ = make_service(provider)
-        self.assertIsNone(service.archive_zone())  # nothing loaded (or loaded before 2.3)
+        self.assertIsNone(service.archive_zone())  # nothing loaded (or loaded before 2.2)
         providers.current_provider_content["itv"] = {"timezone": "Nowhere/Here", "tz_offset": -90}
         self.assertEqual(
             WINTER.astimezone(service.archive_zone()).utcoffset(), timedelta(hours=-1.5)

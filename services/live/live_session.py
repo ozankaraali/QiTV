@@ -204,7 +204,7 @@ once libVLC let go of the provider's stream (`inputEnded`, or after `_CLOSE_CAP_
 `failed(message)` reports a playback error in direct mode, or the provider's refusal for its
 connection limit; pipeline playback errors are recovered here and never reported.
 
-Recording (2.3): while it plays from the buffer, `start_recording(path)` has the helper write
+Recording (2.2): while it plays from the buffer, `start_recording(path)` has the helper write
 the buffer to a file from the clean start at or before where it plays (rewound or not), then
 on with the live edge, opening no connection (`LiveEngine.start_recording`). It stops with
 `stop_recording()`, `stop()` (a channel change), a fallback or a refusal (the file is kept),
@@ -894,7 +894,7 @@ class LiveSession(QObject):
             return self._advance()
         return self._base + self._elapsed
 
-    # ---- recording (2.3) ---------------------------------------------------------------
+    # ---- recording (2.2) ---------------------------------------------------------------
     def recordable(self) -> bool:
         """It plays from the time-shift buffer: a recording can start."""
         return self._phase is _Phase.PIPELINE and self._sid is not None

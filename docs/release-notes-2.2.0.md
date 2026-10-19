@@ -29,6 +29,12 @@ instead of using others' distributions, which may have malware.**
   subtitles found, languages on the left and files on the right, best first; click one and it
   loads. QiTV remembers your pick for each title. Without signing in you get 5 downloads a day;
   signing in to your OpenSubtitles account in Settings → Subtitles gives you more.
+- **Catch-up.** Many providers keep an archive of the last days for some channels. On such a
+  channel the rewind bar goes on past QiTV's own buffer (the dashed part): go there and QiTV plays
+  the provider's archive from that moment, and Go live brings you back. In the guide, go back to a
+  past programme and choose "▶ Watch from the start". On an account that allows one stream, QiTV
+  closes live before it opens the archive. Refresh a provider once (Ctrl+R) after updating so its
+  channels show their archive.
 - **Recording.** Press R, or the red dot after the channel's star, to record the live channel you
   watch; press again to stop. QiTV records from its own rewind buffer, so it needs no second
   connection to your provider, and if you rewound first it records from there. Recordings are

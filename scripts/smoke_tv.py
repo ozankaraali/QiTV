@@ -23,7 +23,7 @@ segment's length (the starts it can land on are a segment apart) + 0.5 s (VLC's 
 and at the end of the 6 s it holds there or closes in (2.1's stay-live keeps 1x inside its dead
 band and nudges only after 15 s outside it: not drifting away is enough); ← moves
 the position back 8-12 s; 1.5x is applied and returns to 1x once stay-live is back at live;
-Catch-up (2.3): Channel 3 is given an archive (an M3U "append" type its source serves, starting
+Catch-up (2.2): Channel 3 is given an archive (an M3U "append" type its source serves, starting
 mid-packet and mid-GOP as a real panel's does); a seek 5 minutes before its buffer probes the
 archive, closes the live stream and plays the archive (VLC plays its address itself, an
 on-demand stream, on the transport's archive bar), and L tunes the channel live again; its
@@ -220,7 +220,7 @@ SPEED = 1.5
 SPEED_TIMEOUT_MS = 3_000
 CATCH_UP_TIMEOUT_MS = 60_000  # at 1.5x the lag shrinks by only 0.5 s a second
 RATE_TOLERANCE = 0.01
-RECORD_MS = 3_000  # how long R records (2.3)
+RECORD_MS = 3_000  # how long R records (2.2)
 RECORD_END_MS = 5_000  # for the second R's file to be closed and its toast to show
 RECORDINGS_DIR = "recordings"  # in <out>: never the user's Movies folder
 PIPELINE_RECORDING = "06-recording.png"
@@ -1555,11 +1555,11 @@ class Driver:
             f"after {took:.1f} s: VLC rate {vlc_rate}; {self._describe(state)}",
         )
 
-        # 6b. R records from the buffer for a few seconds and R stops it (2.3).
+        # 6b. R records from the buffer for a few seconds and R stops it (2.2).
         report.step("pipeline 6b. record")
         yield from self._record(live)
 
-        # 6c. Catch-up (2.3): the provider's archive before the buffer, then L back to live.
+        # 6c. Catch-up (2.2): the provider's archive before the buffer, then L back to live.
         report.step("pipeline 6c. catch-up")
         yield from self._catchup(session)
 

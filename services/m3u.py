@@ -89,7 +89,7 @@ def parse_m3u(data: str, categorize: bool = False):
             if referrer_match:  # only then: a channel without one stays as it was
                 item["referrer"] = referrer_match.group(1)
             if "catchup" in line or "timeshift" in line or "tvg-rec" in line or defaults:
-                # Only a channel with an archive gets its keys (catch-up, 2.3), each type's
+                # Only a channel with an archive gets its keys (catch-up, 2.2), each type's
                 # name kept once in memory.
                 archive = (playlist_fields if categorize else m3u_archive_fields)(
                     _attributes(line), defaults

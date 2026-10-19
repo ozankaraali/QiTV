@@ -30,12 +30,12 @@ left of the right-hand buttons: back to where it came from, as Esc.
 At a small width (or in a longer language) the Stay live indicator first leaves out "adjusted",
 then its name (the LIVE badge beside it says live), then its text is cut short, or the
 indicator left out, so it never runs under the play button.
-Catch-up (2.3): on a channel whose provider keeps an archive the time-shift bar reaches
+Catch-up (2.2): on a channel whose provider keeps an archive the time-shift bar reaches
 further back than the buffer (`buffer_start` in the state: where the buffer starts); that
 part of the line is dashed. While the archive plays (`archive` in the state) the whole line
 is dashed, its left end reads "Archive from 18:44", and the bubble over the knob names the
 day too when the moment playing is not today.
-On live TV a record button (a red dot in a ring, R) follows the star (2.3), a control of the
+On live TV a record button (a red dot in a ring, R) follows the star (2.2), a control of the
 channel's as the star is: it records a time-shifted channel from where it plays, and while it
 records it is lit and a "● REC 01:23" chip after it counts the time; a channel played directly
 shows it dimmed, and hovering it says why it cannot record (a press asks anyway: the shell
@@ -143,7 +143,7 @@ KEY_HINTS = {
 }
 FAVORITE_KEY = "Ctrl+D"
 GRID_KEY = "V"  # the multiview: its grid, or back to one picture
-RECORD_KEY = "R"  # record the channel, or stop recording (2.3)
+RECORD_KEY = "R"  # record the channel, or stop recording (2.2)
 # i18n: tooltip of the record button (and a toast) on a channel played without time-shift
 NO_RECORDING = N_("Can't record: this channel plays without time-shift")
 # button name -> painting icon, if they differ
@@ -211,7 +211,7 @@ class _TitleRow:
     name: str  # elided to its room
     name_rect: QRectF
     star: QRectF  # empty but on live TV
-    record: QRectF  # the record button (2.3): empty but on live TV
+    record: QRectF  # the record button (2.2): empty but on live TV
     rec: QRectF  # the REC chip: empty but while it records
     subtitle_x: float
     clock: str
@@ -292,7 +292,7 @@ class Transport(Overlay):
     infoRequested = Signal()  # the channel's name: its info (the banner)
     favoriteRequested = Signal()  # the star after the name: add or remove the channel
     libraryRequested = Signal()  # ‹ Library: back to the Library the title came from (Esc)
-    recordRequested = Signal()  # the record button: record the channel, or stop (2.3)
+    recordRequested = Signal()  # the record button: record the channel, or stop (2.2)
     bandChanged = Signal()  # its controls changed (a mode, the bar): controls_top() moved
 
     def __init__(

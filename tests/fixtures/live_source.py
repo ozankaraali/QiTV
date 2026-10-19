@@ -22,7 +22,7 @@ start), served beside it as `seg<n>.ts`. With `cc_reset`, each segment is packag
 own, as some CDNs do: every PID's continuity counter, PAT's and PMT's too, restarts at 0.
 
 A request for `url` with a query (`…/1.ts?archive=…`, catch-up's "append" type) is the
-channel's provider archive (2.3): the clip, `ARCHIVE_S` of it, as fast as the client reads, as
+channel's provider archive (2.2): the clip, `ARCHIVE_S` of it, as fast as the client reads, as
 an on-demand stream. It starts as a real panel's archive was seen to: in the middle of a
 packet (152 bytes of one's tail before the first sync byte) and of a GOP (`ARCHIVE_SKIP`).
 QiTV's probe of it (a Range request for its first 16 KB, beside the live stream) is recorded

@@ -4758,7 +4758,7 @@ class RepickTests(LiveSessionCase):
         feed.run(0.7)
         feed.edge += 20.0
         feed.push()
-        feed.run(2.3)
+        feed.run(2.2)
         self.playback.pictureFroze.emit()
         self.assertEqual(len(self.playback.plays), 2)
         opens.append(self.clock.now)

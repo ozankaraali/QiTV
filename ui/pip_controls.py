@@ -184,7 +184,7 @@ class PipControls(QObject):
         """Follow a slot's player and live session (each slot's at wiring, a tile's when the
         multiview adds it): the label shows the state of whichever is small."""
         slot.live.modeChanged.connect(self._refresh_label)
-        slot.live.recordingChanged.connect(self._refresh_label)  # REC (2.3)
+        slot.live.recordingChanged.connect(self._refresh_label)  # REC (2.2)
         slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
 
     # ---- state --------------------------------------------------------------------------------
@@ -641,7 +641,7 @@ class PipControls(QObject):
         if not live:  # a movie or an episode swapped small plays on: its title alone
             return FINISHED_TEXT if slot.name in self._ended else ""
         if slot.live.recording():
-            return REC  # its recording goes on small (2.3)
+            return REC  # its recording goes on small (2.2)
         mode = slot.live.mode
         timeline = self._timelines.get(slot.name)
         if mode == "pipeline" and timeline is not None:

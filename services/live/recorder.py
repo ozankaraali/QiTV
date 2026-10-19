@@ -1,4 +1,4 @@
-"""Record a live session from its time-shift ring to a file, in the helper process (2.3).
+"""Record a live session from its time-shift ring to a file, in the helper process (2.2).
 
 `Recorder` follows the session's ring as the loopback server's readers do (`server._Handler.
 _stream`): segment `seq` from its PAT/PMT header, then every later segment without its header,

@@ -630,7 +630,7 @@ class StbListWorker(QObject):
 
 
 class ArchiveProbeWorker(QObject):
-    """Probe a channel's archive addresses in turn (catch-up, 2.3): `finished` carries
+    """Probe a channel's archive addresses in turn (catch-up, 2.2): `finished` carries
     (the index of the first that plays, or -1; the forms' answer together, `catchup.overall`).
 
     A refusal stops there (it may be the provider's connection limit: asking the next form

@@ -7,7 +7,7 @@ The player's keys are disabled while the Library shows. The Providers menu is an
 group of the configured providers, rebuilt when a provider becomes ready or fails and after
 Settings closes. The drawer's Settings and Add provider rows open the same dialogs, its Free
 channels row the free-channels menu, its Open file row the same file dialog, and its header's
-⌕ the same search. File → Open Recordings Folder opens where recordings go (2.3), as Settings'
+⌕ the same search. File → Open Recordings Folder opens where recordings go (2.2), as Settings'
 Open folder does.
 """
 

@@ -7,7 +7,7 @@ Its header has a button for each of its keys (the owner's mouse-only rule): ‹ 
 day move the time window (← →, dimmed at its ends), and ⌕ (Search), ⛶ (Fullscreen) and ×
 (close, as G or Esc) sit at its right end. Each names its key when hovered.
 
-Catch-up (2.3): when a listed channel's provider keeps an archive (`archive_days(channel)`:
+Catch-up (2.2): when a listed channel's provider keeps an archive (`archive_days(channel)`:
 its days, 0 for none or one that did not answer lately), the window also moves back, as far
 as the deepest archive listed (at most `MAX_BACK`). On the highlighted channel, a past
 programme within its archive can be watched from its start (`programmeRequested`): the one
@@ -348,7 +348,7 @@ class Guide(Overlay):
         else:
             self.tuneRequested.emit(channel)
 
-    # ---- catch-up (2.3) ---------------------------------------------------------------------
+    # ---- catch-up (2.2) ---------------------------------------------------------------------
 
     def _playable(self, programme: Programme | None, channel: dict | None) -> bool:
         """`programme` began in the past, within the channel's archive."""

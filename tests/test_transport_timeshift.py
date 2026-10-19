@@ -427,7 +427,7 @@ class TimeShiftCase(unittest.TestCase):
         t.update_timeline(timeline(start=0.0, end=0.0, live_edge=0.0, position=0.0, lag=0.0), [])
         self.assertFalse(t.grab().isNull())  # nothing buffered yet
 
-    # ---- catch-up (2.3) -----------------------------------------------------------------------
+    # ---- catch-up (2.2) -----------------------------------------------------------------------
 
     def test_a_bar_into_the_archive_keeps_the_buffers_start_and_dashes_the_archive(self):
         t = self.make()

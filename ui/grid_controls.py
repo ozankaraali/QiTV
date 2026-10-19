@@ -220,7 +220,7 @@ class GridControls(QObject):
         """Follow a player's state and its live session's mode (a tile's when it is made)."""
         slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
         slot.live.modeChanged.connect(lambda *_: self._refresh())
-        slot.live.recordingChanged.connect(lambda *_: self._refresh())  # REC (2.3)
+        slot.live.recordingChanged.connect(lambda *_: self._refresh())  # REC (2.2)
 
     # ---- state --------------------------------------------------------------------------
 
@@ -737,7 +737,7 @@ class GridControls(QObject):
 
     def _detail(self, name: str) -> str:
         """A playing tile's label state: LIVE, "−MM:SS" behind live, "Connecting…", or REC
-        while its channel records (2.3)."""
+        while its channel records (2.2)."""
         slot = self._slot(name)
         if slot is None:
             return CONNECTING

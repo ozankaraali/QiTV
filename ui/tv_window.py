@@ -431,7 +431,7 @@ class TVWindow(QMainWindow):
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
         # Each channel's sound sync (J/K, the Sound panel), written off the GUI thread.
         self.sound_sync = SoundSync(os.path.join(config_manager.get_config_dir(), SOUND_SYNC_FILE))
-        # Whether each channel's provider archive answered (catch-up, 2.3).
+        # Whether each channel's provider archive answered (catch-up, 2.2).
         self.catchup_memory = CatchupMemory(
             os.path.join(config_manager.get_config_dir(), CATCHUP_FILE)
         )
