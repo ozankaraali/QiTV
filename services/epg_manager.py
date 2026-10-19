@@ -484,15 +484,6 @@ class EpgManager:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def clear_index(self):
-        cache_dir = self._cache_dir()
-        for file in os.listdir(cache_dir):
-            file_path = os.path.join(cache_dir, file)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-        self.index.clear()
-        self.save_index()
-
     def _index_programs(self, xmltv_file):
         """
         Parse an XMLTV file and build a MultiKeyDict mapping channel identifiers to

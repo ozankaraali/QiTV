@@ -162,16 +162,6 @@ def xtream_signed_in(body: Any) -> bool:
     return status.lower() == "active"
 
 
-def xtream_get_php_url(
-    base: str, username: str, password: str, extra: Optional[Dict[str, str]] = None
-) -> str:
-    """Build the legacy get.php URL for M3U retrieval using the resolved base.
-
-    Example: {base}/get.php?username=U&password=P&type=m3u
-    """
-    return _build_xtream_url(base, "get.php", username, password, extra)
-
-
 def xtream_choose_resolved_base(
     server_info: Dict[str, str], input_base: Optional[str] = None, prefer_https: bool = False
 ) -> str:
@@ -240,20 +230,6 @@ def xtream_xmltv_url(base: str, username: str, password: str) -> str:
     Example: {base}/xmltv.php?username=U&password=P
     """
     return _build_xtream_url(base, "xmltv.php", username, password)
-
-
-def xtream_epg_url(
-    base: str, username: str, password: str, stream_id: str, limit: Optional[int] = None
-) -> str:
-    """Build the EPG data table URL for a specific Xtream stream.
-
-    Gets all EPG listings for a single stream (like STB portal).
-    Example: {base}/player_api.php?username=U&password=P&action=get_simple_data_table&stream_id=XXX&limit=X
-    """
-    extra: Dict[str, str] = {"action": "get_simple_data_table", "stream_id": stream_id}
-    if limit is not None:
-        extra["limit"] = str(limit)
-    return _build_xtream_url(base, "player_api.php", username, password, extra)
 
 
 def provider_prefers_https(provider: Dict[str, Any], global_default: bool) -> bool:
