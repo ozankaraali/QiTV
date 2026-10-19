@@ -3,8 +3,9 @@
 When a channel or a film fails to open, or a provider can't be reached, the account itself is
 asked: Xtream's Player API sign-in (`player_api.php` without an action: its `user_info` has
 the status, the expiry, the stream limit and the streams in use), an STB portal's handshake and
-profile. Neither opens a stream, so the check never takes one of the account's connections. A
-playlist has no account to ask.
+profile. Neither opens a stream, so the check never takes one of the account's connections. An
+M3U playlist from an Xtream panel (its get.php link, services.provider_link) is asked as
+Xtream; another playlist has no account to ask.
 
 `check_account` runs on a worker thread (blocking, a few seconds at most). `AccountChecks`
 runs it on a `JobRunner` when the GUI asks, at most once a minute per provider: a failure
@@ -32,6 +33,7 @@ from services.provider_api import (
     provider_prefers_https,
     xtream_player_api_url,
 )
+from services.provider_link import XTREAM, parse_provider_link
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
@@ -168,6 +170,11 @@ def _check(
             prefer_https=https,
             ssl_verify=verify,
             now=now,
+        )
+    link = parse_provider_link(url) if kind in ("M3UPLAYLIST", "M3USTREAM") else None
+    if link is not None and link.type == XTREAM:  # a playlist from an Xtream panel
+        return check_xtream(
+            link.url, link.username, link.password, prefer_https=https, ssl_verify=verify, now=now
         )
     return None
 

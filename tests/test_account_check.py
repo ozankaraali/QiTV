@@ -185,6 +185,11 @@ class XtreamCheckTests(ServerCase):
         self.assertEqual(check_account(provider).kind, reasons.WRONG_LOGIN)  # no password
         self.assertIsNone(check_account({"type": "XTREAM", "name": "X", "url": ""}))
         self.assertIsNone(check_account({"type": "M3UPLAYLIST", "name": "M", "url": self.base}))
+        # A playlist from an Xtream panel is that panel's account (services.provider_link).
+        playlist = f"{self.base}/get.php?username=u&password=p&type=m3u_plus"
+        playlist_provider = {"type": "M3UPLAYLIST", "name": "M", "url": playlist}
+        self.assertEqual(check_account(playlist_provider).kind, reasons.EXPIRED)
+        self.assertEqual(self.requests[-1], ("/player_api.php", ""))
 
 
 class StbCheckTests(ServerCase):

@@ -2,7 +2,8 @@ from copy import deepcopy
 import logging
 import os
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -29,12 +30,13 @@ from PySide6.QtWidgets import (
 )
 import orjson as json
 
-from services import failure_reasons as reasons
+from services import failure_reasons as reasons, provider_link
 from services.account_check import check_account
 from services.config_manager import ConfigManager
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
 from services.provider_api import CLIENT_HEADERS
+from services.provider_link import parse_provider_link
 from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
 from ui.update_dialogs import check_for_updates
@@ -46,6 +48,19 @@ EXTERNAL_PLAYERS_HINT = (
 
 VERIFIED_TEXT = "Provider verified successfully."
 VERIFY_FAILED_TEXT = "Failed to verify provider"
+PASTE_LINK_TEXT = "Paste link"
+PASTE_LINK_TIP = (
+    "Fill in this provider from one link your provider gave you: an Xtream link with the"
+    " username and password in it, an M3U playlist's address or an STB portal's address."
+    " Pasting the link into the address does the same."
+)
+NO_LINK_TEXT = "The clipboard holds no provider link."
+FILLED_TEXT = "Filled in from the link ({kind}). {next} then press Verify Provider."
+LINK_KINDS = {
+    provider_link.XTREAM: "Xtream",
+    provider_link.M3U: "M3U playlist",
+    provider_link.STB: "STB portal",
+}
 
 requests = lazy_module("requests")
 
@@ -507,7 +522,18 @@ class OptionsDialog(QDialog):
 
         self.url_label = QLabel("Server URL:", self.providers_tab)
         self.url_input = QLineEdit(self.providers_tab)
-        self.providers_layout.addRow(self.url_label, self.url_input)
+        # One link from the provider fills the form: this button, or a link pasted here.
+        self.paste_link_button = QPushButton(PASTE_LINK_TEXT, self.providers_tab)
+        self.paste_link_button.setToolTip(PASTE_LINK_TIP)
+        self.paste_link_button.clicked.connect(self.paste_link)
+        url_row = QHBoxLayout()
+        url_row.setContentsMargins(0, 0, 0, 0)
+        url_row.addWidget(self.url_input, 1)
+        url_row.addWidget(self.paste_link_button)
+        self.providers_layout.addRow(self.url_label, url_row)
+        self._url_before = ""  # the address before the edit textEdited reports
+        self.url_input.textEdited.connect(self._on_url_edited)
+        self.url_input.textChanged.connect(self._remember_url)
 
         self.mac_label = QLabel("MAC Address:", self.providers_tab)
         self.mac_input = QLineEdit(self.providers_tab)
@@ -968,6 +994,57 @@ class OptionsDialog(QDialog):
                 (self.parent().catalog.epg_manager or self.epg_manager).reindex_programs()
 
         self.accept()
+
+    # ---- one link fills the form ----------------------------------------------------------------
+
+    def paste_link(self):
+        """Paste link: the clipboard's provider link fills the form (it is never logged)."""
+        link = parse_provider_link(QGuiApplication.clipboard().text())
+        if link is None:
+            self.verify_result.setText(NO_LINK_TEXT)
+            self.verify_result.setStyleSheet("color: red;")
+            return
+        self.fill_from_link(link)
+
+    def _remember_url(self, text):
+        self._url_before = text
+
+    def _on_url_edited(self, text):
+        """A link pasted (or dropped) into the address fills the form too; typing never does
+        (a link half typed would be cut up under the cursor)."""
+        pasted = len(text) - len(self._url_before) > 1  # textEdited comes before textChanged
+        link = parse_provider_link(text) if pasted else None
+        if link is None:
+            return
+        # After this edit's own signals: the field is changed again only once they are out.
+        QTimer.singleShot(0, self, lambda: self._fill_if_unchanged(text, link))
+
+    def _fill_if_unchanged(self, text, link):
+        if self.url_input.text() == text:
+            self.fill_from_link(link)
+
+    def fill_from_link(self, link):
+        """The type, the address and what the link carries (username and password, or a MAC);
+        the provider's name, when it has none yet, is the link's host."""
+        button = {
+            provider_link.XTREAM: self.type_XTREAM,
+            provider_link.M3U: self.type_M3UPLAYLIST,
+            provider_link.STB: self.type_STB,
+        }[link.type]
+        if not (link.type == provider_link.M3U and self.type_M3USTREAM.isChecked()):
+            button.setChecked(True)  # update_inputs shows the type's fields (a stream stays)
+        self.url_input.setText(link.url)
+        if link.type == provider_link.XTREAM:
+            self.username_input.setText(link.username)
+            self.password_input.setText(link.password)
+        if link.mac:
+            self.mac_input.setText(link.mac)
+        if not self.name_input.text().strip():
+            self.name_input.setText(link.name)
+        mac_missing = link.type == provider_link.STB and not self.mac_input.text().strip()
+        step = "Add the portal's MAC address," if mac_missing else "Check the details,"
+        self.verify_result.setText(FILLED_TEXT.format(kind=LINK_KINDS[link.type], next=step))
+        self.verify_result.setStyleSheet("")
 
     def load_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self)
