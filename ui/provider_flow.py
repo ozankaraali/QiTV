@@ -33,6 +33,7 @@ from services.i18n import tr, translate
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, payloads
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, provider_of, with_provider
 from services.zapping import ZapContext
+from ui.item_provider import provider_type as item_provider_type
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +351,7 @@ class ProviderFlow(QObject):
         channels = list(catalog.items("live", ALL_GROUP_ID) or [])
         if self._mixed():  # ↑/↓ walk every provider's channels, as in All
             channels = list(self.catalog.items("live", ALL_GROUP_ID) or channels)
-        found = next((c for c in channels if ZapContext.same(c, item)), None)
+        found = self._listed(channels, item)
         if found is None:
             logger.info("The last channel %r is no longer listed", item.get("name"))
             self._open_drawer_if_idle()
@@ -449,7 +450,7 @@ class ProviderFlow(QObject):
     def _tune_last(self, item: dict, group: str) -> bool:
         for key in dict.fromkeys((group, ALL_GROUP_ID)):
             channels = self._group_channels(key)
-            found = next((c for c in channels if ZapContext.same(c, item)), None)
+            found = self._listed(channels, item)
             if found is not None:
                 self._tune(found, key, channels)
                 return True
@@ -457,6 +458,26 @@ class ProviderFlow(QObject):
             return True  # All providers: its provider has not listed its channels yet
         logger.info("The last channel %r is no longer listed", item.get("name"))
         return False
+
+    def _listed(self, channels: list[dict], item: dict) -> Optional[dict]:
+        """The listed channel the last channel `item` is. An Xtream channel's address holds the
+        server, user name and password, so after its provider's settings change the address
+        no longer matches: its stream id (unique at that provider) still names it."""
+        found = next((c for c in channels if ZapContext.same(c, item)), None)
+        if found is not None or item_provider_type(self.catalog, item) != "XTREAM":
+            return found
+        stream_id, owner = str(item.get("id") or ""), provider_of(item)
+        if not stream_id:
+            return None
+        return next(
+            (
+                c
+                for c in channels
+                if str(c.get("id") or "") == stream_id
+                and (not owner or not provider_of(c) or provider_of(c) == owner)
+            ),
+            None,
+        )
 
     def _waiting_owner(self, item: dict) -> Optional[tuple[str, dict]]:
         """All providers: (its provider, `item`) while that provider has not listed its

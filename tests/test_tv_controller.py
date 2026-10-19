@@ -1379,6 +1379,26 @@ class StartupTests(ControllerTestCase):
         self.assertEqual(self.zap.context.group_key, "10")
         self.assertEqual(self.drawer.named("open_drawer"), [])
 
+    def start_with_an_old_address(self, ptype):
+        # The stored address holds the provider's old server and password.
+        self.catalog.ptype = ptype
+        self.config.last_live_channel = {
+            "provider_name": "Home",
+            "group_id": "10",
+            "item": {**CHANNELS[2], "cmd": "http://old.test:8080/live/user/oldpass/3.ts"},
+        }
+        self.controller.start()
+        self.catalog.hub_ready("Home")
+        self.catalog.sectionReady.emit("live")
+
+    def test_an_xtream_last_channel_survives_a_change_of_server_or_password(self):
+        self.start_with_an_old_address("XTREAM")
+        self.assertEqual(self.requested(), ["Three"])  # its stream id still names it
+
+    def test_another_providers_last_channel_is_matched_by_address_alone(self):
+        self.start_with_an_old_address("STB")  # an STB channel's id is not its stream
+        self.assertEqual(self.requested(), [])
+
     def test_last_channel_of_another_provider_opens_the_drawer(self):
         self.config.last_live_channel = {
             "provider_name": "Other",
@@ -1424,6 +1444,14 @@ class StartupTests(ControllerTestCase):
         )
         self.assertEqual(self.requested(), ["One"])
         self.assertEqual(self.zap.context.channels, hub.own["Harbor IPTV"].items("live", "*"))
+
+    def test_another_xtream_providers_last_channel_is_found_by_its_stream_id(self):
+        hub = self.start_with_last_of_harbor()
+        hub.own["Harbor IPTV"].channels[0] = {**HARBOR_ONE, "cmd": "http://new.test/live/u/p/1"}
+        hub.ready.add("Harbor IPTV")
+        hub.own["Harbor IPTV"].loaded = True
+        hub.contentChanged.emit("Harbor IPTV")
+        self.assertEqual(self.requested(), ["One"])
 
     def test_a_last_channel_whose_provider_failed_opens_the_drawer(self):
         hub = self.start_with_last_of_harbor()
