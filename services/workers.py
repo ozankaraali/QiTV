@@ -7,6 +7,11 @@ from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, Qt, Signal
 
+from services.failure_reasons import (
+    DEVICE_MESSAGE,
+    UNEXPECTED_ANSWER_MESSAGE,
+    UNREACHABLE_MESSAGE,
+)
 from services.lazy_import import lazy_module
 from services.m3u import decode_playlist, parse_m3u
 from services.provider_api import (
@@ -26,9 +31,7 @@ logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
 
 NO_PORTAL_DATA_MESSAGE = "The portal returned no data"
-STB_DEVICE_REJECTED_MESSAGE = (
-    "The provider rejected this device (check the MAC address or subscription)"
-)
+STB_DEVICE_REJECTED_MESSAGE = DEVICE_MESSAGE
 
 
 def _resolve_xtream_base(server_info: dict, base_url: str, prefer_https: bool) -> str:
@@ -529,9 +532,6 @@ class LinkCreatorWorker(QObject):
 
 def _handshake_failure_message(failure: Optional[str]) -> str:
     """The user's text for a failed STB handshake (provider_manager.HANDSHAKE_*)."""
-    # The catalog's friendly texts; it imports this module, so import them on use.
-    from services.catalog import UNEXPECTED_ANSWER_MESSAGE, UNREACHABLE_MESSAGE
-
     if failure == HANDSHAKE_UNREACHABLE:
         return UNREACHABLE_MESSAGE
     if failure == HANDSHAKE_UNEXPECTED:

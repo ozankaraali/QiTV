@@ -306,7 +306,7 @@ class RawUrlLogTests(unittest.TestCase):
         stb = {"type": "STB", "url": "http://h/c/", "mac": MAC}
         worker = ProviderVerificationWorker(1, stb, False, True)
         with (
-            patch("ui.settings_dialog.StbHandshake.run", side_effect=refused()),
+            patch("services.provider_manager.StbHandshake.run", side_effect=refused()),
             self.assertLogs(level="DEBUG") as logs,
         ):
             worker.run()

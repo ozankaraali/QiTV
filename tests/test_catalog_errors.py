@@ -11,8 +11,11 @@ from PySide6.QtWidgets import QApplication
 import requests
 
 from services.catalog import (
+    FORBIDDEN_MESSAGE,
     LOGIN_REFUSED_MESSAGE,
+    NOT_FOUND_MESSAGE,
     PROVIDER_LOADING_MESSAGE,
+    PROXY_MESSAGE,
     TOO_SLOW_MESSAGE,
     UNEXPECTED_ANSWER_MESSAGE,
     UNREACHABLE_MESSAGE,
@@ -46,6 +49,7 @@ SAMPLES = {
     "Cannot connect to host portal.example:80 ssl:default [Connection refused]": (
         UNREACHABLE_MESSAGE
     ),
+    "Cannot connect to host portal.example:458": UNREACHABLE_MESSAGE,  # a port, no status
     "[Errno 2] No such file or directory: '/home/alice/list.m3u'": UNREACHABLE_MESSAGE,
     CONNECT_TIMEOUT: TOO_SLOW_MESSAGE,
     f"HTTPConnectionPool(host='portal.example', port=80): Read timed out. ({SECRET_URL})": (
@@ -53,9 +57,18 @@ SAMPLES = {
     ),
     "": TOO_SLOW_MESSAGE,
     f"401 Client Error: Unauthorized for url: {SECRET_URL}": LOGIN_REFUSED_MESSAGE,
-    f"403 Client Error: Forbidden for url: {SECRET_URL}": LOGIN_REFUSED_MESSAGE,
-    "Failed to fetch handshake: 403": LOGIN_REFUSED_MESSAGE,
-    f"404 Client Error: Not Found for url: {SECRET_URL}": UNEXPECTED_ANSWER_MESSAGE,
+    # 2.2: a refusal's status has its own words (services.failure_reasons).
+    f"403 Client Error: Forbidden for url: {SECRET_URL}": FORBIDDEN_MESSAGE,
+    "Failed to fetch handshake: 403": FORBIDDEN_MESSAGE,
+    f"404 Client Error: Not Found for url: {SECRET_URL}": NOT_FOUND_MESSAGE,
+    f"407 Client Error: Proxy Authentication Required for url: {SECRET_URL}": PROXY_MESSAGE,
+    f"458 Client Error:  for url: {SECRET_URL}": (
+        "The provider blocked this connection (458); it may not serve your region"
+    ),
+    f"451 Client Error: Unavailable For Legal Reasons for url: {SECRET_URL}": (
+        "The provider blocked this connection (451); it may not serve your region"
+    ),
+    f"502 Server Error: Bad Gateway for url: {SECRET_URL}": UNEXPECTED_ANSWER_MESSAGE,
     "Expecting value: line 1 column 1 (char 0)": UNEXPECTED_ANSWER_MESSAGE,
     "'js'": UNEXPECTED_ANSWER_MESSAGE,
     f"Unexpected answer from {SECRET_URL}": UNEXPECTED_ANSWER_MESSAGE,
@@ -96,6 +109,8 @@ class FriendlyErrorTests(unittest.TestCase):
             "Unknown section: bogus",
             "The provider rejected this device (check the MAC address or subscription)",
             UNREACHABLE_MESSAGE,
+            FORBIDDEN_MESSAGE,
+            "The provider blocked this connection (458); it may not serve your region",
         ):
             self.assertEqual(friendly_error(text), text)
 

@@ -16,6 +16,17 @@ from typing import Any, Callable, Iterator, Optional, cast
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from services.epg_view import Programme, programmes_for_channel
+from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as before)
+    BLOCKED_PREFIX,
+    FORBIDDEN_MESSAGE,
+    LOGIN_REFUSED_MESSAGE,
+    NOT_FOUND_MESSAGE,
+    PROXY_MESSAGE,
+    TOO_SLOW_MESSAGE,
+    UNEXPECTED_ANSWER_MESSAGE,
+    UNREACHABLE_MESSAGE,
+    status_message,
+)
 from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
 from services.provider_api import provider_prefers_https, stb_endpoint, stb_portal_base
 from services.provider_ids import stamp
@@ -38,12 +49,8 @@ MAX_CATALOG_JOBS = 2
 
 # --- failure messages shown to the user ---------------------------------------------------
 # Worker errors are exception texts that can carry URLs, query strings and credentials
-# (Xtream puts the username and password in every URL). Only these fixed strings, and the
-# service's own messages, ever leave the service.
-UNREACHABLE_MESSAGE = "Couldn't reach the provider"
-LOGIN_REFUSED_MESSAGE = "The provider refused the login"
-TOO_SLOW_MESSAGE = "The provider took too long to answer"
-UNEXPECTED_ANSWER_MESSAGE = "The provider sent an unexpected answer"
+# (Xtream puts the username and password in every URL). Only fixed strings (their words are
+# services.failure_reasons'), and the service's own messages, ever leave the service.
 _SAFE_MESSAGES = frozenset(
     {
         PROVIDER_LOADING_MESSAGE,
@@ -60,15 +67,21 @@ _SAFE_MESSAGES = frozenset(
         LOGIN_REFUSED_MESSAGE,
         TOO_SLOW_MESSAGE,
         UNEXPECTED_ANSWER_MESSAGE,
+        FORBIDDEN_MESSAGE,
+        NOT_FOUND_MESSAGE,
+        PROXY_MESSAGE,
     }
 )
-_SAFE_PREFIXES = ("Unknown section: ", "Unsupported provider: ")
+_SAFE_PREFIXES = ("Unknown section: ", "Unsupported provider: ", BLOCKED_PREFIX)
 _TOO_SLOW = re.compile(r"timed? ?out|timeout", re.IGNORECASE)
-_LOGIN_REFUSED = re.compile(
-    r"\b(?:401|403)\s+(?:client\s+)?error\b|unauthori[sz]ed|forbidden"
-    r"|status(?:\s*code)?\W+(?:401|403)\b|:\s*(?:401|403)\s*$",
+# An HTTP status in requests' "404 Client Error: …", "status code 407" or "…: 458".
+_STATUS = re.compile(
+    r"\b([45]\d\d)\s+(?:client\s+|server\s+)?error\b"
+    r"|status(?:\s*code)?\W+([45]\d\d)\b|:\s+([45]\d\d)\s*$",  # not a host's :port
     re.IGNORECASE,
 )
+_LOGIN_REFUSED = re.compile(r"unauthori[sz]ed", re.IGNORECASE)
+_FORBIDDEN = re.compile(r"forbidden", re.IGNORECASE)
 _UNREACHABLE = re.compile(
     r"max retries exceeded|failed to establish|connection (?:refused|reset|aborted|error)"
     r"|connectionerror|failed to resolve|name or service not known|nodename nor servname"
@@ -91,10 +104,15 @@ def friendly_error(message: object) -> str:
     text = "" if message is None else str(message)
     if text in _SAFE_MESSAGES or text.startswith(_SAFE_PREFIXES):
         return text
+    status = _status(text)
     if not text.strip() or _TOO_SLOW.search(text):
         friendly = TOO_SLOW_MESSAGE  # an empty text is almost always a timeout
-    elif _LOGIN_REFUSED.search(text):
+    elif status == 401 or _LOGIN_REFUSED.search(text):
         friendly = LOGIN_REFUSED_MESSAGE
+    elif status is not None and status_message(status) is not None:
+        friendly = str(status_message(status))  # 403, 404, 407, a block (451, 456, 458)
+    elif _FORBIDDEN.search(text):
+        friendly = FORBIDDEN_MESSAGE
     elif _UNREACHABLE.search(text):
         friendly = UNREACHABLE_MESSAGE
     else:
@@ -104,6 +122,14 @@ def friendly_error(message: object) -> str:
     else:
         logger.info("Provider request failed: %s", friendly)
     return friendly
+
+
+def _status(text: str) -> Optional[int]:
+    """The HTTP error status a worker's text names, if any (the text itself is never logged)."""
+    match = _STATUS.search(text)
+    if match is None:
+        return None
+    return int(next(group for group in match.groups() if group))
 
 
 def normalize_seasons(series_name: str, items: list[dict]) -> list[dict]:

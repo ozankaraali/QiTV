@@ -86,8 +86,11 @@ class LiveControls(QObject):
         restore_channel: Callable[[], None],
         show_transport: Callable[[], None],
         logo: Callable[[dict], Optional[QPixmap]] = lambda channel: None,
+        explain: Callable[[dict, str], None] = lambda item, title: None,
         parent: Optional[QObject] = None,
     ) -> None:
+        """`explain(item, title)` asks why the failure just toasted happened at the item's
+        provider (TVController._explain_item)."""
         super().__init__(parent)
         self._tuner = tuner
         self.live = live
@@ -107,6 +110,7 @@ class LiveControls(QObject):
         self._restore_channel = restore_channel
         self._show_transport = show_transport
         self._logo = logo
+        self._explain = explain
         self._ticks: list[tuple[float, str]] = []
         self._wired = False
         self._reconnects = 0  # reopens of the current tune's ended stream so far
@@ -327,6 +331,7 @@ class LiveControls(QObject):
             # reached, and a retry would only be refused or take another device's slot.
             self.stop_tune()  # nothing plays: its slot goes back
             self._toast(self._refusal_text(message), "error", ERROR_MS)
+            self._explain_failure(current)
             return
         if current is not None and self.may_retry(current):
             self.retry(current)  # STB play tokens expire: a fresh link before the error
@@ -335,8 +340,14 @@ class LiveControls(QObject):
         if message in REFUSALS:
             self.stop_tune()  # nothing plays: its slot goes back
             self._toast(self._refusal_text(message), "error", ERROR_MS)
+            self._explain_failure(current)
             return
         self._error(f"{title}: {message}" if title else message)
+        self._explain_failure(current)
+
+    def _explain_failure(self, current: Optional[Target]) -> None:
+        if current is not None:
+            self._explain(current.item, current.title)
 
     def _refusal_text(self, message: str) -> str:
         current = self._current()

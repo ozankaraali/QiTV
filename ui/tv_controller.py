@@ -39,6 +39,11 @@ channel small. A swap drops the Next card, and a title that ended small offers i
 swapped large. Files and a title with no channel streaming close the small picture first: it
 is for live TV.
 
+A failure to open a channel or a film, or to reach a provider, is toasted at once; with
+`account_checks` (services/account_check.py) the provider's account is then asked why, opening
+no stream (at most once a minute per provider), and a plain reason (expired, the connection
+limit, a wrong password, a refusal) replaces the toast while it still shows (`_explain`).
+
 Provider setups (the loading and welcome hints, the last channel, the drawer on an idle player)
 are ProviderFlow's (ui/provider_flow.py). Opening the window's Library (spec §5.4) keeps what
 plays going in a corner of it (`enter_library_playing`; `stop_for_library` is the corner's ×, or
@@ -66,6 +71,7 @@ from services import external_players, favorites
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
+from services.failure_reasons import Reason
 from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
 from services.navigation import (
@@ -163,13 +169,18 @@ class TVController(QObject):
         pip_frame=None,
         sound_sync: Optional[SoundSync] = None,
         pick_subtitle_file: Optional[Callable[[str], str]] = None,
+        account_checks=None,
         parent: Optional[QObject] = None,
     ):
         """With `sessions` (picture in picture), its large slot's player, live session and
         tuner stand for `session`, `live` and `budget`. `sound_sync` keeps each channel's
         sound sync (None: for this run only); `pick_subtitle_file(folder)` asks for a subtitle
-        file (the Subtitles panel's "Load a file…")."""
+        file (the Subtitles panel's "Load a file…"). `account_checks` (an AccountChecks) says
+        why a failure happened (None: the failure's own words only)."""
         super().__init__(parent)
+        self._account_checks = account_checks
+        self._toasts = 0  # toasts shown so far: a reason replaces only the one it explains
+        self._toasted_at = 0.0  # when the last one showed (monotonic)
         self.config = config
         self.catalog = catalog
         self.nav = nav
@@ -225,6 +236,7 @@ class TVController(QObject):
             restore_channel=self._restore_channel,
             logo=self._logo,
             show_transport=self._show_transport,
+            explain=self._explain_item,
             parent=self,
         )
         # Provider setups: the loading and welcome hints, the last channel, the Library's
@@ -245,6 +257,7 @@ class TVController(QObject):
             error=self._error,
             drop_autoplay=lambda: self._autoplay.drop(),
             autoplay_hint=lambda: self._autoplay.hint(),
+            explain=self._explain,
             parent=self,
         )
         self._current: Optional[Target] = None  # handed to the player
@@ -339,6 +352,7 @@ class TVController(QObject):
                 swap=self.swap,
                 toggle_mute=self._mixer.toggle_small_mute,
                 sound=self._tracks.prepare_small,
+                explain=self._explain_item,
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
@@ -441,6 +455,8 @@ class TVController(QObject):
         self._tuning.stop()
         self._cancel_external()
         self._flow.shutdown()
+        if self._account_checks is not None:
+            self._account_checks.close()  # a check under way answers no one
         self.overlays.toast.set_hint(None)  # e.g. the closing notice needs the toast
         try:
             self.watch.flush()
@@ -1067,6 +1083,7 @@ class TVController(QObject):
         self._give_large_back(target)
         self._restore_channel()
         self._error(f"{target.title}: {message}")
+        self._explain_item(target.item, target.title)
 
     def _on_tune_dropped(self, _target: Target) -> None:
         """A tune overtaken by an external play: the channel still playing stays the channel."""
@@ -1517,6 +1534,7 @@ class TVController(QObject):
             self._restore_channel()
         if not self._flow.shows_failure(name):
             self._error(f"{name}: {message}" if name else message)
+            self._explain(name, name)
 
     def _ask_again(self, newest: Target) -> None:
         """A provider settled the newest choice's request: it asks for its link (again), or,
@@ -1702,6 +1720,7 @@ class TVController(QObject):
         target = self._pip.small_title(name) if self._pip is not None else None
         if not self._closed and target is not None:
             self._error(f"{target.title}: {message}")
+            self._explain_item(target.item, target.title)
 
     def _on_error(self, message: str) -> None:
         if self._closed or self._tuner.running():
@@ -1714,6 +1733,8 @@ class TVController(QObject):
         if current is not None and not current.live:
             self._give_small_channel_large()
         self._error(f"{title}: {message}" if title else message)
+        if current is not None:
+            self._explain_item(current.item, title)
 
     def _give_small_channel_large(self) -> None:
         """The movie or the episode playing large failed: a channel shown small beside it
@@ -2057,7 +2078,38 @@ class TVController(QObject):
         toast = self.overlays.library_toast
         if toast is None or not self._flow.in_library():
             toast = self.overlays.toast
+        self._toasts += 1
+        self._toasted_at = time.monotonic()
         toast.show_message(text, kind, ms)
+
+    # ---- why a failure happened ----------------------------------------------------------------
+
+    def _explain_item(self, item: dict, title: str = "") -> None:
+        """`_explain` for the provider of `item` (a channel, a film or an episode)."""
+        if self._account_checks is not None:
+            self._explain(item_provider.provider_name(self.catalog, item), title)
+
+    def _explain(self, provider: str, title: str = "") -> None:
+        """The failure just toasted happened at `provider`: its account is asked why (on a
+        worker, at most once a minute per provider). A plain reason replaces the toast, as
+        "{title}: {reason}", while that toast still shows; an account that is fine leaves it."""
+        checks = self._account_checks
+        if checks is None or self._closed or not provider or provider == ALL_PROVIDERS:
+            return
+        try:
+            entry = self.catalog.provider_entry(provider)
+        except KeyError, AttributeError:
+            return  # gone from the list (or a catalog that cannot say)
+        if not isinstance(entry, dict) or not entry.get("name"):
+            return
+        checks.explain(entry, partial(self._on_reason, self._toasts, title))
+
+    def _on_reason(self, shown: int, title: str, reason: Optional[Reason]) -> None:
+        if self._closed or reason is None or not reason.plain:
+            return
+        if shown != self._toasts or time.monotonic() - self._toasted_at > ERROR_MS / 1000:
+            return  # another message came, or the failure's toast has gone: it is old news
+        self._error(f"{title}: {reason.text}" if title else reason.text)
 
     def _notify(self, text: str, kind: str) -> None:
         """A toast for the shell's helpers: errors stay up longer."""

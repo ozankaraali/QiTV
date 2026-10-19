@@ -396,6 +396,11 @@ class StbHandshake:
         self.token = token
         self.headers = {}
         self.failure = None  # a HANDSHAKE_* reason once run() has returned False
+        # What the attempts met, for an account check (services.account_check): each error
+        # status, whether one timed out, and the profile's answer (its "js") once one came.
+        self.statuses: list[int] = []
+        self.timed_out = False
+        self.profile = None
 
     def run(
         self,
@@ -461,6 +466,8 @@ class StbHandshake:
             else:
                 raise _PortalStatus("profile", profile.status_code)
 
+            if isinstance(body, dict) and isinstance(body.get("js"), dict):
+                self.profile = body["js"]
             theId = body["js"]["id"]
             theName = body["js"]["name"]
             if not theId and not theName:
@@ -469,6 +476,10 @@ class StbHandshake:
             self.failure = None
             return True
         except Exception as e:
+            if isinstance(e, _PortalStatus):
+                self.statuses.append(e.status_code)
+            elif isinstance(e, requests.exceptions.Timeout):
+                self.timed_out = True
             reason = classify_handshake_error(e)
             if self.failure is None or (
                 _HANDSHAKE_FAILURE_RANK[reason] > _HANDSHAKE_FAILURE_RANK[self.failure]

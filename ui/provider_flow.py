@@ -14,6 +14,9 @@ heading). A last channel whose provider has not listed its channels yet waits fo
 of a provider other than the one browsed does), never opening the drawer meanwhile; one whose
 provider's setup failed is not waited for (that would sign it in again).
 
+A failure it says (a setup, the live section, a last channel's provider) is followed by
+`explain`, which asks that provider's account why (TVController._explain).
+
 TVController owns the links, the zapping and the player, and hands this unit callbacks.
 """
 
@@ -54,8 +57,11 @@ class ProviderFlow(QObject):
         error: Callable[[str], None],
         drop_autoplay: Callable[[], None],
         autoplay_hint: Callable[[], Optional[str]],
+        explain: Callable[[str, str], None] = lambda provider, title: None,
         parent: Optional[QObject] = None,
     ) -> None:
+        """`explain(provider, title)` asks why the failure just said happened at `provider`
+        (TVController._explain)."""
         super().__init__(parent)
         self.catalog = catalog
         self.nav = nav
@@ -70,6 +76,7 @@ class ProviderFlow(QObject):
         self._error = error
         self._drop_autoplay = drop_autoplay
         self._autoplay_hint = autoplay_hint
+        self._explain = explain
         self._await_live = False  # after providerReady: the first live section decides
         self._loading = False  # the "Loading <provider>…" hint is up
         self._autotune: Optional[tuple[dict, str]] = None
@@ -356,6 +363,7 @@ class ProviderFlow(QObject):
             return  # not the wait of this owner (a later wait ignores an old failure)
         if not self._closed():
             self._error(f"{owner}: {message}")
+            self._explain(owner, owner)
         self._give_up_foreign()
 
     def _on_foreign_timeout(self) -> None:
@@ -375,6 +383,7 @@ class ProviderFlow(QObject):
             return
         self._end_loading()
         self._error(f"{name}: {message}" if name else message)
+        self._explain(name, name)
         if name != ALL_PROVIDERS and self._mixed():
             # One provider of All: its saved channels stay listed (its error under its heading
             # when it has none), and the list stays on All providers. A last channel waiting
@@ -423,6 +432,7 @@ class ProviderFlow(QObject):
         self._autotune = None
         self._end_loading()
         self._error(f"Live TV: {message}")
+        self._explain(self.catalog.current_provider_name(), "Live TV")
         self._open_drawer_if_idle()  # it shows the retry row
 
     def _open_drawer_if_idle(self) -> None:

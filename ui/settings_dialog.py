@@ -29,16 +29,12 @@ from PySide6.QtWidgets import (
 )
 import orjson as json
 
+from services import failure_reasons as reasons
+from services.account_check import check_account
 from services.config_manager import ConfigManager
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
-from services.provider_api import (
-    CLIENT_HEADERS,
-    https_fallback_candidates,
-    xtream_player_api_url,
-    xtream_signed_in,
-)
-from services.provider_manager import StbHandshake
+from services.provider_api import CLIENT_HEADERS
 from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
 from ui.update_dialogs import check_for_updates
@@ -48,6 +44,9 @@ EXTERNAL_PLAYERS_HINT = (
     " controls."
 )
 
+VERIFIED_TEXT = "Provider verified successfully."
+VERIFY_FAILED_TEXT = "Failed to verify provider"
+
 requests = lazy_module("requests")
 
 # Jobs outlive a closed dialog; a running QThread must never be owned by that dialog.
@@ -55,7 +54,12 @@ _verification_jobs: list[tuple[QThread, QObject]] = []
 
 
 class ProviderVerificationWorker(QObject):
+    """Settings' Verify Provider, off the GUI thread: an STB or Xtream account is asked as
+    the account check asks it (services.account_check: no stream is opened), and a refusal
+    says why in plain words (`reason`, before `result`); a playlist must answer."""
+
     result = Signal(int, object, bool)
+    reason = Signal(int, str)  # the plain reason a verification failed ("" when none)
     finished = Signal()
 
     def __init__(self, request_id, provider, prefer_https, ssl_verify):
@@ -67,25 +71,17 @@ class ProviderVerificationWorker(QObject):
 
     @Slot()
     def run(self):
-        verified = False
+        verified, why = False, ""
         try:
             provider = self.provider
-            if provider["type"] == "STB":
-                session = StbHandshake(prefer_https=self.prefer_https, ssl_verify=self.ssl_verify)
-                verified = session.run(
-                    provider["url"],
-                    provider.get("mac", ""),
-                    serial_number=provider.get("serial_number", ""),
-                    device_id=provider.get("device_id", ""),
+            if provider["type"] in ("STB", "XTREAM"):
+                found = check_account(
+                    provider, prefer_https=self.prefer_https, ssl_verify=self.ssl_verify
                 )
-            elif provider["type"] == "XTREAM":
-                verified = self.verify_xtream(
-                    provider["url"],
-                    provider.get("username", ""),
-                    provider.get("password", ""),
-                    prefer_https=self.prefer_https,
-                    verify_ssl=self.ssl_verify,
-                )
+                # An account at its stream limit is still a working account.
+                verified = found is not None and found.kind in (reasons.OK, reasons.LIMIT)
+                if found is not None and not verified and found.plain:
+                    why = found.text
             elif provider["type"] in ("M3UPLAYLIST", "M3USTREAM"):
                 verified = self.verify_url(
                     provider["url"],
@@ -96,24 +92,9 @@ class ProviderVerificationWorker(QObject):
             # requests exceptions name the URL, credentials and all: the type and host only.
             logging.getLogger(__name__).warning("Provider verification failed: %s", safe_exc(e))
         finally:
+            self.reason.emit(self.request_id, why)
             self.result.emit(self.request_id, self.provider, verified)
             self.finished.emit()
-
-    @staticmethod
-    def verify_xtream(url, username, password, *, prefer_https=False, verify_ssl=True):
-        # Sign in through the Player API: a panel's bare host often answers 404 or 502.
-        api_url = xtream_player_api_url(url, username, password)
-        for candidate in https_fallback_candidates(api_url, prefer_https):
-            try:
-                response = requests.get(
-                    candidate, timeout=10, headers=CLIENT_HEADERS, verify=verify_ssl
-                )
-                body = response.json() if response.ok and response.content else None
-            except requests.RequestException, ValueError:
-                continue
-            if xtream_signed_in(body):
-                return True
-        return False
 
     @staticmethod
     def verify_url(url, *, prefer_https=False, verify_ssl=True):
@@ -220,6 +201,7 @@ class OptionsDialog(QDialog):
         self.edited_provider = None
         self._refresh_provider_ids = set()
         self._verification_request = 0
+        self._verification_why = ""  # the plain reason the verification on its way failed
         self._verification_closed = False
         self.selected_provider_name = self.config_manager.selected_provider_name
         self.selected_provider_index = 0
@@ -1009,6 +991,7 @@ class OptionsDialog(QDialog):
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        worker.reason.connect(self._verification_reason, Qt.QueuedConnection)
         worker.result.connect(self._provider_verified, Qt.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.DirectConnection)
         ThreadCleanup(thread, worker).finished.connect(
@@ -1017,19 +1000,27 @@ class OptionsDialog(QDialog):
         _verification_jobs.append((thread, worker))
         thread.start()
 
+    @Slot(int, str)
+    def _verification_reason(self, request_id, reason):
+        """Why the verification on its way failed, in plain words; `_provider_verified` says it."""
+        if request_id == self._verification_request:
+            self._verification_why = reason
+
     @Slot(int, object, bool)
     def _provider_verified(self, request_id, provider, verified):
         if self._verification_closed or request_id != self._verification_request:
             return
+        why, self._verification_why = self._verification_why, ""
         self.verify_button.setEnabled(True)
         if provider != self._verification_provider():
             self.verify_result.clear()
             return
         if verified:
             self._refresh_provider_ids.add(id(self.edited_provider))
-        self.verify_result.setText(
-            "Provider verified successfully." if verified else "Failed to verify provider."
-        )
+            text = VERIFIED_TEXT
+        else:
+            text = f"{VERIFY_FAILED_TEXT}: {why}." if why else f"{VERIFY_FAILED_TEXT}."
+        self.verify_result.setText(text)
         self.verify_result.setStyleSheet("color: green;" if verified else "color: red;")
 
     def done(self, result):

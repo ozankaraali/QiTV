@@ -60,6 +60,7 @@ from PySide6.QtWidgets import (
 )
 
 from services import favorites, free_channels, thread_cleanup
+from services.account_check import AccountChecks
 from services.browsed_catalog import BrowsedCatalog
 from services.catalogs import Catalogs
 from services.connection_budget import ConnectionBudget
@@ -526,6 +527,8 @@ class TVWindow(QMainWindow):
             pip_frame=self.pip_frame,
             sound_sync=self.sound_sync,
             pick_subtitle_file=self.pick_subtitle_file,
+            # Why a channel or a provider failed, asked of its account (no stream opened).
+            account_checks=AccountChecks(config_manager, parent=self),
             parent=self,
         )
         self.controller = controller

@@ -111,6 +111,7 @@ class PipControls(QObject):
         swap: Callable[[], bool],
         toggle_mute: Callable[[], None],
         sound: Optional[Callable[[Any, dict], None]] = None,
+        explain: Callable[[dict, str], None] = lambda item, title: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
@@ -145,6 +146,7 @@ class PipControls(QObject):
         self._swap = swap
         self._toggle_mute = toggle_mute
         self._sound = sound
+        self._explain = explain  # why a failure happened, at the item's provider
         self._views: dict[str, SlotView] = {}
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
@@ -555,6 +557,9 @@ class PipControls(QObject):
             self._retry(view)
             return
         self._toast(message, "error", ERROR_MS)
+        target = view.target if view is not None else None
+        if target is not None:
+            self._explain(target.item, target.title)  # why, at its provider
 
     def _may_retry(self, target: Optional[Target]) -> bool:
         """As the large picture (LiveControls.may_retry): once per channel opened small, never
