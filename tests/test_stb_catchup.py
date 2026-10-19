@@ -229,15 +229,25 @@ class LinkTests(unittest.TestCase):
         cases = {
             "ffmpeg http://s.test/a/1.ts?t=1": "http://s.test/a/1.ts?t=1",
             "http://s.test/a/1.ts": "http://s.test/a/1.ts",
-            "auto /media/5012.mpg": "",  # what was asked, unmade
-            "": "",
+            "": "",  # no recording
         }
         for cmd, link in cases.items():
             with self.subTest(cmd=cmd):
                 self.assertEqual(stb_archive_link({"js": {"cmd": cmd}}), link)
         self.assertEqual(stb_archive_link({"js": {"cmd": "", "error": "nothing_to_play"}}), "")
-        self.assertEqual(stb_archive_link({"js": []}), "")
-        self.assertEqual(stb_archive_link(None), "")
+
+    def test_any_other_answer_is_the_portals_error_not_a_missing_recording(self):
+        for answer in (
+            {"js": {"cmd": "", "error": "limit"}},  # its limit of streams
+            {"js": {"cmd": "", "error": "link_fault"}},
+            {"js": {"cmd": "auto /media/5012.mpg"}},  # what was asked, unmade
+            {"js": []},  # a portal without an archive to ask
+            {"js": False},
+            None,
+        ):
+            with self.subTest(answer=answer):
+                with self.assertRaises(ValueError):
+                    stb_archive_link(answer)
 
 
 class PortalCase(unittest.TestCase):
@@ -380,6 +390,19 @@ class CatalogLinkTests(PortalCase):
         request = self.catalogs.request_archive_link(self.item, later)
         self.assertTrue(wait_until(lambda: self.failed))
         self.assertEqual(self.failed, [(request, EMPTY_LINK_MESSAGE)])
+
+    def test_the_portals_other_errors_are_no_missing_recording(self):
+        self.catalogs.ensure(self.name)
+        self.assertTrue(wait_until(lambda: self.catalogs.is_ready(self.name)))
+        for error in ("limit", ""):  # "": a portal without an archive to ask: {"js": []}
+            with self.subTest(error=error):
+                self.portal.errors[self.recorded] = error
+                self.failed.clear()
+                request = self.catalogs.request_archive_link(self.item, self.recorded)
+                self.assertTrue(wait_until(lambda: self.failed))
+                [(failed, message)] = self.failed
+                self.assertEqual(failed, request)
+                self.assertNotEqual(message, EMPTY_LINK_MESSAGE)
 
     def test_an_expired_session_signs_in_again_and_the_link_comes(self):
         self.catalogs.ensure(self.name)

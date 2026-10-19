@@ -516,21 +516,37 @@ class STBCategoriesWorker(QObject):
             self.error.emit(str(e))
 
 
+# The `js.error` a portal answers a tv_archive create_link with when the programme has no
+# recording; any other ("limit", "link_fault", …) is the portal's own trouble.
+_NO_RECORDING_ERRORS = frozenset({"nothing_to_play"})
+# Raised (and so the worker's error) when the portal answered a recording's link with neither
+# a link nor "no recording": it says nothing of the recording.
+ARCHIVE_LINK_ERROR = "The portal answered the archive link with an error"
+
+
 def stb_archive_link(answer: Any) -> str:
     """The link in an STB portal's answer to a tv_archive create_link: the last word of its
-    `js.cmd` ("ffrt http://…", or the address alone), as a channel's; "" when it gives none
-    that is an address (no `js` or `cmd`, an `error` such as "nothing_to_play", or the
-    "/media/….mpg" it was asked for, unmade)."""
+    `js.cmd` ("ffrt http://…", or the address alone), as a channel's; "" when the portal says
+    the programme has no recording (an empty `cmd`, alone or with the `error`
+    "nothing_to_play"). Any other answer (another `error`, such as "limit"; no `js` dict, as
+    a portal without an archive to ask answers; a `cmd` that is no address, the
+    "/media/….mpg" asked for, unmade) raises ValueError: it says nothing of the recording."""
     js = answer.get("js") if isinstance(answer, dict) else None
     if not isinstance(js, dict):
-        return ""
+        raise ValueError(ARCHIVE_LINK_ERROR)
     error = js.get("error")
-    if isinstance(error, str) and error.strip():
-        logger.info("The portal made no archive link: %s", error.strip()[:40])
-        return ""
+    error = error.strip() if isinstance(error, str) else ""
     cmd = js.get("cmd")
-    link = cmd.strip().split(" ")[-1] if isinstance(cmd, str) and cmd.strip() else ""
-    return link if "://" in link else ""
+    cmd = cmd.strip() if isinstance(cmd, str) else ""
+    if error and error not in _NO_RECORDING_ERRORS:
+        logger.info("The portal made no archive link: %s", error[:40])
+        raise ValueError(ARCHIVE_LINK_ERROR)
+    if error or not cmd:
+        return ""  # no recording
+    link = cmd.split(" ")[-1]
+    if "://" not in link:
+        raise ValueError(ARCHIVE_LINK_ERROR)
+    return link
 
 
 class LinkCreatorWorker(QObject):
@@ -581,7 +597,7 @@ class LinkCreatorWorker(QObject):
             response.raise_for_status()
             result = response.json()
             if self.programme:
-                link = stb_archive_link(result)  # "": the catalog says the portal gave none
+                link = stb_archive_link(result)  # "": no recording (EMPTY_LINK_MESSAGE)
             else:
                 link = result["js"]["cmd"].split(" ")[-1]
             self.finished.emit({"link": link})

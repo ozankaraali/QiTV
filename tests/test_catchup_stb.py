@@ -345,6 +345,17 @@ class FailureTests(StbCase):
         state, _ticks = self.transport.named("update_timeline")[-1]
         self.assertNotIn("buffer_start", state)  # nor the bar
 
+    def test_the_portals_other_errors_say_it_did_not_answer_and_teach_nothing(self):
+        self.start_portal()
+        self.refuse(UNEXPECTED_ANSWER_MESSAGE)  # e.g. its "limit", after a new sign-in too
+        self.refuse(UNEXPECTED_ANSWER_MESSAGE)
+        self.transport.seekToRequested.emit(3600.0 - 8400.0)  # 18:10: another moment
+        self.refuse(UNEXPECTED_ANSWER_MESSAGE)
+        self.refuse(UNEXPECTED_ANSWER_MESSAGE)
+        self.assertIn((NO_ANSWER_TEXT, "info"), self.toast.messages())
+        self.assertNotIn((NOT_RECORDED_TEXT, "info"), self.toast.messages())
+        self.assertFalse(self.memory.failed(channel_key("Portal B", self.PORTAL)))
+
     def test_the_browsed_portals_link_is_asked_once_more_as_a_channels_is(self):
         self.start_live()
         self.transport.seekToRequested.emit(1500.0)

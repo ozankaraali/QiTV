@@ -10,7 +10,8 @@ such portals commonly answer:
   programmes that have ended, 0 for the others; `create_link` for a channel's live link;
 - `tv_archive`: `create_link` with `cmd` "auto /media/<programme id>.mpg": "ffmpeg
   http://127.0.0.1:…/archive/<id>.ts?token=…" for a recorded programme of channel 101, else a
-  `js` with an empty `cmd` and an `error`, as such portals answer when there is nothing to play.
+  `js` with an empty `cmd` and the `error` "nothing_to_play", as such portals answer when there
+  is nothing to play (`errors` makes a programme's answer another error).
 A request whose bearer token is not the last handshake's is refused as such portals refuse it
 (a 200 whose body is the text "Authorization failed."); `expire()` makes the token stale.
 `/archive/<id>.ts` and `/live/<id>.ts` answer a few MPEG-TS packets.
@@ -81,6 +82,9 @@ class StbFixture:
         self.now = time.time() if now is None else now
         self.token = ""
         self.handshakes = 0
+        # A programme's create_link answers this `js.error` instead ("": `{"js": []}`, as a
+        # portal without an archive to ask answers).
+        self.errors: dict[str, str] = {}
         self.requests: list[tuple[str, dict[str, str], str]] = []  # path, query, bearer
         self.guide = self._guide()
         owner = self
@@ -192,6 +196,9 @@ class StbFixture:
         if (kind, action) == ("tv_archive", "create_link"):
             found = _ARCHIVE_CMD.match(query.get("cmd", ""))
             programme = found.group(1) if found else ""
+            if programme in self.errors:
+                error = self.errors[programme]
+                return {"js": {"id": programme, "cmd": "", "error": error}} if error else {"js": []}
             if programme and self.recorded(programme):
                 return {"js": {"id": programme, "cmd": f"ffmpeg {self.archive_link(programme)}"}}
             return {"js": {"id": programme, "cmd": "", "error": "nothing_to_play"}}
