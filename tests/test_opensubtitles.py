@@ -20,6 +20,7 @@ from opensubtitles_fixtures import (
     FakeResponse,
     download_answer,
     entry,
+    feature,
     login_answer,
     page,
     quota_answer,
@@ -40,6 +41,7 @@ from services.opensubtitles import (
     Credentials,
     Downloaded,
     DownloadWorker,
+    Feature,
     OpenSubtitlesClient,
     OpenSubtitlesError,
     Problem,
@@ -49,13 +51,19 @@ from services.opensubtitles import (
     SubtitleFile,
     api_key,
     clean_title,
+    feature_matches,
+    found_for,
     group_languages,
     language_name,
+    original_title,
     parse_query,
     parse_search,
+    provider_ids,
     ranked,
     safe_file_name,
+    same_title,
     search_query,
+    split_matches,
     system_language,
 )
 
@@ -91,13 +99,58 @@ class TitleTests(unittest.TestCase):
             "[REC] 2": "[REC] 2",  # brackets that are the title's own
             "Harbour (Director's Cut)": "Harbour (Director's Cut)",
             "IT: Up": "IT: Up",  # never down to a single short word
+            "TR - Up": "TR - Up",
             "NF: Salt Road": "NF: Salt Road",  # not a country or language code
-            "EN - Quiet Valley": "EN - Quiet Valley",  # not one of the forms
+            "NF - Salt Road": "NF - Salt Road",
             "CSI: Harbour Nights": "CSI: Harbour Nights",
         }
         for title, expected in cases.items():
             with self.subTest(title=title):
                 self.assertEqual(clean_title(title), (expected, None))
+
+    def test_a_language_tag_goes_in_every_shape_before_or_after_the_title(self):
+        cases = {
+            "TR - Süper Liman Bekçileri (2014)": ("Süper Liman Bekçileri", 2014),
+            "TR – Harbour Lights": ("Harbour Lights", None),
+            "TR — Harbour Lights": ("Harbour Lights", None),
+            "TR- Harbour Lights": ("Harbour Lights", None),
+            "TR | Harbour Lights": ("Harbour Lights", None),
+            "TR:Harbour Lights": ("Harbour Lights", None),
+            "TR▸ Harbour Lights": ("Harbour Lights", None),
+            "TR ▸ Harbour Lights": ("Harbour Lights", None),
+            "[TR] Harbour Lights": ("Harbour Lights", None),
+            "[TR] - Harbour Lights": ("Harbour Lights", None),
+            "(TR) Harbour Lights": ("Harbour Lights", None),
+            "|TR| Harbour Lights": ("Harbour Lights", None),
+            "EN - Quiet Valley": ("Quiet Valley", None),
+            "TR - 4K - Harbour Lights (2019)": ("Harbour Lights", 2019),
+            "Harbour Lights - TR": ("Harbour Lights", None),
+            "Harbour Lights [TR]": ("Harbour Lights", None),
+            "Harbour Lights | EN": ("Harbour Lights", None),
+            "Harbour Lights (2019) - TR": ("Harbour Lights", 2019),
+            "Harbour Lights - TR - 2019": ("Harbour Lights", 2019),
+        }
+        for title, expected in cases.items():
+            with self.subTest(title=title):
+                self.assertEqual(clean_title(title), expected)
+
+    def test_titles_that_start_or_end_with_short_words_keep_them(self):
+        cases = (
+            "Up",
+            "It",
+            "Us",
+            "ET",
+            "Z3RO",
+            "It - Harbour Two",  # a title's own words are not all capitals
+            "Us - The Return",
+            "DE-FROST",  # a word's hyphen, not a tag's dash
+            "Harbour - IV",  # not a language
+            "Harbour Lights TR",  # no separator: may be the title's
+            "Salt Road - It",
+        )
+        for title in cases:
+            with self.subTest(title=title):
+                self.assertEqual(clean_title(title), (title, None))
 
     def test_a_files_name_loses_its_release_tags(self):
         self.assertEqual(
@@ -112,6 +165,53 @@ class TitleTests(unittest.TestCase):
         self.assertEqual(
             search_query("movies", "Harbour Lights", item={}).label(), "Harbour Lights"
         )
+
+    def test_a_film_is_searched_by_the_id_its_provider_gives(self):
+        item = {"name": "TR - Süper Liman Bekçileri (2014)", "tmdb": "4242", "year": "2014"}
+        query = search_query("movies", item["name"], item=item)
+        self.assertEqual(query, SearchQuery("Süper Liman Bekçileri", 2014, tmdb_id=4242))
+        self.assertEqual(query.label(), "Süper Liman Bekçileri (2014)")  # the field: cleaned
+        self.assertTrue(query.by_id)
+        # In an item's info, and an IMDb id with or without its "tt".
+        self.assertEqual(provider_ids({"info": {"tmdb_id": 17}}), (17, None))
+        self.assertEqual(provider_ids({"imdb_id": "tt0123456"}), (None, 123456))
+        self.assertEqual(provider_ids({"imdb": "0123456"}), (None, 123456))
+        for nothing in ({"tmdb": "0"}, {"tmdb": "n/a"}, {"imdb": "7.5"}, {"imdb": "8"}, {}):
+            with self.subTest(item=nothing):
+                self.assertEqual(provider_ids(nothing), (None, None))  # a rating is no id
+
+    def test_a_films_original_title_in_latin_letters_is_searched_for(self):
+        item = {"name": "TR: Liman Işıkları", "o_name": "Harbour Lights (2019)"}
+        self.assertEqual(
+            search_query("movies", item["name"], item=item), SearchQuery("Harbour Lights", 2019)
+        )
+        foreign = {"name": "TR: Liman Işıkları", "o_name": "港の灯り"}
+        self.assertEqual(original_title(foreign), "")
+        self.assertEqual(
+            search_query("movies", foreign["name"], item=foreign).text, "Liman Işıkları"
+        )
+
+    def test_an_episode_is_searched_by_its_series_id_and_numbers(self):
+        context = {"series": {"name": "TR - Tuz Yolu", "tmdb": "77"}, "season": {"number": "2"}}
+        item = {"episode_num": "5", "description": {"tmdb_id": 9001}}  # an Xtream episode's info
+        query = search_query(
+            "series", "Köprü", series_title="TR - Tuz Yolu", item=item, context=context
+        )
+        self.assertEqual(
+            query, SearchQuery("Tuz Yolu", None, 2, 5, tmdb_id=9001, parent_tmdb_id=77)
+        )
+        self.assertEqual(query.label(), "Tuz Yolu S02E05")
+        # The series' id from its info (services.workers puts it on each season).
+        context = {"series": {"name": "Salt Road"}, "season": {"number": 2, "series_tmdb": "77"}}
+        query = search_query("series", "x", item={"episode_num": 5}, context=context)
+        self.assertEqual((query.parent_tmdb_id, query.tmdb_id), (77, None))
+        # A provider that gives each episode its series' id: it is the series'.
+        context = {"series": {"name": "Salt Road", "tmdb": "77"}, "season": {"number": 2}}
+        query = search_query("series", "x", item={"episode_num": 5, "tmdb": 77}, context=context)
+        self.assertEqual((query.parent_tmdb_id, query.tmdb_id), (77, None))
+        # Its own id without its series or numbers could be a film's: its text is searched.
+        query = search_query("series", "Salt Road", item={"info": {"tmdb_id": 9001}})
+        self.assertFalse(query.by_id)
 
     def test_an_episode_is_searched_by_its_series_season_and_number(self):
         context = {"series": {"name": "|EN| Salt Road"}, "season": {"number": "2"}}
@@ -143,6 +243,39 @@ class TitleTests(unittest.TestCase):
         self.assertEqual(parse_query("Harbour Lights (2019)"), SearchQuery("Harbour Lights", 2019))
         self.assertEqual(parse_query("  harbour   lights "), SearchQuery("harbour lights"))
 
+    def test_an_id_is_searched_for_instead_of_the_text(self):
+        film = SearchQuery("Süper Liman Bekçileri", 2014, tmdb_id=4242)
+        self.assertEqual(
+            film.params(("tr",)), [("languages", "tr"), ("tmdb_id", "4242"), ("type", "movie")]
+        )
+        both = SearchQuery("Harbour Lights", 2019, tmdb_id=4242, imdb_id=123456)
+        self.assertEqual(both.params(), [("imdb_id", "123456"), ("type", "movie")])
+        episode = SearchQuery("Salt Road", None, 2, 5, tmdb_id=9001, parent_tmdb_id=77)
+        self.assertEqual(
+            episode.params(),
+            [
+                ("episode_number", "5"),
+                ("parent_tmdb_id", "77"),
+                ("season_number", "2"),
+                ("type", "episode"),
+            ],
+        )
+        # Without its number, an episode's own id names it.
+        unnumbered = SearchQuery("Salt Road", None, 2, None, tmdb_id=9001, parent_tmdb_id=77)
+        self.assertEqual(unnumbered.params(), [("tmdb_id", "9001"), ("type", "episode")])
+        self.assertEqual(episode.without_ids(), SearchQuery("Salt Road", None, 2, 5))
+
+    def test_the_year_is_never_in_the_text_too(self):
+        self.assertEqual(
+            SearchQuery("Harbour Lights 2019", 2019).params(),
+            [("query", "harbour lights"), ("year", "2019")],
+        )
+        self.assertEqual(SearchQuery("1984", 1984).params(), [("query", "1984"), ("year", "1984")])
+        self.assertEqual(
+            search_query("movies", "TR - Süper Liman Bekçileri (2014)").params(),
+            [("query", "süper liman bekçileri"), ("year", "2014")],
+        )
+
     def test_parameters_are_sorted_and_lower_case(self):
         query = SearchQuery("Salt Road", None, 2, 5)
         self.assertEqual(
@@ -173,6 +306,88 @@ class FoundTests(unittest.TestCase):
         self.assertEqual(second.release, "harbour.tr.srt")  # no release: its file's name
         self.assertTrue(second.machine_translated)  # AI counts as a machine
         self.assertEqual((first.order, second.order), (0, 1))
+
+    def test_each_subtitle_names_what_it_was_made_for(self):
+        episode = feature(
+            "The Bridge", 2020, tmdb=9001, series="Salt Road", season=2, episode=5, series_tmdb=77
+        )
+        data = page(
+            entry(1, "en", "a", made_for=feature("Harbour Lights", 2019, tmdb=4242, imdb=1234)),
+            entry(2, "en", "b", made_for=episode),
+            entry(3, "en", "c"),
+        )
+        first, second, third = parse_search(data)
+        self.assertEqual(
+            first.feature,
+            Feature("movie", "Harbour Lights", "2019 - Harbour Lights", "", 2019, 4242, 1234),
+        )
+        self.assertEqual(first.feature.label(), "Harbour Lights (2019)")
+        self.assertEqual(
+            (second.feature.parent_tmdb_id, second.feature.season, second.feature.episode),
+            (77, 2, 5),
+        )
+        self.assertEqual(second.feature.label(), "Salt Road S02E05")
+        self.assertIsNone(third.feature)
+
+    def test_a_title_is_matched_by_its_words_without_case_or_accents(self):
+        self.assertTrue(same_title("Süper Liman Bekçileri", "Super Liman Bekcileri"))
+        self.assertTrue(same_title("ISTANBUL ışıkları", "İstanbul Işıkları"))
+        self.assertTrue(same_title("Harbour Lights", "2019 - Harbour Lights"))
+        self.assertTrue(same_title("The Harbour Lights", "Harbour Lights: The Return"))
+        self.assertFalse(same_title("6 Süper Kahraman", "Six Brave Lanterns 6"))
+        self.assertFalse(same_title("The Harbour", "The Lighthouse"))  # "the" tells nothing
+        self.assertFalse(same_title("Up", "Up and Away Over the Northern Harbour Lights"))
+        self.assertFalse(same_title("", "Harbour"))
+
+    def test_only_the_subtitles_for_the_title_asked_for_are_kept(self):
+        """A translated title and its year find other films of that year (the owner's
+        screenshot: 64 subtitles, none for the film): none of them is taken for it."""
+        query = search_query("movies", "TR - Süper Liman Bekçileri (2014)")
+        data = page(
+            entry(1, "tr", "grown.beginners.2014.tur", made_for=feature("Grown Beginners", 2014)),
+            entry(2, "tr", "Star Corridor (2014) TR", made_for=feature("Star Corridor", 2014)),
+            entry(3, "en", "Night.Ferry.2014", made_for=feature("Night Ferry", 2014)),
+            entry(4, "tr", "WhoIsIt tr", made_for=feature("Who Is It", 2014)),
+            entry(5, "tr", "liman.2014", made_for=feature("Super Liman Bekcileri", 2014)),
+            entry(6, "tr", "liman.2009", made_for=feature("Süper Liman Bekçileri", 2009)),
+        )
+        matching, others = split_matches(parse_search(data), query)
+        self.assertEqual([f.file_id for f in matching], [5])
+        self.assertEqual([f.file_id for f in others], [1, 2, 3, 4, 6])  # 6: another year
+        self.assertEqual(found_for(matching), "Super Liman Bekcileri (2014)")
+        # Not one of them: nothing is for it.
+        matching, others = split_matches(parse_search(page(*data["data"][:4])), query)
+        self.assertEqual((matching, len(others)), ([], 4))
+        # Without the features OpenSubtitles names, nothing tells them apart: all are kept.
+        plain = parse_search(page(entry(7, "en", "a"), entry(8, "tr", "b")))
+        self.assertEqual(split_matches(plain, query), (plain, []))
+
+    def test_by_id_the_features_ids_count_and_the_year_checks_them(self):
+        query = SearchQuery("Süper Liman Bekçileri", 2014, tmdb_id=4242)
+        film = Feature("movie", "Brave Harbour Six", year=2014, tmdb_id=4242)
+        self.assertTrue(feature_matches(film, query))  # its English title: the id says
+        other = Feature("movie", "Other", year=2014, tmdb_id=5)
+        self.assertFalse(feature_matches(other, query))
+        wrong = Feature("movie", "Old", year=1990, tmdb_id=4242)  # a provider's wrong id
+        self.assertFalse(feature_matches(wrong, query))
+        untold = Feature("movie", "Süper Liman Bekçileri", year=2015)  # no ids: its title
+        self.assertTrue(feature_matches(untold, query))
+        episode = SearchQuery("Salt Road", None, 2, 5, parent_tmdb_id=77)
+        bridge = Feature(
+            "episode",
+            "The Bridge",
+            parent_title="Salt Road",
+            parent_tmdb_id=77,
+            season=2,
+            episode=5,
+        )
+        pier = Feature(
+            "episode", "The Pier", parent_title="Salt Road", parent_tmdb_id=77, season=2, episode=6
+        )
+        self.assertTrue(feature_matches(bridge, episode))
+        self.assertFalse(feature_matches(pier, episode))
+        # By text, an episode's series is its title.
+        self.assertTrue(feature_matches(bridge, episode.without_ids()))
 
     def test_languages_group_with_the_preferred_first(self):
         files = [
@@ -265,6 +480,59 @@ class SearchTests(unittest.TestCase):
         params = [dict(r["params"]) for r in http.made("GET", "/subtitles")]
         self.assertEqual([p.get("page") for p in params], [None, "2", None])
         self.assertEqual(params[2].get("languages"), "tr")
+
+    def test_an_id_that_finds_nothing_is_searched_again_by_the_title(self):
+        http = FakeHttp()
+        made_for = feature("Harbour Lights", 2019)
+        http.answer(
+            "GET",
+            API + "/subtitles",
+            FakeResponse(200, page()),  # the id: nothing
+            FakeResponse(200, page(entry(1, "en", "a", made_for=made_for))),
+        )
+        results = []
+        query = SearchQuery("Harbour Lights", 2019, tmdb_id=4242)
+        worker = SearchWorker(client(http), query)
+        worker.finished.connect(results.append)
+        worker.run()
+        params = [dict(r["params"]) for r in http.made("GET", "/subtitles")]
+        self.assertEqual(
+            params,
+            [{"tmdb_id": "4242", "type": "movie"}, {"query": "harbour lights", "year": "2019"}],
+        )
+        (result,) = results
+        self.assertEqual(result.query, SearchQuery("Harbour Lights", 2019))
+        self.assertEqual([f.file_id for f in result.files], [1])
+
+    def test_an_id_that_finds_its_film_is_searched_once(self):
+        http = FakeHttp()
+        made_for = feature("Brave Harbour Six", 2014, tmdb=4242)
+        answer = page(
+            entry(1, "en", "a", made_for=made_for), entry(2, "tr", "b", made_for=made_for)
+        )
+        http.answer("GET", API + "/subtitles", FakeResponse(200, answer))
+        results = []
+        query = SearchQuery("Süper Liman Bekçileri", 2014, tmdb_id=4242)
+        worker = SearchWorker(client(http), query)
+        worker.finished.connect(results.append)
+        worker.run()
+        self.assertEqual(len(http.made("GET", "/subtitles")), 1)
+        self.assertEqual([f.file_id for f in results[0].files], [1, 2])
+        self.assertEqual(results[0].others, ())
+
+    def test_the_worker_keeps_other_titles_apart(self):
+        http = FakeHttp()
+        answer = page(
+            entry(1, "tr", "a", made_for=feature("Grown Beginners", 2014)),
+            entry(2, "en", "b", made_for=feature("Night Ferry", 2014)),
+        )
+        http.answer("GET", API + "/subtitles", FakeResponse(200, answer))
+        results = []
+        worker = SearchWorker(client(http), SearchQuery("Süper Liman Bekçileri", 2014))
+        worker.finished.connect(results.append)
+        worker.run()
+        self.assertEqual(results[0].files, ())
+        self.assertEqual([f.file_id for f in results[0].others], [1, 2])
 
     def test_a_worker_emits_the_result_or_the_problem(self):
         http = FakeHttp()

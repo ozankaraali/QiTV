@@ -222,7 +222,23 @@ def _xtream_item(
         item["plot"] = stream.get("plot") or ""
         item["rating"] = stream.get("rating") or ""
         item["year"] = stream.get("year") or ""
+    if content_type != "itv":
+        tmdb = _tmdb_of(stream)  # finds its subtitles on OpenSubtitles
+        if tmdb:
+            item["tmdb"] = tmdb
     return item
+
+
+def _tmdb_of(info: Any) -> str:
+    """A film's or a series' TMDB id as an Xtream panel lists it ("tmdb", "tmdb_id"; "" when
+    it lists none)."""
+    if not isinstance(info, dict):
+        return ""
+    for key in ("tmdb", "tmdb_id"):
+        value = str(info.get(key) or "").strip()
+        if value.isdigit() and int(value) > 0:
+            return value
+    return ""
 
 
 def _max_connections(user_info) -> Optional[int]:
@@ -403,6 +419,9 @@ class XtreamSeriesInfoWorker(QObject):
 
             # Build seasons list
             seasons = []
+            # The series' TMDB id on each season: its episodes' subtitles are found by it.
+            series_tmdb = _tmdb_of(series_info)
+            series_ids = {"series_tmdb": series_tmdb} if series_tmdb else {}
             if episodes_dict:
                 for season_num in sorted(
                     episodes_dict.keys(), key=lambda x: int(x) if x.isdigit() else 0
@@ -423,6 +442,7 @@ class XtreamSeriesInfoWorker(QObject):
                         "air_date": season_data.get("air_date") or "",
                         "episode_count": str(len(season_episodes)),
                         "episodes": season_episodes,  # Store episodes with season
+                        **series_ids,
                     }
                     seasons.append(season_item)
 

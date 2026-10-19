@@ -13,17 +13,26 @@ raises the daily downloads: `OpenSubtitlesClient` logs in before its first downl
 token in memory only, and logs in again once when OpenSubtitles no longer takes it. Neither
 the key, the password nor the token is ever logged, and neither is a download's link.
 
-What plays is searched by its title: `search_query()` cleans a provider's title ("TR: ",
-"|EN| ", "4K", "1080p" …) and adds a film's year or an episode's season and number; the
-search field shows it as "Title (2019)" or "Series S01E02", and `parse_query()` reads an
-edited one back. Results are grouped by language (`group_languages`) and ranked within one
+What plays is searched by its id when its provider gives one (a TMDB or IMDb id: a film's,
+an episode's, or its series' with the season and episode numbers), else by its title:
+`search_query()` cleans a provider's title ("TR: ", "TR - ", "|EN| ", "4K", "1080p" …),
+prefers a film's original title when the provider names one in Latin letters, and adds a
+film's year or an episode's season and number; the search field shows it as "Title (2019)"
+or "Series S01E02", and `parse_query()` reads an edited one back. An id that finds nothing
+is searched again by the title.
+
+Each subtitle names the film or episode it was made for (`Feature`). `split_matches` keeps
+the ones whose film is the one asked for (its id, else its title's words and the year within
+one): a title in another language can find other films' subtitles, which are never shown as
+this one's. Results are grouped by language (`group_languages`) and ranked within one
 (`ranked`): machine translations last, hearing-impaired after the others unless the viewer
 picked those before, trusted and ranked uploaders first, then the most downloaded.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass, field, replace
 import datetime as _dt
 import logging
 import os
@@ -31,6 +40,7 @@ import re
 import tempfile
 import threading
 from typing import Any, Iterable, Optional, Sequence
+import unicodedata
 from urllib.parse import urljoin, urlsplit
 
 from PySide6.QtCore import QLocale, QObject, Signal, Slot
@@ -110,6 +120,34 @@ def shown_release(release: str) -> str:
 
 
 @dataclass(frozen=True)
+class Feature:
+    """The film or episode a subtitle was made for, as OpenSubtitles names it."""
+
+    kind: str = ""  # "movie", "episode", "tvshow" (lower case)
+    title: str = ""  # a film's title; an episode's own ("The Bridge")
+    movie_name: str = ""  # OpenSubtitles' full name: "2019 - Harbour Lights"
+    parent_title: str = ""  # an episode's series
+    year: Optional[int] = None
+    tmdb_id: Optional[int] = None
+    imdb_id: Optional[int] = None
+    parent_tmdb_id: Optional[int] = None
+    parent_imdb_id: Optional[int] = None
+    season: Optional[int] = None
+    episode: Optional[int] = None
+
+    def names(self) -> list[str]:
+        return [name for name in (self.title, self.parent_title, self.movie_name) if name]
+
+    def label(self) -> str:
+        """ "Harbour Lights (2019)", "Salt Road S02E05"."""
+        if self.parent_title and self.season is not None and self.episode is not None:
+            return f"{self.parent_title} S{self.season:02d}E{self.episode:02d}"
+        if self.title:
+            return f"{self.title} ({self.year})" if self.year else self.title
+        return self.movie_name or self.parent_title
+
+
+@dataclass(frozen=True)
 class SubtitleFile:
     file_id: int
     language: str  # OpenSubtitles' code: "en", "pt-BR"
@@ -121,6 +159,7 @@ class SubtitleFile:
     trusted: bool = False  # from a trusted uploader
     uploader_rank: str = ""  # "Sub leecher", "Gold member", "Administrator" …
     order: int = 0  # where the API listed it
+    feature: Optional[Feature] = None  # what it was made for, when OpenSubtitles said
 
 
 @dataclass(frozen=True)
@@ -129,6 +168,25 @@ class SearchQuery:
     year: Optional[int] = None
     season: Optional[int] = None
     episode: Optional[int] = None
+    # Ids from the provider (an IMDb id without its "tt"): a film's or an episode's own, or an
+    # episode's series' ("parent"). With one, it is searched for instead of the text.
+    tmdb_id: Optional[int] = None
+    imdb_id: Optional[int] = None
+    parent_tmdb_id: Optional[int] = None
+    parent_imdb_id: Optional[int] = None
+
+    @property
+    def by_id(self) -> bool:
+        return bool(self.tmdb_id or self.imdb_id or self.by_parent)
+
+    @property
+    def by_parent(self) -> bool:
+        """An episode's, by its series' id."""
+        return bool(self.parent_tmdb_id or self.parent_imdb_id)
+
+    def without_ids(self) -> SearchQuery:
+        """The same search by its text alone."""
+        return replace(self, tmdb_id=None, imdb_id=None, parent_tmdb_id=None, parent_imdb_id=None)
 
     def label(self) -> str:
         """As the search field shows it: "Title (2019)", "Series S01E02"."""
@@ -140,23 +198,54 @@ class SearchQuery:
         return f"{text} ({self.year})" if self.year else text
 
     def params(self, languages: Sequence[str] = ()) -> list[tuple[str, str]]:
-        """The search's parameters, sorted and lower-case as the API asks (else it redirects)."""
-        params = {"query": self.text.lower()}
-        if self.year:
-            params["year"] = str(self.year)
-        if self.season is not None:
+        """The search's parameters, sorted and lower-case as the API asks (else it redirects).
+        By an id when there is one (an IMDb id first: OpenSubtitles' own): an episode's series'
+        with its season and episode numbers, else its own (or a film's); else by the text and
+        the year."""
+        params: dict[str, str] = {}
+        numbered = True  # the season and episode numbers go with the search
+        own = self.imdb_id or self.tmdb_id
+        numbers = self.season is not None and self.episode is not None
+        if self.by_parent and (numbers or not own):
+            if self.parent_imdb_id:
+                params["parent_imdb_id"] = str(self.parent_imdb_id)
+            else:
+                params["parent_tmdb_id"] = str(self.parent_tmdb_id)
+            params["type"] = "episode"
+        elif own:
+            if self.imdb_id:
+                params["imdb_id"] = str(self.imdb_id)
+            else:
+                params["tmdb_id"] = str(self.tmdb_id)
+            episode = self.season is not None or self.episode is not None or self.by_parent
+            params["type"] = "episode" if episode else "movie"
+            numbered = False  # an episode's own id names it whole
+        else:
+            params["query"] = _without_year(self.text, self.year).lower()
+            if self.year:
+                params["year"] = str(self.year)
+        if numbered and self.season is not None:
             params["season_number"] = str(self.season)
-        if self.episode is not None:
+        if numbered and self.episode is not None:
             params["episode_number"] = str(self.episode)
         if languages:
             params["languages"] = ",".join(sorted({code.lower() for code in languages}))
         return sorted(params.items())
 
 
+def _without_year(text: str, year: Optional[int]) -> str:
+    """The text without the year at its end ("Harbour Lights 2019"): it goes as `year`."""
+    words = text.split()
+    if year and len(words) > 1 and words[-1] == str(year):
+        return " ".join(words[:-1])
+    return text
+
+
 @dataclass(frozen=True)
 class SearchResult:
-    query: SearchQuery
-    files: tuple[SubtitleFile, ...]
+    query: SearchQuery  # what was searched for (by its text when its id found nothing)
+    files: tuple[SubtitleFile, ...]  # for the title asked for
+    others: tuple[SubtitleFile, ...] = ()  # what else the search found: other titles'
 
 
 @dataclass(frozen=True)
@@ -212,9 +301,36 @@ def parse_search(data: Any, start: int = 0) -> list[SubtitleFile]:
                 trusted=attributes.get("from_trusted") is True,
                 uploader_rank=str(rank or ""),
                 order=start + len(found),
+                feature=_feature(attributes.get("feature_details")),
             )
         )
     return found
+
+
+def _feature(details: Any) -> Optional[Feature]:
+    """A subtitle's `feature_details`: the film or episode it was made for (None: unnamed)."""
+    if not isinstance(details, dict):
+        return None
+
+    def text(key: str) -> str:
+        return " ".join(str(details.get(key) or "").split())
+
+    title, movie_name, parent = text("title"), text("movie_name"), text("parent_title")
+    if not (title or movie_name or parent):
+        return None
+    return Feature(
+        kind=text("feature_type").lower(),
+        title=title,
+        movie_name=movie_name,
+        parent_title=parent,
+        year=_plausible_year(details.get("year")),
+        tmdb_id=_positive(details.get("tmdb_id")),
+        imdb_id=_positive(details.get("imdb_id")),
+        parent_tmdb_id=_positive(details.get("parent_tmdb_id")),
+        parent_imdb_id=_positive(details.get("parent_imdb_id")),
+        season=_int(details.get("season_number")),
+        episode=_int(details.get("episode_number")),
+    )
 
 
 def _int(value: Any) -> Optional[int]:
@@ -224,6 +340,91 @@ def _int(value: Any) -> Optional[int]:
         return int(value)
     except TypeError, ValueError:
         return None
+
+
+def _positive(value: Any) -> Optional[int]:
+    number = _int(value)
+    return number if number is not None and number > 0 else None
+
+
+# ---- whether a subtitle is for the title asked for ----------------------------------------
+
+# Words that tell no title from another ("The Film" is not "The Other").
+_LITTLE_WORDS = frozenset("""
+    the a an of and in on at to for with la le les el los las lo il gli un une una uno de del
+    des du der die das den dem ein eine und et en ve bir ile
+    """.split())
+
+
+def _words(text: str) -> list[str]:
+    """A title's words, without case or accents ("Süper" → "super", "İstanbul" → "istanbul")."""
+    folded = unicodedata.normalize("NFKD", str(text).replace("ı", "i").replace("İ", "I"))
+    folded = "".join(c for c in folded if not unicodedata.combining(c)).casefold()
+    return [w for w in re.findall(r"[^\W_]+", folded) if len(w) > 1 or w.isdigit()]
+
+
+def _key_words(text: str) -> set[str]:
+    words = set(_words(text))
+    return (words - _LITTLE_WORDS) or words
+
+
+def same_title(asked: str, name: str) -> bool:
+    """Whether `name` is the title `asked` for: at least half of the words asked for are in
+    it, and they make a third of its own ("Harbour Lights" is "2019 - Harbour Lights", not
+    "Harbour Lights of the Northern Coast and the Islands")."""
+    wanted, theirs = _key_words(asked), _key_words(name)
+    common = len(wanted & theirs)
+    return common > 0 and 2 * common >= len(wanted) and 3 * common >= len(theirs)
+
+
+def _same_ids(query: SearchQuery, feature: Feature) -> Optional[bool]:
+    """Whether the ids asked for are the feature's (None: none to compare)."""
+    pairs = (
+        (query.tmdb_id, feature.tmdb_id),
+        (query.imdb_id, feature.imdb_id),
+        (query.parent_tmdb_id, feature.parent_tmdb_id),
+        (query.parent_imdb_id, feature.parent_imdb_id),
+    )
+    compared = [ours == theirs for ours, theirs in pairs if ours and theirs]
+    return any(compared) if compared else None
+
+
+def feature_matches(feature: Feature, query: SearchQuery) -> bool:
+    """Whether a subtitle made for `feature` is for what `query` asks: its ids (the ones
+    asked for), else its title's words; the year within one when both are known, the season
+    and episode when both are."""
+    if query.year and feature.year and abs(feature.year - query.year) > 1:
+        return False
+    for asked, theirs in ((query.season, feature.season), (query.episode, feature.episode)):
+        if asked is not None and theirs is not None and asked != theirs:
+            return False
+    ids = _same_ids(query, feature)
+    if ids is not None:
+        return ids
+    return any(same_title(query.text, name) for name in feature.names())
+
+
+def split_matches(
+    files: Iterable[SubtitleFile], query: SearchQuery
+) -> tuple[list[SubtitleFile], list[SubtitleFile]]:
+    """(the subtitles for what `query` asks, the others), each in its order. When none names
+    what it was made for, there is nothing to tell them by: all of them are taken."""
+    files = list(files)
+    if not any(file.feature is not None for file in files):
+        return files, []
+    matching: list[SubtitleFile] = []
+    others: list[SubtitleFile] = []
+    for file in files:
+        fits = file.feature is not None and feature_matches(file.feature, query)
+        (matching if fits else others).append(file)
+    return matching, others
+
+
+def found_for(files: Iterable[SubtitleFile]) -> str:
+    """What most of `files` were made for ("Harbour Lights (2019)"; "" when none says)."""
+    labels = Counter(file.feature.label() for file in files if file.feature is not None)
+    labels.pop("", None)
+    return labels.most_common(1)[0][0] if labels else ""
 
 
 # ---- languages and ranking ----------------------------------------------------------------
@@ -343,23 +544,35 @@ def ranked(files: Iterable[SubtitleFile], *, prefer_hi: bool = False) -> list[Su
 _VIDEO_EXTENSION = re.compile(
     r"\.(mkv|mp4|m4v|avi|mov|ts|m2ts|webm|wmv|flv|mpe?g|ogv)$", re.IGNORECASE
 )
-# The country and language codes providers put before a title ("TR: ", "|EN| ", "[DE] ",
-# "FR| "): only these are taken for a provider's tag, and only in those forms.
+# The country and language codes providers put before or after a title ("TR: ", "TR - ",
+# "|EN| ", "[DE] ", "FR| ", " - TR"): only these are taken for a provider's tag, and only in
+# those forms.
 _CODES = frozenset("""
-    AF AL AM AR AT AU AZ BA BE BG BR BY CA CH CN CY CZ DE DK DZ EE EG EN ES EU FI FR GE GR HK HR
-    HU ID IE IL IN IQ IR IS IT JO JP KR KU KW KZ LA LB LT LU LV MA MK MT MX MY NL NO NZ PH PK PL
-    PT QA RO RS RU SA SE SG SI SK SQ SR SY TH TN TR TW UA UK US UZ VN ZA
-    ALB ARA ARB BUL CHI CHN CZE DAN DEU DUT ENG ESP EXYU FIN FRA FRE GER GRE HEB HIN HRV HUN IND
-    ITA JPN KOR KUR LAT LATAM NLD NOR PER POL POR ROM RUM RUS SPA SRP SWE TUR UKR
+    AE AF AL AM AR AT AU AZ BA BD BE BG BR BY CA CH CL CN CO CS CY CZ DA DE DK DZ EE EG EL EN ES
+    EU FA FI FR GE GR HE HI HK HR HU ID IE IL IN IQ IR IS IT JA JO JP KO KR KU KW KZ LA LB LT LU
+    LV MA MK MT MX MY NB NG NL NO NZ PE PH PK PL PT QA RO RS RU SA SE SG SI SK SL SQ SR SV SY TH
+    TN TR TW UA UK UR US UZ VE VI VN ZA ZH
+    AFG ALB ARA ARB AZE BIH BOS BUL CHI CHN CRO CZE DAN DEU DUT ENG ESP EXYU FIN FRA FRE GER GRE
+    HEB HIN HRV HUN IND ITA JPN KOR KUR LAT LATAM MKD NLD NOR PAK PER POL POR ROM RUM RUS SLO SPA
+    SRB SRP SWE THA TUR UKR VIE
     """.split())
+# A provider's tag before a title: a code in brackets ("|EN| ", "[DE] ", "(TR) "), or in
+# capitals followed by a separator ("TR: ", "FR| ", "TR ▸ ", "TR - "; a dash with a space
+# beside it, never a word's hyphen: "DE-FROST" stays). A title's own words are rarely all in
+# capitals: "It - Harbour Two" stays.
+_TAG_SEPARATORS = "|:▸►▶»•·~"
 _PREFIX = re.compile(
     r"^\s*(?:"
     r"\|\s*([A-Za-z]{2,5})\s*\|"  # |EN|
     r"|\[\s*([A-Za-z]{2,5})\s*\]"  # [DE]
-    r"|([A-Za-z]{2,5})\s*\|"  # FR|
-    r"|([A-Za-z]{2,5}):"  # TR:
-    r")\s+"
+    r"|\(\s*([A-Z]{2,5})\s*\)"  # (TR)
+    r"|\{\s*([A-Z]{2,5})\s*\}"  # {TR}
+    rf"|([A-Z]{{2,5}})\s*[{_TAG_SEPARATORS}]"  # FR|  TR:  TR ▸
+    r"|([A-Z]{2,5})(?:\s+[-–—]|[-–—]\s)"  # TR -  TR –  TR—
+    rf")(?:\s*[-–—{_TAG_SEPARATORS}](?=\s))?\s*"  # "[TR] - "
 )
+# A provider's tag after a title: " - TR", " | TR", " ▸ TR".
+_SUFFIX = re.compile(rf"(?:\s+[-–—]|\s*[{_TAG_SEPARATORS}])\s*([A-Z]{{2,5}})\s*$")
 _YEAR_IN_BRACKETS = re.compile(r"[(\[]\s*((?:19|20)\d{2})\s*[)\]]")
 _BRACKETED = re.compile(r"\[([^\]]*)\]|\{([^}]*)\}|\|([^|]*)\||\(([^)]*)\)")
 _QUALITY = re.compile(
@@ -373,7 +586,7 @@ _EPISODE_X = re.compile(r"\b(\d{1,2})x(\d{1,3})\b")
 _SEASON_ONLY = re.compile(r"\b(?:S|Season\s*)(\d{1,2})\s*$", re.IGNORECASE)
 _DASH_YEAR = re.compile(r"\s[-–—]\s*((?:19|20)\d{2})\s*$")
 _FILE_YEAR = re.compile(r"(?<=\s)((?:19|20)\d{2})(?=\s|$)")
-_EDGES = " \t-–—|:·,._/\\"
+_EDGES = " \t-–—|:·,._/\\▸►▶»•~"
 
 
 def _plausible_year(value: Any) -> Optional[int]:
@@ -383,18 +596,34 @@ def _plausible_year(value: Any) -> Optional[int]:
     return year
 
 
+def _a_title(text: str) -> bool:
+    """Whether `text` is enough of a title to be left: two words, or one of four letters."""
+    return len(text.split()) >= 2 or len(text) >= 4
+
+
 def _strip_tags(text: str) -> str:
-    """Strip a provider's tags before the title ("TR: ", "|EN| ", "[DE] ", "FR| "): only a
-    known country or language code, and only while a title of two words, or of one word of
-    four letters or more, remains."""
+    """Strip a provider's tags before the title ("TR: ", "TR - ", "|EN| ", "[DE] ", "FR| "):
+    only a known country or language code, and only while a title of two words, or of one
+    word of four letters or more, remains."""
     while True:
         match = _PREFIX.match(text)
         if match is None:
             return text
         code = next(group for group in match.groups() if group)
         rest = text[match.end() :].strip()
-        words = rest.split()
-        if code.upper() not in _CODES or not (len(words) >= 2 or len(rest) >= 4):
+        if code.upper() not in _CODES or not _a_title(rest):
+            return text
+        text = rest
+
+
+def _strip_tag_after(text: str) -> str:
+    """Strip a provider's tags after the title (" - TR", " | EN"), alike."""
+    while True:
+        match = _SUFFIX.search(text)
+        if match is None or match.group(1) not in _CODES:
+            return text
+        rest = text[: match.start()].strip(_EDGES)
+        if not _a_title(rest):
             return text
         text = rest
 
@@ -440,11 +669,12 @@ def clean_title(name: str) -> tuple[str, Optional[int]]:
     cleaned = " ".join(_QUALITY.sub(" ", text).split()).strip(_EDGES)
     if cleaned:
         text = _strip_tags(cleaned)
-    text = " ".join(text.split()).strip(_EDGES)
+    text = _strip_tag_after(" ".join(text.split()).strip(_EDGES))
     if year is None:
         trailing = _DASH_YEAR.search(text)
         if trailing and _plausible_year(trailing.group(1)) and text[: trailing.start()].strip():
             year, text = int(trailing.group(1)), text[: trailing.start()]
+            text = _strip_tag_after(text.strip(_EDGES))  # "Title - TR - 2019"
     return " ".join(text.split()).strip(_EDGES) or original, year
 
 
@@ -455,6 +685,57 @@ def item_year(item: dict) -> Optional[int]:
         if year:
             return year
     return None
+
+
+# Where a provider names a title's ids and original title: on its item (an Xtream panel's
+# "tmdb"), or in the item's info (an Xtream episode's "tmdb_id", kept as its "description").
+_TMDB_KEYS = ("tmdb_id", "tmdb", "tmdbid")
+_IMDB_KEYS = ("imdb_id", "imdb", "imdbid")
+_ORIGINAL_KEYS = ("o_name", "original_title", "original_name")
+_IMDB_ID = re.compile(r"\btt0*(\d{1,10})\b|^0*(\d{5,10})$", re.IGNORECASE)  # 5+ digits: no rating
+
+
+def _sources(item: Any) -> list[dict]:
+    if not isinstance(item, dict):
+        return []
+    return [item] + [
+        item[key] for key in ("info", "description") if isinstance(item.get(key), dict)
+    ]
+
+
+def _tmdb_id(value: Any) -> Optional[int]:
+    text = str(value).strip() if value is not None and not isinstance(value, bool) else ""
+    return _positive(text) if re.fullmatch(r"\d{1,10}", text) else None
+
+
+def _imdb_id(value: Any) -> Optional[int]:
+    text = str(value).strip() if value is not None and not isinstance(value, bool) else ""
+    match = _IMDB_ID.search(text)
+    return _positive(match.group(1) or match.group(2)) if match else None
+
+
+def provider_ids(item: Any) -> tuple[Optional[int], Optional[int]]:
+    """(its TMDB id, its IMDb id without "tt") as a title's provider gives them; None each
+    when it gives none."""
+    tmdb = imdb = None
+    for source in _sources(item):
+        for key in _TMDB_KEYS:
+            tmdb = tmdb or _tmdb_id(source.get(key))
+        for key in _IMDB_KEYS:
+            imdb = imdb or _imdb_id(source.get(key))
+    return tmdb, imdb
+
+
+def original_title(item: Any) -> str:
+    """A title's original name as its provider gives it, when in Latin letters ("" else):
+    OpenSubtitles knows a film by it, or by its English one, not by a translation's."""
+    for source in _sources(item):
+        for key in _ORIGINAL_KEYS:
+            name = " ".join(str(source.get(key) or "").split())
+            letters = [c for c in name if c.isalpha()]
+            if letters and all(ord(c) < 0x250 for c in letters):
+                return name
+    return ""
 
 
 def _episode_in(text: str) -> tuple[str, Optional[int], Optional[int]]:
@@ -474,24 +755,31 @@ def search_query(
     context: Optional[dict] = None,
 ) -> SearchQuery:
     """What to search for what plays: a film's title (and year), or an episode's series title
-    with its season and episode numbers. `section` is "movies" or "series"; `title` what the
-    player shows; `series_title` an episode's series; `item` and `context` the catalog's. A
-    film's title that names an episode ("Series S01E02", a file's name) is searched as one."""
+    with its season and episode numbers, and the ids the provider gives (a film's or an
+    episode's own, an episode's series'). `section` is "movies" or "series"; `title` what the
+    player shows; `series_title` an episode's series; `item` and `context` the catalog's. An
+    original title in Latin letters is searched for rather than a translated one. A film's
+    title that names an episode ("Series S01E02", a file's name) is searched as one."""
     item, context = item or {}, context or {}
     if section != "series":
         text, year = clean_title(title)
         named, season, episode = _episode_in(text)
         if season is not None and named.strip(_EDGES):
             return SearchQuery(named.strip(_EDGES), None, season, episode)
-        return SearchQuery(text or str(title).strip(), year or item_year(item))
+        original, original_year = clean_title(original_title(item))
+        if original:
+            text, year = original, year or original_year
+        tmdb, imdb = provider_ids(item)
+        return SearchQuery(
+            text or str(title).strip(), year or item_year(item), tmdb_id=tmdb, imdb_id=imdb
+        )
     season_dict = context.get("season") if isinstance(context.get("season"), dict) else None
+    series_dict = context.get("series") if isinstance(context.get("series"), dict) else None
     season_value, episode_value = season_and_episode(season_dict, item)
     season, episode = _int(season_value), _int(episode_value)
     series = series_title
-    if not series:
-        series_dict = context.get("series")
-        if isinstance(series_dict, dict):
-            series = str(series_dict.get("name") or series_dict.get("title") or "")
+    if not series and series_dict is not None:
+        series = str(series_dict.get("name") or series_dict.get("title") or "")
     named, found_season, found_episode = _episode_in(str(series or title))
     if found_season is None and series:
         _rest, found_season, found_episode = _episode_in(str(title))
@@ -499,12 +787,30 @@ def search_query(
         season = found_season
     if episode is None:
         episode = found_episode
-    text, _year = clean_title(named)
+    text, _year = clean_title(original_title(series_dict) or named)
     by_season = _SEASON_ONLY.search(text)
     if by_season and text[: by_season.start()].strip(_EDGES):  # "Series Season 2"
         season = season if season is not None else int(by_season.group(1))
         text = text[: by_season.start()].strip(_EDGES)
-    return SearchQuery(text or str(title).strip(), None, season, episode)
+    tmdb, imdb = provider_ids(item)
+    parent_tmdb, parent_imdb = provider_ids(series_dict)
+    if season_dict is not None:  # the series' id its info gave (services.workers)
+        parent_tmdb = parent_tmdb or _tmdb_id(season_dict.get("series_tmdb"))
+    # A provider that gives an episode its series' id: it is the series'. An episode's own id
+    # without its series or numbers could be taken for a film's: its text is searched for.
+    known = season is not None or episode is not None or parent_tmdb or parent_imdb
+    tmdb = None if tmdb == parent_tmdb or not known else tmdb
+    imdb = None if imdb == parent_imdb or not known else imdb
+    return SearchQuery(
+        text or str(title).strip(),
+        None,
+        season,
+        episode,
+        tmdb_id=tmdb,
+        imdb_id=imdb,
+        parent_tmdb_id=parent_tmdb,
+        parent_imdb_id=parent_imdb,
+    )
 
 
 def parse_query(text: str) -> SearchQuery:
@@ -725,7 +1031,7 @@ class OpenSubtitlesClient:
     ) -> list[SubtitleFile]:
         """Every language's subtitles for `query` (up to `pages` pages); when there are more,
         the `preferred` languages' first page too."""
-        if not query.text:
+        if not query.text and not query.by_id:
             return []
         found: list[SubtitleFile] = []
         seen: set[int] = set()
@@ -949,6 +1255,9 @@ def save_subtitle(path: str, content: bytes) -> None:
 
 
 class SearchWorker(QObject):
+    """Searches for `query`: by its id, then by its text when the id finds nothing for it.
+    Emits the subtitles for the title asked for and, apart, the others found."""
+
     finished = Signal(object)  # SearchResult or Problem
     error = Signal(str)
 
@@ -960,12 +1269,19 @@ class SearchWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        query = self._query
         try:
-            files = self._client.search(self._query, preferred=self._preferred)
+            files = self._client.search(query, preferred=self._preferred)
+            matching, others = split_matches(files, query)
+            if not matching and query.by_id and query.text and not cancel_requested():
+                logger.info("OpenSubtitles found nothing by the id; searching by the title")
+                query = query.without_ids()
+                files = self._client.search(query, preferred=self._preferred)
+                matching, others = split_matches(files, query)
         except OpenSubtitlesError as e:
             self.finished.emit(e.problem)
             return
-        self.finished.emit(SearchResult(self._query, tuple(files)))
+        self.finished.emit(SearchResult(query, tuple(matching), tuple(others)))
 
 
 class DownloadWorker(QObject):

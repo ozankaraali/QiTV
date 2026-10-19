@@ -22,6 +22,7 @@ from opensubtitles_fixtures import (
     FakeHttp,
     FakeResponse,
     entry,
+    feature,
     login_answer,
     page,
     quota_answer,
@@ -33,7 +34,7 @@ from test_tv_controller import ControllerTestCase
 
 from services import _build_keys
 from services.next_episode import play_context
-from services.opensubtitles import CONSUMERS_URL, Problem, SubtitleFile
+from services.opensubtitles import CONSUMERS_URL, Feature, Problem, SubtitleFile
 from services.sound_sync import SoundSync
 from services.subtitle_picks import Pick, SubtitlePicks, pick_key
 from ui.keymap import Action, key_hint
@@ -65,6 +66,26 @@ EPISODE = Target(
     context={"series": {"id": "s1", "name": "Salt Road"}, "season": {"id": "2", "number": 2}},
 )
 CHANNEL = Target({"id": 1, "name": "Harbour News", "cmd": "http://tv/1"}, "live", "Harbour News")
+# A film its provider lists under a translated title, with its language's tag before it.
+TRANSLATED = Target(
+    {"id": "m2", "name": "TR - Süper Liman Bekçileri (2014)", "_provider": "Home"},
+    "movies",
+    "TR - Süper Liman Bekçileri (2014)",
+)
+# The same film from a provider that lists its TMDB id.
+WITH_ID = Target(
+    {"id": "m3", "name": "TR - Süper Liman Bekçileri (2014)", "tmdb": "4242", "_provider": "Home"},
+    "movies",
+    "TR - Süper Liman Bekçileri (2014)",
+)
+# What OpenSubtitles finds for the translated title and its year: other films of 2014.
+OTHER_FILMS = (
+    entry(31, "tr", "grown.beginners.2014.tur", made_for=feature("Grown Beginners", 2014)),
+    entry(32, "tr", "Star Corridor (2014) TR", made_for=feature("Star Corridor", 2014)),
+    entry(33, "en", "Night.Ferry.2014", made_for=feature("Night Ferry", 2014)),
+    entry(34, "de", "WhoIsIt", made_for=feature("Who Is It", 2014)),
+)
+THE_FILM = feature("Brave Harbour Six", 2014, tmdb=4242)
 FOUND = (
     entry(1, "en", "Harbour.Lights.2019.1080p", downloads=500),
     entry(2, "en", "Harbour.Lights.2019.HI", downloads=900, hearing_impaired=True),
@@ -337,6 +358,47 @@ class ResultsPageTests(Case):
         self.assertEqual(searched.count(), 1)  # nothing to search for
 
 
+class OthersPageTests(Case):
+    def test_show_all_results_waits_under_the_line_for_the_keys_and_the_mouse(self):
+        page_ = SubtitleSearchPage(self.host)
+        page_.show_search("Liman Işıkları (2019)")
+        self.assertTrue(page_.control_rect("others").isEmpty())
+        page_.set_results([], {}, "Nothing for this title.", kind="error", others=4)
+        self.assertTrue(page_.offers_others())
+        rect = page_.control_rect("others")
+        self.assertFalse(rect.isEmpty())
+        self.assertGreater(rect.top(), page_.control_rect("status").top())
+        self.assertEqual(page_.focus(), "field")  # to type the original title
+        asked = QSignalSpy(page_.othersRequested)
+        page_.handle(Action.NAV_DOWN)
+        self.assertEqual(page_.focus(), "others")
+        page_.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(asked.count(), 1)
+        page_.handle(Action.NAV_UP)
+        self.assertEqual(page_.focus(), "field")
+        self.click(page_, rect.center())
+        self.assertEqual(asked.count(), 2)
+        self.assertEqual(
+            page_.tooltip_at(rect.center()), "Show the subtitles found for other titles"
+        )
+        page_.show_search("Harbour Lights (2019)")  # a new search: gone
+        self.assertFalse(page_.offers_others())
+        self.assertTrue(page_.control_rect("others").isEmpty())
+
+    def test_named_rows_say_what_each_subtitle_was_made_for(self):
+        page_ = SubtitleSearchPage(self.host)
+        page_.show_search("Liman Işıkları (2019)")
+        made_for = Feature("movie", "Night Ferry", year=2014)
+        files = {"en": [SubtitleFile(1, "en", "Night.Ferry.2014", feature=made_for)]}
+        rows = [LanguageRow("en", "English", 1)]
+        page_.set_results(rows, files, "1 subtitle", named=False)
+        point = page_.row_rect("files", 0).center()
+        self.assertEqual(page_.tooltip_at(point), "Night.Ferry.2014")
+        page_.set_results(rows, files, "1 subtitle", named=True)
+        self.assertEqual(page_.tooltip_at(point), "Night Ferry (2014)\nNight.Ferry.2014")
+        page_.grab()  # paints the named rows
+
+
 class FlowCase(Case):
     """The Subtitles panel with the OpenSubtitles search, over a fake player and HTTP."""
 
@@ -543,6 +605,71 @@ class FlowTests(FlowCase):
             {"query": "salt road", "season_number": "2", "episode_number": "5"},
         )
         self.assertEqual(self.search_page.query(), "Salt Road S02E05")
+
+    def test_other_films_found_for_a_translated_title_are_never_shown_as_its(self):
+        self.current = TRANSLATED
+        self.config.opensubtitles_api_key = KEY
+        serving(self.http, *OTHER_FILMS)
+        self.search()
+        page_ = self.search_page
+        self.assertEqual(page_.query(), "Süper Liman Bekçileri (2014)")  # its tag gone
+        (request,) = self.http.made("GET", "/subtitles")
+        self.assertEqual(
+            dict(request["params"]), {"query": "süper liman bekçileri", "year": "2014"}
+        )
+        self.assertEqual(
+            page_.status(),
+            "No subtitles found for this title. Try its original title, or its English one.",
+        )
+        self.assertEqual(page_.languages(), [])
+        self.assertTrue(page_.offers_others())
+        # "Show all results": each one names its film.
+        page_.handle(Action.NAV_DOWN)
+        page_.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(
+            page_.status(),
+            "4 subtitles in 3 languages for other titles: check the title under each one",
+        )
+        self.assertEqual([row.code for row in page_.languages()], ["en", "tr", "de"])
+        point = page_.row_rect("files", 0).center()
+        self.assertEqual(page_.tooltip_at(point), "Night Ferry (2014)\nNight.Ferry.2014")
+        # Its English title, typed: searched by its words.
+        page_.clear_field()
+        for ch in "Brave Harbour Six (2014)":
+            page_.handle(Action.NAV_TEXT, ch)
+        serving(self.http, entry(41, "en", "Brave.Harbour.Six.2014", made_for=THE_FILM))
+        page_.handle(Action.NAV_ACTIVATE)
+        request = self.http.made("GET", "/subtitles")[-1]
+        self.assertEqual(dict(request["params"]), {"query": "brave harbour six", "year": "2014"})
+        self.assertEqual(page_.status(), "1 subtitle in 1 language")
+        self.assertEqual(page_.highlighted_file().file_id, 41)
+
+    def test_a_film_its_provider_gives_an_id_is_searched_by_it(self):
+        self.current = WITH_ID
+        self.config.opensubtitles_api_key = KEY
+        serving(
+            self.http,
+            entry(41, "en", "Brave.Harbour.Six.2014", made_for=THE_FILM),
+            entry(42, "tr", "Brave.Harbour.Six.2014.TR", made_for=THE_FILM),
+        )
+        self.search()
+        page_ = self.search_page
+        self.assertEqual(page_.query(), "Süper Liman Bekçileri (2014)")
+        (request,) = self.http.made("GET", "/subtitles")
+        self.assertEqual(dict(request["params"]), {"tmdb_id": "4242", "type": "movie"})
+        # The line names the film the subtitles are for: OpenSubtitles calls it otherwise.
+        self.assertEqual(page_.status(), "2 subtitles in 2 languages for Brave Harbour Six (2014)")
+        # The same words again: by its id again; other words: by themselves.
+        page_.handle(Action.NAV_UP)
+        page_.handle(Action.NAV_ACTIVATE)
+        request = self.http.made("GET", "/subtitles")[-1]
+        self.assertEqual(dict(request["params"]), {"tmdb_id": "4242", "type": "movie"})
+        page_.handle(Action.NAV_UP)
+        for _ in " (2014)":
+            page_.handle(Action.NAV_BACKSPACE)
+        page_.handle(Action.NAV_ACTIVATE)
+        request = self.http.made("GET", "/subtitles")[-1]
+        self.assertEqual(dict(request["params"]), {"query": "süper liman bekçileri"})
 
     def test_a_refused_key_brings_the_key_page_back(self):
         self.config.opensubtitles_api_key = KEY

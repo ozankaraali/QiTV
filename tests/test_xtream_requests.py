@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
-from services import provider_api
+from services import provider_api, workers
 from services.account_check import check_xtream
 from services.catalog import format_xtream_episodes
 from services.provider_api import (
@@ -19,6 +19,7 @@ from services.provider_api import (
 from services.workers import (
     _XTREAM_CATALOG_ACTIONS,
     XtreamLoaderWorker,
+    XtreamSeriesInfoWorker,
     _resolve_xtream_base,
     _xtream_item,
 )
@@ -343,6 +344,46 @@ class XtreamItemTests(unittest.TestCase):
         self.assertEqual((item["cmd"], item["logo"], item["tv_genre_id"]), ("", "c.png", "None"))
         self.assertEqual((item["plot"], item["rating"], item["year"]), ("P", "", "2025"))
         self.assertIsNone(self.item({"name": "No id"}, "itv"))
+
+    def test_a_titles_tmdb_id_is_kept_for_its_subtitles(self):
+        film = {"stream_id": 8, "name": "Film", "tmdb": "4242"}
+        self.assertEqual(self.item(film, "vod")["tmdb"], "4242")
+        show = {"series_id": 9, "name": "Show", "tmdb_id": 77}
+        self.assertEqual(self.item(show, "series")["tmdb"], "77")
+        for stream, kind in (
+            ({"stream_id": 8, "name": "Film", "tmdb": ""}, "vod"),
+            ({"stream_id": 8, "name": "Film", "tmdb": "0"}, "vod"),
+            ({"stream_id": 7, "name": "News", "tmdb": "5"}, "itv"),  # a channel: none
+        ):
+            with self.subTest(stream=stream):
+                self.assertNotIn("tmdb", self.item(stream, kind))
+
+    def test_a_series_info_puts_its_tmdb_id_on_each_season(self):
+        answer = {
+            "info": {"name": "Show", "tmdb_id": "77"},
+            "episodes": {"1": [{"id": 31, "info": {"tmdb_id": 9001}}], "2": [{"id": 32}]},
+        }
+
+        class Response:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return answer
+
+        results = []
+        worker = XtreamSeriesInfoWorker("http://p:8", "u", "pw", "9", resolved_base="http://p:8")
+        worker.finished.connect(results.append)
+        with patch.object(workers, "requests") as fake:
+            fake.get.return_value = Response()
+            worker.run()
+        seasons = results[0]["seasons"]
+        self.assertEqual([season["series_tmdb"] for season in seasons], ["77", "77"])
+        answer["info"] = {"name": "Show"}  # none: none on the seasons
+        with patch.object(workers, "requests") as fake:
+            fake.get.return_value = Response()
+            worker.run()
+        self.assertNotIn("series_tmdb", results[1]["seasons"][0])
 
     def test_an_episode_plays_from_the_series_path(self):
         season = {"episodes": [{"id": 31, "title": "Pilot", "container_extension": "mp4"}]}
