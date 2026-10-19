@@ -241,6 +241,14 @@ class ArchiveModeTests(CatchupCase):
         self.assertFalse(self.catchup.active())
         self.assertNotIn(("The stream ended", "info"), self.toast.messages())
 
+    def test_a_stretch_that_ends_at_once_goes_live(self):
+        self.played_ms = 5_000  # far from now, but only 5 s played
+        links = len(self.catalog.links)
+        self.session.ended.emit()
+        self.assertFalse(self.catchup.active())
+        self.assertIn((NO_ANSWER_TEXT, "info"), self.toast.messages())
+        self.assertEqual(len(self.catalog.links), links + 1)
+
     def test_record_says_it_cannot(self):
         self.controller.handle(Action.RECORD)
         self.assertIn((NO_RECORDING_TEXT, "info"), self.toast.messages())
@@ -314,6 +322,17 @@ class ProbeTests(CatchupCase):
         self.runner.answer(-1, "refused")
         self.assertFalse(self.memory.failed(channel_key("Home", APPENDED)))
         self.assertTrue(self.live.running)
+
+    def test_steps_while_it_probes_ask_once_and_play_the_newest_moment(self):
+        self.live.timelineChanged.emit(dict(STATE))
+        self.transport.seekToRequested.emit(1000.0)  # 43:20 ago
+        self.transport.seekToRequested.emit(900.0)  # then 45:00 ago, while it probes
+        self.assertEqual(len(self.runner.jobs), 1)
+        self.runner.answer(0, "plays")
+        self.live.released.emit()
+        moment = int(NOW.timestamp()) - 2700
+        self.assertIn(f"utc={moment}&", self.archive_plays()[-1][0])
+        self.assertEqual(self.budget.holders("Home"), ["main"])
 
     def test_a_probe_answered_after_a_zap_is_dropped(self):
         self.controller.handle(Action.SEEK_BACK)

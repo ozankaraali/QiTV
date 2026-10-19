@@ -84,6 +84,7 @@ MIN_AGE_S = 120.0  # an archive moment is at least this old (newer: the archive 
 EDGE_S = 60.0  # nor older than the archive's depth less this
 AFTER_S = 5 * 60.0  # a programme's address runs on this long after its end
 QUICK_S = 6.0  # VLC failing within this of its open, unprobed, is the archive's failure
+SHORT_S = 30.0  # a stretch that ends sooner than this after its moment has nothing more
 NO_LEARN_S = 15 * 60.0  # a failure at a moment newer than this teaches nothing
 TICK_MS = 1000  # the bar's refresh while it opens or is paused (positions come while it plays)
 PURPOSE = "probe"
@@ -158,6 +159,7 @@ class CatchUp(QObject):
         self._slots: dict[int, _Playing] = {}  # by tuner: each picture's archive
         self._generation = 0  # asks and probes before a newer one are dropped
         self._probing = False
+        self._asked: Optional[_Ask] = None  # the newest ask a running probe answers
         self._timer = QTimer(self, interval=TICK_MS)
         self._timer.timeout.connect(self._tick)
         self._connect(session, True)
@@ -180,7 +182,7 @@ class CatchUp(QObject):
             self._connect(session, True)
         self._tuner, self._session = tuner, session
         self._generation += 1  # a probe for the picture that went small is dropped
-        self._probing = False
+        self._probing, self._asked = False, None
         self._run_timer()
 
     @property
@@ -204,7 +206,7 @@ class CatchUp(QObject):
     def reset(self) -> None:
         """Another title plays large (a zap, a film): its archive and a probe are forgotten."""
         self._generation += 1
-        self._probing = False
+        self._probing, self._asked = False, None
         self._set_playing(None)
 
     # ---- what a channel offers ------------------------------------------------------------
@@ -281,10 +283,16 @@ class CatchUp(QObject):
         if not urls:
             logger.info("No archive address for %s", target.title)
             return False
-        self._generation += 1
-        self._probing = False
         key = self.key(target)
         ask = _Ask(target, archive, key, moment, begins.timestamp(), ends, urls, live_playing)
+        asked = self._asked
+        if self._probing and asked is not None and asked.key == key:
+            # A probe of this channel's archive runs: its answer serves this newer ask (← held
+            # down opens one archive, not one per press).
+            self._asked = replace(ask, live_playing=asked.live_playing and live_playing)
+            return True
+        self._generation += 1
+        self._probing = False
         form = self.memory.answered(key)
         if form is not None and form < len(urls):
             self._play(ask, form, probed=True)
@@ -309,9 +317,9 @@ class CatchUp(QObject):
         ticket = budget.request(name, self._limit(ask.target.item), purpose=PURPOSE, queue=False)
         if ticket == DENIED:
             return False
-        self._probing = True
+        self._probing, self._asked = True, ask
         worker = ArchiveProbeWorker(ask.urls, self._headers(ask.target), self._verify(ask.target))
-        context = (self._generation, ticket, ask)
+        context = (self._generation, ticket)
         self._runner.run_worker(worker, self._on_probed, self._on_probe_failed, context=context)
         return True
 
@@ -325,12 +333,21 @@ class CatchUp(QObject):
         provider = item_provider.provider_dict(self.catalog, target.item)
         return bool(provider.get("ssl_verify", getattr(self.config, "ssl_verify", True)))
 
-    def _on_probed(self, context: tuple[int, int, _Ask], result: Any) -> None:
-        generation, ticket, ask = context
-        self._tuner.budget.release(ticket)  # the probe's connection is closed by now
-        if generation != self._generation:
-            return  # a newer ask, a zap or a swap came meanwhile
+    def _probed(self, context: tuple[int, int]) -> Optional[_Ask]:
+        """A probe ended: its slot goes back (its connection is closed by now); the ask it
+        answers, unless a zap, a swap or another channel's ask came meanwhile."""
+        generation, ticket = context
+        self._tuner.budget.release(ticket)
+        if generation != self._generation or self._asked is None:
+            return None
+        ask, self._asked = self._asked, None
         self._probing = False
+        return ask
+
+    def _on_probed(self, context: tuple[int, int], result: Any) -> None:
+        ask = self._probed(context)
+        if ask is None:
+            return
         index, answer = result if isinstance(result, tuple) else (-1, Answer.UNKNOWN.value)
         if isinstance(index, int) and 0 <= index < len(ask.urls):
             self.memory.remember(ask.key, True, index)
@@ -344,11 +361,9 @@ class CatchUp(QObject):
         else:
             self._failed(ask, NO_ANSWER_TEXT)
 
-    def _on_probe_failed(self, context: tuple[int, int, _Ask], _message: str) -> None:
-        generation, ticket, ask = context
-        self._tuner.budget.release(ticket)
-        if generation == self._generation:
-            self._probing = False
+    def _on_probe_failed(self, context: tuple[int, int], _message: str) -> None:
+        ask = self._probed(context)
+        if ask is not None:
             self._failed(ask, NO_ANSWER_TEXT)
 
     def _learn_failure(self, ask: _Ask) -> None:
@@ -515,6 +530,9 @@ class CatchUp(QObject):
             return self.on_error("")
         position = self.position() or playing.ask.ends
         if position >= self._now().timestamp() - LIVE_S - 60.0:
+            self.go_live()
+        elif position - playing.ask.moment < SHORT_S:
+            self._toast(translate(NO_ANSWER_TEXT))  # it ended at once: no stretch to go on with
             self.go_live()
         else:
             self._reopen(playing, position)
