@@ -347,8 +347,14 @@ class UpdateDownloader(QObject):
                             self.progress.emit(downloaded, total_size)
                             last_progress_update = downloaded
 
-            # Verify download size
-            if total_size > 0 and downloaded < total_size * 0.9:
+            # Verify download size: a disk image whole (`open` succeeds before macOS checks
+            # it, and QiTV would quit for a damaged one), anything else within 10%.
+            short = (
+                downloaded < total_size
+                if is_disk_image(filename)
+                else downloaded < total_size * 0.9
+            )
+            if total_size > 0 and short:
                 download_path.unlink(missing_ok=True)
                 self.error.emit(
                     tr(

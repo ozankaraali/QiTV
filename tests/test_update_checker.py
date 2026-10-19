@@ -338,6 +338,41 @@ class DiskImageDownloadTests(unittest.TestCase):
         self.assertEqual(self.download("qitv-macos-universal.zip"), b"new")
 
 
+class ShortDownloadTests(unittest.TestCase):
+    """A disk image must arrive whole: `open` succeeds before macOS checks it."""
+
+    def download(self, name, size, body):
+        with tempfile.TemporaryDirectory() as folder:
+            response = mock.MagicMock(headers={"content-length": str(size)})
+            response.iter_content.return_value = [body]
+            downloader = update_checker.UpdateDownloader(f"https://release.invalid/{name}", size)
+            done, failed = [], []
+            downloader.finished.connect(done.append)
+            downloader.error.connect(failed.append)
+            with (
+                mock.patch.object(
+                    update_checker, "get_downloads_folder", return_value=Path(folder)
+                ),
+                mock.patch.object(update_checker, "requests") as requests,
+            ):
+                requests.get.return_value = response
+                downloader.run()
+            return bool(done), bool(failed), Path(folder, name).exists()
+
+    def test_a_disk_image_a_byte_short_fails_and_is_removed(self):
+        self.assertEqual(
+            self.download("qitv-macos-universal.dmg", 100, b"x" * 99), (False, True, False)
+        )
+
+    def test_a_whole_disk_image_downloads(self):
+        self.assertEqual(
+            self.download("qitv-macos-universal.dmg", 100, b"x" * 100), (True, False, True)
+        )
+
+    def test_other_downloads_keep_the_ten_percent_margin(self):
+        self.assertEqual(self.download("qitv-windows.exe", 100, b"x" * 95), (True, False, True))
+
+
 class LockedConfigTests(unittest.TestCase):
     """M9: a locked config.json (Windows antivirus, an indexer) must not stop the update flow."""
 
