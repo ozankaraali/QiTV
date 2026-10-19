@@ -1,4 +1,4 @@
-from contextlib import closing
+from contextlib import closing, contextmanager
 import copy
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime, parsedate_to_datetime
@@ -8,7 +8,6 @@ import itertools
 import logging
 import os
 import pickle
-import shutil
 import tempfile
 import threading
 from typing import Any, Dict, Generator, Iterator, List, Optional, Set, Tuple, cast
@@ -146,9 +145,38 @@ def _programme(
 _READ_BYTES = 1 << 20  # how much of an XMLTV file the guide parse reads at a time
 
 
+class _NoXml(ValueError):
+    """A zip guide without an .xml file in it."""
+
+
+@contextmanager
+def _open_xmltv(path: str) -> Iterator[Any]:
+    """The XMLTV file at `path` opened to read, unpacked as it is read when it is gzip or zip.
+
+    Its first bytes tell (a file's name, and a server's headers, are not trusted: feeds are
+    often served as application/octet-stream). A zip without an .xml file raises _NoXml (a
+    ValueError); a damaged archive raises as it is read (EOFError, BadGzipFile, BadZipFile).
+    """
+    with open(path, "rb") as f:
+        magic = f.read(4)
+        f.seek(0)
+        if magic[:2] == b"\x1f\x8b":
+            with gzip.GzipFile(fileobj=f) as unpacked:
+                yield unpacked
+        elif magic == b"PK\x03\x04":
+            with zipfile.ZipFile(f) as archive:
+                name = next((n for n in archive.namelist() if n.endswith(".xml")), None)
+                if name is None:
+                    raise _NoXml("no XML in archive")
+                with archive.open(name) as member:
+                    yield member
+        else:
+            yield f
+
+
 def _root_children(path: str) -> Generator[ET.Element, None, None]:
-    """The elements directly under the root of the XML file at `path`, each complete, in
-    document order.
+    """The elements directly under the root of the XML file at `path` (see _open_xmltv),
+    each complete, in document order.
 
     The file is read a piece at a time and each element is let go once the next one is
     asked for, so the whole document is never in memory (ET.parse's tree took several times
@@ -158,7 +186,7 @@ def _root_children(path: str) -> Generator[ET.Element, None, None]:
     parser: ET.XMLPullParser = ET.XMLPullParser(events=("start", "end"))
     root: Optional[ET.Element] = None
     depth = 0
-    with open(path, "rb") as f:
+    with _open_xmltv(path) as f:
         while True:
             if cancel_requested():
                 raise Cancelled()
@@ -189,47 +217,23 @@ _CHUNK = 65536
 
 
 def write_xmltv_body(response, path: str) -> None:
-    """Write an XMLTV download to ``path``, unpacking gzip or zip bodies by their bytes.
+    """Stream an XMLTV download to ``path`` as it comes: a gzip or zip body stays packed
+    (the parse unpacks it, see _open_xmltv; requests has already decoded Content-Encoding).
 
-    `response` is a streamed requests response, or its body's chunks. Headers are not
-    trusted: feeds are often served as ``application/octet-stream``, and requests has
-    already decoded ``Content-Encoding``. The body is streamed to a temporary ``.download``
-    file first, and an archive unpacked to a ``.part`` file; both are always removed. ``path``
-    is written only whole: when anything fails (a damaged archive, an archive without XML)
-    there is no file at ``path``, not even an earlier one. A cancelled job (the window
-    closing) stops between chunks with Cancelled.
+    `response` is a streamed requests response, or its body's chunks. When anything fails
+    there is no file at ``path``. A cancelled job (the window closing) stops between chunks
+    with Cancelled.
     """
     chunks = response.iter_content(_CHUNK) if hasattr(response, "iter_content") else response
-    temp_path = path + ".download"
-    part_path = path + ".part"
     try:
-        with open(temp_path, "wb") as f:
+        with open(path, "wb") as f:
             for chunk in chunks:
                 if cancel_requested():
                     raise Cancelled()
                 f.write(chunk)
-        with open(temp_path, "rb") as f:
-            magic = f.read(4)
-        if magic[:2] == b"\x1f\x8b":
-            with gzip.open(temp_path, "rb") as src, open(part_path, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-            os.replace(part_path, path)
-        elif magic == b"PK\x03\x04":
-            with zipfile.ZipFile(temp_path) as z:
-                name = next((n for n in z.namelist() if n.endswith(".xml")), None)
-                if name is None:
-                    raise ValueError("no XML in archive")
-                with z.open(name) as src, open(part_path, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-            os.replace(part_path, path)
-        else:
-            os.replace(temp_path, path)
     except BaseException:
-        _remove_quietly(path)  # an earlier download's, which the caller must not read
+        _remove_quietly(path)  # a part of it, which the caller must not read
         raise
-    finally:
-        _remove_quietly(temp_path)
-        _remove_quietly(part_path)
 
 
 def _remove_quietly(path: str) -> None:
@@ -811,15 +815,12 @@ class EpgManager:
             if r.status_code == 200:
                 url_hash = _cache_key(url)
                 xmltv_file_path = os.path.join(self._cache_dir(), f"{url_hash}.xml")
-
+                write_xmltv_body(r, xmltv_file_path)
                 try:
-                    write_xmltv_body(r, xmltv_file_path)
-                except ValueError as e:
-                    # An archive without XML leaves no file, so the index is left untouched.
-                    logger.warning("Error fetching XMLTV from %s: %s", redact_url(url), safe_exc(e))
-
-                if os.path.exists(xmltv_file_path):
                     guide = self._index_download(xmltv_file_path)
+                except _NoXml as e:  # the index is left untouched
+                    logger.warning("Error fetching XMLTV from %s: %s", redact_url(url), safe_exc(e))
+                else:
                     if guide:
                         source_date = _source_date(r.headers.get("Last-Modified"))
                         self._store_guide(url_hash, guide, source_date)

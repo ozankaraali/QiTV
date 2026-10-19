@@ -8,7 +8,7 @@ and measures, each in a fresh child process (so a peak is that step's own):
     index      EpgManager._index_programs on the file
     refresh    a Local File guide's whole refresh: parse, save (.guide), index file
     download   with --gzip: a URL guide served gzipped (nothing reaches a network): the
-               body unpacked to disk, parsed and saved
+               body written to disk as it came, unpacked as it is parsed, and saved
 
 For each, over `--repeat` runs: wall time (the fastest and the median), peak RSS (and the
 interpreter's RSS before the step), the guide's size (channels, keys, programmes, the .guide
