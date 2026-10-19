@@ -21,6 +21,12 @@ the last segments of `hls_s` seconds completed by the wall clock (three at once 
 start), served beside it as `seg<n>.ts`. With `cc_reset`, each segment is packaged on its
 own, as some CDNs do: every PID's continuity counter, PAT's and PMT's too, restarts at 0.
 
+A request for `url` with a query (`…/1.ts?archive=…`, catch-up's "append" type) is the
+channel's provider archive (2.3): the clip from its start, `ARCHIVE_S` of it, as fast as the
+client reads, as an on-demand stream. QiTV's probe of it (a Range request for its first
+16 KB, beside the live stream) is recorded in `archive_requests` only; the archive's playback
+(VLC asks for "bytes=0-") counts as a connection like the live one.
+
 `connections` counts the requests; `events` records when each connection opened (+1) and
 closed (-1), and `peak` is the most open at once. A client going away is seen at once (the
 server watches its socket between chunks), so the counts follow the client's own closes.
@@ -37,6 +43,7 @@ from http.server import BaseHTTPRequestHandler
 import itertools
 import math
 from pathlib import Path
+import re
 import select
 import statistics
 import threading
@@ -50,6 +57,7 @@ LIVE_TS = FIXTURE_DIR / "live.ts"
 PATH = "/live/1.ts"
 PLAYLIST = "/live/index.m3u8"
 HLS_WINDOW = 6  # segments in the live playlist
+ARCHIVE_S = 300.0  # how much of the clip an archive request gets
 PACKET = 188
 CHUNK_PACKETS = 64
 CLOCK = 90_000
@@ -243,6 +251,8 @@ class LiveSource:
         self._hls_started = time.monotonic() - 3 * hls_s
         self.connections = 0
         self.events: list[tuple[float, int]] = []  # (time.monotonic(), +1 open / -1 close)
+        # Catch-up: (time.monotonic(), the path, whether it was a probe) per archive request.
+        self.archive_requests: list[tuple[float, str, bool]] = []
         self._stop = threading.Event()
         lock = threading.Lock()
         owner = self
@@ -254,6 +264,9 @@ class LiveSource:
             def do_GET(self) -> None:
                 if owner.hls_s > 0:
                     self._hls()
+                    return
+                if self.path.startswith(PATH + "?"):
+                    self._archive()
                     return
                 if self.path != PATH:
                     self.send_error(404)
@@ -287,6 +300,32 @@ class LiveSource:
                     self.wfile.write(body)
                 except OSError:
                     pass
+
+            def _archive(self) -> None:
+                """The channel's archive: the clip from its start, as fast as it is read."""
+                # QiTV's probe asks for its first bytes (bytes=0-16383); VLC asks for "bytes=0-".
+                probe = re.fullmatch(r"bytes=0-\d+", self.headers.get("Range") or "") is not None
+                with lock:
+                    owner.archive_requests.append((time.monotonic(), self.path, probe))
+                    if not probe:
+                        owner.connections += 1
+                        owner.events.append((time.monotonic(), 1))
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "video/mp2t")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    for due, chunk in owner.stream.chunks():
+                        if due > ARCHIVE_S or owner._stop.is_set():
+                            return
+                        try:
+                            self.wfile.write(chunk)
+                        except OSError:  # the client went away
+                            return
+                finally:
+                    if not probe:
+                        with lock:
+                            owner.events.append((time.monotonic(), -1))
 
             def _serve(self) -> None:
                 self.send_response(200)

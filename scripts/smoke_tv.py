@@ -23,6 +23,10 @@ segment's length (the starts it can land on are a segment apart) + 0.5 s (VLC's 
 and at the end of the 6 s it holds there or closes in (2.1's stay-live keeps 1x inside its dead
 band and nudges only after 15 s outside it: not drifting away is enough); ← moves
 the position back 8-12 s; 1.5x is applied and returns to 1x once stay-live is back at live;
+Catch-up (2.3): Channel 3 is given an archive (an M3U "append" type its source serves); a seek
+5 minutes before its buffer probes the archive, closes the live stream and plays the archive
+(an on-demand stream, the transport's archive bar), and L tunes the channel live again; its
+source sees one connection at a time (the probe beside the live stream is counted apart).
 R records Channel 3 from the buffer into <out>/recordings for 3 s and R stops it: the file is
 saved (MPEG-TS from its first byte), the controls showed REC meanwhile and the toast says
 "Recording saved" (2.3; no connection is added: the sources' counts below include it);
@@ -219,6 +223,9 @@ RECORD_MS = 3_000  # how long R records (2.3)
 RECORD_END_MS = 5_000  # for the second R's file to be closed and its toast to show
 RECORDINGS_DIR = "recordings"  # in <out>: never the user's Movies folder
 PIPELINE_RECORDING = "06-recording.png"
+PIPELINE_CATCHUP = "06-catchup.png"
+CATCHUP_BEFORE_S = 300.0  # the seek goes this far before the buffer's start
+CATCHUP_TIMEOUT_MS = 20_000  # the probe, the live stream's release, VLC's open
 ZAP_CHANNEL = "Channel 4"  # the second paced source: Down from Channel 3, then Up back
 ZAP_OPEN_TIMEOUT_MS = 15_000  # Channel 3's release, then Channel 4's upstream delivering
 
@@ -240,6 +247,13 @@ ZAP_CHECK = (
 RECORD_CHECK = (
     f"{PIPELINE_PREFIX}R records {LIVE_CHANNEL} from the buffer to a saved MPEG-TS file, R stops it"
 )
+CATCHUP_CHECK = (
+    f"{PIPELINE_PREFIX}a seek before {LIVE_CHANNEL}'s buffer plays its provider archive on the "
+    "archive bar, and L plays it live again"
+)
+CATCHUP_SOURCE_CHECK = (
+    f"{PIPELINE_PREFIX}{LIVE_CHANNEL}'s archive was probed, then played on a connection of its own"
+)
 PIPELINE_CHECKS = (
     TUNED_CHECK,
     ON_DISK_CHECK,
@@ -249,6 +263,8 @@ PIPELINE_CHECKS = (
     SPEED_CHECK,
     LIVE_AGAIN_CHECK,
     RECORD_CHECK,
+    CATCHUP_CHECK,
+    CATCHUP_SOURCE_CHECK,
     ZAP_CHECK,
     NO_HELPER_CHECK,
     EMPTY_DIR_CHECK,
@@ -613,6 +629,16 @@ def _judge_sources(report: Report, sources: list[LiveSource], pipeline: bool, pi
     }
     together = peak_of(first.events + second.events)
     facts["sources_peak_concurrent"] = together
+    if pipeline:
+        archive = [(round(at, 3), probe) for at, _path, probe in first.archive_requests]
+        facts["archive_requests"] = archive
+        probes = [at for at, probe in archive if probe]
+        plays = [at for at, probe in archive if not probe]
+        report.check(
+            CATCHUP_SOURCE_CHECK,
+            bool(probes) and bool(plays) and min(probes) < min(plays),
+            f"archive requests (time, probe): {archive}",
+        )
     # The sources' clock is this process's monotonic one; the app records wall-clock times.
     started_at = (report.data.get("pip") or {}).get("started_at")
     pip_from = None
@@ -1532,6 +1558,10 @@ class Driver:
         report.step("pipeline 6b. record")
         yield from self._record(live)
 
+        # 6c. Catch-up (2.3): the provider's archive before the buffer, then L back to live.
+        report.step("pipeline 6c. catch-up")
+        yield from self._catchup(session)
+
         # 7. Down to Channel 4, and Up back as soon as its upstream delivers: each opens only
         # once the other's upstream is closed. The parent judges it by what the sources saw.
         report.step("pipeline 7. zap to Channel 4 and back")
@@ -1544,6 +1574,40 @@ class Driver:
         )
         facts["zap"] = {"opened": opened, "back": back}
         report.save()
+
+    def _catchup(self, session: Any) -> Generator[int, None, None]:
+        """Channel 3 gets an archive its source serves; a seek 5 min before the buffer plays it,
+        L returns to live."""
+        w, report = self.window, self.report
+        current = getattr(w.controller, "_current", None)
+        if current is None or not self.timeline:
+            report.check(CATCHUP_CHECK, False, "no channel or no time-shift state to start from")
+            return
+        current.item.update(archive=1, catchup="append", catchup_source="?archive={utc}")
+        state = self.timeline[-1][1]
+        transport = w.overlays.transport
+        transport.seekToRequested.emit(float(state["start"]) - CATCHUP_BEFORE_S)
+        archive = yield from self._wait(
+            lambda: session.kind is PlayKind.VOD_STREAM
+            and session.state() is PlaybackState.PLAYING,
+            CATCHUP_TIMEOUT_MS,
+        )
+        self._move_mouse()
+        yield from self._wait(transport.isVisible, TRANSPORT_TIMEOUT_MS)
+        yield 1_000  # the bar follows the archive's position
+        texts = transport.texts()
+        self._capture(PIPELINE_CATCHUP)
+        self._key(Qt.Key.Key_L)
+        back = yield from self._wait(self._pipeline_playing, LIVE_PLAY_TIMEOUT_MS)
+        for key in ("archive", "catchup", "catchup_source"):
+            current.item.pop(key, None)  # the steps after it are the live channel's
+        report.data["pipeline"]["catchup"] = {"archive": archive, "texts": texts, "back": back}
+        report.check(
+            CATCHUP_CHECK,
+            archive and texts[0].startswith("Archive from") and back,
+            f"archive played {archive} ({_redacted(session.url)}), transport {texts!r}, live "
+            f"again {back}",
+        )
 
     def _record(self, live: Any) -> Generator[int, None, None]:
         """R, a few seconds, R: the file is saved where Settings says, and the toast says so."""
