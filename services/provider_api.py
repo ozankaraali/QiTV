@@ -232,6 +232,14 @@ def xtream_xmltv_url(base: str, username: str, password: str) -> str:
     return _build_xtream_url(base, "xmltv.php", username, password)
 
 
+def xtream_stream_url(
+    base: str, kind: str, username: str, password: str, stream_id: Any, ext: str
+) -> str:
+    """A stream's address on an Xtream panel: {base}/{kind}/{username}/{password}/{id}.{ext},
+    `kind` being live, movie or series (an episode)."""
+    return f"{base}/{kind}/{username}/{password}/{stream_id}.{ext}"
+
+
 def provider_prefers_https(provider: Dict[str, Any], global_default: bool) -> bool:
     """A provider's own 'prefer_https' wins; unset (missing/None) falls back to the global setting."""
     value = provider.get("prefer_https")

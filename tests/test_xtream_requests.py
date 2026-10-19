@@ -1,10 +1,18 @@
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import threading
 import unittest
 from urllib.parse import parse_qs, urlsplit
 
-from services.workers import XtreamLoaderWorker, _resolve_xtream_base
+from services.catalog import format_xtream_episodes
+from services.provider_api import xtream_stream_url
+from services.workers import (
+    _XTREAM_CATALOG_ACTIONS,
+    XtreamLoaderWorker,
+    _resolve_xtream_base,
+    _xtream_item,
+)
 
 
 class ResolvedBaseTests(unittest.TestCase):
@@ -119,6 +127,49 @@ class XtreamRequestTests(unittest.TestCase):
             ],
         )
         self.assertEqual(catalog["contents"][0]["cmd"], f"{self.base}/movie/user/password/8.mkv")
+
+
+class XtreamItemTests(unittest.TestCase):
+    """A Player API stream becomes a catalog item of its kind."""
+
+    def item(self, stream, kind):
+        prefix = _XTREAM_CATALOG_ACTIONS[kind][2]  # as the loader binds it
+        address = partial(xtream_stream_url, "http://p:8", prefix, "u", "pw")
+        return _xtream_item(stream, kind, address, "ts", 4)
+
+    def test_each_kind(self):
+        live = {"stream_id": 7, "name": "News", "category_id": "3", "epg_channel_id": "news.test"}
+        self.assertEqual(
+            self.item(live, "itv"),
+            {
+                "id": 7,
+                "number": "4",  # its place, without a number of its own
+                "name": "News",
+                "logo": "",
+                "tv_genre_id": "3",
+                "cmd": "http://p:8/live/u/pw/7.ts",
+                "xmltv_id": "news.test",
+            },
+        )
+        film = {"stream_id": 8, "num": 2, "container_extension": "mkv", "category_ids": [5, 6]}
+        film.update(stream_icon="i.png", plot="Plot", rating="7", releasedate="2026")
+        item = self.item(film, "vod")
+        self.assertEqual((item["number"], item["name"], item["logo"]), ("2", "Stream 8", "i.png"))
+        self.assertEqual((item["tv_genre_id"], item["cmd"]), ("5", "http://p:8/movie/u/pw/8.mkv"))
+        self.assertEqual(
+            [item[k] for k in ("description", "rating", "year", "container_extension")],
+            ["Plot", "7", "2026", "mkv"],
+        )
+        show = {"series_id": 9, "name": "Show", "cover": "c.png", "plot": "P", "year": "2025"}
+        item = self.item(show, "series")
+        self.assertEqual((item["cmd"], item["logo"], item["tv_genre_id"]), ("", "c.png", "None"))
+        self.assertEqual((item["plot"], item["rating"], item["year"]), ("P", "", "2025"))
+        self.assertIsNone(self.item({"name": "No id"}, "itv"))
+
+    def test_an_episode_plays_from_the_series_path(self):
+        season = {"episodes": [{"id": 31, "title": "Pilot", "container_extension": "mp4"}]}
+        [episode] = format_xtream_episodes(season, "http://p:8", "ts", "u", "pw")
+        self.assertEqual(episode["cmd"], "http://p:8/series/u/pw/31.mp4")
 
 
 if __name__ == "__main__":

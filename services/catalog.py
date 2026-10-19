@@ -28,7 +28,12 @@ from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as
     status_message,
 )
 from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
-from services.provider_api import provider_prefers_https, stb_endpoint, stb_portal_base
+from services.provider_api import (
+    provider_prefers_https,
+    stb_endpoint,
+    stb_portal_base,
+    xtream_stream_url,
+)
 from services.provider_ids import stamp
 from services.redact import safe_message
 from services.workers import NO_PORTAL_DATA_MESSAGE, STB_DEVICE_REJECTED_MESSAGE, find_roman_token
@@ -190,7 +195,9 @@ def format_xtream_episodes(season, stream_base, stream_ext, username, password) 
         episode_id = ep.get("id")
         # Use container_extension from episode data, fallback to stream_ext
         container_ext = ep.get("container_extension") or stream_ext
-        cmd = f"{stream_base}/series/{username}/{password}/{episode_id}.{container_ext}"
+        cmd = xtream_stream_url(
+            stream_base, "series", username, password, episode_id, container_ext
+        )
         # Robust episode number extraction
         number_str = None
         for key in ("episode_num", "episode", "num"):
