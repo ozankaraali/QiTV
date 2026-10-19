@@ -48,6 +48,10 @@ _pseudo = os.environ.get(PSEUDO_ENV) == "1"
 _qt_translators: list[Any] = []  # kept alive while installed
 _reported: set[str] = set()
 _upper_locale: Optional[tuple[str, Any]] = None
+# Parsed catalogs by path, with the (mtime, size) they were read at; the language list
+# for the folder's files as they were. Settings and startup ask more than once.
+_parsed: dict[Path, tuple[tuple[int, int], Optional[dict[str, Any]]]] = {}
+_languages: Optional[tuple[tuple, list[tuple[str, str]]]] = None
 _pseudo_keys: Optional[frozenset[str]] = None
 
 
@@ -122,12 +126,14 @@ def decimal(text: str) -> str:
 
 
 def upper(text: str) -> str:
-    """`text` in capitals as the active language writes them (Turkish i → İ)."""
+    """`text` in capitals as the active language writes them (Turkish i → İ, ı → I)."""
     global _upper_locale
     if _upper_locale is None or _upper_locale[0] != _language:
         from PySide6.QtCore import QLocale
 
         _upper_locale = (_language, QLocale(_language))
+    if _base(_language) in _DOTTED_I:  # by hand: a Qt built without ICU would give "I"
+        text = text.replace("i", "İ").replace("ı", "I")
     return str(_upper_locale[1].toUpper(text))
 
 
@@ -157,33 +163,59 @@ def load_catalog(code: str) -> Optional[dict[str, Any]]:
     """`code`'s catalog, or None when there is none or it can't be read."""
     if not _is_code(code) or code == TEMPLATE:
         return None
-    path = catalog_dir() / f"{code}.json"
+    return _read_catalog(catalog_dir() / f"{code}.json")
+
+
+def _read_catalog(path: Path) -> Optional[dict[str, Any]]:
+    """The parsed catalog at `path` (shared: never changed), read again only once the file
+    changes; None when it is missing or can't be read."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    version = (stat.st_mtime_ns, stat.st_size)
+    cached = _parsed.get(path)
+    if cached is not None and cached[0] == version:
+        return cached[1]
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as e:
         logger.warning("Couldn't read %s: %s", path.name, e)
-        return None
-    return data if isinstance(data, dict) else None
+        data = None
+    catalog = data if isinstance(data, dict) else None
+    _parsed[path] = (version, catalog)
+    return catalog
 
 
 def available_languages() -> list[tuple[str, str]]:
-    """(code, the language's own name) of English and of every catalog, English first."""
-    found: list[tuple[str, str]] = []
+    """(code, the language's own name) of English and of every catalog, English first.
+
+    Made once for the folder's files as they are (each file's name, time and size).
+    """
+    global _languages
+    folder = catalog_dir()
     try:
-        paths = sorted(catalog_dir().glob("*.json"))
+        paths = sorted(folder.glob("*.json"))
+        listing = tuple((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in paths)
     except OSError:
-        paths = []
+        paths, listing = [], ()
+    key = (str(folder), listing)
+    if _languages is not None and _languages[0] == key:
+        return list(_languages[1])
+    found: list[tuple[str, str]] = []
     for path in paths:
         code = path.stem
         if code in (TEMPLATE, SOURCE_LANGUAGE) or not _is_code(code):
             continue
-        catalog = load_catalog(code)
+        catalog = _read_catalog(path)
         if catalog is not None:
             found.append((code, native_name(code, catalog)))
     found.sort(key=lambda entry: entry[1].casefold())
-    return [(SOURCE_LANGUAGE, SOURCE_NAME)] + found
+    languages = [(SOURCE_LANGUAGE, SOURCE_NAME)] + found
+    _languages = (key, languages)
+    return list(languages)
 
 
 def native_name(code: str, catalog: Optional[Mapping[str, Any]] = None) -> str:
@@ -257,7 +289,7 @@ def plural_category(code: str, n: int) -> str:
     base = _base(code)
     if base in _NO_PLURALS:
         return "other"
-    if base in _ONE_FOR_0_1:
+    if base in _ONE_FOR_0_1:  # French: "0 chaîne", "1 chaîne", "2 chaînes"
         return "one" if n in (0, 1) else "other"
     if base in _SLAVIC:
         if n % 10 == 1 and n % 100 != 11:
@@ -273,6 +305,8 @@ def plural_category(code: str, n: int) -> str:
         return "many"
     if base in ("cs", "sk"):
         return "one" if n == 1 else "few" if 2 <= n <= 4 else "other"
+    # Every other language (English, German, Spanish, Turkish, …): one for 1, else other. A
+    # catalog that writes only "other" (Turkish) uses it for 1 too.
     return "one" if n == 1 else "other"
 
 
@@ -303,7 +337,8 @@ def pseudo(text: str) -> str:
 # --- inside --------------------------------------------------------------------------------
 
 _NO_PLURALS = {"ja", "ko", "zh", "vi", "th", "id", "ms"}
-_ONE_FOR_0_1 = {"fr", "pt"}
+_ONE_FOR_0_1 = {"fr", "pt"}  # CLDR: 0 and 1 are "one" (Brazilian Portuguese too)
+_DOTTED_I = {"tr", "az"}  # i/İ and ı/I are two letters
 _SLAVIC = {"ru", "uk", "be"}
 _ACCENTS = dict(zip("aceinouyAEINOUCSZsz", "àçéîñöüýÅÉÎÑÖÜÇŠŽšž"))
 

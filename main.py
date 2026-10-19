@@ -87,7 +87,7 @@ def _migrate_favorites(config_manager) -> None:
 
 def main() -> int:
     from PySide6 import QtGui
-    from PySide6.QtCore import QLoggingCategory, qInstallMessageHandler
+    from PySide6.QtCore import QLocale, QLoggingCategory, qInstallMessageHandler
     from PySide6.QtWidgets import QApplication
     import qdarktheme
 
@@ -149,6 +149,8 @@ def main() -> int:
     # The language, before any window: every text is looked up as it is shown.
     i18n.set_language(i18n.resolve(config_manager.language))
     i18n.install_qt_translations(app)
+    # Qt's own widgets (spin boxes, date edits, file dialogs) write numbers and dates so too.
+    QLocale.setDefault(i18n.app_locale())
     _migrate_favorites(config_manager)
     image_manager = ImageManager(config_manager, config_manager.max_cache_image_size * 1024 * 1024)
     provider_manager = ProviderManager(config_manager)

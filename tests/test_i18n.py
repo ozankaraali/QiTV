@@ -109,6 +109,14 @@ class LookupTests(CatalogCase):
         self.assertEqual(i18n.upper("live tv"), "LIVE TV")
         i18n.set_language("tr")
         self.assertEqual(i18n.upper("dizi listesi"), "DİZİ LİSTESİ")
+        self.assertEqual(i18n.upper("ılık iklim"), "ILIK İKLİM")
+
+        class WithoutICU:  # a Qt build whose toUpper knows no language: "i" → "I"
+            def toUpper(self, text):
+                return text.upper()
+
+        with mock.patch.object(i18n, "_upper_locale", ("tr", WithoutICU())):
+            self.assertEqual(i18n.upper("dizi listesi"), "DİZİ LİSTESİ")
 
     def test_dates_use_the_language_s_day_names(self):
         i18n.set_language("tr")
@@ -155,8 +163,19 @@ class PluralTests(CatalogCase):
         self.assertEqual(tr_n("{n} channel", "{n} channels", 1), "1 channel")
 
     def test_plural_rules(self):
-        self.assertEqual(i18n.plural_category("tr", 1), "one")
-        self.assertEqual(i18n.plural_category("tr", 2), "other")
+        cases = {  # n: the category in Turkish, German, Spanish and French
+            0: ("other", "other", "other", "one"),
+            1: ("one", "one", "one", "one"),
+            2: ("other", "other", "other", "other"),
+            21: ("other", "other", "other", "other"),
+        }
+        for n, categories in cases.items():
+            for code, category in zip(("tr", "de", "es", "fr"), categories):
+                with self.subTest(code=code, n=n):
+                    self.assertEqual(i18n.plural_category(code, n), category)
+        self.assertEqual(i18n.plural_category("fr_CA", 0), "one")
+        self.assertEqual(i18n.plural_category("xx", 1), "one")  # any other: one/other
+        self.assertEqual(i18n.plural_category("xx", 0), "other")
         self.assertEqual(i18n.plural_category("ja", 1), "other")
         self.assertEqual(i18n.plural_category("pl", 22), "few")
         self.assertEqual(i18n.plural_category("pl", 25), "many")
@@ -164,6 +183,23 @@ class PluralTests(CatalogCase):
 
 
 class LanguageChoiceTests(CatalogCase):
+    def test_each_catalog_is_read_once_until_its_file_changes(self):
+        write_catalog(self.dir, "tr", {"@meta": {"name": "Türkçe"}, "Settings": "Ayarlar"})
+        write_catalog(self.dir, "de", {"@meta": {"name": "Deutsch"}})
+        with mock.patch.object(i18n.json, "loads", wraps=json.loads) as loads:
+            for _ in range(3):
+                i18n.available_languages()
+                i18n.resolve(None)
+            i18n.set_language("tr")
+            self.assertEqual(loads.call_count, 2)
+            write_catalog(self.dir, "tr", {"@meta": {"name": "Türkçe"}, "Settings": "Ayarlar!"})
+            os.utime(Path(self.dir) / "tr.json", ns=(1, 1))  # another time, whatever the clock
+            i18n.set_language("tr")
+            self.assertEqual(loads.call_count, 3)
+            self.assertEqual(tr("Settings"), "Ayarlar!")
+            self.assertEqual(i18n.available_languages()[-1], ("tr", "Türkçe"))
+            self.assertEqual(loads.call_count, 3)
+
     def test_english_comes_first_then_each_catalog_by_its_own_name(self):
         write_catalog(self.dir, "tr", {"@meta": {"name": "Türkçe"}})
         write_catalog(self.dir, "de", {})
@@ -257,6 +293,21 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(len(problems), 5, problems)
         self.assertEqual(sum("runs at import" in p for p in problems), 3)
         self.assertEqual(sum("needs a string literal" in p for p in problems), 2)
+
+    def test_every_call_names_the_fields_its_text_uses(self):
+        _entries, problems = self.collect("""
+            from services.i18n import N_, tr, tr_n
+
+            def f(n, ms, fields):
+                tr("Sound {ms} ms later", msec=ms)
+                tr_n("{n} channel at {name}", "{n} channels at {name}", n)
+                tr_n("{n} channel", "{n} channels", n)
+                tr("Ses {ms}", **fields)
+                return N_("Sound {ms} ms earlier")
+        """)
+        self.assertEqual(len(problems), 2, problems)
+        self.assertIn("tr() lacks the fields ['ms']", problems[0])
+        self.assertIn("tr_n() lacks the fields ['name']", problems[1])
 
     def test_catalog_checks(self):
         entries, _ = self.collect('''

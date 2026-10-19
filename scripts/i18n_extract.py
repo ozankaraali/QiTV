@@ -153,6 +153,8 @@ class _Scanner(ast.NodeVisitor):
                     self._problem(node, "ctx= needs a string literal")
                     return
                 ctx = value.value
+        if name != "N_":  # an N_ text's fields are given where translate() shows it
+            self._check_fields(name, node, texts)
         entry = Entry(texts[0], texts[1] if name == "tr_n" else None, ctx)
         entry.places.append(f"{self.rel}:{node.lineno}")
         end = getattr(node, "end_lineno", node.lineno) or node.lineno
@@ -162,6 +164,18 @@ class _Scanner(ast.NodeVisitor):
             if comment and (line >= node.lineno or above_alone):
                 entry.comments.append(comment)
         self.entries.append(entry)
+
+    def _check_fields(self, name: str, node: ast.Call, texts: list[str]) -> None:
+        """The call names every {field} its English text uses (tr_n's count is {n})."""
+        given = {k.arg for k in node.keywords}
+        if None in given:  # **fields: what they hold is not known here
+            return
+        wanted = set().union(*(placeholders(text) for text in texts))
+        if name == "tr_n":
+            wanted.discard("n")
+        lacking = wanted - given
+        if lacking:
+            self._problem(node, f"{name}() lacks the fields {sorted(lacking)} its text uses")
 
     def _comment_only(self, line: int) -> bool:
         return 0 < line <= len(self.lines) and self.lines[line - 1].lstrip().startswith("#")
