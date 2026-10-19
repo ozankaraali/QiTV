@@ -17,7 +17,7 @@ instead of using others' distributions, which may have malware.**
   channel list and the quick list jumped back to the channels around 1,000, again and again,
   as logos and the guide loaded. They now stay on the channel you watch, however far down,
   and on where you scrolled.
-- **Five-digit channel numbers** can be typed.
+- **Five-digit channel numbers** can be typed, and the guide shows them whole.
 - **A multiview tile** the focus leaves while it waits to reconnect says its stream ended
   instead of showing LIVE over a still picture.
 - **The live lag** no longer reads short after a channel's pictures stop for a few seconds
