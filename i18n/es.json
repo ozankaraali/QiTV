@@ -460,7 +460,6 @@
   "No stream to spare at {provider}": "No quedan emisiones libres en {provider}",
   "No subtitles": "No hay subtítulos",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "No se encontraron subtítulos para \"{query}\". Prueba con otra ortografía o con menos palabras.",
-  "No subtitles found for this title. Try its original title, or its English one.": "No se encontraron subtítulos para este título. Prueba con su título original o con el inglés.",
   "Normal": "Normal",
   "Normal speed": "Velocidad normal",
   "North Korea": "Corea del Norte",
@@ -628,8 +627,6 @@
   "Server URL:": "URL del servidor:",
   "Settings": "Ajustes",
   "Settings…": "Ajustes…",
-  "Show all results": "Mostrar todos los resultados",
-  "Show the subtitles found for other titles": "Mostrar los subtítulos encontrados para otros títulos",
   "Sierra Leone": "Sierra Leona",
   "Sign out": "Cerrar sesión",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

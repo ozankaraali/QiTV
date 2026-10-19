@@ -14,9 +14,8 @@ how many, and the selected language's subtitles on the right, best first, each w
 release, its downloads and marks for the hearing impaired and machine translations. A click
 on a language shows its subtitles; a click on one (or Enter) downloads it.
 
-When OpenSubtitles found subtitles for other titles only, the line says so and "Show all
-results" under it (↓ from the field) lists them: each one names the film or episode it was
-made for.
+When OpenSubtitles found subtitles for other titles only, they are listed all the same, and
+each one names the film or episode it was made for (the line says to check it).
 
 The keys reach it through the shell (the "subtitles" key context, ui/keymap.py): typed text
 and Ctrl/⌘+V go into the field, Backspace deletes, ↑/↓ move in a list (up from its top to
@@ -87,8 +86,6 @@ BUTTONS = {
     "paste": (N_("Paste"), N_("Paste"), "Ctrl+V"),  # i18n: a button and its tooltip (verb)
     "save": (N_("Save"), N_("Save the key"), "Return"),  # i18n: a button, then its tooltip
     "search": (N_("Search"), N_("Search"), "Return"),  # i18n: a button and its tooltip (verb)
-    # i18n: a button, then its tooltip, when OpenSubtitles found only other titles' subtitles
-    "others": (N_("Show all results"), N_("Show the subtitles found for other titles"), ""),
 }
 KEY_BUTTONS = ("get_key", "paste", "save")
 SEARCH_ROW = ("field", "paste", "search")  # the search's top row, left to right
@@ -158,7 +155,6 @@ class SubtitleSearchPage(Overlay):
     saveKeyRequested = Signal(str)
     getKeyRequested = Signal()
     searchRequested = Signal(str)
-    othersRequested = Signal()  # "Show all results": the subtitles found for other titles
     fileChosen = Signal(object)  # a SubtitleFile
     closed = Signal()
 
@@ -175,7 +171,6 @@ class SubtitleSearchPage(Overlay):
         self._busy = False  # a download is on its way: nothing more is chosen
         self._languages: list[LanguageRow] = []
         self._files: dict[str, list[SubtitleFile]] = {}
-        self._others = 0  # subtitles found for other titles: "Show all results" offers them
         self._named = False  # each subtitle names the title it was made for
         self._language = 0  # the language whose subtitles show
         self._file = 0  # the subtitle the keys are on
@@ -200,7 +195,7 @@ class SubtitleSearchPage(Overlay):
         """The search for `query`, waiting for its results (`status`: "Searching…")."""
         self._page, self._query = RESULTS_PAGE, query
         self._languages, self._files = [], {}
-        self._others, self._named = 0, False
+        self._named = False
         self._language = self._file = 0
         self._scroll = {"languages": 0, "files": 0}
         self._busy = False
@@ -215,14 +210,12 @@ class SubtitleSearchPage(Overlay):
         status: str,
         *,
         kind: str = "info",
-        others: int = 0,
         named: bool = False,
     ) -> None:
         """What the search found: `languages` in order (the first selected), each language's
-        subtitles best first. `others`: how many it found for other titles, offered with "Show
-        all results" while no list shows; `named`: each subtitle names its title."""
+        subtitles best first. `named`: each subtitle names its title (found for other titles)."""
         self._languages, self._files = list(languages), dict(files)
-        self._others, self._named = (0 if self._languages else max(0, others)), named
+        self._named = named
         self._language = self._file = 0
         self._scroll = {"languages": 0, "files": 0}
         self._busy = False
@@ -290,10 +283,6 @@ class SubtitleSearchPage(Overlay):
 
     def busy(self) -> bool:
         return self._busy
-
-    def offers_others(self) -> bool:
-        """Whether "Show all results" shows."""
-        return self._page == RESULTS_PAGE and self._others > 0 and not self._languages
 
     # ---- the keys -----------------------------------------------------------------------------
 
@@ -376,8 +365,6 @@ class SubtitleSearchPage(Overlay):
                 self._focus = self._below_field()
                 if self._focus == "files":
                     self._set_file(0)
-        elif focus == "others":
-            self._focus = "field" if delta < 0 else focus
         elif focus == "languages":
             if delta < 0 and self._language == 0 and not page:
                 self._focus = "field"
@@ -392,12 +379,10 @@ class SubtitleSearchPage(Overlay):
 
     def _below_field(self) -> str:
         """What ↓ from the field (or a button beside it) reaches: the subtitles, else the
-        languages, else "Show all results"; else it stays on the field."""
+        languages; else it stays on the field."""
         if self.files_shown():
             return "files"
-        if self._languages:
-            return "languages"
-        return "others" if self.offers_others() else "field"
+        return "languages" if self._languages else "field"
 
     def side(self, delta: int) -> None:
         """←/→: between the languages and the subtitles, the field and Search, or the buttons."""
@@ -444,9 +429,6 @@ class SubtitleSearchPage(Overlay):
                     self.update()
             elif name == "get_key":
                 self.getKeyRequested.emit()
-        elif name == "others":
-            if self.offers_others() and not self._busy:
-                self.othersRequested.emit()
         elif name in ("field", "search"):
             query = " ".join(self._query.split())
             if query and not self._busy:
@@ -568,9 +550,6 @@ class SubtitleSearchPage(Overlay):
             status_h = float(un.px(_STATUS_U))
             rects.status = QRectF(inner.left(), y, inner.width(), status_h)
             y += status_h
-            if self.offers_others():
-                others_w = min(inner.width(), self._button_width(un, "others"))
-                rects.buttons["others"] = QRectF(inner.left(), y + gap, others_w, button_h)
             title_h = float(un.px(_LIST_TITLE_U))
             lang_w = math.floor(inner.width() * _LANG_SHARE)
             columns = {
@@ -789,8 +768,6 @@ class SubtitleSearchPage(Overlay):
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 self._elided(fonts["status"], self._status, rects.status.width()),
             )
-        if "others" in rects.buttons:
-            self._paint_button(p, un, fonts, rects.buttons["others"], "others", accent=False)
         if not self._languages:
             return
         for name, title in (("languages", LANGUAGES_TITLE), ("files", FILES_TITLE)):

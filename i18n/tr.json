@@ -454,7 +454,6 @@
   "No stream to spare at {provider}": "{provider} sağlayıcısında boşta yayın yok",
   "No subtitles": "Altyazı yok",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "\"{query}\" için altyazı bulunamadı. Başka bir yazım ya da daha az sözcük deneyin.",
-  "No subtitles found for this title. Try its original title, or its English one.": "Bu yapım için altyazı bulunamadı. Orijinal adını ya da İngilizce adını deneyin.",
   "Normal": "Normal",
   "Normal speed": "Normal hız",
   "North Korea": "Kuzey Kore",
@@ -620,8 +619,6 @@
   "Server URL:": "Sunucu URL'si:",
   "Settings": "Ayarlar",
   "Settings…": "Ayarlar…",
-  "Show all results": "Tüm sonuçları göster",
-  "Show the subtitles found for other titles": "Başka yapımlar için bulunan altyazıları göster",
   "Sierra Leone": "Sierra Leone",
   "Sign out": "Oturumu kapat",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

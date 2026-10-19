@@ -359,31 +359,13 @@ class ResultsPageTests(Case):
 
 
 class OthersPageTests(Case):
-    def test_show_all_results_waits_under_the_line_for_the_keys_and_the_mouse(self):
+    def test_with_nothing_listed_the_keys_stay_on_the_field(self):
         page_ = SubtitleSearchPage(self.host)
         page_.show_search("Liman Işıkları (2019)")
-        self.assertTrue(page_.control_rect("others").isEmpty())
-        page_.set_results([], {}, "Nothing for this title.", kind="error", others=4)
-        self.assertTrue(page_.offers_others())
-        rect = page_.control_rect("others")
-        self.assertFalse(rect.isEmpty())
-        self.assertGreater(rect.top(), page_.control_rect("status").top())
+        page_.set_results([], {}, "Nothing for this title.", kind="error")
         self.assertEqual(page_.focus(), "field")  # to type the original title
-        asked = QSignalSpy(page_.othersRequested)
         page_.handle(Action.NAV_DOWN)
-        self.assertEqual(page_.focus(), "others")
-        page_.handle(Action.NAV_ACTIVATE)
-        self.assertEqual(asked.count(), 1)
-        page_.handle(Action.NAV_UP)
-        self.assertEqual(page_.focus(), "field")
-        self.click(page_, rect.center())
-        self.assertEqual(asked.count(), 2)
-        self.assertEqual(
-            page_.tooltip_at(rect.center()), "Show the subtitles found for other titles"
-        )
-        page_.show_search("Harbour Lights (2019)")  # a new search: gone
-        self.assertFalse(page_.offers_others())
-        self.assertTrue(page_.control_rect("others").isEmpty())
+        self.assertEqual(page_.focus(), "field")  # nothing under the line to go to
 
     def test_named_rows_say_what_each_subtitle_was_made_for(self):
         page_ = SubtitleSearchPage(self.host)
