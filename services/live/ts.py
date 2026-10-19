@@ -3460,6 +3460,8 @@ class AudioRelabeler:
                     self._declared.clear()
                     self._renamed.clear()
                     self._streak.clear()
+                    if not self._managed:  # a map elsewhere: nothing to compare it with yet
+                        self._version, self._written = None, b""
                 self._program = program
                 return
 
@@ -3474,6 +3476,8 @@ class AudioRelabeler:
             return []
         if self._program is not None and (section[3] << 8) | section[4] != self._program:
             return []  # another program's map on the same PID
+        if not section[5] & 1:
+            return []  # a map announced for later (current_next 0): VLC applies the current one
         end = len(section) - 4
         i = 12 + (((section[10] & 0x0F) << 8) | section[11])
         declared: dict[int, int] = {}
@@ -3495,7 +3499,7 @@ class AudioRelabeler:
         written = bytes(section[:5]) + bytes([section[5] & 0xC1]) + bytes(section[6:-4])
         version = (section[5] >> 1) & 0x1F
         if not self._managed and self._written and written != self._written:
-            if version == self._version and section[5] & 1:  # (a current one, not the next)
+            if version == self._version:
                 self._managed = True  # VLC would ignore this one: the versions are ours now
                 logger.info("The program map changed under the same version: it is renumbered.")
         if self._managed:

@@ -229,6 +229,34 @@ class AudioRelabelerTests(unittest.TestCase):
                 self.assertEqual(out, data)
                 self.assertEqual(list(relabeler.renamings), [])
 
+    def test_a_map_announced_for_later_and_then_applied_passes_untouched(self):
+        # current v0, next v1, current v1, next v1, current v1: the encoder moves its own
+        # version, and a "next" section (current_next 0) is never a change under one version.
+        from tests.ts_fixtures import pat
+
+        sections = [(MPEG_AUDIO, 0, True), (AAC, 1, False), (AAC, 1, True), (AAC, 1, False)]
+        sections += [(AAC, 1, True), (AAC, 1, True)]
+        data, cc = [pat()], 0  # the PAT names the map's PID
+        for audio, version, current in sections:
+            section = bytearray(pmt_section(audio, version=version))
+            if not current:
+                section[5] &= 0xFE
+            data.extend(psi(bytes(section), cc))
+            cc = (cc + 1) & 0x0F
+        data = b"".join(data)
+        out, _ = relabelled(data)
+        self.assertEqual(out, data)
+
+    def test_a_map_moved_to_another_pid_is_not_a_change_under_its_version(self):
+        from tests.ts_fixtures import _psi_packet, pat
+
+        moved = 0x1001
+        first = labelled(sound_from(make_stream(2), 0, b"\xff\xfd"), MPEG_AUDIO)
+        section = pmt_section(AAC)  # v0 again, on the new PID
+        data = first + pat(pmt_pid=moved) + _psi_packet(moved, section, 0)
+        out, _ = relabelled(data)
+        self.assertEqual(out, data)
+
     def test_a_section_too_short_to_read_passes(self):
         tiny = psi(bytes([0x02, 0xB0, 0x09, 0x00, 0x01, 0xC1, 0x00, 0x00, 0xE1]), 0)
         data = labelled(make_stream(1), MPEG_AUDIO) + b"".join(tiny)
