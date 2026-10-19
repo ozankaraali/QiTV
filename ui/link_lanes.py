@@ -45,6 +45,10 @@ class Target:
     context: Optional[dict] = None  # a movie's or episode's play context (see play_vod)
     start_over: bool = False  # from the start, not where it stopped
     local: bool = False  # a file opened from the disk: no provider's link, slot or history
+    # A live channel's provider archive from this moment (Unix seconds; catch-up, 2.3), to
+    # `archive_until` (a past programme's end) when given; None: live.
+    archive_at: Optional[float] = None
+    archive_until: Optional[float] = None
 
     @property
     def live(self) -> bool:

@@ -69,6 +69,7 @@ from PySide6.QtWidgets import QAbstractScrollArea
 
 from services import external_players, favorites, recording
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, shown_label
+from services.catchup_memory import CatchupMemory
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
 from services.failure_reasons import LIMIT, Reason, own_streams_text, shown_message
@@ -179,6 +180,7 @@ class TVController(QObject):
         sessions: Optional[SessionManager] = None,
         pip_frame=None,
         sound_sync: Optional[SoundSync] = None,
+        catchup_memory: Optional[CatchupMemory] = None,
         pick_subtitle_file: Optional[Callable[[str], str]] = None,
         account_checks=None,
         online_subtitles: Optional[OnlineSetup] = None,
@@ -190,7 +192,8 @@ class TVController(QObject):
     ):
         """With `sessions` (picture in picture), its large slot's player, live session and
         tuner stand for `session`, `live` and `budget`. `sound_sync` keeps each channel's
-        sound sync (None: for this run only); `pick_subtitle_file(folder)` asks for a subtitle
+        sound sync (None: for this run only), `catchup_memory` whether each channel's provider
+        archive answered (None: alike); `pick_subtitle_file(folder)` asks for a subtitle
         file (the Subtitles panel's "Load a file…"); with `online_subtitles` (and the overlays'
         `subtitle_search`) the panel searches OpenSubtitles too. `account_checks` (an
         AccountChecks) says why a failure happened (None: the failure's own words only).
@@ -258,6 +261,9 @@ class TVController(QObject):
             show_transport=self._show_transport,
             explain=self._explain_item,
             may_reopen=self._may_reopen,
+            memory=catchup_memory,
+            prepare=lambda session, target: self._tracks.prepare(session, target, None),
+            archive_allowed=self._archive_allowed,
             parent=self,
         )
         # Provider setups: the loading and welcome hints, the last channel, the Library's
@@ -582,7 +588,8 @@ class TVController(QObject):
         """
         target, self._resume = self._resume, None
         if not self._closed and target is not None and target is self._current:
-            self._request(replace(target, zapped=False, retried=False, start_over=False))
+            again = replace(target, zapped=False, retried=False, start_over=False)
+            self._request(replace(again, archive_at=None, archive_until=None))  # live
 
     def stop_for_library(self) -> None:
         """Stop what plays, waiting for nothing: the corner player's ×, or the Library opened
@@ -1315,6 +1322,18 @@ class TVController(QObject):
             # The in-app stream is released first: the player opens the provider again.
             self._tuner.open(self._guarded(target, lambda: self._launch(target, url)))
             return
+        if target.live and target.archive_at is not None:
+            # Catch-up (2.3): the channel's archive from that moment, when it offers one now;
+            # else the channel plays live.
+            kept = self._current, self._cid
+            self._current, self._cid = target, None
+            if self._live_controls.open_archive(target, url):
+                if self.overlays.transport.isVisible():
+                    self._live_controls.show_live_transport(target)
+                self._delivered(target, url)
+                return
+            self._current, self._cid = kept
+            target = replace(target, archive_at=None, archive_until=None)
         if target.live and self.multiview_shown():
             self._open_in_tile(target, url, previous, provider_name)
             if self.overlays.transport.isVisible():
@@ -2175,6 +2194,7 @@ class TVController(QObject):
         if self._closed:
             return
         self._state = state
+        self._live_controls.catchup.on_state(state)  # an archive that plays has answered
         if state in ("paused", "playing"):
             self.overlays.transport.set_paused(state == "paused")
         if state == "playing":
@@ -2212,6 +2232,8 @@ class TVController(QObject):
     def _on_error(self, message: str) -> None:
         if self._closed or self._tuner.running():
             return  # LiveSession recovers pipeline errors and reports the rest (failed)
+        if self._live_controls.catchup.on_error(message):
+            return  # the archive's: it says so and goes live
         current = self._current
         if current is not None and self._live_controls.may_retry(current):
             self._live_controls.retry(current)  # STB play tokens expire: a fresh link first
@@ -2239,6 +2261,8 @@ class TVController(QObject):
             return
         current = self._current
         if current.live:
+            if self._live_controls.catchup.on_ended():
+                return  # the archive's next stretch opens, or the channel live
             if self._live_controls.pipeline_live():
                 return  # the buffer reopens
             if self._live_controls.may_retry(current):
@@ -2559,6 +2583,11 @@ class TVController(QObject):
         self._tuner.open(self._guarded(target, launch))
 
     # ---- state helpers ------------------------------------------------------------------------
+
+    def _archive_allowed(self) -> bool:
+        """Provider archives play in the large picture, not in the multiview's tiles nor in
+        an external player."""
+        return not self._closed and not self.multiview_shown() and not self._external_launcher()
 
     def _has_media(self) -> bool:
         return self._state in _ACTIVE_STATES or self._tuner.opening()

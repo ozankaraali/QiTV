@@ -67,6 +67,7 @@ from services import favorites, free_channels, thread_cleanup
 from services.account_check import AccountChecks
 from services.browsed_catalog import BrowsedCatalog
 from services.catalogs import Catalogs
+from services.catchup_memory import FILE_NAME as CATCHUP_FILE, CatchupMemory
 from services.connection_budget import ConnectionBudget
 from services.find import Preferences, preferences_for
 from services.i18n import N_, tr, translate
@@ -430,6 +431,10 @@ class TVWindow(QMainWindow):
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
         # Each channel's sound sync (J/K, the Sound panel), written off the GUI thread.
         self.sound_sync = SoundSync(os.path.join(config_manager.get_config_dir(), SOUND_SYNC_FILE))
+        # Whether each channel's provider archive answered (catch-up, 2.3).
+        self.catchup_memory = CatchupMemory(
+            os.path.join(config_manager.get_config_dir(), CATCHUP_FILE)
+        )
         # The subtitles downloaded from OpenSubtitles for each title (2.2), and the folder.
         self.subtitle_picks = SubtitlePicks(
             os.path.join(config_manager.get_config_dir(), SUBTITLE_PICKS_FILE),
@@ -537,6 +542,7 @@ class TVWindow(QMainWindow):
             sessions=self.sessions,
             pip_frame=self.pip_frame,
             sound_sync=self.sound_sync,
+            catchup_memory=self.catchup_memory,
             pick_subtitle_file=self.pick_subtitle_file,
             # Why a channel or a provider failed, asked of its account (no stream opened).
             account_checks=AccountChecks(config_manager, parent=self),

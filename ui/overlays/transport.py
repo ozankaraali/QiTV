@@ -30,6 +30,11 @@ left of the right-hand buttons: back to where it came from, as Esc.
 At a small width (or in a longer language) the Stay live indicator first leaves out "adjusted",
 then its name (the LIVE badge beside it says live), then its text is cut short, or the
 indicator left out, so it never runs under the play button.
+Catch-up (2.3): on a channel whose provider keeps an archive the time-shift bar reaches
+further back than the buffer (`buffer_start` in the state: where the buffer starts); that
+part of the line is dashed. While the archive plays (`archive` in the state) the whole line
+is dashed, its left end reads "Archive from 18:44", and the bubble over the knob names the
+day too when the moment playing is not today.
 On live TV a record button (a red dot in a ring, R) follows the star (2.3), a control of the
 channel's as the star is: it records a time-shifted channel from where it plays, and while it
 records it is lit and a "● REC 01:23" chip after it counts the time; a channel played directly
@@ -44,7 +49,19 @@ import math
 import time
 from typing import Callable, Optional
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QDate,
+    QEvent,
+    QLocale,
+    QObject,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -183,6 +200,10 @@ def _local_now() -> datetime:
     return datetime.now().astimezone()
 
 
+def _optional(value: object) -> Optional[float]:
+    return float(value) if isinstance(value, (int, float)) else None
+
+
 @dataclass(frozen=True)
 class _TitleRow:
     """The top row: the channel's (or title's) name, on live TV a star after it, the clock."""
@@ -216,6 +237,8 @@ class _Timeline:
     reconnecting: bool  # the helper opens a new connection (raw TS)
     auto: bool  # Auto latency
     adjusted: bool  # the channel's Auto target moved from where Auto starts
+    archive: bool = False  # the provider's archive plays (catch-up)
+    buffer_start: Optional[float] = None  # the bar reaches into an archive: the buffer's start
 
     @classmethod
     def from_state(cls, state: dict) -> "_Timeline":
@@ -235,6 +258,8 @@ class _Timeline:
             reconnecting=bool(state.get("reconnecting", False)),
             auto=bool(state.get("auto", False)),
             adjusted=bool(state.get("adjusted", False)),
+            archive=bool(state.get("archive", False)),
+            buffer_start=_optional(state.get("buffer_start")),
         )
 
 
@@ -371,6 +396,8 @@ class Transport(Overlay):
         `stalled` key says the source stalled (the live-edge row reads "Waiting for the
         channel…"), and `reconnecting` that a new connection is being opened ("Reconnecting…").
         Optional `auto` and `adjusted` keys: Auto latency, and its target for the channel moved.
+        Catch-up: `buffer_start`, where the buffer starts on a bar that reaches into the
+        provider's archive; `archive`, the archive plays (the bar is its own).
         """
         tl = _Timeline.from_state(state)
         self._timeline = tl
@@ -676,7 +703,17 @@ class Transport(Overlay):
                 return (_live_label(), self.indicator_text())
             tl = self._timeline
             assert tl is not None
-            buffer_from = fmt_clock(self._wall(tl.live_edge - tl.start))
+            if tl.archive:
+                archive_from = fmt_clock(self._wall(tl.live_edge - tl.start))
+                left = tr(
+                    "Archive from {time}",  # i18n: under the bar while the provider's archive plays
+                    time=archive_from,
+                )
+                behind = fmt_behind(self._shown_lag())
+                # i18n: under the time-shift bar, right: how far behind live it plays ("−00:38")
+                return (left, tr("{behind} behind live", behind=behind))
+            buffered = tl.start if tl.buffer_start is None else tl.buffer_start
+            buffer_from = fmt_clock(self._wall(tl.live_edge - buffered))
             return (
                 # i18n: under the time-shift bar, left: the oldest buffered time ("18:44")
                 tr("Buffer from {time}", time=buffer_from),
@@ -1261,6 +1298,7 @@ class Transport(Overlay):
         seek = rects["seek"]
         cy = seek.center().y()
         kc = self._paint_track(p, un, seek, 0.3)
+        self._paint_archive(p, un, seek)
         p.setFont(self._tick_font(un))
         p.setPen(qcolor(PALETTE.text, 0.75))
         tick_h = un.px(1.5)
@@ -1298,9 +1336,46 @@ class Transport(Overlay):
                 _go_live_label(),
             )
 
+    def archive_fraction(self) -> float:
+        """How much of the bar, from its left, is the provider's archive (0: none)."""
+        tl = self._timeline
+        if tl is None or not self._timeshift or tl.end <= tl.start:
+            return 0.0
+        if tl.archive:
+            return 1.0
+        if tl.buffer_start is None:
+            return 0.0
+        return min(1.0, max(0.0, (tl.buffer_start - tl.start) / (tl.end - tl.start)))
+
+    def _paint_archive(self, p: QPainter, un: Units, seek: QRectF) -> None:
+        """The archive's part of the line, dashed (QiTV's own buffer is a solid line)."""
+        fraction = self.archive_fraction()
+        if fraction <= 0.0:
+            return
+        h = un.px(0.55)
+        part = QRectF(seek.x(), seek.center().y() - h / 2 - 1, seek.width() * fraction, h + 2)
+        step, gap = max(4.0, un.px(1.0)), max(1.5, un.px(0.35))
+        p.save()
+        p.setClipRect(part)
+        x = part.left() + step - gap
+        while x < part.right():
+            p.fillRect(QRectF(x, part.top(), gap, part.height()), qcolor(PALETTE.canvas, 0.9))
+            x += step
+        p.restore()
+
+    def bubble_text(self) -> str:
+        """The moment the knob shows ("14:32:05"; another day's with the day: "Sat 14:32:05")."""
+        moment = self._wall(self._shown_lag())
+        label = moment.strftime("%H:%M:%S")
+        if moment.date() != self._wall(0.0).date():
+            day = QDate(moment.year, moment.month, moment.day).dayOfWeek()
+            name = i18n.app_locale().dayName(day, QLocale.FormatType.ShortFormat)
+            label = f"{name} {label}"
+        return label
+
     def _paint_bubble(self, p: QPainter, un: Units, seek: QRectF, kc: QPointF) -> None:
         """Wall-clock time of the shown position, above the knob."""
-        label = self._wall(self._shown_lag()).strftime("%H:%M:%S")
+        label = self.bubble_text()
         p.setFont(un.font(1.05, QFont.Weight.Bold))
         w = p.fontMetrics().horizontalAdvance(label) + 2 * un.px(0.6)
         h = max(float(un.px(2.1)), p.fontMetrics().height())
