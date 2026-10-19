@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 
 from services.catchup import (
     Answer,
+    mark_stb_archives,
     overall,
     probe,
     xtream_archive_fields,
@@ -27,6 +28,7 @@ from services.provider_api import (
     base_from_url,
     https_fallback_candidates,
     remember_xtream_root,
+    stb_archive_link_url,
     stb_create_link_url,
     stb_portal_base,
     stb_request_url,
@@ -500,6 +502,7 @@ class STBCategoriesWorker(QObject):
                 )
                 resp.raise_for_status()
                 all_channels = resp.json()["js"]["data"]
+                mark_stb_archives(all_channels)  # catch-up: the channels marked archived
                 sorted_channels: Dict[str, List[int]] = {}
                 for index, channel in enumerate(all_channels):
                     category_id = str(channel.get("tv_genre_id"))
@@ -511,6 +514,23 @@ class STBCategoriesWorker(QObject):
             self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
+
+
+def stb_archive_link(answer: Any) -> str:
+    """The link in an STB portal's answer to a tv_archive create_link: the last word of its
+    `js.cmd` ("ffrt http://…", or the address alone), as a channel's; "" when it gives none
+    that is an address (no `js` or `cmd`, an `error` such as "nothing_to_play", or the
+    "/media/….mpg" it was asked for, unmade)."""
+    js = answer.get("js") if isinstance(answer, dict) else None
+    if not isinstance(js, dict):
+        return ""
+    error = js.get("error")
+    if isinstance(error, str) and error.strip():
+        logger.info("The portal made no archive link: %s", error.strip()[:40])
+        return ""
+    cmd = js.get("cmd")
+    link = cmd.strip().split(" ")[-1] if isinstance(cmd, str) and cmd.strip() else ""
+    return link if "://" in link else ""
 
 
 class LinkCreatorWorker(QObject):
@@ -527,7 +547,10 @@ class LinkCreatorWorker(QObject):
         series_param: Optional[str] = None,
         verify_ssl: bool = True,
         prefer_https: bool = False,
+        programme: str = "",
     ):
+        """`programme`: the id of a programme in the portal's guide: the link made is its
+        recording's in the portal's archive (catch-up; `content_type` and `cmd` unused)."""
         super().__init__()
         self.base_url = base_url
         self.headers = headers
@@ -537,22 +560,30 @@ class LinkCreatorWorker(QObject):
         self.series_param = series_param
         self.verify_ssl = verify_ssl
         self.prefer_https = prefer_https
+        self.programme = programme
 
     def run(self):
         try:
-            fetchurl = stb_create_link_url(
-                stb_portal_base(self.base_url, self.prefer_https),
-                self.content_type,
-                self.cmd,
-                is_episode=self.is_episode,
-                series=self.series_param,
-            )
+            base = stb_portal_base(self.base_url, self.prefer_https)
+            if self.programme:
+                fetchurl = stb_archive_link_url(base, self.programme)
+            else:
+                fetchurl = stb_create_link_url(
+                    base,
+                    self.content_type,
+                    self.cmd,
+                    is_episode=self.is_episode,
+                    series=self.series_param,
+                )
             response = requests.get(
                 fetchurl, headers=self.headers, timeout=10, verify=self.verify_ssl
             )
             response.raise_for_status()
             result = response.json()
-            link = result["js"]["cmd"].split(" ")[-1]
+            if self.programme:
+                link = stb_archive_link(result)  # "": the catalog says the portal gave none
+            else:
+                link = result["js"]["cmd"].split(" ")[-1]
             self.finished.emit({"link": link})
         except Exception as e:
             self.error.emit(str(e))

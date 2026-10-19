@@ -68,6 +68,22 @@ def stb_create_link_url(
     )
 
 
+def stb_archive_link_url(base: str, programme_id: str) -> str:
+    """Build the STB create_link URL of a programme's recording in the portal's archive
+    (catch-up): `type=tv_archive` with `cmd` "auto /media/<programme id>.mpg", and the other
+    parameters as set-top boxes send them (an empty `series` and `forced_storage`,
+    `disable_ad=0`, `download=0`). Its answer's `js.cmd` is the link, as a channel's is.
+
+    Some portals also take a `position` (seconds into the programme): it is not sent, the
+    player seeks within the recording instead, which every portal's link allows.
+    """
+    cmd = quote(f"auto /media/{programme_id}.mpg")
+    return (
+        f"{stb_endpoint(base)}?type=tv_archive&action=create_link&cmd={cmd}"
+        "&series=&forced_storage=&disable_ad=0&download=0&JsHttpRequest=1-xml"
+    )
+
+
 def stb_request_url(
     base: str, content_type: str, action: str, params: Optional[Dict[str, str]] = None
 ) -> str:

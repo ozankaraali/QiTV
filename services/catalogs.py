@@ -84,8 +84,8 @@ class Catalogs(QObject):
         # Edited in Settings while in use: set up again with the new settings (reload()); a
         # forced setup asked meanwhile is that one.
         self._renewing: set[str] = set()
-        # Link requests waiting for a catalog's setup: (request id, item, section, is_episode)
-        self._waiting: dict[str, list[tuple[int, dict, str, bool]]] = {}
+        # Link requests waiting for a catalog's setup: (request id, the request to make of it)
+        self._waiting: dict[str, list[tuple[int, Callable[[CatalogService], int]]]] = {}
         # The providers whose guides are in use (None: nobody said yet, every guide loads).
         self._guides: Optional[set[str]] = None
         self._closed = False
@@ -222,10 +222,10 @@ class Catalogs(QObject):
         self.providerReady.emit(name)  # the links held for it are still held (see holds)
         self.contentChanged.emit(name)
         catalog = self._by_name.get(name)
-        for request_id, item, section, is_episode in self._waiting.pop(name, []):
+        for request_id, ask in self._waiting.pop(name, []):
             if catalog is not None:
                 self._ids.reserve(request_id)
-                catalog.request_link(item, section=section, is_episode=is_episode)
+                ask(catalog)
 
     def _on_failed(self, name: str, message: str) -> None:
         self._ready.discard(name)
@@ -250,6 +250,18 @@ class Catalogs(QObject):
         return name
 
     def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
+        return self._link(
+            item, lambda catalog: catalog.request_link(item, section=section, is_episode=is_episode)
+        )
+
+    def request_archive_link(self, item: dict, programme: str) -> int:
+        """The link of a programme's recording in the item's STB portal's archive (catch-up;
+        see CatalogService.request_archive_link), asked as `request_link` asks a link."""
+        return self._link(item, lambda catalog: catalog.request_archive_link(item, programme))
+
+    def _link(self, item: dict, ask: Callable[[CatalogService], int]) -> int:
+        """Make a link request (`ask`) of the item's provider's catalog: now when it is ready,
+        else once its setup is done."""
         name = self._route(item)
         if name not in self._by_name and name not in self.names():
             request_id = next(self._ids)
@@ -258,10 +270,10 @@ class Catalogs(QObject):
             )
             return request_id
         if name in self._ready:
-            return self.catalog(name).request_link(item, section=section, is_episode=is_episode)
+            return ask(self.catalog(name))
         # Never set up (or still signing in): the request runs once the catalog is ready.
         request_id = next(self._ids)
-        self._waiting.setdefault(name, []).append((request_id, item, section, is_episode))
+        self._waiting.setdefault(name, []).append((request_id, ask))
         self.ensure(name)
         return request_id
 
