@@ -922,6 +922,40 @@ class SubtitleFileTests(unittest.TestCase):
         self.assertEqual(len(self.slaves()), 1)
         self.assertEqual((self.session.subtitle_delay(), self.player.spu_delay), (0, 0))
 
+    def test_a_media_track_that_shows_late_is_never_taken_for_the_file(self):
+        # A live stream's embedded subtitles may show after the file was added, before the
+        # file's own track, which libVLC chooses as it comes.
+        self.play()
+        self.session.add_subtitle_file(str(self.film))
+        self.player.spus.append((5, b"Track 2 - [Deutsch]"))
+        self.session._tick()
+        self.player.read(6)
+        self.session._tick()
+        self.assertEqual(
+            self.session.subtitle_tracks(),
+            [(-1, "Disable"), (3, "English"), (5, "Track 2 - [Deutsch]"), (6, "Lighthouse.en.srt")],
+        )
+
+    def test_files_added_unchosen_are_named_in_order_once_all_came(self):
+        other = self.film.with_name("Lighthouse.fr.srt")
+        other.write_text("1\n00:00:01,000 --> 00:00:04,000\nBonjour\n", encoding="utf-8")
+        self.play()
+        self.session.add_subtitle_file(str(self.film))
+        self.session.add_subtitle_file(str(other))
+        self.player.read(4)
+        self.player.read(5)
+        self.session.subtitle_tracks()
+        self.session.set_subtitle_track(3)  # the media's own: the files come back unchosen
+        self.reopen()
+        self.player.read(7)
+        self.session._tick()  # one of two came: which one is not known yet
+        self.assertEqual(self.session.subtitle_tracks()[-1], (7, "Track 2"))
+        self.player.read(8)
+        self.assertEqual(
+            self.session.subtitle_tracks()[-2:],
+            [(7, "Lighthouse.en.srt"), (8, "Lighthouse.fr.srt")],
+        )
+
     def test_a_track_that_never_comes_keeps_libvlcs_name(self):
         self.play()
         self.session.add_subtitle_file(str(self.film))

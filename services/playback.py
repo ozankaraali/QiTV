@@ -308,7 +308,8 @@ class PlaybackSession(QObject):
         self._media_files: set[str] = set()  # the files added to this media
         self._spu_files: dict[int, tuple[str, str]] = {}  # a file's track id: (path, name)
         self._spu_known: set[int] = set()  # the tracks before the files on their way
-        self._spu_waiting: list[tuple[str, str]] = []  # files added, their tracks not seen
+        # Files added whose tracks were not seen yet: (path, name, added chosen).
+        self._spu_waiting: list[tuple[str, str, bool]] = []
         self._spu_wait = QElapsedTimer()
         # The picture (2.3): its shape for every media, the window's size (Fill crops to its
         # shape), and deinterlacing ("auto": never set on this player, libVLC's own).
@@ -717,26 +718,34 @@ class PlaybackSession(QObject):
             logger.info("libVLC did not take the subtitle file %s", name)
             return False
         self._media_files.add(path)
-        self._spu_waiting.append((path, name))
+        self._spu_waiting.append((path, name, select))
         return True
 
     def _name_files(self, ids: list[int]) -> None:
-        """Tell the tracks of the files added from the new ids: one each, after the media's
-        own, so the newest ones (with one file, the track chosen if it is new)."""
+        """Tell the files' tracks among the tracks that came since they were added; a media's
+        own track may show late too (a live stream's), and libVLC names both alike ("Track 2
+        - [English]" for a file named *.en.srt). The file added chosen last takes the track
+        libVLC chose as it came, never another; the others pair in order, once exactly as
+        many new tracks came as they are."""
         new = sorted(i for i in ids if i >= 0 and i not in self._spu_known)
-        if not new:
-            if self._spu_wait.elapsed() > _SUBTITLE_NAME_WAIT_MS:
-                self._spu_waiting = []  # never came: libVLC's own name stays
-            return
-        chosen = int(self._player.video_get_spu())
-        if len(self._spu_waiting) == 1 and chosen in new:
-            new.remove(chosen)
-            new.append(chosen)
-        pairs = list(zip(reversed(self._spu_waiting), reversed(new)))
+        waiting = self._spu_waiting
+        picked = next((file for file in reversed(waiting) if file[2]), None)
+        pairs: list[tuple[tuple[str, str, bool], int]] = []
+        if picked is not None and new:
+            chosen = int(self._player.video_get_spu())
+            if chosen in new:
+                pairs.append((picked, chosen))
+                new.remove(chosen)
+        others = [file for file in waiting if file is not picked]
+        if others and len(new) == len(others):
+            pairs += list(zip(others, new))
         for file, track in pairs:
-            self._spu_files[track] = file
-        self._spu_waiting = self._spu_waiting[: len(self._spu_waiting) - len(pairs)]
-        self._spu_known.update(new)
+            self._spu_files[track] = (file[0], file[1])
+            self._spu_known.add(track)
+        paired = [file for file, _track in pairs]
+        self._spu_waiting = [file for file in waiting if file not in paired]
+        if self._spu_waiting and self._spu_wait.elapsed() > _SUBTITLE_NAME_WAIT_MS:
+            self._spu_waiting = []  # never came: libVLC's own names stay
 
     def _replay_files(self) -> None:
         """A reopened media plays: its files again, the chosen one chosen, each once (one may
