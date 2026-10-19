@@ -115,9 +115,9 @@ class ZapControllerTests(unittest.TestCase):
         self.assertEqual((self.tunes, self.missing, self.digits[-1]), ([], ["9"], ""))
 
     def test_max_digits(self):
-        for d in "12345":
+        for d in "123456":
             self.zap.digit(d)
-        self.assertEqual(self.digits[-1], "1234")
+        self.assertEqual(self.digits[-1], "12345")  # numbers past 9999 can be typed
 
     def test_previous_channel(self):
         fresh = ZapController(clock=self.clock)
