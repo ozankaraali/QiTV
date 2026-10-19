@@ -19,7 +19,6 @@ from PySide6.QtCore import QDate, QEvent, QLocale, QObject, QPointF, QRectF, Qt,
 from PySide6.QtGui import (
     QFont,
     QFontMetrics,
-    QHelpEvent,
     QMouseEvent,
     QPainter,
     QPainterPath,
@@ -28,7 +27,7 @@ from PySide6.QtGui import (
     QTextLayout,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QToolTip, QWidget
+from PySide6.QtWidgets import QWidget
 
 from services import i18n
 from services.catalog import shown_label
@@ -457,16 +456,6 @@ class Guide(Overlay):
             elif button is None and self._select_at(event):
                 self.activate()
         event.accept()
-
-    def event(self, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
-            text = self.tooltip_at(QPointF(event.pos()))
-            if text:
-                QToolTip.showText(event.globalPos(), text, self)
-            else:
-                QToolTip.hideText()
-            return True
-        return super().event(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         delta = event.angleDelta()

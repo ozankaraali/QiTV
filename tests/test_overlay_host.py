@@ -7,14 +7,14 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QRegion, QWheelEvent
+from PySide6.QtGui import QHelpEvent, QRegion, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
 from shiboken6 import isValid
 from timer_fixtures import elapse, wait_until
 
 from ui.overlay_host import RESTORE_REPORT_MS, OverlayHost
-from ui.overlays.base import Overlay
+from ui.overlays.base import Overlay, TooltipWidget
 from ui.video_surface import VideoSurface
 
 
@@ -331,6 +331,49 @@ class LifetimeTests(HostCase):
         self.panel.raise_()
         stack = self.host.children()
         self.assertGreater(stack.index(top), stack.index(self.panel))
+
+
+class _Tips(TooltipWidget):
+    def tooltip_at(self, pos):
+        return "Close" if pos.x() < 10 else ""
+
+
+class _Parent(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.tips = 0
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ToolTip:
+            self.tips += 1
+        return super().event(event)
+
+
+class TooltipTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def hover(self, widget, x):
+        point = QPoint(x, 5)
+        QApplication.sendEvent(widget, QHelpEvent(QEvent.Type.ToolTip, point, point))
+
+    def test_hovering_shows_the_text_at_that_point(self):
+        tips = _Tips()
+        with patch("ui.overlays.base.QToolTip.showText") as show:
+            self.hover(tips, 5)
+        show.assert_called_once()
+        self.assertEqual(show.call_args[0][1], "Close")
+
+    def test_an_empty_spot_passes_the_tooltip_to_the_parent_only_when_flagged(self):
+        for flagged, parent_tips in ((False, 0), (True, 1)):
+            parent = _Parent()
+            tips = _Tips(parent)
+            tips.pass_empty_tooltip = flagged
+            with patch("ui.overlays.base.QToolTip.hideText") as hide:
+                self.hover(tips, 50)
+            hide.assert_called_once()
+            self.assertEqual(parent.tips, parent_tips)
 
 
 class ConfigDirOverrideTests(unittest.TestCase):

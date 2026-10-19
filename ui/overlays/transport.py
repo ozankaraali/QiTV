@@ -42,7 +42,6 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QFontMetricsF,
-    QHelpEvent,
     QHideEvent,
     QLinearGradient,
     QMouseEvent,
@@ -52,7 +51,7 @@ from PySide6.QtGui import (
     QPixmap,
     QRegion,
 )
-from PySide6.QtWidgets import QToolTip, QWidget
+from PySide6.QtWidgets import QWidget
 
 from services import i18n
 from services.i18n import N_, tr, translate
@@ -226,6 +225,8 @@ class _Timeline:
 
 
 class Transport(Overlay):
+    pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
+
     playPauseRequested = Signal()
     seekRequested = Signal(int)
     seekRelativeRequested = Signal(int)
@@ -1288,17 +1289,6 @@ class Transport(Overlay):
                 self.setCursor(Qt.PointingHandCursor)
             else:
                 self.unsetCursor()
-
-    def event(self, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
-            text = self.tooltip_at(QPointF(event.pos()))
-            if text:
-                QToolTip.showText(event.globalPos(), text, self)
-            else:
-                QToolTip.hideText()
-                event.ignore()
-            return True
-        return super().event(event)
 
     def hideEvent(self, event: QHideEvent) -> None:
         # Hidden mid-drag (the host hides with a minimized window): no release will come.

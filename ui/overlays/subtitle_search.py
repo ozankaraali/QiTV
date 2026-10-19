@@ -32,7 +32,6 @@ from PySide6.QtGui import (
     QFont,
     QFontMetricsF,
     QGuiApplication,
-    QHelpEvent,
     QMouseEvent,
     QPainter,
     QPaintEvent,
@@ -40,7 +39,7 @@ from PySide6.QtGui import (
     QPolygonF,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QToolTip, QWidget
+from PySide6.QtWidgets import QWidget
 
 from services import i18n
 from services.i18n import N_, tr_n, translate
@@ -148,6 +147,8 @@ class _Rects:
 
 
 class SubtitleSearchPage(Overlay):
+    pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
+
     saveKeyRequested = Signal(str)
     getKeyRequested = Signal()
     searchRequested = Signal(str)
@@ -962,17 +963,6 @@ class SubtitleSearchPage(Overlay):
         if rows:
             self._wheel -= rows * _WHEEL_STEP
             self.scroll_by(name, -rows)
-
-    def event(self, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
-            tip = self.tooltip_at(QPointF(event.pos()))
-            if tip:
-                QToolTip.showText(event.globalPos(), tip, self)
-            else:
-                QToolTip.hideText()
-                event.ignore()
-            return True
-        return super().event(event)
 
     def tooltip_at(self, pos: QPointF) -> str:
         hit = self._hit(pos)

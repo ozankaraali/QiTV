@@ -18,7 +18,6 @@ acts once.
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
-    QHelpEvent,
     QMouseEvent,
     QPainter,
     QPaintEvent,
@@ -26,7 +25,7 @@ from PySide6.QtGui import (
     QRegion,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QToolTip, QWidget
+from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_, translate
 from ui.overlays.base import Overlay
@@ -48,6 +47,8 @@ TOOLTIPS = {
 
 
 class CornerControls(Overlay):
+    pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
+
     soundRequested = Signal()
     backRequested = Signal()  # ⤢
     stopRequested = Signal()  # ×
@@ -200,14 +201,3 @@ class CornerControls(Overlay):
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         event.accept()
-
-    def event(self, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
-            text = self.tooltip_at(QPointF(event.pos()))
-            if text:
-                QToolTip.showText(event.globalPos(), text, self)
-            else:
-                QToolTip.hideText()
-                event.ignore()
-            return True
-        return super().event(event)

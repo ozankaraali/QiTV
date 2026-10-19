@@ -41,7 +41,6 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QFont,
     QFontMetricsF,
-    QHelpEvent,
     QMouseEvent,
     QPainter,
     QPainterPath,
@@ -49,7 +48,7 @@ from PySide6.QtGui import (
     QPen,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QApplication, QToolTip, QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 from services.i18n import N_, translate
 from ui.overlays.base import Overlay
@@ -122,6 +121,8 @@ class _Rects:
 
 
 class TrackPanel(Overlay):
+    pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
+
     rowChosen = Signal(object)  # a row's key: a click, or Enter on it
     syncStepped = Signal(int)  # -1: earlier, +1: later
     syncReset = Signal()
@@ -601,17 +602,6 @@ class TrackPanel(Overlay):
         if rows:
             self._wheel -= rows * _WHEEL_STEP
             self.scroll_by(-rows)
-
-    def event(self, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
-            text = self.tooltip_at(QPointF(event.pos()))
-            if text:
-                QToolTip.showText(event.globalPos(), text, self)
-            else:
-                QToolTip.hideText()
-                event.ignore()
-            return True
-        return super().event(event)
 
     def tooltip_at(self, pos: QPointF) -> str:
         hit, sync = self._control_at(pos), self._model.sync

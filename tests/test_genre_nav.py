@@ -327,7 +327,7 @@ class TopNavTests(unittest.TestCase):
         button = self.nav._item_rects()["fullscreen"].center().toPoint()
         for point, text in ((button, "Fullscreen"), (self.nav.logo_rect().center().toPoint(), "")):
             event = QHelpEvent(QEvent.Type.ToolTip, point, self.nav.mapToGlobal(point))
-            with mock.patch("ui.library.top_nav.QToolTip.showText") as show:
+            with mock.patch("ui.overlays.base.QToolTip.showText") as show:
                 self.assertTrue(self.nav.event(event))
             show.assert_called_once()
             self.assertTrue(show.call_args[0][1].startswith(text or "QiTV"))

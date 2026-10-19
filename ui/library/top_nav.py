@@ -13,12 +13,12 @@ focus it; they have F11.
 import sys
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QFont, QFontMetrics, QFontMetricsF, QHelpEvent, QPainter
-from PySide6.QtWidgets import QToolTip, QWidget
+from PySide6.QtGui import QFont, QFontMetrics, QFontMetricsF, QPainter
 
 from services.i18n import N_, tr, translate
 from ui.brand import BRAND_NAME, logo_aspect, logo_available, logo_pixmap
 from ui.keymap import key_hint
+from ui.overlays.base import TooltipWidget
 from ui.overlays.painting import Units, draw_icon, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -40,7 +40,7 @@ def _search_label() -> str:
     return "⌕ " + tr("Search")  # i18n: pill button in the Library's top bar that opens search
 
 
-class TopNav(QWidget):
+class TopNav(TooltipWidget):
     tabRequested = Signal(str)  # "live" | "movies" | "series"
     searchRequested = Signal()
     sourceRequested = Signal(QPoint)  # global position under the pill
@@ -204,16 +204,6 @@ class TopNav(QWidget):
             # i18n: tooltip of the Library's fullscreen button (before its key)
             return key_hint(tr("Fullscreen"), FULLSCREEN_KEYS)
         return ""
-
-    def event(self, event) -> bool:
-        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
-            text = self.tooltip_at(QPointF(event.pos()))  # QHelpEvent has no position()
-            if text:
-                QToolTip.showText(event.globalPos(), text, self)
-            else:
-                QToolTip.hideText()
-            return True
-        return super().event(event)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)

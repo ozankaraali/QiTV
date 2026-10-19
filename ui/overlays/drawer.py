@@ -62,7 +62,6 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
     QStyle,
     QStyledItemDelegate,
-    QToolTip,
 )
 
 from services import i18n
@@ -1245,16 +1244,6 @@ class Drawer(Overlay):
             self.unsetCursor()
             self.update()
         super().leaveEvent(event)
-
-    def event(self, event: QEvent) -> bool:
-        if event.type() == QEvent.ToolTip:
-            text = self.tooltip_at(QPointF(event.pos()))
-            if text:
-                QToolTip.showText(event.globalPos(), text, self)
-            else:
-                QToolTip.hideText()
-            return True
-        return super().event(event)
 
     def tooltip_at(self, point: QPointF) -> str:
         """What hovering `point` says: a header button's name and key, ‹, the provider, or the
