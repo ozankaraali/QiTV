@@ -329,7 +329,7 @@ Or with [uv](https://docs.astral.sh/uv/): `uv sync --frozen --dev`, then `uv run
 
 To try QiTV without a provider, `uv run python scripts/make_demo_content.py --out build/demo --serve` serves the demo content on your computer and prints how to start QiTV with it. `--screenshots docs/screenshots` instead of `--serve` takes this page's screenshots again.
 
-A build from the source code has no OpenSubtitles API key of its own: enter yours in Settings → Subtitles (free, see [Subtitles from OpenSubtitles](#subtitles-from-opensubtitles)). The release builds get theirs from CI, which writes `services/_build_keys.py` while packaging, from a repository secret named `QITV_OPENSUBTITLES_KEY`; the file in the repository stays empty, so never commit a key into it.
+A build from the source code has no OpenSubtitles API key of its own: enter yours in Settings → Subtitles (free, see [Subtitles from OpenSubtitles](#subtitles-from-opensubtitles)). The release builds get theirs from CI: before packaging, each build runs `scripts/write_build_keys.py`, which writes the repository secret named `QITV_OPENSUBTITLES_KEY` into `services/_build_keys.py` (without that secret, as in a fork, the key stays empty). The file in the repository stays empty: never commit a key into it.
 
 </details>
 
