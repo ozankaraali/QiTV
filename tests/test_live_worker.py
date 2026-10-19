@@ -56,6 +56,7 @@ STATE_KEYS = {
     "open_quality",
     "video",
     "answered",
+    "reconnecting",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -1589,6 +1590,47 @@ class HeardEdgeTests(unittest.TestCase):
             session._ingest()
         self.assertGreater(session._live_edge(), 25.0)
         self.assertLess(max(behind), worker._EDGE_STEP_S)
+
+    def test_the_state_says_a_new_connection_opens_until_it_delivers(self):
+        # A silent connection is no reconnect; the source's `Reconnecting` is, said at once
+        # (the GUI then reads "Reconnecting…" instead of "Waiting for the channel…").
+        from services.live.source import Discontinuity, Reconnecting
+
+        data = make_stream(8)
+        half = len(data) // 2 // 188 * 188
+        sent = []
+        heard = []
+        helper = SimpleNamespace(
+            root="",
+            send=lambda message, session=None: sent.append(message),
+            server=SimpleNamespace(add_session=lambda *args: None),
+        )
+        session = worker._Session(helper, "r", "http://provider.test/r.ts", {}, True, RAM, 6.0)
+
+        class Source:
+            hls = False
+            burst_s = 0.0
+            user_agent = "test"
+
+            def chunks(self):
+                yield data[:half]
+                heard.append([m[2]["reconnecting"] for m in sent if m[0] == "state"][-1])
+                yield Reconnecting()
+                heard.append([m[2]["reconnecting"] for m in sent if m[0] == "state"][-1])
+                yield Discontinuity()
+                yield data[half:]
+
+            def close(self):
+                pass
+
+            def wait_closed(self, timeout):
+                return True
+
+        with patch.object(source_module, "open_source", lambda *args, **kwargs: Source()):
+            session._ingest()
+        states = [m[2]["reconnecting"] for m in sent if m[0] == "state"]
+        self.assertEqual(heard, [False, True])
+        self.assertFalse(states[-1])
 
 
 if __name__ == "__main__":

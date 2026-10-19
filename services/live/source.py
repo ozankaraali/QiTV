@@ -182,6 +182,13 @@ class Discontinuity:
     """A break in the byte stream: an HLS discontinuity, a sequence gap or a reconnect."""
 
 
+@dataclass(frozen=True)
+class Reconnecting:
+    """Raw TS only: the connection broke (it ended, or sent nothing for `_TS_STALL_TIMEOUT`)
+    and a new one is being opened; a `Discontinuity` follows once it delivers. Until then the
+    source waits on the provider, as during a pause it waits out."""
+
+
 class CaughtUp:
     """HLS only: the source delivered every segment its playlist listed, so what follows comes
     as the provider publishes it. Yielded after each such batch; the helper then reports its
@@ -189,7 +196,7 @@ class CaughtUp:
     the next one) and that the backlog fetched at the start has landed."""
 
 
-Chunk = bytes | Discontinuity | CaughtUp
+Chunk = bytes | Discontinuity | CaughtUp | Reconnecting
 
 
 class Source(Protocol):
@@ -1078,7 +1085,7 @@ class TsSource:
             self._capture.flush()
         return self._http.wait_closed(timeout)
 
-    def _run(self) -> Iterator[bytes | Discontinuity]:
+    def _run(self) -> Iterator[bytes | Discontinuity | Reconnecting]:
         http, response, prefix, capture = self._http, self._response, self._prefix, self._capture
         self._response, self._prefix = None, b""
         if response is None:
@@ -1113,6 +1120,7 @@ class TsSource:
                 log.info("The channel connection broke off (%s); reconnecting.", error.kind)
             finally:
                 http.release(response)
+            yield Reconnecting()  # before the backoff: the helper says so at once
             response = http.retry(lambda: http.get(self._url), backoff)
             if capture is not None:
                 capture.mark("reconnect")

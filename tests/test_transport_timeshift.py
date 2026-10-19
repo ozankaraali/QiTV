@@ -286,6 +286,8 @@ class TimeShiftCase(unittest.TestCase):
         t.update_timeline(dict(at_edge(lag=7.0, rate=1.05), **auto), PROGRAMME)
         self.assertEqual(t.texts()[1], "Stay live ● ≈ 7 s behind · adjusted · catching up 1.05×")
         t.update_timeline(dict(at_edge(lag=4.9), stalled=True, **auto), PROGRAMME)
+        self.assertEqual(t.texts()[1], "Stay live ● Waiting for the channel…")
+        t.update_timeline(dict(at_edge(lag=4.9), stalled=True, reconnecting=True), PROGRAMME)
         self.assertEqual(t.texts()[1], "Stay live ● Reconnecting…")
         t.update_timeline(dict(at_edge(lag=2.6), target=2.5), PROGRAMME)  # a fixed latency
         self.assertEqual(t.texts()[1], "Stay live ● ≈ 2.5 s behind source")
@@ -314,13 +316,13 @@ class TimeShiftCase(unittest.TestCase):
         )
         return {image.pixelColor(x, y).name() for x in xs}
 
-    def test_a_stall_at_the_edge_reads_reconnecting_without_the_on_target_dot(self):
+    def test_a_stall_at_the_edge_reads_waiting_without_the_on_target_dot(self):
         t = self.make()
         t.show_timeshift("104", "Nature")
         t.update_timeline(at_edge(lag=2.6), PROGRAMME)
         self.assertIn(PALETTE.ok.lower(), self.dot_colors(t))
         t.update_timeline(dict(at_edge(lag=2.6, rate=1.05), stalled=True), PROGRAMME)
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● Reconnecting…"))
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● Waiting for the channel…"))
         colors = self.dot_colors(t)
         self.assertNotIn(PALETTE.ok.lower(), colors)
         self.assertIn(PALETTE.warn.lower(), colors)

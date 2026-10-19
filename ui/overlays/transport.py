@@ -3,7 +3,8 @@
 Modes: VOD, plain live (direct play) and time-shift (live through the pipeline). Time-shift shows
 the bar over the buffered range, or, while the session's stay-live mode is LIVE, the stay-live
 latency indicator (it reads "catching up" while stay-live nudges the rate up, "adding buffer"
-while it nudges it down, and "Reconnecting…" while the source has stalled). It shows the settled
+while it nudges it down, "Waiting for the channel…" while the source has stalled, and
+"Reconnecting…" once the helper opens a new connection to it). It shows the settled
 lag (2.1: in half seconds, changed only once the lag moved for a few seconds): "≈ 2.5 s behind
 source"; under Auto latency "≈ 7 s behind", with "adjusted" while trouble holds the channel's
 learned target up (its starvation prior's margin; not what its arrivals need). Its dot is green
@@ -71,6 +72,8 @@ TOP_FRACTION = 0.22
 BOTTOM_FRACTION = 0.42
 TICK_LABEL_MAX_U = 25.0
 MINUS = "−"
+WAITING = "Waiting for the channel…"  # the source stalled, its connection still open
+RECONNECTING = "Reconnecting…"  # the helper opens a new connection to it
 TOOLTIPS = {
     "pip": "Second channel (P)",
     "mini": "Mini player (Alt+P)",
@@ -171,6 +174,7 @@ class _Timeline:
     paused: bool
     target: float
     stalled: bool
+    reconnecting: bool  # the helper opens a new connection (raw TS)
     auto: bool  # Auto latency
     adjusted: bool  # the channel's Auto target moved from where Auto starts
 
@@ -189,6 +193,7 @@ class _Timeline:
             paused=bool(state["paused"]),
             target=float(state.get("target", TARGETS["normal"])),
             stalled=bool(state.get("stalled", False)),
+            reconnecting=bool(state.get("reconnecting", False)),
             auto=bool(state.get("auto", False)),
             adjusted=bool(state.get("adjusted", False)),
         )
@@ -255,7 +260,8 @@ class Transport(Overlay):
         self._edge = True
         self._edge_lag: float | None = None
         self._catching_up = False
-        self._stalled = False  # the source stalled at the live edge: "Reconnecting…"
+        self._stalled = False  # the source stalled at the live edge: `WAITING` ...
+        self._reconnecting = False  # ... and a new connection is being opened: `RECONNECTING`
         self._auto: bool | None = None  # Auto latency: whether its target moved (else None)
         self._rate = 1.0
         # A bar fraction, not a time: the knob stays under the cursor while the buffer slides.
@@ -305,8 +311,9 @@ class Transport(Overlay):
         """Take a `LiveSession.timelineChanged` state; never changes visibility.
 
         `ticks` are programme starts in timeline seconds with their labels. An optional
-        `target` key is the session's effective stay-live target (default: Normal), and an
-        optional `stalled` key says the source stalled (the live-edge row reads "Reconnecting…").
+        `target` key is the session's effective stay-live target (default: Normal), an optional
+        `stalled` key says the source stalled (the live-edge row reads "Waiting for the
+        channel…"), and `reconnecting` that a new connection is being opened ("Reconnecting…").
         Optional `auto` and `adjusted` keys: Auto latency, and its target for the channel moved.
         """
         tl = _Timeline.from_state(state)
@@ -317,6 +324,7 @@ class Transport(Overlay):
         self._edge_lag = tl.shown
         self._auto = tl.adjusted if tl.auto else None
         self._stalled = live and tl.stalled
+        self._reconnecting = self._stalled and tl.reconnecting
         # Steering: any rate but 1x (a nudge's ramp included), slower ones too.
         self._catching_up = live and (tl.rate != 1.0 or tl.nudge != 1.0) and not self._stalled
         self._rate = tl.nudge if tl.nudge != 1.0 else tl.rate  # the nudge's, not the ramp's
@@ -590,7 +598,7 @@ class Transport(Overlay):
         if self._edge_lag is None:
             return ("", "")
         if self._stalled:
-            return ("Stay live", "Reconnecting…")
+            return ("Stay live", RECONNECTING if self._reconnecting else WAITING)
         lag = f"≈ {self._edge_lag:g} s behind"
         if self._auto is not None:
             tail = lag + (" · adjusted" if self._auto else "")
@@ -1274,5 +1282,5 @@ class Transport(Overlay):
         self._edge_lag = None
         self._auto = None
         self._catching_up = False
-        self._stalled = False
+        self._stalled = self._reconnecting = False
         self._rate = 1.0

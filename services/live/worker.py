@@ -397,6 +397,7 @@ class _Session:
         self._received = 0  # bytes from the source, those before the first keyframe too
         self._answered = False  # the source's response headers came (bytes may not have yet)
         self._caught_up = False  # HLS: every segment its playlist listed was delivered once
+        self._reconnecting = False  # raw TS: the connection broke, a new one is being opened
         self._segment = (0, 0.0)  # HLS: the segment being fetched (serial), the edge it began at
         self._measured = (0.0, 0.0)  # HLS: media and EXTINF seconds of the whole segments
         self._pending: list[_Addition] = []
@@ -438,7 +439,13 @@ class _Session:
 
     def _ingest(self) -> None:
         from services.live.ring import RingError
-        from services.live.source import CaughtUp, Discontinuity, SourceError, open_source
+        from services.live.source import (
+            CaughtUp,
+            Discontinuity,
+            Reconnecting,
+            SourceError,
+            open_source,
+        )
 
         target = self._start.get("target")
         try:
@@ -480,6 +487,11 @@ class _Session:
         try:
             for item in source.chunks():
                 self._check()
+                if isinstance(item, Reconnecting):
+                    self._reconnecting = True
+                    self._notify(force=True)
+                    continue
+                self._reconnecting = False
                 if isinstance(item, Discontinuity):
                     self._relabeler.reconnect()
                     if trimmer is not None and rejoiner is not None:
@@ -819,6 +831,9 @@ class _Session:
             "video": self._segmenter.video_pid is not None,
             # The source answered (2.1): its headers came, though no byte may have yet.
             "answered": self._answered,
+            # Raw TS: the connection broke and a new one is being opened (a silent but open
+            # connection is waited out first: a stall is not a reconnect).
+            "reconnecting": self._reconnecting,
         }
         self._heard_edge = edge
         additions, self._pending = self._pending, []

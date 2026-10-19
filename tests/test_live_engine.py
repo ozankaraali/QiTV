@@ -59,6 +59,7 @@ STATE_KEYS = {
     "open_quality",
     "video",
     "answered",
+    "reconnecting",
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024

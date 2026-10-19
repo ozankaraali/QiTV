@@ -74,7 +74,8 @@ steers by has hysteresis (a burst the helper measures for a moment is none:
 `LagFilter.burst`); the timeline's target, the stall bound and Go live follow the helper's
 at once. Held against the instantaneous peak, the rate would change at every burst. A source
 that sends nothing for a burst plus 2 s (a steady one: 2 s) has stalled: the timeline says
-so (`stalled`; the transport reads "Reconnecting…"), the lag is the closed form with the
+so (`stalled`; the transport reads "Waiting for the channel…", or "Reconnecting…" once the
+helper opens a new connection: `reconnecting`), the lag is the closed form with the
 time since the edge moved counted up to there only, and StayLive takes it as buffering, as
 it does a VLC whose clock stood still while it reports Playing (libVLC 3 does when starved)
 clearly longer than it steps (1.5 learned intervals plus a quarter second, at least 0.5 s):
@@ -1954,6 +1955,8 @@ class LiveSession(QObject):
                 "ended": self._ended,
                 "target": self._target(snapshot),
                 "stalled": self._stalled(snapshot),
+                # The helper is opening a new connection (raw TS), not waiting on this one.
+                "reconnecting": bool(snapshot.get("reconnecting", False)),
                 "auto": learned is not None,
                 "adjusted": learned is not None and learned.prior.margin() > 0.0,
             }

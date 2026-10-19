@@ -34,6 +34,7 @@ from services.live.source import (
     STREAM_REFUSED,
     CaughtUp,
     Discontinuity,
+    Reconnecting,
     SourceError,
     _scheme,
     open_source,
@@ -68,13 +69,16 @@ def hls(sequence, names, *, target=1, ended=False, extra=""):
     return (text + ("#EXT-X-ENDLIST\n" if ended else "")).encode()
 
 
-def drain(source, *, caught_up=False):
+def drain(source, *, caught_up=False, reconnecting=False):
     """Every item from ``chunks()``, with adjacent byte blocks joined; `CaughtUp` markers
-    (the helper's cue to report its live edge, no media) only with `caught_up`."""
+    (the helper's cue to report its live edge, no media) only with `caught_up`, and
+    `Reconnecting` ones (its cue to say a new connection opens) only with `reconnecting`."""
     parts = []
     try:
         for item in source.chunks():
             if isinstance(item, CaughtUp) and not caught_up:
+                continue
+            if isinstance(item, Reconnecting) and not reconnecting:
                 continue
             if isinstance(item, bytes) and parts and isinstance(parts[-1], bytes):
                 parts[-1] += item
@@ -114,7 +118,9 @@ def plain(data):
     return bytes(out)
 
 
-def media(url, *, headers=None, verify_ssl=True, stop=None, caught_up=False, **options):
+def media(
+    url, *, headers=None, verify_ssl=True, stop=None, caught_up=False, reconnecting=False, **options
+):
     source = open_source(
         url,
         headers=headers or {},
@@ -122,7 +128,7 @@ def media(url, *, headers=None, verify_ssl=True, stop=None, caught_up=False, **o
         stop=stop or threading.Event(),
         **options,
     )
-    return drain(source, caught_up=caught_up)
+    return drain(source, caught_up=caught_up, reconnecting=reconnecting)
 
 
 @contextmanager
@@ -1042,8 +1048,9 @@ high.m3u8
                 server = self.server({"/live.ts": live}, tls=context, keep_alive=keep_alive)
                 fast = {"_TS_STALL_TIMEOUT": 0.3, "_RECONNECT_DELAYS": FAST_RETRIES}
                 with patch.multiple(source_module, **fast):
-                    parts = media(server.url + "/live.ts", verify_ssl=not tls)
-                self.assertEqual(parts, [head, Discontinuity(), rest])
+                    parts = media(server.url + "/live.ts", verify_ssl=not tls, reconnecting=True)
+                # The helper hears that a new connection opens before it waits for one.
+                self.assertEqual(parts, [head, Reconnecting(), Discontinuity(), rest])
                 self.assertEqual(server.counts["/live.ts"], 2)
                 waited = marks["reconnected"] - marks["stalled"]
                 self.assertGreaterEqual(waited, 0.25)
@@ -1063,9 +1070,10 @@ high.m3u8
         server = self.server({"/live.ts": (200, {"Content-Length": str(len(self.video))}, paused)})
         fast = {"_STALL_TIMEOUT": 0.3, "_TS_STALL_TIMEOUT": 2.0, "_RECONNECT_DELAYS": FAST_RETRIES}
         with patch.multiple(source_module, **fast):
-            parts = media(server.url + "/live.ts")
+            parts = media(server.url + "/live.ts", reconnecting=True)
         self.assertEqual(b"".join(parts), self.video)
         self.assertNotIn(Discontinuity(), parts)
+        self.assertNotIn(Reconnecting(), parts)
         self.assertEqual(server.counts["/live.ts"], 1)
 
     def test_raw_ts_follows_redirects_to_another_port(self):
@@ -1267,7 +1275,8 @@ high.m3u8
         self.assertEqual(raised.exception.kind, "network")
         self.assertIsNone(raised.exception.status)
         self.assertNotIn("secret", str(raised.exception))
-        self.assertEqual(b"".join(received), self.video[:half])
+        self.assertEqual(received[-1], Reconnecting())  # said before the retries began
+        self.assertEqual(b"".join(received[:-1]), self.video[:half])
         self.assertEqual(server.counts["/user/secret/live.ts"], 7)
 
     def test_local_paths_and_file_urls_need_allow_local(self):

@@ -1979,7 +1979,12 @@ class StayLiveTests(LiveSessionCase):
         feed.run(20.0)
         feed.stalled = True
         feed.run(3.0)
-        self.assertTrue(self.timelines[-1]["stalled"])  # "Reconnecting…" while it lasts
+        self.assertTrue(self.timelines[-1]["stalled"])  # "Waiting for the channel…" meanwhile
+        self.assertFalse(self.timelines[-1]["reconnecting"])
+        self.engine._snapshots[sid]["reconnecting"] = True  # the helper opens a new connection
+        feed.run(0.5)
+        self.assertTrue(self.timelines[-1]["reconnecting"])  # "Reconnecting…"
+        self.engine._snapshots[sid]["reconnecting"] = False
         feed.stalled = False
         feed.run(0.25)  # the source sends again
         self.assertFalse(self.timelines[-1]["stalled"])
