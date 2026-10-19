@@ -59,6 +59,16 @@ class SyncKeysTests(ControllerTestCase):
         )
         self.assertEqual(self.store.audio_ms(ONE), 100)  # kept for the channel
 
+    def test_browsing_another_provider_keeps_the_channels_sync_its_own(self):
+        # CHANNELS carry no provider stamp: they are the provider browsed when they opened.
+        self.store.set_audio_ms(ONE, 100)
+        self.play(0)
+        self.catalog.provider = "Backup"  # the drawer browses another provider meanwhile
+        self.controller.handle(Action.SOUND_LATER)
+        self.assertEqual(self.session.delay, 150)
+        self.assertEqual(self.store.audio_ms(ONE), 150)
+        self.assertEqual(self.store.audio_ms(channel_key("Backup", CHANNELS[0])), 0)
+
     def test_nothing_playing_nothing_moves(self):
         self.controller.handle(Action.SOUND_LATER)
         self.assertEqual((self.session.delays, self.toast.messages()), ([], []))
