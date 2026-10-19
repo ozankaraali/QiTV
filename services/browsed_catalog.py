@@ -11,7 +11,7 @@ from the hub, whichever provider an item belongs to.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone, tzinfo
 import logging
 from typing import Any, Callable, Optional
 
@@ -263,6 +263,10 @@ class BrowsedCatalog(QObject):
     def max_connections_of(self, name: str) -> Optional[int]:
         """What provider `name` reported as its simultaneous streams (None: unknown)."""
         return self._catalogs.max_connections(name)
+
+    def archive_zone_of(self, name: str) -> tzinfo:
+        """The time zone provider `name`'s archive addresses are in (catch-up)."""
+        return self._catalogs.archive_zone(name)
 
     def sign_in_again(self, name: str) -> None:
         """Sign provider `name` in again: a link asked next waits for it (an STB retry)."""
@@ -588,3 +592,7 @@ class BrowsedCatalog(QObject):
     def max_connections(self) -> Optional[int]:
         catalog = self._cat()
         return catalog.max_connections() if catalog is not None else None
+
+    def archive_zone(self) -> tzinfo:
+        catalog = self._cat()
+        return catalog.archive_zone() if catalog is not None else timezone.utc

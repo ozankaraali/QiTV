@@ -7,7 +7,7 @@ generation so results that arrive after a provider switch are dropped.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone, tzinfo
 import itertools
 import logging
 import re
@@ -15,6 +15,7 @@ from typing import Any, Callable, Iterator, Optional, cast
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from services.catchup import provider_zone
 from services.epg_view import Programme, programmes_for_channel
 from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as before)
     BLOCKED_PREFIX,
@@ -640,6 +641,14 @@ class CatalogService(QObject):
             if isinstance(content, dict) and content.get("max_connections"):
                 return int(content["max_connections"])
         return None
+
+    def archive_zone(self) -> tzinfo:
+        """The time zone an Xtream panel's archive addresses are in (catch-up, 2.3): what its
+        sign-in said when the live channels loaded; UTC for any other provider."""
+        content = self.provider_manager.current_provider_content.get("itv")
+        if not isinstance(content, dict):
+            return timezone.utc
+        return provider_zone(content.get("timezone"), content.get("tz_offset"))
 
     # --- sections --------------------------------------------------------------------
     def sections(self) -> list[str]:

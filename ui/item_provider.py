@@ -7,6 +7,7 @@ item (a local file, a test's channel) belongs to the browsed provider, as before
 
 from __future__ import annotations
 
+from datetime import timezone, tzinfo
 from typing import Optional
 
 from services.catalog import ALL_GROUP_ID
@@ -58,6 +59,15 @@ def max_connections(catalog, item: dict) -> Optional[int]:
     if _browsed(catalog, item):
         return catalog.max_connections()
     return catalog.max_connections_of(provider_of(item))
+
+
+def archive_zone(catalog, item: dict) -> tzinfo:
+    """The time zone the item's provider's archive addresses are in (catch-up; UTC if none)."""
+    if _browsed(catalog, item):
+        zone = getattr(catalog, "archive_zone", None)
+        return zone() if zone is not None else timezone.utc
+    zone_of = getattr(catalog, "archive_zone_of", None)
+    return zone_of(provider_of(item)) if zone_of is not None else timezone.utc
 
 
 def sign_in_again(catalog, item: dict) -> None:

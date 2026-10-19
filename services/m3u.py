@@ -2,7 +2,21 @@ import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+from services.catchup import m3u_archive_fields
 from services.i18n import N_
+
+_ATTRIBUTE = re.compile(r'([A-Za-z][\w-]*)="([^"]*)"')
+# The attributes catch-up reads (services.catchup.m3u_archive_fields); the #EXTM3U line's set
+# them for every channel.
+_CATCHUP_ATTRIBUTES = ("catchup", "catchup-type", "catchup-days", "catchup-source", "timeshift")
+
+
+def _attributes(line: str) -> Dict[str, str]:
+    """An #EXTINF or #EXTM3U line's attributes, by lower-case name (the first of each)."""
+    found: Dict[str, str] = {}
+    for name, value in _ATTRIBUTE.findall(line):
+        found.setdefault(name.lower(), value)
+    return found
 
 
 def decode_playlist(response) -> str:
@@ -33,9 +47,13 @@ def parse_m3u(data: str, categorize: bool = False):
     items = []
     item = {}
     id_counter = 0
+    defaults: Dict[str, str] = {}  # the #EXTM3U line's catch-up attributes
 
     for line in lines:
-        if line.startswith("#EXTINF"):
+        if line.startswith("#EXTM3U"):
+            header = _attributes(line)
+            defaults = {k: header[k] for k in _CATCHUP_ATTRIBUTES if header.get(k)}
+        elif line.startswith("#EXTINF"):
             tvg_id_match = re.search(r'tvg-id="([^"]+)"', line)
             tvg_logo_match = re.search(r'tvg-logo="([^"]+)"', line)
             group_title_match = re.search(r'group-title="([^"]+)"', line)
@@ -60,6 +78,9 @@ def parse_m3u(data: str, categorize: bool = False):
             }
             if referrer_match:  # only then: a channel without one stays as it was
                 item["referrer"] = referrer_match.group(1)
+            if "catchup" in line or "timeshift" in line or "tvg-rec" in line or defaults:
+                # Only a channel with an archive gets its keys (catch-up, 2.3).
+                item.update(m3u_archive_fields(_attributes(line), defaults))
 
         elif line.startswith("#EXTVLCOPT:http-user-agent="):
             user_agent = line.split("=", 1)[1]

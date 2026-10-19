@@ -7,6 +7,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, Qt, Signal
 
+from services.catchup import (
+    Answer,
+    probe,
+    xtream_archive_fields,
+    xtream_zone_fields,
+)
 from services.failure_reasons import (
     DEVICE_MESSAGE,
     UNEXPECTED_ANSWER_MESSAGE,
@@ -135,11 +141,12 @@ _XTREAM_CATALOG_ACTIONS = {
 # verify_ssl and prefer_https. `get` is requests' or a session's, sending CLIENT_HEADERS.
 
 
-def _xtream_sign_in(get: Callable[..., Any], worker: Any) -> Tuple[Any, str]:
+def _xtream_sign_in(get: Callable[..., Any], worker: Any) -> Tuple[Any, str, Any]:
     """Sign in to an Xtream panel (the Player API without an action): the reply's user_info,
-    and the base its API and streams are at. An address with a path whose panel is not there
-    (a 404 or a page, not the API's JSON) is asked once more at its server's root, which is
-    used from then on when it answers (a stray path 2.2.0 and older cut off)."""
+    the base its API and streams are at, and its server_info (its time zone: catch-up). An
+    address with a path whose panel is not there (a 404 or a page, not the API's JSON) is asked
+    once more at its server's root, which is used from then on when it answers (a stray path
+    2.2.0 and older cut off)."""
     bases = xtream_sign_in_bases(worker.base_url)
     for at, server in enumerate(bases):
         url = xtream_player_api_url(server, worker.username, worker.password)
@@ -152,8 +159,9 @@ def _xtream_sign_in(get: Callable[..., Any], worker: Any) -> Tuple[Any, str]:
             body = {}
         if at:
             remember_xtream_root(worker.base_url, server)
-        resolved = _resolve_xtream_base(body.get("server_info", {}), server, worker.prefer_https)
-        return body.get("user_info", {}), resolved
+        server_info = body.get("server_info", {})
+        resolved = _resolve_xtream_base(server_info, server, worker.prefer_https)
+        return body.get("user_info", {}), resolved, server_info
     raise AssertionError("unreachable: the last base always answers or raises")
 
 
@@ -200,6 +208,7 @@ def _xtream_item(
     if content_type == "itv":
         item["cmd"] = address(stream_id, ext)
         item["xmltv_id"] = stream.get("epg_channel_id") or ""
+        item.update(xtream_archive_fields(stream))  # only on a channel with an archive
     elif content_type == "vod":
         ext = stream.get("container_extension") or ext
         item["cmd"] = address(stream_id, ext)
@@ -254,7 +263,7 @@ class XtreamLoaderWorker(QObject):
         session = requests.Session()
         session.headers.update(CLIENT_HEADERS)
         try:
-            user_info, resolved_base = _xtream_sign_in(session.get, self)
+            user_info, resolved_base, server_info = _xtream_sign_in(session.get, self)
             # Select from provider metadata only. Opening a media URL here consumes
             # a playback connection before the user has selected anything.
             allowed_formats = user_info.get("allowed_output_formats", []) or []
@@ -309,6 +318,7 @@ class XtreamLoaderWorker(QObject):
                 "stream_base": resolved_base,
                 "stream_ext": stream_ext,
                 "max_connections": _max_connections(user_info),
+                **xtream_zone_fields(server_info),  # the panel's time zone (catch-up)
             }
 
             self.finished.emit(result)
@@ -349,7 +359,7 @@ class XtreamSeriesInfoWorker(QObject):
             # Use resolved_base if provided, otherwise determine from base_url
             if not self.resolved_base:
                 get = partial(requests.get, headers=CLIENT_HEADERS)
-                _user_info, self.resolved_base = _xtream_sign_in(get, self)
+                _user_info, self.resolved_base, _server = _xtream_sign_in(get, self)
 
             # Fetch series info
             info_url = xtream_player_api_url(
@@ -616,3 +626,32 @@ class StbListWorker(QObject):
             self.finished.emit(results[-1])
         else:
             self.error.emit(errors[-1] if errors else NO_PORTAL_DATA_MESSAGE)
+
+
+class ArchiveProbeWorker(QObject):
+    """Probe a channel's archive addresses in turn (catch-up, 2.3): `finished` carries
+    (the index of the first that plays, or -1; the last answer's value, an Answer).
+
+    A refusal stops there (it may be the provider's connection limit: asking the next form
+    would only be refused too); a "nothing there" or no clear answer tries the next form.
+    """
+
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, urls: List[str], headers: Dict[str, str], verify_ssl: bool = True):
+        super().__init__()
+        self.urls = list(urls)
+        self.headers = dict(headers)
+        self.verify_ssl = verify_ssl
+
+    def run(self):
+        answer = Answer.UNKNOWN
+        for index, url in enumerate(self.urls):
+            answer = probe(url, headers=self.headers, verify=self.verify_ssl)
+            if answer is Answer.PLAYS:
+                self.finished.emit((index, answer.value))
+                return
+            if answer is Answer.REFUSED:
+                break
+        self.finished.emit((-1, answer.value))

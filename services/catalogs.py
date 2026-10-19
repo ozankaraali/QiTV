@@ -10,7 +10,7 @@ each catalog gets its own pinned `ProviderManager` (and `EpgManager`) over that 
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone, tzinfo
 import gc
 import itertools
 import logging
@@ -272,6 +272,11 @@ class Catalogs(QObject):
     def max_connections(self, name: str) -> Optional[int]:
         catalog = self._by_name.get(name)
         return catalog.max_connections() if catalog is not None else None
+
+    def archive_zone(self, name: str) -> tzinfo:
+        """The time zone provider `name`'s archive addresses are in (UTC when unknown)."""
+        catalog = self._by_name.get(name)
+        return catalog.archive_zone() if catalog is not None else timezone.utc
 
     def use_guides(self, names: set[str]) -> None:
         """Keep the guides of `names` loaded; the others give their memory back."""

@@ -74,13 +74,25 @@ class XtreamRequestTests(unittest.TestCase):
                             "server_protocol": "https",
                             "port": "1",
                             "https_port": "443",
+                            "timezone": "Europe/Berlin",
+                            "time_now": "2026-01-20 15:05:30",
+                            "timestamp_now": 1768917930,
                         },
                         "user_info": {"allowed_output_formats": fixture.allowed_formats},
                     }
                 elif action in ("get_live_categories", "get_vod_categories"):
                     payload = [{"category_id": "10", "category_name": "Fixture"}]
                 elif action == "get_live_streams":
-                    payload = [{"stream_id": 7, "name": "Live", "category_id": "10"}]
+                    payload = [
+                        {"stream_id": 7, "name": "Live", "category_id": "10"},
+                        {
+                            "stream_id": 9,
+                            "name": "Archive",
+                            "category_id": "10",
+                            "tv_archive": 1,
+                            "tv_archive_duration": "3",
+                        },
+                    ]
                 elif action == "get_vod_streams":
                     payload = [
                         {
@@ -133,6 +145,13 @@ class XtreamRequestTests(unittest.TestCase):
             ],
         )
         self.assertEqual(catalog["contents"][0]["cmd"], f"{self.base}/live/user/password/7.ts")
+
+    def test_the_archive_and_the_panels_time_zone_are_kept_compactly(self):
+        catalog = self.load_catalog("itv")
+        plain, archived = catalog["contents"]
+        self.assertNotIn("archive", plain)  # only a channel with an archive has the key
+        self.assertEqual(archived["archive"], 3)
+        self.assertEqual((catalog["timezone"], catalog["tz_offset"]), ("Europe/Berlin", 60))
 
     def test_hls_only_provider_does_not_need_a_stream_probe(self):
         self.allowed_formats = ["m3u8"]
