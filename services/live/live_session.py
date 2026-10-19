@@ -296,8 +296,11 @@ _RELAND_S = 10.0
 # then 2 s every 2 s, and the viewer sat 23 s behind for a minute (the jumps' cooldown counts
 # from the tune). A burst flows at 3x and more, then stands still for most of its period: it
 # never qualifies, whatever the tick it lands on or how it is spread (re-reviews 1 and 2: the
-# unmeasured burst read as a backlog ran VLC dry 4-7 s). Only while VLC played within
-# `_REPICK_PLAY_S` of the open, and never later than `_REPICK_DEADLINE_S` after it.
+# unmeasured burst read as a backlog ran VLC dry 4-7 s). Only while VLC's clock moved within
+# `_REPICK_PLAY_S` of its playing (a sparse-PCR channel's first reading comes ~2 s after it:
+# re-review 2, M-r), which came within `_REPICK_PLAY_S` of the open, and never later than
+# `_REPICK_DEADLINE_S` after it. By design it moves the chosen latency's exposure to a stalling
+# source forward: the start it picks again is nearer the edge (M-p).
 REPICK = True
 _REPICK_S = 5.0
 _REPICK_DUMP_S = 4.0
@@ -500,6 +503,7 @@ class LiveSession(QObject):
         self._repick_moved = 0.0  # ... and when it last moved since ...
         self._repick_seen = 0.0  # ... and the last tick it was looked at
         self._repick_opened = -math.inf  # the tune's first open
+        self._repick_playing: Optional[float] = None  # ... and when VLC first played it
         self._rewound = False  # "Rewound past the buffer" was said; VLC has not played since
         # The mean lag over the source's arrival rhythm, and the lag as shown (2.1).
         self._filter = LagFilter()
@@ -1144,6 +1148,7 @@ class LiveSession(QObject):
         self._reland_edge = self._live_edge(snapshot)
         self._repick_until, self._repick_step = self._clock() + _REPICK_S, None
         self._repick_opened = self._clock()
+        self._repick_playing = None
 
     def _open_first_again(self) -> None:
         """The tune's first open failed (no helper served it): pick its start again."""
@@ -1550,9 +1555,13 @@ class LiveSession(QObject):
             self._repick_until, self._repick_step = -math.inf, None
             return False
         tick, self._repick_seen = max(0.0, now - self._repick_seen), now
+        if self._opened_at is None and self._repick_playing is None:
+            self._repick_playing = now
         played = self._opened_at is None and self._last_ms != 0
         since = now - self._repick_opened
-        if since > _REPICK_DEADLINE_S or (not played and since > _REPICK_PLAY_S):
+        began = self._repick_opened if self._repick_playing is None else self._repick_playing
+        late = now - began > _REPICK_PLAY_S
+        if since > _REPICK_DEADLINE_S or (not played and late):
             self._repick_until, self._repick_step = -math.inf, None  # never, this tune
             return False
         if grown > _REPICK_DUMP_S and now < self._repick_until:

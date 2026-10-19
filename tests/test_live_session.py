@@ -336,8 +336,10 @@ class Feed:
         pcr=0.0,
         speed=1.0,
         speed_1x=1.0,
+        open_s=0.0,
     ):
         self.case, self.sid, self.burst, self.gop = case, sid, burst, gop
+        self.open_s, self.opening_until = open_s, None  # VLC takes this long to play an open
         self.crawl, self.crawled = crawl, 0.0  # wall seconds at another rate since a step
         self.crawl_1x = crawl_1x
         self.hls = hls
@@ -402,7 +404,13 @@ class Feed:
                 self.position, self.media = self.case.live.position(), 0.0
                 self.stamp = self.pending_jump = 0.0
                 self.stamp_offset = self.lead  # VLC's clock may start ahead of its picture
+                if self.open_s > 0:
+                    self.opening_until = self.case.clock.now + self.open_s
+                    return
                 playback.set_state(PlaybackState.PLAYING)
+        if self.opening_until is not None and self.case.clock.now >= self.opening_until - 1e-9:
+            self.opening_until = None
+            playback.set_state(PlaybackState.PLAYING)
 
     def run(self, seconds):
         case, playback = self.case, self.case.playback
@@ -4685,6 +4693,26 @@ class RepickTests(LiveSessionCase):
                     lag = self.timelines[-1]["lag"]
                     self.assertEqual(self.outcome(feed), (2, 0.0))
                     self.assertLess(lag, 22.0)
+
+    def test_a_dump_then_a_flow_is_picked_again_when_vlcs_first_reading_comes_late(self):
+        # Re-review 2, M-r: VLC slow to open (1.5 s) a sparse-PCR channel, whose clock reads
+        # its first time only at its next PCR (2 s): more than `_REPICK_PLAY_S` after the
+        # open, within it of the playing. The dump then flow is picked again all the same.
+        for latency in (AUTO, "normal"):
+            with self.subTest(latency=latency):
+                feed = self.tune(latency, burst=0.0, edge=2.0, pcr=2.0, open_s=1.5)
+                feed.ready(backlog_after_start=False)
+                self.opened(feed)
+                opened = self.clock.now
+                feed.run(0.7)
+                feed.edge += 20.0
+                feed.push()
+                for _ in range(80):
+                    feed.run(0.25)
+                    if len(self.playback.plays) > 1:
+                        break
+                self.assertLess(self.clock.now - opened, 12.0)
+                self.assertEqual(self.outcome(feed)[0], 2)
 
     def test_a_reopen_in_software_and_the_re_pick_are_never_two_opens_in_a_row(self):
         # Hardware decoding froze the picture right after the dump: the stream opened again
