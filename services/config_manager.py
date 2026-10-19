@@ -445,6 +445,7 @@ class ConfigManager:
     pip_volume = _config_property(
         "pip_volume", DEFAULT_OPTION_PIP_VOLUME, coerce=int, clamp=(0, 100)
     )
+    subtitle_folder = _config_property("subtitle_folder", "", coerce=str)  # 2.2: Load a file…
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 

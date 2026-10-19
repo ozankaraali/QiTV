@@ -15,8 +15,8 @@ Left of fullscreen sit the mini player (the whole window small in a corner, Alt+
 TV while the window offers picture in picture the second channel (P), then "Open in external
 player" (the shell's VLC/MPV menu for what plays now). Hovering those names them and their keys.
 Left of the sound (♫) a speaker opens the volume mixer on the large picture's row; it shows
-whether that picture is muted. ♫ opens the Sound panel above it (ui/track_controls.py): the
-controls stay up while it shows (`hold`).
+whether that picture is muted. ♫ opens the Sound panel above it and the subtitles button
+the Subtitles panel (ui/track_controls.py): the controls stay up while one shows (`hold`).
 Without a keyboard every key of the player has a control here too (the owner's mouse-only
 rule): left of the speaker sit Search, and on live TV the guide and the previous channel; a
 time-shifted channel at its live edge has ◀10 beside play; on live TV the channel's name (and
@@ -79,8 +79,6 @@ TOOLTIPS = {
     "fullscreen_back": "Exit fullscreen (F)",
     "external": "Open in external player",
     "volume": "Volume (+/−, M)",
-    "audio": "Sound: track and sync (J, K)",
-    "subtitles": "Subtitles",
     "slower": "Slower",
     "speed": "Normal speed",
     "faster": "Faster",
@@ -97,6 +95,9 @@ KEY_HINTS = {
     "search": ("Search", "Ctrl+F"),
     "title": ("Channel info", "I"),
     "library": ("Back to the Library", "Esc"),
+    # 2.2: each opens a panel whose − and + are these keys.
+    "audio": ("Sound: track and sync", "J, K"),
+    "subtitles": ("Subtitles: track, file and sync", "Shift+J, Shift+K"),
 }
 FAVORITE_KEY = "Ctrl+D"
 # button name -> painting icon, if they differ
@@ -104,7 +105,7 @@ _ICONS = {"mini": "mini_player", "pip": "pip", "previous": "recent"}
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
 # A quick second click (a double-click) repeats these steps; on any other control it counts
 # once: a toggle (★, ⛶, ▶) would undo itself, a jump (⟲, Next) go one further.
-_REPEATS = ("back10", "fwd10", "fwd60", "slower", "faster", "subtitles")
+_REPEATS = ("back10", "fwd10", "fwd60", "slower", "faster")
 _ICON_BUTTONS = (  # painted as icons
     "previous",
     "guide",

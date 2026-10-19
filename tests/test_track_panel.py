@@ -1,7 +1,10 @@
-"""The Sound panel (2.2): ♫ opens it above the button, a click or the keys choose a track and
-nudge the sound's sync, and a click elsewhere, Esc or the idle wait closes it."""
+"""The Sound and Subtitles panels (2.2): ♫ (or the subtitles button) opens one above its
+button, a click or the keys choose a track and nudge the sync, "Load a file…" and a drop load
+a subtitle file, and a click elsewhere, Esc or the idle wait closes it."""
 
 import os
+import tempfile
+from types import SimpleNamespace
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -12,7 +15,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
 from services.sound_sync import SoundSync
-from ui.keymap import Action
+from ui.keymap import Action, key_hint
 from ui.link_lanes import Target
 from ui.overlays.track_panel import IDLE_MS, PanelModel, PanelRow, PanelSync, TrackPanel
 from ui.overlays.transport import Transport
@@ -34,6 +37,12 @@ class FakePlayer(QObject):
         self.audio = list(audio)
         self.playing = 1
         self.delay = 0
+        self.subtitles = [(-1, "Disable"), (3, "English"), (4, "Français")]
+        self.spu = -1  # no subtitles shown
+        self.spu_delay = 0
+        self.files = []  # what add_subtitle_file() was given
+        self.loads = True  # whether libVLC takes a file
+        self.clears = 0
 
     def audio_tracks(self):
         return list(self.audio)
@@ -49,6 +58,34 @@ class FakePlayer(QObject):
 
     def set_audio_delay(self, ms):
         self.delay = ms
+
+    def subtitle_tracks(self):
+        return list(self.subtitles)
+
+    def subtitle_track(self):
+        return self.spu
+
+    def set_subtitle_track(self, track_id):
+        self.spu = track_id
+
+    def subtitle_delay(self):
+        return self.spu_delay
+
+    def set_subtitle_delay(self, ms):
+        self.spu_delay = ms
+
+    def add_subtitle_file(self, path):
+        """As PlaybackSession does once libVLC read it: a track named after the file, chosen."""
+        self.files.append(path)
+        if not self.loads:
+            return False
+        self.spu = max(i for i, _ in self.subtitles) + 1
+        self.subtitles.append((self.spu, os.path.basename(path)))
+        return True
+
+    def clear_subtitles(self):
+        self.clears += 1
+        self.spu_delay = 0
 
 
 class TextTests(unittest.TestCase):
@@ -78,20 +115,32 @@ class PanelCase(unittest.TestCase):
         self.current = CHANNEL
         self.store = SoundSync(None)
         self.toasts = []
+        self.playing = True
+        self.config = SimpleNamespace(subtitle_folder="")
+        self.picks = []  # the folders the file dialog opened in
+        self.chosen = ""  # what the file dialog gives back
         self.panel = TrackPanel(self.host)
+        self.subtitle_panel = TrackPanel(self.host)
         self.controls = self.make_controls()
 
-    def make_controls(self, panel="default"):
+    def pick(self, folder):
+        self.picks.append(folder)
+        return self.chosen
+
+    def make_controls(self, panel="default", subtitle_panel="default"):
         controls = TrackControls(
             sound_panel=self.panel if panel == "default" else panel,
+            subtitle_panel=self.subtitle_panel if subtitle_panel == "default" else subtitle_panel,
             transport=self.transport,
             session=lambda: self.player,
             current=lambda: self.current,
-            playing=lambda: True,
+            playing=lambda: self.playing,
             channel_key=lambda item: f"key-{item['id']}",
             store=self.store,
             toast=lambda text, *args: self.toasts.append(text),
             show_transport=self.transport.poke,
+            pick_file=self.pick,
+            config=self.config,
         )
         controls.wire()
         return controls
@@ -105,9 +154,9 @@ class PanelCase(unittest.TestCase):
     def click_panel(self, rect):
         self.click(self.panel, rect.center().toPoint())
 
-    def shown(self):
+    def shown(self, panel=None):
         """What the panel shows: its rows (ticked marked "*") and its Sync text."""
-        model = self.panel.model()
+        model = (panel or self.panel).model()
         rows = [("*" if r.checked else "") + r.text for r in model.rows]
         return rows, model.sync.text if model.sync else None
 
@@ -292,10 +341,149 @@ class SoundPanelTests(PanelCase):
         self.assertEqual(small.delay, 200)
 
     def test_without_a_panel_the_button_cycles_the_tracks(self):
-        controls = self.make_controls(panel=None)
+        controls = self.make_controls(panel=None, subtitle_panel=None)
         controls.open_sound()
         controls.open_sound()
-        self.assertEqual(self.toasts, ["Audio: Deutsch", "Audio: English"])
+        controls.open_subtitles()
+        controls.open_subtitles()
+        self.assertEqual(
+            self.toasts,
+            ["Audio: Deutsch", "Audio: English", "Subtitles: English", "Subtitles: Français"],
+        )
+
+    def test_nothing_playing_nothing_opens(self):
+        self.playing = False
+        self.click_button("audio")
+        self.controls.nudge_sound(1)
+        self.assertFalse(self.panel.isVisible())
+        self.assertEqual((self.player.delay, self.toasts), (0, []))
+
+
+class SubtitlesPanelTests(PanelCase):
+    def setUp(self):
+        super().setUp()
+        self.current = FILM
+        self.transport.show_vod("Lighthouse", "")
+        self.transport.update_position(0, 100_000)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.srt = os.path.join(directory.name, "Lighthouse.en.srt")
+        with open(self.srt, "w", encoding="utf-8") as f:
+            f.write("1\n00:00:01,000 --> 00:00:04,000\nHello\n")
+
+    def subtitles(self):
+        return self.shown(self.subtitle_panel)
+
+    def test_off_and_the_tracks_then_load_a_file_and_no_sync_while_off(self):
+        self.click_button("subtitles")
+        panel = self.subtitle_panel
+        self.assertTrue(panel.isVisible())
+        self.assertEqual(panel.model().title, "Subtitles")
+        self.assertEqual(self.subtitles(), (["*Off", "English", "Français", "Load a file…"], None))
+        self.assertTrue(panel.model().rows[-1].action)
+        self.assertEqual(self.transport.held(), "subtitles")
+        button = self.transport.button_rect("subtitles")
+        self.assertAlmostEqual(panel.geometry().center().x(), button.center().x(), delta=2)
+
+    def test_a_track_shows_and_its_sync_row_comes(self):
+        self.click_button("subtitles")
+        self.click(self.subtitle_panel, self.subtitle_panel.row_rect(2).center().toPoint())
+        self.assertEqual(self.player.spu, 4)
+        self.assertEqual(
+            self.subtitles(), (["Off", "English", "*Français", "Load a file…"], "In sync")
+        )
+        later = self.subtitle_panel.control_rect("later")
+        self.click(self.subtitle_panel, later.center().toPoint())
+        self.click(self.subtitle_panel, later.center().toPoint())
+        self.assertEqual(self.player.spu_delay, 100)
+        self.assertEqual(self.subtitles()[1], "Subtitles 100 ms later")
+        self.assertEqual(self.player.delay, 0)  # the sound's is its own
+        self.assertEqual(self.store.audio_ms("key-m1"), 0)
+        tip = self.subtitle_panel.tooltip_at(later.center())
+        self.assertEqual(tip, key_hint("Subtitles 50 ms later", "Shift+K"))
+
+    def test_load_a_file_asks_for_one_and_shows_it_chosen(self):
+        self.chosen = self.srt
+        self.click_button("subtitles")
+        self.click(self.subtitle_panel, self.subtitle_panel.row_rect(3).center().toPoint())
+        self.assertEqual(self.picks, [""])
+        self.assertEqual(self.player.files, [self.srt])
+        self.assertTrue(self.subtitle_panel.isVisible())  # back, with the file
+        rows, sync = self.subtitles()
+        self.assertEqual(rows, ["Off", "English", "Français", "*Lighthouse.en.srt", "Load a file…"])
+        self.assertEqual(sync, "In sync")
+        self.assertEqual(self.config.subtitle_folder, os.path.dirname(self.srt))
+        self.assertEqual(self.toasts, [])  # the panel shows it
+        self.click(self.subtitle_panel, self.subtitle_panel.row_rect(4).center().toPoint())
+        self.assertEqual(self.picks, ["", os.path.dirname(self.srt)])  # the last folder
+
+    def test_a_dialog_cancelled_loads_nothing(self):
+        self.click_button("subtitles")
+        self.click(self.subtitle_panel, self.subtitle_panel.row_rect(3).center().toPoint())
+        self.assertEqual((self.picks, self.player.files), ([""], []))
+        self.assertFalse(self.subtitle_panel.isVisible())
+        self.assertEqual(self.transport.held(), "")
+
+    def test_a_file_libvlc_refuses_is_said(self):
+        self.player.loads = False
+        self.assertFalse(self.controls.load_subtitle_file(self.srt))
+        self.assertEqual(self.toasts, ["Couldn't load the subtitles Lighthouse.en.srt"])
+        self.assertEqual(self.config.subtitle_folder, "")
+
+    def test_shift_j_and_shift_k_move_the_subtitles_while_one_shows(self):
+        self.controls.nudge_subtitles(1)
+        self.assertEqual(self.toasts, ["Subtitles are off"])
+        self.player.spu = 3
+        self.controls.nudge_subtitles(-1)
+        self.controls.nudge_subtitles(-1)
+        self.assertEqual(self.player.spu_delay, -100)
+        self.assertEqual(self.toasts[1:], ["Subtitles 50 ms earlier", "Subtitles 100 ms earlier"])
+        self.click_button("subtitles")
+        self.controls.nudge_subtitles(1)
+        self.assertEqual(self.subtitles()[1], "Subtitles 50 ms earlier")
+        self.assertEqual(len(self.toasts), 3)  # the panel says it
+        self.assertFalse(self.controls.handle(Action.SUBTITLES_LATER))  # it stays open
+        self.assertTrue(self.subtitle_panel.isVisible())
+
+    def test_a_dropped_subtitle_file_loads_and_says_so(self):
+        movie = os.path.join(os.path.dirname(self.srt), "Lighthouse.mkv")
+        self.assertTrue(self.controls.accepts_drop([movie, self.srt]))
+        self.assertFalse(self.controls.accepts_drop([movie]))
+        self.assertTrue(self.controls.drop([movie, self.srt]))
+        self.assertEqual(self.player.files, [self.srt])
+        self.assertEqual(self.toasts, ["Subtitles: Lighthouse.en.srt"])
+        self.assertEqual(self.player.spu, 5)
+        self.assertFalse(self.controls.drop([movie]))
+
+    def test_nothing_playing_takes_no_drop(self):
+        self.playing = False
+        self.assertFalse(self.controls.accepts_drop([self.srt]))
+        self.assertFalse(self.controls.drop([self.srt]))
+        self.assertEqual(self.player.files, [])
+
+    def test_one_panel_at_a_time(self):
+        self.click_button("audio")
+        self.controls.open_subtitles()
+        self.assertFalse(self.panel.isVisible())
+        self.assertTrue(self.subtitle_panel.isVisible())
+        self.assertEqual(self.transport.held(), "subtitles")
+        self.assertTrue(self.controls.handle(Action.ESCAPE))
+        self.assertFalse(self.subtitle_panel.isVisible())
+        self.assertEqual(self.transport.held(), "")
+
+    def test_the_panel_follows_a_track_that_comes_later(self):
+        self.click_button("subtitles")
+        self.player.subtitles.append((9, "Track 3"))
+        elapse(700)
+        self.assertIn("Track 3", self.subtitles()[0])
+
+    def test_another_title_starts_without_the_files_a_retry_keeps_them(self):
+        self.controls.prepare(self.player, FILM, FILM)
+        self.assertEqual(self.player.clears, 0)
+        self.controls.prepare(self.player, CHANNEL, FILM)
+        self.assertEqual(self.player.clears, 1)
+        self.controls.prepare_small(self.player, OTHER.item)
+        self.assertEqual(self.player.clears, 2)
 
 
 class PanelWidgetTests(PanelCase):

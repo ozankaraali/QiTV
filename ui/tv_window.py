@@ -13,6 +13,9 @@ Every key goes through ui.keymap: on the Library page to the LibraryController, 
 TVController, so the open drawer receives typed text. Single-key menu entries only show their
 key; modifier combinations are real shortcuts. Keys the keymap resolves are claimed before any
 shortcut or native menu key equivalent (ShortcutOverride), so nothing fires twice.
+
+A subtitle file dropped on the window (the video, its overlays or the Library with its corner
+player) loads with what plays (2.2; the controller says whether it would, while it is dragged).
 """
 
 from __future__ import annotations
@@ -40,6 +43,9 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
     QGuiApplication,
     QKeyEvent,
     QMouseEvent,
@@ -48,6 +54,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QMainWindow,
     QWidget,
 )
@@ -103,6 +110,7 @@ from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
 from ui.settings_dialog import OptionsDialog
+from ui.track_controls import SUBTITLE_FILTER
 from ui.tv_controller import ERROR_MS, Overlays, TVController
 from ui.tv_menus import TVMenus
 from ui.tv_pages import TVPages
@@ -313,6 +321,7 @@ class TVWindow(QMainWindow):
 
         self.setWindowTitle("QiTV")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAcceptDrops(True)  # a subtitle file dropped on it (2.2)
         # The player page is the video container: the large surface fills it, and picture in
         # picture puts the other one in a corner (the PiP frame lays them out). The page paints
         # the black behind the video; the surfaces paint nothing (see ui/video_surface.py).
@@ -338,6 +347,8 @@ class TVWindow(QMainWindow):
         self.setCentralWidget(self.pages)
         # Glued to the page, not a surface: either surface may be the large one.
         self.host = OverlayHost(self, self.player_page)  # shown only while the page is
+        self.host.setAcceptDrops(True)  # a window of its own: a drop on the overlays
+        self.host.installEventFilter(self)
 
         # One catalog per provider behind the hub; each page browses its own provider's.
         # provider_manager stays the registry (the provider list Settings edits).
@@ -440,6 +451,7 @@ class TVWindow(QMainWindow):
         self.pip_label = PipLabel(host)
         self.mixer = Mixer(host)
         self.sound_panel = TrackPanel(host)
+        self.subtitle_panel = TrackPanel(host)
         self.corner_controls = CornerControls(host)
         self.overlays = Overlays(
             banner=ZapBanner(host),
@@ -453,14 +465,15 @@ class TVWindow(QMainWindow):
             pip_label=self.pip_label,
             mixer=self.mixer,
             sound_panel=self.sound_panel,
+            subtitle_panel=self.subtitle_panel,
             library_toast=self.library_toast,
         )
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
         # bottom corner's PiP: its pill, ⇄, speaker and × stay within reach; elsewhere on the
         # PiP the transport keeps only its own buttons and bar, and other clicks reach the
         # small picture (OverlayHost.set_hole). The mixer shows over both (it sits above the
-        # transport's controls and beside the PiP), and the Sound panel over it (above its
-        # button). The drawer and the guide cover them all.
+        # transport's controls and beside the PiP), and the Sound and Subtitles panels over it
+        # (above their buttons). The drawer and the guide cover them all.
         for overlay in (
             self.overlays.banner,
             self.overlays.column,
@@ -468,6 +481,7 @@ class TVWindow(QMainWindow):
             self.pip_label,
             self.mixer,
             self.sound_panel,
+            self.subtitle_panel,
             self.overlays.drawer,
             self.overlays.guide,
             self.overlays.next_card,
@@ -511,6 +525,7 @@ class TVWindow(QMainWindow):
             sessions=self.sessions,
             pip_frame=self.pip_frame,
             sound_sync=self.sound_sync,
+            pick_subtitle_file=self.pick_subtitle_file,
             parent=self,
         )
         self.controller = controller
@@ -613,6 +628,13 @@ class TVWindow(QMainWindow):
             if mode == PageStack.PLAYER and not self.pip_frame.small_rect().isEmpty():
                 self.pip_label.show()  # the corner hid it; the PiP only shows it when it opens
 
+    def pick_subtitle_file(self, folder: str) -> str:
+        """The Subtitles panel's "Load a file…": a subtitle file, from `folder` ("": none)."""
+        if self._closing:
+            return ""
+        path, _filter = QFileDialog.getOpenFileName(self, "Load subtitles", folder, SUBTITLE_FILTER)
+        return path if not self._closing else ""
+
     def _on_corner_sound(self) -> None:
         self.controller.handle(Action.MUTE)
         self.corner_controls.set_muted(self.controller.main_muted())
@@ -681,7 +703,44 @@ class TVWindow(QMainWindow):
             return
         self.controller.video_clicked()
 
+    # ---- dropped files -------------------------------------------------------------------------
+
+    @staticmethod
+    def _dropped_paths(event: QDropEvent) -> list[str]:
+        mime = event.mimeData()
+        if mime is None or not mime.hasUrls():
+            return []
+        return [url.toLocalFile() for url in mime.urls() if url.isLocalFile()]
+
+    def _on_drag(self, event: QDropEvent) -> None:
+        """Dragged over the window (or its overlays): taken only when it would load."""
+        if not self._closing and self.controller.accepts_subtitles(self._dropped_paths(event)):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def _on_drop(self, event: QDropEvent) -> None:
+        if not self._closing and self.controller.drop_subtitles(self._dropped_paths(event)):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        self._on_drag(event)
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        self._on_drag(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        self._on_drop(event)
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if isinstance(watched, OverlayHost) and isinstance(event, QDropEvent):  # drags too
+            if event.type() == QEvent.Type.Drop:
+                self._on_drop(event)
+            else:
+                self._on_drag(event)
+            return True
         if watched in (self.surface, self.pip_surface) and isinstance(event, QMouseEvent):
             if event.type() in _CLICK_EVENTS:
                 reclaim_first_responder(self)  # macOS: libVLC's view took the keys

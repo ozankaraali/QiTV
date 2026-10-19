@@ -1,6 +1,8 @@
-"""The sound's sync in the TV shell (2.2): J and K move the large picture's sound, a live
-channel keeps its sync for its next tune and for each reopen, a film's lasts while it plays,
-and a swap moves nothing: the sync follows the channel, not the player.
+"""The sound's sync and the subtitles in the TV shell (2.2): J and K move the large picture's
+sound, a live channel keeps its sync for its next tune and for each reopen, a film's lasts
+while it plays, and a swap moves nothing: the sync follows the channel, not the player.
+Shift+J and Shift+K move the subtitles; a subtitle file dropped on the window shows with what
+plays, and another channel or title starts without it.
 
 The controller's fakes are tests/test_tv_controller.py's and tests/test_tv_pip.py's.
 """
@@ -166,3 +168,57 @@ class SyncFollowsTheChannelTests(PipCase):
         self.controller.handle(Action.SWAP)
         self.start_large(1)
         self.assertEqual(self.session.play_delays[-1], 250)
+
+
+class SubtitleFlowTests(ControllerTestCase):
+    """Subtitle files and the subtitles' sync are the playback's: another channel or title
+    starts without them, a retry keeps them."""
+
+    def setUp(self):
+        super().setUp()
+        self.picked = []
+        self.controller = self.make_controller(
+            self.column, pick_subtitle_file=lambda folder: self.picked.append(folder) or ""
+        )
+        self.controller.start()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.srt = os.path.join(directory.name, "Heat.en.srt")
+        open(self.srt, "w").close()
+
+    def test_shift_j_and_shift_k_move_the_subtitles_that_show(self):
+        self.play(0)
+        self.controller.handle(Action.SUBTITLES_LATER)
+        self.assertEqual(self.toast.messages()[-1], ("Subtitles are off", "info"))
+        self.session.subtitle_on = 3
+        self.controller.handle(Action.SUBTITLES_LATER)
+        self.controller.handle(Action.SUBTITLES_LATER)
+        self.controller.handle(Action.SUBTITLES_EARLIER)
+        self.assertEqual(self.session.subtitle_ms, 50)
+        self.assertEqual(self.toast.messages()[-1], ("Subtitles 50 ms later", "info"))
+        self.assertEqual(self.session.delay, 0)  # the sound's is its own
+
+    def test_a_dropped_file_shows_with_what_plays_and_goes_with_it(self):
+        self.assertFalse(self.controller.accepts_subtitles([self.srt]))  # nothing plays
+        self.assertFalse(self.controller.drop_subtitles([self.srt]))
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
+        self.ready("http://vod/heat.mkv")
+        self.assertTrue(self.controller.accepts_subtitles([self.srt]))
+        self.assertTrue(self.controller.drop_subtitles([self.srt]))
+        self.assertEqual(self.session.files, [self.srt])
+        self.assertEqual(self.toast.messages()[-1], ("Subtitles: Heat.en.srt", "info"))
+        self.assertEqual(self.config.subtitle_folder, os.path.dirname(self.srt))
+        clears = self.session.clears
+        self.play(0)  # a channel: no file, in sync
+        self.assertEqual(self.session.clears, clears + 1)
+        self.assertEqual(self.session.files, [])
+
+    def test_the_subtitles_button_cycles_without_its_panel(self):
+        self.play(0)
+        self.transport.subtitleRequested.emit()
+        self.transport.subtitleRequested.emit()
+        self.assertEqual(self.session.subtitle_set, [3, -1])
+        self.assertEqual(
+            self.toast.messages()[-2:],
+            [("Subtitles: Français", "info"), ("Subtitles: Off", "info")],
+        )

@@ -683,7 +683,8 @@ class OnScreenKeysTests(unittest.TestCase):
             ("previous", t.previousRequested, t.button_rect("previous")),
             ("fullscreen", t.fullscreenRequested, t.button_rect("fullscreen")),
             ("pip", t.pipRequested, t.button_rect("pip")),
-            ("audio", t.audioRequested, t.button_rect("audio")),  # 2.2: it opens a panel
+            ("audio", t.audioRequested, t.button_rect("audio")),  # 2.2: they open panels
+            ("subtitles", t.subtitleRequested, t.button_rect("subtitles")),
         ):
             with self.subTest(name=name):
                 spy = QSignalSpy(signal)
@@ -699,13 +700,13 @@ class OnScreenKeysTests(unittest.TestCase):
         self.assertEqual([spy.at(i)[0] for i in range(spy.count())], [-10_000, -10_000])
 
     def test_the_sound_buttons_say_what_they_do(self):
-        # 2.0.1 review M3: ♪ and the subtitles had no tooltip; 2.2: ♫ names its sync keys.
+        # 2.0.1 review M3: ♪ and the subtitles had no tooltip; 2.2: they name their sync keys.
         t = self.make()
         t.show_vod("Film", "")
         t.update_position(0, 100_000)
         for name, tooltip in (
             ("audio", "Sound: track and sync (J, K)"),
-            ("subtitles", "Subtitles"),
+            ("subtitles", key_hint("Subtitles: track, file and sync", "Shift+J, Shift+K")),
         ):
             self.assertEqual(t.tooltip_at(t.button_rect(name).center()), tooltip, name)
 

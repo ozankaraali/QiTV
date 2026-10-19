@@ -1,9 +1,10 @@
-"""A small panel above a player control's button: the Sound panel (2.2).
+"""A small panel above a player control's button: the Sound and Subtitles panels (2.2).
 
-The transport's ♫ opens it just above the button and the player controls (which stay up
-while it shows). It lists what can be chosen, the sound's tracks when there are two or more,
-the one playing ticked, then a Sync row: [ − ]  Sound 150 ms later  [ + ], with Reset beside
-"Sync" while it is not in sync. A click on a row chooses it; − and + step (a quick second
+The transport's ♫ (or its subtitles button) opens it just above the button and the player
+controls (which stay up while it shows). It lists what can be chosen, the one playing ticked
+(the sound's tracks; Off and the subtitle tracks), maybe an action row ("Load a file…"),
+then a Sync row: [ − ]  Sound 150 ms later  [ + ], with Reset beside "Sync" while it is not
+in sync. A click on a row chooses it; − and + step (a quick second
 click steps again); hovering them names their keys. The keys reach it through the shell
 while it shows (ui/track_controls.py): ↑/↓ move between its rows, Enter chooses, ←/→ step,
 Esc closes it. A click anywhere else in the window closes it (and does nothing more; the
@@ -69,9 +70,10 @@ _EVENTS_OUTSIDE = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick
 
 @dataclass(frozen=True)
 class PanelRow:
-    key: object  # what `rowChosen` gives back: a track's id
+    key: object  # what `rowChosen` gives back: a track's id, or an action's name
     text: str
     checked: bool = False
+    action: bool = False  # it does something ("Load a file…"): never ticked, in the accent
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,7 @@ class TrackPanel(Overlay):
         self._hover: Optional[int] = None  # the row under the pointer
         self._shown = QElapsedTimer()  # since it showed: a double-click's second press
         self._filtering = False
+        self._idle_ms = idle_ms
         self._idle = QTimer(self, singleShot=True, interval=idle_ms)
         self._idle.timeout.connect(self.dismiss)
         if parent is not None:
@@ -150,10 +153,22 @@ class TrackPanel(Overlay):
             self.show()
         self.raise_()
         self.update()
-        self._idle.start()
+        self._touch()
 
     def model(self) -> PanelModel:
         return self._model
+
+    def set_model(self, model: PanelModel) -> None:
+        """What it shows changed by itself (a track came): no touch, the idle wait goes on."""
+        if model != self._model and not self.isHidden():
+            remaining = self._idle.remainingTime()
+            self.show_panel(model)
+            if remaining >= 0:
+                self._idle.start(remaining)
+
+    def _touch(self) -> None:
+        """A touch: the idle wait starts again, whole."""
+        self._idle.start(self._idle_ms)
 
     def dismiss(self) -> None:
         self._idle.stop()
@@ -182,19 +197,19 @@ class TrackPanel(Overlay):
             self._focus = ticked[0] if ticked else (0 if delta > 0 else stops - 1)
         else:
             self._focus = max(0, min(stops - 1, self._focus + delta))
-        self._idle.start()
+        self._touch()
         self.update()
 
     def activate(self) -> None:
         """Enter: choose the keys' row (the Sync row has nothing to choose)."""
-        self._idle.start()
+        self._touch()
         focus = self._focus
         if focus is not None and focus < len(self._model.rows):
             self.rowChosen.emit(self._model.rows[focus].key)
 
     def step(self, delta: int) -> None:
         """←/→: the Sync row's − or +, when it can step that way."""
-        self._idle.start()
+        self._touch()
         sync = self._model.sync
         if sync is not None and (sync.earlier if delta < 0 else sync.later):
             self.syncStepped.emit(-1 if delta < 0 else 1)
@@ -346,12 +361,12 @@ class TrackPanel(Overlay):
             if index == lit:
                 self._paint_focus(p, un, rect, outline=index == self._focus)
             x = rect.left() + un.px(_PAD_U) / 2
-            if row.checked:
+            if row.checked or row.action:
                 box = QRectF(x + (tick_w - icon) / 2 - un.px(0.3), 0, icon, icon)
                 box.moveCenter(QPointF(box.center().x(), rect.center().y()))
-                draw_icon(p, "check", box, qcolor(PALETTE.accent))
+                draw_icon(p, "plus" if row.action else "check", box, qcolor(PALETTE.accent))
             p.setFont(fonts["row"])
-            p.setPen(text)
+            p.setPen(qcolor(PALETTE.accent) if row.action else text)
             room = rect.right() - un.px(_PAD_U) / 2 - (x + tick_w)
             shown = row_fm.elidedText(row.text, Qt.TextElideMode.ElideRight, max(0.0, room))
             p.drawText(QRectF(x + tick_w, rect.top(), room, rect.height()), left, shown)
@@ -420,7 +435,7 @@ class TrackPanel(Overlay):
             event.ignore()  # Back/Forward go on to the host: the shell's drawer layers
             return
         event.accept()  # never the host's: it would open the channel list
-        self._idle.start()
+        self._touch()
         if event.button() != Qt.MouseButton.LeftButton:
             return
         hit = self._control_at(event.position())
@@ -449,7 +464,7 @@ class TrackPanel(Overlay):
         if hover != self._hover:
             self._hover = hover
             self.update()
-        self._idle.start()
+        self._touch()
         event.ignore()  # the host shows the player controls
 
     def leaveEvent(self, event: QEvent) -> None:

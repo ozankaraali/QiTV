@@ -236,6 +236,10 @@ class FakeSession(QObject):
         self.delay = 0  # audio_delay(): the sound's sync, in ms
         self.delays = []  # every set_audio_delay()
         self.play_delays = []  # the sync each play() opened with (PlaybackSession sets it then)
+        self.subtitle_on = -1  # subtitle_track()
+        self.subtitle_ms = 0  # subtitle_delay()
+        self.files = []  # add_subtitle_file()
+        self.clears = 0  # clear_subtitles()
         self.url, self.kind = None, None  # what plays, as PlaybackSession.url and .kind
 
     def play(self, url, **kwargs):
@@ -306,6 +310,28 @@ class FakeSession(QObject):
 
     def set_subtitle_track(self, track_id):
         self.subtitle_set.append(track_id)
+        self.subtitle_on = track_id
+
+    def subtitle_track(self):
+        return self.subtitle_on
+
+    def subtitle_delay(self):
+        return self.subtitle_ms
+
+    def set_subtitle_delay(self, ms):
+        self.subtitle_ms = ms
+
+    def add_subtitle_file(self, path):
+        """As libVLC adds a slave: a new track, named after the file, chosen."""
+        self.files.append(path)
+        track = max(i for i, _ in self.subtitles) + 1
+        self.subtitles.append((track, os.path.basename(path)))
+        self.subtitle_on = track
+        return True
+
+    def clear_subtitles(self):
+        self.clears += 1
+        self.files, self.subtitle_ms = [], 0
 
 
 class FakeOverlay(QObject):

@@ -17,14 +17,23 @@ from PySide6.QtCore import (
     QEvent,
     QLoggingCategory,
     QMargins,
+    QMimeData,
     QObject,
     QPoint,
+    QPointF,
     QRect,
     Qt,
     QTimer,
+    QUrl,
     qInstallMessageHandler,
 )
-from PySide6.QtGui import QContextMenuEvent, QGuiApplication, QKeySequence
+from PySide6.QtGui import (
+    QContextMenuEvent,
+    QDragEnterEvent,
+    QDropEvent,
+    QGuiApplication,
+    QKeySequence,
+)
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 from timer_fixtures import elapse, wait_until
@@ -76,6 +85,27 @@ INSTANCE = create_instance(["--vout=dummy", "--aout=dummy", "--quiet"])
 HOST_METHODS = ("save_config", "set_provider", "reload_epg")
 HOST_ATTRIBUTES = ("config_manager", "provider_manager", "epg_manager", "image_manager")
 _OFFSCREEN_NOISE = "This plugin does not support"
+
+
+def drag_and_drop(target, paths):
+    """Drag `paths` (local files) over `target` and drop them there: (entered, dropped)."""
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+    copy, left = Qt.DropAction.CopyAction, Qt.MouseButton.LeftButton
+    point = QPoint(20, 20)
+    enter = QDragEnterEvent(point, copy, mime, left, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(target, enter)
+    drop = QDropEvent(QPointF(point), copy, mime, left, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(target, drop)
+    return enter.isAccepted(), drop.isAccepted()
+
+
+def subtitle_file(test) -> Path:
+    directory = tempfile.TemporaryDirectory()
+    test.addCleanup(directory.cleanup)
+    path = Path(directory.name) / "Channel.en.srt"
+    path.write_text("1\n00:00:00,000 --> 00:00:30,000\nHello\n", encoding="utf-8")
+    return path
 
 
 class WindowCase(unittest.TestCase):
@@ -353,6 +383,23 @@ class TVWindowTests(WindowCase):
         refresh_epg.assert_called_once_with()
         self.close_window()
         self.assertFalse(timer.isActive())
+
+    def test_a_subtitle_file_is_refused_while_nothing_plays(self):
+        window = self.window
+        self.assertTrue(window.acceptDrops() and window.host.acceptDrops())
+        srt = subtitle_file(self)
+        for target in (window, window.host):
+            self.assertEqual(drag_and_drop(target, [srt]), (False, False))
+        self.assertEqual(self.toasts, [])
+
+    def test_the_sound_and_subtitles_panels_sit_over_the_mixer_under_the_drawer(self):
+        window, host = self.window, self.window.host
+        order = [w for w in host.children() if isinstance(w, QWidget) and w in host._overlays]
+        mixer, drawer = order.index(window.mixer), order.index(window.overlays.drawer)
+        sound, subtitles = order.index(window.sound_panel), order.index(window.subtitle_panel)
+        self.assertLess(mixer, sound)
+        self.assertLess(sound, subtitles)
+        self.assertLess(subtitles, drawer)
 
     def test_the_transport_covers_the_overlay_host(self):
         self.show()
@@ -1221,6 +1268,31 @@ class VlcWindowTests(WindowCase):
         QTest.keyClick(window, Qt.Key.Key_Escape)
         self.assertFalse(panel.isVisible())
         self.assertTrue(transport.isVisible())  # Esc closed the panel only
+
+    def test_a_subtitle_file_dropped_on_the_window_or_its_overlays_shows(self):
+        # 2.2: libVLC adds it to the stream that plays; its track is named after the file.
+        window = self.window
+        srt = subtitle_file(self)
+        self.open_first_channel()
+        self.assertTrue(wait_until(self.session_on(channel_urls()[0], (PlaybackState.PLAYING,))))
+        self.assertEqual(drag_and_drop(window, [srt.with_suffix(".mkv")]), (False, False))
+        self.assertEqual(drag_and_drop(window.host, [srt]), (True, True))  # over the overlays
+        session = window.session
+
+        def shown():
+            return dict(session.subtitle_tracks()).get(session.subtitle_track()) == srt.name
+
+        self.assertTrue(wait_until(shown))
+        self.assertIn((f"Subtitles: {srt.name}", "info"), self.toasts)
+        self.assertEqual(drag_and_drop(window, [srt]), (True, True))  # on the video
+        window.controller.mouse_moved()
+        window.overlays.transport.subtitleRequested.emit()
+        panel = window.subtitle_panel
+        self.assertTrue(panel.isVisible())
+        self.assertIn(srt.name, [row.text for row in panel.model().rows])
+        QTest.keyClick(window, Qt.Key.Key_K, Qt.KeyboardModifier.ShiftModifier)
+        self.assertEqual(session.subtitle_delay(), 50)
+        self.assertEqual(panel.model().sync.text, "Subtitles 50 ms later")
 
     def test_down_tunes_the_second_channel(self):
         self.open_first_channel()

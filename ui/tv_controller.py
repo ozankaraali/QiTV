@@ -138,6 +138,7 @@ class Overlays:
     pip_label: Any = None  # the PipLabel (Phase 4), with picture in picture only
     mixer: Any = None  # the volume mixer (Phase 4)
     sound_panel: Any = None  # the Sound panel above ♫ (2.2)
+    subtitle_panel: Any = None  # the Subtitles panel above its button (2.2)
     library_toast: Any = None  # the Library page's toast: the menus' messages while it shows
 
 
@@ -161,11 +162,13 @@ class TVController(QObject):
         sessions: Optional[SessionManager] = None,
         pip_frame=None,
         sound_sync: Optional[SoundSync] = None,
+        pick_subtitle_file: Optional[Callable[[str], str]] = None,
         parent: Optional[QObject] = None,
     ):
         """With `sessions` (picture in picture), its large slot's player, live session and
         tuner stand for `session`, `live` and `budget`. `sound_sync` keeps each channel's
-        sound sync (None: for this run only)."""
+        sound sync (None: for this run only); `pick_subtitle_file(folder)` asks for a subtitle
+        file (the Subtitles panel's "Load a file…")."""
         super().__init__(parent)
         self.config = config
         self.catalog = catalog
@@ -260,7 +263,6 @@ class TVController(QObject):
         self._digits = ""  # number entry under way
         self._state = "idle"
         self._tuning_since = 0.0  # when the banner's keep-alive started (TUNING_CAP_S)
-        self._subtitle_id: Optional[int] = None
         self._guide = GuideController(overlays.guide, parent=self)
         self._autoplay = Autoplay(
             catalog=catalog,
@@ -296,9 +298,13 @@ class TVController(QObject):
             audio_changed=self._on_audio_changed,
             parent=self,
         )
-        # The sound's tracks and sync (J/K, the Sound panel); a channel's sync is kept.
+        # The sound's and the subtitles' tracks and sync (their panels, J/K and Shift+J/K),
+        # subtitle files; a channel's sound sync is kept.
         self._tracks = TrackControls(
             sound_panel=overlays.sound_panel,
+            subtitle_panel=overlays.subtitle_panel,
+            pick_file=pick_subtitle_file,
+            config=config,
             transport=overlays.transport,
             session=lambda: self.session,
             current=lambda: self._current,
@@ -407,7 +413,6 @@ class TVController(QObject):
         transport.miniPlayerRequested.connect(self.window_actions.toggle_mini_player)
         transport.externalRequested.connect(self._on_external_requested)
         transport.volumeRequested.connect(self._mixer.open_main)
-        transport.subtitleRequested.connect(self._cycle_subtitles)
         # The buttons for the player's keys (the owner's mouse-only rule): they act as the keys.
         transport.guideRequested.connect(partial(self.handle, Action.GUIDE))
         transport.previousRequested.connect(partial(self.handle, Action.PREVIOUS))
@@ -578,7 +583,6 @@ class TVController(QObject):
         self._lanes.supersede()
         self._lanes.drop_tune()  # a channel or movie still on its way never opens over it
         self._autoplay.drop()
-        self._subtitle_id = None
         self._live_controls.new_target()
         previous, self._current, self._cid = self._current, target, None
 
@@ -653,7 +657,7 @@ class TVController(QObject):
             return
         drawer = self.overlays.drawer
         if not drawer.isVisible() and self._tracks.handle(action, key):
-            return  # the Sound panel shows: the arrows, Enter and Esc are its own
+            return  # a Sound or Subtitles panel shows: the arrows, Enter and Esc are its own
         if not drawer.isVisible() and self._mixer.handle(action, key):
             return  # the mixer shows: the arrows, M, Tab and Esc are its own
         if action in (Action.CH_NEXT, Action.CH_PREV):
@@ -719,6 +723,8 @@ class TVController(QObject):
             self._mixer.mute()
         elif action in (Action.SOUND_EARLIER, Action.SOUND_LATER):
             self._tracks.nudge_sound(-1 if action is Action.SOUND_EARLIER else 1)
+        elif action in (Action.SUBTITLES_EARLIER, Action.SUBTITLES_LATER):
+            self._tracks.nudge_subtitles(-1 if action is Action.SUBTITLES_EARLIER else 1)
         elif action in (Action.VOL_UP, Action.VOL_DOWN):
             self._change_volume(VOLUME_STEP if action is Action.VOL_UP else -VOLUME_STEP)
         elif action is Action.ESCAPE:
@@ -782,6 +788,7 @@ class TVController(QObject):
             overlays.welcome,
             overlays.mixer,
             overlays.sound_panel,
+            overlays.subtitle_panel,
         )
         return not any(menu is not None and menu.isVisible() for menu in menus)
 
@@ -1146,7 +1153,6 @@ class TVController(QObject):
         launcher = self._external_launcher()
         # Direct plays book the slot under the item's own provider, as pipeline tunes do.
         provider_name = item_provider.provider_name(self.catalog, item)
-        self._subtitle_id = None
         self._live_controls.new_target()  # the old channel's ticks and held notice
         previous = self._current  # what the large picture played: a retry keeps its sync
         if launcher is not None:
@@ -1365,7 +1371,6 @@ class TVController(QObject):
         self._current, self._cid, self._current_url = view.target, view.cid, view.url
         self._restore_channel()
         self._state = self._states.get(new.name, "idle")
-        self._subtitle_id = None
         self._tuning.stop()
         self._autoplay.drop()  # the Next card, and its wait, were the other picture's
         self._freed_for = None  # a title on its way for the large picture was dropped
@@ -1394,7 +1399,7 @@ class TVController(QObject):
             if self._state == "ended":
                 self._autoplay.on_ended(current)  # it ended small: what follows, as at its end
         pip.after_swap()
-        self._tracks.refresh()  # an open Sound panel shows the large picture's sound
+        self._tracks.refresh()  # an open panel shows the large picture's sound or subtitles
         if self._tuner_of(old).idle():
             pip.close()  # the old large picture was between two channels: nothing to show
 
@@ -1752,24 +1757,15 @@ class TVController(QObject):
         """`target` still plays and nothing newer was chosen (autoplay may follow it)."""
         return target is self._current and not self._lanes.busy()
 
-    # ---- tracks -------------------------------------------------------------------------------
+    # ---- subtitle files -----------------------------------------------------------------------
 
-    def _cycle_subtitles(self) -> None:
-        tracks = self.session.subtitle_tracks()
-        if not tracks:
-            self._toast("No subtitles")
-            return
-        current = self._subtitle_id if self._subtitle_id is not None else -1
-        track_id, name = self._next_track(tracks, current)
-        self.session.set_subtitle_track(track_id)
-        self._subtitle_id = track_id
-        self._toast(f"Subtitles: {'Off' if track_id == -1 else name}")
+    def accepts_subtitles(self, paths: Sequence[str]) -> bool:
+        """Whether files dragged over the window would load as subtitles of what plays."""
+        return not self._closed and self._tracks.accepts_drop(paths)
 
-    @staticmethod
-    def _next_track(tracks: list[tuple[int, str]], current: int) -> tuple[int, str]:
-        ids = [t[0] for t in tracks]
-        index = ids.index(current) if current in ids else -1
-        return tracks[(index + 1) % len(tracks)]
+    def drop_subtitles(self, paths: Sequence[str]) -> bool:
+        """Files dropped on the window: their subtitle files show with what plays (large)."""
+        return not self._closed and self._tracks.drop(paths)
 
     # ---- overlays -----------------------------------------------------------------------------
 

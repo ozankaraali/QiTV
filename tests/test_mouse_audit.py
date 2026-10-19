@@ -14,6 +14,7 @@ Screens and their controls:
 - "mixer": each row's "speaker" and "slider", and the "row" itself;
 - "sound": the Sound panel ♫ opens: its track "rows", its sync's "earlier" (−), "later" (+)
   and "reset";
+- "subtitles": the Subtitles panel its button opens, alike, and its "Load a file…";
 - "pip_label": the small picture's "swap", "speaker" and "close";
 - "drawer": the top row's "back", "names", "search", "refresh" and "settings", the ⌕ "find" box,
   its "rows", and the rows of its sources and sections columns by title ("Settings", "Movies" …);
@@ -72,6 +73,11 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("player", "Tab"): (("mixer", "row"),),
     # ♫ opens the Sound panel: its − and + are J and K.
     ("player", "J, K"): (("transport", "audio"), ("sound", "earlier"), ("sound", "later")),
+    ("player", "Shift+J, Shift+K"): (
+        ("transport", "subtitles"),
+        ("subtitles", "earlier"),
+        ("subtitles", "later"),
+    ),
     ("player", "F, F11, Ctrl+Meta+F"): (("transport", "fullscreen"), ("picture", "double-click")),
     ("player", "Ctrl+F"): (("transport", "search"),),
     ("player", "Ctrl+D"): (("transport", "favorite"),),
@@ -210,6 +216,22 @@ def _sound(host: QWidget) -> set[str]:
     return found
 
 
+def _subtitles(host: QWidget) -> set[str]:
+    panel = TrackPanel(host)
+    rows = (
+        PanelRow(-1, "Off"),
+        PanelRow(3, "English", True),
+        PanelRow("load_file", "Load a file…", action=True),
+    )
+    sync = PanelSync("In sync", "Subtitles 5,000 ms earlier")
+    panel.show_panel(PanelModel("Subtitles", rows, sync))
+    found = {"rows"} if not panel.row_rect(0).isEmpty() else set()
+    if any(row.action for row in panel.model().rows) and not panel.row_rect(2).isEmpty():
+        found.add("Load a file…")
+    found.update(n for n in ("earlier", "later") if not panel.control_rect(n).isEmpty())
+    return found
+
+
 def _pip_label(host: QWidget) -> set[str]:
     label = PipLabel(host)
     label.follow(corner_rect(QSize(1280, 720), "br"))
@@ -297,6 +319,7 @@ class MouseOnlyAuditTests(unittest.TestCase):
             "picture": _picture(),
             "mixer": _mixer(_child(host)),
             "sound": _sound(_child(host)),
+            "subtitles": _subtitles(_child(host)),
             "pip_label": _pip_label(_child(host)),
             "drawer": drawer,
             "context": context,

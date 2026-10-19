@@ -122,6 +122,35 @@ class ClosedKeymapTests(unittest.TestCase):
     def test_tab_switches_the_mixers_rows(self):
         self.assertEqual(closed(K.Key_Tab, "\t"), (Action.TAB, ""))
 
+    def test_j_and_k_move_the_sound_and_with_shift_the_subtitles(self):
+        # 2.2, VLC's J and K; its G and H are the subtitles' there, but G is the guide here.
+        self.assertEqual(closed(K.Key_J, "j"), (Action.SOUND_EARLIER, ""))
+        self.assertEqual(closed(K.Key_K, "k"), (Action.SOUND_LATER, ""))
+        self.assertEqual(closed(K.Key_J, "J", SHIFT), (Action.SUBTITLES_EARLIER, ""))
+        self.assertEqual(closed(K.Key_K, "K", SHIFT), (Action.SUBTITLES_LATER, ""))
+        self.assertIsNone(closed(K.Key_J, "j", CTRL))
+        self.assertIsNone(closed(K.Key_K, "˚", ALT))
+
+    def test_j_and_k_are_free_everywhere_else(self):
+        # The channel list and the Library type them; the guide does nothing with them.
+        for mods, text in ((NONE, "j"), (SHIFT, "J")):
+            self.assertEqual(opened(K.Key_J, text, mods), (Action.NAV_TEXT, text))
+            self.assertEqual(library(K.Key_J, text, mods), (Action.NAV_TEXT, text))
+            self.assertIsNone(guide(K.Key_J, text, mods))
+            self.assertIsNone(guide(K.Key_K, text.replace("j", "k").replace("J", "K"), mods))
+        claimed = {  # the screens that act on letters (the others type them)
+            key
+            for context in ("player", "guide")
+            for keys, _what in SHORTCUTS[context]
+            for key in shortcut_keys(keys)
+            if key in ("J", "K", "H", "Shift+J", "Shift+K")
+        }
+        self.assertEqual(claimed, {"J", "K", "Shift+J", "Shift+K"})
+
+    def test_other_shifted_letters_still_act_as_their_letters(self):
+        self.assertEqual(closed(K.Key_L, "L", SHIFT), (Action.GO_LIVE, ""))
+        self.assertEqual(closed(K.Key_M, "M", SHIFT), (Action.MUTE, ""))
+
     def test_media_volume_keys(self):
         self.assertEqual(closed(K.Key_VolumeUp), (Action.VOL_UP, ""))
         self.assertEqual(closed(K.Key_VolumeDown), (Action.VOL_DOWN, ""))

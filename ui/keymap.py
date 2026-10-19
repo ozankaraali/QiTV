@@ -51,6 +51,8 @@ class Action(str, Enum):
     TAB = "tab"  # the mixer's other row
     SOUND_EARLIER = "sound_earlier"  # J: the sound 50 ms earlier against the picture
     SOUND_LATER = "sound_later"  # K: 50 ms later (VLC's keys)
+    SUBTITLES_EARLIER = "subtitles_earlier"  # Shift+J: the subtitles 50 ms earlier
+    SUBTITLES_LATER = "subtitles_later"  # Shift+K (VLC's G and H: G is the guide here)
 
 
 CONTEXTS = ("player", "drawer", "library", "guide")
@@ -103,6 +105,11 @@ _PLAYER_CHARS = {
     _K.Key_S.value: Action.SWAP,
     _K.Key_J.value: Action.SOUND_EARLIER,
     _K.Key_K.value: Action.SOUND_LATER,
+}
+# With Shift, the sound's sync keys move the subtitles (the player only).
+_PLAYER_SHIFT_CHARS = {
+    _K.Key_J.value: Action.SUBTITLES_EARLIER,
+    _K.Key_K.value: Action.SUBTITLES_LATER,
 }
 # Remote channel keys (drawer closed, like the arrows they stand in for).
 _CHANNEL_KEYS = {
@@ -212,6 +219,8 @@ def resolve(
         return Action.DIGIT, chr(key)
     if len(text) == 1 and text in _DIGITS:  # layouts where digits need Shift
         return Action.DIGIT, text
+    if mods & _SHIFT and context == "player" and key in _PLAYER_SHIFT_CHARS:
+        return _PLAYER_SHIFT_CHARS[key], ""
     if key in chars:
         return chars[key], ""
     return None
@@ -260,6 +269,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("M", "Mute"),
         ("Tab", "The mixer's other row (while it shows)"),
         ("J, K", "Sound 50 ms earlier / later (sync with the picture)"),
+        ("Shift+J, Shift+K", "Subtitles 50 ms earlier / later"),
         ("F, F11, Ctrl+Meta+F", "Fullscreen"),
         ("Ctrl+F", "Search"),
         ("Ctrl+D", "Add or remove a favorite channel"),
