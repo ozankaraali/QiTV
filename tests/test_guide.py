@@ -565,9 +565,19 @@ class ProgrammeSpansTests(unittest.TestCase):
         self.assertEqual(self.spans([a, b]), [("A", 0.0, 100.0), ("B", 100.0, 200.0)])
         self.assertEqual(result[0].programme.stop, self.start + HALF_HOUR)
 
-    def test_equal_starts_draw_one_box(self):
+    def test_of_equal_starts_the_shorter_is_drawn_first_and_the_longer_after_it(self):
         a, b = prog("A", self.start, 30), prog("B", self.start, 60)
-        self.assertEqual(self.spans([a, b]), [("B", 0.0, 200.0)])
+        expected = [("A", 0.0, 100.0), ("B", 100.0, 100.0)]
+        self.assertEqual(self.spans([a, b]), expected)
+        self.assertEqual(self.spans([b, a]), expected)
+
+    def test_a_long_programme_is_drawn_again_after_one_inside_it(self):
+        outer = prog("Outer", self.start, 120)
+        inner = prog("Inner", self.start + HALF_HOUR, 30)
+        self.assertEqual(
+            self.spans([outer, inner]),
+            [("Outer", 0.0, 100.0), ("Inner", 100.0, 100.0), ("Outer", 200.0, 200.0)],
+        )
 
     def test_slivers_narrower_than_the_minimum_are_dropped(self):
         sliver = prog("Sliver", self.start - timedelta(minutes=29), 30)  # 1 min in the window

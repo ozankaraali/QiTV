@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import random
 import unittest
 
 from services.epg_view import (
@@ -121,15 +122,30 @@ def overlapping_guide():
 AT_0129 = datetime(2026, 10, 19, 1, 29, tzinfo=PLUS2)
 
 
+DAY = datetime(2026, 10, 15, tzinfo=PLUS2)
+HOUR = timedelta(hours=1)
+
+
+def show(title, start, stop):
+    """A programme from `start` to `stop` hours into DAY."""
+    return Programme(title, DAY + start * HOUR, DAY + stop * HOUR)
+
+
+def hours(programmes):
+    """The timeline of `programmes` as (title, start, stop), in hours into DAY."""
+    return [(p.title, (p.start - DAY) / HOUR, (p.stop - DAY) / HOUR) for p in timeline(programmes)]
+
+
 class TimelineTests(unittest.TestCase):
-    def test_an_overlap_ends_where_the_next_programme_starts(self):
+    def test_a_placeholder_shows_only_where_the_real_programmes_leave_off(self):
         result = timeline(normalize(overlapping_guide()))
         self.assertEqual(
-            [(p.title, p.start.strftime("%H:%M"), p.stop.strftime("%H:%M")) for p in result],
+            [(p.title, f"{p.start:%d %H:%M}", f"{p.stop:%d %H:%M}") for p in result],
             [
-                ("Late Film", "23:15", "01:00"),
-                ("Comedy Night", "01:00", "02:30"),
-                ("Drama Hour", "02:30", "05:00"),
+                ("Late Film", "18 23:15", "19 01:00"),
+                ("Comedy Night", "19 01:00", "19 02:30"),
+                ("Drama Hour", "19 02:30", "19 05:00"),
+                ("Placeholder", "19 05:00", "20 01:59"),
             ],
         )
 
@@ -137,10 +153,77 @@ class TimelineTests(unittest.TestCase):
         programmes = normalize([xmltv("20261015200000 +0200", "20261015210000 +0200", "Prime")])
         self.assertIs(timeline(programmes)[0], programmes[0])
 
-    def test_equal_starts_keep_the_one_listed_last(self):
-        a = xmltv("20261015200000 +0200", "20261015210000 +0200", "First")
-        b = xmltv("20261015200000 +0200", "20261015203000 +0200", "Second")
-        self.assertEqual([p.title for p in timeline(normalize([a, b]))], ["Second"])
+    def test_back_to_back_programmes_are_unchanged(self):
+        programmes = [show("A", 10, 11), show("B", 11, 12.5), show("C", 12.5, 13)]
+        result = timeline(programmes)
+        self.assertEqual(len(result), 3)
+        for kept, given in zip(result, programmes):
+            self.assertIs(kept, given)
+
+    def test_an_empty_guide(self):
+        self.assertEqual(timeline([]), [])
+        self.assertEqual(normalize(None), [])
+        self.assertEqual(now_next([], DAY), (None, None))
+
+    def test_a_partial_overlap_ends_where_the_next_programme_starts(self):
+        self.assertEqual(
+            hours([show("A", 20, 21), show("B", 20.5, 21.5)]),
+            [("A", 20, 20.5), ("B", 20.5, 21.5)],
+        )
+
+    def test_of_equal_starts_the_shortest_shows_first_whatever_the_listing(self):
+        news, filler = show("News", 10, 11), show("Filler", 10, 24)
+        expected = [("News", 10, 11), ("Filler", 11, 24)]
+        self.assertEqual(hours([news, filler]), expected)
+        self.assertEqual(hours([filler, news]), expected)  # the filler listed after it
+
+    def test_an_exact_tie_does_not_depend_on_the_listing(self):
+        a, b = show("Evening Talk", 10, 11), show("Night Talk", 10, 11)
+        self.assertEqual(hours([a, b]), hours([b, a]))
+        self.assertEqual(len(timeline([a, b])), 1)
+
+    def test_a_long_programme_resumes_after_one_inside_it(self):
+        self.assertEqual(
+            hours([show("Filler", 0, 24), show("Film", 20, 21)]),
+            [("Filler", 0, 20), ("Film", 20, 21), ("Filler", 21, 24)],
+        )
+
+    def test_the_outer_programme_resumes_after_the_last_inner_one(self):
+        self.assertEqual(
+            hours([show("A", 10, 14), show("B", 11, 12), show("C", 12, 13)]),
+            [("A", 10, 11), ("B", 11, 12), ("C", 12, 13), ("A", 13, 14)],
+        )
+
+    def test_nested_programmes_resume_in_turn(self):
+        self.assertEqual(
+            hours([show("A", 10, 16), show("B", 11, 15), show("C", 12, 13)]),
+            [("A", 10, 11), ("B", 11, 12), ("C", 12, 13), ("B", 13, 15), ("A", 15, 16)],
+        )
+
+    def test_every_moment_shows_the_latest_started_programme_on(self):
+        rng = random.Random(7)
+        for trial in range(300):
+            programmes = []
+            for i in range(rng.randint(1, 8)):
+                start = rng.randrange(0, 40) / 4
+                programmes.append(show(f"P{i}", start, start + rng.randrange(1, 40) / 4))
+            result = timeline(programmes)
+            shuffled = programmes[:]
+            rng.shuffle(shuffled)
+            with self.subTest(trial=trial):
+                self.assertEqual(timeline(shuffled), result)
+                for before, after in zip(result, result[1:]):
+                    self.assertLessEqual(before.stop, after.start)  # never two at once
+                for minute in range(0, 20 * 60, 5):
+                    moment = DAY + timedelta(minutes=minute)
+                    on = [p for p in programmes if p.is_on(moment)]
+                    shown = [p for p in result if p.is_on(moment)]
+                    if not on:
+                        self.assertEqual(shown, [])
+                        continue
+                    latest = max(on, key=lambda p: (p.start, p.start - p.stop, p.title))
+                    self.assertEqual([p.title for p in shown], [latest.title])
+                    self.assertTrue(latest.start <= shown[0].start < shown[0].stop <= latest.stop)
 
     def test_a_gap_stays_a_gap(self):
         result = timeline(
@@ -179,7 +262,7 @@ class OverlappingGuideTests(unittest.TestCase):
     def test_the_guide_window_gets_the_grid_rows_programmes(self):
         window_start = datetime(2026, 10, 19, 1, 0, tzinfo=PLUS2)
         result = programmes_for_channel(self.manager(), {"id": 1}, window_start, limit=12)
-        self.assertEqual([p.title for p in result], ["Comedy Night", "Drama Hour"])
+        self.assertEqual([p.title for p in result], ["Comedy Night", "Drama Hour", "Placeholder"])
 
 
 class ProgrammeTests(unittest.TestCase):

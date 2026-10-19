@@ -78,24 +78,53 @@ def parse_programme(raw: dict) -> Optional[Programme]:
     return Programme(title or "Untitled", start, stop, description)
 
 
+def _piece(programme: Programme, start: datetime, stop: datetime) -> Programme:
+    if (start, stop) == (programme.start, programme.stop):
+        return programme
+    return replace(programme, start=start, stop=stop)
+
+
+def _show(
+    shown: list[Programme], result: list[Programme], since: datetime, until: Optional[datetime]
+) -> datetime:
+    """Add to `result` what `shown` shows from `since` to `until` (None: until all of it has
+    ended): the latest started of its programmes still on. Returns where that ends."""
+    while shown and (until is None or since < until):
+        top = shown[-1]
+        stop = top.stop if until is None else min(top.stop, until)
+        if since < stop:
+            result.append(_piece(top, since, stop))
+            since = stop
+        if top.stop <= since:
+            shown.pop()  # over (one under the top is dropped when it comes up)
+    return since
+
+
 def timeline(programmes: Iterable[Programme]) -> list[Programme]:
     """One programme at a time, oldest first: what the guide's grid, its details bar, the info
     line and the banner all show.
 
     Some guides list several programmes at once for a channel (feeds merged by the provider,
-    or a placeholder a day long beside the real programmes). A programme ends where the next
-    one starts, and one left with no time at all (an equal start) is dropped: of programmes
-    starting together, the one listed last stays. A programme that overlaps nothing is kept
-    as it is.
+    or a placeholder a day long beside the real programmes). The one that started last shows;
+    of programmes starting together, the shortest (an exact tie goes by title, so the order
+    the guide lists them in never matters). A programme shows until another starts, and
+    again after that one when it outlasts it: no gap where the guide has a programme, never
+    two at once. A programme cut so is shown in pieces with their own times; one that
+    overlaps nothing is kept as it is.
     """
-    ordered = sorted(programmes, key=lambda p: p.start)
-    result = []
-    for programme, following in zip(ordered, ordered[1:] + [None]):
-        if following is not None and following.start < programme.stop:
-            if following.start <= programme.start:
-                continue
-            programme = replace(programme, stop=following.start)
-        result.append(programme)
+    # Programmes starting together go longest first: the shortest is on top of `shown`.
+    ordered = sorted(programmes, key=lambda p: (p.start, p.start - p.stop, p.title, p.description))
+    result: list[Programme] = []
+    shown: list[Programme] = []  # started, the latest on top; ones under it may have ended
+    since: Optional[datetime] = None  # the timeline is complete up to here
+    for programme in ordered:
+        if since is not None:
+            since = _show(shown, result, since, programme.start)
+        if since is None or since < programme.start:
+            since = programme.start  # a gap: nothing was on
+        shown.append(programme)
+    if since is not None:
+        _show(shown, result, since, None)
     return result
 
 
