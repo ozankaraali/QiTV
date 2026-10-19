@@ -59,7 +59,7 @@ from services.zapping import ZapContext
 from ui import item_provider
 from ui.grid_frame import GridFrame
 from ui.overlays.grid_tiles import DENIED, EMPTY, FAILED, OPENING, PLAYING, TileView
-from ui.overlays.pip_label import CONNECTING, LIVE
+from ui.overlays.pip_label import CONNECTING, LIVE, REC
 from ui.overlays.transport import fmt_behind
 
 logger = logging.getLogger(__name__)
@@ -220,6 +220,7 @@ class GridControls(QObject):
         """Follow a player's state and its live session's mode (a tile's when it is made)."""
         slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
         slot.live.modeChanged.connect(lambda *_: self._refresh())
+        slot.live.recordingChanged.connect(lambda *_: self._refresh())  # REC (2.3)
 
     # ---- state --------------------------------------------------------------------------
 
@@ -735,10 +736,13 @@ class GridControls(QObject):
         return str((channel or {}).get("name") or "")
 
     def _detail(self, name: str) -> str:
-        """A playing tile's label state: LIVE, "−MM:SS" behind live, or "Connecting…"."""
+        """A playing tile's label state: LIVE, "−MM:SS" behind live, "Connecting…", or REC
+        while its channel records (2.3)."""
         slot = self._slot(name)
         if slot is None:
             return CONNECTING
+        if slot.live.recording():
+            return REC
         timeline = self._timelines.get(name)
         if slot.live.mode == "pipeline" and timeline is not None:
             lag = float(timeline.get("lag", 0.0))

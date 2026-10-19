@@ -468,10 +468,16 @@ class FakeTransport(FakeOverlay):
     previousRequested = Signal()
     infoRequested = Signal()
     favoriteRequested = Signal()
+    recordRequested = Signal()  # 2.3
     bandChanged = Signal()
+    recording_since = None
 
     def set_muted(self, muted):
         self.record("set_muted", muted)
+
+    def set_recording(self, since):
+        self.record("set_recording", since)
+        self.recording_since = since
 
     def set_favorite(self, favorite):
         self.record("set_favorite", favorite)
@@ -652,6 +658,8 @@ class FakeLiveSession(QObject):
     notice = Signal(str)
     failed = Signal(str)
     released = Signal()
+    recordingChanged = Signal(bool)  # 2.3
+    recordingEnded = Signal(str, str, int)  # (reason, path, written)
 
     def __init__(self, playback):
         super().__init__()
@@ -662,6 +670,30 @@ class FakeLiveSession(QObject):
         self.no_rewind_reason = UNAVAILABLE
         self.resizes = []  # the memory buffer sizes the multiview gave it
         self.background = False  # a multiview tile without the focus
+        self.recorded_since = None  # recording since (a clock reading), else None
+
+    def recordable(self):
+        return self.running and self.mode == "pipeline"
+
+    def recording(self):
+        return self.recorded_since is not None
+
+    def recording_since(self):
+        return self.recorded_since
+
+    def start_recording(self, path, **kwargs):
+        if not self.recordable() or self.recording():
+            return False
+        self.calls.append(("start_recording", path))
+        self.recorded_since = 100.0
+        self.recordingChanged.emit(True)
+        return True
+
+    def stop_recording(self):
+        if self.recording():
+            self.calls.append(("stop_recording",))
+            self.recorded_since = None
+            self.recordingChanged.emit(False)
 
     def named(self, name):
         return [c[1:] for c in self.calls if c[0] == name]
@@ -675,6 +707,7 @@ class FakeLiveSession(QObject):
         self.url = url
 
     def stop(self):
+        self.stop_recording()  # as LiveSession: a recording stops, its file is kept
         if not self.running:
             return
         self.calls.append(("stop",))

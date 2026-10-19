@@ -29,12 +29,19 @@ names its key when hovered. A movie or an episode played from the Library has "�
 left of the right-hand buttons: back to where it came from, as Esc.
 At a small width the Stay live indicator's text is shortened, or the indicator left out, so it
 never runs under the play button.
+On live TV a record button (a red dot in a ring, R) follows the star (2.3), a control of the
+channel's as the star is: it records a time-shifted channel from where it plays, and while it
+records it is lit and a "● REC 01:23" chip after it counts the time; a channel played directly
+shows it dimmed, and hovering it says why it cannot record (a press asks anyway: the shell
+says why too). It sits up there because the bottom row has no room to spare for it in longer
+languages (the Stay live indicator's).
 """
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import math
-from typing import Callable
+import time
+from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -56,6 +63,7 @@ from PySide6.QtWidgets import QWidget
 from services import i18n
 from services.i18n import N_, tr, translate
 from services.live.stay_live import TARGETS, Mode, SettledLag
+from services.recording import elapsed_text
 from ui.keymap import key_hint
 from ui.overlays.base import Overlay
 from ui.overlays.painting import (
@@ -117,6 +125,9 @@ KEY_HINTS = {
 }
 FAVORITE_KEY = "Ctrl+D"
 GRID_KEY = "V"  # the multiview: its grid, or back to one picture
+RECORD_KEY = "R"  # record the channel, or stop recording (2.3)
+# i18n: tooltip of the record button (and a toast) on a channel played without time-shift
+NO_RECORDING = N_("Can't record: this channel plays without time-shift")
 # button name -> painting icon, if they differ
 _ICONS = {"mini": "mini_player", "pip": "pip", "previous": "recent"}
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
@@ -178,6 +189,8 @@ class _TitleRow:
     name: str  # elided to its room
     name_rect: QRectF
     star: QRectF  # empty but on live TV
+    record: QRectF  # the record button (2.3): empty but on live TV
+    rec: QRectF  # the REC chip: empty but while it records
     subtitle_x: float
     clock: str
     clock_rect: QRectF
@@ -253,6 +266,7 @@ class Transport(Overlay):
     infoRequested = Signal()  # the channel's name: its info (the banner)
     favoriteRequested = Signal()  # the star after the name: add or remove the channel
     libraryRequested = Signal()  # ‹ Library: back to the Library the title came from (Esc)
+    recordRequested = Signal()  # the record button: record the channel, or stop (2.3)
     bandChanged = Signal()  # its controls changed (a mode, the bar): controls_top() moved
 
     def __init__(
@@ -260,11 +274,18 @@ class Transport(Overlay):
         parent: QWidget | None = None,
         idle_ms: int = 3000,
         now: Callable[[], datetime] = _local_now,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        """`clock`: what a recording's start (`set_recording`) is measured on."""
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self._now = now
+        self._rec_clock = clock
+        self._rec_since: Optional[float] = None  # recording since (the clock's), else None
+        self._rec_timer = QTimer(self)  # the REC chip counts the seconds while shown
+        self._rec_timer.setInterval(1000)
+        self._rec_timer.timeout.connect(self._tick_rec)
         self._live = False
         self._timeshift = False
         self._title = ""
@@ -460,6 +481,28 @@ class Transport(Overlay):
             self.update()
             self._controls_changed()
 
+    def set_recording(self, since: Optional[float]) -> None:
+        """The channel records since `since` (the clock's): the record button is lit and the
+        "● REC 01:23" chip shows; None: it does not."""
+        if since == self._rec_since:
+            return
+        self._rec_since = since
+        if since is None:
+            self._rec_timer.stop()
+        else:
+            self._rec_timer.start()
+        self.update()
+        self._controls_changed()
+
+    def recording(self) -> bool:
+        return self._rec_since is not None
+
+    def rec_text(self) -> str:
+        """What the REC chip says ("REC 01:23"); "" while nothing records."""
+        if self._rec_since is None:
+            return ""
+        return elapsed_text(self._rec_clock() - self._rec_since)
+
     def set_favorite(self, favorite: bool) -> None:
         """Whether the live channel is a favorite: its star is lit."""
         if favorite != self._favorite:
@@ -468,7 +511,8 @@ class Transport(Overlay):
 
     def title_rects(self) -> dict[str, QRectF]:
         """On live TV the title row's controls: "title" (the logo and the name: the channel's
-        info) and "favorite" (the star after the name); nothing otherwise."""
+        info), "favorite" (the star after the name) and "record" (the red dot after it);
+        nothing otherwise."""
         if not self._live:
             return {}
         row = self._title_row()
@@ -476,7 +520,11 @@ class Transport(Overlay):
         badge = self.badge_rect()
         if not badge.isEmpty():
             title = title.united(badge)
-        return {"title": title, "favorite": row.star}
+        return {"title": title, "favorite": row.star, "record": row.record}
+
+    def rec_rect(self) -> QRectF:
+        """The REC chip (empty while nothing records): it only says."""
+        return self._title_row().rec if self._live else QRectF()
 
     def hole_claims(self) -> QRegion:
         """Over the PiP, the clicks this keeps (host coordinates): its buttons and its bar, and
@@ -494,6 +542,8 @@ class Transport(Overlay):
         if self._grid_shown:  # over the multiview's grid what it says shows whole too
             row = self._title_row()
             region = region.united(QRegion(row.clock_rect.toAlignedRect()))
+            if not row.rec.isEmpty():
+                region = region.united(QRegion(row.rec.toAlignedRect()))
             if self._subtitle:
                 width = row.clock_rect.left() - Units(self.width()).px(2) - row.subtitle_x
                 subtitle = QRectF(row.subtitle_x, row.name_rect.y(), width, row.name_rect.height())
@@ -524,6 +574,7 @@ class Transport(Overlay):
             self.size(),
             tuple(sorted(n for n in layout if n not in _LABELS)),
             tuple((n, r.getRect()) for n, r in self.title_rects().items()),  # moves with the name
+            self.rec_rect().getRect() if grid else (),
             grid,
             (
                 tuple((n, r.toAlignedRect().getRect()) for n, r in layout.items() if n in _LABELS)
@@ -549,6 +600,13 @@ class Transport(Overlay):
         return ""
 
     def _tooltip(self, name: str) -> str:
+        if name == "record":
+            if self._rec_since is not None:
+                return key_hint(tr("Stop recording"), RECORD_KEY)  # i18n: tooltip (verb)
+            if not self._timeshift:
+                return translate(NO_RECORDING)
+            # i18n: tooltip of the record button: record the channel being watched (verb)
+            return key_hint(tr("Record"), RECORD_KEY)
         if name == "grid":
             if self._grid_shown:
                 what = tr("Back to one picture")  # i18n: tooltip: leave the multiview's grid
@@ -604,6 +662,12 @@ class Transport(Overlay):
     def _tick(self) -> None:
         if self.isVisible():
             self.update()
+
+    def _tick_rec(self) -> None:
+        """A second more on the REC chip (it widens at the hour: the controls move then)."""
+        if self.isVisible():
+            self.update()
+            self._controls_changed()
 
     def texts(self) -> tuple[str, str]:
         if self._timeshift:
@@ -761,18 +825,29 @@ class Transport(Overlay):
             left = badge.right() + un.px(1.2)
         gap = un.px(0.6)
         room = right - left - clock_w - un.px(4)
+        text = self.rec_text() if self._live else ""
+        rec_w = 0.0
+        if text:
+            fm = QFontMetricsF(self._indicator_font(un))
+            rec_w = 2 * un.px(1.0) + un.px(0.8) + un.px(0.6) + fm.horizontalAdvance(text)
         if self._live:
-            room -= gap + row_h  # the star keeps its room: the name gives way
-        fm = QFontMetrics(un.font(1.8, QFont.Weight.Bold))
-        name = fm.elidedText(self._title, Qt.ElideRight, max(0, int(room)))
-        name_w = fm.horizontalAdvance(name)
+            # The star, the record button and the REC chip keep their room: the name gives way.
+            room -= 2 * (gap + row_h) + (gap + rec_w if text else 0.0)
+        names = QFontMetrics(un.font(1.8, QFont.Weight.Bold))
+        name = names.elidedText(self._title, Qt.ElideRight, max(0, int(room)))
+        name_w = names.horizontalAdvance(name)
         name_rect = QRectF(left, y, name_w + 2, row_h)
-        star = QRectF()
+        star = record = rec = QRectF()
         subtitle_x = left + name_w + un.px(1.2)
         if self._live:
             star = QRectF(left + name_w + gap, y, row_h, row_h)
-            subtitle_x = star.right() + gap
-        return _TitleRow(name, name_rect, star, subtitle_x, clock, clock_rect)
+            record = QRectF(star.right() + gap, y, row_h, row_h)
+            subtitle_x = record.right() + gap
+            if text:
+                h = self._chip_h(un)
+                rec = QRectF(subtitle_x, y + (row_h - h) / 2, rec_w, h)
+                subtitle_x = rec.right() + un.px(1.2)
+        return _TitleRow(name, name_rect, star, record, rec, subtitle_x, clock, clock_rect)
 
     def _layout(self) -> dict[str, QRectF]:
         un = Units(self.width())
@@ -984,6 +1059,32 @@ class Transport(Overlay):
                 p.drawText(chip, Qt.AlignCenter, label)
         p.end()
 
+    def _paint_record(self, p: QPainter, un: Units, row: _TitleRow) -> None:
+        """The record button (red; dim without time-shift; lit while it records) and the REC
+        chip."""
+        if not row.record.isEmpty():
+            side = un.px(1.9)  # as the star
+            c = row.record.center()
+            icon = QRectF(c.x() - side / 2, c.y() - side / 2, side, side)
+            if self._rec_since is not None:
+                halo = icon.adjusted(-un.px(0.4), -un.px(0.4), un.px(0.4), un.px(0.4))
+                fill_round(p, halo, qcolor(PALETTE.live, 0.3), halo.width() / 2)
+            color = qcolor(PALETTE.live) if self._timeshift else qcolor(PALETTE.text, 0.35)
+            draw_icon(p, "record", icon, color)
+        chip = row.rec
+        if chip.isEmpty():
+            return
+        fill_round(p, chip, qcolor(PALETTE.panel), chip.height() / 2)
+        d = un.px(0.8)
+        x = chip.x() + un.px(1.0)
+        fill_round(p, QRectF(x, chip.center().y() - d / 2, d, d), qcolor(PALETTE.live), d / 2)
+        x += d + un.px(0.6)
+        p.setFont(self._indicator_font(un))
+        p.setPen(qcolor(PALETTE.text))
+        p.drawText(
+            QRectF(x, chip.y(), chip.right() - x, chip.height()), Qt.AlignVCenter, self.rec_text()
+        )
+
     def _paint_scrims(self, p: QPainter) -> None:
         p.save()
         if not self._pip_rect.isEmpty():
@@ -1021,6 +1122,7 @@ class Transport(Overlay):
             c = row.star.center()
             lit = qcolor(PALETTE.accent) if self._favorite else qcolor(PALETTE.text, 0.75)
             draw_icon(p, "star", QRectF(c.x() - size / 2, c.y() - size / 2, size, size), lit)
+        self._paint_record(p, un, row)
         if self._subtitle:
             p.setFont(un.font(1.5))
             p.setPen(qcolor(PALETTE.text, 0.75))
@@ -1320,9 +1422,14 @@ class Transport(Overlay):
                 self.seekRequested.emit(target_ms)
 
     def _click(self, rects: dict[str, QRectF], pos: QPointF) -> None:
+        title_signals = {
+            "title": self.infoRequested,
+            "favorite": self.favoriteRequested,
+            "record": self.recordRequested,
+        }
         for name, rect in self.title_rects().items():
             if rect.contains(pos):
-                (self.infoRequested if name == "title" else self.favoriteRequested).emit()
+                title_signals[name].emit()
                 return
         for name, rect in rects.items():
             if not rect.contains(pos):

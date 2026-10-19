@@ -54,6 +54,7 @@ ICONS = [
     "chevron_right",
     "close",
     "check",
+    "record",
 ]
 
 

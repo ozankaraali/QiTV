@@ -51,7 +51,7 @@ from ui.autoplay import FINISHED_TEXT
 from ui.context_actions import is_channel
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, start_kwargs
-from ui.overlays.pip_label import CONNECTING, LIVE
+from ui.overlays.pip_label import CONNECTING, LIVE, REC
 from ui.overlays.transport import fmt_behind
 
 logger = logging.getLogger(__name__)
@@ -184,6 +184,7 @@ class PipControls(QObject):
         """Follow a slot's player and live session (each slot's at wiring, a tile's when the
         multiview adds it): the label shows the state of whichever is small."""
         slot.live.modeChanged.connect(self._refresh_label)
+        slot.live.recordingChanged.connect(self._refresh_label)  # REC (2.3)
         slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
 
     # ---- state --------------------------------------------------------------------------------
@@ -639,6 +640,8 @@ class PipControls(QObject):
     def _state_text(self, slot: Slot, *, live: bool = True) -> str:
         if not live:  # a movie or an episode swapped small plays on: its title alone
             return FINISHED_TEXT if slot.name in self._ended else ""
+        if slot.live.recording():
+            return REC  # its recording goes on small (2.3)
         mode = slot.live.mode
         timeline = self._timelines.get(slot.name)
         if mode == "pipeline" and timeline is not None:

@@ -7,7 +7,8 @@ The player's keys are disabled while the Library shows. The Providers menu is an
 group of the configured providers, rebuilt when a provider becomes ready or fails and after
 Settings closes. The drawer's Settings and Add provider rows open the same dialogs, its Free
 channels row the free-channels menu, its Open file row the same file dialog, and its header's
-⌕ the same search.
+⌕ the same search. File → Open Recordings Folder opens where recordings go (2.3), as Settings'
+Open folder does.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from PySide6.QtCore import QObject, Qt, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLayout, QWidget
 
+from services import recording
 from services.config_manager import get_app_version
 from services.exporter import ExportKind
 from services.i18n import N_, tr, translate
@@ -48,6 +50,12 @@ _SHORTCUT_MODIFIERS = (
     | Qt.KeyboardModifier.AltModifier
     | Qt.KeyboardModifier.MetaModifier
 )
+
+
+def open_folder(path: str) -> bool:
+    """`path` in the system's file manager; False when it could not be opened (a folder
+    that does not exist yet). Nothing is read here: the system opens it."""
+    return QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 
 def about_text() -> str:
@@ -125,6 +133,8 @@ class TVMenus(QObject):
             (tr("Complete Series (Fetch All)…"), ExportKind.COMPLETE_SERIES),
         ):
             add(export, text, "", partial(screens.export, kind))
+        # i18n: a menu entry: the folder recordings go to (Settings → Time-shift)
+        add(file_menu, tr("Open Recordings Folder"), "", self.open_recordings)
         view = bar.addMenu(tr("View"))  # i18n: the menu bar's View menu
         add(view, tr("Live TV"), "Ctrl+1", screens.back_to_tv)
         add(view, tr("Movies"), "Ctrl+2", lambda: screens.open_library("movies"))
@@ -147,6 +157,8 @@ class TVMenus(QObject):
             add(playback, tr("Previous Channel"), "Backspace", self._handler(Action.PREVIOUS))
         )
         player.append(add(playback, tr("Go Live"), "L", self._handler(Action.GO_LIVE)))
+        # i18n: a menu entry: record the channel being watched, or stop recording (verb)
+        player.append(add(playback, tr("Record"), "R", self._handler(Action.RECORD)))
         self.providers_menu = bar.addMenu(tr("Providers"))  # i18n: the menu bar's Providers menu
         self.rebuild_providers()
         help_menu = bar.addMenu(tr("Help"))  # i18n: the menu bar's Help menu
@@ -190,6 +202,12 @@ class TVMenus(QObject):
 
     def _handler(self, action: Action) -> Callable[[], None]:
         return lambda: self._window.controller.handle(action)
+
+    def open_recordings(self) -> None:
+        """The Recordings folder in the system's file manager; a toast when there is none."""
+        window = self._window
+        if not open_folder(recording.folder(window.config_manager)):
+            window.overlays.toast.show_message(translate(recording.NO_RECORDINGS))
 
     def set_player_enabled(self, enabled: bool) -> None:
         """The player's keys in the menus: off while the Library shows."""

@@ -441,6 +441,11 @@ class ConfigManager:
         clamp=MULTIVIEW_TILE_RAM_RANGE,
     )
     subtitle_folder = _config_property("subtitle_folder", "", coerce=str)  # 2.2: Load a file…
+    # 2.3, optional (older builds ignore it): the Recordings folder Settings chose; "" is the
+    # system's Movies (Videos) folder's QiTV (services.recording).
+    recordings_dir = _config_property(
+        "recordings_dir", "", coerce=lambda value: value if isinstance(value, str) else ""
+    )
     # 2.2: OpenSubtitles. Optional keys (older builds ignore them); the key and the password
     # are never logged. The language is the one downloaded last; "hearing impaired" whether
     # that file was for the hearing impaired (such files then rank first).

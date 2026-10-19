@@ -32,7 +32,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from services.i18n import N_, translate
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, draw_icon
-from ui.overlays.pip_label import LIVE, paint_backdrop, paint_pill
+from ui.overlays.pip_label import DOTTED, paint_backdrop, paint_pill
 from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
 
@@ -221,8 +221,8 @@ class GridTiles(Overlay):
         height = max(names.height(), states.height()) + 2 * un.px(0.35)
         dot = max(6, round(states.height() * 0.42))
         dot_gap = un.px(0.4)
-        if tile.detail == LIVE:
-            state_w = dot + dot_gap + states.horizontalAdvance(translate(LIVE))
+        if tile.detail in DOTTED:  # LIVE or REC, after a red dot
+            state_w = dot + dot_gap + states.horizontalAdvance(translate(tile.detail))
         else:
             state_w = states.horizontalAdvance(translate(tile.detail))
         room = max(0.0, tile.rect.width() - 2 * inset)
@@ -311,7 +311,7 @@ class GridTiles(Overlay):
                     p,
                     pill.rect,
                     pill.name,
-                    tile.detail if tile.detail == LIVE else translate(tile.detail),
+                    tile.detail if tile.detail in DOTTED else translate(tile.detail),
                     pill.name_font,
                     pill.state_font,
                     pill.pad,

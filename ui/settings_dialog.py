@@ -2,8 +2,8 @@ from copy import deepcopy
 import logging
 import os
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 import orjson as json
 
-from services import failure_reasons as reasons, i18n, provider_link
+from services import failure_reasons as reasons, i18n, provider_link, recording
 from services.account_check import check_account
 from services.config_manager import ConfigManager
 from services.epg_view import (
@@ -630,6 +630,8 @@ class OptionsDialog(QDialog):
         self.timeshift_checkbox.toggled.connect(cache.setEnabled)
         layout.addWidget(cache)
 
+        layout.addWidget(self._recordings_group(tab))
+
         explanation = QLabel(
             tr(
                 "Without disk, each picture keeps its memory per stream (picture-in-picture's "
@@ -644,6 +646,77 @@ class OptionsDialog(QDialog):
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
         layout.addStretch()
+
+    def _recordings_group(self, tab: QWidget) -> QGroupBox:
+        """Where recordings go (2.3; the optional config key `recordings_dir`, "" for the
+        system's Movies or Videos folder's QiTV): Change…, Use the default, Open folder."""
+        group = QGroupBox(tr("Recordings"), tab)  # i18n: a group's title: recorded channels
+        group.setObjectName("recordingsSettings")
+        box = QVBoxLayout(group)
+        self._recordings_dir: str = self.config_manager.recordings_dir
+        self.recordings_folder = QLineEdit(group)
+        self.recordings_folder.setObjectName("recordingsFolder")
+        self.recordings_folder.setReadOnly(True)
+        # i18n: the accessible name of the Recordings folder's field in Settings
+        self.recordings_folder.setAccessibleName(tr("Recordings folder"))
+        box.addWidget(self.recordings_folder)
+        buttons = QHBoxLayout()
+        self.recordings_change_button = QPushButton(tr("Change…"), group)  # i18n: a button
+        self.recordings_change_button.clicked.connect(self.choose_recordings_folder)
+        # i18n: a button: the Recordings folder goes back to the system's Movies (Videos) folder
+        self.recordings_default_button = QPushButton(tr("Use the default"), group)
+        self.recordings_default_button.clicked.connect(lambda: self._set_recordings_dir(""))
+        # i18n: a button: show the Recordings folder in the system's file manager
+        self.recordings_open_button = QPushButton(tr("Open folder"), group)
+        self.recordings_open_button.clicked.connect(self.open_recordings_folder)
+        for button in (
+            self.recordings_change_button,
+            self.recordings_default_button,
+            self.recordings_open_button,
+        ):
+            buttons.addWidget(button)
+        buttons.addStretch()
+        box.addLayout(buttons)
+        self.recordings_status = QLabel("", group)  # why Open folder could not open it
+        self.recordings_status.setObjectName("recordingsStatus")
+        box.addWidget(self.recordings_status)
+        note = QLabel(
+            tr(
+                "R or the record button on the player controls records the live channel you "
+                "watch, from where you watch it, into this folder. Only channels with "
+                "time-shift can be recorded; a recording needs no second stream."
+            ),
+            group,
+        )
+        note.setWordWrap(True)
+        box.addWidget(note)
+        self._set_recordings_dir(self._recordings_dir)
+        return group
+
+    def _set_recordings_dir(self, path: str) -> None:
+        self._recordings_dir = path
+        self.recordings_folder.setText(recording.folder(self))
+        self.recordings_default_button.setEnabled(bool(path))
+        self.recordings_status.setText("")
+
+    @property
+    def recordings_dir(self) -> str:
+        """The folder chosen here ("": the default), as `recording.folder` reads it."""
+        return self._recordings_dir
+
+    def choose_recordings_folder(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            tr("Choose the Recordings folder"),  # i18n: the title of a folder picker
+            recording.folder(self),
+        )
+        if chosen:
+            self._set_recordings_dir(os.path.normpath(chosen))
+
+    def open_recordings_folder(self) -> None:
+        """The folder shown, in the system's file manager (saved or not)."""
+        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(recording.folder(self)))
+        self.recordings_status.setText("" if opened else translate(recording.NO_RECORDINGS))
 
     def _update_ram_estimate(self, *_args) -> None:
         mib = (
@@ -1155,6 +1228,8 @@ class OptionsDialog(QDialog):
         self.config_manager.timeshift_enabled = self.timeshift_checkbox.isChecked()
         self.config_manager.timeshift_max_mib = self.timeshift_size_slider.value()
         self.config_manager.timeshift_ram_mib = self.timeshift_ram_combo.currentData()
+        if self._recordings_dir != self.config_manager.recordings_dir:
+            self.config_manager.recordings_dir = self._recordings_dir  # an optional key
         self.config_manager.channel_logos = self.channel_logos_checkbox.isChecked()
         self.config_manager.opensubtitles_api_key = "".join(
             self.opensubtitles_key_input.text().split()

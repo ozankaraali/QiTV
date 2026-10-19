@@ -10,9 +10,14 @@ played directly whose stream ends (an on-demand restream may show a placeholder 
 opens again in the same player, so in the same budget slot, twice per tune at most, after
 RECONNECT_MS: "Reconnecting…", and only then "The stream ended".
 
+Recording (2.3): R and the record button record the time-shifted channel being watched from
+where it plays (rewound or not) into the Recordings folder (`services.recording`), or stop
+it; the record button is lit and the REC chip counts while the large picture's channel
+records. A channel played directly, or one still opening, says why it cannot record.
+
 TVController owns the target and the LiveTuner and hands this unit what it needs. With
 picture in picture it is the large picture's: a swap hands it the other player's tuner, live
-session and player (`use_slot`).
+session and player (`use_slot`); a multiview's focused tile is the large picture.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ from urllib.parse import urlsplit
 from PySide6.QtCore import QObject, QTimer, SignalInstance
 from PySide6.QtGui import QPixmap
 
-from services import favorites
+from services import favorites, recording
 from services.epg_view import Programme
 from services.i18n import N_, tr, tr_n, translate
 from services.live.live_session import UNAVAILABLE, LiveSession
@@ -36,7 +41,7 @@ from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from ui import item_provider
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, LiveTuner
-from ui.overlays.transport import Transport
+from ui.overlays.transport import NO_RECORDING, Transport
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,8 @@ ERROR_MS = 6000
 RECONNECT_MS = (1000, 3000)  # the back-off before each reopen of a live stream that ended
 # i18n: toast: a live channel's stream ended and is opened again
 RECONNECTING_TEXT = N_("Reconnecting…")
+# i18n: a toast: R or the record button was pressed while the channel is still opening
+NOT_YET_TEXT = N_("Recording can start once the channel plays")
 _PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
 # Never opened again: on-demand content, and a file listed as a channel ends for good.
 _NOT_LIVE = (PlayKind.VOD_FILE, PlayKind.VOD_STREAM, PlayKind.LIVE_PIPELINE)
@@ -133,6 +140,7 @@ class LiveControls(QObject):
         transport.goLiveRequested.connect(self.go_live)
         transport.programmeStartRequested.connect(self._programme_start)
         transport.seekToRequested.connect(self._seek_to)
+        transport.recordRequested.connect(self.toggle_recording)
         self._wired = True
         self._connect(True)
 
@@ -147,6 +155,7 @@ class LiveControls(QObject):
                 (live.timelineChanged, self._on_live_timeline),
                 (live.notice, self._on_live_notice),
                 (live.failed, self._on_live_failed),
+                (live.recordingChanged, self._on_recording_changed),
             ]
         for signal, slot in pairs:
             if connect:
@@ -162,6 +171,7 @@ class LiveControls(QObject):
         if self._wired:
             self._connect(True)
         self.new_target()
+        self._on_recording_changed()  # the REC chip is the new large picture's
 
     # ---- tuning -------------------------------------------------------------------------------
 
@@ -380,6 +390,30 @@ class LiveControls(QObject):
                 limit,
             )
         return tr("The provider refused the stream — it may limit concurrent streams")
+
+    # ---- recording (2.3) ----------------------------------------------------------------------
+
+    def toggle_recording(self) -> None:
+        """R and the record button: record the channel being watched from where it plays, or
+        stop recording (the file is kept; its toast follows once it is closed)."""
+        live, current = self.live, self._current()
+        if live is not None and live.recording():
+            live.stop_recording()
+            self._show_transport()
+            return
+        if current is None or not current.live:
+            return  # a movie or nothing: there is no live channel to record
+        if live is None or not live.recordable() or not self.pipeline_live():
+            opening = live is not None and self._tuner.opening()
+            self._toast(translate(NOT_YET_TEXT if opening else NO_RECORDING))
+            return
+        when = self._now().astimezone()
+        if live.start_recording(recording.path_for(self.config, current.title, when)):
+            self._show_transport()
+
+    def _on_recording_changed(self, *_args: Any) -> None:
+        live = self.live
+        self._transport.set_recording(live.recording_since() if live is not None else None)
 
     # ---- the transport's time-shift controls --------------------------------------------------
 

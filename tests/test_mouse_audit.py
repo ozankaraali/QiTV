@@ -9,7 +9,8 @@ in fullscreen.
 
 Screens and their controls:
 - "transport": the player controls' buttons by name ("grid" is the multiview's), and on live
-  TV the title row's "title" (the channel's name and logo) and "favorite" (the star after it);
+  TV the title row's "title" (the channel's name and logo), "favorite" (the star after it) and
+  "record" (the red dot after that, 2.3);
 - "picture": the video's own "click", "double-click" and "wheel";
 - "mixer": each row's "speaker" and "slider", and the "row" itself;
 - "sound": the Sound panel ♫ opens: its track "rows", its sync's "earlier" (−), "later" (+)
@@ -71,6 +72,9 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("player", "Left, Right"): (("transport", "back10"), ("transport", "fwd10")),
     ("player", "Space"): (("transport", "play"),),
     ("player", "L"): (("transport", "golive"),),
+    # The record button after the channel's star (2.3): lit while it records, dimmed on a
+    # channel played directly (a press says why).
+    ("player", "R"): (("transport", "record"),),
     ("player", "G"): (("transport", "guide"),),
     ("player", "I"): (("transport", "title"),),
     ("player", "+, -"): (("transport", "volume"), ("mixer", "slider")),

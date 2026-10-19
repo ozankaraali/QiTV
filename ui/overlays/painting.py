@@ -432,6 +432,13 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             dot = QPainterPath()
             dot.addEllipse(QRectF(0.25, 0.25, 0.5, 0.5))
             fill(dot)
+        elif name == "record":  # record the channel: a dot in a ring
+            ring = QPainterPath()
+            ring.addEllipse(QRectF(0.1, 0.1, 0.8, 0.8))
+            line(ring)
+            dot = QPainterPath()
+            dot.addEllipse(QRectF(0.26, 0.26, 0.48, 0.48))
+            fill(dot)
         elif name == "check":  # ✓: the track that plays
             tick = QPainterPath(QPointF(0.2, 0.52))
             tick.lineTo(0.42, 0.74)

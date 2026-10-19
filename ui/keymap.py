@@ -56,6 +56,7 @@ class Action(str, Enum):
     SUBTITLES_EARLIER = "subtitles_earlier"  # Shift+J: the subtitles 50 ms earlier
     SUBTITLES_LATER = "subtitles_later"  # Shift+K (VLC's G and H: G is the guide here)
     PASTE = "paste"  # Ctrl/⌘+V: the clipboard into the subtitles search's field
+    RECORD = "record"  # R: record the channel being watched, or stop (2.3)
 
 
 # "subtitles": the OpenSubtitles search over the player (2.2): it types like the drawer.
@@ -110,6 +111,7 @@ _PLAYER_CHARS = {
     _K.Key_V.value: Action.MULTIVIEW,
     _K.Key_J.value: Action.SOUND_EARLIER,
     _K.Key_K.value: Action.SOUND_LATER,
+    _K.Key_R.value: Action.RECORD,
 }
 # With Shift, the sound's sync keys move the subtitles (the player only).
 _PLAYER_SHIFT_CHARS = {
@@ -277,6 +279,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Left, Right", N_("Back / forward 10 seconds")),
         ("Space", N_("Play / pause")),
         ("L", N_("Go live")),
+        ("R", N_("Record the channel, or stop recording")),
         ("G", N_("Guide")),
         ("I", N_("Channel info")),
         ("+, -", N_("Volume up / down (the mixer)")),

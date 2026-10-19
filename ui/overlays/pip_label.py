@@ -13,7 +13,8 @@ less room, down to the drawn size and its spacing.
 
 The state is what the pill is for, so it is never cut: the channel name gives way first, down
 to nothing, then the state's font shrinks. Only "Connecting…" may still be cut once its font
-shrank a little (a mini player's 90 px PiP); LIVE and the time behind live always show whole.
+shrank a little (a mini player's 90 px PiP); LIVE and the time behind live always show whole,
+and so does REC, which a channel that records shows instead (2.3), after a red dot as LIVE.
 """
 
 from dataclasses import dataclass
@@ -41,6 +42,9 @@ from ui.theme import PALETTE, qcolor
 LIVE = N_("LIVE")  # i18n: badge on a small picture or a multiview tile (live TV); max ~6 letters
 # i18n: a small picture's or a multiview tile's state until its channel plays
 CONNECTING = N_("Connecting…")
+# i18n: a small picture's or a multiview tile's state while its channel records; max ~6 letters
+REC = N_("REC")
+DOTTED = (LIVE, REC)  # states painted after a red dot, never cut
 BUTTONS = ("swap", "speaker", "close")  # after the pill, left to right
 MIN_HIT_PX = 28  # each button takes clicks over this square at least, room permitting
 TOOLTIPS = {
@@ -85,8 +89,8 @@ def paint_pill(
 ) -> None:
     """A channel's name and its state in a pill, as the PiP label shows them (a multiview
     tile's label too): LIVE after a red dot, a time behind live in the accent colour, any
-    other state muted. `name` and `state` fit already (elided); `state` is LIVE (in
-    English) or the text to show."""
+    other state muted. `name` and `state` fit already (elided); `state` is LIVE or REC (in
+    English, after a red dot) or the text to show."""
     paint_backdrop(p, pill)
     p.save()
     p.setClipRect(pill)
@@ -104,12 +108,12 @@ def paint_pill(
     p.setFont(state_font)
     rest = QRectF(x, pill.top(), max(0.0, pill.right() - x), pill.height())
     align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-    if state == LIVE:
+    if state in DOTTED:
         fill_round(
             p, QRectF(x, pill.center().y() - dot / 2, dot, dot), qcolor(PALETTE.live), dot / 2
         )
         p.setPen(qcolor(PALETTE.text, 0.9))
-        p.drawText(rest.adjusted(dot + dot_gap, 0, 0, 0), align, translate(LIVE))
+        p.drawText(rest.adjusted(dot + dot_gap, 0, 0, 0), align, translate(state))
     else:
         shifted = state.startswith(_SHIFTED_PREFIXES)
         p.setPen(
@@ -257,7 +261,7 @@ class PipLabel(Overlay):
         room = max(0.0, min(r.left() for r in hits.values()) - un.px(0.6) - inset)
         # The name gives way first, then the state's font shrinks (the module docstring).
         state_room = room - 2 * pad
-        whole = self._state == LIVE or bool(_BEHIND.match(self._state))
+        whole = self._state in DOTTED or bool(_BEHIND.match(self._state))
         normal = state_font.pixelSize()
         smallest = _SMALLEST_STATE_PX if whole else max(_SMALLEST_STATE_PX, round(normal * _SHRINK))
         while self._state_width(state_font, dot_gap) > state_room and (
@@ -315,8 +319,10 @@ class PipLabel(Overlay):
         return max(6, round(metrics.height() * 0.42)) + dot_gap + live
 
     def _state_width(self, font: QFont, dot_gap: float, text: str | None = None) -> float:
-        if self._state == LIVE:
-            return self._live_width(font, dot_gap)
+        if self._state in DOTTED:
+            metrics = QFontMetrics(font)
+            dot = max(6, round(metrics.height() * 0.42))
+            return dot + dot_gap + metrics.horizontalAdvance(translate(self._state))
         shown = translate(self._state) if text is None else text
         return QFontMetrics(font).horizontalAdvance(shown)
 

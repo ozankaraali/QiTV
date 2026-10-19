@@ -67,7 +67,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QAbstractScrollArea
 
-from services import external_players, favorites
+from services import external_players, favorites, recording
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, shown_label
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
@@ -119,6 +119,7 @@ logger = logging.getLogger(__name__)
 
 INFO_MS = 3000
 ERROR_MS = 6000
+RECORDING_MS = 5000  # "Recording saved: <name>" (a name to read)
 VOLUME_STEP = 5
 SEEK_STEP_MS = 10_000
 TUNING_KEEP_MS = 3000  # under the banner's 4 s: it is shown again while a link resolves
@@ -481,6 +482,8 @@ class TVController(QObject):
         self._connect_session(session, True)
         for name, player in self._players():
             self._watch_player(name, player)
+        for live in self._lives():
+            self._watch_recordings(live)
         if self.sessions is not None:
             self.sessions.largeChanged.connect(self._on_large_changed)
             self.sessions.largeChanged.connect(lambda *_: self._update_guides())
@@ -505,7 +508,7 @@ class TVController(QObject):
         transport.previousRequested.connect(partial(self.handle, Action.PREVIOUS))
         transport.infoRequested.connect(partial(self.handle, Action.INFO))
         transport.favoriteRequested.connect(self._favorite_playing)
-        self._live_controls.wire()
+        self._live_controls.wire()  # its record button too (2.3)
         self._mixer.wire()
         self._tracks.wire()
         if self._pip is not None:
@@ -833,6 +836,7 @@ class TVController(QObject):
             Action.PLAY_PAUSE: self._play_pause,
             Action.INFO: self._info,
             Action.GO_LIVE: lambda: self._live_controls.go_live(),
+            Action.RECORD: lambda: self._live_controls.toggle_recording(),
             Action.GUIDE: self._open_guide,
             Action.FAVORITE: self._favorite,
             Action.FULLSCREEN: lambda: self.window_actions.toggle_fullscreen(),
@@ -1889,10 +1893,28 @@ class TVController(QObject):
         if not self._wired or self._closed:
             return
         self._watch_player(slot.name, slot.playback)
+        self._watch_recordings(slot.live)
         if self._pip is not None:
             self._pip.watch_slot(slot)
         if self._grid is not None:
             self._grid.watch_slot(slot)
+
+    def _lives(self) -> list[Any]:
+        """Every player's live session (the large picture's alone without picture in picture)."""
+        sessions = self.sessions
+        if sessions is None:
+            return [self.live] if self.live is not None else []
+        return [slot.live for slot in sessions.slots()]
+
+    def _watch_recordings(self, live) -> None:
+        """A recording of any player's channel says how it ended (2.3): saved, or why not."""
+        live.recordingEnded.connect(self._on_recording_ended)
+
+    def _on_recording_ended(self, reason: str, path: str, written: int) -> None:
+        if self._closed:
+            return
+        text, kind = recording.ended_text(reason, path, written)
+        self._toast(text, kind, ERROR_MS if kind == "error" else RECORDING_MS)
 
     def _watch_player(self, name: str, player) -> None:
         """Follow a player's state, a title's position and its errors (it may be small)."""

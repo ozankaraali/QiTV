@@ -470,7 +470,10 @@ class TVWindowTests(WindowCase):
                 ("Quit", "Ctrl+Q"),
             ],
         )
-        self.assertEqual(shortcuts(menus["File"]), [("Open File…", "Ctrl+O"), ("Export", "")])
+        self.assertEqual(
+            shortcuts(menus["File"]),
+            [("Open File…", "Ctrl+O"), ("Export", ""), ("Open Recordings Folder", "")],
+        )
         export = menus["File"].actions()[1].menu()
         self.assertEqual(
             [a.text() for a in export.actions()],
@@ -499,6 +502,7 @@ class TVWindowTests(WindowCase):
                 ("Mute", "M"),
                 ("Previous Channel", "Backspace"),
                 ("Go Live", "L"),
+                ("Record", "R"),
             ],
         )
         self.assertEqual(
