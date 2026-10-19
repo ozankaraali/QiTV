@@ -188,9 +188,11 @@ jobs:
           $base = "https://download.videolan.org/pub/videolan/vlc/$env:VLC_FALLBACK/win64"
           $zip = Join-Path $env:RUNNER_TEMP $name
           Invoke-WebRequest "$base/$name" -OutFile $zip
-          $want = ((Invoke-WebRequest "$base/$name.sha256").Content -split '\s+')[0]
+          # The checksum file comes as bytes (application/octet-stream): read it from disk.
+          Invoke-WebRequest "$base/$name.sha256" -OutFile "$zip.sha256"
+          $want = ((Get-Content "$zip.sha256" -Raw).Trim() -split '\s+')[0]
           $got = (Get-FileHash $zip -Algorithm SHA256).Hash
-          if ($got -ne $want) { throw "The VLC download does not match VideoLAN's checksum" }
+          if ($got -ne $want) { throw "The VLC download ($got) does not match VideoLAN's checksum ($want)" }
           Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'vlc')
           New-Item -ItemType Directory -Force -Path (Split-Path $dir) | Out-Null
           Move-Item (Join-Path $env:RUNNER_TEMP "vlc\vlc-$env:VLC_FALLBACK") $dir
