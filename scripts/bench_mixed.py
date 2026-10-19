@@ -514,6 +514,23 @@ def run(args) -> int:
     bench.step("filter_all_1char", lambda: handle(Action.NAV_TEXT, "k"))
     bench.step("filter_all_2char", lambda: handle(Action.NAV_TEXT, "a"))
     bench.step("filter_all_clear", lambda: handle(Action.ESCAPE))
+    bench.idle()
+
+    # The find (typing above ends before its pause): the genres at once, every provider's
+    # channels from a worker; its first find folds every channel's title there. GUI stalls
+    # meanwhile are recorded under these steps.
+    finder = window.finder
+
+    def type_find(text: str) -> None:
+        for char in text:
+            handle(Action.NAV_TEXT, char)
+
+    bench.timed("find_first", lambda: type_find("spor"), lambda: not finder.searching)
+    res["find_genres"], res["find_channels"] = len(finder.genres), len(finder.channels)
+    bench.timed("find_more", lambda: handle(Action.NAV_TEXT, "t"), lambda: not finder.searching)
+    bench.idle()
+    bench.timed("find_again", lambda: type_find(" 1"), lambda: not finder.searching)
+    bench.step("find_end", lambda: handle(Action.ESCAPE))
     bench.step("drawer_close", lambda: handle(Action.ESCAPE))
     bench.idle()
     res["drawer_open_again"] = None
