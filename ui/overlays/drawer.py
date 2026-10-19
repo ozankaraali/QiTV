@@ -65,7 +65,10 @@ from PySide6.QtWidgets import (
     QToolTip,
 )
 
+from services import i18n
+from services.catalog import shown_label
 from services.find import FoundChannel, FoundGenre
+from services.i18n import N_, tr, tr_n, translate
 from services.navigation import (
     ADD_PROVIDER_ROW,
     FAVORITES_GROUP,
@@ -119,23 +122,26 @@ SEARCH_ACTION = "search"  # the header's ⌕: the Library's search
 BACK_BUTTON = "back"  # the header's ‹: a layer up
 _CRUMB = "crumb:"  # a name in the header, by its path index ("crumb:up": the elided head)
 SEPARATOR = " › "
-BACK_TOOLTIP = key_hint("Back", "Left")  # "Back (←)"
-PROVIDER_TOOLTIP = "Choose another provider"
+# The texts below stay English (the code compares them); translate() shows them, and the
+# tooltips naming a key are made where they show.
+BACK_TOOLTIP = key_hint(N_("Back"), "Left")  # "Back (←)"
+PROVIDER_TOOLTIP = N_("Choose another provider")  # i18n: tooltip of the provider's name
 CRUMB_FONT_U = 1.15
 PREVIEW_DEBOUNCE_MS = 200
-LOADING_TEXT = "Loading…"
-EMPTY_TEXT = "Nothing here"
-ERROR_TEXT = "Couldn't load — press Enter to retry"
-PROVIDER_ERROR_TEXT = "Couldn't connect — press Enter to retry"
+LOADING_TEXT = N_("Loading…")
+EMPTY_TEXT = N_("Nothing here")  # i18n: an empty list in the channel list
+ERROR_TEXT = N_("Couldn't load — press Enter to retry")
+PROVIDER_ERROR_TEXT = N_("Couldn't connect — press Enter to retry")
 FIND_ACTION = "find"  # the ⌕ Find box above the right column
 FIND_CLEAR = "find_clear"  # its ✕
-FIND_PLACEHOLDER = "Find a genre or channel"
-FIND_TOOLTIP = "Find a genre or a channel at every provider: type its name"
-FIND_CLEAR_TOOLTIP = key_hint("Clear the find", "Esc")
-SEARCHING_TEXT = "Searching…"
-FIND_FAILED_TEXT = "Couldn't search — type again to retry"
+FIND_PLACEHOLDER = N_("Find a genre or channel")  # i18n: the empty find box's prompt
+FIND_TOOLTIP = N_("Find a genre or a channel at every provider: type its name")
+FIND_CLEAR_TOOLTIP = key_hint(N_("Clear the find"), "Esc")
+SEARCHING_TEXT = N_("Searching…")
+FIND_FAILED_TEXT = N_("Couldn't search — type again to retry")
 # The find's last row: the words in the box, for the Library's search (whole at 640 px wide).
-FIND_LIBRARY_TEXT = "Search films and series ›"
+# i18n: the find's last row: films and series with the words typed; about 30 letters at most
+FIND_LIBRARY_TEXT = N_("Search films and series ›")
 FOUND_GENRE = "found_genre"  # a row of the find: a genre found (any provider's)
 FOUND_LIBRARY = "found_library"  # its last row: films and series in the Library's search
 FIND_PARENT = NavNode("find", "find", "Find")  # the right column's parent while it finds
@@ -150,11 +156,16 @@ _ACTION_ICONS = {
     FREE_CHANNELS_ROW: "plus",
     OPEN_FILE_ROW: "file",
 }
-_HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key
-    SEARCH_ACTION: key_hint("Search", "Ctrl+F"),
-    REFRESH_ACTION: key_hint("Refresh channels and guide", "Ctrl+R"),
-    SETTINGS_ROW: key_hint("Settings", "Ctrl+,"),
+_HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key (see _hint)
+    SEARCH_ACTION: (N_("Search"), "Ctrl+F"),  # i18n: a button's tooltip (verb)
+    REFRESH_ACTION: (N_("Refresh channels and guide"), "Ctrl+R"),
+    SETTINGS_ROW: (N_("Settings"), "Ctrl+,"),
 }
+
+
+def _hint(what: str, keys: str) -> str:
+    """A tooltip naming its key; `what` (English, marked N_) in the active language."""
+    return key_hint(translate(what), keys)
 
 
 def _draw_refresh(p: QPainter, rect: QRectF, color: QColor) -> None:
@@ -375,7 +386,9 @@ def _genre_label(genre: FoundGenre, labels: bool) -> str | None:
     one provider; no count for a genre an STB portal has not listed yet)."""
     parts = [genre.provider] if labels else []
     if genre.count is not None:
-        parts.append(f"{genre.count:,} channel" + ("" if genre.count == 1 else "s"))
+        count = genre.count
+        # i18n: a genre's channel count beside it; {n} comes with its thousands separator
+        parts.append(tr_n("{n} channel", "{n} channels", count, n=i18n.number(count)))
     return " · ".join(parts) or None
 
 
@@ -454,7 +467,7 @@ class _SimpleRowDelegate(QStyledItemDelegate):
             p.drawText(
                 QRectF(left, rect.y(), width, rect.height()),
                 Qt.AlignLeft | Qt.AlignBottom,
-                elided(p, str(index.data(Qt.DisplayRole) or "").upper(), width),
+                elided(p, i18n.upper(str(index.data(Qt.DisplayRole) or "")), width),
             )
             p.restore()
             return
@@ -1133,25 +1146,30 @@ class Drawer(Overlay):
         labels = len(self._nav.catalog.provider_names()) >= 2  # with one provider, as in 2.0
         nodes: list[NavNode] = []
         if genres:
-            nodes.append(NavNode("header", "find:genres", "Genres"))
+            # i18n: a heading of the find's results, painted in capitals
+            nodes.append(NavNode("header", "find:genres", tr("Genres")))
             nodes += [
-                NavNode(FOUND_GENRE, mixed_group_id(g.provider, g.group_id), g.title, g)
+                NavNode(
+                    FOUND_GENRE, mixed_group_id(g.provider, g.group_id), shown_label(g.title), g
+                )
                 for g in genres
             ]
         if channels:
-            nodes.append(NavNode("header", "find:channels", "Channels"))
+            # i18n: a heading of the find's results, painted in capitals
+            nodes.append(NavNode("header", "find:channels", tr("Channels")))
             nodes += [
                 NavNode("item", item_key(h.item), item_title(h.item), h.item) for h in channels
             ]
         if not genres and not channels:
             if searching:
-                notice = SEARCHING_TEXT
+                notice = translate(SEARCHING_TEXT)
             elif finder is not None and finder.failed:
-                notice = FIND_FAILED_TEXT
+                notice = translate(FIND_FAILED_TEXT)
             else:
-                notice = f"No genre or channel has “{text}”"
+                # i18n: {text} is what was typed in the find box
+                notice = tr("No genre or channel has “{text}”", text=text)
             nodes.append(NavNode("notice", "find:notice", notice))
-        nodes.append(NavNode(FOUND_LIBRARY, "find:library", FIND_LIBRARY_TEXT))
+        nodes.append(NavNode(FOUND_LIBRARY, "find:library", translate(FIND_LIBRARY_TEXT)))
         col.parent = FIND_PARENT
         col.message = None
         shown = ("find", _shown_rows(nodes, False, None, labels))
@@ -1239,15 +1257,15 @@ class Drawer(Overlay):
         Find box and its ✕."""
         button = self._header_button_at(point)
         if button in _HEADER_TOOLTIPS:
-            return _HEADER_TOOLTIPS[button]
+            return _hint(*_HEADER_TOOLTIPS[button])
         if button == FIND_ACTION:
-            return FIND_TOOLTIP
+            return translate(FIND_TOOLTIP)
         if button == FIND_CLEAR:
-            return FIND_CLEAR_TOOLTIP
+            return key_hint(tr("Clear the find"), "Esc")  # i18n: the find box's ✕ (tooltip)
         if button == BACK_BUTTON:
-            return BACK_TOOLTIP
+            return key_hint(tr("Back"), "Left")  # i18n: tooltip of ‹: a layer up (verb)
         if button == _crumb_key(0):
-            return PROVIDER_TOOLTIP
+            return translate(PROVIDER_TOOLTIP)
         return ""
 
     def header_hit_rect(self, rect: QRectF) -> QRectF:
@@ -1572,7 +1590,7 @@ class Drawer(Overlay):
             text = elided(p, self.find_text + "▏", inner.width())
         else:
             p.setPen(qcolor(PALETTE.text, 0.5))
-            text = elided(p, FIND_PLACEHOLDER, inner.width())
+            text = elided(p, translate(FIND_PLACEHOLDER), inner.width())
         p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, text)
         if not clear.isEmpty():
             mark = 1.1 * u
@@ -1596,5 +1614,5 @@ class Drawer(Overlay):
             p.drawText(
                 QRectF(view.x(), view.y(), view.width(), 6.0 * u),
                 Qt.AlignCenter | Qt.TextWordWrap,
-                col.message,
+                translate(col.message),
             )

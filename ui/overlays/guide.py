@@ -15,7 +15,7 @@ import logging
 import math
 from typing import NamedTuple
 
-from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QDate, QEvent, QLocale, QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QFont,
     QFontMetrics,
@@ -30,7 +30,10 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QToolTip, QWidget
 
+from services import i18n
+from services.catalog import shown_label
 from services.epg_view import Programme, now_next, timeline
+from services.i18n import N_, tr, translate
 from services.navigation import item_key
 from ui.keymap import key_hint
 from ui.overlays.base import Overlay
@@ -54,16 +57,17 @@ CHANNEL_U = 22.0
 SIDE_U = 1.6
 MIN_BOX_U = 1.5  # narrower boxes (slivers at the window's edges) are not drawn
 TIME_DETAIL_U = 8.0  # boxes at least this wide show their time under the title
-NO_INFO_TEXT = "No programme information"
+NO_INFO_TEXT = N_("No programme information")  # i18n: a channel's guide is empty
 BUTTON_U = 2.2  # the header's buttons: 28 px at the default 1280 px window
 BUTTON_GAP_U = 0.6
-# The header's buttons, left to right: what they do and their key (ui.keymap.SHORTCUTS).
+# The header's buttons, left to right: what they do and their key (ui.keymap.SHORTCUTS);
+# what they do is shown with translate().
 HEADER_BUTTONS = {
-    "earlier": ("Earlier", "Left"),
-    "later": ("Later", "Right"),
-    "search": ("Search", "Ctrl+F"),
-    "fullscreen": ("Fullscreen", "F"),
-    "close": ("Close the guide", "G"),
+    "earlier": (N_("Earlier"), "Left"),  # i18n: the guide's ‹ (tooltip): an earlier time
+    "later": (N_("Later"), "Right"),  # i18n: the guide's › (tooltip): a later time
+    "search": (N_("Search"), "Ctrl+F"),
+    "fullscreen": (N_("Fullscreen"), "F"),
+    "close": (N_("Close the guide"), "G"),
 }
 _BUTTON_ICONS = {"earlier": "chevron_left", "later": "chevron_right"}
 
@@ -129,7 +133,12 @@ def day_label(window_start: datetime, now: datetime) -> str:
     """The window's local day: "Today", "Tomorrow" or its weekday."""
     start = window_start.astimezone()
     days = (start.date() - now.astimezone().date()).days
-    return {0: "Today", 1: "Tomorrow"}.get(days, start.strftime("%A"))
+    if days == 0:
+        return tr("Today")  # i18n: the guide's day, top left
+    if days == 1:
+        return tr("Tomorrow")  # i18n: the guide's day, top left
+    day = QDate(start.year, start.month, start.day).dayOfWeek()
+    return str(i18n.app_locale().dayName(day, QLocale.FormatType.LongFormat))
 
 
 def footer_programme(programmes: list[Programme], now: datetime) -> Programme | None:
@@ -290,7 +299,8 @@ class Guide(Overlay):
         """What hovering `point` says: a header button's name and key, or nothing."""
         for name, rect in self.header_buttons().items():
             if rect.contains(point):
-                return key_hint(*HEADER_BUTTONS[name])
+                what, keys = HEADER_BUTTONS[name]
+                return key_hint(translate(what), keys)
         return ""
 
     def activate(self) -> None:
@@ -583,7 +593,7 @@ class Guide(Overlay):
             p.drawText(
                 QRectF(now_x - tip / 2, header.bottom() - 1.6 * u, 8 * u, 1.4 * u),
                 Qt.AlignLeft | Qt.AlignVCenter,
-                "▼ now",
+                "▼ " + tr("now"),  # i18n: the guide's now-line marker; short (~5 letters)
             )
 
     def _paint_row(
@@ -639,7 +649,7 @@ class Guide(Overlay):
                 elided(p, str(number).strip(), num_w),
             )
         x += num_w + 0.9 * u
-        name = str(channel.get("name") or "")
+        name = shown_label(str(channel.get("name") or ""))  # "Stream 2" in the active language
         size = 3.0 * u
         url = channel.get("logo") or ""
         pixmap = self._logos.pixmap(url) if url and self._logos is not None else None
@@ -677,7 +687,9 @@ class Guide(Overlay):
             p.setPen(qcolor(PALETTE.text, 0.45))
             inner = box.adjusted(0.9 * u, 0, -0.9 * u, 0)
             p.drawText(
-                inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, NO_INFO_TEXT, inner.width())
+                inner,
+                Qt.AlignLeft | Qt.AlignVCenter,
+                elided(p, translate(NO_INFO_TEXT), inner.width()),
             )
             return
         left = box.left() + (0.2 * u if on_now else 0.0)
@@ -733,7 +745,7 @@ class Guide(Overlay):
             p.drawText(
                 QRectF(left, footer.top(), width, footer.height()),
                 Qt.AlignLeft | Qt.AlignVCenter,
-                NO_INFO_TEXT,
+                translate(NO_INFO_TEXT),
             )
             return
         title_font = units.font(1.2, QFont.Weight.Bold)

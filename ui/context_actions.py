@@ -25,6 +25,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMenu, QWidget
 
 from services import external_players, favorites
+from services.i18n import N_, tr, translate
 from services.navigation import NavModel, NavNode
 from ui.link_lanes import LinkLanes, Target
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
@@ -32,9 +33,10 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 logger = logging.getLogger(__name__)
 
 Launcher = Callable[[str], tuple[bool, str]]
-LINK_COPIED_TEXT = "Link copied"
-OPEN_PIP_TEXT = "Open in picture-in-picture"
-PLAYERS = (("Play in VLC", "vlc"), ("Play in MPV", "mpv"))
+# English (a test finds the menu's entry by it); translate() shows them.
+LINK_COPIED_TEXT = N_("Link copied")  # i18n: a toast: the stream's link is on the clipboard
+OPEN_PIP_TEXT = N_("Open in picture-in-picture")  # i18n: a menu entry
+PLAYERS = ((N_("Play in VLC"), "vlc"), (N_("Play in MPV"), "mpv"))
 
 
 def is_channel(nav: NavModel, node: Optional[NavNode]) -> bool:
@@ -132,11 +134,13 @@ class ContextActions(QObject):
         item: dict = node.payload
         if channel:
             kept = favorites.is_favorite(self.config, item)
-            text = "Remove from favorites" if kept else "Add to favorites"
+            text = tr("Remove from favorites") if kept else tr("Add to favorites")
             menu.addAction(text).triggered.connect(lambda _=False: self._toggle_favorite(item))
             open_pip = self._open_pip
             if open_pip is not None:
-                menu.addAction(OPEN_PIP_TEXT).triggered.connect(lambda _=False: open_pip(node))
+                menu.addAction(translate(OPEN_PIP_TEXT)).triggered.connect(
+                    lambda _=False: open_pip(node)
+                )
         if playable:
             if channel:
                 menu.addSeparator()
@@ -153,13 +157,13 @@ class ContextActions(QObject):
         """The players, then "Copy stream link"."""
         self._add_players(menu, target)
         menu.addSeparator()
-        menu.addAction("Copy stream link").triggered.connect(
+        menu.addAction(tr("Copy stream link")).triggered.connect(  # i18n: a menu entry
             lambda _=False: self.lanes.request_side(target, self._copy_link, play=False)
         )
 
     def _add_players(self, menu: QMenu, target: Target) -> None:
         for text, player in PLAYERS:
-            menu.addAction(text).triggered.connect(
+            menu.addAction(translate(text)).triggered.connect(
                 lambda _=False, name=player: self._external_play(target, name)
             )
 
@@ -178,7 +182,7 @@ class ContextActions(QObject):
             )
         if not found:
             logger.info("Not playing %s externally: %s is not installed", target.title, player)
-            self._notify(missing.partition("\n")[0], "error")
+            self._notify(translate(missing.partition("\n")[0]), "error")  # its headline
             return
         if target.local:  # its address is the file's (play_file)
             self.lanes.supersede()  # a newer choice than a side play waiting for its link
@@ -190,4 +194,4 @@ class ContextActions(QObject):
 
     def _copy_link(self, url: str) -> None:
         QGuiApplication.clipboard().setText(url)
-        self._notify(LINK_COPIED_TEXT, "info")
+        self._notify(translate(LINK_COPIED_TEXT), "info")

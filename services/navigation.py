@@ -22,7 +22,8 @@ from typing import Any, Callable, Optional, cast
 from PySide6.QtCore import QObject, Signal
 
 from services import favorites
-from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
+from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, shown_label
+from services.i18n import N_, tr, translate
 from services.provider_ids import (
     ALL_PROVIDERS,
     ALL_PROVIDERS_TITLE,
@@ -34,7 +35,8 @@ from services.provider_ids import (
 
 logger = logging.getLogger(__name__)
 
-SECTION_TITLES = {"live": "Live TV", "movies": "Movies", "series": "Series"}
+# Shown with translate() (section_title); the keys are what code compares.
+SECTION_TITLES = {"live": N_("Live TV"), "movies": N_("Movies"), "series": N_("Series")}
 LIBRARY_SECTIONS = frozenset({"movies", "series"})  # chosen in the drawer, shown by the Library
 SETTINGS_ROW = "settings"
 ADD_PROVIDER_ROW = "add_provider"
@@ -45,7 +47,7 @@ RECENT_GROUP = "@recent"
 _RECENT_LIMIT = 20
 _MEMO_LIMIT = 64  # memoized child lists kept (least recently used are dropped)
 LAZY_ROWS = 2000  # a list of items this long gets its nodes made on demand (see NodeSeq)
-LOADING_NOTICE = "Loading…"  # under a provider's heading in "All providers" while it loads
+LOADING_NOTICE = N_("Loading…")  # under a provider's heading in "All providers" while it loads
 _UNREADABLE = ("header", "notice")  # rows that only label: never opened or played
 
 
@@ -73,12 +75,24 @@ class NavNode:
         return isinstance(other, NavNode) and self._identity() == other._identity()
 
 
-ACTION_ROWS = (  # the drawer paints their icons (a gear, a plus, a file)
-    NavNode("action", SETTINGS_ROW, "Settings"),
-    NavNode("action", ADD_PROVIDER_ROW, "Add provider"),
-    NavNode("action", FREE_CHANNELS_ROW, "Free channels…"),
-    NavNode("action", OPEN_FILE_ROW, "Open file"),
+# The drawer paints their icons (a gear, a plus, a file); action_rows() has their titles shown.
+ACTION_ROWS = (
+    NavNode("action", SETTINGS_ROW, N_("Settings")),
+    NavNode("action", ADD_PROVIDER_ROW, N_("Add provider")),  # i18n: a row of the channel list
+    NavNode("action", FREE_CHANNELS_ROW, N_("Free channels…")),  # i18n: a row; opens a menu
+    NavNode("action", OPEN_FILE_ROW, N_("Open file")),  # i18n: a row of the channel list (verb)
 )
+
+
+def action_rows() -> list[NavNode]:
+    """The sources column's action rows, their titles in the active language."""
+    return [NavNode(n.layer, n.key, translate(n.title)) for n in ACTION_ROWS]
+
+
+def section_title(section: str) -> str:
+    """A section's name as shown: "Live TV", "Movies", "Series" (else its key, capitalised)."""
+    title = SECTION_TITLES.get(section)
+    return translate(title) if title is not None else section.title()
 
 
 def item_key(item: dict) -> str:
@@ -105,9 +119,12 @@ def episode_key(item: dict) -> str:
 
 
 def item_title(item: dict, *, episode: bool = False) -> str:
-    """How the drawer names a channel, title or season (an episode by its own name)."""
+    """How the drawer names a channel, title or season (an episode by its own name); the
+    names the loaders make up ("Season 2") in the active language."""
     title = (item.get("ename") if episode else None) or item.get("name") or item.get("title")
-    return str(title or "Untitled")
+    if not title:
+        return tr("Untitled")  # i18n: a channel or film without a name
+    return shown_label(str(title))
 
 
 def _item_node(item: dict, layer: str = "item") -> NavNode:
@@ -256,7 +273,8 @@ class NavModel(QObject):
     # --- structure ---------------------------------------------------------------------
     def _source(self) -> NavNode:
         name = self.catalog.current_provider_name()
-        return NavNode("source", name, ALL_PROVIDERS_TITLE if name == ALL_PROVIDERS else name, name)
+        title = translate(ALL_PROVIDERS_TITLE) if name == ALL_PROVIDERS else name
+        return NavNode("source", name, title, name)
 
     def all_mode(self) -> bool:
         """Whether the channel list shows every provider (the "All providers" source)."""
@@ -276,15 +294,11 @@ class NavModel(QObject):
             names = self.catalog.provider_names()
             sources = [NavNode("source", n, n, n) for n in names]
             if len(names) >= 2:  # one provider has nothing to mix
-                sources.insert(
-                    0, NavNode("source", ALL_PROVIDERS, ALL_PROVIDERS_TITLE, ALL_PROVIDERS)
-                )
-            return sources + list(ACTION_ROWS)
+                title = translate(ALL_PROVIDERS_TITLE)
+                sources.insert(0, NavNode("source", ALL_PROVIDERS, title, ALL_PROVIDERS))
+            return sources + action_rows()
         if parent.layer == "source":
-            return [
-                NavNode("section", s, SECTION_TITLES.get(s, s.title()), s)
-                for s in self.catalog.sections()
-            ]
+            return [NavNode("section", s, section_title(s), s) for s in self.catalog.sections()]
         section = self.section_of(parent)
         state = (self._data_version(), self._events)
         if parent.layer == "section":
@@ -312,7 +326,7 @@ class NavModel(QObject):
         listed = self.catalog.groups(parent.key)
         for at, g in enumerate(listed):
             if not g.header:
-                groups.append(NavNode("group", g.id, g.title, g, g.count))
+                groups.append(NavNode("group", g.id, shown_label(g.title), g, g.count))
                 continue
             groups.append(NavNode("header", g.id, g.title, g))  # a provider's heading
             if at + 1 == len(listed) or listed[at + 1].header:  # none of its groups yet
@@ -333,7 +347,7 @@ class NavModel(QObject):
         loaded = getattr(self.catalog, "provider_loaded", None)
         if loaded is None or loaded(name, section):
             return ""
-        return LOADING_NOTICE
+        return translate(LOADING_NOTICE)
 
     def _series_children(self, parent: NavNode) -> Optional[list[NavNode]]:
         if parent.layer == "item" and self.section_of(parent) == "series":
@@ -542,10 +556,12 @@ class NavModel(QObject):
         pinned = []
         favorites = self._favorite_items()
         if favorites:
-            pinned.append(NavNode("group", FAVORITES_GROUP, "★ Favorites", None, len(favorites)))
+            title = "★ " + tr("Favorites")  # i18n: the group of starred channels
+            pinned.append(NavNode("group", FAVORITES_GROUP, title, None, len(favorites)))
         recent = self._recent_items()
         if recent:
-            pinned.append(NavNode("group", RECENT_GROUP, "⟲ Recent", None, len(recent)))
+            title = "⟲ " + tr("Recent")  # i18n: the group of channels watched lately (noun)
+            pinned.append(NavNode("group", RECENT_GROUP, title, None, len(recent)))
         return pinned
 
     def shows_provider(self, parent: Optional[NavNode]) -> bool:
@@ -597,7 +613,8 @@ class NavModel(QObject):
     def reset_to(self, section: str = "live", group_id: Optional[str] = None) -> None:
         self._revealed = None
         source = self._source()
-        section_node = NavNode("section", section, SECTION_TITLES.get(section, section), section)
+        title = section_title(section) if section in SECTION_TITLES else section
+        section_node = NavNode("section", section, title, section)
         self._path = [source, section_node]
         self._pending_group = None
         self._request_section(section)
@@ -745,8 +762,12 @@ class NavModel(QObject):
             logger.info("Refreshing section %s failed; showing the saved catalog", section)
             self._on_section_ready(section)
             if self._shows_saved(section):
-                title = SECTION_TITLES.get(section, section.title())
-                self.notice.emit(f"Couldn't refresh {title}; showing saved channels")
+                self.notice.emit(
+                    tr(  # i18n: {section} is Live TV, Movies or Series; a toast
+                        "Couldn't refresh {section}; showing saved channels",
+                        section=section_title(section),
+                    )
+                )
             return
         if self._pending_group and self._pending_group[0] == section:
             self._pending_group = None
@@ -778,7 +799,7 @@ class NavModel(QObject):
             self._ready_sections.discard(key[1])
             self._requested_sections.discard(key[1])
         self._pending.discard(key)
-        self._errors[key] = message or "Load failed"
+        self._errors[key] = message or tr("Load failed")  # i18n: a list couldn't be loaded
         self.changed.emit()
 
     def _on_group_failed(self, section: str, group_id: str, message: str) -> None:
@@ -793,7 +814,8 @@ class NavModel(QObject):
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self._one_of_all(name):
             self._settle_provider(name, ready=False)
-            self._provider_errors[name] = message or "Couldn't connect"
+            # i18n: under a provider's name in the channel list: its setup failed
+            self._provider_errors[name] = message or tr("Couldn't connect")
             self.changed.emit()
             return
         # Requests made for the setup's provider will never settle: none is loading now,
@@ -804,7 +826,7 @@ class NavModel(QObject):
         self._refused_sections.clear()
         for key in [k for k, m in self._errors.items() if m == PROVIDER_LOADING_MESSAGE]:
             del self._errors[key]
-        self._provider_errors[name] = message or "Couldn't connect"
+        self._provider_errors[name] = message or tr("Couldn't connect")
         self.changed.emit()
 
     def _on_provider_ready(self, name: str) -> None:

@@ -7,18 +7,21 @@ countries. Cancelling the picker adds nothing.
 
 from __future__ import annotations
 
+from functools import cmp_to_key
 from typing import Callable, Optional
 
-from PySide6.QtCore import QLocale, QPoint, QTimer
+from PySide6.QtCore import QCollator, QLocale, QPoint, QTimer
 from PySide6.QtWidgets import QInputDialog, QMenu, QWidget
 
-from services import free_channels
+from services import free_channels, i18n
+from services.i18n import N_, tr, translate
 from ui.context_actions import menu_style
 
-ALL_TEXT = "All countries"
-OTHER_TEXT = "Another country…"
-PICKER_TITLE = "Free channels"
-PICKER_LABEL = "Country:"
+# English (tests compare them); translate() shows them.
+ALL_TEXT = N_("All countries")  # i18n: a menu entry: the free channels of every country
+OTHER_TEXT = N_("Another country…")  # i18n: a menu entry; opens a list of countries
+PICKER_TITLE = N_("Free channels")  # i18n: the country list's window title
+PICKER_LABEL = N_("Country:")
 
 
 def system_territory() -> str:
@@ -30,15 +33,30 @@ def system_territory() -> str:
         return ""
 
 
+def shown_countries() -> list[tuple[str, str]]:
+    """(iptv-org's code, name) of every country, named in the active language and in its
+    alphabetical order (English keeps the list's own order)."""
+    shown = [(code, free_channels.shown_name(code)) for code, _name in free_channels.COUNTRIES]
+    if i18n.language() != i18n.SOURCE_LANGUAGE:
+        collator = QCollator(i18n.app_locale())
+
+        def by_name(a: tuple[str, str], b: tuple[str, str]) -> int:
+            return int(collator.compare(a[1], b[1]))
+
+        shown.sort(key=cmp_to_key(by_name))
+    return shown
+
+
 def pick_country(parent: Optional[QWidget]) -> Optional[str]:
     """A list of every country (typing letters jumps in it): iptv-org's code, None on cancel."""
-    names = [name for _code, name in free_channels.COUNTRIES]
+    countries = shown_countries()
+    names = [name for _code, name in countries]
     name, accepted = QInputDialog.getItem(
-        parent, PICKER_TITLE, PICKER_LABEL, names, 0, False  # not editable
+        parent, translate(PICKER_TITLE), translate(PICKER_LABEL), names, 0, False  # not editable
     )
     if not accepted:
         return None
-    return next((code for code, n in free_channels.COUNTRIES if n == name), None)
+    return next((code for code, n in countries if n == name), None)
 
 
 def build_menu(
@@ -52,10 +70,11 @@ def build_menu(
     and Another country…. `territory` is the system's region code (None: ask the system)."""
     menu = QMenu(parent)
     menu.setStyleSheet(menu_style())
-    menu.addAction(ALL_TEXT).triggered.connect(lambda _checked=False: choose(None))
+    menu.addAction(translate(ALL_TEXT)).triggered.connect(lambda _checked=False: choose(None))
     code = free_channels.region_code(system_territory() if territory is None else territory)
     if code is not None:
-        text = f"{free_channels.country_name(code)} (your region)"
+        # i18n: a menu entry: the free channels of the system's country, {country}
+        text = tr("{country} (your region)", country=free_channels.shown_name(code))
         menu.addAction(text).triggered.connect(lambda _checked=False: choose(code))
 
     def other() -> None:
@@ -64,7 +83,9 @@ def build_menu(
             choose(picked)
 
     # After the menu has closed: the dialog is modal and must not open under a popup.
-    menu.addAction(OTHER_TEXT).triggered.connect(lambda _checked=False: QTimer.singleShot(0, other))
+    menu.addAction(translate(OTHER_TEXT)).triggered.connect(
+        lambda _checked=False: QTimer.singleShot(0, other)
+    )
     return menu
 
 

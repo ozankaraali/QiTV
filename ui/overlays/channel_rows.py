@@ -16,6 +16,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QFont, QFontMetrics, QFontMetricsF, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QStyle, QStyledItemDelegate
 
+from services.catalog import shown_label
 from services.provider_ids import provider_of
 from services.zapping import ZapContext
 from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round
@@ -178,7 +179,9 @@ class ChannelRowsModel(QAbstractListModel):
             return None
         item = self._items[row]
         if role == Qt.DisplayRole:
-            return item.get("name", "")
+            name = item.get("name", "")
+            # A name a loader made up ("Stream 2") in the active language.
+            return shown_label(name) if isinstance(name, str) else name
         if role == NumberRole:
             return self._numbers[row] if self._numbers is not None else item.get("number")
         if role == ProviderRole:
