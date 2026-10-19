@@ -19,14 +19,15 @@ from unittest.mock import patch
 
 from test_live_source import FAST_RETRIES, KEY, SourceTestCase, drain, encrypt, leaf
 
-from services.live import source as source_module
-from services.live.source import CAPTURE_ENV, Discontinuity, open_source
+from services.live import capture as capture_module, source as source_module
+from services.live.capture import CAPTURE_ENV
+from services.live.source import Discontinuity, open_source
 
 NAME = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{8}$")
 
 
 class _Logs:
-    """The source module's log records (level, message) while in the block."""
+    """The source and capture modules' log records (level, message) while in the block."""
 
     def __enter__(self):
         self.records = []
@@ -36,16 +37,20 @@ class _Logs:
             def emit(self, record):
                 logs.records.append((record.levelno, record.getMessage()))
 
-        self._logger = logging.getLogger("services.live.source")
         self._handler = Collect(logging.DEBUG)
-        self._level = self._logger.level
-        self._logger.addHandler(self._handler)
-        self._logger.setLevel(logging.DEBUG)
+        self._loggers = [
+            logging.getLogger(f"services.live.{name}") for name in ("source", "capture")
+        ]
+        self._levels = [logger.level for logger in self._loggers]
+        for logger in self._loggers:
+            logger.addHandler(self._handler)
+            logger.setLevel(logging.DEBUG)
         return self.records
 
     def __exit__(self, *_exc):
-        self._logger.removeHandler(self._handler)
-        self._logger.setLevel(self._level)
+        for logger, level in zip(self._loggers, self._levels):
+            logger.removeHandler(self._handler)
+            logger.setLevel(level)
 
 
 def captures(directory):
@@ -83,7 +88,7 @@ class CaptureFileTests(unittest.TestCase):
         self.root = self.directory.name
 
     def capture(self, url="http://host.invalid/user/secret/1.ts"):
-        capture = source_module._Capture(self.root, url)
+        capture = capture_module._Capture(self.root, url)
         self.addCleanup(capture.close)
         return capture
 
@@ -136,7 +141,7 @@ class CaptureFileTests(unittest.TestCase):
 
     def test_the_directory_is_made_when_missing(self):
         nested = os.path.join(self.root, "a", "b")
-        capture = source_module._Capture(nested, "http://host.invalid/1.ts")
+        capture = capture_module._Capture(nested, "http://host.invalid/1.ts")
         capture.write(b"abc")
         capture.close()
         self.assertEqual(len(captures(nested)), 1)
@@ -218,7 +223,7 @@ class CaptureFileTests(unittest.TestCase):
     def test_the_size_cap_stops_the_capture_once(self):
         capture = self.capture()
         opened = capture._opened
-        with patch.object(source_module, "_CAPTURE_MAX_BYTES", 25), _Logs() as logs:
+        with patch.object(capture_module, "_CAPTURE_MAX_BYTES", 25), _Logs() as logs:
             for index in range(5):
                 capture.write(b"0123456789", opened + index)
         (name,) = captures(self.root)
@@ -240,10 +245,10 @@ class CaptureFileTests(unittest.TestCase):
         self.assertEqual(stops, [f"The live stream capture {name} stopped after 3 hours."])
 
     def test_the_disk_keeps_a_gibibyte_free(self):
-        floor = source_module._CAPTURE_FREE_FLOOR
-        usage = shutil_usage(free=floor + source_module._CAPTURE_CHECK_BYTES)
+        floor = capture_module._CAPTURE_FREE_FLOOR
+        usage = shutil_usage(free=floor + capture_module._CAPTURE_CHECK_BYTES)
         capture = self.capture()
-        with patch.object(source_module.shutil, "disk_usage", return_value=usage), _Logs() as logs:
+        with patch.object(capture_module.shutil, "disk_usage", return_value=usage), _Logs() as logs:
             capture.write(b"abc")
             capture.write(b"def")
         self.assertEqual(os.listdir(self.root), [])
@@ -254,11 +259,11 @@ class CaptureFileTests(unittest.TestCase):
 
     def test_the_free_space_is_looked_up_again_as_the_capture_grows(self):
         plenty = shutil_usage(free=1 << 50)
-        low = shutil_usage(free=source_module._CAPTURE_FREE_FLOOR)
+        low = shutil_usage(free=capture_module._CAPTURE_FREE_FLOOR)
         capture = self.capture()
         with (
-            patch.object(source_module, "_CAPTURE_CHECK_BYTES", 10),
-            patch.object(source_module.shutil, "disk_usage", side_effect=[plenty, plenty, low]),
+            patch.object(capture_module, "_CAPTURE_CHECK_BYTES", 10),
+            patch.object(capture_module.shutil, "disk_usage", side_effect=[plenty, plenty, low]),
             _Logs() as logs,
         ):
             for _ in range(5):
@@ -274,7 +279,7 @@ class CaptureFileTests(unittest.TestCase):
     def test_a_write_error_logs_one_warning_without_the_path_and_stops(self):
         capture = self.capture()
         writes = failing_open(after=1)
-        with patch.object(source_module, "open", writes.open, create=True), _Logs() as logs:
+        with patch.object(capture_module, "open", writes.open, create=True), _Logs() as logs:
             capture.write(b"abc")
             capture.write(b"def")  # fails
             capture.write(b"ghi")  # stopped: never tried
@@ -448,7 +453,7 @@ class CapturedSourceTests(SourceTestCase):
         writes = failing_open(after=1)
         with (
             patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES),
-            patch.object(source_module, "open", writes.open, create=True),
+            patch.object(capture_module, "open", writes.open, create=True),
             _Logs() as logs,
         ):
             _source, parts = stream(server.url + "/user/secret/live.ts")
@@ -473,7 +478,7 @@ class CapturedSourceTests(SourceTestCase):
     def test_the_size_cap_leaves_the_stream_whole(self):
         server = self.server({"/live.ts": (200, {}, self.video)})
         cap = len(self.video) // 2
-        with patch.object(source_module, "_CAPTURE_MAX_BYTES", cap), _Logs() as logs:
+        with patch.object(capture_module, "_CAPTURE_MAX_BYTES", cap), _Logs() as logs:
             _source, parts = stream(server.url + "/live.ts")
         self.assertEqual(parts, [self.video])
         stops = [message for _level, message in logs if "stopped at 2 GiB" in message]

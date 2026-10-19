@@ -13,50 +13,35 @@ after that, 10 s without a byte breaks the connection. ``close()`` may be called
 thread, never blocks, and interrupts a TLS handshake, header read, body read or backoff
 wait at once. A DNS lookup (``getaddrinfo``) is not bounded at all, and a TCP connect is
 bounded only by the 60 s connect timeout per address. Credentials never reach error texts
-or log lines: all ``SourceError`` messages are fixed strings.
-
-Platforms: on macOS and Linux, ``close()`` shuts down a duplicate descriptor of each live
-connection, which wakes any call blocked on it, and never closes a descriptor from another
-thread. On Windows a ``shutdown()`` wakes nothing blocked in Winsock (on a duplicate or on
-the original handle); only closing the handle the call waits on does. There ``close()``
-closes the owning plain socket objects, so the reader's own later close is a no-op. TLS
-sockets are never touched from another thread (OpenSSL keeps using the raw handle value,
-which a new socket may already own): they wait in slices of at most 0.25 s and stop on
-their own once the source is closed.
+or log lines: all ``SourceError`` messages are fixed strings. How ``close()`` wakes a
+blocked call on each platform: `services.live.interruptible_http`. What a source reads can
+be saved for replay: `services.live.capture`.
 """
 
 from __future__ import annotations
 
-import _socket
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-import hashlib
 import logging
 import os
 import re
-import shutil
-import socket
-import ssl
-import sys
 import threading
 import time
-from typing import Any, BinaryIO, Protocol, TextIO, TypeVar, cast
+from typing import Any, BinaryIO, Protocol, TypeVar
 from urllib.parse import urljoin, urlsplit
 from urllib.request import url2pathname
-import weakref
 
 from Cryptodome.Cipher import AES
 from Cryptodome.Util.Padding import unpad
 import m3u8
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.connection import HTTPConnection, HTTPSConnection
-from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.exceptions import NameResolutionError, ReadTimeoutError
-from urllib3.util.ssl_ import create_urllib3_context, resolve_cert_reqs, resolve_ssl_version
 
+from services.live import interruptible_http
+from services.live.capture import _Capture
 from services.live.hls_audio import AudioWeaver
+from services.live.interruptible_http import _Closed, _Interrupter, _InterruptibleAdapter
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED  # noqa: F401 (and here)
 from services.live.ts import ContinuityJoiner, program_has_audio
 from services.vlc_profile import DEFAULT_USER_AGENT
@@ -119,21 +104,7 @@ _LIMIT_WORDS = re.compile(
 )
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 _IDENTITY = {"Accept-Encoding": "identity"}
-_WINDOWS = sys.platform == "win32"
-# Interrupt plain sockets through their owning objects and let TLS sockets wait in slices,
-# instead of shutting down duplicates (see the module docstring).
-_INTERRUPT_OWNERS = _WINDOWS
-_TLS_SLICE = 0.25
-# A directory where every opened source saves what it reads from the provider, with arrival
-# times (`_Capture`). For debugging only: the files hold the provider's stream. Unset (the
-# default), nothing is saved and nothing is paid.
-CAPTURE_ENV = "QITV_CAPTURE_DIR"
-_CAPTURE_MAX_BYTES = 2 << 30  # a capture stops after 2 GiB ...
-_CAPTURE_MAX_SECONDS = 3 * 3600.0  # ... or 3 hours
-_CAPTURE_FREE_FLOOR = 1 << 30  # and never leaves the disk less than 1 GiB free
-_CAPTURE_CHECK_BYTES = 32 << 20  # the free space is looked up again after this much
-_CAPTURE_BUFFER = 1 << 20
-_CAPTURE_FLUSH_S = 1.0  # a read this long after the last flush flushes both files
+
 
 _OPEN_FAILED = "The channel could not be opened for time-shift."
 _HTTP_FAILED = "The channel could not be reached over HTTP."
@@ -220,10 +191,6 @@ class Source(Protocol):
         """After ``close()``: wait up to ``timeout`` until the upstream connection is closed
         (on Windows a TLS reader closes it within one 0.25 s slice); True once it is."""
         ...
-
-
-class _Closed(Exception):
-    """The source was closed or stopped; iteration ends quietly."""
 
 
 class _ReadError(Exception):
@@ -327,246 +294,6 @@ def _quietly(action: Callable[[], object], what: str) -> None:
         action()
     except Exception as error:
         log.debug("Closing the %s failed (%s).", what, type(error).__name__)
-
-
-def _shutdown(sock: socket.socket) -> None:
-    try:
-        sock.shutdown(socket.SHUT_RDWR)
-    except OSError:
-        pass  # already closed or never connected: nothing left to interrupt
-
-
-def _abort(sock: socket.socket) -> None:
-    """Interrupt a call blocked on ``sock`` (an owning plain socket) from another thread.
-
-    On Windows only, the handle is then closed: nothing else wakes a blocked Winsock call.
-    The C-level close marks the object's descriptor invalid under the GIL before releasing
-    the handle, so the reader's later calls fail and its own close does nothing. POSIX
-    never closes here: on macOS a close right after the shutdown can swallow its wakeup.
-    """
-    try:
-        _socket.socket.shutdown(sock, socket.SHUT_RDWR)
-    except OSError:
-        pass  # not connected or already closed
-    if not _WINDOWS:
-        return
-    try:
-        _socket.socket.close(sock)
-    except OSError:
-        pass  # the peer already reset it; the handle is released either way
-
-
-class _Interrupter:
-    """Lets another thread interrupt every live connection of one source.
-
-    macOS and Linux: a duplicate descriptor per connection. It shares the kernel socket,
-    so shutting it down wakes a TLS handshake, header read or body read blocked on the
-    original descriptor. Duplicates are only closed under the lock, so a recycled
-    descriptor number is never touched.
-
-    Windows: the owning plain socket objects (held weakly). Only closing a handle wakes a
-    call blocked on it there; see ``_abort``. TLS sockets are left to ``_sliced_tls_socket``.
-    (Tests force this mode elsewhere, where the shutdown alone wakes a plain reader.)
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._handles: dict[int, socket.socket] = {}
-        self._owners: weakref.WeakSet[socket.socket] = weakref.WeakSet()
-        self._interrupted = False
-
-    @property
-    def interrupted(self) -> bool:
-        return self._interrupted
-
-    def adopt(self, sock: socket.socket) -> None:
-        """Windows: a plain socket object that owns its handle."""
-        with self._lock:
-            if not self._interrupted:
-                self._owners.add(sock)
-                return
-        _abort(sock)  # the source closed while this connection was being made
-
-    def track(self, connection: object, sock: socket.socket) -> None:
-        if _INTERRUPT_OWNERS:
-            # An HTTPS connection's socket is about to become a TLS socket's handle, which
-            # must not be closed from another thread; its TLS socket waits in slices.
-            if not isinstance(connection, HTTPSConnection):
-                self.adopt(sock)
-            return
-        with self._lock:
-            if not self._interrupted:
-                self._forget_locked(connection)
-                try:
-                    self._handles[id(connection)] = sock.dup()
-                except OSError as error:
-                    log.debug("A connection cannot be interrupted (%s).", type(error).__name__)
-                return
-        _shutdown(sock)  # the source closed while this connection was being made
-
-    def forget(self, connection: object) -> None:
-        with self._lock:
-            self._forget_locked(connection)
-
-    def _forget_locked(self, connection: object) -> None:
-        handle = self._handles.pop(id(connection), None)
-        if handle is not None:
-            handle.close()
-
-    def interrupt(self) -> None:
-        with self._lock:
-            self._interrupted = True
-            for handle in self._handles.values():
-                _shutdown(handle)
-                handle.close()
-            self._handles.clear()
-            for owner in list(self._owners):
-                _abort(owner)
-
-
-def _tls_context(connection: Any, socket_class: type[ssl.SSLSocket]) -> ssl.SSLContext:
-    """The context urllib3 builds for a connection without one, plus ``socket_class``."""
-    context = create_urllib3_context(
-        ssl_version=resolve_ssl_version(connection.ssl_version),
-        ssl_minimum_version=connection.ssl_minimum_version,
-        ssl_maximum_version=connection.ssl_maximum_version,
-        cert_reqs=resolve_cert_reqs(connection.cert_reqs),
-    )
-    # urllib3 loads the system roots itself only into a context it built (requests always
-    # passes its CA bundle when verifying, so this matters only without verification).
-    if not (connection.ca_certs or connection.ca_cert_dir or connection.ca_cert_data):
-        context.load_default_certs()
-    context.sslsocket_class = socket_class
-    return context
-
-
-def _sliced_tls_socket(interrupter: _Interrupter) -> type[ssl.SSLSocket]:
-    """Windows TLS sockets that wait in slices and stop by themselves once interrupted.
-
-    The real socket timeout is at most ``_TLS_SLICE``; the caller's timeout is kept as a
-    deadline over the retries. Retrying after an ``_ssl`` timeout is safe: it is raised
-    only while OpenSSL waits for the network (WANT_READ or WANT_WRITE), and CPython
-    allows a write to be retried from a moved buffer. Only that timeout, which has no
-    errno, is retried: a Winsock WSAETIMEDOUT is sticky and raised at once.
-    """
-
-    def waiting(self: Any, operation: Callable[[], _T]) -> _T:
-        timeout = self.gettimeout()
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            if interrupter.interrupted:
-                raise _Closed()
-            try:
-                return operation()
-            except TimeoutError as error:
-                if error.errno is not None:
-                    raise
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise
-
-    def settimeout(self: Any, value: float | None) -> None:
-        self._logical_timeout = value
-        if value is None:
-            ssl.SSLSocket.settimeout(self, _TLS_SLICE)
-        else:
-            ssl.SSLSocket.settimeout(self, min(float(value), _TLS_SLICE))
-
-    def gettimeout(self: Any) -> float | None:
-        if "_logical_timeout" not in self.__dict__:
-            return ssl.SSLSocket.gettimeout(self)
-        timeout: float | None = self._logical_timeout
-        return timeout
-
-    def setblocking(self: Any, flag: bool) -> None:
-        self.settimeout(None if flag else 0.0)
-
-    def read(self: Any, len: int = 1024, buffer: Any = None) -> Any:  # also recv, recv_into
-        return waiting(self, lambda: ssl.SSLSocket.read(self, len, buffer))
-
-    def send(self: Any, data: Any, flags: int = 0) -> int:  # also sendall
-        return waiting(self, lambda: ssl.SSLSocket.send(self, data, flags))
-
-    def do_handshake(self: Any, block: bool = False) -> None:
-        waiting(self, lambda: ssl.SSLSocket.do_handshake(self, block))
-
-    namespace = {
-        "settimeout": settimeout,
-        "gettimeout": gettimeout,
-        "setblocking": setblocking,
-        "read": read,
-        "send": send,
-        "do_handshake": do_handshake,
-    }
-    return cast("type[ssl.SSLSocket]", type("SSLSocket", (ssl.SSLSocket,), namespace))
-
-
-def _interruptible_pools(interrupter: _Interrupter) -> dict[str, type[HTTPConnectionPool]]:
-    tls_socket = _sliced_tls_socket(interrupter)
-
-    def connection_class(base: type[HTTPConnection]) -> type[HTTPConnection]:
-        def new_conn(self: HTTPConnection) -> socket.socket:
-            sock = base._new_conn(self)
-            interrupter.track(self, sock)
-            return sock
-
-        def close(self: HTTPConnection) -> None:
-            try:
-                base.close(self)
-            finally:
-                interrupter.forget(self)
-
-        def connect(self: Any) -> None:
-            # Windows TLS sockets must wait in slices; the TLS socket exists only inside
-            # urllib3's wrap_socket: hand urllib3 its usual context with a sliced class.
-            if not (_INTERRUPT_OWNERS and isinstance(self, HTTPSConnection)):
-                base.connect(self)
-                return
-            if self.ssl_context is not None:
-                base.connect(self)  # a caller's own context: left as it is
-                return
-            self.ssl_context = _tls_context(self, tls_socket)
-            try:
-                base.connect(self)
-            finally:
-                self.ssl_context = None
-
-        def getresponse(self: HTTPConnection) -> Any:
-            sock = self.sock  # http.client drops it at once for a close-delimited body
-            response = base.getresponse(self)
-            response.qitv_socket = sock  # the reader shortens its timeout (`_Http.read`)
-            return response
-
-        namespace = {
-            "_new_conn": new_conn,
-            "close": close,
-            "connect": connect,
-            "getresponse": getresponse,
-        }
-        return cast("type[HTTPConnection]", type(base.__name__, (base,), namespace))
-
-    def pool_class(base: type[HTTPConnectionPool], connection: type[HTTPConnection]) -> Any:
-        return type(base.__name__, (base,), {"ConnectionCls": connection_class(connection)})
-
-    return {
-        "http": pool_class(HTTPConnectionPool, HTTPConnection),
-        "https": pool_class(HTTPSConnectionPool, HTTPSConnection),
-    }
-
-
-class _InterruptibleAdapter(HTTPAdapter):
-    def __init__(self, interrupter: _Interrupter) -> None:
-        self._pool_classes = _interruptible_pools(interrupter)
-        super().__init__()
-
-    def init_poolmanager(self, *args: Any, **kwargs: Any) -> None:
-        super().init_poolmanager(*args, **kwargs)
-        self.poolmanager.pool_classes_by_scheme = self._pool_classes
-
-    def proxy_manager_for(self, proxy: str, **proxy_kwargs: Any) -> Any:
-        manager = super().proxy_manager_for(proxy, **proxy_kwargs)
-        if not proxy.lower().startswith("socks"):  # SOCKS pools bring their own connections
-            manager.pool_classes_by_scheme = self._pool_classes
-        return manager
 
 
 def _retryable(error: Exception) -> bool:
@@ -800,7 +527,7 @@ class _Http:
             owner = self._owner
         self._closed_event.set()
         self._interrupter.interrupt()
-        if response is not None and not _INTERRUPT_OWNERS:
+        if response is not None and not interruptible_http._INTERRUPT_OWNERS:
             # A close-delimited body's socket has no live duplicate (http.client closed its
             # connection after the headers). Never used with owners: TLS sockets are not
             # touched from here, and plain owners were already interrupted above.
@@ -842,183 +569,6 @@ def _shorten_read_timeout(response: Any, seconds: float) -> None:
         sock.settimeout(min(seconds, _TIMEOUT))
     except OSError as error:  # closed under the reader: its next read fails anyway
         log.debug("A read timeout could not be shortened (%s).", type(error).__name__)
-
-
-def _private(path: str, flags: int) -> int:
-    """`open`'s opener for a capture file: readable and writable by its owner only."""
-    return os.open(path, flags, 0o600)
-
-
-class _Capture:
-    """What one opened source reads from the provider, saved under ``QITV_CAPTURE_DIR`` so a
-    glitch can be replayed exactly: by the replay tool (``scripts/replay_capture.py``), or
-    the ``.ts`` file alone in VLC or mpv.
-
-    ``<stamp>-<hash>.ts`` holds the bytes as they were read, before any parsing, joining or
-    segmenting: a raw TS body from its first byte on, and an HLS channel's media segments one
-    after another in arrival order (an AES-128 segment decrypted, as it reaches the joiner;
-    no playlist). ``<stamp>-<hash>.times`` is text with one ``<cumulative bytes> <seconds>``
-    line per read: the bytes in the ``.ts`` file once that read was saved, and the seconds
-    since the open began, with 3 decimals. Lines starting with ``#`` are comments, which a
-    reader skips: ``# reconnect <seconds>`` once a raw TS stream's new connection answered
-    (its bytes go on in the same pair, as they go on in the stream the helper reads), and for
-    HLS ``# segment <seconds>`` as each segment answers, after ``# discontinuity <seconds>``
-    when a break comes before it. The stamp is the local time at the open and the hash 8 hex
-    digits of the channel URL's SHA-256: no address or credential reaches a file or a log.
-
-    The files are made at the first bytes, readable by their owner only (and the directory,
-    when it is made here), and written in the reading thread, buffered. Both are flushed by
-    a comment line, by a read that comes a second or more after the last flush (so also the
-    first read after a stall), and when the source closes: `flush` from the closing thread,
-    then the reading thread's own close (the helper ends with ``os._exit``, which flushes
-    nothing). A capture stops after 2 GiB or 3 hours, or where the disk would keep less than
-    1 GiB free; a failure to write logs one warning and stops it. Playback goes on unchanged
-    either way.
-    """
-
-    def __init__(self, directory: str, url: str) -> None:
-        self._opened = time.monotonic()
-        digest = hashlib.sha256(url.encode("utf-8", "surrogatepass")).hexdigest()[:8]
-        self.name = f"{time.strftime('%Y%m%d-%H%M%S')}-{digest}"
-        self._directory = directory
-        self._lock = threading.Lock()  # the reading thread, and `flush` from a closing one
-        self._files: tuple[BinaryIO, TextIO] | None = None
-        self._written = 0
-        self._checked = 0  # what had been written when the free space was last looked up
-        self._flushed = self._opened
-        self._stopped = False
-
-    @classmethod
-    def from_environment(cls, url: str) -> _Capture | None:
-        directory = os.environ.get(CAPTURE_ENV, "")
-        return cls(directory, url) if directory else None
-
-    def write(self, block: bytes, at: float | None = None) -> None:
-        """One read's bytes, which arrived at ``at`` (`time.monotonic`; now by default)."""
-        if self._stopped or not block:
-            return
-        now = time.monotonic() if at is None else at
-        with self._lock:
-            try:
-                self._write(block, now)
-            except Exception as error:
-                self._failed(error)
-
-    def mark(self, event: str) -> None:
-        """A ``# <event> <seconds>`` line in the times file, now; both files are flushed."""
-        if self._stopped:
-            return
-        now = time.monotonic()
-        with self._lock:
-            try:
-                files = self._open()
-                if files is not None:
-                    files[1].write(f"# {event} {now - self._opened:.3f}\n")
-                    self._flush(now)
-            except Exception as error:
-                self._failed(error)
-
-    def flush(self) -> None:
-        """From any thread (the source's ``close`` and ``wait_closed``): what is buffered goes
-        to disk. Never waits: while the reading thread is writing, it is left to that thread,
-        which closes the files as the source ends."""
-        if self._stopped or not self._lock.acquire(blocking=False):
-            return
-        try:
-            if self._files is not None:
-                self._flush(time.monotonic())
-        except Exception as error:
-            self._failed(error)
-        finally:
-            self._lock.release()
-
-    def close(self) -> None:
-        """In the reading thread, as the source ends: both files are flushed and closed."""
-        with self._lock:
-            self._close()
-
-    def _write(self, block: bytes, now: float) -> None:
-        seconds = now - self._opened
-        if seconds >= _CAPTURE_MAX_SECONDS:
-            self._stop(logging.INFO, "after 3 hours")
-            return
-        if self._written + len(block) > _CAPTURE_MAX_BYTES:
-            self._stop(logging.INFO, "at 2 GiB")
-            return
-        files = self._open()
-        if files is None:
-            return
-        data, times = files
-        data.write(block)
-        self._written += len(block)
-        times.write(f"{self._written} {seconds:.3f}\n")
-        if now - self._flushed >= _CAPTURE_FLUSH_S:
-            self._flush(now)
-
-    def _flush(self, now: float) -> None:
-        if self._files is not None:
-            for file in self._files:  # the bytes first: no line counts bytes still unsaved
-                file.flush()
-        self._flushed = now
-
-    def _close(self) -> None:
-        self._stopped = True
-        files, self._files = self._files, None
-        if files is not None:
-            for file in files:
-                _quietly(file.close, "capture")
-
-    def _open(self) -> tuple[BinaryIO, TextIO] | None:
-        """The files, made at the first call; None once the disk is too full."""
-        if self._files is None:
-            os.makedirs(self._directory, mode=0o700, exist_ok=True)
-            if not self._room():
-                return None
-            self._files = self._create()
-            log.info("Capturing the live stream to %s.ts and .times.", self.name)
-        elif self._written - self._checked >= _CAPTURE_CHECK_BYTES and not self._room():
-            return None
-        return self._files
-
-    def _create(self) -> tuple[BinaryIO, TextIO]:
-        """A new pair: a second open in the same second of the same channel adds -2, -3..."""
-        for attempt in range(1, 100):
-            name = self.name if attempt == 1 else f"{self.name}-{attempt}"
-            path = os.path.join(self._directory, name)
-            try:
-                data = open(path + ".ts", "xb", buffering=_CAPTURE_BUFFER, opener=_private)
-            except FileExistsError:
-                continue
-            try:
-                times = open(path + ".times", "x", encoding="ascii", newline="\n", opener=_private)
-            except BaseException:
-                data.close()
-                raise
-            self.name = name
-            return data, times
-        raise FileExistsError()
-
-    def _room(self) -> bool:
-        """Whether the disk keeps 1 GiB free until the next look, even with the buffer."""
-        self._checked = self._written
-        free = shutil.disk_usage(self._directory).free
-        if free >= _CAPTURE_FREE_FLOOR + _CAPTURE_CHECK_BYTES + _CAPTURE_BUFFER:
-            return True
-        self._stop(logging.WARNING, "with less than 1 GiB free on its disk")
-        return False
-
-    def _stop(self, level: int, why: str) -> None:
-        self._close()
-        log.log(level, "The live stream capture %s stopped %s.", self.name, why)
-
-    def _failed(self, error: Exception) -> None:
-        # An OSError's text names the path: only its type is told.
-        self._close()
-        log.warning(
-            "The live stream capture %s stopped: it could not be written (%s).",
-            self.name,
-            type(error).__name__,
-        )
 
 
 def _guarded(

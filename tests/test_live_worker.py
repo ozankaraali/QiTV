@@ -30,7 +30,7 @@ from process_fixtures import still_running, terminate
 from ts_fixtures import PMT_PID, make_stream
 from urllib3.exceptions import InsecureRequestWarning
 
-from services.live import source as source_module, worker
+from services.live import interruptible_http, source as source_module, worker
 from services.live.ring import RamRing
 from services.live.worker import helper_main
 
@@ -1432,7 +1432,7 @@ class ClosedAfterReleaseTests(unittest.TestCase):
         # Forced Windows mode: a TLS socket is never touched from another thread, so its
         # reader notices the close within one 0.25 s slice and only then closes it.
         created = []
-        sliced = source_module._sliced_tls_socket
+        sliced = interruptible_http._sliced_tls_socket
 
         def recording(interrupter):
             base = sliced(interrupter)
@@ -1457,8 +1457,8 @@ class ClosedAfterReleaseTests(unittest.TestCase):
         context = self.enterContext(tls_server_context())
         upstream = LocalSource({SECRET_PATH: (200, {}, stalled)}, tls=context)
         self.addCleanup(upstream.close)
-        self.enterContext(patch.object(source_module, "_INTERRUPT_OWNERS", True))
-        self.enterContext(patch.object(source_module, "_sliced_tls_socket", recording))
+        self.enterContext(patch.object(interruptible_http, "_INTERRUPT_OWNERS", True))
+        self.enterContext(patch.object(interruptible_http, "_sliced_tls_socket", recording))
         self.enterContext(warnings.catch_warnings())
         warnings.simplefilter("ignore", InsecureRequestWarning)
         helper = InProcessHelper(self)

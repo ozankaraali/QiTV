@@ -28,7 +28,7 @@ import requests
 import ts_fixtures
 from urllib3.exceptions import InsecureRequestWarning
 
-from services.live import source as source_module
+from services.live import interruptible_http, source as source_module
 from services.live.source import (
     STREAM_LIMIT,
     STREAM_REFUSED,
@@ -2160,7 +2160,7 @@ class SlicedTlsSocketTests(unittest.TestCase):
     def test_only_a_slice_timeout_is_retried(self):
         # The 0.25 s slice's own timeout has no errno and is retried until the deadline. A
         # Winsock WSAETIMEDOUT (errno 10060) is sticky: retrying it would spin until then.
-        sliced = source_module._sliced_tls_socket(source_module._Interrupter())
+        sliced = interruptible_http._sliced_tls_socket(interruptible_http._Interrupter())
         sock = sliced.__new__(sliced)  # never connected: only the retry logic runs
         sock._logical_timeout = 5.0
         slice_timeout = TimeoutError("The read operation timed out")
@@ -2192,19 +2192,19 @@ class WindowsInterruptModeTests(SourceTestCase):
 
     def setUp(self):
         super().setUp()
-        patcher = patch.object(source_module, "_INTERRUPT_OWNERS", True)
+        patcher = patch.object(interruptible_http, "_INTERRUPT_OWNERS", True)
         patcher.start()
         self.addCleanup(patcher.stop)
         # Nothing outside the reader may touch a TLS socket: on Windows OpenSSL keeps
         # using its raw handle value, which a new socket may already own.
         self.aborted = []
-        abort = source_module._abort
+        abort = interruptible_http._abort
 
         def spy(sock):
             self.aborted.append(type(sock))
             abort(sock)
 
-        spier = patch.object(source_module, "_abort", spy)
+        spier = patch.object(interruptible_http, "_abort", spy)
         spier.start()
         self.addCleanup(spier.stop)
         self.tls_shutdowns = []
@@ -2229,14 +2229,14 @@ class WindowsInterruptModeTests(SourceTestCase):
         # An HTTPS connection's raw socket becomes its TLS socket's handle; closing it from
         # another thread, even before the handshake, would close a TLS handle.
         adopted = []
-        adopt = source_module._Interrupter.adopt
+        adopt = interruptible_http._Interrupter.adopt
 
         def record(interrupter, sock):
             adopted.append(sock)  # a strong reference: the owner set itself is weak
             adopt(interrupter, sock)
 
         with self.tls_context() as context, insecure():
-            with patch.object(source_module._Interrupter, "adopt", record):
+            with patch.object(interruptible_http._Interrupter, "adopt", record):
                 for tls in (False, True):
                     with self.subTest(tls=tls):
                         adopted.clear()
