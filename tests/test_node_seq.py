@@ -5,17 +5,12 @@ to everything the list path does.
 """
 
 import os
-import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
-import weakref
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
-import shiboken6
 
 from services import navigation
 from services.navigation import (
@@ -23,7 +18,6 @@ from services.navigation import (
     NavModel,
     NodeSeq,
     _item_node,
-    fold_notifier,
     payloads,
 )
 from tests.test_drawer import DrawerTests
@@ -76,57 +70,6 @@ class NodeSeqTests(unittest.TestCase):
         self.assertEqual(seq.find_focus("1"), seq[0])
         self.assertIsNone(seq.find_focus(("C", "1")))
 
-    def test_matching_folds_narrows_and_remembers_the_source_rows(self):
-        seq = NodeSeq(channels(30))
-        seq._folded_titles()  # (folded ahead, as the drawer does a moment after showing)
-        cafe = seq.matching("cafe")  # "Café" folds to "cafe"
-        self.assertEqual([n.key for n in cafe], [str(n) for n in range(3, 31, 3)])
-        self.assertEqual([cafe.source_row(r) for r in range(3)], [2, 5, 8])
-        self.assertIs(seq.matching("cafe"), cafe)
-        narrower = seq.matching("cafe 12")  # typing on narrows the rows of the filter before
-        self.assertEqual([n.key for n in narrower], ["12"])
-        self.assertEqual(narrower.source_row(0), 11)
-        self.assertEqual(seq.matching("zzz").items, [])
-        self.assertIs(seq.matching(""), seq)
-
-    def test_titles_folded_ahead_in_the_background_serve_the_filter(self):
-        seq = NodeSeq(channels(30))
-        seq.fold_ahead(0)
-        seq.fold_ahead(0)  # asking again starts nothing
-        self.assertTrue(seq._fold_due)
-        seq._fold_in_background()
-        thread = seq._folding
-        seq._fold_in_background()
-        self.assertIs(seq._folding, thread)
-        folded = seq._folded_titles()  # waits for the thread if it is still folding
-        self.assertEqual(folded[2], "cafe 3")
-        self.assertIs(seq._folded_titles(), folded)
-        self.assertEqual([n.key for n in seq.matching("cafe 3")], ["3", "30"])
-
-    def test_filtering_before_any_fold_starts_it_in_the_background_not_here(self):
-        seq = NodeSeq(channels(30))
-        started = []
-        with mock.patch.object(NodeSeq, "_fold_in_background", lambda s: started.append(s)):
-            self.assertIs(seq.matching("cafe"), seq)  # unfiltered; nothing folded on this thread
-        self.assertEqual(started, [seq])
-        self.assertIsNone(seq._folded)
-        seq._folded_titles()  # the background fold ends
-        self.assertEqual(len(seq.matching("cafe")), 10)
-
-    def test_filtering_while_the_titles_are_still_folding_shows_the_list_as_it_is(self):
-        seq = NodeSeq(channels(30))
-        gate = threading.Event()
-        fold_all = navigation.fold_all
-        with mock.patch.object(navigation, "fold_all", lambda t: gate.wait(5) and fold_all(t)):
-            seq._fold_in_background()  # a fold is under way
-            thread = seq._folding
-            self.assertIs(seq.matching("cafe"), seq)
-            seq._fold_in_background()  # (and no second one starts)
-            self.assertIs(seq._folding, thread)
-            gate.set()
-            thread.join(5)
-        self.assertEqual(len(seq.matching("cafe")), 10)
-
     def test_numbers_and_their_width(self):
         self.assertTrue(NodeSeq(channels(5)).numbered())
         self.assertFalse(NodeSeq(channels(5, numbered=False)).numbered())
@@ -154,78 +97,6 @@ class LongGroupTests(unittest.TestCase):
         self.assertGreater(LAZY_ROWS, 100)
 
 
-class FoldedFilterTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-
-    def test_a_list_replaced_while_it_folds_is_let_go_on_the_gui_thread(self):
-        # The fold thread never holds the list: when the drawer and the nav model let go of it
-        # mid-fold, it goes then and there, on this thread, never later on the fold's (where
-        # the last reference to anything Qt it held would be dropped off the GUI thread).
-        seq = NodeSeq(channels(30))
-        token = seq.token
-        let_go_on = []
-        watch = weakref.ref(seq, lambda _ref: let_go_on.append(threading.current_thread()))
-        notifier, told = fold_notifier(), []  # (the drawer makes it, on this thread)
-        notifier.folded.connect(told.append)
-        self.addCleanup(notifier.folded.disconnect, told.append)
-        gate = threading.Event()
-        fold_all = navigation.fold_all
-
-        def slow_fold(titles):
-            gate.wait(5)
-            return fold_all(titles)
-
-        with mock.patch.object(navigation, "fold_all", slow_fold):
-            seq._fold_in_background()
-            thread = seq._folding
-            del seq  # the list is replaced (a refresh, another group): its last reference goes
-            gate.set()
-            thread.join(5)
-        self.assertFalse(thread.is_alive())
-        self.assertIsNone(watch())
-        self.assertEqual(let_go_on, [threading.main_thread()])
-        QTest.qWait(20)
-        self.assertEqual(told, [token])  # the fold still tells, and its notifier lives on
-        self.assertTrue(shiboken6.isValid(notifier))
-        self.assertIs(fold_notifier(), notifier)
-
-    def test_a_list_dropped_before_its_fold_ahead_is_not_folded(self):
-        # Sweep A12: the timer held the list and folded it a moment later though nothing
-        # showed it any more (a quarter of a second of CPU for 200,000 channels).
-        seq, kept = NodeSeq(channels(30)), NodeSeq(channels(30))
-        watch = weakref.ref(seq)
-        fold_all, folded = navigation.fold_all, []
-
-        def counting(titles):
-            folded.append(len(titles))
-            return fold_all(titles)
-
-        with mock.patch.object(navigation, "fold_all", counting):
-            seq.fold_ahead(10)
-            kept.fold_ahead(10)
-            del seq  # another group shows: the list is let go before its fold is due
-            self.assertIsNone(watch())
-            QTest.qWait(60)
-            kept._folding.join(5)
-        self.assertEqual(folded, [30])  # the list still shown folds ahead
-        self.assertIsNotNone(kept._folded)
-
-    def test_a_fold_that_fails_is_tried_again_by_the_next_filter(self):
-        seq = NodeSeq(channels(30))
-        boom = mock.patch.object(navigation, "fold_all", side_effect=ValueError("boom"))
-        with boom, self.assertLogs(navigation.logger, "ERROR"):
-            self.assertIs(seq.matching("cafe"), seq)  # starts the fold, which fails
-            seq._folding.join(5)
-        self.assertIsNone(seq._folded)
-        failed = seq._folding
-        seq.matching("cafe")  # starts a new fold
-        self.assertIsNot(seq._folding, failed)
-        seq._folding.join(5)
-        self.assertEqual([n.key for n in seq.matching("cafe")], [str(n) for n in range(3, 31, 3)])
-
-
 class LazyDrawerTests(DrawerTests):
     """Every drawer test again, with the channel lists made on demand."""
 
@@ -233,10 +104,6 @@ class LazyDrawerTests(DrawerTests):
         patch = mock.patch.object(navigation, "LAZY_ROWS", 1)
         patch.start()
         self.addCleanup(patch.stop)
-        # the titles are folded in the background a moment after a list shows: here, at once
-        fold = mock.patch.object(NodeSeq, "_fold_in_background", lambda seq: seq._folded_titles())
-        fold.start()
-        self.addCleanup(fold.stop)
         super().setUp()
 
 

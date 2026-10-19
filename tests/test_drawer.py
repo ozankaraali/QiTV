@@ -30,7 +30,7 @@ from ui.find_session import DEBOUNCE_MS, FindSession
 from ui.keymap import key_hint
 from ui.overlay_host import OverlayHost
 from ui.overlays import drawer as drawer_module
-from ui.overlays.channel_rows import ChannelRowsModel
+from ui.overlays.channel_rows import ChannelRowsModel, NumberRole
 from ui.overlays.drawer import (
     EMPTY_TEXT,
     FIND_CLEAR_TOOLTIP,
@@ -586,6 +586,15 @@ class DrawerTests(unittest.TestCase):
         self.assertTrue(self.drawer.escape())
         self.assertFalse(self.drawer.isVisible())
         self.assertEqual(self.closed, [True])
+
+    def test_unnumbered_rows_show_their_position_in_the_group(self):
+        self.catalog.live["10"] = [{"id": i, "name": f"Chan {i}"} for i in range(12)]
+        self.nav.changed.emit()
+        self.drawer.open_drawer()
+        model = self.drawer._columns["right"].model
+        numbers = [model.index(r).data(NumberRole) for r in range(12)]
+        self.assertEqual(numbers, [str(n) for n in range(1, 13)])
+        self.assertEqual(model.number_digits, 2)
 
     def test_page_moves_several_rows(self):
         self.catalog.live["10"] = [{"id": i, "name": f"Chan {i}"} for i in range(60)]

@@ -17,10 +17,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 import itertools
 import logging
-import threading
 from typing import Any, Callable, Optional, cast
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, Signal
 
 from services import favorites
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
@@ -32,7 +31,6 @@ from services.provider_ids import (
     split_group_id,
     with_provider,
 )
-from services.text_fold import fold_all
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +44,6 @@ FAVORITES_GROUP = "@favorites"
 RECENT_GROUP = "@recent"
 _RECENT_LIMIT = 20
 _MEMO_LIMIT = 64  # memoized child lists kept (least recently used are dropped)
-FOLD_AHEAD_MS = 400  # a long list folds its titles this long after it is shown
 LAZY_ROWS = 2000  # a list of items this long gets its nodes made on demand (see NodeSeq)
 LOADING_NOTICE = "Loading…"  # under a provider's heading in "All providers" while it loads
 _UNREADABLE = ("header", "notice")  # rows that only label: never opened or played
@@ -119,90 +116,22 @@ def _item_node(item: dict, layer: str = "item") -> NavNode:
     return NavNode(layer, key, item_title(item, episode=episode), item)
 
 
-class _Folded(QObject):
-    folded = Signal(object)  # the token of the NodeSeq whose titles are folded
-
-
-_fold_notifier: Optional[_Folded] = None
-
-
-def fold_notifier() -> _Folded:
-    """Emits `folded(token)` on the GUI thread when a long list's titles are folded (the token
-    tells which list). Made on first use, which must be on the GUI thread (the drawer makes it):
-    the signal is queued to it from the fold's. It lives as long as the app, so a fold thread
-    never lets go of the last reference to it."""
-    global _fold_notifier
-    if _fold_notifier is None:
-        _fold_notifier = _Folded()
-    return _fold_notifier
-
-
-class _Fold:
-    """A list's folded titles, made once under a lock (by the fold thread, or by a caller that
-    waits for it). Plain data: the fold thread holds this, never the NodeSeq."""
-
-    __slots__ = ("titles", "lock")
-
-    def __init__(self, titles: Optional[list[str]]):
-        self.titles = titles
-        self.lock = threading.Lock()
-
-    def make(self, items: list[dict], wait: bool = True) -> Optional[list[str]]:
-        if not self.lock.acquire(blocking=wait):
-            return None
-        try:
-            if self.titles is None:
-                titles = [i.get("name") or i.get("title") or "Untitled" for i in items]
-                try:
-                    self.titles = fold_all(titles)
-                except TypeError:  # a title that is not text
-                    self.titles = fold_all([str(title) for title in titles])
-            return self.titles
-        finally:
-            self.lock.release()
-
-
-def _fold_and_tell(fold: _Fold, items: list[dict], token: int) -> None:
-    """The fold thread: folds `items`' titles into `fold`, then tells the GUI thread. It holds
-    neither the NodeSeq nor anything Qt it could be the last to let go of: a list replaced
-    while it folds goes on the GUI thread, then and there."""
-    try:
-        fold.make(items)
-    except Exception:
-        logger.exception("Folding the titles failed")  # a later filter tries again
-        return
-    notifier = _fold_notifier  # (made on the GUI thread, and kept: never dropped here)
-    if notifier is not None:
-        notifier.folded.emit(token)
-
-
 class NodeSeq(Sequence):
     """The item nodes of a long list (one provider's 57,000 channels, or all four's 200,000),
     made when a row is asked for: the drawer shows a screenful at a time, and making every
     node up front cost seconds. It reads like a list of NavNodes and is not changed once made.
 
-    `items` are the dicts behind the rows (the models take them as they are); `matching()` is
-    the same list narrowed by the drawer's filter.
+    `items` are the dicts behind the rows (the models take them as they are).
     """
 
     _tokens = itertools.count(1)
 
-    def __init__(
-        self,
-        items: list[dict],
-        origin: Optional[list[int]] = None,
-        folded: Optional[list[str]] = None,
-    ):
+    def __init__(self, items: list[dict]):
         self.items = items
         self.token = next(self._tokens)  # tells one list from another without comparing rows
-        self._origin = origin  # each item's row in the list this one was narrowed from
-        self._fold = _Fold(folded)
-        self._folding: Optional[threading.Thread] = None  # the last fold thread started
-        self._fold_due = False
         self._made: dict[int, NavNode] = {}
         self._rows: dict[NavNode, int] = {}  # the nodes made so far -> their rows
         self._absent: set[NavNode] = set()  # nodes looked for here and not found
-        self._narrowed: Optional[tuple[str, NodeSeq]] = None
         self._digits: Optional[int] = None
         self._numbered: Optional[bool] = None
 
@@ -226,10 +155,6 @@ class NodeSeq(Sequence):
         for row, item in enumerate(self.items):
             yield self._made.get(row) or _item_node(item)
 
-    def source_row(self, row: int) -> int:
-        """Row `row`'s position in the list this one was narrowed from (its own if none)."""
-        return self._origin[row] if self._origin is not None else row
-
     def row_of(self, node: NavNode) -> Optional[int]:
         """The row holding `node` (any node of the same item), None if it is not listed."""
         row = self._rows.get(node)
@@ -250,66 +175,6 @@ class NodeSeq(Sequence):
             if item_key(item) == key and (not provider or provider_of(item) == provider):
                 return self[row]
         return None
-
-    def matching(self, needle: str) -> "NodeSeq":
-        """The rows whose folded title contains `needle` (already folded); typing on narrows
-        the rows of the filter before."""
-        if not needle:
-            return self
-        if self._narrowed is not None:
-            before, seq = self._narrowed
-            if before == needle:
-                return seq
-            if needle.startswith(before):
-                narrowed = seq.matching(needle)
-                self._narrowed = (needle, narrowed)
-                return narrowed
-        if self._folded is None:
-            # Never folded on the GUI thread (200,000 titles): start it in the background if
-            # it has not (or a fold failed), and show the list as it is until it ends.
-            self._fold_in_background()
-            if self._folded is None:
-                return self
-        folded = self._folded
-        rows = [row for row, title in enumerate(folded) if needle in title]
-        narrowed = NodeSeq(
-            [self.items[row] for row in rows],
-            [self.source_row(row) for row in rows],
-            [folded[row] for row in rows],
-        )
-        self._narrowed = (needle, narrowed)
-        return narrowed
-
-    def fold_ahead(self, after_ms: int = FOLD_AHEAD_MS) -> None:
-        """Fold the titles in the background a moment from now (not while the list is still
-        opening), so the first letter typed to filter finds them done: a quarter of a second
-        for 200,000 channels. Asking again starts nothing."""
-        if self._folded is None and not self._fold_under_way() and not self._fold_due:
-            self._fold_due = True
-            # A bound method: the timer holds the list weakly, so one dropped meanwhile (the
-            # drawer moved on) is never folded. A lambda here would keep it until then.
-            QTimer.singleShot(after_ms, self._fold_in_background)
-
-    def _fold_in_background(self) -> None:
-        """Start folding the titles in a thread, unless they are folded or a fold runs. The
-        thread is given the titles and where to put them, never this list (see
-        _fold_and_tell); `fold_notifier()` tells when it ends."""
-        if self._folded is None and not self._fold_under_way():
-            self._folding = threading.Thread(
-                target=_fold_and_tell, args=(self._fold, self.items, self.token), daemon=True
-            )
-            self._folding.start()
-
-    def _fold_under_way(self) -> bool:
-        return self._folding is not None and self._folding.is_alive()
-
-    @property
-    def _folded(self) -> Optional[list[str]]:
-        return self._fold.titles
-
-    def _folded_titles(self, wait: bool = True) -> Optional[list[str]]:
-        """The folded titles, folded here if no thread has (waiting for one that folds)."""
-        return self._fold.make(self.items, wait)
 
     def numbered(self) -> bool:
         """Whether any channel has a number (else the position stands in for it)."""

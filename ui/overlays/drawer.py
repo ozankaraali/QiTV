@@ -234,43 +234,39 @@ def _is_live_item(nav: NavModel, node: NavNode) -> bool:
 
 
 class _SeqNumbers(LazyNumbers):
-    """The numbers of a long group's shown rows, looked up row by row (see _numbers)."""
+    """The numbers of a long group's rows, looked up row by row (see _numbers)."""
 
-    def __init__(self, group: NodeSeq, shown: NodeSeq) -> None:
-        self._shown = shown
+    def __init__(self, group: NodeSeq) -> None:
+        self._group = group
         self._own = group.numbered()
-        if self._own:
-            self.digits = shown.number_digits()
-        else:  # positions stand in: the last row's is the longest
-            last = shown.source_row(len(shown) - 1) + 1 if len(shown) else 0
-            self.digits = len(str(last)) if last else 0
-        self.signature = (group.token, shown.token)
+        # Else positions stand in: the last row's is the longest.
+        self.digits = group.number_digits() if self._own else len(str(len(group)))
+        self.signature = (group.token,)
 
     def __len__(self) -> int:
-        return len(self._shown)
+        return len(self._group)
 
     def __getitem__(self, row: int) -> str | None:
         if self._own:
-            return ZapContext.number_of(self._shown.items[row]) or None
-        return str(self._shown.source_row(row) + 1)
+            return ZapContext.number_of(self._group.items[row]) or None
+        return str(row + 1)
 
 
-def _numbers(group, shown):
-    """The numbers of the `shown` rows of a live group.
+def _numbers(group):
+    """The numbers of a live group's rows.
 
     When no channel of the group has a number, its position in the group stands in, as on
     the banner and for number entry.
     """
-    if isinstance(group, NodeSeq) and isinstance(shown, NodeSeq):
-        return _SeqNumbers(group, shown)
+    if isinstance(group, NodeSeq):
+        return _SeqNumbers(group)
     channels = [n.payload for n in group if isinstance(n.payload, dict)]
     if any(ZapContext.number_of(c) for c in channels):
         return [
             (ZapContext.number_of(n.payload) or None) if isinstance(n.payload, dict) else None
-            for n in shown
+            for n in group
         ]
-    position = {node: str(row + 1) for row, node in enumerate(group)}
-    return [position.get(node) for node in shown]
+    return [str(row + 1) for row in range(len(group))]
 
 
 def _shown_rows(
@@ -978,7 +974,7 @@ class Drawer(Overlay):
         if col.message is None and not nodes:
             col.message = EMPTY_TEXT
         live = bool(nodes) and _is_live_item(self._nav, nodes[0])
-        numbers = _numbers(children or [], nodes) if live else None
+        numbers = _numbers(nodes) if live else None
         # The same rows again (e.g. the section reported ready once more): the list keeps its
         # model, so it is neither laid out nor repainted from scratch.
         tagged = live and self._nav.shows_provider(parent)
