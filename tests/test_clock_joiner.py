@@ -461,6 +461,29 @@ class ForwardJumpTests(unittest.TestCase):
         out, joiner, _ = watched([late], chunk=5000)
         self.assertEqual(len(joiner.jumps), 1)
 
+    def test_what_passes_as_it_came_the_segmenter_tells_apart(self):
+        # A gap in the pictures that the sound fills passes as it came (raw TS, or HLS), and
+        # the segmenter keeps it on the timeline; a jump before the pictures went on 10 s also
+        # passes as it came, and the segmenter leaves it out of the timeline, as before.
+        gap = make_stream(24, video_gaps=((14.0, 18.0),))
+        for arrival, segments, extinf in (
+            ("raw TS", [gap], None),
+            ("HLS", at_seconds(gap, 4.0, 8.0, 12.0, 16.0, 20.0), [4.0] * 6),
+        ):
+            with self.subTest(arrival=arrival):
+                out, joiner, _ = watched(segments, chunk=5000, extinf=extinf)
+                self.assertEqual((out, list(joiner.jumps)), (gap, []))
+                events, dropped = segmented(out)
+                self.assertEqual(dropped, [])
+                opened = [event for event in events if isinstance(event, ts.Opened)]
+                self.assertFalse(any(event.discontinuity for event in opened))
+        early = make_stream(20, jumps=((5.0, 13.0),))
+        out, joiner, _ = watched([early], chunk=5000)
+        self.assertEqual((out, list(joiner.jumps)), (early, []))
+        _, dropped = segmented(out)
+        self.assertEqual(len(dropped), 1)
+        self.assertAlmostEqual(dropped[0][2], 13.0, places=3)
+
     def test_backward_steps_are_left_to_the_junctions(self):
         # A restart nobody reported (a step back) is no forward jump: it passes as it came.
         data = make_stream(12) + make_stream(12)

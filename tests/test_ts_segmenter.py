@@ -760,6 +760,60 @@ class SegmenterTests(unittest.TestCase):
                     self.assertEqual(len(seg.dropped), 1)
                     self.assertAlmostEqual(seg.dropped[0][2], reported, places=3)
 
+    def test_a_gap_in_the_pictures_that_the_sound_fills_stays_on_the_timeline(self):
+        # The pictures stop for 4 s (14 s to 18 s) while the sound goes on: a gap in real time,
+        # not a timestamp jump, however the bytes arrive (in one burst nothing in the arrival
+        # explains it). The segment from 12 s holds it whole, up to the keyframe at 18 s, and
+        # nothing is left out of the timeline.
+        data = fx.make_stream(24, video_gaps=((14.0, 18.0),))
+        cases = {
+            "one burst": lambda: run(data),
+            "read 187 bytes at a time": lambda: run(data, chunk=187),
+            "live": lambda: run_at(data, by_pts(data)),
+        }
+        for name, replay in cases.items():
+            with self.subTest(name):
+                seg, events = replay()
+                o = opens(events)
+                self.assertEqual(
+                    [frame_of(e.first_pts) for e in o],
+                    [0, 50, 100, 150, 200, 250, 300, 450, 500, 550],
+                )
+                self.assertFalse(any(e.discontinuity for e in o))
+                self.assertEqual(closes(events)[6].next_first_pts, 900000 + 18 * CLOCK)
+                self.assertEqual(seg.dropped, [])
+
+    def test_a_gap_nothing_else_fills_stays_where_the_arrival_shows_the_time_passed(self):
+        # No sound, and the PCR rides on the pictures: nothing else goes on through a 4 s gap
+        # in them. Where the source paused as long (live), it stays media; in one burst it is a
+        # jump, left out as before.
+        data = fx.make_stream(24, audio=False, video_gaps=((14.0, 18.0),))
+        seg, events = run_at(data, by_pts(data))
+        self.assertFalse(any(e.discontinuity for e in opens(events)))
+        self.assertEqual(closes(events)[6].next_first_pts, 900000 + 18 * CLOCK)
+        self.assertEqual(seg.dropped, [])
+        seg, events = run(data)
+        self.assertEqual([e.discontinuity for e in opens(events)].count(True), 1)
+        self.assertEqual(len(seg.dropped), 1)
+        self.assertAlmostEqual(seg.dropped[0][2], 4.0, places=3)
+
+    def test_a_jump_stays_one_whatever_else_goes_on_around_it(self):
+        # Every timestamp 5 s on at 12 s: with the bytes arriving at the pictures' pace (no
+        # pause), with the sound muxed 0.3 s ahead of its pictures (it leaps before they do),
+        # or with subtitles 12 s ahead of the pictures between them, it is a jump, left out.
+        jumped = fx.make_stream(20, jumps=((12.0, 5.0),))
+        cases = {
+            "paced by the pictures": lambda: run_at(jumped, by_frame(jumped)),
+            "sound ahead": lambda: run(fx.make_stream(20, jumps=((12.0, 5.0),), audio_ahead_s=0.3)),
+            "subtitles ahead": lambda: run(with_subtitles(jumped, 12 * CLOCK)),
+        }
+        for name, replay in cases.items():
+            with self.subTest(name):
+                seg, events = replay()
+                self.assertEqual([e.discontinuity for e in opens(events)].count(True), 1)
+                self.assertEqual(len(seg.dropped), 1)
+                self.assertAlmostEqual(seg.dropped[0][2], 5.0, places=3)
+
     def test_a_slideshow_with_frames_seconds_apart_is_not_a_discontinuity(self):
         # A radio channel's still picture every 5 s with continuous audio: steps of the
         # stream's own frame cadence are no PTS jump, but a +60 s step still is.
