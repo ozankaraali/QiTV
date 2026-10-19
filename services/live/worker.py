@@ -464,8 +464,12 @@ class _Session:
             def program() -> tuple[int | None, int | None]:
                 return segmenter.video_pid, segmenter.video_type
 
-            trimmer = self._trimmer = RepeatTrimmer(program=program, clock=time.monotonic)
             self._clock_joiner = ClockJoiner(program=program)
+            # The clock joiner runs the counters on at every junction; without one, the trimmer
+            # does where it drops.
+            trimmer = self._trimmer = RepeatTrimmer(
+                program=program, clock=time.monotonic, join_counters=self._clock_joiner is None
+            )
         try:
             for item in source.chunks():
                 self._check()
@@ -661,13 +665,13 @@ class _Session:
         self._send(_error(self.sid, kind, message, status))
 
     def _pass_on(self, pieces: list[bytes]) -> None:
-        """The trimmer's output, through the clock joiner, to the segmenter. Between two pieces
-        a new run starts (the trimmer dropped its start, or the clock joiner re-based it): the
-        segmenter cuts it a segment of its own. Without a clock joiner its timestamps start
-        over there; with one they run on."""
+        """The trimmer's output, through the clock joiner, to the segmenter. Between two of
+        the trimmer's pieces a restarted run starts: the clock joiner re-bases it so its
+        timestamps run on, and between two of its pieces (or, without one, the trimmer's) the
+        segmenter cuts the new run a segment of its own."""
         clock = self._clock_joiner
         for k, piece in enumerate(pieces):
-            parts = [piece] if clock is None else clock.feed(piece)
+            parts = [piece] if clock is None else clock.feed(piece, junction=k > 0)
             for j, part in enumerate(parts):
                 if (j if clock is not None else k) > 0:
                     self._segmenter.discontinuity()
