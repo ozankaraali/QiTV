@@ -439,6 +439,11 @@ class ConfigManager:
     # The last multiview grid (2.2, optional; older builds ignore it): {"version": 1, "cells",
     # "focus", "tiles": [a last_live_channel-style record, or None per tile]}.
     multiview = _config_property("multiview", None)
+    # The multiview's layouts showed once by themselves, as a hint (optional; older builds
+    # ignore it).
+    multiview_hinted = _config_property(
+        "multiview_hinted", False, coerce=lambda value: value is True
+    )
     multiview_tile_ram_mib = _config_property(
         "multiview_tile_ram_mib",
         DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB,

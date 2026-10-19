@@ -8,7 +8,16 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, qInstallMessageHandler
+from PySide6.QtCore import (
+    QEvent,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    qInstallMessageHandler,
+)
 from PySide6.QtGui import QMouseEvent, QRegion
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
@@ -20,12 +29,13 @@ from services.navigation import NavNode
 from services.sessions import SessionManager, Slot
 from services.zapping import ZapContext
 from tests.test_tv_controller import CHANNELS, FakeLiveSession, FakeSession
-from tests.test_tv_pip import MOVIE, FakeMixer, PipCase
+from tests.test_tv_pip import MOVIE, SHIFTED, FakeMixer, PipCase
 from tests.test_tv_window import INSTANCE, WindowCase
-from ui.grid_controls import LAYOUT_NAMES, LEAVE_FIRST, LIVE_ONLY, NO_STREAM
+from ui.grid_controls import LAYOUT_NAMES, LEAVE_FIRST, LIVE_ONLY, NEEDS_HARDWARE, NO_STREAM
 from ui.grid_frame import GridFrame, grid_rects
 from ui.keymap import Action
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
+from ui.mixer_controls import FOLLOW_ACTION, FOLLOWS_TEXT, MIXED_TEXT
 from ui.overlays.grid_tiles import (
     DENIED,
     EMPTY,
@@ -35,6 +45,8 @@ from ui.overlays.grid_tiles import (
     GridTiles,
     TileView,
 )
+from ui.overlays.layout_row import LayoutChoice, LayoutRow
+from ui.overlays.mixer import MixerMode
 from ui.overlays.pip_label import CONNECTING, LIVE
 
 LEFT = Qt.MouseButton.LeftButton
@@ -275,6 +287,153 @@ class GridTilesTests(FrameCase):
         self.assertTrue(self.view.pill_rect("t3").isEmpty())
         self.assertFalse(self.view.mask_region().contains(pill.topLeft() + QPoint(2, 2)))
         controls.hide()
+        self.assertFalse(self.view.pill_rect("t3").isEmpty())
+
+
+class TileStripTests(FrameCase):
+    """A tile's own controls: the strip the tile under the pointer shows."""
+
+    def setUp(self):
+        super().setUp()
+        self.view = GridTiles(self.page)
+        self.view.show()
+        self.events = []
+        self.view.tilePressed.connect(lambda n: self.events.append(("pressed", n)))
+        self.view.leaveRequested.connect(lambda n: self.events.append(("leave", n)))
+        self.view.tileAction.connect(lambda n, c: self.events.append((c, n)))
+        self.rects = grid_rects(PAGE, 4)
+        self.show(4)
+
+    def show(self, cells, size=PAGE):
+        rects = grid_rects(size, cells)
+        self.rects = rects
+        tiles = [
+            TileView("main", rects[0], PLAYING, "One", LIVE, True, muted=False, position=LIVE),
+            TileView("pip", rects[1], PLAYING, "Two", "−01:30", position="−01:30", behind=True),
+            TileView("t2", rects[2], EMPTY),
+            TileView("t3", rects[3], DENIED, "Four", NO_STREAM.format(provider="P")),
+        ]
+        names = ("t4", "t5", "t6", "t7", "t8")
+        tiles += [
+            TileView(names[i], rect, PLAYING, f"Ch {i}", LIVE, position=LIVE)
+            for i, rect in enumerate(rects[4:])
+        ]
+        self.view.set_tiles(tiles)
+
+    def hover(self, index, dy=-12):
+        rect = self.rects[index]
+        self.view.hover_at(QPointF(rect.center().x(), rect.bottom() + dy))
+
+    def test_the_tile_under_the_pointer_shows_its_controls_and_only_it(self):
+        self.hover(1)
+        self.assertEqual(self.view.hovered(), "pip")
+        strip = self.view.strip_rect("pip")
+        self.assertTrue(self.rects[1].contains(strip.toRect()))
+        self.assertGreater(strip.center().y(), self.rects[1].center().y())  # at its bottom
+        for control in ("play", "speaker", "live", "big", "close"):
+            rect = self.view.control_rect("pip", control)
+            self.assertFalse(rect.isEmpty(), control)
+            self.assertTrue(self.view.mask_region().contains(rect.center().toPoint()), control)
+        self.assertTrue(self.view.strip_rect("main").isEmpty())
+        self.hover(0)
+        self.assertEqual(self.view.hovered(), "main")
+        self.assertTrue(self.view.strip_rect("pip").isEmpty())
+
+    def test_a_plus_has_none_a_card_its_close_only_and_off_the_tiles_none_shows(self):
+        self.hover(2)
+        self.assertIsNone(self.view.hovered())
+        self.hover(3)
+        self.assertEqual(self.view.hovered(), "t3")
+        self.assertFalse(self.view.control_rect("t3", "close").isEmpty())
+        self.assertTrue(self.view.control_rect("t3", "play").isEmpty())
+        self.view.hover_at(QPointF(-5, -5))
+        self.assertIsNone(self.view.hovered())
+
+    def test_a_press_on_a_control_acts_on_its_tile_without_focusing_it(self):
+        self.hover(1)
+        for control in ("play", "speaker", "live", "big", "close"):
+            centre = self.view.control_rect("pip", control).center().toPoint()
+            QTest.mouseClick(self.view.hits, LEFT, pos=centre)
+        QTest.qWait(QApplication.doubleClickInterval() + 50)
+        self.assertEqual(
+            self.events,
+            [(c, "pip") for c in ("play", "speaker", "live", "big", "close")],
+        )  # no press, no click: the focus stays
+
+    def test_a_quick_second_click_on_a_control_counts_once_and_never_leaves(self):
+        self.hover(1)
+        centre = self.view.control_rect("pip", "play").center().toPoint()
+        QTest.mouseDClick(self.view.hits, LEFT, pos=centre)
+        QTest.qWait(QApplication.doubleClickInterval() + 50)
+        self.assertNotIn(("leave", "pip"), self.events)
+        self.assertLessEqual(self.events.count(("play", "pip")), 1)
+
+    def test_its_tooltips_name_what_each_does_now(self):
+        self.hover(1)
+        tip = lambda c: self.view.tooltip_at(self.view.control_rect("pip", c).center())  # noqa
+        self.assertEqual(tip("play"), "Pause this tile")
+        self.assertEqual(tip("speaker"), "Unmute this tile")
+        self.assertEqual(tip("live"), "Go live")
+        self.assertEqual(tip("close"), "Close this tile")
+        self.hover(0)
+        main = self.view.control_rect("main", "live").center()
+        self.assertEqual(self.view.tooltip_at(main), "")  # at live: nothing to do
+
+    def test_it_hides_after_the_controls_idle_time(self):
+        self.view.set_idle_ms(30)
+        self.hover(1)
+        self.assertTrue(wait_until(lambda: self.view.hovered() is None))
+        self.assertFalse(self.view.mask_region().contains(self.rects[1].center()))
+
+    def test_nine_small_tiles_keep_the_speaker_and_close_only(self):
+        small = QSize(360, 203)  # a mini player's
+        self.page.resize(small)
+        self.show(9, small)
+        self.hover(4)
+        shown = [c for c in ("play", "speaker", "live", "big", "close")
+                 if not self.view.control_rect("t4", c).isEmpty()]  # fmt: skip
+        self.assertEqual(shown, ["speaker", "close"])
+        strip = self.view.strip_rect("t4")
+        self.assertTrue(QRectF(self.rects[4]).contains(strip))  # never overflows its tile
+
+    def test_it_sits_above_the_player_controls_buttons_when_they_cover_its_place(self):
+        bottom = self.rects[3]
+        claim = QRect(bottom.left(), bottom.bottom() - 60, bottom.width(), 50)
+        controls = Avoided(self.page, claim)
+        self.view.avoid(controls)
+        controls.show()
+        self.hover(1)  # a tile above them: at its bottom
+        self.assertAlmostEqual(
+            self.view.strip_rect("pip").bottom(), self.rects[1].bottom() - 7, delta=2
+        )
+        self.show(4)
+        self.view.set_tiles(
+            [t if t.name != "t3" else TileView("t3", t.rect, PLAYING, "Four", LIVE, position=LIVE)
+             for t in self.view.tiles()]
+        )  # fmt: skip
+        self.hover(3, dy=-150)
+        strip = self.view.strip_rect("t3")
+        self.assertLess(strip.bottom(), claim.top())
+        self.assertTrue(QRectF(self.rects[3]).contains(strip))
+
+    def test_with_the_controls_up_to_its_label_it_takes_the_labels_place(self):
+        # A small window, behind live: the bar and the buttons reach high over a bottom tile.
+        bottom = self.rects[3]
+        claim = QRect(bottom.left(), bottom.top() + 50, bottom.width(), bottom.height() - 50)
+        controls = Avoided(self.page, claim)
+        self.view.avoid(controls)
+        controls.show()
+        self.view.set_tiles(
+            [t if t.name != "t3" else TileView("t3", t.rect, PLAYING, "Four", LIVE, position=LIVE)
+             for t in self.view.tiles()]
+        )  # fmt: skip
+        self.assertFalse(self.view.pill_rect("t3").isEmpty())
+        self.hover(3, dy=-10)
+        strip = self.view.strip_rect("t3")
+        self.assertLess(strip.top(), bottom.top() + 12)
+        self.assertFalse(strip.intersects(QRectF(claim)))
+        self.assertTrue(self.view.pill_rect("t3").isEmpty())  # the label waits meanwhile
+        self.view.hover_at(QPointF(-5, -5))
         self.assertFalse(self.view.pill_rect("t3").isEmpty())
 
 
@@ -1175,6 +1334,265 @@ class MultiviewMixerTests(MultiviewCase):
         self.assertEqual(selected, 0)
         self.assertEqual(rows[0][3], False)  # the focused tile is heard
         self.assertEqual(rows[1][3], True)
+
+
+class LayoutRowTests(unittest.TestCase):
+    """The layouts above the layout chip: drawn, the one showing marked, those not offered
+    dimmed; one click picks."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.page = QWidget()
+        self.page.resize(PAGE)
+        self.video = Recorder(self.page)
+        self.video.setGeometry(0, 0, 400, 300)
+        self.row = LayoutRow(self.page)
+        self.page.show()
+        self.addCleanup(self.page.close)
+        self.events = []
+        self.row.layoutChosen.connect(lambda n: self.events.append(("chosen", n)))
+        self.row.unavailableChosen.connect(lambda n: self.events.append(("unavailable", n)))
+        self.row.closed.connect(lambda: self.events.append(("closed",)))
+        self.anchor = QRectF(1000, 650, 90, 28)
+
+    def open(self, offered=(2, 4), current=4, hint=False):
+        choices = [
+            LayoutChoice(c, LAYOUT_NAMES[c], c in offered, "" if c in offered else "why")
+            for c in (2, 4, 6, 9)
+        ]
+        self.row.show_layouts(choices, current, self.anchor, 640, hint=hint)
+
+    def click(self, cells):
+        QTest.mouseClick(self.row, LEFT, pos=self.row.cell_rect(cells).center().toPoint())
+
+    def test_it_shows_the_four_layouts_above_the_chip_and_the_controls(self):
+        self.open()
+        self.assertTrue(self.row.isVisible())
+        self.assertEqual([c.name for c in self.row.choices()], ["1×2", "2×2", "3×2", "3×3"])
+        self.assertEqual(self.row.current(), 4)
+        geometry = self.row.geometry()
+        self.assertLess(geometry.bottom(), 640)
+        self.assertLess(abs(geometry.center().x() - self.anchor.center().x()), 2)
+        self.assertLessEqual(geometry.right(), PAGE.width())
+        widths = {self.row.cell_rect(c).width() for c in (2, 4, 6, 9)}
+        self.assertEqual(len(widths), 1)  # alike, side by side
+
+    def test_one_click_picks_a_layout_offered_and_closes(self):
+        self.open()
+        self.click(2)
+        self.assertEqual(self.events, [("closed",), ("chosen", 2)])
+        self.assertFalse(self.row.isVisible())
+
+    def test_a_dimmed_layout_says_why_and_picks_nothing(self):
+        self.open()
+        self.assertEqual(self.row.tooltip_at(self.row.cell_rect(9).center()), "why")
+        self.assertEqual(self.row.tooltip_at(self.row.cell_rect(4).center()), "")
+        self.click(9)
+        self.assertEqual(self.events, [("unavailable", 9)])
+        self.assertTrue(self.row.isVisible())
+
+    def test_a_click_elsewhere_closes_it_and_does_nothing_more(self):
+        self.open()
+        QTest.mouseClick(self.video, LEFT, pos=QPoint(20, 20))
+        self.assertEqual((self.events, self.video.presses), ([("closed",)], 0))
+
+    def test_as_a_hint_a_click_elsewhere_goes_on(self):
+        self.open(hint=True)
+        self.assertTrue(self.row.hinting())
+        QTest.mouseClick(self.video, LEFT, pos=QPoint(20, 20))
+        self.assertEqual((self.events, self.video.presses), ([("closed",)], 1))
+
+    def test_the_keys_move_from_the_layout_showing_and_enter_picks(self):
+        self.open(offered=(2, 4, 6, 9))
+        self.row.move_focus(1)
+        self.assertEqual(self.row.focused(), 6)
+        self.row.move_focus(1)
+        self.row.move_focus(1)  # never past the last
+        self.assertEqual(self.row.focused(), 9)
+        self.row.activate()
+        self.assertEqual(self.events[-1], ("chosen", 9))
+
+
+class TileControlCase(MultiviewCase):
+    """The grid with the layouts to pick from (a real LayoutRow over a page) and the mixer."""
+
+    def setUp(self):
+        self.mixer = FakeMixer()
+        self.row_page = QWidget()
+        self.row_page.resize(PAGE)
+        self.layout_row = LayoutRow(self.row_page)
+        self.row_page.show()
+        self.addCleanup(self.row_page.close)
+        super().setUp()
+        self.config.multiview_hinted = True  # no hint: the tests open them
+
+    def overlays(self, column):
+        overlays = super().overlays(column)
+        overlays.layout_row = self.layout_row
+        return overlays
+
+    def click_layout(self, cells):
+        row = self.layout_row
+        QTest.mouseClick(row, LEFT, pos=row.cell_rect(cells).center().toPoint())
+
+
+class LayoutChoiceTests(TileControlCase):
+    def test_the_layout_chip_opens_the_layouts_and_a_click_picks_one(self):
+        self.start_large(0)
+        self.v()
+        self.transport.layoutRequested.emit()
+        row = self.layout_row
+        self.assertTrue(row.isVisible())
+        self.assertEqual(row.current(), 4)
+        self.assertEqual([c.available for c in row.choices()], [True, True, False, False])
+        self.assertEqual(row.choices()[3].tooltip, NEEDS_HARDWARE)
+        self.assertEqual(self.transport.held(), "layout")  # the controls stay, the chip lit
+        self.click_layout(2)
+        self.assertEqual(self.grid.names(), ["main", "pip"])
+        self.assertFalse(row.isVisible())
+        self.assertEqual(self.transport.held(), "")
+        self.transport.layoutRequested.emit()
+        self.click_layout(9)
+        self.assertEqual(self.toast.messages()[-1], (NEEDS_HARDWARE, "info"))
+        self.assertEqual(self.grid.names(), ["main", "pip"])
+        self.transport.layoutRequested.emit()  # the chip again: they close
+        self.assertFalse(row.isVisible())
+
+    def test_the_keys_pick_a_layout_while_they_show_and_esc_closes_them(self):
+        self.start_large(0)
+        self.v()
+        self.transport.layoutRequested.emit()
+        self.controller.handle(Action.SEEK_BACK)  # ←: 1×2
+        self.controller.handle(Action.OK)
+        self.assertEqual(self.grid.names(), ["main", "pip"])
+        self.transport.layoutRequested.emit()
+        self.controller.handle(Action.ESCAPE)
+        self.assertFalse(self.layout_row.isVisible())
+        self.assertTrue(self.grid.shown())  # Esc closed them, not the grid
+
+    def test_the_first_grid_shows_the_layouts_once_by_themselves(self):
+        self.config.multiview_hinted = False
+        saves = self.config.saves
+        self.start_large(0)
+        self.v()
+        self.assertTrue(self.layout_row.hinting())
+        self.assertTrue(self.config.multiview_hinted)
+        self.assertGreater(self.config.saves, saves)
+        self.v()  # leaving closes them
+        self.assertFalse(self.layout_row.isVisible())
+        self.v()
+        self.assertFalse(self.layout_row.isVisible())  # once only
+
+
+class HardwareLayoutChoiceTests(TileControlCase):
+    hardware = True
+
+    def test_with_hardware_decoding_every_layout_is_offered(self):
+        self.start_large(0)
+        self.v()
+        self.transport.layoutRequested.emit()
+        self.assertTrue(all(c.available for c in self.layout_row.choices()))
+        self.click_layout(9)
+        self.assertEqual(len(self.grid.names()), 9)
+        self.assertEqual(self.transport.named("set_grid_state")[-1], (True, True, "3×3"))
+
+
+class TileControlTests(TileControlCase):
+    def test_each_control_acts_on_its_tile_and_the_focus_stays(self):
+        self.two_pictures()
+        main_calls = len(self.live.calls)
+        self.grid.tile_control("pip", "play")
+        self.assertEqual(self.pip_live.calls[-1], ("toggle_pause",))
+        self.grid.tile_control("pip", "live")  # at live: LIVE only says so
+        self.assertNotIn(("go_live",), self.pip_live.calls)
+        self.pip_live.timelineChanged.emit(SHIFTED)  # 200 s behind live
+        self.assertEqual(self.grid.label("pip")[1], "−03:20")
+        self.grid.tile_control("pip", "live")
+        self.assertEqual(self.pip_live.calls[-1], ("go_live",))
+        self.grid.tile_control("pip", "speaker")
+        self.assertFalse(self.sessions.muted("pip"))
+        self.assertFalse(self.sessions.muted("main"))
+        self.assertEqual(len(self.live.calls), main_calls)  # the focused tile: untouched
+        self.assertIs(self.sessions.large(), self.main_slot)
+        self.grid.tile_control("main", "play")  # the focused tile: as Space
+        self.assertEqual(self.live.calls[-1], ("toggle_pause",))
+        self.assertIs(self.sessions.large(), self.main_slot)
+
+    def test_close_stops_the_tile_gives_its_stream_back_and_shows_plus(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.grid_frame.focusRequested.emit("main")
+        self.assertEqual(sorted(self.budget.holders("Home")), ["main", "t2"])
+        self.grid.tile_control("t2", "close")
+        self.assertEqual(t2.live.calls[-1], ("stop",))
+        t2.live.released.emit()  # its upstream closed
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.assertEqual(self.grid.state("t2"), EMPTY)
+        self.assertIs(self.sessions.large(), self.main_slot)
+        self.grid_frame.focusRequested.emit("t2")  # as "+", never as its old channel
+        self.assertIsNone(self.controller._current)
+
+    def test_closing_the_focused_tile_stops_its_stream_and_keeps_the_focus(self):
+        self.start_large(0)
+        self.v()
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.grid.tile_control("main", "close")
+        self.assertEqual(self.live.calls[-1], ("stop",))
+        self.live.released.emit()
+        self.assertEqual(self.budget.holders("Home"), [])
+        self.assertEqual(self.grid.state("main"), EMPTY)
+        self.assertIs(self.sessions.large(), self.main_slot)
+        self.assertIsNone(self.controller._current)
+
+    def test_the_big_picture_leaves_the_grid_with_that_tile_big(self):
+        self.two_pictures()
+        self.grid.tile_control("pip", "big")
+        self.assertFalse(self.grid.shown())
+        self.assertIs(self.sessions.large(), self.pip_slot)
+        self.assertIs(self.sessions.small(), self.main_slot)
+
+
+class GridMixShellTests(TileControlCase):
+    def test_a_mix_keeps_the_sound_as_the_focus_moves_and_leaving_ends_it(self):
+        self.two_pictures()
+        self.grid.tile_control("pip", "speaker")  # heard beside the focused tile: a mix
+        self.assertTrue(self.sessions.mixed())
+        self.grid_frame.focusRequested.emit("pip")  # the controls move, the sound stays
+        self.assertEqual((self.session.muted, self.pip_session.muted), (False, False))
+        self.grid.tile_control("main", "speaker")  # the tile without the focus now
+        self.grid_frame.focusRequested.emit("main")
+        self.assertEqual((self.session.muted, self.pip_session.muted), (True, False))
+        self.v()  # leaving: the big picture is heard, the normal rule again
+        self.assertFalse(self.sessions.mixed())
+        self.assertIs(self.sessions.large(), self.main_slot)
+        self.assertFalse(self.session.muted)
+        self.assertFalse(self.pip_session.muted)  # the PiP stays heard, as one made audible
+        self.v()
+        self.assertFalse(self.sessions.mixed())  # the next grid follows the focus again
+
+    def test_the_mixer_says_whose_sound_plays_and_follow_focus_goes_back(self):
+        self.two_pictures()
+        self.controller._mixer.open_main()
+        self.assertEqual(self.mixer.mode, MixerMode(FOLLOWS_TEXT))
+        self.mixer.muteRequested.emit(1)  # tile 2's row: heard
+        self.assertEqual(self.mixer.mode, MixerMode(MIXED_TEXT, FOLLOW_ACTION))
+        self.mixer.followRequested.emit()
+        self.assertEqual(self.mixer.mode, MixerMode(FOLLOWS_TEXT))
+        self.assertEqual((self.session.muted, self.pip_session.muted), (False, True))
+        self.mixer.dismiss()
+        self.controller.handle(Action.VOL_UP)  # the focused tile's level: never a mix
+        self.assertFalse(self.sessions.mixed())
+        self.controller.handle(Action.MUTE)
+        self.controller.handle(Action.MUTE)
+        self.assertFalse(self.sessions.mixed())
+        self.v()
+        self.controller._mixer.open_main()
+        self.assertIsNone(self.mixer.mode)  # one picture: no line
 
 
 class MultiviewWindowTests(WindowCase):

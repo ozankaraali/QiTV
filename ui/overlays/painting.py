@@ -19,6 +19,18 @@ from PySide6.QtGui import (
 from ui.theme import PALETTE, qcolor
 
 MIN_FONT_PX = 11  # overlay text stays readable in the mini player (u is 3.6 px there)
+# The multiview's layouts as icons ("layout_4": its tiles): (columns, rows).
+LAYOUT_ICONS = {"layout_2": (2, 1), "layout_4": (2, 2), "layout_6": (3, 2), "layout_9": (3, 3)}
+_LAYOUT_WIDTH, _LAYOUT_GAP = 0.84, 0.07  # a layout icon's frame and the gaps between its tiles
+
+
+def layout_frame(columns: int, rows: int) -> tuple[float, float]:
+    """A layout icon's tiles, 16:9 each as on the grid: the frame's top and height in the
+    icon's unit box (it is `_LAYOUT_WIDTH` wide, centred)."""
+    cell_w = (_LAYOUT_WIDTH - _LAYOUT_GAP * (columns - 1)) / columns
+    height = rows * cell_w * 9 / 16 + _LAYOUT_GAP * (rows - 1)
+    return (1 - height) / 2, height
+
 
 _BADGE_COLORS = [
     "#2f6f7a",
@@ -389,6 +401,29 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
         elif name == "grid":  # multiview: four pictures, two by two
             for x, y in ((0.12, 0.2), (0.52, 0.2), (0.12, 0.52), (0.52, 0.52)):
                 fill(_rrect(x, y, 0.36, 0.28, 0.05))
+        elif name == "single":  # back from the multiview: one picture, where "grid" had four
+            line(_rrect(0.1, 0.22, 0.8, 0.56, 0.07))
+            fill(_rrect(0.22, 0.34, 0.56, 0.32, 0.04))
+        elif name in LAYOUT_ICONS:  # a multiview layout: its tiles, 16:9 each
+            columns, rows = LAYOUT_ICONS[name]
+            gap = _LAYOUT_GAP
+            top, _height = layout_frame(columns, rows)
+            cell_w = (_LAYOUT_WIDTH - gap * (columns - 1)) / columns
+            cell_h = cell_w * 9 / 16
+            left = (1 - _LAYOUT_WIDTH) / 2
+            for row in range(rows):
+                for column in range(columns):
+                    x = left + column * (cell_w + gap)
+                    y = top + row * (cell_h + gap)
+                    fill(_rrect(x, y, cell_w, cell_h, min(cell_w, cell_h) * 0.18))
+        elif name == "enlarge":  # a multiview tile made the big picture: arrows to two corners
+            shafts = QPainterPath(QPointF(0.56, 0.44))
+            shafts.lineTo(0.78, 0.22)
+            shafts.moveTo(0.44, 0.56)
+            shafts.lineTo(0.22, 0.78)
+            line(shafts)
+            fill(_poly([(0.86, 0.14), (0.86, 0.44), (0.56, 0.14)]))
+            fill(_poly([(0.14, 0.86), (0.14, 0.56), (0.44, 0.86)]))
         elif name == "swap":  # ⇄: the small and the large picture trade places
             shafts = QPainterPath(QPointF(0.16, 0.34))
             shafts.lineTo(0.72, 0.34)
@@ -449,6 +484,13 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             chevron.lineTo(tip, 0.5)
             chevron.lineTo(back, 0.8)
             p.setPen(QPen(color, 0.12, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(chevron)
+        elif name == "chevron_down":  # ⌄: a chip that opens a choice
+            chevron = QPainterPath(QPointF(0.2, 0.36))
+            chevron.lineTo(0.5, 0.66)
+            chevron.lineTo(0.8, 0.36)
+            p.setPen(QPen(color, 0.14, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             p.setBrush(Qt.NoBrush)
             p.drawPath(chevron)
         elif name == "close":  # ×

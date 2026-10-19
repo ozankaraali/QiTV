@@ -134,13 +134,16 @@ class FakeMixer(FakeOverlay):
     levelRequested = Signal(int, int)
     muteRequested = Signal(int)
     rowSelected = Signal(int)
+    followRequested = Signal()  # the multiview's "Follow focus"
     closed = Signal()
     rows = ()
     selected = 0
 
-    def show_rows(self, rows, selected):
+    mode = None  # the multiview's line under the rows (MixerMode), else None
+
+    def show_rows(self, rows, selected, mode=None):
         self.record("show_rows", rows, selected)
-        self.rows, self.selected = list(rows), selected
+        self.rows, self.selected, self.mode = list(rows), selected, mode
         self.visible = True
 
     def dismiss(self):

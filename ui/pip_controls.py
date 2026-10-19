@@ -240,6 +240,11 @@ class PipControls(QObject):
     def view(self, name: str) -> SlotView:
         return self._views.setdefault(name, SlotView())
 
+    def forget_view(self, name: str) -> None:
+        """Slot `name` (a multiview tile) closed: what it showed is forgotten."""
+        self._views.pop(name, None)
+        self._timelines.pop(name, None)
+
     def take_large(
         self,
         old: str,

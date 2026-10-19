@@ -18,7 +18,10 @@ hides, from changes made to those rows, and given back at startup.
 
 While the multiview's grid shows, the rows are its tiles that play: the focused one first
 (it is the large picture: the keys act on it), then the others in the grid's order, each
-named "Tile N" after its place.
+named "Tile N" after its place. A line under them says whose sound plays: it follows the
+focused tile until a tile without the focus is changed here (or by its own speaker,
+`toggle_mute_of`); then "Your mix stays", and moving the focus changes no sound until
+"Follow focus" (that line's action) or the grid is left (SessionManager's mix).
 
 Without a mixer (tests) or without picture in picture, a toast says the volume instead, and
 without a SessionManager the player's own volume and mute are used.
@@ -35,7 +38,7 @@ from services.i18n import N_, tr, translate
 from services.redact import safe_message
 from services.sessions import MAIN_LEVEL, PIP_LEVEL, SessionManager, Slot
 from ui.keymap import Action
-from ui.overlays.mixer import MixerRow
+from ui.overlays.mixer import MixerMode, MixerRow
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,13 @@ MAIN_ROW = 0  # the mixer's first row; the PiP's is the second
 MAIN_TITLE = N_("Main")
 # i18n: the mixer's row for the small picture (picture in picture); max ~8 letters
 PIP_TITLE = N_("PiP")
+# The multiview's line under the mixer's rows: whose sound plays.
+# i18n: the volume mixer, multiview: only the focused (selected) tile is heard; short
+FOLLOWS_TEXT = N_("Sound follows the focused tile")
+# i18n: the volume mixer, multiview: the levels and mutes the user set stay as the focus moves
+MIXED_TEXT = N_("Your mix stays")
+# i18n: a link after "Your mix stays": the sound follows the focused tile again; short
+FOLLOW_ACTION = N_("Follow focus")
 _UP, _DOWN = Qt.Key.Key_Up.value, Qt.Key.Key_Down.value
 _OTHER_ROW = (Action.SEEK_BACK, Action.SEEK_FWD, Action.TAB)
 
@@ -93,11 +103,16 @@ class MixerControls(QObject):
             sessions.set_role_levels(
                 main=int(main), pip=int(getattr(self.config, "pip_volume", PIP_LEVEL))
             )
+        if sessions is not None:
+            sessions.mixChanged.connect(lambda *_: self.refresh())  # the line follows
         if overlay is not None:
             overlay.levelRequested.connect(self._on_level)
             overlay.muteRequested.connect(self._on_mute)
             overlay.rowSelected.connect(self._on_selected)
             overlay.closed.connect(self.save)
+            followed = getattr(overlay, "followRequested", None)
+            if followed is not None:
+                followed.connect(self.follow_focus)
 
     # ---- actions ------------------------------------------------------------------------------
 
@@ -177,6 +192,25 @@ class MixerControls(QObject):
         sessions.set_muted(small.name, not sessions.muted(small.name))
         self.refresh()
 
+    def toggle_mute_of(self, name: str) -> None:
+        """A multiview tile's speaker: mute or unmute that tile (the mixer follows while it
+        shows, as for the PiP label's speaker)."""
+        sessions = self.sessions
+        if sessions is None:
+            return
+        try:
+            muted = sessions.muted(name)
+        except KeyError:
+            return  # no such tile (any more)
+        sessions.set_muted(name, not muted)
+        self.refresh()
+
+    def follow_focus(self) -> None:
+        """The mixer's "Follow focus": the grid's sound follows the focused tile again."""
+        if self.sessions is not None:
+            self.sessions.follow_focus()
+            self.refresh()
+
     def refresh(self) -> None:
         """PiP opened, closed or swapped: the speakers follow, and the rows while the mixer
         shows."""
@@ -218,7 +252,16 @@ class MixerControls(QObject):
             MixerRow(title, channel, self._level(index), self._muted(index))
             for index, (_slot, title, channel) in enumerate(shown)
         ]
-        overlay.show_rows(rows, self._row)
+        overlay.show_rows(rows, self._row, self._mode())
+
+    def _mode(self) -> Optional[MixerMode]:
+        """The line under the rows while the multiview's grid shows (None otherwise)."""
+        sessions = self.sessions
+        if sessions is None or not sessions.grid():
+            return None
+        if sessions.mixed():
+            return MixerMode(translate(MIXED_TEXT), translate(FOLLOW_ACTION))
+        return MixerMode(translate(FOLLOWS_TEXT))
 
     def _on_level(self, row: int, level: int) -> None:
         if row < len(self._slots()):

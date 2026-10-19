@@ -3,6 +3,7 @@
   "1080p at 8 Mb/s:": "1080p à 8 Mb/s :",
   "2.  Copy the key, Paste it below and Save.": "2.  Copiez la clé, collez-la ci-dessous avec « Coller », puis « Enregistrer ».",
   "4K at 25 Mb/s:": "4K à 25 Mb/s :",
+  "6 and 9 tiles need hardware decoding: Settings → Hardware video decoding, then restart QiTV": "6 et 9 images demandent le décodage matériel : Paramètres → Décodage vidéo matériel, puis redémarrez QiTV",
   "@meta": {
     "name": "Français"
   },
@@ -83,6 +84,7 @@
   "Benin": "Bénin",
   "Between the languages and the subtitles": "Passer des langues aux sous-titres",
   "Bhutan": "Bhoutan",
+  "Big picture (double-click)": "Grande image (double-clic)",
   "Bitrate": "Débit",
   "Bolivia": "Bolivie",
   "Bonaire": "Bonaire",
@@ -139,6 +141,7 @@
   "Close": "Fermer",
   "Close picture-in-picture (P)": "Fermer l’image dans l’image (P)",
   "Close the guide": "Fermer le guide",
+  "Close this tile": "Fermer cette image",
   "Close what is open, leave the multiview or fullscreen; after a movie, back to the Library": "Fermer ce qui est ouvert, quitter la multivue ou le plein écran ; après un film, retour à la Bibliothèque",
   "Closed {channel} to play {title}: {provider} allows {n} stream": {
     "one": "Pour lire {title}, QiTV a fermé {channel} : {provider} autorise {n} flux à la fois",
@@ -270,6 +273,7 @@
   "Finished": "Terminé",
   "Finland": "Finlande",
   "First / last title": "Premier / dernier titre",
+  "Follow focus": "Suivre la sélection",
   "Forward 10 seconds": "Avancer de 10 secondes",
   "France": "France",
   "Free channels": "Chaînes gratuites",
@@ -416,6 +420,7 @@
   "Multiview: several channels at once, or back to one": "Multivue : plusieurs chaînes à la fois, ou retour à une seule",
   "Mute": "Couper le son",
   "Mute the small picture": "Couper le son de la petite image",
+  "Mute this tile": "Couper le son de cette image",
   "Muted": "Son coupé",
   "My list": "Ma liste",
   "Myanmar": "Myanmar",
@@ -509,6 +514,7 @@
   "Paste the key first.": "Collez d’abord la clé.",
   "Paste your API key": "Collez votre clé API",
   "Paste your API key here": "Collez votre clé API ici",
+  "Pause this tile": "Mettre cette image en pause",
   "Peru": "Pérou",
   "Philippines": "Philippines",
   "PiP": "Petite",
@@ -526,6 +532,7 @@
   "Play in VLC": "Lire dans VLC",
   "Play now": "Lire maintenant",
   "Play or open": "Lire ou ouvrir",
+  "Play this tile": "Lire cette image",
   "Play/Pause": "Lecture/Pause",
   "Playback": "Lecture",
   "Playback stops in {time}": "La lecture s’arrête dans {time}",
@@ -644,6 +651,7 @@
   "Something went wrong. Try again.": "Un problème est survenu. Réessayez.",
   "Sound": "Son",
   "Sound 50 ms earlier / later (sync with the picture)": "Son avancé / retardé de 50 ms (synchro avec l’image)",
+  "Sound follows the focused tile": "Le son suit l’image sélectionnée",
   "Sound in sync": "Son synchronisé",
   "Sound {ms} ms earlier": "Son avancé de {ms} ms",
   "Sound {ms} ms later": "Son retardé de {ms} ms",
@@ -775,6 +783,7 @@
   "Unknown language": "Langue inconnue",
   "Unmute": "Rétablir le son",
   "Unmute the small picture": "Rétablir le son de la petite image",
+  "Unmute this tile": "Rétablir le son de cette image",
   "Untitled": "Sans titre",
   "Update Available": "Mise à jour disponible",
   "Update Check Failed": "Échec de la recherche de mises à jour",
@@ -845,6 +854,7 @@
     "one": "Votre compte autorise {n} flux ; {active} sont utilisés",
     "other": "Votre compte autorise {n} flux ; {active} sont utilisés"
   },
+  "Your mix stays": "Votre mixage reste",
   "Your provider allows {n} stream at a time": {
     "one": "Votre fournisseur autorise {n} flux à la fois",
     "other": "Votre fournisseur autorise {n} flux à la fois"

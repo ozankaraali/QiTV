@@ -526,12 +526,33 @@ class FakeTransport(FakeOverlay):
     def set_pip_state(self, available, open_):
         self.record("set_pip_state", available, open_)
 
-    def set_grid_state(self, available, shown, layout="", restorable=False):
+    def set_grid_state(self, available, shown, layout="", restorable=False, cells=0):
         self.record("set_grid_state", available, shown, layout)
         self.restorable = restorable
 
     def follow_pip(self, rect):
         self.record("follow_pip", rect)
+
+    held_button = ""  # hold(): the button whose panel shows
+
+    def hold(self, button):
+        self.record("hold", button)
+        self.held_button = button
+
+    def held(self):
+        return self.held_button
+
+    def button_rect(self, name):
+        return QRectF(1000, 650, 90, 28)  # where its buttons are, as far as panels need
+
+    def controls_top(self):
+        return 640
+
+    def control_at(self, pos):
+        return None
+
+    def pos(self):
+        return QPoint(0, 0)
 
     def show_vod(self, title, subtitle):
         self.record("show_vod", title, subtitle)

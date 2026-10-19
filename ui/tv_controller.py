@@ -168,6 +168,7 @@ class Overlays:
     picture_panel: Any = None  # the Picture panel above its button (2.3)
     stats: Any = None  # the statistics over the picture (2.3)
     sleep_notice: Any = None  # the sleep timer's last minute (2.3)
+    layout_row: Any = None  # the multiview's layouts above its layout chip
     library_toast: Any = None  # the Library page's toast: the menus' messages while it shows
 
 
@@ -466,6 +467,9 @@ class TVController(QObject):
                 restore=self._restore_tile,
                 forget=self._forget_tile,
                 pending=self._focused_link,
+                layouts=overlays.layout_row,
+                tile_action=self._on_tile_control,
+                show_controls=self._show_transport,
                 parent=self,
             )
             self._grid.changed.connect(self._mixer.refresh)
@@ -852,6 +856,8 @@ class TVController(QObject):
             return  # the Picture panel or the sleep timer's notice shows: Enter is theirs
         if not drawer.isVisible() and self._mixer.handle(action, key):
             return  # the mixer shows: the arrows, M, Tab and Esc are its own
+        if not drawer.isVisible() and self._grid is not None and self._grid.handle_key(action):
+            return  # the multiview's layouts show: ←/→, Enter and Esc are theirs
         if action in (Action.CH_NEXT, Action.CH_PREV):
             delta = 1 if action is Action.CH_NEXT else -1
             if self._on_demand():
@@ -973,6 +979,8 @@ class TVController(QObject):
 
     def mouse_moved(self) -> None:
         self._show_transport()
+        if self._grid is not None:
+            self._grid.pointer_moved()  # the tile under the pointer shows its controls
 
     def _close_online(self) -> None:
         if self._online is not None:
@@ -1895,6 +1903,57 @@ class TVController(QObject):
     def _mixer_tiles(self) -> Optional[list[tuple[str, str, str]]]:
         return self._grid.mixer_rows() if self._grid is not None else None
 
+    def _on_tile_control(self, name: str, control: str) -> None:
+        """A multiview tile's own control (its strip): it acts on that tile, the focus stays.
+        "play" pauses or plays it (the focused one as Space does), "live" goes live,
+        "speaker" mutes or unmutes it, "close" stops the focused tile's stream and "closed"
+        forgets what a closed tile without the focus showed."""
+        sessions = self.sessions
+        if self._closed or sessions is None:
+            return
+        try:
+            slot = sessions.slot(name)
+        except KeyError:
+            return
+        focused = slot is sessions.large()
+        if control == "play":
+            if focused:
+                self._play_pause()
+            else:
+                self._tuner_of(slot).toggle_pause()
+        elif control == "live":
+            if focused:
+                self._live_controls.go_live()
+            else:
+                self._tuner_of(slot).go_live()
+        elif control == "speaker":
+            self._mixer.toggle_mute_of(name)
+        elif control == "close" and focused:
+            self._close_focused_tile()
+        elif control == "closed" and self._pip is not None:
+            self._pip.forget_view(name)  # it takes the focus as "+", never as its old channel
+
+    def _close_focused_tile(self) -> None:
+        """The focused tile's ✕: its stream stops (its provider's stream goes back once
+        released), a link on its way never opens, and the tile shows "+" with the focus; the
+        player controls are the grid's until a channel is picked there."""
+        sessions = self.sessions
+        if sessions is None:
+            return
+        self._lanes.drop_tune()
+        self._tuning.stop()
+        if self._digits:
+            self.zap.cancel_digits()
+        self._tracks.close()
+        self._live_controls.stop_tune()
+        large = sessions.large()
+        large.channel = large.group_key = None
+        self._current, self._cid, self._current_url = None, None, ""
+        self._restore_channel()
+        self.overlays.banner.dismiss()
+        if self.overlays.transport.isVisible():
+            self._show_grid_transport()
+
     def _open_pip_node(self, node: NavNode) -> None:
         """The channel list's "Open in picture-in-picture": never over the grid's tiles."""
         if self.multiview_shown():
@@ -2664,6 +2723,8 @@ class TVController(QObject):
         self.overlays.transport.set_level(self._mixer.main_level())
         if self._pip is not None:
             self._pip.refresh_label()
+        if self._grid is not None:
+            self._grid.refresh_tiles()  # a tile's speaker shows its mute
 
     # ---- favorites and context actions --------------------------------------------------------
 

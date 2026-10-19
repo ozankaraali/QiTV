@@ -3,6 +3,7 @@
   "1080p at 8 Mb/s:": "1080p mit 8 Mb/s:",
   "2.  Copy the key, Paste it below and Save.": "2.  Kopieren Sie den Schlüssel, fügen Sie ihn unten mit „Einfügen“ ein und klicken Sie auf „Speichern“.",
   "4K at 25 Mb/s:": "4K mit 25 Mb/s:",
+  "6 and 9 tiles need hardware decoding: Settings → Hardware video decoding, then restart QiTV": "6 und 9 Kacheln brauchen Hardware-Decodierung: Einstellungen → Hardware-Videodecodierung, dann QiTV neu starten",
   "@meta": {
     "name": "Deutsch"
   },
@@ -83,6 +84,7 @@
   "Benin": "Benin",
   "Between the languages and the subtitles": "Zwischen Sprachen und Untertiteln",
   "Bhutan": "Bhutan",
+  "Big picture (double-click)": "Großes Bild (Doppelklick)",
   "Bitrate": "Bitrate",
   "Bolivia": "Bolivien",
   "Bonaire": "Bonaire",
@@ -139,6 +141,7 @@
   "Close": "Schließen",
   "Close picture-in-picture (P)": "Bild-in-Bild schließen (P)",
   "Close the guide": "TV-Guide schließen",
+  "Close this tile": "Diese Kachel schließen",
   "Close what is open, leave the multiview or fullscreen; after a movie, back to the Library": "Geöffnetes schließen, Mehrfachansicht oder Vollbild verlassen; nach einem Film zurück zur Mediathek",
   "Closed {channel} to play {title}: {provider} allows {n} stream": {
     "one": "{channel} für {title} geschlossen: {provider} erlaubt {n} Stream gleichzeitig",
@@ -270,6 +273,7 @@
   "Finished": "Beendet",
   "Finland": "Finnland",
   "First / last title": "Erster / letzter Titel",
+  "Follow focus": "Der Auswahl folgen",
   "Forward 10 seconds": "10 Sekunden vor",
   "France": "Frankreich",
   "Free channels": "Kostenlose Sender",
@@ -416,6 +420,7 @@
   "Multiview: several channels at once, or back to one": "Mehrfachansicht: mehrere Sender gleichzeitig oder zurück zu einem",
   "Mute": "Stummschalten",
   "Mute the small picture": "Kleines Bild stummschalten",
+  "Mute this tile": "Diese Kachel stummschalten",
   "Muted": "Stumm",
   "My list": "Meine Liste",
   "Myanmar": "Myanmar",
@@ -509,6 +514,7 @@
   "Paste the key first.": "Fügen Sie zuerst den Schlüssel ein.",
   "Paste your API key": "API-Schlüssel einfügen",
   "Paste your API key here": "API-Schlüssel hier einfügen",
+  "Pause this tile": "Diese Kachel anhalten",
   "Peru": "Peru",
   "Philippines": "Philippinen",
   "PiP": "PiP",
@@ -526,6 +532,7 @@
   "Play in VLC": "In VLC abspielen",
   "Play now": "Jetzt abspielen",
   "Play or open": "Abspielen oder öffnen",
+  "Play this tile": "Diese Kachel abspielen",
   "Play/Pause": "Abspielen/Pause",
   "Playback": "Wiedergabe",
   "Playback stops in {time}": "Wiedergabe endet in {time}",
@@ -644,6 +651,7 @@
   "Something went wrong. Try again.": "Etwas ist schiefgelaufen. Versuchen Sie es erneut.",
   "Sound": "Ton",
   "Sound 50 ms earlier / later (sync with the picture)": "Ton 50 ms früher / später (synchron zum Bild)",
+  "Sound follows the focused tile": "Der Ton folgt der ausgewählten Kachel",
   "Sound in sync": "Ton synchron",
   "Sound {ms} ms earlier": "Ton {ms} ms früher",
   "Sound {ms} ms later": "Ton {ms} ms später",
@@ -775,6 +783,7 @@
   "Unknown language": "Unbekannte Sprache",
   "Unmute": "Ton einschalten",
   "Unmute the small picture": "Ton des kleinen Bildes einschalten",
+  "Unmute this tile": "Ton dieser Kachel einschalten",
   "Untitled": "Ohne Titel",
   "Update Available": "Update verfügbar",
   "Update Check Failed": "Update-Prüfung fehlgeschlagen",
@@ -845,6 +854,7 @@
     "one": "Ihr Konto erlaubt {n} Stream; {active} sind belegt",
     "other": "Ihr Konto erlaubt {n} Streams; {active} sind belegt"
   },
+  "Your mix stays": "Ihre Mischung bleibt",
   "Your provider allows {n} stream at a time": {
     "one": "Ihr Anbieter erlaubt {n} Stream gleichzeitig",
     "other": "Ihr Anbieter erlaubt {n} Streams gleichzeitig"

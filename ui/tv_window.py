@@ -111,6 +111,7 @@ from ui.overlays.corner_controls import CornerControls
 from ui.overlays.drawer import Drawer
 from ui.overlays.grid_tiles import GridTiles
 from ui.overlays.guide import Guide
+from ui.overlays.layout_row import LayoutRow
 from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
 from ui.overlays.pip_label import PipLabel
@@ -471,6 +472,7 @@ class TVWindow(QMainWindow):
         self.picture_panel = TrackPanel(host)
         self.stats_overlay = StatsOverlay(host)
         self.sleep_notice = SleepNotice(host)
+        self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
         self.corner_controls = CornerControls(host)
         self.overlays = Overlays(
@@ -493,6 +495,7 @@ class TVWindow(QMainWindow):
             stats=self.stats_overlay,
             sleep_notice=self.sleep_notice,
             library_toast=self.library_toast,
+            layout_row=self.layout_row,
         )
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
         # bottom corner's PiP: its pill, ⇄, speaker and × stay within reach; elsewhere on the
@@ -500,11 +503,11 @@ class TVWindow(QMainWindow):
         # small picture (OverlayHost.set_hole). The multiview's tiles are drawn under all of
         # them, and take their clicks over the transport but for its buttons and bar
         # (GridTiles.hits). The mixer shows over them (it sits above the transport's controls
-        # and beside the PiP), and the Sound, Subtitles and Picture panels over it (above their
-        # buttons). The statistics sit over the transport, under its title row (they take no
-        # click). The drawer and the guide cover them all; the OpenSubtitles search covers
-        # the player with its backdrop, under the corner player's controls, the sleep timer's
-        # last minute and the toast.
+        # and beside the PiP), and the Sound, Subtitles and Picture panels and the multiview's
+        # layouts over it (above their buttons). The statistics sit over the transport, under
+        # its title row (they take no click). The drawer and the guide cover them all; the
+        # OpenSubtitles search covers the player with its backdrop, under the corner player's
+        # controls, the sleep timer's last minute and the toast.
         for overlay in (
             self.grid_tiles,
             self.overlays.banner,
@@ -517,6 +520,7 @@ class TVWindow(QMainWindow):
             self.sound_panel,
             self.subtitle_panel,
             self.picture_panel,
+            self.layout_row,
             self.overlays.drawer,
             self.overlays.guide,
             self.overlays.next_card,

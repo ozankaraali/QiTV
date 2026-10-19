@@ -972,6 +972,16 @@ class SmallWidthLayoutTests(unittest.TestCase):
         yield "stay live, adding buffer, Auto adjusted"
         t.update_timeline(self.state("shifted", 300.0, 1.0), [])
         yield "shifted, Go live"
+        # Over the multiview's grid: its layout chip, and "Last grid", give way.
+        t.show_live("One", "")
+        t.set_grid_state(True, True, "3×3", True, cells=9)
+        yield "multiview, live"
+        t.show_timeshift("One", "")
+        t.update_timeline(self.state("live", 12.5, 1.05), [])
+        yield "multiview, stay live, catching up"
+        t.update_timeline(self.state("shifted", 300.0, 1.0), [])
+        yield "multiview, shifted, Go live"
+        t.set_grid_state(True, False)
 
     def test_no_two_controls_overlap_at_any_width(self):
         for width in self.WIDTHS:
@@ -1101,6 +1111,57 @@ class SmallWidthLayoutTests(unittest.TestCase):
         fm = QFontMetricsF(t._indicator_font(Units(1280)))
         box = t._layout()["indicator"]
         self.assertGreater(box.width(), fm.horizontalAdvance(head) + fm.horizontalAdvance(tail))
+
+
+class GridChipTests(TransportCase):
+    """The multiview's controls: the way back to one picture, and the layout chip beside it,
+    drawn as a button (its layout's picture, its name and ⌄)."""
+
+    def grid(self, width=1280, restorable=False):
+        t = self.make()
+        t.setGeometry(0, 0, width, round(width * 9 / 16))
+        t.set_pip_state(True, False)
+        t.show_live("One", "News")
+        t.set_grid_state(True, True, "2×2", restorable, cells=4)
+        return t
+
+    def test_the_chip_sits_just_left_of_the_grid_button_which_shows_the_way_back(self):
+        t = self.grid()
+        chip, button = t.button_rect("layout"), t.button_rect("grid")
+        self.assertLess(chip.right(), button.left())
+        self.assertLess(button.left() - chip.right(), Units(1280).px(2.5))
+        self.assertEqual(t.icon("grid"), "single")
+        self.assertEqual(t.tooltip_at(button.center()), key_hint("Back to one picture", "V"))
+        self.assertTrue(t.layout_chip_named())
+        self.assertGreaterEqual(chip.height(), Units(1280).px(2.2))
+        t.set_grid_state(True, False)
+        self.assertEqual(t.icon("grid"), "grid")
+        self.assertNotIn("layout", t._layout())
+
+    def test_a_click_on_the_chip_asks_for_the_layouts_and_it_is_lit_while_they_show(self):
+        t = self.grid()
+        spy = QSignalSpy(t.layoutRequested)
+        self.click(t, t.button_rect("layout").center().toPoint())
+        self.assertEqual(spy.count(), 1)
+        t.hold("layout")
+        self.assertFalse(t.grab().isNull())  # painted lit
+        self.assertEqual(t.held(), "layout")
+
+    def test_in_a_narrow_window_last_grid_gives_way_first_then_the_layouts_name(self):
+        wide = self.grid(1280, restorable=True)
+        self.assertIn("restore", wide._layout())
+        names = {}
+        for width in (960, 640, 480, 360, 300):
+            t = self.grid(width, restorable=True)
+            rects = t._layout()
+            names[width] = ("restore" in rects, t.layout_chip_named())
+            self.assertIn("layout", rects)
+            self.assertIn("grid", rects)
+        # Once "Last grid" is gone it stays gone at smaller widths; then the name goes.
+        restores = [names[w][0] for w in (960, 640, 480, 360, 300)]
+        self.assertEqual(restores, sorted(restores, reverse=True))
+        named = [names[w][1] for w in (960, 640, 480, 360, 300)]
+        self.assertEqual(named, sorted(named, reverse=True))
 
 
 class HostSizingTests(unittest.TestCase):

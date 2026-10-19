@@ -99,7 +99,8 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("player", "Ctrl+D"): (("transport", "favorite"),),
     ("player", "P, Ctrl+P"): (("transport", "pip"), ("pip_label", "close")),
     ("player", "S"): (("pip_label", "swap"), ("picture", "click")),
-    # The multiview's button on the player controls, lit while its grid shows.
+    # The multiview's button on the player controls (one picture, the way back, while its
+    # grid shows).
     ("player", "V"): (("transport", "grid"),),
     ("player", "Alt+P"): (("transport", "mini"),),
     # Close what is open: a click on the picture closes the channel list, × the guide (the

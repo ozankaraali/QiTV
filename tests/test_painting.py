@@ -60,6 +60,14 @@ ICONS = [
     "close",
     "check",
     "record",
+    "grid",
+    "single",
+    "enlarge",
+    "chevron_down",
+    "layout_2",
+    "layout_4",
+    "layout_6",
+    "layout_9",
 ]
 
 

@@ -13,11 +13,15 @@ source stalled. The bar and the Go live chip show only when the viewer left live
 chosen speed); a drag keeps the bar.
 
 Left of fullscreen sit the mini player (the whole window small in a corner, Alt+P), on live
-TV while the window offers picture in picture the second channel (P) and the multiview (V,
-lit while its grid shows; the second channel gives way then), then "Open in external player"
-(the shell's VLC/MPV menu for what plays now). Hovering those names them and their keys.
-While the grid shows, a chip left of them names its layout ("2×2"): a click changes it; and
-while the last grid's channels can come back, a "Last grid" chip brings them.
+TV while the window offers picture in picture the second channel (P) and the multiview (V;
+while its grid shows it shows the way back, one picture, as fullscreen's does, and the
+second channel gives way), then "Open in external player" (the shell's VLC/MPV menu for what
+plays now). Hovering those names them and their keys. While the grid shows, the layout chip
+sits just left of the multiview's button: the layout's picture, its name ("2×2") and ⌄, drawn
+as a button (a click opens the layouts to pick from: the shell's; lit while they show). While
+the last grid's channels can come back, a "Last grid" chip left of the other buttons brings
+them. In a narrow window "Last grid" gives way first, then the layout's name, then (a mini
+player's width) the chip.
 Left of the sound (♫) a speaker opens the volume mixer on the large picture's row; it shows
 whether that picture is muted, and else its volume (a wave per third). ♫ opens the Sound panel
 above it and the subtitles button the Subtitles panel (ui/track_controls.py), and the Picture
@@ -99,7 +103,7 @@ from ui.overlays.painting import (
     volume_icon,
 )
 from ui.pointer import NAV_BUTTONS
-from ui.theme import PALETTE, qcolor
+from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)  # − and + step through these
 TOP_FRACTION = 0.22
@@ -290,7 +294,7 @@ class Transport(Overlay):
     seekToRequested = Signal(float)
     pipRequested = Signal()  # the second channel: open picture in picture, or close it
     gridRequested = Signal()  # the multiview: its grid, or back to one picture
-    layoutRequested = Signal()  # the grid's layout chip: the next layout
+    layoutRequested = Signal()  # the grid's layout chip: the layouts to pick from
     restoreRequested = Signal()  # the grid's "Last grid" chip: the last grid's channels
     miniPlayerRequested = Signal()
     # "Open in external player": the shell's menu opens from this point (the button's
@@ -338,6 +342,7 @@ class Transport(Overlay):
         self._grid_available = False  # the window can show the multiview's grid
         self._grid_shown = False
         self._grid_layout = ""  # the grid's layout, as its chip names it ("2×2")
+        self._grid_cells = 0  # its tiles: the chip's picture (painting's "layout_4")
         self._grid_restorable = False  # the last grid can come back: its chip shows
         self._pip_rect = QRect()  # the small picture: the shades leave it alone
         self._muted = False  # the large picture's mute: the speaker shows it
@@ -469,17 +474,30 @@ class Transport(Overlay):
             self._controls_changed()
 
     def set_grid_state(
-        self, available: bool, shown: bool, layout: str = "", restorable: bool = False
+        self,
+        available: bool,
+        shown: bool,
+        layout: str = "",
+        restorable: bool = False,
+        cells: int = 0,
     ) -> None:
-        """The multiview's button: shown on live TV when `available`; lit while its grid
-        shows, with the layout chip naming `layout` ("2×2") beside it, and while the last
-        grid's channels can come back (`restorable`), a "Last grid" chip."""
-        state = (available, shown, layout if shown else "", restorable and shown)
+        """The multiview's button: shown on live TV when `available`; while its grid shows it
+        shows the way back (one picture), with the layout chip beside it: the picture of
+        `cells` tiles and `layout`'s name ("2×2"); and while the last grid's channels can
+        come back (`restorable`), a "Last grid" chip."""
+        state = (
+            available,
+            shown,
+            layout if shown else "",
+            restorable and shown,
+            cells if shown else 0,
+        )
         current = (
             self._grid_available,
             self._grid_shown,
             self._grid_layout,
             self._grid_restorable,
+            self._grid_cells,
         )
         if state != current:
             (
@@ -487,9 +505,14 @@ class Transport(Overlay):
                 self._grid_shown,
                 self._grid_layout,
                 self._grid_restorable,
+                self._grid_cells,
             ) = state
             self.update()
             self._controls_changed()
+
+    def idle_ms(self) -> int:
+        """How long it stays up after the last touch (the multiview's tile controls too)."""
+        return self._idle.interval()
 
     def set_muted(self, muted: bool) -> None:
         """Whether the large picture is muted: its speaker shows it."""
@@ -517,6 +540,8 @@ class Transport(Overlay):
             return "full_window"
         if name == "fullscreen" and self._fullscreen:
             return "exit_fullscreen"
+        if name == "grid" and self._grid_shown:
+            return "single"  # the way back, as fullscreen's
         return _ICONS.get(name, name)
 
     def set_library_available(self, available: bool) -> None:
@@ -992,15 +1017,12 @@ class Transport(Overlay):
             else:
                 put("play", big, un.px(1.5))
             left_end = x  # the left buttons and their gap
-            x = float(right)
-            for name in self._right_buttons("picture", "subtitles", "audio", "volume"):
-                x -= icon
-                rects[name] = QRectF(x, cy - icon / 2, icon, icon)
-                x -= un.px(icon_gap)
-            x = self._put_layout_chip(rects, un, x, cy)
             # As wide as its word in a longer language ("EN VIVO"), never narrower than LIVE's.
             badge = QFontMetricsF(self._live_font(un)).horizontalAdvance(_live_label())
             pill_w = max(float(un.px(5.2)), badge + un.px(1.6))
+            buttons = self._right_buttons("picture", "subtitles", "audio", "volume")
+            floor = left_end + pill_w + un.px(0.4)  # the LIVE badge keeps its room
+            x = self._put_right(rects, un, buttons, cy, floor, icon_gap)
             rects["live"] = QRectF(x - pill_w - un.px(0.4), cy - un.px(1.1), pill_w, un.px(2.2))
             crowded = rects["live"].left() < left_end
             if self._timeshift and self._edge_lag is not None:
@@ -1025,27 +1047,34 @@ class Transport(Overlay):
                 if self._next_available:
                     put("next", skip, un.px(1.0))
             speed_x = x  # the chip goes in once the right side has taken its room
-            x = float(right)
-            for name in self._right_buttons("picture", "audio", "volume", "subtitles"):
-                x -= icon
-                rects[name] = QRectF(x, cy - icon / 2, icon, icon)
-                x -= un.px(icon_gap)
-            x = self._put_layout_chip(rects, un, x, cy)
-            if shifted and self._behind():
-                fm = QFontMetricsF(self._chip_font(un))
-                label = _go_live_label()
-                width = 2 * un.px(1.0) + un.px(0.7) + un.px(0.5) + fm.horizontalAdvance(label)
+            side = self._side_chip(un)
+            room = speed_x + (side[1] if side is not None else 0.0) + un.px(0.8)
+            x = self._put_right(
+                rects,
+                un,
+                self._right_buttons("picture", "audio", "volume", "subtitles"),
+                cy,
+                room,
+                icon_gap,
+            )
+            if side is not None:
                 h = self._chip_h(un)
-                rects["golive"] = QRectF(x - width, cy - h / 2, width, h)
-            elif self._library and not self._live:
-                fm = QFontMetricsF(self._chip_font(un))
-                width = 2 * un.px(1.0) + fm.horizontalAdvance(translate(LIBRARY_LABEL))
-                h = self._chip_h(un)
-                rects["library"] = QRectF(x - width, cy - h / 2, width, h)
+                rects[side[0]] = QRectF(x - side[1], cy - h / 2, side[1], h)
             chips = [rects[n].left() - un.px(0.8) for n in ("golive", "library") if n in rects]
             crowded = min(chips, default=x) < speed_x
             rects.update(self._speed_rects(un, speed_x, cy, min(chips, default=x)))
         return rects, crowded
+
+    def _side_chip(self, un: Units) -> Optional[tuple[str, float]]:
+        """The chip left of the right-hand buttons under the bar, and its width: Go live while
+        a time-shifted channel plays behind live, ‹ Library for a title from the Library."""
+        fm = QFontMetricsF(self._chip_font(un))
+        if self._timeshift and self._behind():
+            label = _go_live_label()
+            return "golive", 2 * un.px(1.0) + un.px(0.7) + un.px(0.5) + fm.horizontalAdvance(label)
+        if self._library and not self._live:
+            return "library", 2 * un.px(1.0) + fm.horizontalAdvance(translate(LIBRARY_LABEL))
+        return None
 
     def _speed_rects(self, un: Units, x: float, cy: float, room: float) -> dict[str, QRectF]:
         """− 1.25x + from `x`: as wide and tall as their text, whose font stops at a floor
@@ -1065,20 +1094,76 @@ class Transport(Overlay):
             }
         return {"speed": QRectF(x, top, label, h)} if x + label <= room else {}
 
-    def _put_layout_chip(self, rects: dict[str, QRectF], un: Units, x: float, cy: float) -> float:
-        """While the grid shows, its layout chip ends at `x`; where the next control ends."""
-        if not (self._grid_shown and self._grid_layout):
-            return x
-        fm = QFontMetricsF(self._chip_font(un))
-        width = 2 * un.px(1.0) + fm.horizontalAdvance(self._grid_layout)
+    def _put_right(
+        self,
+        rects: dict[str, QRectF],
+        un: Units,
+        buttons: tuple[str, ...],
+        cy: float,
+        floor: float,
+        icon_gap: float = _ICON_GAP_U,
+    ) -> float:
+        """The icon buttons from the right edge inwards, `icon_gap` (u) apart, the layout
+        chip just left of the multiview's button, then "Last grid": the chips keep to the right
+        of `floor` (what the left side and the row's chip need), "Last grid" giving way first,
+        then the layout's name. Where the next control ends."""
+        icon = un.px(2.2)
+        step = icon + un.px(icon_gap)
+        x = float(self.width() - un.px(3))
+        chip, named, restore = self._grid_chips(un, x - len(buttons) * step - floor)
         h = self._chip_h(un)
-        rects["layout"] = QRectF(x - width, cy - h / 2, width, h)
-        x -= width + un.px(1.2)
-        if self._grid_restorable:
-            width = 2 * un.px(1.0) + fm.horizontalAdvance(translate(RESTORE_LABEL))
-            rects["restore"] = QRectF(x - width, cy - h / 2, width, h)
-            x -= width + un.px(1.2)
+        for name in buttons:
+            x -= icon
+            rects[name] = QRectF(x, cy - icon / 2, icon, icon)
+            x -= un.px(icon_gap)
+            if name == "grid" and chip:
+                rects["layout"] = QRectF(x - chip, cy - h / 2, chip, h)
+                x -= chip + un.px(1.8)
+        if chip and "layout" not in rects:  # never: the chip shows with the grid's button
+            rects["layout"] = QRectF(x - chip, cy - h / 2, chip, h)
+            x -= chip + un.px(1.8)
+        if restore:
+            rects["restore"] = QRectF(x - restore, cy - h / 2, restore, h)
+            x -= restore + un.px(1.2)
         return x
+
+    def _grid_chips(self, un: Units, room: float) -> tuple[float, bool, float]:
+        """While the grid shows: the layout chip's width (0: no room for it), whether it names
+        the layout, and the "Last grid" chip's width (0: left out), within `room`."""
+        if not (self._grid_shown and self._grid_layout):
+            return 0.0, False, 0.0
+        gap = un.px(1.8)
+        full, short = self._layout_chip_width(un, True), self._layout_chip_width(un, False)
+        restore = 0.0
+        if self._grid_restorable:
+            fm = QFontMetricsF(self._chip_font(un))
+            restore = 2 * un.px(1.0) + fm.horizontalAdvance(translate(RESTORE_LABEL))
+        if restore and full + gap + restore + un.px(1.2) <= room:
+            return full, True, restore
+        if full + gap <= room:
+            return full, True, 0.0
+        if short + gap <= room:
+            return short, False, 0.0
+        return 0.0, False, 0.0  # a mini player's: the layouts wait for a larger window
+
+    def _layout_chip_parts(self, un: Units, named: bool) -> tuple[float, float, float, float]:
+        """The layout chip's inner sizes: its pad, the picture's width, the name's (0 without
+        it) and ⌄'s."""
+        h = self._chip_h(un)
+        name = QFontMetricsF(self._chip_font(un)).horizontalAdvance(self._grid_layout)
+        return float(un.px(0.8)), h * 0.95, name if named else 0.0, h * 0.5
+
+    def _layout_chip_width(self, un: Units, named: bool) -> float:
+        pad, picture, name, caret = self._layout_chip_parts(un, named)
+        gap = un.px(0.4)
+        return 2 * pad + picture + (gap + name if name else 0.0) + gap + caret
+
+    def layout_chip_named(self) -> bool:
+        """The layout chip names the layout (a narrow window shows its picture and ⌄ only)."""
+        chip = self._layout().get("layout")
+        if chip is None:
+            return False
+        return chip.width() >= self._layout_chip_width(Units(self.width()), True) - 0.5
 
     def _right_buttons(self, *rest: str) -> tuple[str, ...]:
         """The icon buttons from the right edge inwards: the window's and the picture's, the
@@ -1150,20 +1235,53 @@ class Transport(Overlay):
             self._paint_vod(p, un, rects, text)
         for name in _ICON_BUTTONS:
             if name in rects:
-                lit = (
-                    (name == "pip" and self._pip_open)
-                    or (name == "grid" and self._grid_shown)
-                    or name == self._held
-                )
+                lit = (name == "pip" and self._pip_open) or name == self._held
                 draw_icon(p, self.icon(name), rects[name], qcolor(PALETTE.accent) if lit else text)
-        for name, label in (("layout", self._grid_layout), ("restore", translate(RESTORE_LABEL))):
-            chip = rects.get(name)
-            if chip is not None:
-                fill_round(p, chip, qcolor(PALETTE.text, 0.14), chip.height() / 2)
-                p.setFont(self._chip_font(un))
-                p.setPen(text)
-                p.drawText(chip, Qt.AlignCenter, label)
+        chip = rects.get("layout")
+        if chip is not None:
+            self._paint_layout_chip(p, un, chip, text)
+        chip = rects.get("restore")
+        if chip is not None:
+            fill_round(p, chip, qcolor(PALETTE.text, 0.14), chip.height() / 2)
+            p.setFont(self._chip_font(un))
+            p.setPen(text)
+            p.drawText(chip, Qt.AlignCenter, translate(RESTORE_LABEL))
         p.end()
+
+    def _paint_layout_chip(self, p: QPainter, un: Units, chip: QRectF, text: QColor) -> None:
+        """The layout's picture, its name and ⌄, on a chip drawn as a button: outlined, lit
+        while the layouts show (`hold("layout")`)."""
+        lit = self._held == "layout"
+        color = qcolor(PALETTE.accent) if lit else text
+        radius = chip.height() / 2
+        fill_round(
+            p,
+            chip,
+            qcolor(PALETTE.accent, FOCUS_FILL_ALPHA) if lit else qcolor(PALETTE.text, 0.2),
+            radius,
+        )
+        p.save()
+        p.setPen(QPen(qcolor(PALETTE.accent) if lit else qcolor(PALETTE.text, 0.5), 1.0))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(chip.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+        p.restore()
+        pad, picture, name, caret = self._layout_chip_parts(un, self.layout_chip_named())
+        gap = un.px(0.4)
+        x = chip.left() + pad
+        cy = chip.center().y()
+        icon = f"layout_{self._grid_cells}" if self._grid_cells in (2, 4, 6, 9) else "grid"
+        draw_icon(p, icon, QRectF(x, cy - picture / 2, picture, picture), color)
+        x += picture + gap
+        if name:
+            p.setFont(self._chip_font(un))
+            p.setPen(color)
+            p.drawText(
+                QRectF(x, chip.top(), name + 1, chip.height()),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                self._grid_layout,
+            )
+            x += name + gap
+        draw_icon(p, "chevron_down", QRectF(x, cy - caret / 2, caret, caret), color)
 
     def _paint_record(self, p: QPainter, un: Units, row: _TitleRow) -> None:
         """The record button (red; dim without time-shift; lit while it records) and the REC

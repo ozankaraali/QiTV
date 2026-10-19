@@ -3,6 +3,7 @@
   "1080p at 8 Mb/s:": "1080p, 8 Mb/s:",
   "2.  Copy the key, Paste it below and Save.": "2.  Anahtarı kopyalayın, “Yapıştır” ile aşağıya yapıştırın ve “Kaydet” düğmesine basın.",
   "4K at 25 Mb/s:": "4K, 25 Mb/s:",
+  "6 and 9 tiles need hardware decoding: Settings → Hardware video decoding, then restart QiTV": "6 ve 9 ekran için donanımla kod çözme gerekir: Ayarlar → Donanımla video kod çözme, ardından QiTV'yi yeniden başlatın",
   "@meta": {
     "name": "Türkçe"
   },
@@ -83,6 +84,7 @@
   "Benin": "Benin",
   "Between the languages and the subtitles": "Diller ile altyazılar arasında",
   "Bhutan": "Butan",
+  "Big picture (double-click)": "Büyük ekranda izle (çift tıklama)",
   "Bitrate": "Bit hızı",
   "Bolivia": "Bolivya",
   "Bonaire": "Bonaire",
@@ -138,6 +140,7 @@
   "Close": "Kapat",
   "Close picture-in-picture (P)": "Resim içinde resmi kapat (P)",
   "Close the guide": "Rehberi kapat",
+  "Close this tile": "Bu ekranı kapat",
   "Close what is open, leave the multiview or fullscreen; after a movie, back to the Library": "Açık olanı kapat, çoklu ekrandan veya tam ekrandan çık; film bitince Kitaplığa dön",
   "Closed {channel} to play {title}: {provider} allows {n} stream": {
     "other": "{title} için {channel} kapatıldı: {provider} aynı anda en fazla {n} yayına izin veriyor"
@@ -266,6 +269,7 @@
   "Finished": "Bitti",
   "Finland": "Finlandiya",
   "First / last title": "İlk / son başlık",
+  "Follow focus": "Ses seçili ekrandan gelsin",
   "Forward 10 seconds": "10 saniye ileri",
   "France": "Fransa",
   "Free channels": "Ücretsiz kanallar",
@@ -412,6 +416,7 @@
   "Multiview: several channels at once, or back to one": "Çoklu ekran: aynı anda birkaç kanal veya tek kanala dönüş",
   "Mute": "Sesi kapat",
   "Mute the small picture": "Küçük resmin sesini kapat",
+  "Mute this tile": "Bu ekranın sesini kapat",
   "Muted": "Ses kapalı",
   "My list": "Listem",
   "Myanmar": "Myanmar",
@@ -502,6 +507,7 @@
   "Paste the key first.": "Önce anahtarı yapıştırın.",
   "Paste your API key": "API anahtarınızı yapıştırın",
   "Paste your API key here": "API anahtarınızı buraya yapıştırın",
+  "Pause this tile": "Bu ekranı duraklat",
   "Peru": "Peru",
   "Philippines": "Filipinler",
   "PiP": "PiP",
@@ -519,6 +525,7 @@
   "Play in VLC": "VLC'de oynat",
   "Play now": "Şimdi oynat",
   "Play or open": "Oynat veya aç",
+  "Play this tile": "Bu ekranı oynat",
   "Play/Pause": "Oynat/Duraklat",
   "Playback": "Oynatma",
   "Playback stops in {time}": "Oynatma {time} sonra duracak",
@@ -635,6 +642,7 @@
   "Something went wrong. Try again.": "Bir şeyler ters gitti. Yeniden deneyin.",
   "Sound": "Ses",
   "Sound 50 ms earlier / later (sync with the picture)": "Ses 50 ms erken / geç (görüntüyle senkron)",
+  "Sound follows the focused tile": "Ses, seçili ekrandan gelir",
   "Sound in sync": "Ses senkronize",
   "Sound {ms} ms earlier": "Ses {ms} ms erken",
   "Sound {ms} ms later": "Ses {ms} ms geç",
@@ -765,6 +773,7 @@
   "Unknown language": "Bilinmeyen dil",
   "Unmute": "Sesi aç",
   "Unmute the small picture": "Küçük resmin sesini aç",
+  "Unmute this tile": "Bu ekranın sesini aç",
   "Untitled": "Adsız",
   "Update Available": "Güncelleme mevcut",
   "Update Check Failed": "Güncelleme denetimi başarısız",
@@ -830,6 +839,7 @@
   "Your account allows {n} stream; {active} are in use": {
     "other": "Hesabınız {n} yayına izin veriyor; {active} yayın kullanımda"
   },
+  "Your mix stays": "Ses ayarınız korunuyor",
   "Your provider allows {n} stream at a time": {
     "other": "Sağlayıcınız aynı anda {n} yayına izin veriyor"
   },
