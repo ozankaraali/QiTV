@@ -978,12 +978,28 @@ class Transport(Overlay):
 
     def _layout(self) -> dict[str, QRectF]:
         """The controls' rects; in a row too crowded for them (a small window, a longer
-        language, every button of the multiview and the second channel, or the multiview's
-        chips cut short), the icons sit closer."""
+        language, every button of the multiview and the second channel), the icons sit closer
+        before a text gives way: the multiview's chips, the Stay live indicator or the speed
+        chip's − and +."""
         rects, crowded = self._layout_at(_ICON_GAP_U)
-        if crowded or self._grid_chips_short(rects):
+        if crowded or self._grid_chips_short(rects) or self._squeezed(rects):
             return self._layout_at(_TIGHT_GAP_U)[0]
         return rects
+
+    def _squeezed(self, rects: dict[str, QRectF]) -> bool:
+        """The Stay live indicator went without a part of its text (or altogether), or the
+        speed chip without its − and +."""
+        if "speed" in rects and "slower" not in rects:
+            return True
+        variants = self._indicator_variants() if self._timeshift and not self._shows_bar() else []
+        if not variants:
+            return False
+        un = Units(self.width())
+        fm = QFontMetricsF(self._indicator_font(un))
+        head, tail = variants[0]
+        whole = self._indicator_bare(un, fm, head) + fm.horizontalAdvance(tail)
+        box = rects.get("indicator")
+        return box is None or box.width() < whole - 0.5
 
     def _grid_chips_short(self, rects: dict[str, QRectF]) -> bool:
         """While the grid shows: its layout chip went without its name, or left out, or
