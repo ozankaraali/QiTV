@@ -2442,7 +2442,7 @@ class SafeJumpTests(LiveSessionCase):
         self.assertEqual(self.live.position(), 50.0)
 
     def test_an_evicted_position_reopens_no_earlier_than_the_margin(self):
-        # A keyframe at the oldest point, starts without one after it: the reopen 5 s
+        # A keyframe at the oldest point, starts without one after it: the reopen a margin
         # past the oldest point went back to it, which the next eviction may beat.
         sid = self.ready(segments(0, 3), live_edge=6.0)
         self.playback.set_state(PlaybackState.PLAYING)
@@ -2452,7 +2452,7 @@ class SafeJumpTests(LiveSessionCase):
         self.engine.buffer(sid, spans, live_edge=112.0)
         self.playback.set_state(PlaybackState.ENDED)
         self.playback.ended.emit()
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 52))  # holding 105
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 53))  # holding 106
         self.assertEqual(self.notices, [REWOUND])
 
     def test_on_an_audio_only_stream_far_behind_jumps(self):
@@ -3843,13 +3843,39 @@ class InterruptionTests(LiveSessionCase):
         self.step(1.0)
         self.pause_past_the_ring(sid)
         self.live.toggle_pause()
-        # 5 s past the oldest point, so the next eviction does not beat VLC's request.
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 152))
+        # Half way into this short ring, so the next eviction does not beat VLC's request.
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 153))
         self.assertEqual(self.notices, [REWOUND])
-        self.assertEqual(self.live.position(), 304.0)
+        self.assertEqual(self.live.position(), 306.0)
         self.assertEqual(self.playback.paused, [True])  # reopened, not unpaused in place
         self.playback.set_state(PlaybackState.PLAYING)
         self.assertEqual(self.playback.paused, [True])
+
+    def test_a_pause_past_a_long_ring_resumes_30_s_inside_it(self):
+        # 9 minutes held, paused for 15: a bitrate that rises a little or a wait took a 5 s
+        # margin away within minutes, and every time the picture broke and rewound again.
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(1.0)
+        self.live.toggle_pause()
+        self.playback.set_state(PlaybackState.PAUSED)
+        self.step(900.0, media=0)
+        self.engine.buffer(sid, segments(200, 270, start=400.0), live_edge=940.5)
+        self.live.toggle_pause()
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 215))
+        self.assertEqual(self.live.position(), 430.0)
+        self.assertEqual(self.notices, [REWOUND])
+
+    def test_a_short_ring_rewinds_half_way_into_it(self):
+        # A ring under a minute (a 4K channel in the smallest memory) keeps half of it ahead.
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(1.0)
+        self.engine.buffer(sid, segments(150, 20, start=300.0), live_edge=340.0)
+        self.playback.set_state(PlaybackState.ENDED)
+        self.playback.ended.emit()
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 160))  # 320: 20 s in
+        self.assertEqual(self.notices, [REWOUND])
 
     def test_a_resume_inside_the_buffer_unpauses_in_place(self):
         self.ready(segments(0, 3), live_edge=6.0)
@@ -3866,7 +3892,7 @@ class InterruptionTests(LiveSessionCase):
         self.engine.buffer(sid, segments(50, 6, start=100.0), live_edge=112.0)
         self.playback.set_state(PlaybackState.ENDED)
         self.playback.ended.emit()
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 52))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 53))
         self.assertEqual(self.notices, [REWOUND])
 
     def test_a_short_ring_rewinds_to_its_newest_closed_segment_at_most(self):
@@ -3885,10 +3911,10 @@ class InterruptionTests(LiveSessionCase):
         self.pause_past_the_ring(sid)
         self.live.toggle_pause()
         # The ring moved on again before VLC's request: a 404, and the retry rewinds too.
-        self.engine.buffer(sid, segments(153, 6, start=306.0), live_edge=318.5)
+        self.engine.buffer(sid, segments(156, 6, start=312.0), live_edge=324.5)
         self.playback.set_state(PlaybackState.ERROR)
         self.playback.errorOccurred.emit("The stream could not be opened")
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 155))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 159))
         self.assertEqual(self.notices, [REWOUND])
         self.playback.set_state(PlaybackState.PLAYING)
         self.step(1.0)

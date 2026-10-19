@@ -169,9 +169,9 @@ cleanly where it can (2.1): a keyframe, else an intra picture, a start without e
 a debug log says on a stream with video; a keyframe over an intra picture within that band.
 
 Interruptions while playing from the pipeline:
-- VLC ended or failed: reopen at the position, or 5 s past the oldest buffered point with
-  "Rewound past the buffer" (once until VLC plays again) when the ring evicted it (after a
-  long pause, say). Resuming from a pause checks for that eviction first. Nothing is reopened
+- VLC ended or failed: reopen at the position, or 30 s past the oldest buffered point (half
+  way into a shorter buffer) with "Rewound past the buffer" (once until VLC plays again) when
+  the ring evicted it (after a long pause, say). Resuming from a pause checks for that eviction first. Nothing is reopened
   once the session ended: playback runs to the end of the buffer. Interruptions that do not reach playing again within
   `ready_timeout_ms` fall back.
 - `sessionFailed("disk")`: the helper went on in RAM without the history: a notice, then go
@@ -273,7 +273,9 @@ LOADING = N_("Still loading…")  # i18n: toast: a channel takes long to start
 _CLOSE_CAP_MS = 2000  # a close not confirmed by then counts as done
 _RECOVERY_MS = 10_000  # a helper restart must bring the session back by then
 _EXPIRED_S = 0.5  # a position this far before the oldest buffered point is gone
-_REWIND_MARGIN_S = 5.0  # an evicted position reopens this far past the oldest point
+# An evicted position reopens this far past the oldest point, at most half the buffer: the
+# ring holds bytes, so a rising bitrate or a wait moves its oldest point on faster than 1x.
+_REWIND_MARGIN_S = 30.0
 _BELOW_TARGET_S = 0.25  # Go live never lands a mean lag further below the target
 _LAND_ABOVE_S = 0.75  # Go live lands at most this far above the target (when a start is there)
 _OPEN_SEED_S = 0.5  # VLC's open time (play() to Playing) before any was measured
@@ -2432,14 +2434,16 @@ class LiveSession(QObject):
 
     def _reopen_at_position(self) -> None:
         """Reopen where playback was; when the ring evicted that, `_REWIND_MARGIN_S` past its
-        oldest point (the oldest segment itself may be evicted before VLC asks for it), with
-        "Rewound past the buffer" once until VLC plays again.
+        oldest point, or half way into a shorter ring (the next eviction would soon beat a
+        nearer start), with "Rewound past the buffer" once until VLC plays again.
         """
         assert self._sid is not None
         position = self._advance()
-        start = self._buffer_start()
+        snapshot = self._snapshot()
+        start = self._buffer_start(snapshot)
         expired = position < start - _EXPIRED_S
-        at = start + _REWIND_MARGIN_S if expired else max(position, start)
+        margin = min(_REWIND_MARGIN_S, max(0.0, self._live_edge(snapshot) - start) / 2)
+        at = start + margin if expired else max(position, start)
         # Where playback starts cleanly, as a seek there; past the ring, never before the
         # segment the margin reaches (an earlier keyframe would give the margin back).
         holding = _locate(self._engine.spans(self._sid), at) if expired else None
