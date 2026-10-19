@@ -815,55 +815,52 @@ class TVController(QObject):
             back = action is Action.SEEK_BACK
             if not self._live_controls.seek_live(back):
                 self._seek(-SEEK_STEP_MS if back else SEEK_STEP_MS)
-        elif action is Action.PLAY_PAUSE:
-            self._tuner.toggle_pause()
-            self._show_transport()
-        elif action is Action.INFO:
-            self._info()
-        elif action is Action.GO_LIVE:
-            self._live_controls.go_live()
-        elif action is Action.GUIDE:
-            self._open_guide()
-        elif action is Action.FAVORITE:
-            self._favorite()
-        elif action is Action.FULLSCREEN:
-            self.window_actions.toggle_fullscreen()
-        elif action is Action.MINI_PLAYER:
-            self.window_actions.toggle_mini_player()
-        elif action in (Action.PIP, Action.SWAP) and self.multiview_shown():
-            self._toast(LEAVE_FIRST)  # the grid's tiles are the pictures meanwhile
-        elif action is Action.PIP:
-            if self._pip is not None:
-                self._pip.pip_key()
-        elif action is Action.SWAP:
-            if self._pip is not None:
-                self._pip.swap_key()
-        elif action is Action.MULTIVIEW:
-            self.toggle_multiview()
-        elif action is Action.MUTE:
-            self._mixer.mute()
-        elif action in (Action.SOUND_EARLIER, Action.SOUND_LATER):
-            self._tracks.nudge_sound(-1 if action is Action.SOUND_EARLIER else 1)
-        elif action in (Action.SUBTITLES_EARLIER, Action.SUBTITLES_LATER):
-            self._tracks.nudge_subtitles(-1 if action is Action.SUBTITLES_EARLIER else 1)
-        elif action in (Action.VOL_UP, Action.VOL_DOWN):
-            self._change_volume(VOLUME_STEP if action is Action.VOL_UP else -VOLUME_STEP)
-        elif action is Action.ESCAPE:
-            self._escape()
-        elif action in (Action.NAV_UP, Action.NAV_DOWN):
-            drawer.move_by(-1 if action is Action.NAV_UP else 1)
-        elif action in (Action.NAV_PAGE_UP, Action.NAV_PAGE_DOWN):
-            drawer.page(-1 if action is Action.NAV_PAGE_UP else 1)
-        elif action is Action.NAV_LEFT:
-            drawer.left()
-        elif action is Action.NAV_RIGHT:
-            drawer.right()
-        elif action is Action.NAV_ACTIVATE:
-            drawer.activate()
-        elif action is Action.NAV_TEXT:
-            drawer.type_text(payload)
-        elif action is Action.NAV_BACKSPACE:
-            drawer.backspace()
+        elif action in (Action.PIP, Action.SWAP):
+            if self.multiview_shown():
+                self._toast(LEAVE_FIRST)  # the grid's tiles are the pictures meanwhile
+            elif self._pip is not None:
+                self._pip.pip_key() if action is Action.PIP else self._pip.swap_key()
+        else:
+            call = self._plain_call(action, payload)
+            if call is not None:
+                call()
+
+    def _plain_call(self, action: Action, payload: str) -> Optional[Callable[[], None]]:
+        """What an action without a guard of its own does: one call each, the pairs a step
+        each way. Looked up at the key press: the large picture's tuner changes with a swap."""
+        drawer, tracks = self.overlays.drawer, self._tracks
+        calls: dict[Action, Callable[[], None]] = {
+            Action.PLAY_PAUSE: self._play_pause,
+            Action.INFO: self._info,
+            Action.GO_LIVE: lambda: self._live_controls.go_live(),
+            Action.GUIDE: self._open_guide,
+            Action.FAVORITE: self._favorite,
+            Action.FULLSCREEN: lambda: self.window_actions.toggle_fullscreen(),
+            Action.MINI_PLAYER: lambda: self.window_actions.toggle_mini_player(),
+            Action.MULTIVIEW: self.toggle_multiview,
+            Action.MUTE: lambda: self._mixer.mute(),
+            Action.SOUND_EARLIER: lambda: tracks.nudge_sound(-1),
+            Action.SOUND_LATER: lambda: tracks.nudge_sound(1),
+            Action.SUBTITLES_EARLIER: lambda: tracks.nudge_subtitles(-1),
+            Action.SUBTITLES_LATER: lambda: tracks.nudge_subtitles(1),
+            Action.VOL_UP: lambda: self._change_volume(VOLUME_STEP),
+            Action.VOL_DOWN: lambda: self._change_volume(-VOLUME_STEP),
+            Action.ESCAPE: self._escape,
+            Action.NAV_UP: lambda: drawer.move_by(-1),
+            Action.NAV_DOWN: lambda: drawer.move_by(1),
+            Action.NAV_PAGE_UP: lambda: drawer.page(-1),
+            Action.NAV_PAGE_DOWN: lambda: drawer.page(1),
+            Action.NAV_LEFT: lambda: drawer.left(),
+            Action.NAV_RIGHT: lambda: drawer.right(),
+            Action.NAV_ACTIVATE: lambda: drawer.activate(),
+            Action.NAV_TEXT: lambda: drawer.type_text(payload),
+            Action.NAV_BACKSPACE: lambda: drawer.backspace(),
+        }
+        return calls.get(action)
+
+    def _play_pause(self) -> None:
+        self._tuner.toggle_pause()
+        self._show_transport()
 
     def video_clicked(self) -> None:
         if self.overlays.drawer.isVisible():
