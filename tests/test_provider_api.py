@@ -1,8 +1,6 @@
 import unittest
 from urllib.parse import quote
 
-from urlobject import URLObject
-
 from services.provider_api import (
     https_fallback_candidates,
     stb_create_link_url,
@@ -11,34 +9,37 @@ from services.provider_api import (
     xtream_signed_in,
 )
 
-PORTAL_URLS = [
-    "http://portal.example:8080/c/",
-    "https://portal.example/stalker_portal/c/",
-    "HTTP://Portal.Example:80/c/index.html?x=1#frag",
-    "http://user:pass@portal.example:8000",
-    " http://portal.example/c/\r\n",
-    "portal.example:8080/c/",
-    "",
+# A portal URL, its base, and its base when HTTPS is preferred: as the URLObject parsing these
+# helpers replaced in the workers and mixins gave them.
+PORTAL_BASES = [
+    ("http://portal.example:8080/c/", "http://portal.example:8080", "https://portal.example:8080"),
+    (
+        "https://portal.example/stalker_portal/c/",
+        "https://portal.example",
+        "https://portal.example",
+    ),
+    (
+        "HTTP://Portal.Example:80/c/index.html?x=1#frag",
+        "http://Portal.Example:80",
+        "https://Portal.Example:80",
+    ),
+    (
+        "http://user:pass@portal.example:8000",
+        "http://user:pass@portal.example:8000",
+        "https://user:pass@portal.example:8000",
+    ),
+    (" http://portal.example/c/\r\n", "http://portal.example", "https://portal.example"),
+    ("portal.example:8080/c/", "portal.example://", "portal.example://"),
+    ("", "://", "://"),
 ]
-
-
-def legacy_portal_base(url, prefer_https):
-    # The URLObject-based expression these helpers replaced in the workers and mixins.
-    url = URLObject(url)
-    scheme = url.scheme
-    if prefer_https and scheme == "http":
-        scheme = "https"
-    return f"{scheme}://{url.netloc}"
 
 
 class StbUrlTests(unittest.TestCase):
     def test_portal_base_matches_previous_urlobject_parsing(self):
-        for url in PORTAL_URLS:
-            for prefer_https in (False, True):
+        for url, plain, https in PORTAL_BASES:
+            for prefer_https, expected in ((False, plain), (True, https)):
                 with self.subTest(url=url, prefer_https=prefer_https):
-                    self.assertEqual(
-                        stb_portal_base(url, prefer_https), legacy_portal_base(url, prefer_https)
-                    )
+                    self.assertEqual(stb_portal_base(url, prefer_https), expected)
 
     def test_create_link_url_keeps_wire_format(self):
         base = "https://portal.example:8080"

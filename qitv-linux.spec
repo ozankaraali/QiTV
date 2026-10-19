@@ -61,7 +61,6 @@ a = Analysis(
         'aiohttp',
         'asyncio',
         'requests',
-        'urlobject',
     ],
     hookspath=[],
     hooksconfig={},

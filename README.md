@@ -359,6 +359,5 @@ QiTV is licensed under [MIT](LICENSE). The release downloads also contain other 
 | requests | Apache-2.0 |
 | tzlocal | MIT |
 | urllib3 | MIT |
-| URLObject | Public Domain |
 
 QiTV 1.14.x bundled MPV (GPLv3); 2.0 does not.

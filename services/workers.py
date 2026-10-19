@@ -3,6 +3,7 @@
 import logging
 import re
 from typing import Dict, List, Optional
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, Qt, Signal
 
@@ -23,7 +24,6 @@ from services.redact import safe_exc, safe_traceback
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
-urlobject = lazy_module("urlobject")
 
 NO_PORTAL_DATA_MESSAGE = "The portal returned no data"
 STB_DEVICE_REJECTED_MESSAGE = (
@@ -36,8 +36,8 @@ def _resolve_xtream_base(server_info: dict, base_url: str, prefer_https: bool) -
     resolved_base = xtream_choose_resolved_base(server_info, base_url, prefer_https=prefer_https)
     if resolved_base:
         return resolved_base
-    url_obj = urlobject.URLObject(base_url)
-    return f"{url_obj.scheme or 'http'}://{url_obj.netloc or url_obj}".rstrip("/")
+    parts = urlsplit(base_url)
+    return f"{parts.scheme or 'http'}://{parts.netloc or base_url}".rstrip("/")
 
 
 # --- Roman numeral helpers (conservative matching) ---

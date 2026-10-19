@@ -8,7 +8,7 @@ import tempfile
 import threading
 import time
 from typing import Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from PySide6.QtCore import QObject, Signal
 import orjson as json
@@ -21,7 +21,6 @@ from services.redact import safe_exc
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
-urlobject = lazy_module("urlobject")
 
 # Why an STB handshake failed (StbHandshake.failure); the setup worker words it for the user.
 HANDSHAKE_UNREACHABLE = "unreachable"  # DNS, connection, timeout or a server error
@@ -509,7 +508,7 @@ class StbHandshake:
 
     @staticmethod
     def create_headers(url, mac, token, serial_number="", device_id=""):
-        url = urlobject.URLObject(url)
+        parts = urlsplit(url)
         # Use a robust string representation of local timezone
         try:
             timezone = str(tzlocal.get_localzone())
@@ -532,10 +531,10 @@ class StbHandshake:
             "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
             "Accept-Charset": "UTF-8,*;q=0.8",
             "X-User-Agent": "Model: MAG200; Link: Ethernet",
-            "Host": f"{url.netloc}",
+            "Host": parts.netloc,
             "Range": "bytes=0-",
             "Accept": "*/*",
-            "Referer": f"{url}/c/" if not url.path else f"{url}/",
+            "Referer": f"{url}/c/" if not parts.path else f"{url}/",  # the URL as given
             "Cookie": "; ".join(cookie_parts) + ";",
             "Authorization": f"Bearer {token}",
         }

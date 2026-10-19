@@ -57,6 +57,25 @@ class StbHandshakeTests(unittest.TestCase):
         profile = next(url for url in calls if "action=get_profile" in url)
         self.assertEqual(parse_qs(urlsplit(profile).query)["prehash"], [PREHASH])
 
+    def test_headers_name_the_portals_host_and_refer_to_the_url_as_given(self):
+        for url, host, referer in (
+            ("http://portal.example:8080", "portal.example:8080", "http://portal.example:8080/c/"),
+            (
+                "http://portal.example:8080/stalker_portal/c",
+                "portal.example:8080",
+                "http://portal.example:8080/stalker_portal/c/",
+            ),
+            (
+                "https://user@portal.example/c/",
+                "user@portal.example",
+                "https://user@portal.example/c//",
+            ),
+            ("portal.example:8080", "", "portal.example:8080/"),
+        ):
+            with self.subTest(url=url):
+                headers = StbHandshake.create_headers(url, "00:1A:79:00:00:01", "TOKEN")
+                self.assertEqual((headers["Host"], headers["Referer"]), (host, referer))
+
 
 class ProviderSetupWorkerTests(unittest.TestCase):
     """Finding I7: a rejected STB handshake is a setup failure, not a ready provider."""

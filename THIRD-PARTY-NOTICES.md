@@ -76,7 +76,6 @@ QiTV's own dependencies:
 | requests | Apache-2.0 |
 | tzlocal | MIT |
 | urllib3 | MIT |
-| URLObject | Public Domain |
 
 The libraries they need (as `uv.lock` resolves them):
 

@@ -4,7 +4,20 @@ import threading
 import unittest
 from urllib.parse import parse_qs, urlsplit
 
-from services.workers import XtreamLoaderWorker
+from services.workers import XtreamLoaderWorker, _resolve_xtream_base
+
+
+class ResolvedBaseTests(unittest.TestCase):
+    def test_without_an_advertised_base_the_users_url_gives_scheme_and_host(self):
+        for url, base in (
+            ("http://panel.example:8080/", "http://panel.example:8080"),
+            ("https://panel.example/player_api.php", "https://panel.example"),
+            ("panel.example", "http://panel.example"),
+            ("panel.example:8080", "panel.example://panel.example:8080"),  # as ever
+            ("", "http:"),
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(_resolve_xtream_base({}, url, prefer_https=False), base)
 
 
 class XtreamRequestTests(unittest.TestCase):
