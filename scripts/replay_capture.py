@@ -165,20 +165,22 @@ def load_capture(path: str | Path) -> Capture:
 
 def _load_woven(path: str) -> Capture:
     """An HLS capture with its separate audio's pair: each video segment woven with its audio
-    again (`hls_audio.weave_capture`), read whole once its audio had come, as the helper read
-    it then."""
+    again (`hls_audio.weave_capture`), read whole once the audio fetched for it had come (the
+    audio segments read after it and before the next video segment), as the helper read it
+    then."""
     video = captured_segments(path)
-    audio = {segment.sequence: segment for segment in captured_segments(path + AUDIO_PAIR)}
+    audio = captured_segments(path + AUDIO_PAIR)
     woven = weave_capture(
         [(segment.sequence, segment.data) for segment in video],
-        {sequence: segment.data for sequence, segment in audio.items()},
+        {segment.sequence: segment.data for segment in audio},
     )
     reads: list[tuple[int, float]] = []
     end = 0
-    for segment, data in zip(video, woven):
+    for k, (segment, data) in enumerate(zip(video, woven)):
         end += len(data)
-        heard = audio.get(segment.sequence)
-        reads.append((end, max(segment.at, heard.at) if heard is not None else segment.at))
+        until = video[k + 1].at if k + 1 < len(video) else float("inf")
+        heard = [part.at for part in audio if segment.at <= part.at < until]
+        reads.append((end, max([segment.at, *heard])))
     return Capture(Path(path).name, b"".join(woven), reads or [(0, 0.0)])
 
 

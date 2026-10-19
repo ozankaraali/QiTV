@@ -578,13 +578,14 @@ video.m3u8
             return 200, {}, leaf("a0.ts", *(["a1.ts"] if count > 1 else []), ended=False)
 
         video = ts_fixtures.make_stream(4, audio=False)
+        later = ts_fixtures.make_stream(4, audio=False, pts_start=900000 + 4 * 90000)
         server = self.server(
             {
                 "/master.m3u8": (200, {}, master),
                 "/video.m3u8": (200, {}, leaf("v0.ts", "v1.ts")),
                 "/audio.m3u8": audio_playlist,
                 "/v0.ts": (200, {}, video),
-                "/v1.ts": (200, {}, video),
+                "/v1.ts": (200, {}, later),
                 "/a0.ts": (200, {}, ts_fixtures.audio_only(4)),
                 "/a1.ts": (200, {}, ts_fixtures.audio_only(4, pts_start=900000 + 4 * 90000)),
             }
@@ -2167,6 +2168,21 @@ class FragmentedMp4Tests(SourceTestCase):
         self.assertEqual(server.counts["/init.mp4"], 1)  # read once for all its segments
         self.assertEqual(len(frames(out)[0x100]), 150)
 
+    def woven_audio(self, out, count):
+        """The audio PTS woven into `out`, and those of the split fixture's audio rendition
+        (its `count` segments remuxed) that its video's time span takes: from a second before
+        its first picture (VLC still plays those) to a frame before its last picture's end (a
+        frame across a segment's end goes with the next one)."""
+        found = frames(out)
+        video = sorted(f.pts for f in found[0x100])
+        start, end = video[0] - 90000, video[-1] + 3600 - 3840  # a frame: 2048 at 48 kHz
+        rendition = [
+            f.pts
+            for ts in self.remuxed("split/1", "init_1.mp4", count, pcr=False)
+            for f in frames(ts)[0x101]
+        ]
+        return [f.pts for f in found[0x101]], [pts for pts in rendition if start <= pts < end]
+
     def test_a_separate_fmp4_audio_rendition_is_remuxed_and_woven_in(self):
         server = self.server(self.routes("split"))
         (out,) = media(server.url + "/master.m3u8")
@@ -2175,16 +2191,26 @@ class FragmentedMp4Tests(SourceTestCase):
         video = [
             f.payload for ts in self.remuxed("split/0", "init_0.mp4", 3) for f in frames(ts)[0x100]
         ]
-        audio = [
-            f.payload
-            for ts in self.remuxed("split/1", "init_1.mp4", 3, pcr=False)
-            for f in frames(ts)[0x101]
-        ]
         self.assertEqual([f.payload for f in found[0x100]], video)
-        self.assertEqual([f.payload for f in found[0x101]], audio)
+        woven, rendition = self.woven_audio(out, 4)
+        self.assertEqual(woven, rendition)
         self.assertTrue(all(f.pcr is None for f in found[0x101]))  # the video's PCR alone
         self.assertEqual((server.counts["/0/init_0.mp4"], server.counts["/1/init_1.mp4"]), (1, 1))
-        self.assertEqual(server.counts["/1/seg3.m4s"], 0)  # no video segment of its sequence
+        self.assertEqual([server.counts[f"/1/seg{k}.m4s"] for k in range(3)], [1, 1, 1])
+
+    def test_an_audio_rendition_numbered_unlike_its_video_is_matched_by_time(self):
+        # One packager numbers its audio segments its own way (and cuts them at other
+        # durations): matched by media sequence number, its channels played silent.
+        routes = self.routes("split")
+        playlist = routes["/1/index.m3u8"][2].replace(
+            b"#EXT-X-MEDIA-SEQUENCE:0", b"#EXT-X-MEDIA-SEQUENCE:500"
+        )
+        routes["/1/index.m3u8"] = (200, {}, playlist)
+        server = self.server(routes)
+        (out,) = media(server.url + "/master.m3u8")
+        woven, rendition = self.woven_audio(out, 4)
+        self.assertEqual(woven, rendition)
+        self.assertGreater(len(woven), 100)
 
     def test_an_init_that_cannot_be_remuxed_leaves_the_channel_unsupported(self):
         encrypted = movie(trak(1, b"vide", 90000, visual(b"encv")))

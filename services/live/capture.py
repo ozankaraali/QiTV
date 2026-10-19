@@ -57,9 +57,10 @@ class _Capture:
     An HLS channel whose separate audio rendition is woven in (`services.live.hls_audio`)
     saves the audio's segments in a second pair, ``<name>.audio.ts`` and ``.audio.times``
     (`audio`), on the same clock and in the same form: each audio segment as it was read (TS,
-    or packed AAC with its ID3 tag), after ``# segment <seconds> <sequence>`` naming the video
-    segment it is woven into. `hls_audio.weave_capture` weaves the pairs again as the helper
-    did, so a capture replays with sound (``scripts/replay_capture.py`` does).
+    or packed AAC with its ID3 tag; fMP4 as the TS it is remuxed to), after ``# segment
+    <seconds> <sequence>`` naming its own media sequence number (the renditions are matched by
+    time). `hls_audio.weave_capture` weaves the pairs again as the helper did, so a capture
+    replays with sound (``scripts/replay_capture.py`` does).
 
     The files are made at the first bytes, readable by their owner only (and the directory,
     when it is made here), and written in the reading thread, buffered. Both are flushed by

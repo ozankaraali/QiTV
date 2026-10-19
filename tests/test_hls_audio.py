@@ -7,7 +7,7 @@ from __future__ import annotations
 import unittest
 
 from services.live import ts
-from services.live.hls_audio import _LEAD_TICKS, AudioWeaver
+from services.live.hls_audio import _LEAD_TICKS, AudioWeaver, video_start
 from services.live.ts import PACKET, program_has_audio, pts_delta
 from tests.ts_fixtures import CLOCK, PMT_PID, VIDEO_PID, crc32_mpeg, make_stream, pat, pes_packets
 
@@ -167,6 +167,70 @@ class AudioWeaverTests(unittest.TestCase):
         for audio in (b"", b"\x00" * 1000, packed(1, None), b"\x47" + b"\x00" * 1000):
             with self.subTest(audio=audio[:4]):
                 self.assertEqual(AudioWeaver().weave(self.video, audio), self.video)
+
+
+class QueuedAudioTests(unittest.TestCase):
+    """The audio queue `HlsSource` matches renditions by time with (2.3)."""
+
+    def setUp(self):
+        self.video = make_stream(4, audio=False)  # PTS from 900000
+        self.later = make_stream(4, audio=False, pts_start=900000 + 4 * CLOCK)
+
+    def test_each_video_segment_takes_the_audio_due_before_its_end(self):
+        weaver = AudioWeaver()
+        self.assertTrue(weaver.add(audio_ts(6, 0x102)))  # 6 s of audio for 4 s of video
+        start = video_start(self.video)
+        self.assertEqual(start, 900000)
+        first = weaver.weave_due(self.video, start + 4 * CLOCK)
+        due = int(4 * CLOCK) // AUDIO_TICKS + 1  # those that start before the end
+        self.assertEqual(
+            [pts for pts, _ in audio_starts(first, 0x102)],
+            [900000 + k * AUDIO_TICKS for k in range(due)],
+        )
+        self.assertTrue(weaver.reaches(start + 4 * CLOCK))
+        self.assertFalse(weaver.reaches(start + 8 * CLOCK))
+        second = weaver.weave_due(self.later, start + 8 * CLOCK)
+        rest = [pts for pts, _ in audio_starts(second, 0x102)]
+        self.assertEqual(rest[0], 900000 + due * AUDIO_TICKS)  # on from where the first ended
+        self.assertEqual(len(rest), int(6 * CLOCK) // AUDIO_TICKS - due)
+        self.assertEqual(weaver._queue, [])
+        empty = weaver.weave_due(self.later, start + 8 * CLOCK)
+        self.assertIn((0x0F, 0x102), pmt_streams(empty))  # still listed, none due
+
+    def test_overlapping_segments_queue_each_frame_once_and_a_new_timeline_restarts(self):
+        weaver = AudioWeaver()
+        base = 200 * CLOCK
+        weaver.add(audio_ts(4, 0x102, start=base))
+        weaver.add(audio_ts(4, 0x102, start=base + 2 * CLOCK))  # its last 2 s again
+        times = [pts for pts, _ in weaver._queue]
+        self.assertEqual(times, sorted(set(times)))
+        self.assertEqual(len(times), len({pts for pts in times}))
+        self.assertGreater(times[-1], base + 5 * CLOCK)
+        weaver.add(audio_ts(1, 0x102, start=100 * CLOCK))  # over a minute back: a new timeline
+        self.assertEqual(weaver._queue[-1][0] // CLOCK, 100)
+        weaver.add(audio_ts(4, 0x102, start=97 * CLOCK))  # 3 s back: an overlap, left out
+        self.assertEqual(weaver._queue[-1][0] // CLOCK, 100)
+
+    def test_audio_too_late_for_the_video_is_dropped(self):
+        weaver = AudioWeaver()
+        weaver.add(audio_ts(4, 0x102))
+        weaver.drop(900000 + 2 * CLOCK)
+        self.assertEqual(weaver._queue[0][0], 900000 + (2 * CLOCK // AUDIO_TICKS + 1) * AUDIO_TICKS)
+        weaver.reset()
+        self.assertEqual(weaver._queue, [])
+
+    def test_peek_leaves_packed_audio_where_it_was(self):
+        weaver = AudioWeaver()
+        weaver.add(packed(1, 900000))
+        self.assertEqual(
+            weaver.peek(packed(1, None)), (900000 + 46 * AUDIO_TICKS, 900000 + 91 * AUDIO_TICKS)
+        )
+        weaver.add(packed(1, None))  # still follows on from the first, not from what peek read
+        self.assertEqual(weaver._queue[46][0], 900000 + 46 * AUDIO_TICKS)
+
+    def test_video_start_is_the_earliest_picture(self):
+        self.assertEqual(video_start(self.later), 900000 + 4 * CLOCK)
+        self.assertIsNone(video_start(audio_ts(1, 0x102)))
 
 
 if __name__ == "__main__":

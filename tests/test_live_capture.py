@@ -429,14 +429,15 @@ class CapturedSourceTests(SourceTestCase):
 
     def test_a_separate_audio_rendition_gets_a_pair_of_its_own_and_weaves_back(self):
         # 2.2 weaves a video-only variant's separate audio in; the capture keeps the video's
-        # pair a playable TS and the audio's segments in `<name>.audio.ts`, each after the
-        # sequence of the video segment it goes into, so the capture replays with sound.
+        # pair a playable TS and the audio's segments in `<name>.audio.ts`, each after its own
+        # sequence number, so the capture replays with sound (matched by time again).
         master = (
             b'#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",DEFAULT=YES,'
             b'URI="audio.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=100000,AUDIO="a"\nvideo.m3u8\n'
         )
         video = ts_fixtures.make_stream(4, audio=False)
         later = 900000 + 4 * 90000
+        next_video = ts_fixtures.make_stream(4, audio=False, pts_start=later)
         kinds = {
             "TS audio": (ts_fixtures.audio_only(4), ts_fixtures.audio_only(4, pts_start=later)),
             "packed AAC": (packed(4, 900000), packed(4, later)),
@@ -449,7 +450,7 @@ class CapturedSourceTests(SourceTestCase):
                         "/video.m3u8": (200, {}, leaf("v0.ts", "v1.ts")),
                         "/audio.m3u8": (200, {}, leaf("a0.aac", "a1.aac")),
                         "/v0.ts": (200, {}, video),
-                        "/v1.ts": (200, {}, video),
+                        "/v1.ts": (200, {}, next_video),
                         "/a0.aac": (200, {}, first),
                         "/a1.aac": (200, {}, second),
                     }
@@ -459,7 +460,7 @@ class CapturedSourceTests(SourceTestCase):
                 name, audio_name = captures(root)
                 self.assertEqual(audio_name, name + capture_module.AUDIO_PAIR)
                 base = Path(root) / name
-                self.assertEqual(base.with_suffix(".ts").read_bytes(), video + video)  # no audio
+                self.assertEqual(base.with_suffix(".ts").read_bytes(), video + next_video)
                 audio_base = Path(root) / audio_name
                 self.assertEqual(Path(f"{audio_base}.ts").read_bytes(), first + second)
                 for path in (f"{base}.times", f"{audio_base}.times"):

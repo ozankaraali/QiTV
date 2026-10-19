@@ -2,11 +2,14 @@
 
 About one public HLS channel in eight names its audio in a playlist of its own, its video
 variant's TS carrying none. The time-shift helper used to fetch only the variant and leave such
-a channel to direct play (no rewind). `HlsSource` now fetches both and hands each video segment
-with the audio segment of the same media sequence number to `AudioWeaver.weave`, which returns
-one TS: the video's packets as they came, the audio's PES on a PID of their own listed in the
-video's PMT, each woven in once the video's clock (its PCR) is within `_LEAD_TICKS` of the
-audio's PTS, so VLC always holds the sound before it is due. Both kinds of audio segment the
+a channel to direct play (no rewind). `HlsSource` now fetches both: it queues the audio
+segments (`AudioWeaver.add`) and has each video segment take the audio due before its end
+(`AudioWeaver.weave_due`), so the renditions are matched by time, not by media sequence number
+(one packager numbers and cuts its audio segments unlike its video's). Each video segment comes
+out as one TS: the video's packets as they came, the audio's PES on a PID of their own listed
+in the video's PMT, each woven in once the video's clock (its PCR) is within `_LEAD_TICKS` of
+the audio's PTS, so VLC always holds the sound before it is due. (`AudioWeaver.weave` weaves
+one audio segment whole.) Both kinds of audio segment the
 public channels use are read: MPEG-TS (its audio stream's packets, under its own stream type
 and descriptors) and packed ADTS AAC (raw frames after an ID3 tag whose PRIV
 com.apple.streaming.transportStreamTimestamp dates the first one; each frame becomes a PES).
@@ -40,34 +43,109 @@ _DVB_AUDIO = (0x6A, 0x7A, 0x7C)  # private PES (0x06) with an AC-3, E-AC-3 or AA
 _ADTS_RATES = (96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000)
 _TIMESTAMP_OWNER = b"com.apple.streaming.transportStreamTimestamp\x00"
 _PTS_MODULO = 1 << 33
+_TIMELINE_TICKS = 60 * 90000  # audio this far back from the queue's is a new timeline
 
 Unit = tuple[int, list[bytes]]  # (PTS, the TS packets of one audio PES, on the audio's own PID)
 
 
 class AudioWeaver:
-    """Weaves audio segments into video segments, one pair at a time (see the module)."""
+    """Weaves an audio rendition into video segments (see the module)."""
 
     def __init__(self) -> None:
         self._pid: int | None = None  # the audio's PID in the woven TS, kept once chosen
         self._type = 0  # its stream type ...
         self._info = b""  # ... and ES descriptors in the PMT
+        self._stream: tuple[int, bytes, int] | None = None  # (type, descriptors, PID) as read
         self._cc = 0  # the counter of the packets built from packed audio
         self._next_pts: int | None = None  # packed audio: where its last segment ended
+        self._queue: list[Unit] = []  # audio added and not woven yet, in PTS order
+        self._last: int | None = None  # the PTS of the last unit queued
         self.woven = 0  # segments woven so far
 
     def weave(self, video: bytes, audio: bytes) -> bytes:
-        """`video` with `audio`'s sound in it; `video` as it came when either is unreadable."""
+        """`video` with all of `audio`'s sound in it; `video` as it came when either is
+        unreadable."""
         tables = _program(video)
         if tables is None:
             return video
-        pmt_pid, used = tables
-        read = _ts_audio(audio) if audio[:1] == bytes([SYNC]) else self._packed(audio)
-        if read is None:
+        read = self._read(audio)
+        if read is None or not read[0]:
             return video
         units, stream_type, info, own_pid = read
-        if not units:
+        return self._weave(video, tables, units, (stream_type, info, own_pid))
+
+    def add(self, audio: bytes) -> bool:
+        """Queue an audio segment's sound after what is queued; False when it is unreadable.
+        A unit at or before the last one queued (where segments overlap) is left out, unless it
+        is so far before it that it starts a new timeline."""
+        read = self._read(audio)
+        if read is None or not read[0]:
+            return False
+        units, stream_type, info, own_pid = read
+        self._stream = self._stream or (stream_type, info, own_pid)
+        for unit in units:
+            if self._last is not None and -_TIMELINE_TICKS < pts_delta(self._last, unit[0]) <= 0:
+                continue
+            self._queue.append(unit)
+            self._last = unit[0]
+        return True
+
+    def peek(self, audio: bytes) -> tuple[int, int] | None:
+        """(first PTS, last PTS) of an audio segment, without queueing it; None when it is
+        unreadable."""
+        kept = self._cc, self._next_pts
+        try:
+            read = self._read(audio)
+        finally:
+            self._cc, self._next_pts = kept
+        if read is None or not read[0]:
+            return None
+        return read[0][0][0], read[0][-1][0]
+
+    def reaches(self, end: int) -> bool:
+        """Whether the audio queued reaches `end` (a video segment's), give or take a frame:
+        its last frame ends no more than one frame before it (a frame across `end` is woven
+        with the next video segment, a frame late at most)."""
+        if not self._queue:
+            return False
+        last = self._queue[-1][0]
+        step = max(0, pts_delta(self._queue[-2][0], last)) if len(self._queue) > 1 else 0
+        return pts_delta(end, (last + 2 * step) % _PTS_MODULO) >= 0
+
+    def drop(self, before: int) -> None:
+        """Leave out the queued audio due before `before` (a video segment's start: VLC would
+        throw it away as late)."""
+        while self._queue and pts_delta(before, self._queue[0][0]) < 0:
+            self._queue.pop(0)
+
+    def reset(self) -> None:
+        """Forget the queued audio (a break: the audio is found again by time)."""
+        self._queue, self._last, self._next_pts = [], None, None
+
+    def weave_due(self, video: bytes, until: int) -> bytes:
+        """`video` with the queued audio due before `until` (its end) in it; the rest stays
+        queued. Its PMT lists the audio once there is any, even when none is due."""
+        tables = _program(video)
+        if tables is None or self._stream is None:
             return video
+        due: list[Unit] = []
+        while self._queue and pts_delta(self._queue[0][0], until) > 0:
+            due.append(self._queue.pop(0))
+        return self._weave(video, tables, due, self._stream)
+
+    def _read(self, audio: bytes) -> tuple[list[Unit], int, bytes, int] | None:
+        return _ts_audio(audio) if audio[:1] == bytes([SYNC]) else self._packed(audio)
+
+    def _weave(
+        self,
+        video: bytes,
+        tables: tuple[int, set[int]],
+        units: list[Unit],
+        stream: tuple[int, bytes, int],
+    ) -> bytes:
+        pmt_pid, used = tables
         if self._pid is None:
+            stream_type, info, own_pid = stream
             self._pid = own_pid if own_pid not in used else _free_pid(used)
             self._type, self._info = stream_type, info
         pid = self._pid
@@ -192,15 +270,66 @@ class AudioWeaver:
         return packets
 
 
+def video_start(data: bytes) -> int | None:
+    """The earliest PTS of a TS segment's video PES (its first picture's time); None without
+    one."""
+    times = _video_times(data)
+    if not times:
+        return None
+    first = times[0]
+    return (first + min(pts_delta(first, pts) for pts in times)) % _PTS_MODULO
+
+
+def _video_times(data: bytes) -> list[int]:
+    """The PTS of a TS segment's video PES, in order."""
+    times = []
+    for at in range(0, len(data) - PACKET + 1, PACKET):
+        if data[at] != SYNC or not data[at + 1] & 0x40:
+            continue
+        start = at + (5 + data[at + 4] if data[at + 3] & 0x20 else 4)
+        if start + 4 > at + PACKET or not 0xE0 <= data[start + 3] <= 0xEF:
+            continue
+        pts = _pes_times(data, at)[0]
+        if pts is not None:
+            times.append(pts)
+    return times
+
+
+def _video_end(data: bytes) -> int | None:
+    """Where a TS segment's pictures end: its latest PTS and one picture more (the shortest
+    step between them); None without pictures."""
+    times = _video_times(data)
+    if not times:
+        return None
+    first = times[0]
+    offsets = sorted({pts_delta(first, pts) for pts in times})
+    steps = [b - a for a, b in zip(offsets, offsets[1:])]
+    return (first + offsets[-1] + (min(steps) if steps else 0)) % _PTS_MODULO
+
+
 def weave_capture(video: Iterable[tuple[int, bytes]], audio: Mapping[int, bytes]) -> list[bytes]:
-    """A capture's video segments, (sequence, bytes), woven again as `HlsSource` wove them:
-    each with the captured audio segment of its sequence when there is one (else silent), by
-    one weaver for them all (`services.live.capture` saves the audio in a pair of its own)."""
+    """A capture's video segments, (sequence, bytes), woven again with its audio segments (by
+    their own sequence numbers) as `HlsSource` weaves them: matched by time, each video segment
+    taking the audio due before the next one's first picture (the last one, before its own
+    pictures' end) and none from over a second before its own first picture
+    (`services.live.capture` saves the audio in a pair of its own)."""
     weaver = AudioWeaver()
-    return [
-        weaver.weave(segment, audio[sequence]) if audio.get(sequence) else segment
-        for sequence, segment in video
-    ]
+    for sequence in sorted(audio):
+        if audio[sequence]:
+            weaver.add(audio[sequence])
+    segments = [data for _sequence, data in video]
+    starts = [video_start(data) for data in segments]
+    woven = []
+    for k, data in enumerate(segments):
+        start = starts[k]
+        until = next((later for later in starts[k + 1 :] if later is not None), None)
+        until = _video_end(data) if until is None else until
+        if start is None or until is None:
+            woven.append(data)
+            continue
+        weaver.drop((start - _LEAD_TICKS) % _PTS_MODULO)
+        woven.append(weaver.weave_due(data, until))
+    return woven
 
 
 def _program(data: bytes) -> tuple[int, set[int]] | None:
