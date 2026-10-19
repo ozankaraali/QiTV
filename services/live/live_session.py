@@ -580,6 +580,19 @@ class LiveSession(QObject):
     def is_pipeline(self) -> bool:
         return self._mode == "pipeline"
 
+    def source_kind(self) -> str:
+        """What the helper reads for the channel playing through it (2.3, the statistics):
+        "ts", "hls" or "fmp4" (HLS of fragmented MP4, remuxed to TS); "" while it plays
+        directly or has not answered."""
+        if self._mode != "pipeline":
+            return ""
+        snapshot = self._snapshot()
+        if snapshot.get("fmp4") is True:
+            return "fmp4"
+        if snapshot.get("hls") is True:
+            return "hls"
+        return "ts" if snapshot.get("answered") is True else ""
+
     @property
     def no_rewind_reason(self) -> str:
         """What a rewind says while the channel plays directly: `CRAWLING` when VLC crawled

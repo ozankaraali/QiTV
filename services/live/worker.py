@@ -989,6 +989,8 @@ class _Session:
             # An HLS source: the parent keeps its player at 1x (VLC crawls once its rate
             # was changed on such a stream; 2.0.2).
             "hls": bool(source is not None and source.hls),
+            # HLS of fragmented MP4 segments, remuxed to TS (2.3: the statistics say so).
+            "fmp4": bool(source is not None and getattr(source, "fmp4", False) is True),
             # PTS jumps the timeline left out: (timeline position, seconds), the latest last.
             "breaks": list(self._breaks),
             # HLS: every segment its playlist listed has arrived, once at least (the backlog

@@ -20,8 +20,9 @@ While the grid shows, a chip left of them names its layout ("2×2"): a click cha
 while the last grid's channels can come back, a "Last grid" chip brings them.
 Left of the sound (♫) a speaker opens the volume mixer on the large picture's row; it shows
 whether that picture is muted, and else its volume (a wave per third). ♫ opens the Sound panel
-above it and the subtitles button the Subtitles panel (ui/track_controls.py): the controls stay
-up while one shows (`hold`).
+above it and the subtitles button the Subtitles panel (ui/track_controls.py), and the Picture
+button beside them the Picture panel (ui/picture_controls.py): the controls stay up while one
+shows (`hold`).
 Without a keyboard every key of the player has a control here too (the owner's mouse-only
 rule): left of the speaker sit Search, and on live TV the guide and the previous channel; a
 time-shifted channel at its live edge has ◀10 beside play; on live TV the channel's name (and
@@ -30,7 +31,8 @@ names its key when hovered. A movie or an episode played from the Library has "�
 left of the right-hand buttons: back to where it came from, as Esc.
 At a small width (or in a longer language) the Stay live indicator first leaves out "adjusted",
 then its name (the LIVE badge beside it says live), then its text is cut short, or the
-indicator left out, so it never runs under the play button.
+indicator left out, so it never runs under the play button. A row whose LIVE, Go live or
+‹ Library chip would still run into the buttons at its left sets its icons closer together.
 Catch-up (2.2): on a channel whose provider keeps an archive the time-shift bar reaches
 further back than the buffer (`buffer_start` in the state: where the buffer starts); that
 part of the line is dashed. While the archive plays (`archive` in the state) the whole line
@@ -103,6 +105,8 @@ SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)  # − and + step through these
 TOP_FRACTION = 0.22
 BOTTOM_FRACTION = 0.42
 TICK_LABEL_MAX_U = 25.0
+_ICON_GAP_U = 1.8  # between the icon buttons
+_TIGHT_GAP_U = 1.0  # in a crowded row
 MINUS = "−"
 # The source stalled, its connection still open (the texts are shown with translate()).
 # i18n: the Stay live indicator on the player bar: the channel sends nothing for now
@@ -142,6 +146,9 @@ KEY_HINTS = {
     "audio": (N_("Sound: track and sync"), "J, K"),  # i18n: tooltip of the sound button
     # i18n: tooltip of the subtitles button
     "subtitles": (N_("Subtitles: track, file and sync"), "Shift+J, Shift+K"),
+    # i18n: tooltip of the Picture button (its panel: aspect ratio, deinterlacing, sleep timer
+    # and statistics)
+    "picture": (N_("Picture, sleep timer and statistics"), "A"),
 }
 FAVORITE_KEY = "Ctrl+D"
 GRID_KEY = "V"  # the multiview: its grid, or back to one picture
@@ -159,6 +166,7 @@ _ICON_BUTTONS = (  # painted as icons
     "guide",
     "search",
     "subtitles",
+    "picture",
     "audio",
     "volume",
     "external",
@@ -275,6 +283,7 @@ class Transport(Overlay):
     fullscreenRequested = Signal()
     audioRequested = Signal()
     subtitleRequested = Signal()
+    pictureRequested = Signal()  # the Picture panel: aspect, deinterlacing, sleep timer, stats
     nextRequested = Signal()
     goLiveRequested = Signal()
     programmeStartRequested = Signal()
@@ -943,6 +952,14 @@ class Transport(Overlay):
         return _TitleRow(name, name_rect, star, record, rec, subtitle_x, clock, clock_rect)
 
     def _layout(self) -> dict[str, QRectF]:
+        """The controls' rects; in a row too crowded for them (a small window, a longer
+        language, every button of the multiview and the second channel), the icons sit closer."""
+        rects, crowded = self._layout_at(_ICON_GAP_U)
+        return self._layout_at(_TIGHT_GAP_U)[0] if crowded else rects
+
+    def _layout_at(self, icon_gap: float) -> tuple[dict[str, QRectF], bool]:
+        """The rects with `icon_gap` (u) between the icons, and whether the chips at their left
+        (LIVE, Go live, ‹ Library) run into the buttons at the row's left."""
         un = Units(self.width())
         left, right = un.px(3), self.width() - un.px(3)
         bottom = self.height() - un.px(3)
@@ -976,15 +993,16 @@ class Transport(Overlay):
                 put("play", big, un.px(1.5))
             left_end = x  # the left buttons and their gap
             x = float(right)
-            for name in self._right_buttons("subtitles", "audio", "volume"):
+            for name in self._right_buttons("picture", "subtitles", "audio", "volume"):
                 x -= icon
                 rects[name] = QRectF(x, cy - icon / 2, icon, icon)
-                x -= un.px(1.8)
+                x -= un.px(icon_gap)
             x = self._put_layout_chip(rects, un, x, cy)
             # As wide as its word in a longer language ("EN VIVO"), never narrower than LIVE's.
             badge = QFontMetricsF(self._live_font(un)).horizontalAdvance(_live_label())
             pill_w = max(float(un.px(5.2)), badge + un.px(1.6))
             rects["live"] = QRectF(x - pill_w - un.px(0.4), cy - un.px(1.1), pill_w, un.px(2.2))
+            crowded = rects["live"].left() < left_end
             if self._timeshift and self._edge_lag is not None:
                 right_edge = rects["live"].x() - un.px(0.8)
                 # Less room drops "adjusted", then the name, then cuts the text (painted
@@ -1008,10 +1026,10 @@ class Transport(Overlay):
                     put("next", skip, un.px(1.0))
             speed_x = x  # the chip goes in once the right side has taken its room
             x = float(right)
-            for name in self._right_buttons("audio", "volume", "subtitles"):
+            for name in self._right_buttons("picture", "audio", "volume", "subtitles"):
                 x -= icon
                 rects[name] = QRectF(x, cy - icon / 2, icon, icon)
-                x -= un.px(1.8)
+                x -= un.px(icon_gap)
             x = self._put_layout_chip(rects, un, x, cy)
             if shifted and self._behind():
                 fm = QFontMetricsF(self._chip_font(un))
@@ -1025,8 +1043,9 @@ class Transport(Overlay):
                 h = self._chip_h(un)
                 rects["library"] = QRectF(x - width, cy - h / 2, width, h)
             chips = [rects[n].left() - un.px(0.8) for n in ("golive", "library") if n in rects]
+            crowded = min(chips, default=x) < speed_x
             rects.update(self._speed_rects(un, speed_x, cy, min(chips, default=x)))
-        return rects
+        return rects, crowded
 
     def _speed_rects(self, un: Units, x: float, cy: float, room: float) -> dict[str, QRectF]:
         """− 1.25x + from `x`: as wide and tall as their text, whose font stops at a floor
@@ -1589,6 +1608,8 @@ class Transport(Overlay):
                 self.volumeRequested.emit()
             elif name == "subtitles":
                 self.subtitleRequested.emit()
+            elif name == "picture":
+                self.pictureRequested.emit()
             elif name == "pip":
                 self.pipRequested.emit()
             elif name == "grid":

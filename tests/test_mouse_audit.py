@@ -16,6 +16,8 @@ Screens and their controls:
 - "sound": the Sound panel ♫ opens: its track "rows", its sync's "earlier" (−), "later" (+)
   and "reset";
 - "subtitles": the Subtitles panel its button opens, alike, and its "Load a file…";
+- "picture_panel": the Picture panel its button opens (2.3): its setting rows' ‹ and › by
+  their keys ("aspect", "deinterlace", "sleep") and its "stats" row;
 - "subtitle_search": the OpenSubtitles search its "Search OpenSubtitles…" opens: the key page's
   "field", "clear" (✕), "get_key", "paste" and "save", the search's "field", "clear", "paste" and
   "search", its "languages" and "files" rows, and "close" (×);
@@ -54,6 +56,7 @@ from ui.overlays.pip_label import PipLabel
 from ui.overlays.subtitle_search import LanguageRow, SubtitleSearchPage
 from ui.overlays.track_panel import PanelModel, PanelRow, PanelSync, TrackPanel
 from ui.overlays.transport import Transport
+from ui.picture_controls import ASPECT, DEINTERLACE, SLEEP, STATS
 from ui.pip import corner_rect
 from ui.video_surface import VideoSurface
 
@@ -88,6 +91,9 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
         ("subtitles", "earlier"),
         ("subtitles", "later"),
     ),
+    # The Picture button opens the Picture panel; its aspect row's ‹ and › step the ratio.
+    ("player", "A"): (("transport", "picture"), ("picture_panel", "aspect")),
+    ("player", "Shift+I"): (("picture_panel", "stats"),),  # its Statistics row
     ("player", "F, F11, Ctrl+Meta+F"): (("transport", "fullscreen"), ("picture", "double-click")),
     ("player", "Ctrl+F"): (("transport", "search"),),
     ("player", "Ctrl+D"): (("transport", "favorite"),),
@@ -265,6 +271,23 @@ def _subtitles(host: QWidget) -> set[str]:
     return found
 
 
+def _picture_panel(host: QWidget) -> set[str]:
+    panel = TrackPanel(host)
+    rows = (
+        PanelRow(ASPECT, "Aspect ratio", value="Auto", widest="Fill the window"),
+        PanelRow(DEINTERLACE, "Deinterlacing", value="Auto"),
+        PanelRow(SLEEP, "Sleep timer", value="Off", widest="1:30:00 left"),
+        PanelRow(STATS, "Statistics"),
+    )
+    panel.show_panel(PanelModel("Picture", rows))
+    found = set()
+    for index, row in enumerate(rows):
+        steps = not (panel.step_rect(index, -1).isEmpty() or panel.step_rect(index, 1).isEmpty())
+        if not panel.row_rect(index).isEmpty() and (steps or not row.value):
+            found.add(str(row.key))
+    return found
+
+
 def _subtitle_search(host: QWidget) -> set[str]:
     """The key page, a key typed into it, then the search with what it found."""
     page = SubtitleSearchPage(host)
@@ -387,6 +410,7 @@ class MouseOnlyAuditTests(unittest.TestCase):
             "mixer": _mixer(_child(host)),
             "sound": _sound(_child(host)),
             "subtitles": _subtitles(_child(host)),
+            "picture_panel": _picture_panel(_child(host)),
             "subtitle_search": _subtitle_search(_child(host)),
             "pip_label": _pip_label(_child(host)),
             "drawer": drawer,

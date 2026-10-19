@@ -1092,6 +1092,11 @@ class HlsSource:
         return self._serial
 
     @property
+    def fmp4(self) -> bool:
+        """Its segments are fragmented MP4 (CMAF), remuxed to TS: an init section was read."""
+        return self._init is not None
+
+    @property
     def segment_s(self) -> float:
         """The EXTINF seconds of the segment being fetched; 0.0 once every listed one came."""
         return self._fetching

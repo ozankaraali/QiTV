@@ -242,6 +242,10 @@ class FakeSession(QObject):
         self.files = []  # add_subtitle_file()
         self.clears = 0  # clear_subtitles()
         self.url, self.kind = None, None  # what plays, as PlaybackSession.url and .kind
+        self.shape = "auto"  # aspect(): the picture's shape (2.3)
+        self.shapes = []  # every set_aspect()
+        self.deinterlacing = "auto"
+        self.stats = {}  # what video_stats() reads
 
     def play(self, url, **kwargs):
         self.plays.append((url, kwargs))
@@ -333,6 +337,26 @@ class FakeSession(QObject):
     def clear_subtitles(self):
         self.clears += 1
         self.files, self.subtitle_ms = [], 0
+
+    def aspect(self):
+        return self.shape
+
+    def set_aspect(self, aspect):
+        self.shape = aspect
+        self.shapes.append(aspect)
+
+    def set_video_size(self, width, height):
+        pass
+
+    def deinterlace(self):
+        return self.deinterlacing
+
+    def set_deinterlace(self, choice):
+        self.deinterlacing = choice
+        return True
+
+    def video_stats(self):
+        return dict(self.stats)
 
 
 class FakeOverlay(QObject):
@@ -457,6 +481,7 @@ class FakeTransport(FakeOverlay):
     fullscreenRequested = Signal()
     audioRequested = Signal()
     subtitleRequested = Signal()
+    pictureRequested = Signal()
     goLiveRequested = Signal()
     programmeStartRequested = Signal()
     seekToRequested = Signal(float)

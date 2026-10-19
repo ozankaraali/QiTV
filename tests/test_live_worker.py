@@ -51,6 +51,7 @@ STATE_KEYS = {
     "burst_s",
     "received",
     "hls",
+    "fmp4",
     "breaks",
     "caught_up",
     "backlog_s",

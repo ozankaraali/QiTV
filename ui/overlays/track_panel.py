@@ -1,4 +1,5 @@
-"""A small panel above a player control's button: the Sound and Subtitles panels (2.2).
+"""A small panel above a player control's button: the Sound and Subtitles panels (2.2), and the
+Picture panel (2.3).
 
 The transport's ♫ (or its subtitles button) opens it just above the button and the player
 controls (which stay up while it shows). It lists what can be chosen, the one playing ticked
@@ -16,6 +17,11 @@ touch closes it too; `closed` says so.
 It never grows taller than the room above the player controls (a small window, the mini
 player): beyond what fits, its rows scroll (the wheel, ↑/↓, a small arrow at each end that
 has more), and the title and the Sync row always show.
+
+A setting's row (the Picture panel's "Aspect ratio  ‹ 16:9 ›", `PanelRow.value`) steps through
+its choices: a click on ‹ or › steps back or on, a click elsewhere on it, Enter or → on (← back);
+`rowStepped` says so. Its value is lit while it is not the default (`lit`), and it keeps its
+width while it steps (`widest`).
 
 It is painted as the mixer is (ui/overlays/mixer.py): the same panel, outline and radius, the
 same unit-based metrics and focus fill, and the speed chip's round − and + (transport).
@@ -76,6 +82,7 @@ _FLOOR_GAP_U = 1.0  # above the transport's controls
 _BOTTOM_U = 4.0  # from the bottom, without them
 _EDGE_U = 1.0  # from the host's sides, and its top
 _ARROW_U = 1.0  # the "more rows" arrows
+_STEP_U = 1.8  # a setting's ‹ and ›
 _WHEEL_STEP = 120  # one notch: one row
 _EVENTS_OUTSIDE = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 
@@ -87,6 +94,10 @@ class PanelRow:
     checked: bool = False
     action: bool = False  # it does something ("Load a file…"): never ticked, in the accent
     icon: str = ""  # an action's icon (painting.draw_icon's name; "": a plus)
+    value: str = ""  # a setting's choice ("16:9"): shown between ‹ and ›, which step it
+    widest: str = ""  # the setting's longest choice: its column keeps that width
+    lit: bool = False  # the setting is not at its default: its value shows lit
+    tip: str = ""  # the row's tooltip (it names its key)
 
 
 @dataclass(frozen=True)
@@ -115,6 +126,8 @@ class _Rects:
     label: QRectF = field(default_factory=QRectF)  # "Sync"
     reset: QRectF = field(default_factory=QRectF)  # empty: in sync
     sync_row: QRectF = field(default_factory=QRectF)  # the focus fill of the Sync row
+    # Each setting row's ‹, value and › (by row index), while it shows.
+    steps: dict[int, tuple[QRectF, QRectF, QRectF]] = field(default_factory=dict)
     earlier: QRectF = field(default_factory=QRectF)
     text: QRectF = field(default_factory=QRectF)
     later: QRectF = field(default_factory=QRectF)
@@ -124,6 +137,7 @@ class TrackPanel(Overlay):
     pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
 
     rowChosen = Signal(object)  # a row's key: a click, or Enter on it
+    rowStepped = Signal(object, int)  # a setting row's key, and -1 (‹, ←) or +1 (›, →, Enter)
     syncStepped = Signal(int)  # -1: earlier, +1: later
     syncReset = Signal()
     closed = Signal()  # it hid itself (a click elsewhere, Esc, the idle wait) or was dismissed
@@ -270,16 +284,34 @@ class TrackPanel(Overlay):
             self._scroll = index - shown + 1
         self._scroll = self._clamped(self._scroll)
 
+    def focus_row(self, index: int) -> None:
+        """Put the keys on row `index` (scrolled into sight)."""
+        if 0 <= index < len(self._model.rows):
+            self._focus = index
+            self._scroll_to(index)
+            self._touch()
+            self.update()
+
     def activate(self) -> None:
-        """Enter: choose the keys' row (the Sync row has nothing to choose)."""
+        """Enter: choose the keys' row, or step a setting's on (the Sync row has nothing to
+        choose)."""
         self._touch()
         focus = self._focus
         if focus is not None and focus < len(self._model.rows):
-            self.rowChosen.emit(self._model.rows[focus].key)
+            row = self._model.rows[focus]
+            if row.value:
+                self.rowStepped.emit(row.key, 1)
+            else:
+                self.rowChosen.emit(row.key)
 
     def step(self, delta: int) -> None:
-        """←/→: the Sync row's − or +, when it can step that way."""
+        """←/→: the keys' setting row back or on, else the Sync row's − or +, when it can step
+        that way."""
         self._touch()
+        focus = self._focus
+        if focus is not None and focus < len(self._model.rows) and self._model.rows[focus].value:
+            self.rowStepped.emit(self._model.rows[focus].key, -1 if delta < 0 else 1)
+            return
         sync = self._model.sync
         if sync is not None and (sync.earlier if delta < 0 else sync.later):
             self.syncStepped.emit(-1 if delta < 0 else 1)
@@ -292,6 +324,11 @@ class TrackPanel(Overlay):
         """ "earlier" (−), "later" (+), "reset" or "title"; empty when not shown."""
         rects = self._rects()
         return QRectF(getattr(rects, name))
+
+    def step_rect(self, index: int, delta: int) -> QRectF:
+        """Setting row `index`'s ‹ (`delta` -1) or › (+1); empty when not shown."""
+        steps = self._rects().steps.get(index)
+        return QRectF() if steps is None else QRectF(steps[0 if delta < 0 else 2])
 
     # ---- layout -------------------------------------------------------------------------
 
@@ -333,9 +370,17 @@ class TrackPanel(Overlay):
         model = self._model
         title = QFontMetricsF(fonts["title"]).horizontalAdvance(model.title)
         row_fm = QFontMetricsF(fonts["row"])
+        values = self._value_width(un)
+        setting = (2 * un.px(_GAP_U) + values) if values else 0.0  # beside a setting's name
         rows = max(
             (
-                un.px(_TICK_U) + min(row_fm.horizontalAdvance(r.text), float(un.px(_TEXT_MAX_U)))
+                un.px(_TICK_U)
+                # A track's long name is cut short, a setting's (QiTV's words) never.
+                + (
+                    row_fm.horizontalAdvance(r.text) + setting
+                    if r.value
+                    else min(row_fm.horizontalAdvance(r.text), float(un.px(_TEXT_MAX_U)))
+                )
                 for r in model.rows
             ),
             default=0.0,
@@ -356,6 +401,20 @@ class TrackPanel(Overlay):
             controls = 2 * un.px(_CHIP_U) + 4 * un.px(_GAP_U) + text
             content = max(content, label, controls)
         return math.ceil(content + 2 * un.px(_PAD_U)) + 2, math.ceil(height)
+
+    def _value_width(self, un: Units) -> float:
+        """The settings' ‹ value › column: as wide as their widest choice (0: no setting)."""
+        fm = QFontMetricsF(self._fonts(un)["row"])
+        texts = [t for r in self._model.rows if r.value for t in (r.value, r.widest)]
+        if not texts:
+            return 0.0
+        widest = max(fm.horizontalAdvance(t) for t in texts)
+        return 2 * self._step_width(un) + 2 * un.px(_GAP_U) + widest
+
+    def _step_width(self, un: Units) -> float:
+        """A setting's ‹ or ›: never narrower than its row's text is tall (a mini player's
+        font stops at a floor while u shrinks)."""
+        return max(float(un.px(_STEP_U)), QFontMetricsF(self._fonts(un)["row"]).height())
 
     def _layout(self) -> None:
         parent = self.parentWidget()
@@ -390,11 +449,22 @@ class TrackPanel(Overlay):
         rects = _Rects(QRectF(left, y, right - left, heights["title"]))
         y += heights["title"]
         shown = self.shown_rows()
-        for index in range(len(self._model.rows)):
+        values = self._value_width(un)
+        arrow = float(un.px(_ARROW_U)) + gap if len(shown) < len(self._model.rows) else 0.0
+        step = self._step_width(un)
+        for index, row in enumerate(self._model.rows):
             if index not in shown:
                 rects.rows.append(QRectF())  # scrolled out of sight
                 continue
-            rects.rows.append(QRectF(pad / 2, y, self.width() - pad, heights["row"]))
+            rect = QRectF(pad / 2, y, self.width() - pad, heights["row"])
+            rects.rows.append(rect)
+            if row.value:  # ‹ value ›, at the row's right (left of a "more rows" arrow)
+                end = rect.right() - pad / 2 - arrow
+                more = QRectF(end - step, rect.top(), step, rect.height())
+                less = QRectF(end - values, rect.top(), step, rect.height())
+                width = more.left() - gap - less.right() - gap
+                text = QRectF(less.right() + gap, rect.top(), width, rect.height())
+                rects.steps[index] = (less, text, more)
             y += heights["row"]
         sync = self._model.sync
         if sync is None:
@@ -461,9 +531,15 @@ class TrackPanel(Overlay):
                 draw_icon(p, glyph, box, qcolor(PALETTE.accent))
             p.setFont(fonts["row"])
             p.setPen(qcolor(PALETTE.accent) if row.action else text)
-            room = rect.right() - un.px(_PAD_U) / 2 - (x + tick_w) - arrow
+            steps = rects.steps.get(index)
+            if steps is not None:
+                room = steps[0].left() - 2 * un.px(_GAP_U) - (x + tick_w)
+            else:
+                room = rect.right() - un.px(_PAD_U) / 2 - (x + tick_w) - arrow
             label = row_fm.elidedText(row.text, Qt.TextElideMode.ElideRight, max(0.0, room))
             p.drawText(QRectF(x + tick_w, rect.top(), room, rect.height()), left, label)
+            if steps is not None:
+                self._paint_steps(p, un, row, steps, text, muted)
         if scrolls:
             self._paint_arrows(p, un, rects, shown, muted)
         sync = model.sync
@@ -492,6 +568,21 @@ class TrackPanel(Overlay):
             p.setBrush(color)
             p.drawPath(path)
             p.restore()
+
+    @staticmethod
+    def _paint_steps(p: QPainter, un: Units, row: PanelRow, steps, text, muted) -> None:
+        """A setting's ‹ value ›: the value lit while it is not the default."""
+        less, value, more = steps
+        icon = min(less.width(), max(float(un.px(_ICON_U)), less.width() * 0.6))
+        for rect, glyph in ((less, "chevron_left"), (more, "chevron_right")):
+            box = QRectF(0, 0, icon, icon)
+            box.moveCenter(rect.center())
+            draw_icon(p, glyph, box, muted)
+        p.setPen(text if row.lit else muted)
+        shown = QFontMetricsF(p.font()).elidedText(
+            row.value, Qt.TextElideMode.ElideRight, value.width()
+        )
+        p.drawText(value, Qt.AlignmentFlag.AlignCenter, shown)
 
     @staticmethod
     def _paint_focus(p: QPainter, un: Units, rect: QRectF, *, outline: bool) -> None:
@@ -539,8 +630,13 @@ class TrackPanel(Overlay):
     # ---- input --------------------------------------------------------------------------
 
     def _control_at(self, pos: QPointF) -> Optional[tuple[str, int]]:
-        """("row", index), ("earlier"|"later"|"reset", 0), or None."""
+        """("less"|"more", index) on a setting's ‹ or ›, ("row", index),
+        ("earlier"|"later"|"reset", 0), or None."""
         rects = self._rects()
+        for index, (less, _value, more) in rects.steps.items():
+            for name, rect in (("less", less), ("more", more)):
+                if rect.contains(pos):
+                    return (name, index)
         for index, rect in enumerate(rects.rows):
             if rect.contains(pos):
                 return ("row", index)
@@ -562,8 +658,11 @@ class TrackPanel(Overlay):
         if hit is None:
             return
         name, index = hit
-        if name == "row":
-            self.rowChosen.emit(self._model.rows[index].key)
+        row = self._model.rows[index] if name in ("row", "less", "more") else None
+        if row is not None and (row.value or name != "row"):
+            self.rowStepped.emit(row.key, -1 if name == "less" else 1)
+        elif row is not None:
+            self.rowChosen.emit(row.key)
         elif name == "reset":
             self.syncReset.emit()
         else:
@@ -580,7 +679,7 @@ class TrackPanel(Overlay):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         hit = self._control_at(event.position())
-        hover = hit[1] if hit is not None and hit[0] == "row" else None
+        hover = hit[1] if hit is not None and hit[0] in ("row", "less", "more") else None
         if hover != self._hover:
             self._hover = hover
             self.update()
@@ -605,6 +704,8 @@ class TrackPanel(Overlay):
 
     def tooltip_at(self, pos: QPointF) -> str:
         hit, sync = self._control_at(pos), self._model.sync
+        if hit is not None and hit[0] in ("row", "less", "more"):
+            return self._model.rows[hit[1]].tip
         if hit is None or sync is None:
             return ""
         return {"earlier": sync.earlier_tip, "later": sync.later_tip}.get(hit[0], "")
