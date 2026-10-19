@@ -163,6 +163,10 @@ class MixerControls(QObject):
         """Whether the large picture is muted."""
         return self._muted(MAIN_ROW)
 
+    def main_level(self) -> int:
+        """The large picture's volume (0-100)."""
+        return self._level(MAIN_ROW)
+
     def toggle_small_mute(self) -> None:
         """The PiP label's speaker: mute or unmute the small picture (its label follows, and
         the mixer while it shows)."""

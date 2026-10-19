@@ -161,7 +161,29 @@ def _rrect(x: float, y: float, w: float, h: float, r: float) -> QPainterPath:
 
 
 def _speaker() -> QPainterPath:
-    return _poly([(0.12, 0.38), (0.30, 0.38), (0.50, 0.2), (0.50, 0.8), (0.30, 0.62), (0.12, 0.62)])
+    return _poly([(0.06, 0.38), (0.24, 0.38), (0.44, 0.2), (0.44, 0.8), (0.24, 0.62), (0.06, 0.62)])
+
+
+# The speaker's sound waves, inner first, around the middle of its cone's mouth: one per third
+# of the volume (volume_icon), each a quarter circle.
+_WAVE_CX = 0.44
+_WAVE_RADII = (0.17, 0.31, 0.45)
+# Each speaker icon and its waves; "volume" is the two-wave one (a level not known).
+_SPEAKER_WAVES = {"volume_0": 0, "volume_1": 1, "volume_2": 2, "volume_3": 3, "volume": 2}
+VOLUME_LOW = 33  # up to this level the speaker shows one wave
+VOLUME_MID = 66  # up to this two, above it three
+
+
+def volume_icon(level: int, muted: bool = False) -> str:
+    """The speaker that shows a sound at `level` (0-100), as common players do: crossed out
+    when muted, else a wave per third of the way up (none at 0: silent, yet not muted)."""
+    if muted:
+        return "mute"
+    if level <= 0:
+        return "volume_0"
+    if level <= VOLUME_LOW:
+        return "volume_1"
+    return "volume_2" if level <= VOLUME_MID else "volume_3"
 
 
 def _arc(cx: float, cy: float, r: float, start: float, span: float) -> QPainterPath:
@@ -250,16 +272,16 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
                 Qt.AlignCenter,
                 "10",
             )
-        elif name == "volume":
+        elif name in _SPEAKER_WAVES:
             fill(_speaker())
-            line(_arc(0.5, 0.5, 0.2, -45, 90))
-            line(_arc(0.5, 0.5, 0.36, -45, 90))
+            for radius in _WAVE_RADII[: _SPEAKER_WAVES[name]]:
+                line(_arc(_WAVE_CX, 0.5, radius, -45, 90))
         elif name == "mute":
             fill(_speaker())
-            cross = QPainterPath(QPointF(0.64, 0.38))
-            cross.lineTo(0.88, 0.62)
-            cross.moveTo(0.88, 0.38)
-            cross.lineTo(0.64, 0.62)
+            cross = QPainterPath(QPointF(0.58, 0.38))
+            cross.lineTo(0.82, 0.62)
+            cross.moveTo(0.82, 0.38)
+            cross.lineTo(0.58, 0.62)
             line(cross)
         elif name == "fullscreen":
             brackets = QPainterPath()

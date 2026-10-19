@@ -47,6 +47,19 @@ class MixerTests(MixerCase):
         mixer.show_rows([MAIN], 1)  # PiP closed: the selection stays on a row there is
         self.assertEqual(mixer.selected(), 0)
 
+    def test_each_row_s_speaker_shows_its_level_or_its_mute(self):
+        host, mixer = self.make()
+
+        def speaker(level, muted=False):
+            mixer.show_rows([MixerRow("Main", "One", level, muted)], 0)
+            return mixer.grab().toImage().copy(mixer.speaker_rect(0).toAlignedRect())
+
+        shown = [speaker(0), speaker(20), speaker(50), speaker(90), speaker(90, muted=True)]
+        for at, image in enumerate(shown):  # none, one, two and three waves, crossed out
+            self.assertNotIn(image, shown[:at] + shown[at + 1 :])
+        self.assertEqual(speaker(25), shown[1])  # the same third: the same speaker
+        self.assertEqual(speaker(20, muted=True), shown[4])
+
     def test_bottom_centre_4u_from_the_bottom(self):
         host, mixer = self.make()
         mixer.show_rows([MAIN, PIP], 0)

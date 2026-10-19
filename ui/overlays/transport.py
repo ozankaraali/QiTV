@@ -19,8 +19,9 @@ lit while its grid shows; the second channel gives way then), then "Open in exte
 While the grid shows, a chip left of them names its layout ("2×2"): a click changes it; and
 while the last grid's channels can come back, a "Last grid" chip brings them.
 Left of the sound (♫) a speaker opens the volume mixer on the large picture's row; it shows
-whether that picture is muted. ♫ opens the Sound panel above it and the subtitles button
-the Subtitles panel (ui/track_controls.py): the controls stay up while one shows (`hold`).
+whether that picture is muted, and else its volume (a wave per third). ♫ opens the Sound panel
+above it and the subtitles button the Subtitles panel (ui/track_controls.py): the controls stay
+up while one shows (`hold`).
 Without a keyboard every key of the player has a control here too (the owner's mouse-only
 rule): left of the speaker sit Search, and on live TV the guide and the previous channel; a
 time-shifted channel at its live edge has ◀10 beside play; on live TV the channel's name (and
@@ -93,6 +94,7 @@ from ui.overlays.painting import (
     fill_round,
     fmt_clock,
     fmt_duration,
+    volume_icon,
 )
 from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
@@ -330,6 +332,7 @@ class Transport(Overlay):
         self._grid_restorable = False  # the last grid can come back: its chip shows
         self._pip_rect = QRect()  # the small picture: the shades leave it alone
         self._muted = False  # the large picture's mute: the speaker shows it
+        self._level = 100  # and its volume (libVLC's default until the mixer says)
         self._mini = self._fullscreen = False  # their buttons then show the way back
         self._favorite = False  # the live channel is a favorite: its star is lit
         self._library = False  # the title came from the Library: ‹ Library shows
@@ -485,6 +488,12 @@ class Transport(Overlay):
             self._muted = muted
             self.update()
 
+    def set_level(self, level: int) -> None:
+        """The large picture's volume (0-100): its speaker's waves show it."""
+        if level != self._level:
+            self._level = level
+            self.update()
+
     def set_window_mode(self, *, mini: bool, fullscreen: bool) -> None:
         """In the mini player or fullscreen, its button shows the way back."""
         if (mini, fullscreen) != (self._mini, self._fullscreen):
@@ -493,8 +502,8 @@ class Transport(Overlay):
 
     def icon(self, name: str) -> str:
         """The icon a button paints now (ui.overlays.painting.draw_icon's name)."""
-        if name == "volume" and self._muted:
-            return "mute"
+        if name == "volume":
+            return volume_icon(self._level, self._muted)
         if name == "mini" and self._mini:
             return "full_window"
         if name == "fullscreen" and self._fullscreen:

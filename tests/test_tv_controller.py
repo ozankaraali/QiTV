@@ -475,6 +475,9 @@ class FakeTransport(FakeOverlay):
     def set_muted(self, muted):
         self.record("set_muted", muted)
 
+    def set_level(self, level):
+        self.record("set_level", level)
+
     def set_recording(self, since):
         self.record("set_recording", since)
         self.recording_since = since

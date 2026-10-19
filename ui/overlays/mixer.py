@@ -2,9 +2,10 @@
 
 One row ("Main") without picture in picture; two while it is open ("Main" for the large
 picture, "PiP" for the small one, each with its channel's name). Each row has a speaker
-(a click mutes or unmutes it), a slider (a click or a drag sets its level) and the level.
-The selected row is outlined; the keys act on it (the shell routes them while the mixer
-shows). It hides itself 3 s after the last change, and says so (`closed`).
+(a click mutes or unmutes it; crossed out when muted, else a wave per third of its level), a
+slider (a click or a drag sets its level) and the level. The selected row is outlined; the keys
+act on it (the shell routes them while the mixer shows). It hides itself 3 s after the last
+change, and says so (`closed`).
 
 Bottom-centre: 4u from the bottom, or just above the transport's controls while the
 transport shows (`set_floor`), so both can show at once. Never over the PiP (`avoid`): over
@@ -21,7 +22,7 @@ from PySide6.QtGui import QFont, QFontMetricsF, QMouseEvent, QPainter, QPaintEve
 from PySide6.QtWidgets import QWidget
 
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, draw_icon, draw_progress, fill_round
+from ui.overlays.painting import Units, draw_icon, draw_progress, fill_round, volume_icon
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -254,7 +255,7 @@ class Mixer(Overlay):
                 p.restore()
             dim = row.muted or row.level == 0
             text = qcolor(PALETTE.text, PALETTE.text_muted_alpha if dim else 1.0)
-            draw_icon(p, "mute" if dim else "volume", rects.speaker, text)
+            draw_icon(p, volume_icon(row.level, row.muted), rects.speaker, text)
             p.setFont(title_font)
             p.setPen(qcolor(PALETTE.text))
             title_w = QFontMetricsF(title_font).horizontalAdvance(row.title)

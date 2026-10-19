@@ -678,6 +678,10 @@ class TVController(QObject):
         """Whether the large picture is muted."""
         return self._mixer.main_muted()
 
+    def main_level(self) -> int:
+        """The large picture's volume (0-100)."""
+        return self._mixer.main_level()
+
     def resume_live(self) -> None:
         """Back to live TV from the Library (R5): the last live channel again, else the drawer
         (see ProviderFlow.resume_live)."""
@@ -2540,8 +2544,9 @@ class TVController(QObject):
 
     def _on_audio_changed(self) -> None:
         """A level or mute changed, or the pictures swapped: the PiP label's speaker and the
-        transport's follow."""
+        transport's follow (crossed out, or a wave per third of the volume)."""
         self.overlays.transport.set_muted(self._mixer.main_muted())
+        self.overlays.transport.set_level(self._mixer.main_level())
         if self._pip is not None:
             self._pip.refresh_label()
 

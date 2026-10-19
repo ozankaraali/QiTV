@@ -291,6 +291,24 @@ class TransportCase(unittest.TestCase):
         t.set_muted(False)
         self.assertEqual(t.grab().toImage().copy(volume), heard)
 
+    def test_the_volume_button_shows_the_level_a_wave_per_third(self):
+        t = self.make()
+        t.show_live("One", "")
+        self.assertEqual(t.icon("volume"), "volume_3")  # libVLC's 100 until the mixer says
+        volume = t.button_rect("volume").toAlignedRect()
+        shown = {}
+        for level, icon in ((0, "volume_0"), (20, "volume_1"), (50, "volume_2"), (90, "volume_3")):
+            t.set_level(level)
+            self.assertEqual(t.icon("volume"), icon)
+            shown[icon] = t.grab().toImage().copy(volume)
+        images = list(shown.values())
+        for at, image in enumerate(images):  # each level looks different
+            self.assertNotIn(image, images[:at] + images[at + 1 :])
+        t.set_muted(True)
+        self.assertEqual(t.icon("volume"), "mute")  # muted at any level
+        t.set_muted(False)
+        self.assertEqual(t.icon("volume"), "volume_3")
+
     def test_over_the_pip_only_its_controls_keep_the_clicks(self):
         t = self.make()
         t.show_live("One", "")

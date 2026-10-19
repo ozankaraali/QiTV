@@ -709,6 +709,7 @@ class TVWindow(QMainWindow):
         self.host.show_only(self.corner_controls if corner else None)
         if corner:
             self.corner_controls.set_muted(self.controller.main_muted())
+            self.corner_controls.set_level(self.controller.main_level())
             self.corner_controls.show()
         else:
             self.corner_controls.hide()
@@ -731,6 +732,7 @@ class TVWindow(QMainWindow):
     def _on_corner_sound(self) -> None:
         self.controller.handle(Action.MUTE)
         self.corner_controls.set_muted(self.controller.main_muted())
+        self.corner_controls.set_level(self.controller.main_level())
 
     # ---- input --------------------------------------------------------------------------------
 

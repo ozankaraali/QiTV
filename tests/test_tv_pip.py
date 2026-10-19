@@ -118,6 +118,9 @@ class FakePipLabel(FakeOverlay):
     def set_audible(self, audible):
         self.audible = audible
 
+    def set_level(self, level):
+        self.level = level
+
     def show(self):
         self.visible = True
 
@@ -1485,6 +1488,16 @@ class MixerTests(PipCase):
         self.label.muteRequested.emit()  # the small picture is heard: a swap keeps mutes
         self.controller.handle(Action.SWAP)
         self.assertEqual(self.transport.named("set_muted")[-1], (False,))  # Two, heard
+
+    def test_the_speakers_show_each_picture_s_level(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.assertEqual(self.label.level, 30)  # the small picture's
+        self.controller.handle(Action.VOL_DOWN)  # the large picture's 100 → 95
+        self.assertEqual(self.transport.named("set_level")[-1], (95,))
+        self.controller.handle(Action.SWAP)  # the levels go with their streams
+        self.assertEqual(self.transport.named("set_level")[-1], (30,))
+        self.assertEqual(self.label.level, 95)
 
     def test_raising_the_pip_row_from_zero_unmutes_the_small_picture(self):
         self.start_large(0)

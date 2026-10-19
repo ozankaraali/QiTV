@@ -636,6 +636,7 @@ class PipControls(QObject):
         name = target.title if target is not None else str((small.channel or {}).get("name", ""))
         label.set_info(name, self._state_text(small, live=target is None or target.live))
         label.set_audible(not self.sessions.muted(small.name))
+        label.set_level(self.sessions.level(small.name))
 
     def _state_text(self, slot: Slot, *, live: bool = True) -> str:
         if not live:  # a movie or an episode swapped small plays on: its title alone
