@@ -2004,15 +2004,36 @@ class ClockJoiner:
         if not self._active:
             out.append(data)
             return
-        assert self._joiner is not None
         buf = bytearray(data)
-        at, n = 0, len(buf)
-        while at + PACKET <= n and buf[at] == SYNC:
-            if buf[at + 1] & 0x40 or buf[at + 3] & 0x20:
-                _shift_packet(buf, at, self._offset)
-            at += PACKET
+        at, n, start = 0, len(buf), 0
+        while at < n:
+            if at + PACKET <= n and buf[at] == SYNC:
+                if buf[at + 1] & 0x40 or buf[at + 3] & 0x20:
+                    _shift_packet(buf, at, self._offset)
+                at += PACKET
+                continue
+            # Out of packet sync (a desync inside the run, or the input's partial tail): the
+            # packets before it go through the joiner, these bytes as they are (the segmenter
+            # skips them), and the packets after it are re-based too.
+            self._join(bytes(buf[start:at]), out)
+            resync = at + 1
+            while resync < n and not (
+                buf[resync] == SYNC
+                and resync + PACKET <= n
+                and (resync + PACKET == n or buf[resync + PACKET] == SYNC)
+            ):
+                resync += 1
+            out.append(bytes(buf[at:resync]))
+            start = at = resync
+        self._join(bytes(buf[start:at]), out)
+
+    def _join(self, data: bytes, out: list[bytes | None]) -> None:
+        """Whole re-based packets through the joiner (counters on), unflagged after a junction."""
+        if not data:
+            return
+        assert self._joiner is not None
         last = dict(self._joiner.counters) if self._unflag_left > 0 else None
-        joined = self._joiner.feed(bytes(buf))
+        joined = self._joiner.feed(data)
         out.append(joined if last is None else self._unflag(joined, last))
 
     def _unflag(self, data: bytes, last: dict[int, int]) -> bytes:

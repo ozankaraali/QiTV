@@ -183,6 +183,19 @@ class ClockJoinerTests(unittest.TestCase):
         self.assertEqual((out, splits), (data, 0))
         self.assertEqual(list(joiner.junctions), [])
 
+    def test_bytes_out_of_sync_inside_a_rebased_run_leave_the_packets_after_them_rebased(self):
+        # A desync in the middle of a re-based run (bytes that are no packet, in one read with
+        # the packets around them): they pass as they are, and the packets after them still
+        # run on the joined clock and counters.
+        old, new = make_stream(5), make_stream(5)
+        junk = b"\x99" * 37
+        cut = len(new) // 2 - len(new) // 2 % PACKET
+        for chunk in (None, 5000):
+            with self.subTest(chunk=chunk):
+                out, _, _ = joined(old, new[:cut] + junk + new[cut:], chunk=chunk)
+                self.assertEqual(out.count(junk), 1)
+                self.assert_runs_on(out.replace(junk, b""))
+
     def test_a_reconnect_ends_the_rebasing(self):
         joiner = ClockJoiner(program=lambda: (VIDEO_PID, 0x1B))
         old, new = make_stream(5), make_stream(5)
