@@ -4,7 +4,10 @@
 MPEG-TS stream that never ends, the way a provider's live channel arrives: 64-packet chunks,
 each sent when the wall clock reaches the media time of its last PCR. Every pass after the
 first moves PTS, DTS and PCR one clip length on and continues the continuity counters, so
-the loop looks like one continuous broadcast (no timestamp jump, no discontinuity).
+the loop looks like one continuous broadcast (no timestamp jump, no discontinuity). It also
+marks its pictures with the pass's number (`_mark`), so none repeats a picture of the last
+minute byte for byte: the time-shift helper takes seconds of pictures repeated in order for a
+provider replaying its last seconds, and drops them (`services.live.ts.LoopTrimmer`).
 
 The clip (12 s, 320×180, 25 fps H.264 baseline with a 1 s GOP, plus AAC) is generated test
 content, made once with ffmpeg as a developer tool:
@@ -66,6 +69,18 @@ CHUNK_PACKETS = 64
 CLOCK = 90_000
 _WRAP = 1 << 33
 _NO_PES_HEADER = {0xBC, 0xBE, 0xBF, 0xF0, 0xF1, 0xF2, 0xF8, 0xFF}  # no PTS field
+_AUD = b"\0\0\0\1\x09"  # an H.264 access unit delimiter; its next byte is primary_pic_type
+# The delimiter's last byte a pass gives a picture: primary_pic_type 7 (the clip's own), 1, 2
+# or 6, each allowing I and P slices (decoders ignore it)
+_AUD_MARKS = (0xF0, 0x30, 0x50, 0xD0)
+_MARK_BLOCK = 10  # pictures marked by one base-4 digit of the pass number, five digits in turn
+
+
+def _mark(loop: int, picture: int) -> int:
+    """The access unit delimiter's last byte for picture `picture` of pass `loop`: by blocks
+    of `_MARK_BLOCK` pictures, one base-4 digit of the pass number after the other, so two
+    passes within five of each other differ at least once in every 50 pictures (2 s)."""
+    return _AUD_MARKS[(loop >> (2 * ((picture // _MARK_BLOCK) % 5))) & 3]
 
 
 @dataclass(frozen=True)
@@ -137,6 +152,15 @@ class LoopedStream:
             raise ValueError("the clip must be whole 188-byte packets")
         self._packets = [data[i : i + PACKET] for i in range(0, len(data), PACKET)]
         self._parsed = [_parse(packet) for packet in self._packets]
+        # The packets that begin a picture with an access unit delimiter: (picture, the
+        # offset of its primary_pic_type).
+        self._pictures: dict[int, tuple[int, int]] = {}
+        for i, (packet, parsed) in enumerate(zip(self._packets, self._parsed)):
+            if parsed.pts is None or not 0xE0 <= packet[parsed.pts - 6] <= 0xEF:
+                continue  # (its stream_id: a video PES)
+            es = parsed.pts + packet[parsed.pts - 1]  # after the PES header
+            if packet[es : es + len(_AUD)] == _AUD:
+                self._pictures[i] = (len(self._pictures), es + len(_AUD))
         # Each pass continues every PID's counters from where the last pass left them.
         self._cc_step = Counter(p.pid for p in self._parsed if p.payload)
         pcrs = [
@@ -196,9 +220,13 @@ class LoopedStream:
             return b"".join(self._packets[start:end])
         shift = loop * self._ticks
         out = bytearray()
-        for packet, parsed in zip(self._packets[start:end], self._parsed[start:end]):
+        for index in range(start, end):
+            packet, parsed = self._packets[index], self._parsed[index]
             data = bytearray(packet)
             data[3] = (data[3] & 0xF0) | ((data[3] + loop * self._cc_step[parsed.pid]) & 0x0F)
+            picture = self._pictures.get(index)
+            if picture is not None:
+                data[picture[1]] = _mark(loop, picture[0])
             if parsed.pcr is not None:
                 _write_pcr(data, parsed.pcr, _read_pcr(data, parsed.pcr) + shift)
             for at in (parsed.pts, parsed.dts):

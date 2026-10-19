@@ -17,7 +17,7 @@ form cannot import `ts_fixtures`).
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 import time
 from typing import Callable
@@ -87,6 +87,17 @@ _REJOIN_TAIL_BYTES = 8 * 1024 * 1024  # output kept to read the last PTS and pic
 _REJOIN_WINDOW_TICKS = 60 * _CLOCK  # a new connection's PTS this near the old's: one timebase
 _REJOIN_KEY_WAIT_TICKS = 2 * _CLOCK  # past the old connection's end, a keyframe is waited for
 _REJOIN_WAIT_PACKETS = 4 * _CLOCK_PENDING_PACKETS  # ... with this many packets held at most
+# LoopTrimmer (a provider that replays its last seconds while its own source is down):
+_LOOP_MIN_S = 2.0  # a replay this long, of pictures at least this far back, is a loop ...
+_LOOP_PICTURES = 10  # ... of at least this many distinct pictures (a still repeated is none)
+_LOOP_WINDOW_S = 60.0  # the pictures a replay's copy is looked for in ...
+_LOOP_WINDOW_PICTURES = 4096  # ... at most this many (60 s at 60 fps fit)
+_LOOP_WINDOW_SOUND = 8192  # the latest sound PES (every other PES) kept to tell repeated sound
+_LOOP_SOUND_SHARE = 0.9  # a replay's sound repeats too: at least this share of its PES, ...
+_LOOP_SOUND_NEW = 4  # ... and no replay once this many of its PES are new
+_LOOP_EARLY_TICKS = _CLOCK  # sound this far before a loop's first picture still passes
+_LOOP_HOLD_BYTES = 16 * 1024 * 1024  # a run judged is held at most this much (2 s of 64 Mbit/s)
+_LOOP_SOUND_WAIT = 64  # other PES that begin while a picture is read: past it, the video stalled
 
 
 class Unsupported(Exception):
@@ -1807,11 +1818,593 @@ def _kept_from(
     return b"".join(kept)
 
 
-def _starts_pes(data: bytes, off: int) -> bool:
+def _starts_pes(data: bytes | bytearray, off: int) -> bool:
     """Whether the payload of the unit-start packet at `off` begins a PES."""
     afc = (data[off + 3] >> 4) & 3
     start = off + 4 + (1 + data[off + 4] if afc & 2 else 0)
     return start + 4 <= off + PACKET and data[start : start + 3] == _START_CODE
+
+
+@dataclass(frozen=True, slots=True)
+class Loop:
+    """A replay `LoopTrimmer` dropped, from its first picture (`offset`, an input offset) until
+    new content came.
+
+    `back_s` is how far back the copy it replayed lay, `found_at` and `ended_at` the clock when
+    it was recognised and when it ended, `dropped_s` the pictures' media left out and `dropped`
+    the input ranges left out ((offset, bytes)). `ended_by`: "keyframe" (a new picture to start
+    at), "pictures" (new pictures without a keyframe for `_LOOP_MIN_S`), "sound" (new sound for
+    `_LOOP_MIN_S` while the pictures repeated), "stall" (the pictures stopped while the sound
+    went on: `_LOOP_SOUND_WAIT`), "end" (the input ended).
+    """
+
+    offset: int
+    back_s: float
+    found_at: float
+    ended_at: float
+    dropped_s: float
+    dropped: tuple[tuple[int, int], ...]
+    ended_by: str
+
+    @property
+    def dropped_bytes(self) -> int:
+        return sum(size for _, size in self.dropped)
+
+
+@dataclass(slots=True)
+class _Unit:
+    """A PES `LoopTrimmer` reads: where its first packet is (an input offset), its PTS, whether
+    it is a keyframe (a picture), and its ES bytes so far."""
+
+    at: int
+    pts: int | None
+    key: bool
+    parts: list[bytes | bytearray]
+
+
+_PASSING, _HOLDING, _DROPPING = 0, 1, 2  # LoopTrimmer's states
+
+
+def _just_before(step: int) -> bool:
+    """Whether a PES `step` ticks from a run's first picture is sound that belongs before it
+    (muxed after it): up to `_LOOP_EARLY_TICKS` earlier."""
+    return -_LOOP_EARLY_TICKS <= step < 0
+
+
+class LoopTrimmer:
+    """Drops what a raw TS source replays while its own source is down, until new content comes.
+
+    One provider, when its upstream dies, keeps the connection open by replaying its last
+    seconds over and over under new, continuous timestamps (measured: copies 7-17 s back, the
+    same 9.5 s three times in 37 s), and VLC played the loop. Here the pictures (each video
+    PES's ES bytes, hashed) of the last `_LOOP_WINDOW_S` and the latest `_LOOP_WINDOW_SOUND`
+    other PES (the sound) are remembered. A picture whose copy lies at least `_LOOP_MIN_S`
+    back begins a run: from its first packet everything is held while the pictures after it
+    repeat the copy's, in order. The run is a loop once it holds `_LOOP_MIN_S` of pictures,
+    `_LOOP_PICTURES` of them distinct, with its sound repeated too (`_LOOP_SOUND_SHARE` of the
+    PES that began in it, when the program has sound; the sound muxed after the run's first
+    picture but timed before it is the content's before). A copy that far back means the run
+    replays a sequence that once went on to other pictures: a still picture an encoder
+    repeats, or a short pattern, matches the pictures right before it and begins no run.
+    Short of a loop, what was held passes on as it came (a run goes once `_LOOP_SOUND_NEW` of
+    its sound PES are new), and a run judged no loop is not held again while it goes on.
+
+    A loop is dropped from its first picture: every packet until new content comes, the tables
+    too (alone they would let the segmenter time a segment by the wall clock), but the sound
+    that still belongs before it (each sound PID's PES, not repeated, timed up to
+    `_LOOP_EARLY_TICKS` before the first picture, until one is not). It ends at a new picture
+    (none in the window) that is a keyframe, at a new picture once `_LOOP_MIN_S` of new
+    pictures came without one (a long GOP or intra refresh: the ones before it go), or at a
+    repeated picture once a sound PID brought `_LOOP_MIN_S` of new sound while the pictures
+    repeated (a still picture with live sound). From that picture everything passes on but the
+    sound timed before it (each PID's, until a PES at or after it, `_CLOCK_PENDING_PACKETS` at
+    most), as a new run (a piece of its own) that `ClockJoiner` re-bases onto the last picture
+    passed on: the live edge stood still while the loop went (the player says "Waiting for the
+    channel…", as for a stalled source) and goes on with no timestamp jump. From the first
+    loop's end on, what passes on goes through `ContinuityJoiner`, so the counters run on
+    across loops and reconnects (about a microsecond a packet).
+
+    A picture is judged once the next begins: its bytes wait that long (a picture's delay), or
+    until `_LOOP_SOUND_WAIT` other PES began (the video stalled: what is held passes on, and a
+    loop ends there). `feed` takes and returns pieces as `RepeatTrimmer` passes them on (each after the first
+    starts a new run): a run being judged passes on as it came at a new run, and a loop goes on
+    across it (its new run starts where the loop ends). `reconnect()` (a reconnect comes next)
+    and `finish()` pass on what is held as it came, or drop it during a loop, which goes on
+    across a reconnect (the provider's next connection may replay on; `ClockJoiner` re-bases
+    the loop's end onto the last picture before the reconnect). Per packet the cost is reading
+    its header and keeping its payload for its PES's digest; memory is the two windows'
+    digests and at most `_LOOP_HOLD_BYTES` held. Pure logic: the clock (for `loops`) and the
+    program's video PID and type (the segmenter's) are the caller's.
+    """
+
+    def __init__(
+        self,
+        *,
+        program: Callable[[], tuple[int | None, int | None]],
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._program = program
+        self._clock = clock
+        # The bytes not yet passed on or dropped, from input offset `_base` on: from the picture
+        # being read (passing or dropping), or from a run's first picture (holding).
+        self._held = bytearray()
+        self._base = 0
+        self._scan = 0  # the input offset of the next packet to read
+        self._searching = True  # the next packet start must be proven by three sync bytes
+        self._picture: _Unit | None = None  # the picture being read
+        self._reading: dict[int, _Unit] = {}  # the sound PES being read, by PID
+        self._pes_pids: set[int] = set()  # the PIDs that carried a PES other than the picture
+        self._since = 0  # their PES begun since the picture being read began
+        self._last_pts: int | None = None  # the latest picture's PTS
+        self._frame: int | None = None  # the shortest forward PTS step seen: a picture
+        # The windows: digests by number in a ring, and each digest's latest number.
+        self._pictures: list[int | None] = [None] * _LOOP_WINDOW_PICTURES
+        self._picture_at: dict[int, int] = {}
+        self._count = 0  # pictures read: the next one's number
+        self._sounds: list[int | None] = [None] * _LOOP_WINDOW_SOUND
+        self._sound_at: dict[int, int] = {}
+        self._sound_count = 0
+        self._state = _PASSING
+        # The run (holding) or the loop (dropping): its first picture's input offset and PTS,
+        # how many pictures back its copy lies, its pictures, their digests, its sound PES and
+        # how many of them repeated.
+        self._run_at = 0
+        self._run_pts: int | None = None
+        self._run_back = 0
+        self._run_pictures = 0
+        self._run_digests: set[int] = set()
+        self._run_sound = [0, 0]
+        self._repeated: set[int] = set()  # where its sound PES that repeat begin (input offsets)
+        self._rejected: tuple[int, int] | None = None  # a run judged no loop: (back, next number)
+        # Dropping:
+        self._found_at = 0.0
+        self._reached: set[int] = set()  # sound PIDs past the sound that still passes
+        self._new = 0  # new pictures in a row
+        self._live: dict[int, int] = {}  # the PTS where new sound began, by PID
+        self._live_now = False  # the next picture ends the loop (the sound is new)
+        self._dropped: list[tuple[int, int]] = []
+        self._ending: Loop | None = None  # the loop that ended, recorded once the sound after
+        # it was judged (`_gate`)
+        # Passing after a loop: the sound before the new content's first PTS goes.
+        self._gate: int | None = None
+        self._gated: set[int] = set()  # sound PIDs past it
+        self._gate_left = 0  # packets it judges at most
+        self._keep: dict[int, bool] = {}  # sound PIDs: whether the PES being filtered passes
+        # Each PID's last counter passed on before the first loop (from its first packet
+        # dropped), and from where that loop ended on, the joiner that runs them on.
+        self._counters: dict[int, int] = {}
+        self._counted = False  # those were read (from the run's bytes)
+        self._joiner: ContinuityJoiner | None = None
+        self.loops: deque[Loop] = deque(maxlen=_TRIMS_KEPT)
+
+    def feed(self, pieces: list[bytes]) -> list[bytes]:
+        """Take pieces (each after the first starts a new run); return what passes on, the same
+        way (a loop's end starts a new run)."""
+        out: list[list[bytes]] = [[]]
+        for k, piece in enumerate(pieces):
+            if k:
+                self._new_run(out)
+            if piece:
+                self._read(piece, out)
+        return [b"".join(part) for part in out]
+
+    def reconnect(self) -> list[bytes]:
+        """A reconnect comes next: what is held passes on as it came (dropped during a loop,
+        which goes on); nothing read so far is joined to the next connection's bytes."""
+        out: list[list[bytes]] = [[]]
+        self._end_input(out)
+        return [b"".join(out[0])]
+
+    def finish(self) -> list[bytes]:
+        """The input ended: what is held passes on as it came (dropped during a loop)."""
+        out: list[list[bytes]] = [[]]
+        self._end_input(out)
+        if self._state == _DROPPING:
+            self._state = _PASSING
+            self._ended("end")
+        self._close()
+        return [b"".join(out[0])]
+
+    # -- reading ---------------------------------------------------------------------------
+
+    def _read(self, chunk: bytes, out: list[list[bytes]]) -> None:
+        held = self._held
+        held += chunk
+        video, video_type = self._program()
+        reading = self._reading
+        off = self._scan - self._base
+        while off + PACKET <= len(held):
+            if self._searching or held[off] != SYNC:
+                found = _find_sync(held, off)
+                if found < 0:
+                    off = max(off, len(held) - 2 * PACKET)
+                    self._searching = True
+                    break
+                off, self._searching = found, False
+                continue
+            b1 = held[off + 1]
+            if not b1 & 0x80:  # with the transport error flag the header is untrusted
+                pid = ((b1 & 0x1F) << 8) | held[off + 2]
+                if b1 & 0x40:
+                    if pid == video:
+                        at = self._base + off
+                        self._picture_starts(off, video_type, out)
+                        off = at - self._base  # what was settled left `held`
+                    elif _starts_pes(held, off):
+                        self._sound_starts(pid, off)
+                else:
+                    unit = self._picture if pid == video else reading.get(pid)
+                    b3 = held[off + 3]
+                    if unit is not None and b3 & 0x10:
+                        start = off + 5 + held[off + 4] if b3 & 0x20 else off + 4
+                        if start < off + PACKET:
+                            unit.parts.append(held[start : off + PACKET])
+            off += PACKET
+        self._scan = self._base + off
+        if self._picture is not None and self._since > _LOOP_SOUND_WAIT:
+            self._stalled(self._picture, out)
+        if self._state == _PASSING and self._picture is None:
+            self._settle(self._scan, out, drop=False)  # no picture is read: nothing waits
+
+    def _stalled(self, picture: _Unit, out: list[list[bytes]]) -> None:
+        """No picture followed `picture` while `_LOOP_SOUND_WAIT` other PES began (the video
+        stalled): it is not judged, and what is held passes on as it came. A loop ends there
+        (what comes is no replay of pictures)."""
+        self._picture = None
+        if self._state == _DROPPING:
+            self._resume(picture, self._scan, "stall", out)
+            return
+        if self._state == _HOLDING:
+            self._rejected = (self._run_back, self._count)
+            self._release(self._scan, out)
+
+    def _picture_starts(self, off: int, video_type: int | None, out: list[list[bytes]]) -> None:
+        """A picture begins at `off` in `held`: the one before it was read whole."""
+        at = self._base + off
+        pkt = bytes(self._held[off : off + PACKET])
+        rai, pts, es = _pes_start(pkt)
+        previous = self._picture
+        self._picture = _Unit(
+            at, pts, _trim_key(pkt, rai, es, video_type), [pkt[es:]] if es < PACKET else []
+        )
+        self._since = 0
+        if pts is not None:
+            if self._last_pts is not None:
+                step = pts_delta(self._last_pts, pts)
+                if 0 < step < _CLOCK and (self._frame is None or step < self._frame):
+                    self._frame = step
+            self._last_pts = pts
+        if previous is not None:
+            self._judge(previous, hash(b"".join(previous.parts)), at, out)
+
+    def _sound_starts(self, pid: int, off: int) -> None:
+        """A PES of another PID begins at `off` in `held`: the one before it was read whole."""
+        self._pes_pids.add(pid)
+        pkt = bytes(self._held[off : off + PACKET])
+        _, pts, es = _pes_start(pkt)
+        previous = self._reading.get(pid)
+        self._reading[pid] = _Unit(self._base + off, pts, False, [pkt[es:]] if es < PACKET else [])
+        self._since += 1
+        if previous is None:
+            return
+        digest = hash(b"".join(previous.parts))
+        seen = self._sound_at.get(digest) is not None
+        number = self._sound_count
+        slot = number % _LOOP_WINDOW_SOUND
+        old = self._sounds[slot]
+        if old is not None and self._sound_at.get(old) == number - _LOOP_WINDOW_SOUND:
+            del self._sound_at[old]
+        self._sounds[slot] = digest
+        self._sound_at[digest] = number
+        self._sound_count = number + 1
+        if seen and self._state == _HOLDING:
+            self._repeated.add(previous.at)
+        pts, first = previous.pts, self._run_pts
+        if previous.at < self._run_at or (
+            pts is not None and first is not None and _just_before(pts_delta(first, pts))
+        ):
+            return  # the sound of what came before the run (or the loop): it tells nothing
+        if self._state == _HOLDING:
+            self._run_sound[0] += 1
+            self._run_sound[1] += seen
+        elif self._state == _DROPPING:
+            if seen:
+                self._live.pop(pid, None)
+            elif pts is not None:  # new sound for `_LOOP_MIN_S` while the pictures repeat
+                since = self._live.setdefault(pid, pts)
+                self._live_now |= pts_delta(since, pts) >= _LOOP_MIN_S * _CLOCK
+
+    # -- judging ---------------------------------------------------------------------------
+
+    def _judge(self, picture: _Unit, digest: int, end: int, out: list[list[bytes]]) -> None:
+        """A picture was read whole: its bytes end at input offset `end`, where the next one's
+        begin."""
+        number = self._count
+        latest = self._latest(digest)
+        self._remember(digest)
+        if self._state == _DROPPING:
+            how = None
+            if latest is None:  # new content: from a keyframe (its sound is new too)
+                self._new += 1
+                self._live.clear()
+                self._live_now = False
+                if picture.key:
+                    how = "keyframe"
+                elif self._new * self._ticks() >= _LOOP_MIN_S * _CLOCK:
+                    how = "pictures"
+            else:
+                self._new = 0
+                if self._live_now:  # a still picture repeated, its sound live
+                    how = "sound"
+            if how is None:
+                self._run_pictures += 1
+                self._settle(end, out, drop=True)
+            else:
+                self._resume(picture, end, how, out)
+            return
+        if self._state == _HOLDING:
+            back = self._run_back
+            if self._at(number - back) == digest:
+                self._run_pictures += 1
+                self._run_digests.add(digest)
+                verdict = self._verdict()
+                if verdict:
+                    self._drop_run(end, out)
+                elif verdict is not None or len(self._held) >= _LOOP_HOLD_BYTES:
+                    self._rejected = (back, number + 1)
+                    self._release(end, out)
+                return
+            self._release(picture.at, out)  # the run broke here: this picture is judged afresh
+        rejected = self._rejected
+        if rejected is not None:
+            back, expected = rejected
+            if expected == number and self._at(number - back) == digest:
+                self._rejected = (back, number + 1)  # the run judged no loop goes on
+                latest = None
+            else:
+                self._rejected = None
+        if latest is not None and (number - latest) * self._ticks() >= _LOOP_MIN_S * _CLOCK:
+            self._settle(picture.at, out, drop=False)
+            self._state = _HOLDING
+            self._run_at, self._run_pts, self._run_back = picture.at, picture.pts, number - latest
+            self._run_pictures, self._run_digests, self._run_sound = 1, {digest}, [0, 0]
+            self._repeated = set()
+        else:
+            self._settle(end, out, drop=False)
+
+    def _verdict(self) -> bool | None:
+        """Whether the run held is a loop: None while that is not known yet."""
+        came, repeated = self._run_sound
+        if came - repeated >= _LOOP_SOUND_NEW:
+            return False  # its sound is new
+        if self._run_pictures * self._ticks() < _LOOP_MIN_S * _CLOCK:
+            return None
+        if len(self._run_digests) < _LOOP_PICTURES:
+            return False
+        return repeated >= _LOOP_SOUND_SHARE * came
+
+    def _release(self, end: int, out: list[list[bytes]]) -> None:
+        """The run held is no loop: it passes on as it came, up to `end`."""
+        logger.debug("a replay of %d pictures was let go", self._run_pictures)
+        self._state = _PASSING
+        self._settle(end, out, drop=False)
+
+    def _drop_run(self, end: int, out: list[list[bytes]]) -> None:
+        """The run held is a loop: it goes from its first picture on."""
+        self._state = _DROPPING
+        self._found_at = self._clock()
+        self._close()  # the loop before it, should its sound still have been judged
+        self._gate = None
+        self._reached, self._keep, self._live = set(), {}, {}
+        self._new, self._live_now = 0, False
+        self._counters, self._counted = {}, False
+        self._dropped = []
+        back = self._run_back * self._ticks() / _CLOCK
+        logger.info("The source replays what it sent %.1f s before: dropped until it is new.", back)
+        self._settle(end, out, drop=True)
+
+    def _resume(self, picture: _Unit, end: int, how: str, out: list[list[bytes]]) -> None:
+        """The loop ends: new content passes on from `picture` as a new run."""
+        self._settle(picture.at, out, drop=True)
+        self._state = _PASSING
+        self._ended(how)
+        out.append([])  # the new content's clock is re-based onto what passed on (ClockJoiner)
+        if self._joiner is None:
+            self._joiner = ContinuityJoiner(self._counters)
+        else:
+            out[-2].append(self._joiner.end())
+        self._joiner.segment()  # the new content's counters run on from what passed on
+        self._rejected = None
+        self._keep = {}
+        self._gate, self._gated, self._gate_left = picture.pts, set(), _CLOCK_PENDING_PACKETS
+        if self._gate is None:
+            self._close()  # no sound to judge after it
+        self._settle(end, out, drop=False)
+
+    def _ended(self, how: str) -> None:
+        """The loop ends (`how`): its record waits for the sound after it (`_close`)."""
+        ticks = self._ticks()
+        dropped_s = self._run_pictures * ticks / _CLOCK
+        back_s = self._run_back * ticks / _CLOCK
+        found_at = self._found_at
+        self._ending = Loop(self._run_at, back_s, found_at, self._clock(), dropped_s, (), how)
+        logger.info("A replayed stretch ended (%s): %.1f s dropped.", how, dropped_s)
+
+    def _close(self) -> None:
+        """Record the loop that ended, with what was dropped after it too."""
+        if self._ending is not None:
+            self.loops.append(replace(self._ending, dropped=tuple(self._dropped)))
+            self._ending = None
+
+    def _new_run(self, out: list[list[bytes]]) -> None:
+        """A new run starts with the next piece: a run held passes on as it came first; a loop
+        goes on (the new run starts where it ends)."""
+        dropping = self._state == _DROPPING
+        self._end_input(out)
+        if not dropping:
+            out.append([])
+
+    def _end_input(self, out: list[list[bytes]]) -> None:
+        """No byte read so far joins the next: what is held passes on as it came, or goes
+        during a loop (its sound that still passed ends here). The counters run on across."""
+        end = self._base + len(self._held)
+        if self._state == _DROPPING:
+            self._run_pictures += self._picture is not None  # the picture cut short goes too
+            self._settle(end, out, drop=True)
+            self._reached.update(self._pes_pids)
+        else:
+            if self._state == _HOLDING:
+                self._release(end, out)
+            self._settle(end, out, drop=False)
+        if self._joiner is not None:
+            out[-1].append(self._joiner.end())
+            self._joiner.segment()
+        self._picture = None
+        self._reading.clear()
+        self._scan = self._base
+        self._searching = True
+        self._last_pts = None
+        self._rejected = None
+        if self._gate is not None:
+            self._gate = None
+            self._close()
+
+    # -- the windows -----------------------------------------------------------------------
+
+    def _ticks(self) -> int:
+        """A picture's duration (the shortest forward PTS step seen; 25 fps before one)."""
+        return self._frame or _CLOCK // 25
+
+    def _window(self) -> int:
+        """The pictures of the last `_LOOP_WINDOW_S` (at most the ring)."""
+        return min(_LOOP_WINDOW_PICTURES, int(_LOOP_WINDOW_S * _CLOCK / self._ticks()))
+
+    def _latest(self, digest: int) -> int | None:
+        """The number of the latest picture in the window with this digest."""
+        number = self._picture_at.get(digest)
+        if number is None or self._count - number > self._window():
+            return None
+        return number
+
+    def _at(self, number: int) -> int | None:
+        """The digest of picture `number`, while it is in the window."""
+        if number < 0 or self._count - number > self._window():
+            return None
+        return self._pictures[number % _LOOP_WINDOW_PICTURES]
+
+    def _remember(self, digest: int) -> None:
+        number = self._count
+        slot = number % _LOOP_WINDOW_PICTURES
+        old = self._pictures[slot]
+        if old is not None and self._picture_at.get(old) == number - _LOOP_WINDOW_PICTURES:
+            del self._picture_at[old]
+        self._pictures[slot] = digest
+        self._picture_at[digest] = number
+        self._count = number + 1
+
+    # -- passing on and dropping -----------------------------------------------------------
+
+    def _settle(self, upto: int, out: list[list[bytes]], *, drop: bool) -> None:
+        """Pass on or drop the held bytes before input offset `upto` (through `_filter` when
+        dropping, or passing while the sound after a loop is judged)."""
+        n = upto - self._base
+        if n <= 0:
+            return
+        if drop or self._gate is not None:
+            self._filter(n, out, drop)
+        else:
+            self._emit(bytes(self._held[:n]), out)
+        del self._held[:n]
+        self._base = upto
+
+    def _emit(self, data: bytes, out: list[list[bytes]]) -> None:
+        """Pass `data` on (through the joiner once a loop ended)."""
+        if data:
+            out[-1].append(data if self._joiner is None else self._joiner.feed(data))
+
+    def _filter(self, n: int, out: list[list[bytes]], drop: bool) -> None:
+        """The first `n` held bytes packet by packet: dropping, every packet goes but the sound
+        before the loop's first picture; passing, every packet passes but the sound before the
+        new content's first picture (`_gate`)."""
+        held, base = self._held, self._base
+        video = self._program()[0]
+        sound = self._pes_pids - {video}
+        if drop and sound <= self._reached and self._counted:
+            self._drop(base, n)  # nothing of it passes
+            return
+        self._counted |= drop
+        kept: list[bytes] = []
+        counters = self._counters
+        at = 0
+        while at < n:
+            if at + PACKET > n or held[at] != SYNC:  # out of packet sync, or a partial packet
+                found = held.find(_SYNC_BYTE, at + 1, n)
+                stop = n if found < 0 else found
+                if drop:
+                    self._drop(base + at, stop - at)
+                else:
+                    kept.append(bytes(held[at:stop]))
+                at = stop
+                continue
+            keep = self._passes(at, video, drop)
+            if keep:
+                kept.append(bytes(held[at : at + PACKET]))
+            else:
+                self._drop(base + at, PACKET)
+            b1, b3 = held[at + 1], held[at + 3]
+            if drop and b3 & 0x10 and not b1 & 0x80:  # the counters passed on before the loop
+                pid = ((b1 & 0x1F) << 8) | held[at + 2]
+                if keep or pid not in counters:
+                    counters[pid] = b3 & 0x0F if keep else (b3 - 1) & 0x0F
+            at += PACKET
+        self._emit(b"".join(kept), out)
+        if not drop and self._gate is not None:
+            self._gate_left -= n // PACKET
+            if self._gate_left <= 0 or sound <= self._gated:
+                self._gate = None
+                self._close()
+
+    def _passes(self, at: int, video: int | None, drop: bool) -> bool:
+        """Whether the held packet at `at` passes (see `_filter`)."""
+        held = self._held
+        b1 = held[at + 1]
+        pid = ((b1 & 0x1F) << 8) | held[at + 2]
+        if pid == video or pid not in self._pes_pids or b1 & 0x80:
+            return not drop  # the picture, the tables, PCRs and null packets: as the bytes go
+        if b1 & 0x40 and _starts_pes(held, at):
+            pts = _pes_times(held, at)[0]
+            if drop:
+                first = self._run_pts
+                keep = (
+                    pid not in self._reached
+                    and pts is not None
+                    and first is not None
+                    and _just_before(pts_delta(first, pts))
+                    and self._base + at not in self._repeated  # (the loop's own goes)
+                )
+                if not keep:
+                    self._reached.add(pid)
+            else:
+                gate = self._gate
+                keep = (
+                    pid in self._gated or pts is None or gate is None or pts_delta(gate, pts) >= 0
+                )
+                if keep:
+                    self._gated.add(pid)
+            self._keep[pid] = keep
+            return keep
+        # The rest of a PES: as its start went (one begun before the bytes judged here: before
+        # a loop it passes, before new content it goes).
+        return self._keep.get(pid, drop and pid not in self._reached)
+
+    def _drop(self, at: int, size: int) -> None:
+        if size <= 0:
+            return
+        dropped = self._dropped
+        if dropped and dropped[-1][0] + dropped[-1][1] == at:
+            dropped[-1] = (dropped[-1][0], dropped[-1][1] + size)
+        else:
+            dropped.append((at, size))
 
 
 class ClockJoiner:
@@ -1837,8 +2430,10 @@ class ClockJoiner:
     segmenter cuts the new run a segment of its own and learns afresh whether it flags its
     keyframes). Until the first junction nothing is rewritten: each packet's header is read
     (its counter, a video PES's timestamps). `discontinuity()` (a reconnect) ends the
-    re-basing: what follows passes on as it comes, as before. Pure logic: the program's video
-    PID is the caller's.
+    re-basing: what follows passes on as it comes, as before, but for a junction that comes
+    before the new connection passed a picture (where a loop `LoopTrimmer` dropped across the
+    reconnect ends): that is re-based onto the last picture before the reconnect. Pure logic:
+    the program's video PID is the caller's.
     """
 
     def __init__(self, *, program: Callable[[], tuple[int | None, int | None]]) -> None:
@@ -1850,6 +2445,8 @@ class ClockJoiner:
         self._last_pts: int | None = None  # the latest video PTS as it came
         self._top: int | None = None  # the furthest video PTS passed on (re-based)
         self._last_dts: int | None = None  # the latest video DTS passed on (re-based)
+        # (`_top`, `_last_dts`, `_last_pts`) before a reconnect, until a picture passed after it
+        self._before: tuple[int, int | None, int | None] | None = None
         self._frame = _CLOCK // 25  # the shortest forward PTS step seen: a frame
         self._counters: dict[int, int] = {}  # each PID's last counter passed on, until active
         self._joiner: ContinuityJoiner | None = None  # once active: the counters run on
@@ -1916,8 +2513,15 @@ class ClockJoiner:
         return pieces
 
     def discontinuity(self) -> bytes:
-        """A reconnect comes next: what waits passes on as it is, and the re-basing ends."""
+        """A reconnect comes next: what waits passes on as it is, and the re-basing ends. A
+        junction that comes before the next connection passed a picture (where a loop
+        `LoopTrimmer` dropped across the reconnect ends) is re-based onto the last picture
+        before the reconnect, as if that had been a pause."""
         out = self._end()
+        if self._joiner is not None:
+            self._counters = self._joiner.counters  # what passed on: the next joiner's start
+        if self._top is not None:
+            self._before = (self._top, self._last_dts, self._last_pts)
         self._active, self._offset, self._joiner = False, 0, None
         self._unflag_left = 0
         self._last_pts = self._top = self._last_dts = None
@@ -1951,12 +2555,15 @@ class ClockJoiner:
         self._pending = None
         first = pending[-1]
         pts, dts = _pes_times(first, 0)
-        if pts is None or self._top is None:
+        top, last_dts = self._top, self._last_dts
+        if top is None and self._before is not None:
+            top, last_dts, self._last_pts = self._before  # none passed on since a reconnect
+        if pts is None or top is None:
             self._pass_pending(pending, out)
             return
         # The new run's first picture follows the old run's last by a frame, in PTS and DTS.
-        last_dts = self._top if self._last_dts is None else self._last_dts
-        by_pts = (self._top + self._frame - pts) % _PTS_MODULO
+        last_dts = top if last_dts is None else last_dts
+        by_pts = (top + self._frame - pts) % _PTS_MODULO
         by_dts = (last_dts + self._frame - (pts if dts is None else dts)) % _PTS_MODULO
         offset = by_pts if pts_delta(by_dts, by_pts) >= 0 else by_dts
         moved = pts_delta(self._offset, offset)
@@ -2005,6 +2612,7 @@ class ClockJoiner:
         if self._last_pts is not None and 0 < pts_delta(self._last_pts, pts) < self._frame:
             self._frame = pts_delta(self._last_pts, pts)
         self._last_pts = pts
+        self._before = None
         shifted = (pts + self._offset) % _PTS_MODULO
         if self._top is None or pts_delta(self._top, shifted) > 0:
             self._top = shifted
@@ -2077,7 +2685,7 @@ class ClockJoiner:
 _NO_PES_HEADER = frozenset((0xBC, 0xBE, 0xBF, 0xF0, 0xF1, 0xF2, 0xF8, 0xFF))
 
 
-def _pes_times(pkt: bytes, off: int) -> tuple[int | None, int | None]:
+def _pes_times(pkt: bytes | bytearray, off: int) -> tuple[int | None, int | None]:
     """(PTS, DTS) of the PES starting in the packet at `off`, None where it has none."""
     afc = (pkt[off + 3] >> 4) & 3
     start = off + 4
@@ -2097,7 +2705,7 @@ def _pes_times(pkt: bytes, off: int) -> tuple[int | None, int | None]:
     return pts, dts
 
 
-def _timestamp(data: bytes, at: int) -> int:
+def _timestamp(data: bytes | bytearray, at: int) -> int:
     b = data[at : at + 5]
     return ((b[0] >> 1) & 7) << 30 | b[1] << 22 | (b[2] >> 1) << 15 | b[3] << 7 | b[4] >> 1
 
@@ -2426,7 +3034,7 @@ def _lists_audio(section: bytes) -> bool:
     return False
 
 
-def _find_sync(data: bytes, start: int) -> int:
+def _find_sync(data: bytes | bytearray, start: int) -> int:
     """First i >= start with sync bytes at i, i+188 and i+376; -1 if none is decidable yet."""
     stop = len(data) - 2 * PACKET  # candidates must have i + 376 inside data
     if stop <= start:  # (a negative stop would count from the end)

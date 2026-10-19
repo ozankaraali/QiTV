@@ -98,6 +98,7 @@ from services.live.ts import (
     ClockJoiner,
     Data,
     Event,
+    LoopTrimmer,
     Opened,
     ReconnectTrimmer,
     RepeatTrimmer,
@@ -416,6 +417,8 @@ class _Session:
         self._rejoiner: ReconnectTrimmer | None = None
         # Raw TS only: drops what a restart inside the connection sends twice.
         self._trimmer: RepeatTrimmer | None = None
+        # Raw TS only: drops what a provider replays while its own source is down.
+        self._loop_trimmer: LoopTrimmer | None = None
         # Raw TS only: re-bases a restarted run's timestamps so its clock runs on.
         self._clock_joiner: ClockJoiner | None = None
         self._timeline = Timeline()
@@ -577,6 +580,7 @@ class _Session:
             trimmer = self._trimmer = RepeatTrimmer(
                 program=program, clock=time.monotonic, join_counters=self._clock_joiner is None
             )
+            self._loop_trimmer = LoopTrimmer(program=program, clock=time.monotonic)
         ticking = self._hold_ticker(trimmer) if trimmer is not None else None
         try:
             try:
@@ -849,10 +853,16 @@ class _Session:
         self._send(_error(self.sid, kind, message, status))
 
     def _pass_on(self, pieces: list[bytes]) -> None:
-        """The trimmer's output, through the clock joiner, to the segmenter. Between two of
-        the trimmer's pieces a restarted run starts: the clock joiner re-bases it so its
-        timestamps run on, and between two of its pieces (or, without one, the trimmer's) the
-        segmenter cuts the new run a segment of its own."""
+        """The trimmer's output, through the loop trimmer and the clock joiner, to the
+        segmenter. Between two of the trimmer's pieces a restarted run starts (and between two
+        of the loop trimmer's, the new content after a loop it dropped): the clock joiner
+        re-bases it so its timestamps run on, and between two of its pieces (or, without one,
+        the trimmer's) the segmenter cuts the new run a segment of its own."""
+        loop = self._loop_trimmer
+        self._rebase(pieces if loop is None else loop.feed(pieces))
+
+    def _rebase(self, pieces: list[bytes]) -> None:
+        """Pieces through the clock joiner to the segmenter (see `_pass_on`)."""
         clock = self._clock_joiner
         for k, piece in enumerate(pieces):
             parts = [piece] if clock is None else clock.feed(piece, junction=k > 0)
@@ -863,7 +873,11 @@ class _Session:
                     self._to_segmenter(part)
 
     def _clock_end(self, reconnect: bool) -> None:
-        """The clock joiner's input ends (a reconnect follows, or the end): what it holds."""
+        """The loop trimmer's and the clock joiner's input ends (a reconnect follows, or the
+        end): what they hold."""
+        loop = self._loop_trimmer
+        if loop is not None:
+            self._rebase(loop.reconnect() if reconnect else loop.finish())
         clock = self._clock_joiner
         if clock is not None:
             tail = clock.discontinuity() if reconnect else clock.finish()

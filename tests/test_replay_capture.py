@@ -227,6 +227,30 @@ class ReplayCaptureTests(unittest.TestCase):
         self.assertEqual(rejoin["step_s"], -2.96)
         self.assertIn("reconnects: 1; in the old timebase, cut: -2.96 s", rc.report(after))
 
+    def test_a_provider_that_replays_its_last_nine_seconds_twice(self):
+        # The source dies after 20 s; the provider sends its last 9 s twice more under
+        # timestamps that run on, then new frames: the ring holds each frame once, and the live
+        # edge stands still while the loop arrives.
+        frames = [*range(20 * FPS), *range(11 * FPS, 20 * FPS), *range(11 * FPS, 20 * FPS)]
+        frames += range(20 * FPS, 30 * FPS)
+        runs = [(frames, 900000, backlogged)]
+        before = self.measure(runs, stages="noloop")
+        self.assertEqual(before["ring"]["frames_repeated"], 18 * FPS)
+        self.assertEqual(before["loops"], [])
+        after = self.measure(runs)
+        self.assertEqual(after["ring"]["frames_repeated"], 0)
+        self.assertEqual(after["ring"]["restarts"], 0)  # the clock runs on where it was cut
+        self.assertEqual(after["ring"]["junctions_rebased"], [(18.04, 0.04)])
+        self.assertEqual(after["ring"]["cc_breaks_unannounced"], 0)
+        (loop,) = after["loops"]
+        self.assertEqual(
+            (loop["back_s"], loop["dropped_s"], loop["ended_by"]), (9.0, 18.0, "keyframe")
+        )
+        (still,) = [(at, held) for at, held in after["edge_still"] if held > 5]
+        self.assertAlmostEqual(still[0], backlogged(20.0), delta=0.1)  # from the loop's start
+        self.assertAlmostEqual(still[1], 18.0, delta=0.2)  # until the new frames
+        self.assertIn("loops dropped", rc.report(after))
+
 
 if __name__ == "__main__":
     unittest.main()

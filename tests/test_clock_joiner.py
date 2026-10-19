@@ -206,6 +206,24 @@ class ClockJoinerTests(unittest.TestCase):
         self.assertEqual(joiner.offset_s, 0.0)
         self.assertEqual(len(out), len(old) + len(new))
 
+    def test_a_junction_before_any_picture_after_a_reconnect_follows_the_last_one(self):
+        # Where a loop the loop trimmer dropped across a reconnect ends: the new content is
+        # re-based onto the last picture before the reconnect, as after a pause. Once a
+        # picture passed after the reconnect, a junction follows that one instead.
+        joiner = ClockJoiner(program=lambda: (VIDEO_PID, 0x1B))
+        old = make_stream(5)
+        later = shift_pid(shift_pid(make_stream(5), VIDEO_PID, 40 * CLOCK), AUDIO_PID, 40 * CLOCK)
+        out = b"".join(joiner.feed(old)) + joiner.discontinuity()
+        out += b"".join(joiner.feed(later, junction=True)) + joiner.finish()
+        self.assertEqual(steps(times(out, VIDEO_PID)), {FRAME})
+        self.assertEqual(list(joiner.junctions), [(40 - 5 + FRAME / CLOCK, FRAME / CLOCK)])
+
+        joiner = ClockJoiner(program=lambda: (VIDEO_PID, 0x1B))
+        after = make_stream(3)
+        out = b"".join(joiner.feed(old)) + joiner.discontinuity() + b"".join(joiner.feed(after))
+        out += b"".join(joiner.feed(later, junction=True)) + joiner.finish()
+        self.assertEqual(list(joiner.junctions), [(40 - 3 + FRAME / CLOCK, FRAME / CLOCK)])
+
     def test_pes_without_the_optional_header_carry_no_time(self):
         # A padding stream (0xBE): its header has no flags byte to read as one.
         pkt = bytes([0x47, 0x41, 0x02, 0x10]) + b"\x00\x00\x01\xbe\x00\xb2" + b"\xc0\xc0" * 89

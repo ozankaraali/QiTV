@@ -84,6 +84,22 @@ class LoopedStreamTests(unittest.TestCase):
             breaks = [i for i, (a, b) in enumerate(itertools.pairwise(values)) if b != (a + 1) % 16]
             self.assertEqual(breaks, [], hex(pid))
 
+    def test_the_time_shift_helper_takes_no_pass_for_a_replay(self):
+        # Ten passes (two minutes) through the helper's loop trimmer pass on untouched: each
+        # pass marks its pictures, so none replays the seconds before it byte for byte.
+        from services.live.ts import LoopTrimmer
+
+        trimmer = LoopTrimmer(program=lambda: (0x100, 0x1B), clock=lambda: 0.0)
+        sent, passed = [], []
+        for _, chunk in itertools.islice(self.stream.chunks(), 10 * len(self.two_loops()[0])):
+            sent.append(chunk)
+            passed.extend(trimmer.feed([chunk]))
+        passed.extend(trimmer.finish())
+        self.assertEqual(list(trimmer.loops), [])
+        self.assertEqual(b"".join(passed), b"".join(sent))
+        marked = b"".join(chunk for _, chunk in self.two_loops()[1])
+        self.assertNotEqual(marked.count(b"\0\0\0\1\x09\xf0"), 300)  # the second pass is marked
+
     def test_chunks_are_due_at_their_media_time(self):
         first, second = self.two_loops()
         dues = [due for due, _ in first + second]
