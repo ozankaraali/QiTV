@@ -9,11 +9,12 @@ label's speaker mutes or unmutes the small picture without showing the mixer (on
 follows). The arrows are the arrow keys only (a remote's Ch± and PageUp/PageDown still zap),
 and ←/→ and Tab are the mixer's only with two rows (else they still seek).
 
-Levels and mutes belong to the streams (SessionManager): a swap moves each with its stream,
-so the rows trade values. Raising the small picture's level makes it audible; lowering a
-muted one keeps it muted. Config `pip_volume` is the small picture's level: the "pip"
-player's, saved (once the mixer hides) only from changes made while it is the small one,
-and given back to it at startup.
+Mutes belong to the streams (SessionManager); levels to the roles: the large picture plays
+at the main level and the small one at the PiP's, whichever stream has the role, so a swap
+or a focus moved in the grid changes no loudness. Raising the small picture's level makes it
+audible; lowering a muted one keeps it muted. Config `volume` is the main level and
+`pip_volume` the PiP's (2.2.1, optional; older builds ignore `volume`): saved once the mixer
+hides, from changes made to those rows, and given back at startup.
 
 While the multiview's grid shows, the rows are its tiles that play: the focused one first
 (it is the large picture: the keys act on it), then the others in the grid's order, each
@@ -32,7 +33,7 @@ from PySide6.QtCore import QObject, Qt
 
 from services.i18n import N_, tr, translate
 from services.redact import safe_message
-from services.sessions import PIP_LEVEL, SessionManager, Slot
+from services.sessions import MAIN_LEVEL, PIP_LEVEL, SessionManager, Slot
 from ui.keymap import Action
 from ui.overlays.mixer import MixerRow
 
@@ -82,13 +83,16 @@ class MixerControls(QObject):
         self._tiles = tiles
         self._row = MAIN_ROW
         self._pip_level: Optional[int] = None  # the small picture's changed level, to remember
+        self._main_level: Optional[int] = None  # the large picture's, to remember
         self._main_muted = False  # without a SessionManager: the player's own mute
 
     def wire(self) -> None:
         sessions, overlay = self.sessions, self._overlay
-        if sessions is not None:
-            level = getattr(self.config, "pip_volume", PIP_LEVEL)
-            sessions.set_level("pip", int(level))  # the PiP's remembered level
+        if sessions is not None:  # the remembered levels
+            main = getattr(self.config, "volume", MAIN_LEVEL)
+            sessions.set_role_levels(
+                main=int(main), pip=int(getattr(self.config, "pip_volume", PIP_LEVEL))
+            )
         if overlay is not None:
             overlay.levelRequested.connect(self._on_level)
             overlay.muteRequested.connect(self._on_mute)
@@ -182,16 +186,20 @@ class MixerControls(QObject):
             self._overlay.dismiss()  # closed → save()
 
     def save(self) -> None:
-        """Remember the "pip" player's level (config pip_volume) once it changed."""
+        """Remember the main and the PiP's levels (config volume, pip_volume) once changed."""
         sessions = self.sessions
-        level, self._pip_level = self._pip_level, None
-        if sessions is None or level is None:
+        main, self._main_level = self._main_level, None
+        pip, self._pip_level = self._pip_level, None
+        if sessions is None or (main is None and pip is None):
             return
-        self.config.pip_volume = level
+        if main is not None:
+            self.config.volume = main
+        if pip is not None:
+            self.config.pip_volume = pip
         try:
             self.config.save_config()
         except Exception as e:
-            logger.warning("Couldn't save the picture-in-picture volume: %s", safe_message(e))
+            logger.warning("Couldn't save the volume: %s", safe_message(e))
 
     # ---- the overlay --------------------------------------------------------------------------
 
@@ -259,8 +267,11 @@ class MixerControls(QObject):
         if slot is None or self.sessions is None:
             self._session().set_volume(level)
             return
-        self.sessions.set_level(slot.name, level)
-        if slot.name == "pip" and slot is self.sessions.small():
+        sessions = self.sessions
+        sessions.set_level(slot.name, level)
+        if slot is sessions.large():
+            self._main_level = level  # volume: the large picture's level, as set now
+        elif slot is sessions.small() and not sessions.grid():
             self._pip_level = level  # pip_volume: the small picture's level, as set now
 
     def _muted(self, row: int) -> bool:

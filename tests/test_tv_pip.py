@@ -1418,7 +1418,7 @@ class MixerTests(PipCase):
         self.controller.handle(Action.MUTE)
         self.assertFalse(self.sessions.muted("main"))
 
-    def test_a_swap_moves_each_level_with_its_stream(self):
+    def test_a_swap_keeps_each_rows_level_with_its_role(self):
         self.start_large(0)
         self.open_small(CHANNELS[1])
         self.controller.handle(Action.VOL_DOWN)
@@ -1429,11 +1429,11 @@ class MixerTests(PipCase):
         )
         self.mixer.levelRequested.emit(1, 40)  # raised: audible
         self.assertEqual(self.mixer.shown()[0][1], ("PiP", "Two", 40, False))
-        self.controller.handle(Action.SWAP)
+        self.controller.handle(Action.SWAP)  # as loud as before: the levels are the roles'
         self.assertEqual(
-            self.mixer.shown()[0], [("Main", "Two", 40, False), ("PiP", "One", 80, False)]
+            self.mixer.shown()[0], [("Main", "Two", 80, False), ("PiP", "One", 40, False)]
         )
-        self.assertEqual((self.session.level, self.pip_session.level), (80, 40))
+        self.assertEqual((self.session.level, self.pip_session.level), (40, 80))
 
     def open_pip_row(self):
         """Show the mixer on the PiP's row (+ at full volume changes nothing, then Tab)."""
@@ -1560,17 +1560,29 @@ class MixerTests(PipCase):
         self.mixer.dismiss()  # within the 3 s
         self.assertEqual((self.config.pip_volume, self.config.saves), (35, 1))
 
-    def test_the_pip_level_is_remembered_only_while_the_pip_player_is_small(self):
-        # Review M4 (ruling): pip_volume is the small picture's level.
+    def test_the_main_and_the_pip_levels_are_remembered_by_role(self):
+        # volume is the large picture's level and pip_volume the small one's, whichever
+        # player has the role.
         self.start_large(0)
         self.open_small(CHANNELS[1])
         self.controller.handle(Action.SWAP)  # the "pip" player is large now
-        self.controller.handle(Action.VOL_DOWN)  # Main: the "pip" player's level
+        self.controller.handle(Action.VOL_DOWN)  # Main: 100 -> 95
         self.mixer.dismiss()
-        self.assertEqual((self.config.pip_volume, self.config.saves), (30, 0))
+        self.assertEqual(
+            (self.config.volume, self.config.pip_volume, self.config.saves), (95, 30, 1)
+        )
         self.controller.handle(Action.SWAP)
+        self.assertEqual(self.sessions.level("main"), 95)  # large again, as loud
         self.open_pip_row()
         self.controller.handle(Action.CH_PREV, key=UP)
         self.mixer.dismiss()
-        self.assertEqual(self.config.saves, 1)
+        self.assertEqual(self.config.saves, 2)
         self.assertEqual(self.config.pip_volume, self.sessions.level("pip"))
+
+    def test_the_main_level_comes_back_at_startup(self):
+        self.config.volume = 45
+        self.config.pip_volume = 12
+        controller = self.make_controller(self.column, sessions=self.sessions)
+        controller.start()
+        self.assertEqual((self.sessions.level("main"), self.sessions.level("pip")), (45, 12))
+        self.assertEqual(self.session.level, 45)

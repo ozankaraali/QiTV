@@ -43,8 +43,10 @@ Audio follows the large picture: the PiP (and a tile) opens muted, and while the
 the large role is muted it takes the user's mute from the old large slot, which is muted in
 its place. Once the user makes a small slot audible (the mixer's PiP row raised above 0, or
 an explicit unmute), giving it the large role changes no mute: each stream keeps its own, so
-both stay audible; muting it again brings the default back. Each stream also has a volume
-level of its own, which always stays with it across role changes.
+both stay audible; muting it again brings the default back. The volume levels belong to the
+roles, as a TV's does: the large picture plays at the main level and the PiP at the PiP's
+(the shell remembers both), so a swap, a focus moved in the grid or a tile kept big changes
+no loudness; a tile without the focus has a level of its own while the grid shows.
 """
 
 from __future__ import annotations
@@ -187,18 +189,20 @@ class SessionManager(QObject):
         # What the last pipFailed stood for: the small stream's own failure (LiveSession's
         # message, a refusal one of REFUSALS); "" when its start raised or the budget refused.
         self.failure = ""
-        self._levels: dict[str, int] = {}
+        self._levels: dict[str, int] = {}  # a tile's own level while the grid shows
+        self._main_level = MAIN_LEVEL  # the large picture's
+        self._pip_level = PIP_LEVEL  # the PiP's (the small slot outside the grid)
         self._muted: dict[str, bool] = {}
         self._tuners: dict[str, SlotTuner] = {}
         self._grid = False  # the multiview's grid shows (enter_grid)
         self._sizes: Optional[tuple[int, int]] = None  # (focused, other) tile buffers
         self._direct: set[str] = set()  # the tiles open_slot opened directly, until they stop
         self._tile_opens: dict[str, _Open] = {}  # tiles waiting for a release or a slot
-        self._add(main, MAIN_LEVEL, muted=False)
+        self._add(main, PIP_LEVEL, muted=False)
         self._add(pip, PIP_LEVEL, muted=True)
         # A wanted level makes PlaybackSession apply it on every media it opens; without one
         # the main player takes whatever level its audio output opens at.
-        main.playback.set_volume(self._levels[main.name])
+        main.playback.set_volume(self._level_of(main))
 
     def add_slot(self, slot: Slot) -> None:
         """Another slot (a multiview tile's): muted, at the PiP's default level, until the
@@ -278,7 +282,7 @@ class SessionManager(QObject):
         """Give slot `name` the large role; False (and nothing changes) when it has it, or
         the PiP's channel change is still on its way.
 
-        No stream is played, stopped or started, and no level changes. The slot that was
+        No stream is played, stopped or started; each takes its new role's level. The slot that was
         large becomes the PiP's when `name` was the PiP's (a swap); else the PiP's slot
         stays. A muted slot taking the role takes the user's mute of the old large one,
         which is muted in its place; one the user made audible leaves both mutes as they are
@@ -295,6 +299,8 @@ class SessionManager(QObject):
             users_mute = self._muted[old.name]
             self._set_mute(old, True)
             self._set_mute(new, users_mute)
+        self._apply_level(new)  # the levels stay with the roles
+        self._apply_level(old)
         if self._grid:  # the buffer and stay-live follow the focus
             self._as_tile(new, focused=True)
             self._as_tile(old, focused=False)
@@ -330,6 +336,8 @@ class SessionManager(QObject):
         self._set_mute(large, True)  # the PiP is small and muted, as it opens
         self._set_mute(freed, users_mute)
         self._open = True
+        self._apply_level(freed)
+        self._apply_level(large)
         self.largeChanged.emit(freed.name, large.name)  # the shell trades what each shows first
         self.pipStateChanged.emit(True)
         return True
@@ -353,6 +361,8 @@ class SessionManager(QObject):
         self._sizes = (full_bytes, tile_bytes) if full_bytes > 0 and tile_bytes > 0 else None
         for slot in self._slots.values():
             if slot is not self._large:
+                if slot is self._small:  # the PiP's level goes with it into the grid
+                    self._levels[slot.name] = self._pip_level
                 self._as_tile(slot, focused=False)
 
     def leave_grid(self, keep: Optional[str] = None) -> None:
@@ -373,6 +383,7 @@ class SessionManager(QObject):
             self._background(slot, False)  # a PiP's stay-live steers as ever
         if keep is not None and keep != self._large.name:
             self._small = self._slot(keep)
+            self._apply_level(self._small)  # the PiP's level, now it is the PiP
             if sizes is not None:
                 self._resize(self._small, sizes[0])
             self._sizes = None
@@ -448,7 +459,7 @@ class SessionManager(QObject):
             raise TypeError(f"The {name} slot cannot open a channel directly")
         slot.channel = channel
         self._direct.add(name)
-        slot.playback.set_volume(self._levels[name])
+        slot.playback.set_volume(self._level_of(slot))
         self._set_mute(slot, self._muted[name])
         self.slotState.emit(name, True)
         open_(action, direct=True, provider=provider, limit=limit)
@@ -473,7 +484,7 @@ class SessionManager(QObject):
         slot = self._slot(opening.slot)
         stream = self._tuners[slot.name].stream
         assert stream is not None
-        slot.playback.set_volume(self._levels[slot.name])
+        slot.playback.set_volume(self._level_of(slot))
         self._set_mute(slot, self._muted[slot.name])
         kwargs = dict(opening.start_kwargs)
         size = self.tile_bytes(slot is self._large)  # the focus may have moved since
@@ -598,7 +609,7 @@ class SessionManager(QObject):
         opening = not self._open
         if opening:
             self._muted[slot.name] = True  # the PiP opens small and muted
-        slot.playback.set_volume(self._levels[slot.name])
+        slot.playback.set_volume(self._level_of(slot))
         # Asked for before it starts. A player that still has its audio output takes it at
         # once; after a stop, the next output comes up with the old one's state (muted by
         # _stop) and PlaybackSession applies this within ~30 ms of it opening.
@@ -650,19 +661,48 @@ class SessionManager(QObject):
         self._set_mute(self._slot(slot_name), muted)
 
     def level(self, slot_name: str) -> int:
-        return self._levels[slot_name]
+        """The level that slot plays at: its role's (module docstring)."""
+        return self._level_of(self._slot(slot_name))
 
     def set_level(self, slot_name: str, value: int) -> None:
-        """That stream's volume (0–100); raised on the small slot (or a tile that is not
-        focused), it unmutes it too."""
+        """The volume (0–100) of that slot's role: the main level for the large picture,
+        the PiP's for the small one, a tile's own for a tile without the focus. Raised on the
+        small slot (or a tile that is not focused), it unmutes it too."""
         slot = self._slot(slot_name)
         level = max(0, min(100, int(value)))
-        raised = level > self._levels[slot.name]
-        self._levels[slot.name] = level
+        raised = level > self._level_of(slot)
+        if slot is self._large:
+            self._main_level = level
+        elif self._grid:
+            self._levels[slot.name] = level
+        else:
+            self._pip_level = level
         slot.playback.set_volume(level)
         small = slot is self.small() or (self._grid and slot is not self._large)
         if raised and small:  # only raising it makes the PiP (or a tile) audible
             self._set_mute(slot, False)
+
+    def set_role_levels(self, *, main: int, pip: int) -> None:
+        """The main and the PiP's levels as remembered (0–100), applied to the slots that
+        have those roles now."""
+        self._main_level = max(0, min(100, int(main)))
+        self._pip_level = max(0, min(100, int(pip)))
+        for slot in self._slots.values():
+            self._apply_level(slot)
+
+    def role_levels(self) -> tuple[int, int]:
+        """(main, PiP): the levels to remember."""
+        return self._main_level, self._pip_level
+
+    def _level_of(self, slot: Slot) -> int:
+        if slot is self._large:
+            return self._main_level
+        if self._grid:
+            return self._levels[slot.name]
+        return self._pip_level
+
+    def _apply_level(self, slot: Slot) -> None:
+        slot.playback.set_volume(self._level_of(slot))
 
     def _set_mute(self, slot: Slot, muted: bool) -> None:
         self._muted[slot.name] = bool(muted)

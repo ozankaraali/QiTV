@@ -252,6 +252,8 @@ class SessionManagerTests(_Fixture):
             [
                 ("main", "player", "set_muted", True),
                 ("pip", "player", "set_muted", False),
+                ("pip", "player", "set_volume", 100),  # the large picture's level
+                ("main", "player", "set_volume", 30),  # the PiP's
                 ("manager", "large", "pip"),
             ],
         )
@@ -471,14 +473,25 @@ class LevelTests(_Fixture):
         self.manager.set_level("pip", -5)
         self.assertEqual((self.manager.level("main"), self.manager.level("pip")), (100, 0))
 
-    def test_a_swap_carries_each_level_with_its_stream(self):
+    def test_the_levels_stay_with_the_roles_across_a_swap(self):
         self.open_granted(B)
         self.manager.set_level("main", 80)
         self.manager.set_level("pip", 20)
         before = len(self.log)
+        self.manager.swap()  # the large picture stays as loud, the small one as quiet
+        self.assertEqual((self.manager.level("pip"), self.manager.level("main")), (80, 20))
+        volumes = [e for e in self.log[before:] if e[2] == "set_volume"]
+        self.assertEqual(
+            volumes, [("pip", "player", "set_volume", 80), ("main", "player", "set_volume", 20)]
+        )
+        self.assertEqual(self.manager.role_levels(), (80, 20))
+
+    def test_remembered_levels_go_to_the_roles(self):
+        self.open_granted(B)
+        self.manager.set_role_levels(main=55, pip=15)
+        self.assertEqual((self.manager.level("main"), self.manager.level("pip")), (55, 15))
         self.manager.swap()
-        self.assertEqual((self.manager.level("main"), self.manager.level("pip")), (80, 20))
-        self.assertFalse([e for e in self.log[before:] if e[2] == "set_volume"])
+        self.assertEqual((self.manager.level("pip"), self.manager.level("main")), (55, 15))
 
 
 class AudibleSmallTests(_Fixture):
@@ -490,8 +503,10 @@ class AudibleSmallTests(_Fixture):
         before = len(self.log)
         self.assertTrue(self.manager.swap())
         self.assertIs(self.manager.large(), self.pip)
-        self.assertEqual(self.log[before:], [("manager", "large", "pip")])
+        mutes = [e for e in self.log[before:] if e[2] == "set_muted"]
+        self.assertEqual(mutes, [])  # both stay audible
         self.assertEqual((self.manager.muted("main"), self.manager.muted("pip")), (False, False))
+        self.assertEqual((self.manager.level("pip"), self.manager.level("main")), (100, 40))
         self.manager.swap()
         self.assertEqual((self.manager.muted("main"), self.manager.muted("pip")), (False, False))
         self.assertEqual((self.last_mute("main"), self.last_mute("pip")), (False, False))

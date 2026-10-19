@@ -545,6 +545,22 @@ class MultiviewTests(MultiviewCase):
         self.assertEqual(self.grid.state("t2"), PLAYING)
         self.assertEqual(self.watch.plays[-1][1]["name"], "Three")
 
+    def test_the_focused_tile_and_the_big_picture_after_it_keep_the_main_level(self):
+        # Tile 2 is the PiP's player: a remembered quiet PiP level never makes it quiet once
+        # it has the focus, nor once it is the big picture.
+        self.sessions.set_role_levels(main=70, pip=0)
+        self.start_large(0)
+        self.session.stateChanged.emit("playing")
+        self.v()
+        tile = self.pick_in("pip", CHANNELS[2], "http://stream/3")
+        self.assertEqual((self.sessions.level("pip"), tile.playback.level), (70, 70))
+        self.assertEqual(self.sessions.level("main"), 30)  # a tile of its own, muted meanwhile
+        self.assertTrue(self.sessions.muted("main"))
+        self.v()  # leave: tile 2 is the big picture, tile 1 the PiP
+        self.assertIs(self.sessions.large(), tile)
+        self.assertEqual((self.sessions.level("pip"), tile.playback.level), (70, 70))
+        self.assertEqual((self.sessions.level("main"), self.session.level), (0, 0))
+
     def test_zapping_onto_a_channel_another_tile_shows_moves_the_focus_there(self):
         self.two_pictures()
         links = len(self.catalog.links)
