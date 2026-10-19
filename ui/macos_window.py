@@ -1,16 +1,21 @@
 """The TV window's Cocoa details: the overlay attached as a child window, so macOS moves it with
-the player (spec §5.7), and the keys given back to the window after a click on the video."""
+the player, the keys given back to the window after a click on the video, and for the desktop
+picture in picture (ui/desktop_pip.py) whether a window is on the desktop shown and a window
+that shows on every desktop."""
 
 import ctypes
 import ctypes.util
 import functools
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from PySide6.QtGui import QGuiApplication
 
 logger = logging.getLogger(__name__)
 _NS_WINDOW_ABOVE = 1
+# NSWindowCollectionBehavior: on every desktop (Space), and allowed beside a fullscreen window.
+_CAN_JOIN_ALL_SPACES = 1 << 0
+_FULL_SCREEN_AUXILIARY = 1 << 8
 
 
 @functools.cache
@@ -113,4 +118,37 @@ def attach_child_window(parent, child) -> bool:
         return True
     except Exception as e:  # never let a Cocoa detail break the player
         logger.debug("Could not attach the overlay as a child window: %s", e)
+        return False
+
+
+def on_active_space(widget) -> Optional[bool]:
+    """macOS: whether `widget`'s window is on a desktop (Space) shown now ([NSWindow
+    isOnActiveSpace]); None elsewhere, or when it cannot tell."""
+    if QGuiApplication.platformName() != "cocoa":
+        return None
+    try:
+        ns_window = _send(int(widget.winId()), b"window")
+        if not ns_window:
+            return None
+        return bool(_send(ns_window, b"isOnActiveSpace", ctypes.c_bool))
+    except Exception as e:  # never let a Cocoa detail break the player
+        logger.debug("Could not tell the window's desktop: %s", e)
+        return None
+
+
+def join_all_spaces(widget) -> bool:
+    """macOS: `widget`'s window shows on every desktop, beside a fullscreen one too, and stays
+    when QiTV is not the active app. Nothing happens elsewhere (False)."""
+    if QGuiApplication.platformName() != "cocoa":
+        return False
+    try:
+        ns_window = _send(int(widget.winId()), b"window")
+        if not ns_window:
+            return False
+        behavior = _CAN_JOIN_ALL_SPACES | _FULL_SCREEN_AUXILIARY
+        _send(ns_window, b"setCollectionBehavior:", None, (ctypes.c_ulong, behavior))
+        _send(ns_window, b"setHidesOnDeactivate:", None, (ctypes.c_bool, False))
+        return True
+    except Exception as e:  # never let a Cocoa detail break the player
+        logger.debug("Could not show the window on every desktop: %s", e)
         return False
