@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from typing import Final, List, Literal, Optional, Tuple
+from typing import Final, List, Literal, Optional
 
 PTS_TICKS_PER_SECOND = 90_000
 _PTS_MODULUS = 1 << 33
@@ -44,7 +44,6 @@ START_OPEN: Final = "open"
 # cut while the video was quiet, an audio-only stream's cut, or an H.264 picture whose first
 # slice is I or SI without RAI (its other slices may be P).
 START_NONE: Final = "none"
-START_QUALITIES: Final[Tuple[StartQuality, ...]] = (START_KEY, START_OPEN, START_NONE)
 
 
 def _pts_delta(a: int, b: int) -> int:
@@ -79,7 +78,6 @@ class Timeline:
         self._spans: List[Span] = []
         self._end = 0.0
         self._open: Optional[_Open] = None
-        self._next_seq = 0
         self._max_edge = 0.0
 
     # -- segment lifecycle -------------------------------------------------
@@ -127,7 +125,6 @@ class Timeline:
         span = Span(opened.seq, self._end, self._end + duration, discontinuity, start_quality)
         self._spans.append(span)
         self._end = span.end
-        self._next_seq = opened.seq + 1
         self._open = None
         return span
 
@@ -172,30 +169,6 @@ class Timeline:
             edge += min(max(progress, 0.0), _LIMIT)
         self._max_edge = max(self._max_edge, edge)
         return self._max_edge
-
-    def locate(self, t: float) -> Optional[Tuple[int, float]]:
-        """Segment seq and in-segment offset for ``t``, clamped to the closed spans.
-
-        None when nothing is closed yet. The open segment is not addressable, so
-        ``locate(live_edge(...))`` lands on the last closed span's end.
-        """
-        if not self._spans:
-            return None
-        t = min(max(t, self.start), self._end)
-        for span in self._spans:
-            if t < span.end:
-                return span.seq, t - span.start
-        last = self._spans[-1]
-        return last.seq, last.end - last.start
-
-    def seq_after(self, t: float) -> int:
-        """First buffered segment starting at or after ``t`` (else the next to come)."""
-        for span in self._spans:
-            if span.start >= t:
-                return span.seq
-        if self._open is not None:
-            return self._open.seq
-        return self._next_seq
 
     @staticmethod
     def _pts_seconds(a: Optional[int], b: Optional[int]) -> Optional[float]:

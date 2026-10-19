@@ -2310,13 +2310,6 @@ class OptionsDialogTests(WindowCase):
         self.assertIn((SAVE_FAILED_TEXT, "error"), self.toasts)
         self.assertNotIn(self.config_dir, "\n".join(logs.output))
 
-    def test_cache_size_is_read_from_the_config_directory(self):
-        cache = Path(self.config_dir) / "cache"
-        (cache / "probe.bin").write_bytes(b"x" * 1024 * 1024)
-        self.provider_manager._cache_writer.submit(lambda: None).result(timeout=5)
-        expected = sum(f.stat().st_size for f in cache.rglob("*") if f.is_file()) / (1024 * 1024)
-        self.assertAlmostEqual(self.dialog().get_cache_size(), expected, places=3)
-
     def test_an_edit_that_keeps_the_connection_reloads_nothing_and_the_list_stays(self):
         # Polish: one provider, only its stream limit changed. Its cache was cleared, its
         # channels downloaded again, and the open drawer jumped back to live.

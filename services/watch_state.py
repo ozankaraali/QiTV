@@ -107,10 +107,6 @@ class WatchState:
         if self._clock() - self._last_flush >= self._flush_interval_s:
             self.flush()
 
-    def clear_position(self, cid: str) -> None:
-        self.config.clear_playback_position(cid)
-        self.flush()
-
     def flush(self) -> None:
         self._save()
 

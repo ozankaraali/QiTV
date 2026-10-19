@@ -503,9 +503,6 @@ class FakeTransport(FakeOverlay):
     def update_timeline(self, state, ticks):
         self.record("update_timeline", state, ticks)
 
-    def show_live_edge(self, lag_s, catching_up):
-        self.record("show_live_edge", lag_s, catching_up)
-
     def update_position(self, position, length):
         self.record("update_position", position, length)
 

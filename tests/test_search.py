@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 from services import thread_cleanup
 from services.jobs import ImmediateRunner, JobRunner
 from services.provider_manager import ProviderManager
-from services.search import SearchWorker, build_index, search_caches, search_index
+from services.search import SearchWorker, build_index, search_index
 
 APP = QApplication.instance() or QApplication([])
 
@@ -22,17 +22,21 @@ def titles(hits, section=None):
     return [h.title for h in hits if section is None or h.section == section]
 
 
-class SearchCachesTests(unittest.TestCase):
+def search(caches, text, **kwargs):
+    return search_index(build_index(caches), text, **kwargs)
+
+
+class SearchTests(unittest.TestCase):
     def test_multi_term_matching(self):
         caches = [
             ("P", {"vod": [{"id": "1", "name": "Salt Roads (2024)"}, {"id": "2", "name": "Salt"}]})
         ]
-        self.assertEqual(titles(search_caches(caches, "salt road")), ["Salt Roads (2024)"])
-        self.assertEqual(titles(search_caches(caches, "road salt")), ["Salt Roads (2024)"])
+        self.assertEqual(titles(search(caches, "salt road")), ["Salt Roads (2024)"])
+        self.assertEqual(titles(search(caches, "road salt")), ["Salt Roads (2024)"])
 
     def test_accent_and_turkish_folding(self):
         caches = [("P", {"itv": {"contents": [{"id": "1", "name": "İstanbul Haber"}]}})]
-        hits = search_caches(caches, "istanbul")
+        hits = search(caches, "istanbul")
         self.assertEqual(titles(hits), ["İstanbul Haber"])
         self.assertEqual(hits[0].section, "live")
         self.assertEqual(hits[0].provider, "P")
@@ -51,13 +55,13 @@ class SearchCachesTests(unittest.TestCase):
             )
         ]
         self.assertEqual(
-            titles(search_caches(caches, "night")), ["Night Road", "The Night Road", "Road Night"]
+            titles(search(caches, "night")), ["Night Road", "The Night Road", "Road Night"]
         )
 
     def test_dedupes_across_stb_groups(self):
         item = {"id": "7", "name": "Dup Movie"}
         caches = [("P", {"vod": {"contents": {"g1": [item], "g2": [dict(item)]}}})]
-        self.assertEqual(titles(search_caches(caches, "dup")), ["Dup Movie"])
+        self.assertEqual(titles(search(caches, "dup")), ["Dup Movie"])
 
     def test_cache_shapes(self):
         caches = [
@@ -70,7 +74,7 @@ class SearchCachesTests(unittest.TestCase):
                 },
             )
         ]
-        hits = search_caches(caches, "alpha")
+        hits = search(caches, "alpha")
         self.assertEqual(
             [(h.section, h.title) for h in hits],
             [("live", "Alpha live"), ("movies", "Alpha film"), ("series", "Alpha show")],
@@ -88,17 +92,17 @@ class SearchCachesTests(unittest.TestCase):
                 },
             )
         ]
-        self.assertEqual(titles(search_caches(caches, "alpha")), ["Alpha one"])
+        self.assertEqual(titles(search(caches, "alpha")), ["Alpha one"])
 
     def test_per_section_limit(self):
         items = [{"id": str(i), "name": f"Movie {i}"} for i in range(10)]
-        hits = search_caches([("P", {"vod": items})], "movie", limit_per_section=3)
+        hits = search([("P", {"vod": items})], "movie", limit_per_section=3)
         self.assertEqual(len(hits), 3)
 
     def test_short_query_gives_nothing(self):
         caches = [("P", {"vod": [{"id": "1", "name": "A film"}]})]
-        self.assertEqual(search_caches(caches, "a"), [])
-        self.assertEqual(search_caches(caches, "  "), [])
+        self.assertEqual(search(caches, "a"), [])
+        self.assertEqual(search(caches, "  "), [])
 
 
 class IndexTests(unittest.TestCase):
@@ -106,17 +110,17 @@ class IndexTests(unittest.TestCase):
         caches = [
             ("P", {"vod": {"contents": {"a": 5, "b": None, "c": "x"}}, "itv": {"contents": 7}})
         ]
-        self.assertEqual(search_caches(caches, "foo"), [])
+        self.assertEqual(search(caches, "foo"), [])
         self.assertEqual(build_index(caches), [])
 
-    def test_prebuilt_index_matches_search_caches(self):
+    def test_index_folds_titles_once_and_drops_duplicates(self):
         caches = [
             ("P", {"vod": [{"id": "1", "name": "İstanbul Film"}, {"id": "1", "name": "dup"}]})
         ]
         index = build_index(caches)
         self.assertEqual(len(index), 1)
         self.assertEqual(index[0][2], "istanbul film")
-        self.assertEqual(search_index(index, "istanbul"), search_caches(caches, "istanbul"))
+        self.assertEqual(titles(search_index(index, "istanbul")), ["İstanbul Film"])
 
     def test_large_index_no_match_is_fast(self):
         items = [{"id": str(i), "name": f"Night Road Salt Film {i}"} for i in range(75000)]

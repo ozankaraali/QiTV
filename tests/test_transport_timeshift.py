@@ -238,10 +238,6 @@ class TimeShiftCase(unittest.TestCase):
         self.assertEqual(t.texts()[1], "Stay live ● ≈ 3 s behind source · catching up 1.05×")
         t.update_timeline(at_edge(lag=2.6, rate=1.0), PROGRAMME)
         self.assertEqual(t.texts()[1], "Stay live ● ≈ 2.5 s behind source")
-        t.show_live_edge(3.0, True)
-        self.assertIn("catching up", t.texts()[1])
-        t.show_live_edge(0.9, False)
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● ≈ 1 s behind source"))
 
     def test_the_indicator_shows_the_settled_lag_and_the_nudge_not_its_ramp(self):
         # 2.1: the session's "shown" lag (settled, in half seconds) is what the row reads, and
@@ -293,9 +289,6 @@ class TimeShiftCase(unittest.TestCase):
         self.assertEqual(t.texts()[1], "Stay live ● Reconnecting…")
         t.update_timeline(dict(at_edge(lag=2.6), target=2.5), PROGRAMME)  # a fixed latency
         self.assertEqual(t.texts()[1], "Stay live ● ≈ 2.5 s behind source")
-        t.update_timeline(dict(at_edge(lag=4.9), **auto), PROGRAMME)
-        t.show_live_edge(1.2, False)  # no timeline: the lag, as before
-        self.assertEqual(t.texts()[1], "Stay live ● ≈ 1 s behind source")
 
     def test_a_narrow_transport_shortens_the_auto_text_as_the_others(self):
         t = self.make()
@@ -339,12 +332,6 @@ class TimeShiftCase(unittest.TestCase):
         t.update_timeline(timeline(stalled=True), PROGRAMME)
         self.assertEqual(t.texts(), ("Buffer from 18:44", "−00:38 behind live"))
 
-    def test_show_live_edge_drops_the_bar(self):
-        t = self.shifted()
-        t.show_live_edge(1.2, False)
-        self.assertNotIn("seek", t._layout())
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● ≈ 1 s behind source"))
-
     def test_live_mode_shows_the_edge_row_whatever_the_lag(self):
         # After Go live on a long-GOP source the lag sits above the target while stay-live closes it.
         t = self.shifted()
@@ -386,8 +373,6 @@ class TimeShiftCase(unittest.TestCase):
             t.update_timeline(timeline(lag=bad), PROGRAMME)
             self.assertEqual(t.texts()[1], "−00:00 behind live", bad)
             self.assertFalse(t.grab().isNull())
-        t.show_live_edge(float("inf"), False)
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● ≈ 0 s behind source"))
 
     def test_tick_labels_elide_and_never_overlap(self):
         t = self.make()

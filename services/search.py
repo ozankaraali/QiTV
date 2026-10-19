@@ -91,12 +91,6 @@ def search_index(
     return hits
 
 
-def search_caches(
-    caches: list[tuple[str, dict]], text: str, *, limit_per_section: int = LIMIT_PER_SECTION
-) -> list[Hit]:
-    return search_index(build_index(caches), text, limit_per_section=limit_per_section)
-
-
 class SearchWorker(QObject):
     """JobRunner worker: gathers every provider's cached content (a catalog's own in memory, else
     the disk) unless given, then searches."""

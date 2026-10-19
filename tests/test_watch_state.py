@@ -17,7 +17,6 @@ def make_config():
         last_live_channel=None,
         history=[],
         saves=0,
-        cleared=[],
     )
     cfg.add_to_watch_history = lambda item, t, link, p, content_id=None: cfg.history.append(
         (item, t, link, p)
@@ -25,10 +24,6 @@ def make_config():
     cfg.save_config = lambda retry=True: setattr(cfg, "saves", cfg.saves + 1)
     cfg.save_playback_position = lambda cid, pos, dur: cfg.playback_positions.__setitem__(
         cid, {"position": pos, "duration": dur}
-    )
-    cfg.clear_playback_position = lambda cid: (
-        cfg.cleared.append(cid),
-        cfg.playback_positions.pop(cid, None),
     )
     return cfg
 
@@ -105,12 +100,6 @@ class WatchStateTests(unittest.TestCase):
         self.ws.update_position("c", 30000, 100000)
         self.assertEqual(self.cfg.saves, 1)
         self.assertEqual(self.cfg.playback_positions["c"]["position"], 30000)
-
-    def test_clear_position_saves(self):
-        self.cfg.save_playback_position("c", 10000, 100000)
-        self.ws.clear_position("c")
-        self.assertEqual(self.cfg.cleared, ["c"])
-        self.assertEqual(self.cfg.saves, 1)
 
     def test_flush_always_saves(self):
         self.ws.flush()

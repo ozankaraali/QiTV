@@ -673,14 +673,3 @@ class ConfigManager:
             "timestamp": datetime.now().isoformat(),
         }
         self.playback_positions = positions
-
-    def clear_playback_position(self, content_id: str) -> None:
-        """Clear saved playback position for content.
-
-        Args:
-            content_id: Unique content identifier
-        """
-        positions = self.playback_positions or {}
-        if content_id in positions:
-            del positions[content_id]
-            self.playback_positions = positions

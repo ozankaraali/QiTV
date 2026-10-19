@@ -325,17 +325,6 @@ class Transport(Overlay):
         self.update()
         self._controls_changed()
 
-    def show_live_edge(self, lag_s: float, catching_up: bool) -> None:
-        """Show the live-edge indicator instead of the bar; never changes visibility."""
-        self._live = self._timeshift = True
-        self._edge = True
-        self._edge_lag = SettledLag.rounded(_seconds(lag_s))
-        self._auto = None
-        self._catching_up = catching_up
-        self._stalled = False
-        self.update()
-        self._controls_changed()
-
     def update_position(self, position_ms: int, length_ms: int) -> None:
         self._position = max(0, position_ms)
         self._length = max(0, length_ms)
