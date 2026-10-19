@@ -26,7 +26,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QContextMenuEvent, QGuiApplication, QKeySequence
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMenu
+from PySide6.QtWidgets import QApplication, QMenu, QWidget
 from timer_fixtures import elapse, wait_until
 
 import main as qitv_main
@@ -1900,6 +1900,54 @@ class DrawerSettingsTests(WindowCase):
         QTest.mouseClick(self.window.windowHandle(), Qt.MouseButton.LeftButton, pos=inside)
         self.assertEqual(heard.events, [])
         self.assertEqual(self.window.library_controller.mode, "search")
+
+    def click_where_search_was(self, open_search):
+        """`open_search()`, then at once a click where the drawer's ⌕ was; the mouse events the
+        Library's widget there heard."""
+        self.show()
+        drawer = self.wait_for_drawer()
+        host = drawer.window()
+        at = host.mapToGlobal(drawer.mapTo(host, drawer.search_rect().center().toPoint()))
+        open_search()
+        self.assertTrue(self.window.screens.library_shown())
+        inside = self.window.mapFromGlobal(at)
+        under = self.window.childAt(inside)
+        self.assertIsNotNone(under)
+        heard = MouseHeard(under)
+        QTest.mouseClick(self.window.windowHandle(), Qt.MouseButton.LeftButton, pos=inside)
+        self.assertEqual(self.window.library_controller.mode, "search")
+        return heard.events
+
+    def test_a_click_right_after_a_key_opened_the_search_reaches_the_library(self):
+        # A key makes no double-click: the next click is aimed at the Library (only the second
+        # click of a click that showed it, as on ⌕ above, reaches nothing).
+        ctrl_f = (self.window, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+        events = self.click_where_search_was(lambda: QTest.keyClick(*ctrl_f))
+        self.assertEqual(events, [QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease])
+
+    def test_a_click_right_after_the_menu_opened_the_search_reaches_the_library(self):
+        events = self.click_where_search_was(self.menu_actions()["Search"].trigger)
+        self.assertEqual(events, [QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease])
+
+    def test_a_closing_window_keeps_no_click_off_another_window(self):
+        # The second-click guard filters the whole application. A window closed within the
+        # double-click interval of its last page move swallowed the first click on the next
+        # window (a test's last move, the next test's ‹ Library: CI, a fast runner).
+        other = QWidget()
+        self.addCleanup(other.deleteLater)
+        self.addCleanup(other.close)
+        other.resize(200, 200)
+        other.show()
+        self.assertTrue(QTest.qWaitForWindowExposed(other))
+        heard = MouseHeard(other)
+        self.show()
+        self.wait_for_drawer()
+        self.window.screens.open_library("movies")  # as the drawer's Movies row: armed
+        self.window.close()  # its first step lets go of the second click
+        QTest.mouseClick(other.windowHandle(), Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+        self.assertEqual(
+            heard.events, [QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease]
+        )
 
     def test_the_drawers_open_file_row_opens_a_file(self):
         # Ctrl/⌘+O without the menu bar (hidden in fullscreen on Windows and Linux).

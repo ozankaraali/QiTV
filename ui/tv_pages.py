@@ -14,8 +14,9 @@ overlay host, and its toast, hide with the player page.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
-from typing import Optional
+from typing import Iterator, Optional
 
 from PySide6.QtCore import QObject, QPoint
 from PySide6.QtWidgets import QFileDialog, QWidget
@@ -42,8 +43,9 @@ class TVPages(QObject):
         super().__init__(parent)
         self._window = window
         self._return_to_library = False  # the movie playing came from the Library
-        # After ‹ Library, ⌕ and the Movies/Series rows: see back_to_library.
+        # After ‹ Library, ⌕ and the Movies/Series rows: see _guard_second_click.
         self._second_click = SecondClickGuard(self)
+        self._keyed = False  # a key or a menu item moves the pages: see from_keys
         self.library_model = LibraryModel(
             window.library_catalog, window.config_manager, window.watch, self
         )
@@ -92,15 +94,38 @@ class TVPages(QObject):
             stack.show_player()
         window.menus.set_player_enabled(not library)
 
+    def _guard_second_click(self) -> None:
+        """A click just showed another page: a double-click's second click would land on
+        whatever that page shows under the pointer, so for the double-click interval it reaches
+        nothing (SecondClickGuard). A key or a menu item makes no double-click (from_keys):
+        the next click is the user's own and reaches the page."""
+        if not self._keyed:
+            self._second_click.arm()
+
+    @contextmanager
+    def from_keys(self) -> Iterator[None]:
+        """The page moves made inside come from a key or a menu item (TVWindow's keys, the
+        menus' entries and their shortcuts): no second click follows them."""
+        keyed, self._keyed = self._keyed, True
+        try:
+            yield
+        finally:
+            self._keyed = keyed
+
+    def shutdown(self) -> None:
+        """The window closes: the guard, which filters the whole application, lets go now
+        (another window's next click is not this one's second click)."""
+        self._second_click.disarm()
+
     def back_to_player(self) -> None:
         """⤢, a click on the corner player: the player page again, what plays as it was.
 
         A double-click's second click would land on the player page under the pointer (a
-        double-click there toggles fullscreen): it reaches nothing (see back_to_library).
+        double-click there toggles fullscreen): it reaches nothing (_guard_second_click).
         """
         if not self._window.closing() and self._window.pages.mode() == PageStack.CORNER:
             self._show_page(self._window.player_page)
-            self._second_click.arm()
+            self._guard_second_click()
 
     def stop_corner(self) -> None:
         """× on the corner player: what plays stops (today's stop for the Library) and the
@@ -112,21 +137,21 @@ class TVPages(QObject):
         self._set_return_to_library(False)
         window.controller.stop_for_library()
         self._show_page(window.library_page)
-        self._second_click.arm()
+        self._guard_second_click()
 
     def open_library(self, section: str) -> None:
         """Movies or Series: what plays goes on in a corner of the Library (nothing playing: the
         Library has the whole window).
 
         From the channel list's Movies and Series rows the Library shows at once, so a
-        double-click's second click reaches nothing (see back_to_library). Keys and the menu
-        arm the guard too: only a click within the double-click interval is dropped.
+        double-click's second click reaches nothing (_guard_second_click); after a key or
+        the menu the next click reaches the Library.
         """
         if self._window.closing():
             return
         self._enter_library()
         self.library_controller.open(section)
-        self._second_click.arm()
+        self._guard_second_click()
 
     def open_search(self) -> None:
         """The quick search: from ⌕ (the player controls, the guide, the channel list) a
@@ -135,7 +160,7 @@ class TVPages(QObject):
             return
         self._enter_library()
         self.library_controller.open_search()
-        self._second_click.arm()
+        self._guard_second_click()
 
     def _enter_library(self) -> None:
         window = self._window
@@ -213,7 +238,7 @@ class TVPages(QObject):
         """
         if not self._window.closing() and self._can_return():
             self._enter_library()
-            self._second_click.arm()
+            self._guard_second_click()
 
     def _can_return(self) -> bool:
         """The title playing, on its way or failed came from the Library, and no live channel

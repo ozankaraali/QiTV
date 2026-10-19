@@ -149,7 +149,7 @@ class TVMenus(QObject):
         window = self._window
         action = QAction(text, window)
         action.setMenuRole(role)
-        action.triggered.connect(lambda _checked=False: slot())
+        action.triggered.connect(lambda _checked=False: self._run(slot))
         menu.addAction(action)
         if not shortcut:
             return action
@@ -164,6 +164,11 @@ class TVMenus(QObject):
             # keyPressEvent (the drawer types "f", "m" and " ", and Return activates).
             action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
         return action
+
+    def _run(self, slot: Callable[[], Any]) -> None:
+        """A menu entry or its shortcut: a page it shows gets no second click (TVPages)."""
+        with self._window.screens.from_keys():
+            slot()
 
     def _handler(self, action: Action) -> Callable[[], None]:
         return lambda: self._window.controller.handle(action)

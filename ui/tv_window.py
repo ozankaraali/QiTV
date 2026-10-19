@@ -627,6 +627,10 @@ class TVWindow(QMainWindow):
             return
         action, payload = resolved
         event.accept()
+        with self.screens.from_keys():  # a page a key shows gets no second click
+            self._act(action, payload, key=as_int(event.key()))
+
+    def _act(self, action: Action, payload: str, key: int) -> None:
         if action is Action.ESCAPE and self.exports.cancel():
             return  # Esc while exporting cancels the export
         if self.screens.library_shown():
@@ -639,7 +643,7 @@ class TVWindow(QMainWindow):
             return
         if action is Action.ESCAPE and self.screens.escape_to_library():
             return
-        self.controller.handle(action, payload, key=as_int(event.key()))
+        self.controller.handle(action, payload, key=key)
 
     def _on_video_clicked(self) -> None:
         if self._dragged:  # the press moved the mini player
@@ -1164,6 +1168,7 @@ class TVWindow(QMainWindow):
     def _shut_down(self) -> None:
         self.epg_refresh.stop()
         self._run_steps(
+            ("let the next click through", self.screens.shutdown),
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
             ("stop the live pipeline", self.stop_live),
