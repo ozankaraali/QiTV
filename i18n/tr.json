@@ -290,6 +290,7 @@
   "Iceland": "İzlanda",
   "Import": "İçe aktar",
   "In sync": "Senkronize",
+  "In the window that opens, drag QiTV onto Applications and choose Replace.\n\nNot Now keeps the update in your Downloads folder.": "Açılan pencerede QiTV'yi Uygulamalar klasörüne sürükleyin, sonra “Değiştir” düğmesine basın.\n\n“Şimdi değil” derseniz güncelleme İndirilenler klasörünüzde bekler.",
   "India": "Hindistan",
   "Indonesia": "Endonezya",
   "International": "Uluslararası",
@@ -436,6 +437,7 @@
   "North Korea": "Kuzey Kore",
   "North Macedonia": "Kuzey Makedonya",
   "Norway": "Norveç",
+  "Not Now": "Şimdi değil",
   "Nothing here": "Burada bir şey yok",
   "Nothing is loaded in this section yet.": "Bu bölümde henüz yüklenen bir şey yok.",
   "Nothing matches “{query}”": "“{query}” ile eşleşen bir şey yok",
@@ -516,6 +518,7 @@
   "QiTV is already using all {n} streams your account allows": {
     "other": "QiTV, hesabınızın izin verdiği {n} yayının hepsini zaten kullanıyor"
   },
+  "QiTV will close and open the update.": "QiTV kapanacak ve güncellemeyi açacak.",
   "QiTV's other picture is using the account's only stream": "Hesabın tek yayınını QiTV'nin diğer resmi kullanıyor",
   "Quit": "Çık",
   "R or the record button on the player controls records the live channel you watch, from where you watch it, into this folder. Only channels with time-shift can be recorded; a recording needs no second stream.": "R tuşu ya da oynatıcı kontrollerindeki kayıt düğmesi, izlediğiniz canlı kanalı izlediğiniz yerden başlayarak bu klasöre kaydeder. Yalnızca zaman kaydırması olan kanallar kaydedilebilir; kayıt için ikinci bir yayın gerekmez.",
@@ -728,6 +731,7 @@
   "Update Check Failed": "Güncelleme denetimi başarısız",
   "Update Downloaded": "Güncelleme indirildi",
   "Update Failed": "Güncelleme başarısız",
+  "Update Now": "Şimdi güncelle",
   "Update downloaded successfully!": "Güncelleme başarıyla indirildi!",
   "Uruguay": "Uruguay",
   "Use disk for a longer time-shift buffer.\nQiTV deletes the oldest data automatically and cleans up when you stop, change channel or quit.": "Daha uzun bir zaman kaydırma arabelleği için diski kullan.\nQiTV en eski verileri kendiliğinden siler; durdurduğunuzda, kanal değiştirdiğinizde ya da çıktığınızda da temizler.",

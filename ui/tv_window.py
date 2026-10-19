@@ -605,8 +605,8 @@ class TVWindow(QMainWindow):
         self.catalogs.contentChanged.connect(self.finder.content_changed)
         self.catalogs.providersChanged.connect(self.finder.content_changed)
         self.overlays.drawer.libraryFindRequested.connect(self.screens.open_search)
-        # A Windows self-update waits for background threads: the engine's must stop first,
-        # and start again if the update cannot launch.
+        # A self-update (Windows, a macOS disk image) waits for background threads: the
+        # engine's must stop first, and start again if the update cannot launch.
         call_before_update(self.stop_live, self.restart_live)
         sources = (*self.surfaces.values(), self.host)
         # The pointer over the video goes with the player controls (and comes back on a move).

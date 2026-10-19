@@ -15,7 +15,7 @@ Version 2.0 works like a TV: the channel fills the window, ↑ and ↓ change ch
 Download QiTV from [RELEASES](https://github.com/ozankaraali/QiTV/releases):
 
 - **Windows:** `qitv-windows.exe`. Run it; there is nothing to install.
-- **macOS:** `qitv-macos-universal.zip` for Apple silicon Macs, `qitv-macos-intel.zip` for Intel Macs. Unzip it and move QiTV to Applications. QiTV needs macOS 13 or newer. QiTV is not notarized by Apple, so the first time macOS may say it cannot check the app: open System Settings → Privacy & Security and choose **Open Anyway**.
+- **macOS:** `qitv-macos-universal.dmg` for Apple silicon Macs, `qitv-macos-intel.dmg` for Intel Macs. Open it and drag QiTV onto Applications (the same app also comes as a `.zip`). To update, Help → Check for Updates downloads the new `.dmg`, opens it and closes QiTV: drag QiTV onto Applications again and choose **Replace**. QiTV needs macOS 13 or newer. QiTV is not notarized by Apple, so the first time macOS may say it cannot check the app: open System Settings → Privacy & Security and choose **Open Anyway**.
 - **Linux:** `qitv-linux`. Make it runnable with `chmod +x qitv-linux`, then start it.
 
 VLC comes inside QiTV: you do not need to install VLC to use it.
