@@ -9,6 +9,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 import threading
 import time
@@ -139,6 +140,80 @@ class CaptureFileTests(unittest.TestCase):
         capture.write(b"abc")
         capture.close()
         self.assertEqual(len(captures(nested)), 1)
+        if os.name == "posix":
+            self.assertEqual(stat.S_IMODE(os.stat(nested).st_mode), 0o700)
+
+    @unittest.skipUnless(os.name == "posix", "file modes are POSIX")
+    def test_the_files_are_readable_by_their_owner_only(self):
+        capture = self.capture()
+        capture.write(b"abc")
+        capture.close()
+        (name,) = captures(self.root)
+        for suffix in (".ts", ".times"):
+            mode = os.stat(Path(self.root) / f"{name}{suffix}").st_mode
+            self.assertEqual(stat.S_IMODE(mode), 0o600, suffix)
+
+    def on_disk(self, capture):
+        """What the capture's two files hold on disk now (its buffers left as they are)."""
+        base = Path(self.root) / capture.name
+        return base.with_suffix(".ts").read_bytes(), base.with_suffix(".times").read_text()
+
+    def test_a_mark_flushes_both_files(self):
+        capture = self.capture()
+        capture.write(b"abc", capture._opened)
+        self.assertEqual(self.on_disk(capture), (b"", ""))  # buffered
+        capture.mark("reconnect")
+        data, times = self.on_disk(capture)
+        self.assertEqual(data, b"abc")
+        self.assertRegex(times, r"^3 0\.000\n# reconnect \d+\.\d{3}\n$")
+
+    def test_a_read_a_second_after_the_last_flush_flushes_both_files(self):
+        capture = self.capture()
+        opened = capture._opened
+        capture.write(b"abc", opened + 0.2)
+        capture.write(b"def", opened + 0.9)
+        self.assertEqual(self.on_disk(capture), (b"", ""))
+        capture.write(b"ghi", opened + 2.5)  # after a stall
+        self.assertEqual(self.on_disk(capture), (b"abcdefghi", "3 0.200\n6 0.900\n9 2.500\n"))
+        capture.write(b"jkl", opened + 2.6)
+        self.assertEqual(self.on_disk(capture)[0], b"abcdefghi")
+
+    def test_flush_from_another_thread_never_waits_for_the_reading_thread(self):
+        capture = self.capture()
+        capture.write(b"abc")
+        with capture._lock:  # the reading thread is writing: left to it
+            flushing = threading.Thread(target=capture.flush)
+            flushing.start()
+            flushing.join(1.0)
+            self.assertFalse(flushing.is_alive())
+        self.assertEqual(self.on_disk(capture)[0], b"")
+        flushing = threading.Thread(target=capture.flush)
+        flushing.start()
+        flushing.join(1.0)
+        data, times = self.on_disk(capture)
+        self.assertEqual(data, b"abc")
+        self.assertRegex(times, r"^3 \d+\.\d{3}\n$")
+        capture.write(b"def")  # still open: the reading thread closes it
+        capture.close()
+        self.assertEqual(self.on_disk(capture)[0], b"abcdef")
+
+    def test_closing_the_source_flushes_its_capture(self):
+        for method in ("close", "wait_closed"):
+            with self.subTest(method=method):
+                capture = self.capture()
+                http = source_module._Http({}, True, threading.Event())
+                self.addCleanup(http.close)
+                source = source_module.TsSource(
+                    http, "http://host.invalid/1.ts", None, b"", capture=capture
+                )
+                capture.write(b"abc")
+                self.assertEqual(self.on_disk(capture)[0], b"")
+                if method == "close":
+                    source.close()
+                else:
+                    source.wait_closed(0.0)
+                self.assertEqual(self.on_disk(capture)[0], b"abc")
+                capture.close()
 
     def test_the_size_cap_stops_the_capture_once(self):
         capture = self.capture()
