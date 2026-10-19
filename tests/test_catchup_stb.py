@@ -123,6 +123,25 @@ class OfferTests(StbCase):
         self.assertEqual(state["buffer_start"], 3000.0)  # the dashed part before the buffer
         self.assertEqual(self.controller.archive_days(ARCHIVED), 7)  # the guide's reach
 
+    def test_without_the_portals_guide_a_marked_channel_rewinds_as_before(self):
+        self.catalog.epg[11] = [Programme("From a file", NOW - HALF, NOW + HALF)]  # XMLTV's
+        self.start_live()
+        self.controller.mouse_moved()
+        state, _ticks = self.transport.named("update_timeline")[-1]
+        self.assertNotIn("buffer_start", state)  # no dashed part: nothing could play there
+        self.controller.handle(Action.SEEK_BACK)
+        self.assertEqual(self.live.named("seek_relative"), [(-10.0,)])
+        self.assertEqual(self.archive_links, [])
+        self.assertNotIn((NOT_RECORDED_TEXT, "info"), self.toast.messages())
+
+    def test_without_any_guide_a_marked_channel_rewinds_as_before(self):
+        self.catalog.epg[11] = []  # the channel guide is off, or lists nothing for it
+        self.start_live()
+        self.transport.seekToRequested.emit(1500.0)
+        self.assertEqual(self.archive_links, [])
+        self.assertNotIn((NOT_RECORDED_TEXT, "info"), self.toast.messages())
+        self.assertEqual(self.live.named("seek_to")[-1], (1500.0,))
+
     def test_a_channel_not_marked_rewinds_as_before(self):
         self.start_live(PLAIN)
         self.controller.mouse_moved()

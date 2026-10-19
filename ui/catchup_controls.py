@@ -3,7 +3,8 @@ provider's archive plays.
 
 A channel whose provider keeps an archive of it (`services.catchup.archive_of`) offers it
 (`offered`) unless its archive did not answer lately (`services.catchup_memory`), the
-multiview's grid shows or an external player plays the channels. Then:
+multiview's grid shows or an external player plays the channels (an STB portal's channel, also
+unless the guide is not the portal's own: only that one names its recordings). Then:
 - the time-shift bar reaches `EXTEND_S` further back than the buffer (`extend`: its start moves
   back, `buffer_start` says where the buffer starts; the transport draws that part dashed);
   a seek there, a step back past the buffer's start (←, ◀10) and ⏮ to a programme that began
@@ -65,7 +66,7 @@ not recorded yet: the programme on now).
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import time
 from typing import Any, Callable, Optional
@@ -119,6 +120,7 @@ QUICK_S = 6.0  # VLC failing within this of its open, unprobed, is the archive's
 SHORT_S = 30.0  # a stretch that ends sooner than this after its moment has nothing more
 NO_LEARN_S = 15 * 60.0  # a failure at a moment newer than this teaches nothing
 TICK_MS = 1000  # the bar's refresh while it opens or is paused (positions come while it plays)
+GUIDE_CHECK_S = 15.0  # whether the guide names an STB channel's recordings, asked again after
 PURPOSE = "probe"
 
 
@@ -201,6 +203,9 @@ class CatchUp(QObject):
         self._probing = False
         self._asked: Optional[_Ask] = None  # the newest ask a running probe answers
         self._linking: Optional[_Ask] = None  # an STB recording's ask whose link is on its way
+        # By channel key: when it was asked (the clock's) whether the guide names the STB
+        # channel's recordings, and the answer (`_guide_names_recordings`).
+        self._named: dict[str, tuple[float, bool]] = {}
         self._key: tuple[Optional[dict], str, str] = (None, "", "")  # item, provider, its key
         self._timer = QTimer(self, interval=TICK_MS)
         self._timer.timeout.connect(self._tick)
@@ -247,9 +252,10 @@ class CatchUp(QObject):
 
     def reset(self) -> None:
         """Another title plays large (a zap, a film): its archive, a probe and a link on its
-        way are forgotten."""
+        way are forgotten, and whether the guide names a channel's recordings is asked anew."""
         self._generation += 1
         self._probing, self._asked, self._linking = False, None, None
+        self._named.clear()
         self._set_playing(None)
 
     # ---- what a channel offers ------------------------------------------------------------
@@ -280,13 +286,30 @@ class CatchUp(QObject):
                 )
 
     def offered(self, target: Optional[Target]) -> Optional[Archive]:
-        """The channel's archive when it may be played now; else None."""
+        """The channel's archive when it may be played now; else None (an STB portal's also
+        when the guide names none of its recordings: no guide, or one not the portal's)."""
         if target is None or not target.live or not self._allowed():
             return None
         archive = archive_of(target.item)
         if archive is None or self.memory.failed(self.key(target)):
             return None
+        if archive.kind == STB and not self._guide_names_recordings(target, archive):
+            return None
         return archive
+
+    def _guide_names_recordings(self, target: Target, archive: Archive) -> bool:
+        """Whether the guide lists the STB channel's programmes with their ids at its portal
+        (the portal's own guide does; an XMLTV guide, or none, does not), from the archive's
+        oldest moment on. Kept for `GUIDE_CHECK_S`: the bar asks at each tick."""
+        key, clock = self.key(target), self._clock()
+        named = self._named.get(key)
+        if named is not None and clock - named[0] < GUIDE_CHECK_S:
+            return named[1]
+        oldest = self._now() - timedelta(seconds=archive.seconds)
+        programmes = self.catalog.programmes(target.item, oldest, 4)
+        answer = any(getattr(p, "recording", None) is not None for p in programmes)
+        self._named[key] = (clock, answer)
+        return answer
 
     def known_failed(self, target: Optional[Target]) -> bool:
         """The channel claims an archive that did not answer lately."""
