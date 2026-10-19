@@ -17,11 +17,16 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from test_live_source import FAST_RETRIES, KEY, SourceTestCase, drain, encrypt, leaf
+from test_hls_audio import packed
+from test_live_source import FAST_RETRIES, KEY, SourceTestCase, drain, encrypt, joined, leaf
+import ts_fixtures
 
+from scripts import replay_capture
 from services.live import capture as capture_module, source as source_module
 from services.live.capture import CAPTURE_ENV
+from services.live.hls_audio import weave_capture
 from services.live.source import Discontinuity, open_source
+from services.live.ts import program_has_audio
 
 NAME = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{8}$")
 
@@ -58,18 +63,21 @@ def captures(directory):
     return sorted(path.stem for path in Path(directory).glob("*.ts"))
 
 
-def read_times(path):
+def read_times(path, sequences=None):
     """(reads, comments): the `<cumulative bytes> <seconds>` lines as (int, float), and the
-    other lines as (word, seconds, after how many reads), as the replay tools tolerate them."""
+    other lines as (word, seconds, after how many reads), as the replay tools tolerate them;
+    each `# segment` line's media sequence number goes to `sequences`, if given."""
     reads, comments = [], []
     for line in Path(path).read_text(encoding="ascii").splitlines():
         parts = line.split()
         if len(parts) == 2:
             reads.append((int(parts[0]), float(parts[1])))
             continue
-        assert parts[0] == "#" and len(parts) == 3, line
+        assert parts[0] == "#" and len(parts) == (4 if parts[1] == "segment" else 3), line
         assert re.fullmatch(r"\d+\.\d{3}", parts[2]), line
         comments.append((parts[1], float(parts[2]), len(reads)))
+        if parts[1] == "segment" and sequences is not None:
+            sequences.append(int(parts[3]))
     return reads, comments
 
 
@@ -416,6 +424,71 @@ class CapturedSourceTests(SourceTestCase):
             boundaries,
             [("segment", 0), ("discontinuity", len(self.video)), ("segment", len(self.video))],
         )
+
+    def test_a_separate_audio_rendition_gets_a_pair_of_its_own_and_weaves_back(self):
+        # 2.2 weaves a video-only variant's separate audio in; the capture keeps the video's
+        # pair a playable TS and the audio's segments in `<name>.audio.ts`, each after the
+        # sequence of the video segment it goes into, so the capture replays with sound.
+        master = (
+            b'#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",DEFAULT=YES,'
+            b'URI="audio.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=100000,AUDIO="a"\nvideo.m3u8\n'
+        )
+        video = ts_fixtures.make_stream(4, audio=False)
+        later = 900000 + 4 * 90000
+        kinds = {
+            "TS audio": (ts_fixtures.audio_only(4), ts_fixtures.audio_only(4, pts_start=later)),
+            "packed AAC": (packed(4, 900000), packed(4, later)),
+        }
+        for kind, (first, second) in kinds.items():
+            with self.subTest(kind), tempfile.TemporaryDirectory() as root:
+                server = self.server(
+                    {
+                        "/master.m3u8": (200, {}, master),
+                        "/video.m3u8": (200, {}, leaf("v0.ts", "v1.ts")),
+                        "/audio.m3u8": (200, {}, leaf("a0.aac", "a1.aac")),
+                        "/v0.ts": (200, {}, video),
+                        "/v1.ts": (200, {}, video),
+                        "/a0.aac": (200, {}, first),
+                        "/a1.aac": (200, {}, second),
+                    }
+                )
+                with patch.dict(os.environ, {CAPTURE_ENV: root}), _Logs() as logs:
+                    _source, parts = stream(server.url + "/master.m3u8")
+                name, audio_name = captures(root)
+                self.assertEqual(audio_name, name + capture_module.AUDIO_PAIR)
+                base = Path(root) / name
+                self.assertEqual(base.with_suffix(".ts").read_bytes(), video + video)  # no audio
+                audio_base = Path(root) / audio_name
+                self.assertEqual(Path(f"{audio_base}.ts").read_bytes(), first + second)
+                for path in (f"{base}.times", f"{audio_base}.times"):
+                    sequences = []
+                    reads, comments = read_times(path, sequences)
+                    self.assertEqual([word for word, _at, _after in comments], ["segment"] * 2)
+                    self.assertEqual(sequences, [0, 1])
+                (video_times, _), (audio_times, _) = (
+                    read_times(f"{base}.times"),
+                    read_times(f"{audio_base}.times"),
+                )
+                self.assertLessEqual(video_times[0][1], audio_times[0][1])  # one clock
+                message = f"Capturing its separate audio to {audio_name}.ts and .times."
+                self.assertIn((logging.INFO, message), logs)
+                # Woven again, the capture is what the helper read: with sound.
+                segments = capture_module.captured_segments(str(base))
+                heard = capture_module.captured_segments(str(audio_base))
+                self.assertEqual([s.sequence for s in segments], [0, 1])
+                self.assertEqual([s.data for s in heard], [first, second])
+                woven = weave_capture(
+                    [(s.sequence, s.data) for s in segments], {s.sequence: s.data for s in heard}
+                )
+                self.assertEqual(parts, joined(*woven))
+                self.assertTrue(program_has_audio(woven[0]))
+                replayed = replay_capture.load_capture(f"{base}.ts")
+                self.assertEqual(replayed.data, b"".join(woven))
+                self.assertEqual(
+                    [end for end, _at in replayed.reads], [len(woven[0]), len(replayed.data)]
+                )
+                self.assertEqual(replayed.reads[-1][1], heard[-1].at)  # once its audio came
+                self.assertTrue(replay_capture.scan_ts(replayed.data).audio)
 
     def test_an_encrypted_hls_segment_is_captured_decrypted(self):
         playlist = leaf(

@@ -12,10 +12,13 @@ and descriptors) and packed ADTS AAC (raw frames after an ID3 tag whose PRIV
 com.apple.streaming.transportStreamTimestamp dates the first one; each frame becomes a PES).
 The renditions share the video's timestamps (HLS requires it), so nothing is re-timed. fMP4
 (CMAF) audio is not read here. Anything unreadable leaves the video segment as it came.
+A capture (``QITV_CAPTURE_DIR``) keeps the audio segments in a pair of their own;
+`weave_capture` weaves them in again, so it replays with sound.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 import logging
 
 from services.live.ts import (
@@ -186,6 +189,17 @@ class AudioWeaver:
                 packets.append(head + bytes([0x10 | self._cc]) + chunk)
             self._cc = (self._cc + 1) & 0x0F
         return packets
+
+
+def weave_capture(video: Iterable[tuple[int, bytes]], audio: Mapping[int, bytes]) -> list[bytes]:
+    """A capture's video segments, (sequence, bytes), woven again as `HlsSource` wove them:
+    each with the captured audio segment of its sequence when there is one (else silent), by
+    one weaver for them all (`services.live.capture` saves the audio in a pair of its own)."""
+    weaver = AudioWeaver()
+    return [
+        weaver.weave(segment, audio[sequence]) if audio.get(sequence) else segment
+        for sequence, segment in video
+    ]
 
 
 def _program(data: bytes) -> tuple[int, set[int]] | None:

@@ -1198,9 +1198,9 @@ class HlsSource:
         if self._capture is not None:
             if self._pending:
                 self._capture.mark("discontinuity")
-            self._capture.mark("segment")
+            self._capture.mark("segment", sequence)
         try:
-            blocks = _checked_ts(self._blocks(response, decryptor))
+            blocks = _checked_ts(self._blocks(response, decryptor, self._capture))
             if self._audio_unknown or self._weaver is not None:
                 blocks = iter([self._with_audio(b"".join(blocks), sequence)])
             for block in blocks:
@@ -1298,8 +1298,11 @@ class HlsSource:
             if _skippable(error) is None:
                 raise
             return b""
+        capture = self._capture.audio() if self._capture is not None else None
+        if capture is not None:  # its own pair: the video's stays a playable TS
+            capture.mark("segment", sequence)
         try:
-            return b"".join(self._blocks(response, decryptor))
+            return b"".join(self._blocks(response, decryptor, capture))
         except _ReadError, _BadSegment:
             return b""
         finally:
@@ -1315,8 +1318,10 @@ class HlsSource:
         log.info("Skipped an HLS segment (%s %s).", failure.kind, failure.status or "")
         self._mark()
 
-    def _blocks(self, response: Any, decryptor: _Decryptor | None) -> Iterator[bytes]:
-        capture = self._capture
+    def _blocks(
+        self, response: Any, decryptor: _Decryptor | None, capture: _Capture | None
+    ) -> Iterator[bytes]:
+        """A segment's bytes as read (decrypted), each saved in `capture` too, if any."""
         while block := self._http.read(response):
             if decryptor:
                 block = decryptor.update(block)

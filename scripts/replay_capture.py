@@ -6,6 +6,9 @@
 A capture is `<name>.ts` (the bytes as the connection delivered them) and `<name>.times` (one
 "<cumulative bytes> <seconds since connect>" line per read; a third word "reconnect" makes the
 next read a new connection's first); `<capture>` names either file or their common prefix.
+An HLS capture whose separate audio was woven in has `<name>.audio.ts` and `.audio.times`
+beside it: each video segment is woven with its audio again (`hls_audio.weave_capture`) and
+read whole when its audio had come, as the helper read it, so the replay has sound.
 Captures hold provider streams: keep them out of the repository.
 
 The bytes go through the helper's own session code (`services.live.worker._Session._ingest`:
@@ -70,6 +73,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services.live import source as source_module, worker  # noqa: E402
+from services.live.capture import AUDIO_PAIR, captured_segments  # noqa: E402
+from services.live.hls_audio import weave_capture  # noqa: E402
 from services.live.timeline import START_KEY, START_OPEN, Span  # noqa: E402
 from services.live.ts import (  # noqa: E402  (the segmenter's own picture reading)
     JUMP_S,
@@ -132,6 +137,8 @@ def load_capture(path: str | Path) -> Capture:
     for suffix in (".ts", ".times"):
         if path.endswith(suffix):
             path = path[: -len(suffix)]
+    if Path(path + AUDIO_PAIR + ".ts").exists():
+        return _load_woven(path)
     data = Path(path + ".ts").read_bytes()
     reads: list[tuple[int, float]] = []
     reconnects: list[int] = []
@@ -148,6 +155,25 @@ def load_capture(path: str | Path) -> Capture:
     if not reads or reads[-1][0] < len(data):
         reads.append((len(data), reads[-1][1] if reads else 0.0))
     return Capture(Path(path).name, data, reads, reconnects)
+
+
+def _load_woven(path: str) -> Capture:
+    """An HLS capture with its separate audio's pair: each video segment woven with its audio
+    again (`hls_audio.weave_capture`), read whole once its audio had come, as the helper read
+    it then."""
+    video = captured_segments(path)
+    audio = {segment.sequence: segment for segment in captured_segments(path + AUDIO_PAIR)}
+    woven = weave_capture(
+        [(segment.sequence, segment.data) for segment in video],
+        {sequence: segment.data for sequence, segment in audio.items()},
+    )
+    reads: list[tuple[int, float]] = []
+    end = 0
+    for segment, data in zip(video, woven):
+        end += len(data)
+        heard = audio.get(segment.sequence)
+        reads.append((end, max(segment.at, heard.at) if heard is not None else segment.at))
+    return Capture(Path(path).name, b"".join(woven), reads or [(0, 0.0)])
 
 
 # ---- MPEG-TS reading -----------------------------------------------------------------------
