@@ -412,12 +412,25 @@ def split_matches(
     files = list(files)
     if not any(file.feature is not None for file in files):
         return files, []
+    fits = [file.feature is not None and feature_matches(file.feature, query) for file in files]
+    # A film one subtitle's own name matched is that film wherever else it comes: a translated
+    # title finds a few subtitles named so and many more under the film's original name, all
+    # with its ids (OpenSubtitles' film).
+    films = {_film_of(f.feature) for f, ok in zip(files, fits) if ok and f.feature is not None}
+    films.discard(None)
     matching: list[SubtitleFile] = []
     others: list[SubtitleFile] = []
-    for file in files:
-        fits = file.feature is not None and feature_matches(file.feature, query)
-        (matching if fits else others).append(file)
+    for file, ok in zip(files, fits):
+        ok = ok or (file.feature is not None and _film_of(file.feature) in films)
+        (matching if ok else others).append(file)
     return matching, others
+
+
+def _film_of(feature: Feature) -> Optional[tuple]:
+    """What tells a film (or an episode) from another by OpenSubtitles' ids; None without them."""
+    if feature.tmdb_id is None and feature.imdb_id is None:
+        return None
+    return (feature.tmdb_id, feature.imdb_id, feature.season, feature.episode)
 
 
 def found_for(files: Iterable[SubtitleFile]) -> str:

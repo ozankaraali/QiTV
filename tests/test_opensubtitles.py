@@ -362,6 +362,22 @@ class FoundTests(unittest.TestCase):
         plain = parse_search(page(entry(7, "en", "a"), entry(8, "tr", "b")))
         self.assertEqual(split_matches(plain, query), (plain, []))
 
+    def test_a_film_one_subtitle_names_claims_its_others_under_the_original_name(self):
+        # Searched by a translated title without an id: one subtitle carries the translated
+        # name, the rest the film's original one, all with the film's ids; another film of the
+        # same year stays apart.
+        query = search_query("movies", "TR - Yaşayan Ölü Ovası (1968)")
+        film = dict(tmdb=4321, imdb=63350)
+        data = page(
+            entry(1, "tr", "olu.ovasi.tr", made_for=feature("Yaşayan Ölü Ovası", 1968, **film)),
+            entry(2, "en", "dead.plain.1968", made_for=feature("Plain of the Dead", 1968, **film)),
+            entry(3, "de", "dead.plain.de", made_for=feature("Plain of the Dead", 1968, **film)),
+            entry(4, "en", "other.1968", made_for=feature("Harbour Night", 1968, tmdb=99)),
+        )
+        matching, others = split_matches(parse_search(data), query)
+        self.assertEqual([f.file_id for f in matching], [1, 2, 3])
+        self.assertEqual([f.file_id for f in others], [4])
+
     def test_by_id_the_features_ids_count_and_the_year_checks_them(self):
         query = SearchQuery("Süper Liman Bekçileri", 2014, tmdb_id=4242)
         film = Feature("movie", "Brave Harbour Six", year=2014, tmdb_id=4242)
