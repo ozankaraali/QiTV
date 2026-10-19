@@ -266,10 +266,18 @@ class CatchUp(QObject):
 
     def cancel(self) -> None:
         """A probe still running, or an STB recording's link on its way, is dropped (Go live,
-        a seek within the buffer); a probe's slot goes back when it ends."""
+        a seek within the buffer); a probe's slot goes back when it ends. One for a channel
+        that does not play yet (the guide's "Watch from the start" on another channel: the
+        channel before it plays on meanwhile, under the chosen one's name) tunes the chosen
+        channel live instead, as a failed one does."""
         if self._probing or self._linking is not None:
+            ask = self._linking or self._asked
             self._generation += 1
             self._probing, self._asked, self._linking = False, None, None
+            if ask is not None and not ask.live_playing and self._playing is None:
+                self._request(
+                    replace(ask.target, archive_at=None, archive_until=None, zapped=False)
+                )
 
     def offered(self, target: Optional[Target]) -> Optional[Archive]:
         """The channel's archive when it may be played now; else None."""

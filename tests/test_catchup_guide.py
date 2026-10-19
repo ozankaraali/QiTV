@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
-from test_catchup_playback import ARCHIVED, PLAIN, CatchupCase
+from test_catchup_playback import APPENDED, ARCHIVED, PLAIN, CatchupCase
 from test_tv_controller import NOW as CONTROLLER_NOW
 from timer_fixtures import wait_until
 
@@ -20,7 +20,7 @@ from services.epg_view import Programme
 from services.live.tuning import channel_key
 from services.zapping import ZapContext
 from ui.guide_controller import GuideController
-from ui.keymap import key_hint
+from ui.keymap import Action, key_hint
 from ui.overlays.guide import WINDOW, Guide, slot_start
 
 NOW = datetime(2026, 10, 15, 19, 42, tzinfo=timezone.utc)
@@ -228,6 +228,21 @@ class ControllerCatchupTests(CatchupCase):
         self.assertEqual(self.controller.archive_days(ARCHIVED), 3)
         self.config.play_in_vlc = True  # an external player plays the channels: none
         self.assertEqual(self.controller.archive_days(ARCHIVED), 0)
+
+    def test_go_live_while_another_channels_archive_is_probed_tunes_that_channel_live(self):
+        self.catalog.ptype = "M3UPLAYLIST"  # no limit: the archive is probed first
+        self.start_archived(PLAIN)
+        channels = [ARCHIVED, PLAIN, APPENDED]
+        self.controller._guide.catchupRequested.emit(APPENDED, self.SHOW, "10", channels)
+        self.catalog.linkReady.emit(self.catalog.links[-1][0], APPENDED["cmd"])
+        self.assertEqual(len(self.runner.jobs), 1)  # the probe runs; the other channel plays
+        self.assertIs(self.controller._current.item, APPENDED)  # its banner shows
+        links = len(self.catalog.links)
+        self.controller.handle(Action.GO_LIVE)
+        self.assertEqual(len(self.catalog.links), links + 1)
+        self.assertIs(self.catalog.links[-1][1], APPENDED)  # the channel chosen, live
+        self.runner.answer(0, "plays")  # too late
+        self.assertEqual(self.archive_plays(), [])
 
 
 if __name__ == "__main__":

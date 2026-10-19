@@ -191,6 +191,27 @@ class OpenTests(StbCase):
         self.assertIs(self.controller._current.item, ARCHIVED)
         self.assertEqual(self.budget.holders("Home"), ["main"])
 
+    def test_go_live_or_a_seek_while_another_channels_link_comes_tunes_that_channel_live(self):
+        for act in (
+            lambda: self.controller.handle(Action.GO_LIVE),
+            lambda: self.transport.seekToRequested.emit(3200.0),  # within the buffer
+        ):
+            with self.subTest(act=act):
+                self.start_live(PLAIN)
+                self.watch_programme(ARCHIVED, "5001")
+                self.catalog.linkReady.emit(self.catalog.links[-1][0], LIVE[11])
+                self.assertEqual(self.asked()[-1], "5001")
+                self.assertIs(self.controller._current.item, ARCHIVED)  # its banner shows
+                links = len(self.catalog.links)
+                act()  # the other channel still plays: its buffer goes live (or seeks)
+                self.assertEqual(len(self.catalog.links), links + 1)
+                self.assertIs(self.catalog.links[-1][1], ARCHIVED)  # the channel chosen, live
+                self.link()  # the recording's link, too late
+                self.assertEqual(self.archive_plays(), [])
+                self.catalog.linkReady.emit(self.catalog.links[-1][0], LIVE[11])
+                self.live.released.emit()
+                self.assertTrue(wait_until(lambda: self.starts()[-1][0] == LIVE[11]))
+
     def test_steps_while_the_link_comes_ask_once_and_play_the_newest_moment(self):
         self.start_live()
         self.transport.seekToRequested.emit(1500.0)  # 19:55
