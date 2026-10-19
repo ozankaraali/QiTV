@@ -33,13 +33,17 @@ def _picture(index: int) -> bytes:
     return body + tag + b"\x55" * 300
 
 
-def write_capture(directory: str, name: str, runs, cut_last: int | None = None) -> str:
+def write_capture(
+    directory: str, name: str, runs, cut_last: int | None = None, reconnect: bool = False
+) -> str:
     """Write `<name>.ts` and `<name>.times`. `runs` are (frame indexes, first PTS, arrival),
     where arrival maps a frame's media position in its run to the second it arrives; each run
-    after the first is flagged discontinuous on its first PCR. `cut_last` cuts the first run's
-    last packet to that many bytes (a provider's junction)."""
+    after the first is flagged discontinuous on its first PCR (with `reconnect`, it is instead
+    a new connection's, unflagged). `cut_last` cuts the first run's last packet to that many
+    bytes (a provider's junction)."""
     counters = {0: 0, PMT_PID: 0, VIDEO_PID: 0}
     timed: list[tuple[float, bytes]] = []
+    first_end = 0
     for number, (indexes, first_pts, arrival) in enumerate(runs):
         for k, index in enumerate(indexes):
             at = arrival(k / FPS)
@@ -58,7 +62,7 @@ def write_capture(directory: str, name: str, runs, cut_last: int | None = None) 
                 cc_start=counters[VIDEO_PID],
                 pcr=pts,
             )
-            if number and not k:
+            if number and not k and not reconnect:
                 flagged = bytearray(packets[0])
                 flagged[5] |= 0x80  # discontinuity_indicator
                 packets[0] = bytes(flagged)
@@ -66,11 +70,15 @@ def write_capture(directory: str, name: str, runs, cut_last: int | None = None) 
         if number == 0 and cut_last is not None:
             at, packet = timed[-1]
             timed[-1] = (at, packet[:cut_last])
+        if number == 0:
+            first_end = len(timed)
     data = bytearray()
     lines = []
     for k, (at, packet) in enumerate(timed):
         data += packet
-        if k + 1 == len(timed) or timed[k + 1][0] != at:
+        if reconnect and k + 1 == first_end:
+            lines.append(f"{len(data)} {at:.3f} reconnect")
+        elif k + 1 == len(timed) or timed[k + 1][0] != at:
             lines.append(f"{len(data)} {at:.3f}")
     path = Path(directory) / name
     path.with_suffix(".ts").write_bytes(bytes(data))
@@ -88,8 +96,8 @@ class ReplayCaptureTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
-    def measure(self, runs, cut_last=None, stages="all"):
-        path = write_capture(self.tmp.name, "capture", runs, cut_last)
+    def measure(self, runs, cut_last=None, stages="all", reconnect=False):
+        path = write_capture(self.tmp.name, "capture", runs, cut_last, reconnect)
         return rc.measure(rc.load_capture(path), stages=stages)
 
     def test_a_steady_channel_shows_no_restart_no_repeat_and_a_flat_edge(self):
@@ -200,6 +208,24 @@ class ReplayCaptureTests(unittest.TestCase):
         self.assertIn(
             "re-based junctions (step before, after): [(-19.96, 0.04)]", rc.report(result)
         )
+
+    def test_a_reconnect_that_resends_three_seconds_in_the_old_timebase(self):
+        # The connection stalls 12 s after 20 s of media; the new one sends the last 3 s
+        # again, with the same timestamps, then goes on: the ring holds each frame once.
+        resume = backlogged(20.0) + 12.0
+        runs = [
+            (range(20 * FPS), 900000, backlogged),
+            (range(17 * FPS, 30 * FPS), 900000 + 17 * CLOCK, lambda m: resume + max(0, m - 3)),
+        ]
+        before = self.measure(runs, stages="none", reconnect=True)
+        self.assertEqual(before["ring"]["frames_repeated"], 3 * FPS)
+        after = self.measure(runs, reconnect=True)
+        self.assertEqual(after["ring"]["frames_repeated"], 0)
+        self.assertEqual(after["ring"]["cc_breaks_unannounced"], 0)
+        self.assertEqual(after["reconnects"]["count"], 1)
+        (rejoin,) = after["reconnects"]["rejoined"]
+        self.assertEqual(rejoin["step_s"], -2.96)
+        self.assertIn("reconnects: 1; in the old timebase, cut: -2.96 s", rc.report(after))
 
 
 if __name__ == "__main__":

@@ -4,13 +4,14 @@
                                             [--stages none|trim|all]
 
 A capture is `<name>.ts` (the bytes as the connection delivered them) and `<name>.times` (one
-"<cumulative bytes> <seconds since connect>" line per read); `<capture>` names either file or
-their common prefix. Captures hold provider streams: keep them out of the repository.
+"<cumulative bytes> <seconds since connect>" line per read; a third word "reconnect" makes the
+next read a new connection's first); `<capture>` names either file or their common prefix.
+Captures hold provider streams: keep them out of the repository.
 
 The bytes go through the helper's own session code (`services.live.worker._Session._ingest`:
-repeat trimmer, clock joiner, segmenter, RAM ring, timeline, burst meter and the state it
-sends the GUI; --stages trim: without the `ClockJoiner`, none: without the `RepeatTrimmer`
-either), read by read, with
+reconnect trimmer, repeat trimmer, clock joiner, segmenter, RAM ring, timeline, burst meter and
+the state it sends the GUI; --stages trim: without the `ClockJoiner`, none: without the
+`ReconnectTrimmer` and the `RepeatTrimmer` either), read by read, with
 the clock set to each read's arrival time, so a three-minute capture replays in seconds. The
 seams this needs, which the product does not offer: `_Session` builds its `Segmenter()` on the
 real clock and calls `time.monotonic()` in `_measure` and `_notify`, so the replay swaps in a
@@ -75,6 +76,7 @@ from services.live.ts import (  # noqa: E402  (the segmenter's own picture readi
     Data,
     Event,
     Opened,
+    Rejoin,
     Segmenter,
     Trim,
     _classify,
@@ -109,6 +111,7 @@ class Capture:
     name: str
     data: bytes
     reads: list[tuple[int, float]]  # (cumulative bytes, seconds since connect) per read
+    reconnects: list[int] = field(default_factory=list)  # where a new connection's bytes begin
     _ends: list[int] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
@@ -131,9 +134,12 @@ def load_capture(path: str | Path) -> Capture:
             path = path[: -len(suffix)]
     data = Path(path + ".ts").read_bytes()
     reads: list[tuple[int, float]] = []
+    reconnects: list[int] = []
     for line in Path(path + ".times").read_text().splitlines():
         parts = line.split()
-        if len(parts) != 2:
+        if len(parts) == 3 and parts[2] == "reconnect":
+            reconnects.append(int(parts[0]))
+        elif len(parts) != 2:
             continue
         end, at = int(parts[0]), float(parts[1])
         if reads and (end < reads[-1][0] or at < reads[-1][1]):
@@ -141,7 +147,7 @@ def load_capture(path: str | Path) -> Capture:
         reads.append((min(end, len(data)), at))
     if not reads or reads[-1][0] < len(data):
         reads.append((len(data), reads[-1][1] if reads else 0.0))
-    return Capture(Path(path).name, data, reads)
+    return Capture(Path(path).name, data, reads, reconnects)
 
 
 # ---- MPEG-TS reading -----------------------------------------------------------------------
@@ -415,13 +421,17 @@ class _ReplaySource:
         self._capture = capture
         self._clock = clock
 
-    def chunks(self) -> Iterator[bytes]:
+    def chunks(self) -> Iterator[bytes | source_module.Discontinuity]:
         data, done = self._capture.data, 0
+        reconnects = set(self._capture.reconnects)
         for end, at in self._capture.reads:
             self._clock.now = at
             if end > done:
                 yield data[done:end]
                 done = end
+            if end in reconnects:
+                reconnects.discard(end)
+                yield source_module.Discontinuity()
 
     def close(self) -> None:
         pass
@@ -502,28 +512,34 @@ class _ObservedSegmenter(Segmenter):
 
 
 class Positions:
-    """Where the stream VLC reads came from in the capture: through the trimmer (which left
-    out `Trim.dropped` ranges and the packets cut short) and the segmenter
+    """Where the stream VLC reads came from in the capture: through the reconnect trimmer
+    (which left out `Rejoin.dropped` ranges), the repeat trimmer (`Trim.dropped` ranges and the
+    packets cut short, in the reconnect trimmer's output) and the segmenter
     (`_ObservedSegmenter.slices`)."""
 
     def __init__(
-        self, segmenter: _ObservedSegmenter, trims: list[Trim], cut: list[tuple[int, int]]
+        self,
+        segmenter: _ObservedSegmenter,
+        trims: list[Trim],
+        cut: list[tuple[int, int]],
+        rejoined: Optional[list[tuple[int, int]]] = None,
     ) -> None:
         self._seg = segmenter
         self._dropped = sorted([item for trim in trims for item in trim.dropped] + cut)
+        self._rejoined = sorted(rejoined or [])
 
-    def _capture(self, out: int) -> int:
-        """The capture offset of the trimmer's output byte `out`."""
-        for start, size in self._dropped:
+    @staticmethod
+    def _up(out: int, dropped: list[tuple[int, int]]) -> int:
+        for start, size in dropped:
             if start > out:
                 break
             out += size
         return out
 
-    def _out(self, offset: int) -> Optional[int]:
-        """The trimmer's output offset of capture byte `offset` (None: it was dropped)."""
+    @staticmethod
+    def _down(offset: int, dropped: list[tuple[int, int]]) -> Optional[int]:
         shift = 0
-        for start, size in self._dropped:
+        for start, size in dropped:
             if start + size <= offset:
                 shift += size
             elif start <= offset:
@@ -532,8 +548,20 @@ class Positions:
                 break
         return offset - shift
 
+    def _capture(self, out: int) -> int:
+        """The capture offset of the trimmer's output byte `out`."""
+        return self._up(self._up(out, self._dropped), self._rejoined)
+
+    def _out(self, offset: int) -> Optional[int]:
+        """The trimmer's output offset of capture byte `offset` (None: it was dropped)."""
+        mid = self._down(offset, self._rejoined)
+        return None if mid is None else self._down(mid, self._dropped)
+
     def dropped(self, offset: int, length: int) -> bool:
-        return any(s < offset + length and offset < s + n for s, n in self._dropped)
+        if any(s < offset + length and offset < s + n for s, n in self._rejoined):
+            return True
+        mid = self._down(offset, self._rejoined)
+        return mid is not None and any(s < mid + length and mid < s + n for s, n in self._dropped)
 
     def to_input(self, stream_offset: int) -> Optional[int]:
         """The capture offset of a byte VLC reads (stream offsets exclude the headers)."""
@@ -542,11 +570,21 @@ class Positions:
 
     def to_stream(self, offset: int) -> Optional[int]:
         """The stream offset of the first byte passed on at or after capture byte `offset`."""
-        for start, size in self._dropped:
-            if start <= offset < start + size:
-                offset = start + size
+        while self._out(offset) is None:
+            offset = self._next_kept(offset)
         out = self._out(offset)
         return None if out is None else self._seg.to_stream(out)
+
+    def _next_kept(self, offset: int) -> int:
+        """Past the dropped range that holds capture byte `offset`."""
+        for start, size in self._rejoined:
+            if start <= offset < start + size:
+                return start + size
+        mid = self._down(offset, self._rejoined)
+        for start, size in self._dropped:
+            if mid is not None and start <= mid < start + size:
+                return offset + start + size - mid
+        return offset + 1
 
     def passed_whole(self, offset: int, length: int) -> bool:
         """Whether capture bytes [offset, offset + length) reached VLC in one piece."""
@@ -554,6 +592,22 @@ class Positions:
         if out is None or self.dropped(offset, length):
             return False
         return self._seg.passed_whole(out, length)
+
+
+class _Unrejoined:
+    """`ReconnectTrimmer` as if there were none (--stages none): everything passes untouched."""
+
+    def __init__(self, **_: Any) -> None:
+        self.rejoins: list[Rejoin] = []
+
+    def feed(self, chunk: bytes) -> bytes:
+        return chunk
+
+    def reconnect(self) -> bytes:
+        return b""
+
+    def finish(self) -> bytes:
+        return b""
 
 
 class _Untrimmed:
@@ -622,11 +676,12 @@ class Replay:
     edges: list[tuple[float, float]]  # (sim time, live edge) after every read
     junctions: list[tuple[float, float]]  # the clock joiner's (step before, step after) in s
     seconds: float  # how long the replay took
+    rejoins: list[Rejoin] = field(default_factory=list)  # reconnects found in the old timebase
 
 
 def replay(capture: Capture, stages: str = "all") -> Replay:
     """Run the capture through `_Session._ingest` on a simulated clock (`stages` "trim": as if
-    there were no `ClockJoiner`, "none": no `RepeatTrimmer` either)."""
+    there were no `ClockJoiner`, "none": no `ReconnectTrimmer` and `RepeatTrimmer` either)."""
     clock = _Clock()
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="qitv-replay-") as root:
@@ -638,10 +693,12 @@ def replay(capture: Capture, stages: str = "all") -> Replay:
         segmenter = session._segmenter = _ObservedSegmenter(clock)
         meter = session._bursts = _RecordingMeter()
         trimmer = worker.RepeatTrimmer if stages != "none" else _Untrimmed
+        rejoiner = worker.ReconnectTrimmer if stages != "none" else _Unrejoined
         clock_joiner = worker.ClockJoiner if stages == "all" else (lambda **_: None)
         with (
             mock.patch.object(worker, "time", SimpleNamespace(monotonic=clock)),
             mock.patch.object(worker, "RepeatTrimmer", trimmer),
+            mock.patch.object(worker, "ReconnectTrimmer", rejoiner),
             mock.patch.object(worker, "ClockJoiner", clock_joiner),
             mock.patch.object(
                 source_module, "open_source", lambda *_, **__: _ReplaySource(capture, clock)
@@ -652,6 +709,8 @@ def replay(capture: Capture, stages: str = "all") -> Replay:
         joined = session._clock_joiner
         junctions = list(joined.junctions) if joined is not None else []
         trims = list(trimmer_used.trims) if trimmer_used is not None else []
+        rejoiner_used = session._rejoiner
+        rejoins = list(rejoiner_used.rejoins) if rejoiner_used is not None else []
         cut = list(trimmer_used.cut_short) if trimmer_used is not None else []
         kept = helper.server.ring
         parts: list[bytes] = []
@@ -666,7 +725,7 @@ def replay(capture: Capture, stages: str = "all") -> Replay:
             kept.close()
     return Replay(
         segmenter,
-        Positions(segmenter, trims, cut),
+        Positions(segmenter, trims, cut, [item for r in rejoins for item in r.dropped]),
         trims,
         session._timeline.spans(),
         b"".join(parts),
@@ -675,6 +734,7 @@ def replay(capture: Capture, stages: str = "all") -> Replay:
         meter.edges,
         junctions,
         time.monotonic() - started,
+        rejoins,
     )
 
 
@@ -1079,6 +1139,13 @@ def measure(
             "held_s": [round(trim.released_at - trim.held_at, 2) for trim in rep.trims],
             "reasons": [trim.reason for trim in rep.trims],
         },
+        "reconnects": {
+            "count": len(capture.reconnects),
+            "rejoined": [
+                {"step_s": round(r.step_s, 2), "dropped_bytes": r.dropped_bytes}
+                for r in rep.rejoins
+            ],
+        },
         "restarts": rows,
     }
     if decode:
@@ -1165,6 +1232,14 @@ def report(result: dict[str, Any]) -> str:
             f"trimmer: held {trims['held']} new runs ({', '.join(map(str, trims['held_s']))} s),"
             f" dropped {trims['dropped']}: {trims['dropped_s']:.1f} s, "
             f"{trims['dropped_bytes']} bytes"
+        )
+    reconnects = result["reconnects"]
+    if reconnects["count"]:
+        cuts = ", ".join(
+            f"{r['step_s']:+.2f} s ({r['dropped_bytes']} bytes)" for r in reconnects["rejoined"]
+        )
+        lines.append(
+            f"reconnects: {reconnects['count']}; in the old timebase, cut: {cuts or 'none'}"
         )
     if result["restarts"]:
         lines.append(

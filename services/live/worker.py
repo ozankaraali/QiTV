@@ -81,6 +81,7 @@ from services.live.ts import (
     Data,
     Event,
     Opened,
+    ReconnectTrimmer,
     RepeatTrimmer,
     Segmenter,
     Unsupported,
@@ -382,7 +383,9 @@ class _Session:
         self._ready = False
         self._ended = False
         self._segmenter = Segmenter()
-        # Raw TS only (`_ingest`): drops what a restart inside the connection sends twice.
+        # Raw TS only (`_ingest`): drops what a reconnect sends again in the old timebase.
+        self._rejoiner: ReconnectTrimmer | None = None
+        # Raw TS only: drops what a restart inside the connection sends twice.
         self._trimmer: RepeatTrimmer | None = None
         # Raw TS only: re-bases a restarted run's timestamps so its clock runs on.
         self._clock_joiner: ClockJoiner | None = None
@@ -458,12 +461,13 @@ class _Session:
             raise _Cancelled()
         self._adopt(self._make_ring())
         segmenter = self._segmenter
-        trimmer = None
+        trimmer = rejoiner = None
         if not source.hls:  # HLS has its own discontinuities and no such restarts
 
             def program() -> tuple[int | None, int | None]:
                 return segmenter.video_pid, segmenter.video_type
 
+            rejoiner = self._rejoiner = ReconnectTrimmer(program=program)
             self._clock_joiner = ClockJoiner(program=program)
             # The clock joiner runs the counters on at every junction; without one, the trimmer
             # does where it drops.
@@ -474,7 +478,9 @@ class _Session:
             for item in source.chunks():
                 self._check()
                 if isinstance(item, Discontinuity):
-                    if trimmer is not None:  # a reconnect: what they hold passes on untouched
+                    if trimmer is not None and rejoiner is not None:
+                        # A reconnect: what they hold passes on untouched.
+                        self._pass_on(trimmer.feed(rejoiner.reconnect()))
                         self._pass_on(trimmer.discontinuity())
                         self._clock_end(reconnect=True)
                     segmenter.discontinuity()
@@ -486,15 +492,16 @@ class _Session:
                 else:
                     self._follow(source)  # before its bytes: where an HLS segment begins
                     self._received += len(item)
-                    if trimmer is None:
+                    if trimmer is None or rejoiner is None:
                         self._apply(segmenter.feed(item))
                     else:
-                        self._pass_on(trimmer.feed(item))
+                        self._pass_on(trimmer.feed(rejoiner.feed(item)))
                     self._measure()
                     if not self._ready:
                         self._notify()  # bytes flow, nothing playable yet: say so
             self._check()
-            if trimmer is not None:
+            if trimmer is not None and rejoiner is not None:
+                self._pass_on(trimmer.feed(rejoiner.finish()))
                 self._pass_on(trimmer.finish())
                 self._clock_end(reconnect=False)
             self._apply(segmenter.finish())
@@ -653,6 +660,8 @@ class _Session:
             self._check()  # a cancelled session never touches its ring again
             try:
                 if self._trimmer is not None:
+                    if self._rejoiner is not None:
+                        self._pass_on(self._trimmer.feed(self._rejoiner.finish()))
                     self._pass_on(self._trimmer.finish())
                     self._clock_end(reconnect=False)
                 self._apply(self._segmenter.finish())

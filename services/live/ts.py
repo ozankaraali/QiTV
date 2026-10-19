@@ -82,6 +82,9 @@ _TRIMS_KEPT = 64  # the latest trims kept for a look (a memory bound)
 # ClockJoiner: a junction's packets wait at most this many for its first picture (a few
 # hundred milliseconds at 25 Mbit/s); then they pass on as they are.
 _CLOCK_PENDING_PACKETS = 4096
+# ReconnectTrimmer
+_REJOIN_TAIL_BYTES = 8 * 1024 * 1024  # output kept to read the last PTS and pictures from
+_REJOIN_WINDOW_TICKS = 60 * _CLOCK  # a new connection's PTS this near the old's: one timebase
 
 
 class Unsupported(Exception):
@@ -937,6 +940,284 @@ class ContinuityJoiner:
         if self._flag_pcr and afc & 2 and out[at + 4] and out[at + 5] & 0x10:
             out[at + 5] |= 0x80
             self._flag_pcr = False
+
+
+@dataclass(frozen=True, slots=True)
+class Rejoin:
+    """A reconnect `ReconnectTrimmer` found in the source's own timebase, and what it dropped.
+
+    `offset` is the input offset where the new connection began; `step_s` how far its first
+    picture lies from the furthest one before it (negative: it re-sent that much); `dropped`
+    the input ranges left out ((offset, bytes)).
+    """
+
+    offset: int
+    step_s: float
+    dropped: tuple[tuple[int, int], ...]
+
+    @property
+    def dropped_bytes(self) -> int:
+        return sum(size for _, size in self.dropped)
+
+
+class ReconnectTrimmer:
+    """Drops what a raw TS source sends again after a reconnect, in the timebase it had.
+
+    One provider stalls for 9-14 s every 30-60 s; the helper's stall timeout reconnects, and
+    the new connection starts at the provider's last keyframe 2-4 s back with the old
+    connection's timestamps, so the ring held that stretch twice and it played twice. After
+    `reconnect()` the new connection's packets wait for its first video PES with a PTS
+    (`_CLOCK_PENDING_PACKETS` at most). It re-sends when that PTS lies at most
+    `_REJOIN_WINDOW_TICKS` before the furthest video PTS passed on (modulo 2**33) and its first
+    packet's picture bytes are those of the picture passed on with that PTS (a restart's new
+    clock may land there too, its picture never matches). Then the picture is dropped up to
+    its first keyframe after the furthest PTS, every other PES PID (the sound) up to its first
+    PES after that PID's furthest PTS, and the tables pass; from the first such drop on, what
+    passes goes through `ContinuityJoiner`, so the counters run on. A new connection that
+    resumes after the old one, one in another timebase (a reset: `RepeatTrimmer`'s and the
+    segmenter's, as before), one that re-sends further back than the tail holds, and a program
+    without a picture pass untouched, as does everything before the first reconnect. The PTS,
+    pictures and counters before a reconnect are read from the last `_REJOIN_TAIL_BYTES` passed
+    on, so between reconnects bytes pass as they come, at no cost per packet. The program's
+    video PID and type are the caller's (the segmenter's).
+    """
+
+    def __init__(self, *, program: Callable[[], tuple[int | None, int | None]]) -> None:
+        self._program = program
+        self._tail: deque[bytes] = deque()  # the latest output, `_REJOIN_TAIL_BYTES` or more
+        self._tail_size = 0
+        self._joiner: ContinuityJoiner | None = None  # from the first drop on
+        self._pos = 0  # the input offset of the next byte fed
+        self._armed = False  # a reconnect came: its connection is judged
+        self._buf = b""  # while armed: bytes not yet judged (a partial packet)
+        self._searching = False
+        self._pending: list[tuple[int, bytes]] | None = None  # (offset, packet) before a picture
+        self._video: int | None = None
+        self._video_type: int | None = None
+        self._top: dict[int, int] = {}  # each PES PID's furthest PTS before the reconnect
+        self._counters: dict[int, int] = {}  # each PID's last counter before it
+        self._pictures: dict[int, bytes] = {}  # the picture bytes of each video PES start, by PTS
+        self._keep: dict[int, bool] = {}  # PES PIDs: whether the PES being read passes
+        self._resumed: set[int] = set()  # PIDs that pass for good
+        self._after = 0  # packets judged since the picture resumed
+        self._at = 0  # where the connection began
+        self._step = 0.0
+        self._dropped: list[tuple[int, int]] = []
+        self.rejoins: deque[Rejoin] = deque(maxlen=_TRIMS_KEPT)
+
+    def feed(self, chunk: bytes) -> bytes:
+        """Take input bytes; return what passes on."""
+        if not self._armed:
+            self._pos += len(chunk)
+            return self._out(chunk)
+        base = self._pos - len(self._buf)
+        self._pos += len(chunk)
+        data = self._buf + chunk if self._buf else chunk
+        kept: list[bytes] = []
+        n = len(data)
+        off = 0
+        searching = self._searching
+        while off + PACKET <= n and self._armed:
+            if searching or data[off] != SYNC:
+                found = _find_sync(data, off)
+                if found < 0:
+                    junk = max(off, n - 2 * PACKET)  # a later sync may still start in the tail
+                    self._drop(base + off, junk - off)
+                    off, searching = junk, True
+                    break
+                self._drop(base + off, found - off)
+                off, searching = found, False
+                continue
+            self._judge(data[off : off + PACKET], base + off, kept)
+            off += PACKET
+        if self._armed:
+            self._buf, self._searching = data[off:], searching
+        else:
+            kept.append(data[off:])
+            self._buf = b""
+        return self._out(b"".join(kept))
+
+    def reconnect(self) -> bytes:
+        """A reconnect comes next: what is held passes on as it came (the segmenter drops a
+        partial packet), and the next connection is judged against what passed on."""
+        out = self._release()
+        self._arm()
+        return out
+
+    def finish(self) -> bytes:
+        """The input ended: what is held passes on as it came."""
+        return self._release()
+
+    def _release(self) -> bytes:
+        held = b"".join(packet for _, packet in self._pending or ()) + self._buf
+        self._pending, self._buf = None, b""
+        if self._armed:
+            self._close()
+        out = self._out(held)
+        if self._joiner is not None:
+            out += self._joiner.end()
+            self._joiner.segment()
+        return out
+
+    def _out(self, data: bytes) -> bytes:
+        """Pass `data` on (through the joiner once one runs), keeping the tail."""
+        if self._joiner is not None and data:
+            data = self._joiner.feed(data)
+        if data:
+            self._tail.append(data)
+            self._tail_size += len(data)
+            while self._tail_size - len(self._tail[0]) >= _REJOIN_TAIL_BYTES:
+                self._tail_size -= len(self._tail.popleft())
+        return data
+
+    def _arm(self) -> None:
+        video, video_type = self._program()
+        self._top, self._counters, self._pictures = _last_times(b"".join(self._tail), video)
+        self._armed = video is not None and video in self._top
+        self._video, self._video_type = video, video_type
+        self._pending = [] if self._armed else None
+        self._searching = True
+        self._keep, self._resumed = {}, set()
+        self._after = 0
+        self._at, self._step, self._dropped = self._pos, 0.0, []
+
+    def _judge(self, pkt: bytes, at: int, kept: list[bytes]) -> None:
+        """Hold a packet until the first picture's PTS tells the timebase, then pass or drop
+        it (and those held)."""
+        pending = self._pending
+        if pending is not None:
+            pending.append((at, pkt))
+            if (pkt[1] & 0xC0) == 0x40 and ((pkt[1] & 0x1F) << 8 | pkt[2]) == self._video:
+                pts = _pes_times(pkt, 0)[0]
+                if pts is not None:
+                    self._decide(pts, pending, kept)
+            elif len(pending) >= _CLOCK_PENDING_PACKETS:  # no picture in reach: as it came
+                self._pending = None
+                self._armed = False
+                kept.extend(packet for _, packet in pending)
+            return
+        self._place(pkt, at, self._passes(pkt), kept)
+        if self._video in self._resumed:
+            self._after += 1
+            dropping = any(not keep for pid, keep in self._keep.items() if pid not in self._resumed)
+            if not dropping or self._after >= _CLOCK_PENDING_PACKETS:
+                self._close()
+
+    def _decide(self, pts: int, pending: list[tuple[int, bytes]], kept: list[bytes]) -> None:
+        assert self._video is not None
+        self._pending = None
+        step = pts_delta(self._top[self._video], pts)
+        self._step = step / _CLOCK
+        first = pending[-1][1]
+        if (
+            abs(step) > _REJOIN_WINDOW_TICKS
+            or step <= 0
+            and self._pictures.get(pts) != first[_pes_start(first)[2] :]
+        ):  # another timebase (or a re-send beyond the tail): not this stage's
+            self._armed = False
+            kept.extend(packet for _, packet in pending)
+            return
+        if step > 0:
+            self._resumed.add(self._video)  # the picture goes on after the old one's
+        judged = [(at, packet, self._passes(packet)) for at, packet in pending]
+        if self._video in self._resumed and all(keep for _, _, keep in judged):
+            self._armed = False  # it resumes where the old connection ended: untouched
+            kept.extend(packet for _, packet in pending)
+            return
+        if self._joiner is None:
+            self._joiner = ContinuityJoiner(self._counters)
+        for at, packet, keep in judged:
+            self._place(packet, at, keep, kept)
+
+    def _passes(self, pkt: bytes) -> bool:
+        """Whether a packet of the new connection passes: the picture from its first keyframe
+        after the old connection's furthest PTS, other PES from their first after theirs, and
+        everything else (the tables, null packets)."""
+        b1 = pkt[1]
+        pid = ((b1 & 0x1F) << 8) | pkt[2]
+        if pid in self._resumed or b1 & 0x80 or pid == 0x1FFF:
+            return True
+        if b1 & 0x40:
+            if not _starts_pes(pkt, 0):
+                return True  # a section: the tables pass
+            pts = _pes_times(pkt, 0)[0]
+            top = self._top.get(pid)
+            after = pts is not None and top is not None and pts_delta(top, pts) > 0
+            if pid == self._video:
+                if after:
+                    rai, _, es = _pes_start(pkt)
+                    after = _trim_key(pkt, rai, es, self._video_type)
+            elif top is None:
+                after = True  # a PID without a PTS before: nothing to repeat
+            elif pts is None:
+                after = self._keep.get(pid, False)
+            if after:
+                self._resumed.add(pid)
+                return True
+            self._keep[pid] = False
+            return False
+        return self._keep.get(pid, pid not in self._top)  # as its PES (a section passes)
+
+    def _place(self, pkt: bytes, at: int, keep: bool, kept: list[bytes]) -> None:
+        if keep:
+            kept.append(pkt)
+        else:
+            self._drop(at, PACKET)
+
+    def _drop(self, at: int, size: int) -> None:
+        if size <= 0:
+            return
+        dropped = self._dropped
+        if dropped and dropped[-1][0] + dropped[-1][1] == at:
+            dropped[-1] = (dropped[-1][0], dropped[-1][1] + size)
+        else:
+            dropped.append((at, size))
+
+    def _close(self) -> None:
+        """The connection is judged: from here its bytes pass as they come."""
+        self._armed = False
+        if self._joiner is None and not self._dropped:
+            return
+        rejoin = Rejoin(self._at, self._step, tuple(self._dropped))
+        self.rejoins.append(rejoin)
+        logger.info(
+            "A reconnect resumed %.1f s from where the old connection was: %d bytes dropped.",
+            rejoin.step_s,
+            rejoin.dropped_bytes,
+        )
+
+
+def _last_times(
+    data: bytes, video: int | None
+) -> tuple[dict[int, int], dict[int, int], dict[int, bytes]]:
+    """Each PES PID's furthest PTS (of its latest run: a step back over `_REORDER_TICKS`
+    starts it over), each PID's last continuity counter, and the picture bytes in the first
+    packet of each `video` PES, by PTS, in `data` from its first sync."""
+    top: dict[int, int] = {}
+    counters: dict[int, int] = {}
+    pictures: dict[int, bytes] = {}
+    n = len(data)
+    off = _find_sync(data, 0)
+    while 0 <= off and off + PACKET <= n:
+        if data[off] != SYNC:
+            off = _find_sync(data, off)
+            continue
+        b1, b3 = data[off + 1], data[off + 3]
+        if not b1 & 0x80:
+            pid = ((b1 & 0x1F) << 8) | data[off + 2]
+            if b3 & 0x10 and pid != 0x1FFF:
+                counters[pid] = b3 & 0x0F
+            if b1 & 0x40:
+                pts = _pes_times(data, off)[0]
+                if pts is not None:
+                    last = top.get(pid)
+                    if last is None or not -_REORDER_TICKS <= pts_delta(last, pts) <= 0:
+                        top[pid] = pts
+                    if pid == video:
+                        pkt = data[off : off + PACKET]
+                        pictures[pts] = pkt[_pes_start(pkt)[2] :]
+        off += PACKET
+    return top, counters, pictures
 
 
 @dataclass(frozen=True, slots=True)
