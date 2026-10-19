@@ -22,7 +22,8 @@ Screens and their controls:
 - "pip_label": the small picture's "swap", "speaker" and "close";
 - "drawer": the top row's "back", "names", "search", "refresh" and "settings", the ⌕ "find" box,
   its "rows", and the rows of its sources and sections columns by title ("Settings", "Movies" …);
-- "context": the channel list's right-click menu, by entry;
+- "context": the channel list's right-click menu, by entry (a channel of a genre's, and one of
+  ⟲ Recent's);
 - "guide": its header's buttons and its "rows";
 - "library": the top bar's items ("live", "search", "fullscreen" …), the grid's "posters", the
   highlighted title's strip buttons ("favorite", "play") and the A–Z "rail".
@@ -37,11 +38,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QApplication, QWidget
 
-from services.navigation import NavModel
+from services.navigation import RECENT_GROUP, NavModel
 from services.opensubtitles import SubtitleFile
 from tests.test_navigation import FakeCatalog
 from tests.test_poster_grid import FakePosters, details, titles
-from ui.context_actions import OPEN_PIP_TEXT, ContextActions
+from ui.context_actions import OPEN_PIP_TEXT, REMOVE_RECENT_TEXT, ContextActions
 from ui.keymap import SHORTCUTS
 from ui.library.poster_grid import PosterGrid
 from ui.library.top_nav import TopNav
@@ -112,6 +113,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("drawer", "A…Z"): (("drawer", "find"),),  # a click on it, then the rows of what it finds
     ("drawer", "Ctrl+D"): (("context", "Add to favorites"),),
     ("drawer", "Ctrl+P"): (("context", OPEN_PIP_TEXT),),
+    ("drawer", "Delete"): (("context", REMOVE_RECENT_TEXT),),  # a channel of ⟲ Recent
     ("drawer", "Ctrl+F"): (("drawer", "search"),),
     # Beside the list: its first click closes the list, the double-click is fullscreen.
     ("drawer", "F11, Ctrl+Meta+F"): (("picture", "double-click"),),
@@ -294,7 +296,12 @@ def _pip_label(host: QWidget) -> set[str]:
 
 def _drawer_and_context(host: QWidget) -> tuple[set[str], set[str]]:
     catalog = FakeCatalog()
-    config = SimpleNamespace(favorites=[], watch_history=[])
+    watched = {
+        "provider_name": "Home",
+        "item_type": "channel",
+        "item_data": {"id": 1, "name": "One"},
+    }
+    config = SimpleNamespace(favorites=[], watch_history=[watched])
     nav = NavModel(catalog, config)
     drawer = Drawer(nav, None, lambda item: None, host)
     nav.reset_to("live", "10")
@@ -320,9 +327,16 @@ def _drawer_and_context(host: QWidget) -> tuple[set[str], set[str]]:
         play_external=lambda *args: None,
         notify=lambda text, kind: None,
         open_pip=lambda node: None,
+        forget_recent=lambda item: None,
+        clear_recents=lambda: None,
     )
-    menu = actions.menu(drawer._columns["right"].nodes[0])  # a right-click on a channel
-    entries = {a.text() for a in menu.actions() if not a.isSeparator()} if menu else set()
+    entries: set[str] = set()
+    for group in ("10", RECENT_GROUP):  # a right-click on a channel of a genre, of ⟲ Recent
+        nav.reset_to("live", group)
+        drawer.open_drawer()
+        menu = actions.menu(drawer._columns["right"].nodes[0])
+        if menu is not None:
+            entries.update(a.text() for a in menu.actions() if not a.isSeparator())
     nav.focus_source("Home")  # the sources on the left, the provider's sections on the right
     drawer.open_drawer(focus_side="left")
     for side in ("left", "right"):

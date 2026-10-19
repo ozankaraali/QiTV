@@ -234,6 +234,18 @@ class OpenKeymapTests(unittest.TestCase):
         self.assertEqual(opened(K.Key_S, "s"), (Action.NAV_TEXT, "s"))
         self.assertEqual(opened(K.Key_P, "p", CTRL), (Action.PIP, ""))
 
+    def test_delete_takes_the_highlighted_channel_out_of_recent_in_the_list_only(self):
+        self.assertEqual(opened(K.Key_Delete, "\x7f"), (Action.FORGET, ""))
+        self.assertEqual(opened(K.Key_Delete, "", SHIFT | KEYPAD), (Action.FORGET, ""))
+        self.assertIsNone(opened(K.Key_Delete, "", CTRL))  # a shortcut, never ours
+        self.assertEqual(opened(K.Key_Backspace), (Action.NAV_BACKSPACE, ""))  # the find's
+        for context in ("player", "guide", "library", "subtitles"):
+            self.assertNotEqual(
+                resolve(K.Key_Delete.value, NONE, "\x7f", context=context),
+                (Action.FORGET, ""),
+                context,
+            )
+
     def test_media_keys_work_with_the_drawer_open(self):
         self.assertEqual(opened(K.Key_MediaTogglePlayPause), (Action.PLAY_PAUSE, ""))
         self.assertEqual(opened(K.Key_MediaNext), (Action.MEDIA_NEXT, ""))

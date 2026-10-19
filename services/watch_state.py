@@ -82,6 +82,22 @@ class WatchState:
                 "group_id": "" if group_id is None else str(group_id),
                 "item": item,
             }
+        self._save_soon()
+
+    def forget(self, matches: Callable[[dict], bool]) -> int:
+        """Drop the history entries `matches` picks (a channel taken out of ⟲ Recent, or all
+        of them); how many went. Saved as a play is: the entries left keep their format.
+        """
+        history = self.config.watch_history or []
+        kept = [entry for entry in history if not (isinstance(entry, dict) and matches(entry))]
+        removed = len(history) - len(kept)
+        if removed:
+            self.config.watch_history = kept
+            self._save_soon()
+        return removed
+
+    def _save_soon(self) -> None:
+        """Mark the state changed and save it: at once, or once the zapping settles."""
         self._dirty = True
         if self.save_delay_ms <= 0:
             self._save()

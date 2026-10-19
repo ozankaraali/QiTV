@@ -1,4 +1,4 @@
-"""The drawer's context menu: a right-click on a channel, title or episode.
+"""The drawer's context menu: a right-click on a channel, title or episode, or ⟲ Recent.
 
 The player controls' "Open in external player" offers the two players for what plays now
 (`show_players`): the same plays as the menu's, opening upwards from the button. A right-click
@@ -7,6 +7,9 @@ on a Library title or episode offers the players and its link (`show_target`).
 - "Add to favorites" / "Remove from favorites" (channels only);
 - "Open in picture-in-picture" (channels, when the shell offers picture in picture): the
   channel plays small beside the one playing (Ctrl/⌘+P on the highlighted row does the same);
+- "Remove from Recents" (a channel of ⟲ Recent, while the list shows it): it leaves the list
+  (Delete on the highlighted row does the same); "Clear Recents ›" there, and on the ⟲ Recent
+  row itself, opens one entry that clears the whole list: the submenu is the confirmation;
 - "Play in VLC" / "Play in MPV": the shell plays the link externally once the in-app stream is
   released. A player that is not installed is said at once, and nothing stops. A local file
   (File → Open File…) is no provider's: it goes out as it is, with no link to ask for;
@@ -24,9 +27,9 @@ from PySide6.QtCore import QObject, QPoint
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMenu, QWidget
 
-from services import external_players, favorites
-from services.i18n import N_, tr, translate
-from services.navigation import NavModel, NavNode
+from services import external_players, favorites, i18n
+from services.i18n import N_, tr, tr_n, translate
+from services.navigation import RECENT_GROUP, NavModel, NavNode
 from ui.link_lanes import LinkLanes, Target
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -36,6 +39,10 @@ Launcher = Callable[[str], tuple[bool, str]]
 # English (a test finds the menu's entry by it); translate() shows them.
 LINK_COPIED_TEXT = N_("Link copied")  # i18n: a toast: the stream's link is on the clipboard
 OPEN_PIP_TEXT = N_("Open in picture-in-picture")  # i18n: a menu entry
+# i18n: a menu entry: the channel leaves the list of channels watched lately ("Recent")
+REMOVE_RECENT_TEXT = N_("Remove from Recents")
+# i18n: a menu entry opening a submenu that confirms emptying the "Recent" list
+CLEAR_RECENTS_TEXT = N_("Clear Recents")
 PLAYERS = ((N_("Play in VLC"), "vlc"), (N_("Play in MPV"), "mpv"))
 
 
@@ -79,14 +86,19 @@ class ContextActions(QObject):
         play_external: Callable[[Target, str, Launcher], None],
         notify: Callable[[str, str], None],
         open_pip: Optional[Callable[[NavNode], None]] = None,
+        forget_recent: Optional[Callable[[dict], None]] = None,
+        clear_recents: Optional[Callable[[], None]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`external` is services.external_players or a stand-in; `notify(text, kind)` toasts.
 
-        `open_pip(node)` opens a channel row in picture in picture (None: no such entry).
+        `open_pip(node)` opens a channel row in picture in picture, `forget_recent(item)` takes
+        a channel out of ⟲ Recent and `clear_recents()` empties it (None: no such entry).
         """
         super().__init__(parent)
         self._open_pip = open_pip
+        self._forget_recent = forget_recent
+        self._clear_recents = clear_recents
         self.nav = nav
         self.config = config
         self.lanes = lanes
@@ -125,6 +137,8 @@ class ContextActions(QObject):
 
     def menu(self, node: NavNode, parent: Optional[QWidget] = None) -> Optional[QMenu]:
         """`node`'s menu; None when it has nothing to offer (a series)."""
+        if node.layer == "group" and node.key == RECENT_GROUP:
+            return self._recents_menu(parent)
         channel = is_channel(self.nav, node)
         playable = isinstance(node.payload, dict) and self.nav.is_playable(node)
         if not channel and not playable:
@@ -141,11 +155,40 @@ class ContextActions(QObject):
                 menu.addAction(translate(OPEN_PIP_TEXT)).triggered.connect(
                     lambda _=False: open_pip(node)
                 )
+            forget = self._forget_recent
+            if forget is not None and self.nav.is_recent_row(node):
+                menu.addSeparator()
+                menu.addAction(translate(REMOVE_RECENT_TEXT)).triggered.connect(
+                    lambda _=False: forget(item)
+                )
+                self._add_clear_recents(menu)
         if playable:
             if channel:
                 menu.addSeparator()
             self._add_link_actions(menu, self._target(node))
         return menu
+
+    def _recents_menu(self, parent: Optional[QWidget]) -> Optional[QMenu]:
+        """A right-click on the ⟲ Recent row: "Clear Recents ›"."""
+        if self._clear_recents is None or not self.nav.recent_count():
+            return None
+        menu = QMenu(parent)
+        menu.setStyleSheet(menu_style())
+        self._add_clear_recents(menu)
+        return menu
+
+    def _add_clear_recents(self, menu: QMenu) -> None:
+        """The "Clear Recents ›" submenu: its one entry, naming how many channels go, clears
+        the list (a second, deliberate choice: never a dialog over the TV)."""
+        clear = self._clear_recents
+        if clear is None:
+            return
+        sub = menu.addMenu(translate(CLEAR_RECENTS_TEXT))
+        sub.setStyleSheet(menu_style())
+        count = self.nav.recent_count()
+        # i18n: the one entry under "Clear Recents": it empties the list; {n} is how many go
+        text = tr_n("Clear {n} channel", "Clear all {n} channels", count, n=i18n.number(count))
+        sub.addAction(text).triggered.connect(lambda _=False: clear())
 
     def _target(self, node: NavNode) -> Target:
         """What the row plays: its section and group as the drawer shows them now."""

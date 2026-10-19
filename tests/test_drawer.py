@@ -19,6 +19,7 @@ from services.navigation import (
     FAVORITES_GROUP,
     FREE_CHANNELS_ROW,
     OPEN_FILE_ROW,
+    RECENT_GROUP,
     SETTINGS_ROW,
     NavModel,
     item_key,
@@ -824,6 +825,82 @@ class HostedDrawerInputTests(unittest.TestCase):
         self.right_click(self.drawer._columns["left"].view, 0)
         self.assertEqual(requests, [])
         self.assertEqual(self.events, [])
+
+    def test_a_right_click_on_recent_asks_for_its_menu(self):
+        self.nav.config.watch_history = [recent_entry(3)]  # "Clear Recents" is there
+        self.nav.changed.emit()
+        elapse(50)  # the genres lay out again, ⟲ Recent first
+        left = self.drawer._columns["left"]
+        self.assertEqual(left.nodes[0].key, RECENT_GROUP)
+        requests = []
+        self.drawer.contextRequested.connect(lambda node, pos: requests.append(node))
+        # Off the row's middle: a press where the test before pressed would be a double-click.
+        rect = left.view.visualRect(left.view.model().index(0, 0))
+        point = left.view.viewport().mapTo(self.host, rect.center() - QPoint(rect.width() // 4, 0))
+        QTest.mouseClick(self.host.windowHandle(), Qt.MouseButton.RightButton, pos=point)
+        self.assertEqual([n.key for n in requests], [RECENT_GROUP])
+        self.assertEqual(self.events, [])
+
+
+def recent_entry(i, provider="Home"):
+    """A watch-history entry of channel `i` ("Chan i") at `provider`."""
+    channel = {"id": i, "name": f"Chan {i}"}
+    return {"provider_name": provider, "item_type": "channel", "item_data": channel}
+
+
+class RecentPlaceTests(unittest.TestCase):
+    """A channel taken out of ⟲ Recent: the list stays where it was scrolled, and the row that
+    takes its place takes the highlight (the 2.2 rule: lists keep their place)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.catalog, self.nav, self.host, self.drawer = make()
+        self.addCleanup(self.host.deleteLater)
+        self.addCleanup(self.host.close)
+        self.nav.config.watch_history = [recent_entry(i) for i in range(20)]  # Recent's most
+        self.nav.reset_to("live", RECENT_GROUP)
+        self.drawer.open_drawer()
+        elapse(50)
+        self.right = self.drawer._columns["right"]
+
+    def forget(self, i):
+        history = self.nav.config.watch_history
+        self.nav.config.watch_history = [e for e in history if e["item_data"]["id"] != i]
+        self.nav.changed.emit()  # as the shell does once the history changed
+        elapse(50)
+
+    def screen_y(self, row):
+        view = self.right.view
+        rect = view.visualRect(view.model().index(row))
+        return view.viewport().mapTo(self.host, rect.center()).y()
+
+    def test_the_row_below_takes_the_highlight_and_the_list_keeps_its_place(self):
+        self.drawer.move_by(15)
+        self.assertEqual(self.drawer.highlighted().title, "Chan 15")
+        bar = self.right.view.verticalScrollBar()
+        value, y = bar.value(), self.screen_y(15)
+        self.assertGreater(value, 0)  # scrolled: the row is far down
+        self.forget(15)
+        self.assertEqual(len(self.right.nodes), 19)
+        self.assertEqual(self.drawer.highlighted().title, "Chan 16")
+        self.assertEqual(bar.value(), value)
+        self.assertEqual(self.screen_y(15), y)  # Chan 16 where Chan 15 was
+        self.forget(3)  # a row above the highlight (the menu's): the highlight stays on its row
+        self.assertEqual(self.drawer.highlighted().title, "Chan 16")
+
+    def test_the_last_row_hands_the_highlight_to_the_one_above(self):
+        self.drawer.move_by(19)
+        self.assertEqual(self.drawer.highlighted().title, "Chan 19")
+        self.forget(19)
+        self.assertEqual(self.drawer.highlighted().title, "Chan 18")
+        self.assertTrue(
+            self.right.view.viewport()
+            .rect()
+            .contains(self.right.view.visualRect(self.right.view.model().index(18)))
+        )
 
 
 GENRES = 300  # more than a batch of rows (the list views lay rows out 100 at a time)

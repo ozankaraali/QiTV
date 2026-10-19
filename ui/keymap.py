@@ -57,6 +57,7 @@ class Action(str, Enum):
     SUBTITLES_LATER = "subtitles_later"  # Shift+K (VLC's G and H: G is the guide here)
     PASTE = "paste"  # Ctrl/⌘+V: the clipboard into the subtitles search's field
     RECORD = "record"  # R: record the channel being watched, or stop (2.2)
+    FORGET = "forget"  # Delete in the channel list: the highlighted channel leaves ⟲ Recent
 
 
 # "subtitles": the OpenSubtitles search over the player (2.2): it types like the drawer.
@@ -212,6 +213,8 @@ def resolve(
     if context == "drawer":
         if key in _DRAWER_KEYS:
             return _DRAWER_KEYS[key], ""
+        if key == _K.Key_Delete.value and not held:  # the row's "Remove from Recents"
+            return Action.FORGET, ""
         return _text(text, mods, windows=platform.startswith("win"))
     if context == "subtitles":
         if key in _DRAWER_KEYS:
@@ -311,6 +314,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Backspace", N_("Delete a letter of the find")),
         ("Ctrl+D", N_("Add or remove a favorite channel")),
         ("Ctrl+P", N_("Open the channel in picture-in-picture")),
+        ("Delete", N_("Remove the channel from Recents")),
         ("Ctrl+F", N_("Search")),
         ("F11, Ctrl+Meta+F", N_("Fullscreen")),
         ("Esc", N_("End the find, then close")),

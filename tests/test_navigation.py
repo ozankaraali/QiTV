@@ -17,8 +17,9 @@ from services.navigation import (
     SETTINGS_ROW,
     NavModel,
     NavNode,
+    recent_channel,
 )
-from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
+from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, with_provider
 
 
 class FakeCatalog(QObject):
@@ -178,6 +179,30 @@ class NavModelTests(unittest.TestCase):
         self.assertEqual([n.title for n in favorites], ["Two"])
         recent = self.nav.children(groups[1])
         self.assertEqual([n.title for n in recent], ["One"])
+
+    def test_a_watched_entry_names_its_channel_for_recent(self):
+        entries = self.config.watch_history
+        self.assertEqual(recent_channel(entries[0]), ("Home", "1"))
+        self.assertEqual(recent_channel(entries[1]), ("Other", "3"))  # listed while it exists
+        self.assertIsNone(recent_channel(entries[2]))  # a film
+        self.assertIsNone(recent_channel({"item_type": "channel", "item_data": {"id": 1}}))
+
+    def test_a_recent_row_is_one_of_recent_s_channels_while_the_list_shows_them(self):
+        self.nav.reset_to("live", RECENT_GROUP)
+        self.assertEqual(self.nav.recent_count(), 1)
+        (row,) = self.nav.children(self.nav.path[-1])
+        self.assertTrue(self.nav.is_recent_row(row))
+        self.nav.reset_to("live", "10")
+        one = self.nav.children(self.nav.path[-1])[0]
+        self.assertFalse(self.nav.is_recent_row(one))  # the same channel, in its genre
+        self.assertFalse(self.nav.is_recent_row(None))
+        self.nav.reset_to("live", RECENT_GROUP)
+        self.assertFalse(self.nav.is_recent_row(self.nav.path[-1]))  # the group, not a row
+        other = NavNode("item", "1", "One", with_provider({"id": 1, "name": "One"}, "Backup"))
+        self.assertFalse(self.nav.is_recent_row(other))  # watched at Home, not at Backup
+        self.config.watch_history = []  # taken out: the row is no longer one of them
+        self.assertFalse(self.nav.is_recent_row(row))
+        self.assertEqual(self.nav.recent_count(), 0)
 
     def test_a_favorite_without_a_name_is_found_by_its_title(self):
         self.catalog.live["10"].append({"id": 3, "title": "Three"})

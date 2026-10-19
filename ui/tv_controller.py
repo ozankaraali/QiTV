@@ -84,6 +84,7 @@ from services.navigation import (
     item_key,
     item_title,
     payloads,
+    recent_channel,
 )
 from services.next_episode import play_context
 from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of, split_group_id
@@ -326,6 +327,8 @@ class TVController(QObject):
             play_external=self._play_external,
             notify=self._menu_notify,
             open_pip=self._open_pip_node if sessions is not None else None,
+            forget_recent=self._forget_recent,
+            clear_recents=self._clear_recents,
             parent=self,
         )
         # The volume keys, mute and the wheel, on the mixer (one row per picture).
@@ -872,6 +875,7 @@ class TVController(QObject):
             Action.NAV_ACTIVATE: lambda: drawer.activate(),
             Action.NAV_TEXT: lambda: drawer.type_text(payload),
             Action.NAV_BACKSPACE: lambda: drawer.backspace(),
+            Action.FORGET: self._forget_highlighted,
         }
         return calls.get(action)
 
@@ -2589,6 +2593,39 @@ class TVController(QObject):
             self._toast(translate(FAVORITES_SAVE_FAILED_TEXT), "error", ERROR_MS)
             return
         self._toast(tr("Added to favorites") if added else tr("Removed from favorites"))
+
+    def _forget_highlighted(self) -> None:
+        """Delete in the channel list: the highlighted channel leaves ⟲ Recent (nothing on any
+        other row, nor while the find lists what it found: Delete there is the find's)."""
+        drawer = self.overlays.drawer
+        if not drawer.isVisible() or drawer.finding():
+            return
+        node = drawer.highlighted()
+        if node is not None and self.nav.is_recent_row(node):
+            self._forget_recent(node.payload)
+
+    def _forget_recent(self, item: dict) -> None:
+        """The channel leaves ⟲ Recent: its plays leave the watch history (saved with it)."""
+        wanted = (provider_of(item), item_key(item))
+        if self.watch.forget(lambda entry: recent_channel(entry) == wanted):
+            self._recents_changed()
+            self._toast(tr("Removed from Recents"))  # i18n: a toast (see "Remove from Recents")
+
+    def _clear_recents(self) -> None:
+        """Clear Recents: every channel leaves ⟲ Recent (films and episodes stay in the
+        history: the Library's Continue)."""
+        if self.watch.forget(lambda entry: recent_channel(entry) is not None):
+            self._recents_changed()
+            self._toast(tr("Recents cleared"))  # i18n: a toast: the "Recent" list was emptied
+
+    def _recents_changed(self) -> None:
+        """⟲ Recent follows; emptied while it shows, the list goes a layer up to the genres
+        (its row is gone from them)."""
+        path = self.nav.path
+        if path and path[-1].key == RECENT_GROUP and not self.nav.recent_count():
+            self.nav.up()
+        else:
+            self.nav.changed.emit()
 
     def _on_context(self, node: NavNode, global_pos: QPoint) -> None:
         """A right-click on a drawer row: its context menu."""

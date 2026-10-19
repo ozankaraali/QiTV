@@ -73,7 +73,7 @@ With two or more providers, QiTV mixes them: every channel, film and series know
 - **All providers.** The sources column (the channel list's left-most column) starts with **All providers**. It shows ★ Favorites, ⟲ Recent and All with every provider's channels together, each with its provider's name beside it, and then each provider's own groups under its name, named as that provider names them. Groups are never merged, even when two providers use the same name. Typed channel numbers find the first match, in the order of your providers in Settings.
 - **Browsing is only browsing.** Picking another provider, or All providers, only changes what the list shows: nothing that plays stops, picture-in-picture stays open, and <kbd>↑</kbd>/<kbd>↓</kbd> keep going through the list the channel was picked from. <kbd>Enter</kbd> (or a click on the picture) opens the list where the big picture's channel was picked: its provider, its group, its row.
 - **Two providers at once.** Watch a channel from one account and open one from another in picture-in-picture; swap them and change channels on either. Each provider's stream limit counts on its own, so two accounts that each allow one stream can each play one picture.
-- **One history.** ⟲ Recent lists the channels you watched at every provider, newest first, each with its provider's name. <kbd>Backspace</kbd> (the channel before) goes back across providers too, and **Start with the last channel** (Settings) tunes the last channel from its own provider.
+- **One history.** ⟲ Recent lists the channels you watched at every provider, newest first, each with its provider's name. Right-click one there for **Remove from Recents** (or highlight it and press <kbd>Delete</kbd>), or **Clear Recents** to empty the list (also on ⟲ Recent itself). <kbd>Backspace</kbd> (the channel before) goes back across providers too, and **Start with the last channel** (Settings) tunes the last channel from its own provider.
 - **The guide** of a provider is loaded while its channels are on screen or playing, and let go afterwards, so All providers doesn't download every guide at once.
 - **One account's trouble stays with it.** A provider that can't sign in or refresh keeps its saved lists, and the other providers keep working. A channel you play from it says which provider failed and why.
 - **The Providers menu** in the menu bar lists your providers with All providers at the top, and ticks the one the channel list shows.
@@ -135,6 +135,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Backspace</kbd> | Delete a letter of the find |
 | <kbd>Ctrl/⌘+D</kbd> | Add or remove a favorite channel |
 | <kbd>Ctrl/⌘+P</kbd> | Open the channel in picture-in-picture |
+| <kbd>Delete (fn+⌫ on a Mac)</kbd> | Remove the channel from Recents |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Esc</kbd> | End the find, then close |

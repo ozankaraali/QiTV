@@ -26,9 +26,10 @@ from services.epg_view import Programme
 from services.live.live_session import CRAWLING, UNAVAILABLE
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
-from services.navigation import FAVORITES_GROUP, NavModel, NavNode, item_key
+from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode, item_key
 from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
+from services.watch_state import WatchState
 from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
 from ui.keymap import Action
@@ -399,9 +400,13 @@ class FakeDrawer(FakeOverlay):
     contextRequested = Signal(object, object)
     closed = Signal()
     highlight = None
+    found = False  # the find lists what it found
 
     def highlighted(self):
         return self.highlight
+
+    def finding(self):
+        return self.found
 
     def open_drawer(self, focus_key=None, focus_side="right"):
         if focus_side == "right":
@@ -3992,6 +3997,120 @@ class ContextMenuTests(ControllerTestCase):
         )
         self.nav.reset_to("series")
         self.assertIsNone(self.menu_for(NavNode("item", "s9", "Harbour Lights", SERIES)))
+
+
+def watched(provider, channel, kind="channel"):
+    """A watch-history entry as ConfigManager.add_to_watch_history writes it."""
+    return {
+        "content_id": f"{provider}:{channel['id']}",
+        "item_data": dict(channel),
+        "item_type": kind,
+        "link": f"http://tv/{channel['id']}",
+        "provider_name": provider,
+        "timestamp": "2026-10-19T20:00:00",
+        "name": channel["name"],
+    }
+
+
+class RecentsTests(ControllerTestCase):
+    """A channel taken out of ⟲ Recent: its row's menu, Delete, and Clear Recents."""
+
+    menu_for = ContextMenuTests.menu_for
+    texts = staticmethod(ContextMenuTests.texts)
+    choose = staticmethod(ContextMenuTests.choose)
+
+    def setUp(self):
+        super().setUp()
+        self.film = watched("Home", {"id": 9, "name": "Film"}, "movie")
+        self.home_two, self.backup_two = watched("Home", CHANNELS[1]), watched(
+            "Backup", CHANNELS[1]
+        )
+        self.home_one, self.older_two = watched("Home", CHANNELS[0]), watched("Home", CHANNELS[1])
+        self.history = [self.home_two, self.film, self.backup_two, self.home_one, self.older_two]
+        self.config.watch_history = list(self.history)
+        self.controller.watch = WatchState(self.config)  # the real history keeper: it saves
+        self.controller.start()
+        self.nav.reset_to("live", RECENT_GROUP)
+        self.rows = self.nav.children(self.nav.path[-1])
+
+    def shown(self):
+        return [(provider_of(n.payload), n.title) for n in self.nav.children(self.nav.path[-1])]
+
+    def test_a_recent_channel_s_menu_takes_it_out_and_saves_the_history(self):
+        self.assertEqual(self.shown(), [("Home", "Two"), ("Backup", "Two"), ("Home", "One")])
+        menu = self.menu_for(self.rows[0])
+        self.assertEqual(
+            self.texts(menu),
+            [
+                "Add to favorites",
+                "Remove from Recents",
+                "Clear Recents",
+                "Play in VLC",
+                "Play in MPV",
+                "Copy stream link",
+            ],
+        )
+        saves = self.config.saves
+        self.choose(menu, "Remove from Recents")
+        # Both its plays at that provider go; the same channel at another provider, the other
+        # channels and the film stay, as they were (older builds read the same entries).
+        self.assertEqual(self.config.watch_history, [self.film, self.backup_two, self.home_one])
+        self.assertEqual(self.config.saves, saves + 1)
+        self.assertEqual(self.shown(), [("Backup", "Two"), ("Home", "One")])
+        self.assertEqual(self.toast.messages()[-1], ("Removed from Recents", "info"))
+
+    def test_a_channel_elsewhere_offers_no_recents_entries(self):
+        self.nav.reset_to("live", "10")
+        two = self.nav.children(self.nav.path[-1])[1]
+        texts = self.texts(self.menu_for(two))
+        self.assertNotIn("Remove from Recents", texts)
+        self.assertNotIn("Clear Recents", texts)
+
+    def test_clear_recents_asks_once_more_then_empties_the_list_and_goes_up(self):
+        menu = self.menu_for(self.rows[2])
+        sub = next(a for a in menu.actions() if a.text() == "Clear Recents").menu()
+        self.assertEqual(self.texts(sub), ["Clear all 3 channels"])
+        self.assertEqual(self.config.watch_history, self.history)  # the submenu only asks
+        saves = self.config.saves
+        self.choose(sub, "Clear all 3 channels")
+        self.assertEqual(self.config.watch_history, [self.film])  # the Library's Continue stays
+        self.assertEqual(self.config.saves, saves + 1)
+        self.assertEqual(self.toast.messages()[-1], ("Recents cleared", "info"))
+        # Its row is gone from the genres: the list is back on them.
+        self.assertEqual([n.layer for n in self.nav.path], ["source", "section"])
+        self.assertNotIn(RECENT_GROUP, [n.key for n in self.nav.children(self.nav.path[-1])])
+
+    def test_the_recent_row_itself_offers_clear_recents(self):
+        recent = next(n for n in self.nav.children(self.nav.path[1]) if n.key == RECENT_GROUP)
+        menu = self.menu_for(recent)
+        self.assertEqual(self.texts(menu), ["Clear Recents"])
+        sub = menu.actions()[0].menu()
+        self.choose(sub, "Clear all 3 channels")
+        self.assertEqual(self.config.watch_history, [self.film])
+        self.assertIsNone(self.menu_for(recent))  # nothing left to clear
+
+    def test_delete_takes_the_highlighted_recent_channel_out(self):
+        self.drawer.visible = True
+        self.drawer.highlight = self.rows[1]  # Two, at Backup
+        self.controller.handle(Action.FORGET)
+        self.assertEqual(
+            self.config.watch_history, [self.home_two, self.film, self.home_one, self.older_two]
+        )
+        self.assertEqual(self.toast.messages()[-1], ("Removed from Recents", "info"))
+        history = list(self.config.watch_history)
+        self.drawer.found = True  # the find lists what it found: Delete is the find's then
+        self.drawer.highlight = self.rows[0]
+        self.controller.handle(Action.FORGET)
+        self.assertEqual(self.config.watch_history, history)
+        self.drawer.found = False
+        self.nav.reset_to("live", "10")  # a genre's channel: nothing to take out
+        self.drawer.highlight = self.nav.children(self.nav.path[-1])[0]
+        self.controller.handle(Action.FORGET)
+        self.assertEqual(self.config.watch_history, history)
+        self.nav.reset_to("live", RECENT_GROUP)
+        self.drawer.highlight, self.drawer.visible = self.rows[0], False  # the list is closed
+        self.controller.handle(Action.FORGET)
+        self.assertEqual(self.config.watch_history, history)
 
 
 class ExternalButtonTests(ControllerTestCase):
