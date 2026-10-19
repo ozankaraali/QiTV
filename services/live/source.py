@@ -93,6 +93,8 @@ _STOP_POLL = 0.1
 _PLAYLIST_HOPS = 4
 _KEY_CACHE = 16
 _KEY_LIMIT = 1024
+# A live playlist's newest segments checked before fetching, this long in all (`_check_media`).
+_CHECKED_SECONDS = 300.0
 _INIT_LIMIT = 4 * 1024 * 1024  # an fMP4 init segment (EXT-X-MAP): some kilobytes in practice
 # A live playlist without a new segment for this long is frozen.
 _FROZEN_TIMEOUT = 60.0
@@ -805,26 +807,47 @@ def _key_method(key: Any) -> str:
     return str(key.method or "NONE").upper() if key is not None else "NONE"
 
 
+def _checked(playlist: Any) -> list[Any]:
+    """The segments `_check_media` checks: a finished playlist's all, a live one's newest
+    `_CHECKED_SECONDS` of them."""
+    segments = playlist.segments
+    if playlist.is_endlist:
+        return list(segments)
+    start, total = len(segments), 0.0
+    while start > 0 and total < _CHECKED_SECONDS:
+        start -= 1
+        total += float(segments[start].duration or 0)
+    return list(segments[start:])
+
+
 def _check_media(playlist: Any, base: str) -> None:
     """Reject what this fetcher cannot play, before fetching any of it: byte ranges (of a
-    segment or an init section), keys other than AES-128."""
+    segment or an init section), keys other than AES-128, URIs other than HTTP(S). A live
+    playlist's URIs and keys are checked for its newest segments (`_checked`): a DVR window
+    lists hours of them, reloaded every few seconds, and the source fetches near its end
+    (resolving each URI again as it fetches it)."""
     segments = playlist.segments
-    maps = [segment.init_section for segment in segments if segment.init_section is not None]
-    if any(segment.byterange for segment in segments) or any(
-        init.byterange for init in [*maps, *(playlist.segment_map or ())]
+    if (
+        any(segment.byterange for segment in segments)
+        or any(init.byterange for init in playlist.segment_map or ())
+        or any(s.init_section is not None and s.init_section.byterange for s in segments)
     ):
         raise SourceError("unsupported", _BYTE_RANGES)
-    for segment in segments:
+    resolved: set[str] = set()  # an init's or key's URI, which many segments share
+    for segment in _checked(playlist):
         _resolve(base, segment.uri)
-        if segment.init_section is not None:
-            _resolve(base, segment.init_section.uri)
+        uris = [segment.init_section.uri] if segment.init_section is not None else []
         method = _key_method(segment.key)
         if method == "AES-128":
             if not segment.key.uri:
                 raise SourceError("unsupported", _UNDECRYPTABLE)
-            _resolve(base, segment.key.uri)
+            uris.append(segment.key.uri)
         elif method != "NONE":
             raise SourceError("unsupported", _ENCRYPTION)
+        for uri in uris:
+            if uri not in resolved:
+                resolved.add(uri)
+                _resolve(base, uri)
 
 
 def _check_audio(playlist: Any, url: str) -> str | None:

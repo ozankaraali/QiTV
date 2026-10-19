@@ -24,6 +24,7 @@ import warnings
 from Cryptodome.Cipher import AES
 from Cryptodome.Util.Padding import pad
 from http_fixtures import LocalSource, leaf, tls_server_context
+import m3u8
 import requests
 from test_fmp4 import FIXTURES, box, frames, movie, sound, trak, visual
 import ts_fixtures
@@ -454,6 +455,19 @@ class LiveSourceTests(SourceTestCase):
         self.assertEqual(server.counts["/nested/movie.mp4"], 0)
         self.assertEqual(server.counts["/video.ts"], 0)
         self.assertEqual(server.counts["/low.m3u8"], 0)
+
+    def test_a_live_playlists_newest_segments_are_checked_not_its_whole_window(self):
+        # A DVR window lists hours of segments and is reloaded every few seconds: resolving
+        # every URI on each reload took a third of a core on one public channel. A live
+        # playlist's newest five minutes are checked before fetching; a finished one's all.
+        base = "http://provider.test/live.m3u8"
+        head = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nftp://elsewhere/old.ts\n"
+        body = "".join(f"#EXTINF:10,\nseg{k}.ts\n" for k in range(31))
+        source_module._check_media(m3u8.loads(head + body, uri=base), base)  # 310 s back
+        for text in (head + body + "#EXT-X-ENDLIST\n", head + body.replace("seg30", "ftp://x/n")):
+            with self.subTest(text[-24:]), self.assertRaises(SourceError) as raised:
+                source_module._check_media(m3u8.loads(text, uri=base), base)
+            self.assertEqual(str(raised.exception), source_module._NON_HTTP)
 
     def test_hls_segments_that_are_not_transport_streams_are_unsupported(self):
         server = self.server(
