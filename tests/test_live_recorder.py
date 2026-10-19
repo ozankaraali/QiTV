@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication
 from http_fixtures import LocalSource
 from ts_fixtures import make_stream
 
-from services.live import engine as engine_module, recorder as recorder_module
+from services.live import engine as engine_module, recorder as recorder_module, worker
 from services.live.engine import LiveEngine
 from services.live.recorder import (
     ENDED,
@@ -388,8 +388,20 @@ class HelperRecordingTests(unittest.TestCase):
         self.helper.parent.send(("open", "s", self.source.url + SECRET_PATH, {}, True, RAM, 6.0))
         self.helper.wait_for(lambda message: message == ("ready", "s"))
 
+    def seen(self, predicate, timeout=10):
+        """The first message matching `predicate`: one received already (while the test waited
+        for another), else the next one within `timeout`."""
+        for message in self.helper.messages:
+            if predicate(message):
+                return message
+        return self.helper.wait_for(predicate, timeout)
+
     def recorded(self, rid, timeout=10):
-        return self.helper.wait_for(lambda m: m[0] == "recorded" and m[2] == rid, timeout)
+        return self.seen(lambda m: m[0] == "recorded" and m[2] == rid, timeout)
+
+    def closed(self, sid, timeout=10):
+        # Generous: the close thread sends it once the upstream let go, on a loaded runner late.
+        return self.seen(lambda m: m == ("closed", sid), timeout)
 
     def assert_transport_stream(self, path):
         data = Path(path).read_bytes()
@@ -415,11 +427,50 @@ class HelperRecordingTests(unittest.TestCase):
         self.helper.parent.send(("record_start", "s", "r1", path, 0, {}))
         time.sleep(0.6)
         self.helper.parent.send(("close", "s"))
-        message = self.recorded("r1")  # also when it comes after "closed"
+        message = self.recorded("r1")  # before or after "closed": in no set order
         self.assertEqual(message[3], STOPPED)
         self.assert_transport_stream(path)
-        self.assertIn(("closed", "s"), self.helper.messages)
+        self.assertEqual(self.closed("s"), ("closed", "s"))
         self.assertTrue(self.hung_up.wait(3), "the session kept its upstream connection")
+
+    def test_a_closes_closed_and_its_recordings_end_come_in_either_order(self):
+        # CI (a loaded runner): "closed" came after the recording's end. Neither waits for the
+        # other ("closed" leaves from the command loop or the close thread once the upstream
+        # let go, the end from the recording's thread once the teardown stopped it): each order
+        # is forced here by holding one of the two at the helper's send until the other went
+        # (the outbox sends in the order messages were queued).
+        send = worker._Helper.send
+
+        def holding(sid, last, went):
+            def held(helper, message, session=None):
+                kind = message[0] if message[1:2] == (sid,) else ""
+                if kind == last:
+                    went.wait(5)
+                send(helper, message, session)
+                if kind in ("closed", "recorded") and kind != last:
+                    went.set()
+
+            return held
+
+        for rid, last in enumerate(("closed", "recorded")):
+            sid, went = f"o{rid}", threading.Event()
+            patched = mock.patch.object(worker._Helper, "send", holding(sid, last, went))
+            with self.subTest(f"{last} last"), patched:
+                self.helper.parent.send(
+                    ("open", sid, self.source.url + SECRET_PATH, {}, True, RAM, 6.0)
+                )
+                self.helper.wait_for(lambda message, sid=sid: message == ("ready", sid))
+                path = str(self.folder / f"{last} last.ts")
+                self.helper.parent.send(("record_start", sid, str(rid), path, 0, {}))
+                self.seen(lambda m, rid=rid: m[0] == "recording" and m[2] == str(rid))
+                self.helper.parent.send(("close", sid))
+                ended = self.recorded(str(rid))
+                closed = self.closed(sid)
+                order = [m for m in self.helper.messages if m in (ended, closed)]
+                self.assertEqual(order, [ended, closed] if last == "closed" else [closed, ended])
+                self.assertEqual(ended[3], STOPPED)  # the file kept, either way
+                self.assertEqual(os.path.getsize(path), ended[5])
+                self.assertEqual(Path(path).read_bytes()[:1], b"\x47")
 
     def test_a_new_recording_may_start_while_the_last_one_finishes(self):
         first, second = str(self.folder / "a.ts"), str(self.folder / "b.ts")

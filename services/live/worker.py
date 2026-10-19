@@ -47,8 +47,11 @@ engine always ship in one build, and the engine still takes four);
 `("ready", sid)` once the first segment is open (its state comes first);
 `("recording", sid, rid, path, written)` once recording `rid` made its file and every few
 seconds while it grows (2.2), and `("recorded", sid, rid, reason, path, written)` once it ended
-(`reason` is one of `recorder.REASONS`; `path` the file written, "" when none was), both also
-after "closed": a recording outlives its session's cancel, and they are never dropped for it;
+(`reason` is one of `recorder.REASONS`; `path` the file written, "" when none was). After a
+"close" they come before or after the session's "closed", in no set order: the close never
+waits for its recording (the next channel opens on "closed"), and the session's teardown lets
+the recording reach the live edge meanwhile. A recording outlives its session's cancel, and
+these messages are never dropped for it;
 `("error", sid, kind, message[, status])`, an HTTP failure's status last (2.1: the parent
 logs why a channel played directly); `("ended", sid)`; `("closed", sid)`. Error messages are
 fixed strings. `kind`, one meaning each:
@@ -485,7 +488,7 @@ class _Session:
         self._helper.send(message)
 
     def _recorded(self, recorder: Recorder) -> None:
-        """A recording's end (its own thread): the parent hears it, also after "closed"."""
+        """A recording's end (its own thread): the parent hears it, before or after "closed"."""
         with self.lock:
             if self._recorder is recorder:
                 self._recorder = None

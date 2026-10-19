@@ -50,7 +50,8 @@ Recording (2.2): `start_recording(sid, path, seq)` has the helper write the sess
 to a file from segment `seq` on, following the live edge (no second connection: the helper's
 recorder reads the ring), until `stop_recording(sid)`, the session's close, its input's end or
 a limit. It returns the recording's id, and each is answered by one `recordingEnded(rid,
-reason, path, written)`, also after `sessionClosed`: `reason` is the helper's
+reason, path, written)`, before or after the session's `sessionClosed` (in no set order: a close
+never waits for its recording): `reason` is the helper's
 (`services.live.recorder.REASONS`), or the engine's "lost" when the helper died (or time-shift
 went off) before it said; then `path` is the partial file left behind as the helper last told
 it ("" while it had made none) and `written` its size then (-1 when not known). A start for a
