@@ -221,6 +221,10 @@ class ConfigManager:
     def get_config_dir(self):
         return os.path.dirname(self.config_path)
 
+    def subtitles_dir(self) -> str:
+        """Where downloaded subtitles are kept (made by the first download)."""
+        return os.path.join(self.get_config_dir(), "subtitles")
+
     def load_config(self):
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
@@ -433,6 +437,16 @@ class ConfigManager:
         "pip_volume", DEFAULT_OPTION_PIP_VOLUME, coerce=int, clamp=(0, 100)
     )
     subtitle_folder = _config_property("subtitle_folder", "", coerce=str)  # 2.2: Load a file…
+    # 2.2: OpenSubtitles. Optional keys (older builds ignore them); the key and the password
+    # are never logged. The language is the one downloaded last; "hearing impaired" whether
+    # that file was for the hearing impaired (such files then rank first).
+    opensubtitles_api_key = _config_property("opensubtitles_api_key", "", coerce=str)
+    opensubtitles_username = _config_property("opensubtitles_username", "", coerce=str)
+    opensubtitles_password = _config_property("opensubtitles_password", "", coerce=str)
+    opensubtitles_language = _config_property("opensubtitles_language", "", coerce=str)
+    opensubtitles_hearing_impaired = _config_property(
+        "opensubtitles_hearing_impaired", False, coerce=lambda value: value is True
+    )
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 
