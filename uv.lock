@@ -984,7 +984,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=26.3" },
     { name = "pycryptodomex", specifier = ">=3.24.1" },
     { name = "pyqtdarktheme-fork", specifier = ">=2.3.6" },
-    { name = "pyside6", specifier = ">=6.11.2" },
+    { name = "pyside6", specifier = ">=6.11.2,<6.12" },
     { name = "python-vlc", specifier = "==3.0.21203" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "tzlocal", specifier = ">=5.4.4" },

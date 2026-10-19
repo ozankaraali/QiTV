@@ -12,7 +12,8 @@ dependencies = [
     "packaging>=26.3",
     "pycryptodomex>=3.24.1",
     "pyqtdarktheme-fork>=2.3.6",
-    "pyside6>=6.11.2",
+    # 6.12 needs macOS 14.4; QiTV supports macOS 13 (README).
+    "pyside6>=6.11.2,<6.12",
     "python-vlc==3.0.21203",
     "requests>=2.34.2",
     "tzlocal>=5.4.4",
