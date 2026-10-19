@@ -75,6 +75,13 @@ def handle_replace_flag():
         logging.error(f"Failed to perform update replacement: {e}")
 
 
+def written_dirs(config_dir: str) -> list[str]:
+    """Where QiTV writes files through services.atomic_write: the config (and the channel
+    stores beside it), the guide cache and the provider cache."""
+    cache = os.path.join(config_dir, "cache")
+    return [config_dir, os.path.join(cache, "epg"), os.path.join(cache, "provider")]
+
+
 def _migrate_favorites(config_manager) -> None:
     """Old stars (bare names) become per-provider entries once; a failed save is only logged."""
     from services import favorites
@@ -92,6 +99,7 @@ def main() -> int:
     import qdarktheme
 
     from services import i18n
+    from services.atomic_write import sweep_in_background
     from services.config_manager import ConfigManager, get_app_version
     from services.epg_manager import EpgManager
     from services.gc_guard import GcGuard
@@ -159,6 +167,8 @@ def main() -> int:
     image_manager = ImageManager(config_manager, config_manager.max_cache_image_size * 1024 * 1024)
     provider_manager = ProviderManager(config_manager)
     epg_manager = EpgManager(config_manager, provider_manager)
+    # Temporary files of writes killed midway, a day old, go (on a thread of their own).
+    sweep_in_background(written_dirs(config_manager.get_config_dir()))
 
     if platform.system() == "Windows":
         myappid = f"com.ozankaraali.qitv.{get_app_version()}"
