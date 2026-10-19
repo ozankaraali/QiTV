@@ -356,23 +356,30 @@ class ConfigDirOverrideTests(unittest.TestCase):
             self.assertTrue(path.endswith("config.json"))
             self.assertNotEqual(os.path.dirname(path), "")
 
-    def test_override_skips_legacy_migration(self):
+    def test_a_config_json_in_the_current_directory_stays_put(self):
+        # Pre-1.0 QiTV kept config.json in the current directory, and later versions moved
+        # one found there into the config directory: whatever file sat where QiTV started.
         from services.config_manager import ConfigManager
 
         with tempfile.TemporaryDirectory() as cwd, tempfile.TemporaryDirectory() as directory:
+            decoy = os.path.join(cwd, "config.json")
+            with open(decoy, "w", encoding="utf-8") as f:
+                f.write('{"favorites": ["Decoy"]}')
+            config_path = os.path.join(directory, "config.json")
             old = os.getcwd()
             os.chdir(cwd)
             try:
-                with open("config.json", "w") as f:
-                    f.write("{}")
-                manager = ConfigManager.__new__(ConfigManager)
-                manager.config_path = os.path.join(directory, "config.json")
-                with patch.dict(os.environ, {"QITV_CONFIG_DIR": directory}):
-                    manager._migrate_old_config()
-                self.assertTrue(os.path.isfile("config.json"))
-                self.assertFalse(os.path.exists(manager.config_path))
+                with (
+                    patch.dict(os.environ),
+                    patch.object(ConfigManager, "_get_config_path", return_value=config_path),
+                ):
+                    os.environ.pop("QITV_CONFIG_DIR", None)
+                    manager = ConfigManager()
             finally:
                 os.chdir(old)
+            with open(decoy, encoding="utf-8") as f:
+                self.assertEqual(f.read(), '{"favorites": ["Decoy"]}')
+            self.assertNotIn("Decoy", manager.favorites or [])
 
 
 if __name__ == "__main__":

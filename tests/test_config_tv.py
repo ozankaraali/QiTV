@@ -17,13 +17,9 @@ class TvConfigTests(unittest.TestCase):
         path = Path(directory.name) / "config.json"
         if saved is not None:
             path.write_text(json.dumps(saved), encoding="utf-8")
-        patches = (
-            patch.object(ConfigManager, "_get_config_path", return_value=str(path)),
-            patch.object(ConfigManager, "_migrate_old_config"),
-        )
-        for p in patches:
-            p.start()
-            self.addCleanup(p.stop)
+        patcher = patch.object(ConfigManager, "_get_config_path", return_value=str(path))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         return ConfigManager(), path
 
     def test_new_install_has_tv_defaults(self):
@@ -224,7 +220,6 @@ class TvConfigTests(unittest.TestCase):
         replace, _ = self._flaky_replace(100)
         with (
             patch.object(ConfigManager, "_get_config_path", return_value=str(path)),
-            patch.object(ConfigManager, "_migrate_old_config"),
             patch("services.config_manager.os.replace", side_effect=replace),
             patch("time.sleep"),
             self.assertLogs("services.config_manager", "WARNING") as logs,
@@ -348,12 +343,9 @@ class EpgExpirationTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / "config.json"
-        for p in (
-            patch.object(ConfigManager, "_get_config_path", return_value=str(path)),
-            patch.object(ConfigManager, "_migrate_old_config"),
-        ):
-            p.start()
-            self.addCleanup(p.stop)
+        patcher = patch.object(ConfigManager, "_get_config_path", return_value=str(path))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.config = ConfigManager()
 
     def test_each_unit_in_seconds(self):

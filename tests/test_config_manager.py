@@ -38,10 +38,7 @@ class WindowConfigMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
             config_path.write_text(json.dumps(saved_state), encoding="utf-8")
-            with (
-                patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)),
-                patch.object(ConfigManager, "_migrate_old_config"),
-            ):
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
                 config = ConfigManager()
                 window = QMainWindow()
                 restored = QMainWindow()
@@ -74,10 +71,7 @@ class WatchHistoryIdentityTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
-            with (
-                patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)),
-                patch.object(ConfigManager, "_migrate_old_config"),
-            ):
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
                 config = ConfigManager()
                 watch = WatchState(config)
                 ep1 = {"id": "7", "name": "Show", "season": "1", "series": "1"}

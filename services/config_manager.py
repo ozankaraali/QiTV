@@ -173,7 +173,6 @@ class ConfigManager:
         self._save_failed_at: float | None = None  # monotonic time of the last failed save
         self.config_path = self._get_config_path()
         os.makedirs(os.path.dirname(self.config_path) or ".", exist_ok=True)
-        self._migrate_old_config()
         self.load_config()
 
     def _get_config_path(self):
@@ -221,17 +220,6 @@ class ConfigManager:
 
     def get_config_dir(self):
         return os.path.dirname(self.config_path)
-
-    def _migrate_old_config(self):
-        if os.environ.get("QITV_CONFIG_DIR"):
-            return
-        try:
-            old_config_path = "config.json"
-            if os.path.isfile(old_config_path) and not os.path.isfile(self.config_path):
-                shutil.copy(old_config_path, self.config_path)
-                os.remove(old_config_path)
-        except Exception as e:
-            logger.warning(f"Error during config migration: {e}")
 
     def load_config(self):
         try:
