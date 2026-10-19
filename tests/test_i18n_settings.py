@@ -31,6 +31,7 @@ class LanguageSettingTests(base.WindowCase):
             [
                 ("", "System default (Türkçe)"),
                 ("en", "English"),
+                ("de", "Deutsch"),
                 ("es", "Español"),
                 ("tr", "Türkçe"),
             ],

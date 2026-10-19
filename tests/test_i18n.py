@@ -393,10 +393,12 @@ class ShippedCatalogTests(unittest.TestCase):
                 # UTF-8, sorted, as the extractor writes it (a diff shows one text per line).
                 self.assertEqual(path.read_text(encoding="utf-8"), extract.dumps(catalog))
 
-    def test_turkish_translates_every_text(self):
-        catalog = extract.read_json(extract.CATALOGS / "tr.json")
-        self.assertEqual(extract.missing(catalog, self.entries), [])
-        self.assertEqual(i18n.native_name("tr", catalog), "Türkçe")
+    def test_turkish_and_german_translate_every_text(self):
+        for code, name in (("tr", "Türkçe"), ("de", "Deutsch")):
+            with self.subTest(code):
+                catalog = extract.read_json(extract.CATALOGS / f"{code}.json")
+                self.assertEqual(extract.missing(catalog, self.entries), [])
+                self.assertEqual(i18n.native_name(code, catalog), name)
 
     def test_spanish_translates_every_text(self):
         catalog = extract.read_json(extract.CATALOGS / "es.json")
