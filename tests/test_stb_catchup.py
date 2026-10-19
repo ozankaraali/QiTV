@@ -86,8 +86,21 @@ class ArchiveFieldsTests(unittest.TestCase):
             with self.subTest(channel=channel):
                 self.assertEqual(stb_archive_fields(channel), {})
 
-    def test_its_depth_is_days_or_hours_above_31(self):
-        depths = {"7": 7, "31": 31, "168": 7, "48": 2, "40": 2, "0": 1, "": 1, "x": 1, "9999": 31}
+    def test_its_depth_is_hours_in_whole_days_or_above_31_else_days(self):
+        depths = {
+            "7": 7,
+            "30": 30,
+            "31": 31,
+            "24": 1,  # a day in hours, not 24 days
+            "24.0": 1,
+            "168": 7,
+            "48": 2,
+            "40": 2,
+            "0": 1,
+            "": 1,
+            "x": 1,
+            "9999": 31,
+        }
         for given, days in depths.items():
             with self.subTest(given=given):
                 fields = stb_archive_fields({"tv_archive": "1", "tv_archive_duration": given})

@@ -81,7 +81,11 @@ MAX_DAYS = 31  # a longer archive reads as this long
 # portals commonly send it, `enable_tv_archive` and `archive` as some name it. `allow_pvr` is
 # the portal's own recorder, not an archive: it is not read.
 _STB_MARKS = ("tv_archive", "enable_tv_archive", "archive")
-_STB_HOURS_OVER = MAX_DAYS  # a depth above this is in hours (168: a week)
+# An STB portal's `tv_archive_duration` is in hours on many portals (a week, 168, is a common
+# default) and in days on others; the field does not say which. A depth above a month, or one
+# that is a whole number of days in hours (24, 48, 72…), is read as hours: no portal keeps 24
+# days where it means one, and a depth in days is a few of them.
+_STB_HOURS_OVER = MAX_DAYS
 MAX_MINUTES = 6 * 60  # the longest stretch one address asks for
 PROBE_BYTES = 16 * 1024
 PROBE_TIMEOUT_S = 8.0
@@ -139,8 +143,8 @@ def _marked(value: Any) -> bool:
 def stb_archive_fields(channel: Mapping[str, Any]) -> dict[str, Any]:
     """The archive keys of an STB portal's channel: `archive_days` and `catchup` STB where the
     portal marks it archived (`_STB_MARKS`), else none. Its depth is `tv_archive_duration`:
-    days as most portals give it, hours when it is more than 31 (some count hours: 168 is a
-    week); a channel marked without one keeps a day."""
+    hours when it is more than 31 or a whole number of days (24 is a day, 168 a week), else
+    days; a channel marked without one keeps a day."""
     if not any(_marked(channel.get(name)) for name in _STB_MARKS):
         return {}
     try:
@@ -149,7 +153,7 @@ def stb_archive_fields(channel: Mapping[str, Any]) -> dict[str, Any]:
         depth = 0.0
     if not math.isfinite(depth) or depth <= 0:
         days = 1
-    elif depth > _STB_HOURS_OVER:
+    elif depth > _STB_HOURS_OVER or depth % 24 == 0:
         days = math.ceil(depth / 24.0)
     else:
         days = math.ceil(depth)
