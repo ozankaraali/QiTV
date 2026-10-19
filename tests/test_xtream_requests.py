@@ -6,7 +6,13 @@ import unittest
 from urllib.parse import parse_qs, urlsplit
 
 from services.catalog import format_xtream_episodes
-from services.provider_api import xtream_stream_url
+from services.provider_api import (
+    xtream_base,
+    xtream_choose_resolved_base,
+    xtream_player_api_url,
+    xtream_stream_url,
+    xtream_xmltv_url,
+)
 from services.workers import (
     _XTREAM_CATALOG_ACTIONS,
     XtreamLoaderWorker,
@@ -21,8 +27,8 @@ class ResolvedBaseTests(unittest.TestCase):
             ("http://panel.example:8080/", "http://panel.example:8080"),
             ("https://panel.example/player_api.php", "https://panel.example"),
             ("panel.example", "http://panel.example"),
-            ("panel.example:8080", "panel.example://panel.example:8080"),  # as ever
-            ("", "http:"),
+            ("panel.example:8080", "http://panel.example:8080"),
+            ("http://panel.example/xc/", "http://panel.example/xc"),  # under a path
         ):
             with self.subTest(url=url):
                 self.assertEqual(_resolve_xtream_base({}, url, prefer_https=False), base)
@@ -32,6 +38,7 @@ class XtreamRequestTests(unittest.TestCase):
     def setUp(self):
         self.requests = []
         self.allowed_formats = ["m3u8", "ts"]
+        self.prefix = ""  # the path the panel is served under
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -40,7 +47,7 @@ class XtreamRequestTests(unittest.TestCase):
                 query = parse_qs(url.query)
                 action = query.get("action", [None])[0]
                 fixture.requests.append((url.path, action))
-                if url.path != "/player_api.php":
+                if url.path != f"{fixture.prefix}/player_api.php":
                     self.send_error(403, "Media must not be opened during catalog loading")
                     return
                 if action is None:
@@ -87,8 +94,8 @@ class XtreamRequestTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         self.base = f"http://127.0.0.1:{server.server_port}"
 
-    def load_catalog(self, content_type):
-        worker = XtreamLoaderWorker(self.base, "user", "password", content_type)
+    def load_catalog(self, content_type, server=None):
+        worker = XtreamLoaderWorker(server or self.base, "user", "password", content_type)
         results = []
         errors = []
         worker.finished.connect(results.append)
@@ -127,6 +134,83 @@ class XtreamRequestTests(unittest.TestCase):
             ],
         )
         self.assertEqual(catalog["contents"][0]["cmd"], f"{self.base}/movie/user/password/8.mkv")
+
+    def test_a_panel_under_a_path_is_asked_and_played_under_it(self):
+        self.prefix = "/xc"  # it advertises 127.0.0.1:1 over https, its own address
+        for server in (f"{self.base}/xc", f"{self.base}/xc/", f"{self.base}/xc/player_api.php"):
+            with self.subTest(server=server):
+                self.requests.clear()
+                catalog = self.load_catalog("itv", server)
+                self.assertEqual(
+                    self.requests,
+                    [
+                        ("/xc/player_api.php", None),
+                        ("/xc/player_api.php", "get_live_categories"),
+                        ("/xc/player_api.php", "get_live_streams"),
+                    ],
+                )
+                self.assertEqual(catalog["resolved_base"], f"{self.base}/xc")
+                cmd = catalog["contents"][0]["cmd"]
+                self.assertEqual(cmd, f"{self.base}/xc/live/user/password/7.ts")
+
+
+class XtreamBaseTests(unittest.TestCase):
+    """Every Xtream address is built on the same base: a panel's path is kept when the saved
+    server address has one, and an address without one gives scheme and host as before."""
+
+    BASES = (
+        ("http://panel.example.test:8080", "http://panel.example.test:8080"),
+        ("http://panel.example.test:8080/", "http://panel.example.test:8080"),
+        ("panel.example.test:8080", "http://panel.example.test:8080"),
+        (" https://panel.example.test ", "https://panel.example.test"),
+        ("http://panel.example.test/player_api.php", "http://panel.example.test"),
+        ("http://panel.example.test/get.php?username=u&password=p", "http://panel.example.test"),
+        ("http://panel.example.test/xc", "http://panel.example.test/xc"),
+        ("http://panel.example.test/xc/", "http://panel.example.test/xc"),
+        ("http://panel.example.test:8080/xc/player_api.php", "http://panel.example.test:8080/xc"),
+        ("https://panel.example.test/a/b/xmltv.php", "https://panel.example.test/a/b"),
+    )
+
+    def test_the_base_of_each_address(self):
+        for server, base in self.BASES:
+            with self.subTest(server=server):
+                self.assertEqual(xtream_base(server), base)
+                self.assertEqual(
+                    xtream_player_api_url(server, "u", "p", action="get_live_streams"),
+                    f"{base}/player_api.php?username=u&password=p&action=get_live_streams",
+                )
+                self.assertEqual(
+                    xtream_xmltv_url(server, "u", "p"), f"{base}/xmltv.php?username=u&password=p"
+                )
+
+    def test_the_advertised_host_serves_a_panel_without_a_path(self):
+        info = {"url": "cdn.example.test", "port": "80", "server_protocol": "http"}
+        for server in ("http://panel.example.test", "http://panel.example.test/player_api.php"):
+            with self.subTest(server=server):
+                self.assertEqual(
+                    xtream_choose_resolved_base(info, server), "http://cdn.example.test"
+                )
+
+    def test_a_panel_under_a_path_keeps_the_users_address(self):
+        info = {"url": "10.0.0.5", "port": "25461", "server_protocol": "http"}
+        server = "http://panel.example.test/xc/"
+        self.assertEqual(xtream_choose_resolved_base(info, server), "http://panel.example.test/xc")
+        self.assertEqual(
+            xtream_choose_resolved_base(info, server, prefer_https=True),
+            "https://panel.example.test/xc",
+        )
+        self.assertEqual(
+            _resolve_xtream_base({}, server, prefer_https=False), "http://panel.example.test/xc"
+        )
+
+    def test_streams_and_episodes_are_under_the_path(self):
+        base = "http://panel.example.test/xc"
+        self.assertEqual(
+            xtream_stream_url(base, "live", "u", "p", 7, "ts"), f"{base}/live/u/p/7.ts"
+        )
+        season = {"episodes": [{"id": 31, "container_extension": "mp4"}]}
+        [episode] = format_xtream_episodes(season, base, "ts", "u", "p")
+        self.assertEqual(episode["cmd"], f"{base}/series/u/p/31.mp4")
 
 
 class XtreamItemTests(unittest.TestCase):

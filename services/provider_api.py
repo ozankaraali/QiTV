@@ -89,22 +89,42 @@ def stb_request_url(
 # -----------------------------
 
 
-def _ensure_base(url: str) -> str:
-    """Normalize a provider URL to a base 'scheme://host[:port]' string.
+# What a server address may end in besides the path the panel is served under: an API file.
+_XTREAM_FILES = ("player_api.php", "get.php", "xmltv.php", "panel_api.php")
 
-    Accepts inputs like 'domain:8080', 'http://domain:8080', 'https://domain', etc.
+
+def _ensure_base(url: str) -> str:
+    """Normalize an Xtream server address to its base, 'scheme://host[:port][/path]'.
+
+    Accepts 'domain:8080', 'http://domain:8080/', 'https://domain/player_api.php?…' and
+    the like. A panel served under a path ('http://domain/xc') keeps it: its API and
+    streams are under it. An address without one (most saved providers) gives
+    'scheme://host[:port]' as before; an API file pasted with it ('…/player_api.php',
+    'get.php', …), a trailing slash, a query or a fragment are dropped.
     """
     try:
+        url = url.strip()
         if "://" not in url:
             # Default to http if scheme not provided; auth may instruct https later
             url = f"http://{url}"
-        # Trim trailing slash
-        if url.endswith("/"):
-            url = url[:-1]
-        # Reduce to scheme://netloc if path present
-        return base_from_url(url)
+        parts = urlsplit(url)
+        segments = [s for s in parts.path.split("/") if s]
+        if segments and segments[-1].lower() in _XTREAM_FILES:
+            segments.pop()
+        base = f"{parts.scheme}://{parts.netloc}"
+        return f"{base}/{'/'.join(segments)}" if segments else base
     except Exception:
         return url
+
+
+def xtream_base(url: str) -> str:
+    """An Xtream server address's base: where its API files and streams are."""
+    return _ensure_base(url)
+
+
+def _xtream_path(url: str) -> str:
+    """The path an Xtream server address's panel is served under ('/xc'), or ''."""
+    return urlsplit(_ensure_base(url)).path
 
 
 def _build_xtream_url(
@@ -177,6 +197,14 @@ def xtream_choose_resolved_base(
         host = (server_info.get("url") or "").strip()
         if not host:
             return ""
+        if input_base and _xtream_path(input_base):
+            # A panel under a path sits behind a web server it doesn't know of: the host
+            # and port it advertises are its own, not that server's. The user's address is
+            # where its API and streams are (HTTPS when preferred).
+            base = _ensure_base(input_base)
+            if prefer_https and base.startswith("http://"):
+                base = "https://" + base[len("http://") :]
+            return base
 
         # Determine preferred scheme from input_base if provided
         preferred_scheme = None

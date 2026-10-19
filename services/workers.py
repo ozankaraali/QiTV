@@ -4,7 +4,6 @@ from functools import partial
 import logging
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, Qt, Signal
 
@@ -23,6 +22,7 @@ from services.provider_api import (
     stb_create_link_url,
     stb_portal_base,
     stb_request_url,
+    xtream_base,
     xtream_choose_resolved_base,
     xtream_player_api_url,
     xtream_stream_url,
@@ -41,10 +41,7 @@ STB_DEVICE_REJECTED_MESSAGE = DEVICE_MESSAGE
 def _resolve_xtream_base(server_info: dict, base_url: str, prefer_https: bool) -> str:
     """Pick the panel-advertised base, falling back to the user's URL when there is none."""
     resolved_base = xtream_choose_resolved_base(server_info, base_url, prefer_https=prefer_https)
-    if resolved_base:
-        return resolved_base
-    parts = urlsplit(base_url)
-    return f"{parts.scheme or 'http'}://{parts.netloc or base_url}".rstrip("/")
+    return resolved_base or xtream_base(base_url)
 
 
 # --- Roman numeral helpers (conservative matching) ---
