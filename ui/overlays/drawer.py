@@ -602,7 +602,9 @@ class _Column:
         self.model = _NodeModel(logos, now_provider, drawer)
         self.view = ChannelListView(drawer)
         self.view.setModel(self.model)
-        self.channel_delegate = ChannelRowDelegate(0.9, self.view)
+        # A list that mixes providers names each row's below its name (as the find does), so
+        # a long name keeps the row's width; one provider's rows are drawn as before.
+        self.channel_delegate = ChannelRowDelegate(0.9, self.view, provider_below=True)
         self.simple_delegate = _SimpleRowDelegate(self.view)
         self.found_delegate = _FoundRowDelegate(
             self.simple_delegate,

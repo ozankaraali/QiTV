@@ -93,6 +93,26 @@ class DrawerTests(unittest.TestCase):
         self.nav.reset_to("live", "10")
         self.assertEqual(model.index(0).data(ChannelRowsModel.ProviderRole), "")
 
+    def test_a_mixed_lists_rows_name_their_provider_below_the_channels_name(self):
+        for channel in self.catalog.live["10"]:
+            channel["_provider"] = "Home"
+        drawn, elided = [], channel_rows_module.elided
+
+        def spy(p, text, width):
+            drawn.append(text)
+            return elided(p, text, width)
+
+        self.nav.reset_to("live", FAVORITES_GROUP)
+        self.drawer.open_drawer()
+        with mock.patch.object(channel_rows_module, "elided", spy):
+            self.drawer.grab()
+        self.assertEqual(drawn, ["Two", "Home"])  # no chip beside the name: the provider below
+        drawn.clear()
+        self.nav.reset_to("live", "10")  # one provider's group: as before
+        with mock.patch.object(channel_rows_module, "elided", spy):
+            self.drawer.grab()
+        self.assertEqual(drawn, ["One", "Two"])
+
     def test_open_focuses_right_and_highlights_key(self):
         self.drawer.open_drawer("1")
         self.assertEqual(self.drawer.focus_side, "right")
