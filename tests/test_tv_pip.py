@@ -1388,6 +1388,17 @@ class OneStreamPipTests(PipCase):
         self.assertEqual(self.budget.holders("Home"), ["main"])
         self.assertEqual([url for url, _ in self.session.plays], ["rtmp://tv/3"])
 
+    def test_a_direct_channel_is_refused_while_the_small_picture_holds_the_only_stream(self):
+        self.open_small(CHANNELS[1])
+        self.tune(2)
+        self.ready("rtmp://tv/3")  # played directly: the same limit as a time-shifted tune
+        self.assertEqual(
+            self.toast.messages()[-1], ("Your provider allows 1 stream at a time", "error")
+        )
+        self.assertEqual(self.session.plays, [])
+        self.assertEqual(self.budget.holders("Home"), ["pip"])
+        self.assertTrue(self.sessions.pip_open())  # the small picture plays on
+
 
 class MixerTests(PipCase):
     """The volume keys on the mixer: a row per picture (Phase 4 Task 3b)."""

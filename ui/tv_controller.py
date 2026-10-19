@@ -1435,6 +1435,8 @@ class TVController(QObject):
                 self._current, self._cid = target, None
                 self.overlays.transport.set_speed(1.0)  # LiveSession starts every tune at 1x
             else:
+                if self._live_controls.refuse_over_limit(target, direct=True):
+                    return  # over the provider's stream limit: nothing opens
                 self._current, self._cid = target, None
                 session = self.session  # the large picture's, whatever swaps before it opens
 

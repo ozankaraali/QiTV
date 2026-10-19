@@ -265,14 +265,24 @@ class LiveControls(QObject):
         False when the provider's limit is taken by other streams (Phase 4: picture in
         picture): the toast says so and the running channel goes on.
         """
+        if self.refuse_over_limit(target):
+            return False
+        name = item_provider.provider_name(self.catalog, target.item)
+        self._tuner.tune(self.live_start(target, url), name, self.limit(target.item))
+        return True
+
+    def refuse_over_limit(self, target: Target, *, direct: bool = False) -> bool:
+        """Other players' streams (picture in picture, tiles) take the whole limit of
+        `target`'s provider: True, the toast says so and the running channel goes on.
+        `direct`: a channel played directly, whose open waits for a closing picture's
+        stream (that one does not count)."""
         name = item_provider.provider_name(self.catalog, target.item)
         limit = self.limit(target.item)
-        if self._tuner.refused(name, limit):
-            logger.info("Not opening %s: the provider allows %s streams", target.title, limit)
-            self._restore_channel()
-            self._toast(self.limit_text(limit), "error", ERROR_MS)
+        if not self._tuner.refused(name, limit, direct=direct):
             return False
-        self._tuner.tune(self.live_start(target, url), name, limit)
+        logger.info("Not opening %s: the provider allows %s streams", target.title, limit)
+        self._restore_channel()
+        self._toast(self.limit_text(limit), "error", ERROR_MS)
         return True
 
     def live_start(self, target: Target, url: str) -> LiveStart:
