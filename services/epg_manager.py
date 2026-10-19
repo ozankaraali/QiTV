@@ -1,3 +1,4 @@
+from contextlib import closing
 import copy
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime, parsedate_to_datetime
@@ -10,7 +11,7 @@ import pickle
 import shutil
 import tempfile
 import threading
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Generator, Iterator, List, Optional, Set, Tuple, cast
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -77,11 +78,30 @@ def _file_stamp(path: str) -> tuple[int, int, int]:
 _XMLTV_FORMATS = ("%Y%m%d%H%M%S %z", "%Y%m%d%H%M%S")
 
 
+def _stop_not_before(start: str, stop: str) -> bool:
+    """True when the text alone shows `stop` is not before `start`: both begin with 14 ASCII
+    digits ("YYYYmmddHHMMSS"), end the same (" +HHMM", or nothing), and stop's digits are not
+    lower. Such times parse with the same offset and compare as their digits do, or one of
+    them does not parse: either way normalize_programme_stop returns `stop` as it is."""
+    if len(start) != len(stop) or len(stop) not in (14, 20) or start[14:] != stop[14:]:
+        return False
+    first, last = start[:14], stop[:14]
+    return (
+        first <= last
+        and first.isascii()
+        and last.isascii()
+        and first.isdecimal()
+        and last.isdecimal()
+    )
+
+
 def normalize_programme_stop(start: str, stop: str) -> str:
     """Move a stop time that precedes its start (programme ends after midnight) to the next day.
 
     Accepts XMLTV times with or without a UTC offset; unparseable values are returned unchanged.
     """
+    if _stop_not_before(start, stop):  # most programmes: no time is parsed
+        return stop
     for fmt in _XMLTV_FORMATS:
         try:
             start_dt = parse_xmltv_as(start, fmt)
@@ -94,38 +114,100 @@ def normalize_programme_stop(start: str, stop: str) -> str:
     return stop
 
 
-def xml_to_dict(element):
+def xml_to_dict(element, shared: Optional[Dict[str, str]] = None):
     """
     Recursively converts an XML element and its children into a dictionary.
     Handles multiple occurrences of the same child element by storing them in a list.
     Includes attributes of elements in the resulting dictionary.
+
+    `shared`, a dict the caller keeps over many calls, makes equal strings one object: the
+    "@name" keys, and attribute values and texts of up to _SHARED_LENGTH characters (a
+    guide's languages, categories, titles and times repeat over thousands of programmes).
     """
+    return {element.tag: _element_dict(element, shared)}
 
-    def parse_element(element):
-        parsed_data: Dict[str, Any] = {}
 
-        # Include element attributes
-        if element.attrib:
-            parsed_data.update(("@" + k, v) for k, v in element.attrib.items())
+_SHARED_LENGTH = 64
 
-        for child in element:
-            if len(child):
-                child_data = parse_element(child)
+
+def _attributes_into(data: Dict[str, Any], element, shared: Optional[Dict[str, str]]) -> None:
+    # items(), unlike .attrib, makes no dict for an element without attributes.
+    if shared is None:
+        for name, value in element.items():
+            data["@" + name] = value
+        return
+    for name, value in element.items():
+        key = "@" + name
+        key = shared.setdefault(key, key)
+        if len(value) <= _SHARED_LENGTH:
+            value = shared.setdefault(value, value)
+        data[key] = value
+
+
+def _element_dict(element, shared: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    parsed_data: Dict[str, Any] = {}
+    _attributes_into(parsed_data, element, shared)
+    for child in element:
+        if len(child):
+            child_data = _element_dict(child, shared)
+        else:
+            text = child.text
+            if shared is not None and text is not None and len(text) <= _SHARED_LENGTH:
+                text = shared.setdefault(text, text)
+            child_data = {"__text": text}
+            _attributes_into(child_data, child, shared)
+
+        tag = child.tag
+        if tag in parsed_data:
+            if isinstance(parsed_data[tag], list):
+                parsed_data[tag].append(child_data)
             else:
-                child_data = {"__text": child.text}
-                if child.attrib:
-                    child_data.update(("@" + k, v) for k, v in child.attrib.items())
+                parsed_data[tag] = [parsed_data[tag], child_data]
+        else:
+            parsed_data[tag] = child_data
+    return parsed_data
 
-            if child.tag in parsed_data:
-                if isinstance(parsed_data[child.tag], list):
-                    parsed_data[child.tag].append(child_data)
-                else:
-                    parsed_data[child.tag] = [parsed_data[child.tag], child_data]
+
+_READ_BYTES = 1 << 20  # how much of an XMLTV file the guide parse reads at a time
+
+
+def _root_children(path: str) -> Generator[ET.Element, None, None]:
+    """The elements directly under the root of the XML file at `path`, each complete, in
+    document order.
+
+    The file is read a piece at a time and each element is let go once the next one is
+    asked for, so the whole document is never in memory (ET.parse's tree took several times
+    the file's size). Raises ET.ParseError where ET.parse would (after yielding the elements
+    before the error), and Cancelled between pieces when the job is cancelled.
+    """
+    parser: ET.XMLPullParser = ET.XMLPullParser(events=("start", "end"))
+    root: Optional[ET.Element] = None
+    depth = 0
+    with open(path, "rb") as f:
+        while True:
+            if cancel_requested():
+                raise Cancelled()
+            data = f.read(_READ_BYTES)
+            if data:
+                parser.feed(data)
             else:
-                parsed_data[child.tag] = child_data
-        return parsed_data
-
-    return {element.tag: parse_element(element)}
+                parser.close()
+            events = cast(Iterator[Tuple[str, ET.Element]], parser.read_events())
+            for event, element in events:
+                if event == "start":
+                    depth += 1
+                    if depth == 1:
+                        root = element
+                    continue
+                depth -= 1
+                if depth == 1:
+                    yield element
+                    # Detach it from the root (and the siblings after it already read: they
+                    # are whole elements still, each yielded as its end is read).
+                    assert root is not None
+                    root.clear()
+            if not data:
+                return
 
 
 _CHUNK = 65536
@@ -402,43 +484,53 @@ class EpgManager:
         their program lists. In addition to the canonical channel id, also map
         common aliases (display-name values) to the same program list so lookups
         can succeed even when providers don't supply xmltv_id.
+
+        The file is read as it is parsed (see _root_children), so a <channel> entry may come
+        before or after its programmes. Equal strings of the programmes are one object (see
+        xml_to_dict).
         """
         programs = MultiKeyDict()
 
-        tree = ET.parse(xmltv_file).getroot()
-
-        # 1) Build channel -> alias names map from <channel> entries
+        # 1) Build channel -> alias names map from <channel> entries, and
+        # 2) accumulate the programmes' per-channel lists, in one pass over the file.
         alias_map: Dict[str, Set[str]] = {}
-        for ch in tree.findall("channel"):
-            ch_id = ch.get("id")
-            if not ch_id:
-                continue
-            names: Set[str] = alias_map.setdefault(ch_id, set())
-            for dn in ch.findall("display-name"):
-                txt = (dn.text or "").strip()
-                if not txt:
-                    continue
-                names.add(txt)
-                # Include a lowercase variant for more forgiving matching
-                names.add(txt.lower())
-
-        # 2) Iterate over programmes and accumulate per-channel lists using a stable
-        #     multikey tuple that includes id + aliases + any user-provided keys.
         tmp_lists: Dict[str, List[Dict[str, Any]]] = {}
-        for programme in tree.findall("programme"):
-            channel_id = programme.get("channel")
-            start_time = programme.get("start")
-            stop_time = programme.get("stop")
+        shared: Dict[str, str] = {}
+        # The generator is closed (its file too) also when this loop is left by an error.
+        with closing(_root_children(xmltv_file)) as elements:
+            for element in elements:
+                if element.tag == "programme":
+                    channel_id = element.get("channel")
+                    start_time = element.get("start")
+                    stop_time = element.get("stop")
 
-            if not channel_id or not start_time or not stop_time:
-                # Skip malformed entries
-                continue
+                    if not channel_id or not start_time or not stop_time:
+                        # Skip malformed entries
+                        continue
 
-            program_data = xml_to_dict(programme)["programme"]
-            program_data["@stop"] = normalize_programme_stop(start_time, stop_time)
-            tmp_lists.setdefault(channel_id, []).append(program_data)
+                    program_data = xml_to_dict(element, shared)["programme"]
+                    program_data["@stop"] = normalize_programme_stop(
+                        program_data["@start"], program_data["@stop"]
+                    )
+                    plist = tmp_lists.get(channel_id)
+                    if plist is None:
+                        plist = tmp_lists[channel_id] = []
+                    plist.append(program_data)
+                elif element.tag == "channel":
+                    ch_id = element.get("id")
+                    if not ch_id:
+                        continue
+                    names: Set[str] = alias_map.setdefault(ch_id, set())
+                    for dn in element.findall("display-name"):
+                        txt = (dn.text or "").strip()
+                        if not txt:
+                            continue
+                        names.add(txt)
+                        # Include a lowercase variant for more forgiving matching
+                        names.add(txt.lower())
 
         # 3) Commit lists into MultiKeyDict with expanded keys per channel
+        #     (a stable multikey tuple: id + aliases + any user-provided keys).
         for ch_id, plist in tmp_lists.items():
             # Start with user-provided key group if exists, otherwise the channel id
             user_keys = self.config_manager.xmltv_channel_map.get_keys(ch_id)
@@ -457,6 +549,14 @@ class EpgManager:
             programs.setdefault(multikeys, []).extend(plist)
 
         return programs
+
+    def _index_download(self, xmltv_file):
+        """_index_programs on a downloaded file, then the file goes: also when the parse
+        fails or is cancelled (a provider's guide can take hundreds of MB)."""
+        try:
+            return self._index_programs(xmltv_file)
+        finally:
+            os.remove(xmltv_file)
 
     def reindex_programs(self):
         """Re-key the guide shown after the XMLTV mapping changed (Settings, GUI thread).
@@ -740,8 +840,7 @@ class EpgManager:
                 write_xmltv_body(body if body is not None else iter(()), xmltv_file_path)
 
                 # Parse and index the XMLTV file
-                guide = self._index_programs(xmltv_file_path)
-                os.remove(xmltv_file_path)
+                guide = self._index_download(xmltv_file_path)
                 if guide:
                     self._store_guide(provider_hash, guide)
                 else:
@@ -803,8 +902,7 @@ class EpgManager:
                 logger.warning("Error fetching XMLTV from %s: %s", redact_url(url), safe_exc(e))
 
             if os.path.exists(xmltv_file_path):
-                guide = self._index_programs(xmltv_file_path)
-                os.remove(xmltv_file_path)
+                guide = self._index_download(xmltv_file_path)
                 if guide:
                     source_date = _source_date(r.headers.get("Last-Modified"))
                     self._store_guide(url_hash, guide, source_date)
