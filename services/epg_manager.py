@@ -48,7 +48,7 @@ def _http_date(moment: datetime) -> str:
 
 
 def _cache_key(source: str) -> str:
-    """Name an EPG source's cache entry (index key and pickle file stem)."""
+    """Name an EPG source's cache entry (index key and guide file stem)."""
     return hashlib.md5(source.encode()).hexdigest()
 
 
@@ -341,10 +341,6 @@ class EpgManager:
     def _guide_path(self, cache_key):
         return os.path.join(self._cache_dir(), f"{cache_key}.guide")
 
-    def _pickle_path(self, cache_key):
-        """Where versions before the piecewise format (epg_store) saved the guide."""
-        return os.path.join(self._cache_dir(), f"{cache_key}.pkl")
-
     def _is_expired(self, epg_info):
         epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
         age = datetime.now() - epg_date
@@ -370,11 +366,8 @@ class EpgManager:
         The guide shown is kept when it is the one in that file and the file is unchanged.
         """
         path = self._guide_path(cache_key)
-        legacy = not os.path.exists(path)
-        if legacy:
-            path = self._pickle_path(cache_key)
-            if not os.path.exists(path):
-                return False
+        if not os.path.exists(path):
+            return False
         stamp = _file_stamp(path)
         saved = self._saved
         shown = (
@@ -385,11 +378,7 @@ class EpgManager:
         )
         if not shown:
             try:
-                if legacy:
-                    with open(path, "rb") as f:
-                        guide = pickle.load(f)
-                else:
-                    guide = read_guide(path)
+                guide = read_guide(path)
             except _UNREADABLE_GUIDE as e:
                 # Damaged, or written by another version: it stays so, so treat it as
                 # missing (the caller fetches the guide and saves a new file).
@@ -413,10 +402,6 @@ class EpgManager:
         # one parsed above, about 1 KiB of objects per programme, can go.
         self._publish(cache_key, saved)
         self._saved = (path, _file_stamp(path), saved)
-        try:
-            os.remove(self._pickle_path(cache_key))  # an earlier version's copy
-        except FileNotFoundError:
-            pass
         now = datetime.now()
         self.index[cache_key] = {
             "date": (source_date or now).strftime(_INDEX_TIME_FORMAT),
@@ -709,8 +694,8 @@ class EpgManager:
 
     # Each _set_epg_from_* loader follows the same steps (set_current_epg has already
     # dropped a guide of another source): a source indexed as None has no EPG; an
-    # outdated one is refetched; otherwise its cached pickle is used. Sources that were
-    # never indexed, or whose pickle is gone, are fetched.
+    # outdated one is refetched; otherwise its saved guide is used. Sources that were
+    # never indexed, or whose guide file is gone, are fetched.
 
     def _set_epg_from_stb(self, provider_url, headers):
         provider_hash = _cache_key(provider_url)

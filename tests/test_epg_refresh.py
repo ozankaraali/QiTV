@@ -388,7 +388,8 @@ class SavedGuideTests(_GuideCase):
         self.assertIsNot(manager.epg, old)
         self.assertEqual(manager._epg_source, source)
 
-    def test_a_guide_saved_by_an_earlier_version_is_read_and_replaced(self):
+    def test_a_1x_pickled_guide_is_ignored_and_the_guide_is_fetched(self):
+        # Only 1.x saved the guide as <key>.pkl; every 2.x saves <key>.guide.
         guide = MultiKeyDict()
         guide[("news.test", "News")] = [
             {
@@ -405,11 +406,13 @@ class SavedGuideTests(_GuideCase):
         legacy = os.path.join(manager._cache_dir(), f"{self.key}.pkl")
         with open(legacy, "wb") as f:
             pickle.dump(guide, f)
-        manager.set_current_epg()
-        self.assertEqual(self.titles(manager), ["Legacy"])
-        self.expire(manager)
-        self.load(manager, "New")
-        self.assertEqual(self.cache_files(), [f"{self.key}.guide", "index.json"])
+        get = patch("services.epg_manager.requests.get", side_effect=serving(xmltv("New")))
+        with get as fetch, patch.object(pickle, "load") as unpickle:
+            manager.set_current_epg()
+        fetch.assert_called_once()
+        unpickle.assert_not_called()
+        self.assertEqual(self.titles(manager), ["New"])
+        self.assertIn(f"{self.key}.guide", self.cache_files())
 
 
 class SharedIndexTests(_GuideCase):
