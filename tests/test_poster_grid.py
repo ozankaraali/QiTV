@@ -20,6 +20,7 @@ from ui.library.poster_grid import (
     REQUEST_DELAY_MS,
     START_OVER,
     PosterGrid,
+    _outward,
     _wrap,
     card_hue,
 )
@@ -605,6 +606,53 @@ class PosterGridTests(unittest.TestCase):
         self.assertTrue(self.grid.viewport().rect().contains(self.grid.strip_rect()))
         self.grid.set_sections([("", titles(30, "Other"))], keep_current=True)
         self.assertEqual(self.grid.current_index(), 0)
+
+    def test_a_list_loaded_again_keeps_its_title_by_key_and_its_place(self):
+        # Owner (2.2.0): a genre's titles loaded again (new dicts) sent the grid to the top.
+        items = titles(200)
+        self.grid.set_key_provider(lambda item: item["name"])
+        self.grid.set_sections([("", items)])
+        self.grid.set_current_index(120)
+        bar = self.grid.verticalScrollBar()
+        value, top = bar.value(), self.grid.item_rect(120).top()
+        self.assertGreater(value, 0)
+        again = [dict(item) for item in items]
+        self.grid.set_sections([("", again)], keep_current=True)
+        self.assertEqual(self.grid.current_index(), 120)
+        self.assertIs(self.grid.item(120), again[120])
+        self.assertEqual(bar.value(), value)
+        # New titles above it: the title stays current, its row where it was on screen.
+        fresh = titles(self.grid.columns(), "Fresh") + [dict(item) for item in items]
+        self.grid.set_sections([("", fresh)], keep_current=True)
+        current = self.grid.current_index()
+        self.assertEqual(self.grid.item(current)["name"], "Title 120")
+        self.assertLessEqual(abs(self.grid.item_rect(current).top() - top), 1)  # (rounding)
+        gone = titles(200, "Other")
+        self.grid.set_sections([("", gone)], keep_current=True)  # not listed: from the top
+        self.assertEqual((self.grid.current_index(), bar.value()), (0, 0))
+
+    def test_a_title_moved_in_its_list_is_looked_for_nearest_first(self):
+        self.assertEqual(list(_outward(2, 5)), [2, 1, 3, 0, 4])
+        self.assertEqual(list(_outward(9, 3)), [2, 1, 0])  # past the end: from the last
+        self.assertEqual(list(_outward(0, 0)), [])
+
+    def test_a_double_click_across_a_refresh_activates_the_title_pressed_or_nothing(self):
+        items = titles(30)
+        self.grid.set_key_provider(lambda item: item["name"])
+        self.grid.set_sections([("", items)])
+        point = self.grid.item_rect(4).center()
+        QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+        # Loaded again between the clicks, one title more ahead of it: it is still the one.
+        self.grid.set_sections([("", titles(1, "Fresh") + titles(30))], keep_current=True)
+        QTest.mouseDClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+        self.assertEqual(self.named("activated"), [5])
+        self.assertEqual(self.grid.item(5)["name"], "Title 4")
+        QTest.qWait(QApplication.doubleClickInterval() + 50)
+        point = self.grid.item_rect(0).center()
+        QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)  # Fresh 0
+        self.grid.set_sections([("", titles(30, "Other"))])  # another list: its first current
+        QTest.mouseDClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+        self.assertEqual(self.named("activated"), [5])  # never a title that was not pressed
 
     def test_set_sections_starts_at_the_top_by_default(self):
         items = titles(200)

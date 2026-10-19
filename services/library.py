@@ -365,20 +365,37 @@ class LibraryModel(QObject):
             self._catalog.request_section(self._section)
             self.changed.emit()
             return
-        self.set_section(self._section)
+        if (
+            name == self._provider
+            and self._genre is not None
+            and self._section in self._catalog.sections()
+        ):
+            # The source shown is ready again (a refresh, a new sign-in, a title of it chosen
+            # while it set up): its lists come again and the genre being read stays.
+            self._catalog.request_section(self._section)
+            self.changed.emit()
+            return
+        self.set_section(self._section)  # another source: from its first genre
 
     def _on_section_ready(self, section: str) -> None:
+        """The section's lists arrived: the first genre when none is chosen yet; afterwards
+        (a stale list reloaded, the section asked for again, another provider's lists in the
+        mix) the genre being read stays while it is listed."""
         if not self._current(section):
             return
         self._ready = True  # memo keys carry the content version: nothing to clear
         pinned = self._pinned_genres()
         groups = [g for g in self._catalog.groups(self._section) if not g.header]
-        if self._mixed() and self._genre_listed(groups):
-            pass  # another provider's lists arrived: the genre being read stays
+        genre = self._genre
+        if genre is not None and self._genre_listed(groups):
+            if genre not in PINNED_TITLES:
+                self._select(genre)  # a portal's genre loads on demand: asked again if gone
         elif pinned:
             self._genre = pinned[0].id
         elif groups:
             self._select(str(groups[0].id))
+        else:
+            self._genre = None
         self._pinned_sig = self._pinned_signature()
         self.changed.emit()
 
@@ -498,6 +515,11 @@ class LibraryModel(QObject):
     def _item_cid(self, item: dict) -> str:
         kind = self.item_kind(item)
         return self._content_id(item, {"episode": "episode", "series": "serie"}.get(kind, "movie"))
+
+    def identity(self, item: dict) -> str:
+        """A title's lasting identity (its provider, id and kind): the same title once its
+        list is loaded again, in new dicts."""
+        return self._item_cid(item)
 
     # --- loaded items / pinned --------------------------------------------------------
     def _all_lists_everything(self, groups: list) -> bool:

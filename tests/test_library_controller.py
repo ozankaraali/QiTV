@@ -5,8 +5,9 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, QPoint, QRectF, Signal
+from PySide6.QtCore import QObject, QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 from timer_fixtures import elapse
@@ -902,6 +903,98 @@ class LibraryControllerTests(unittest.TestCase):
         ctl.handle(Action.ESCAPE)
         self.assertEqual(ctl.mode, "browse")
         self.assertIs(self.screen.grid.item(self.screen.grid.current_index()), SERIES)
+
+    def reload_movies(self):
+        """The provider's films come again (a stale list reloaded, a new setup): the same
+        titles in new dicts, as a catalog stores them."""
+        self.catalog.version += 1
+        for key, items in list(self.catalog.item_map.items()):
+            if items is not None:
+                self.catalog.item_map[key] = [dict(item) for item in items]
+
+    def test_a_film_chosen_while_its_provider_sets_up_again_plays_where_it_was(self):
+        # Owner (2.2.0): a film chosen in a genre far down the list; its provider was not ready
+        # and the Library went back to its first genre, at the top. It plays once its provider
+        # is ready, once, and the Library stays on the genre and the title.
+        ctl = self.open_movies()
+        self.model.select_genre("c")
+        ctl.handle(Action.NAV_RIGHT)  # Comedy 1
+        self.catalog.catalogs.ready.discard("P")  # set up again (a refresh, a new sign-in)
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.played, [])
+        self.reload_movies()
+        self.make_ready("P")
+        self.assertEqual(self.played_names(), ["Comedy 1"])
+        self.assertEqual(self.catalog.requests[-1], ("section", "movies"))  # asked again
+        self.catalog.sectionReady.emit("movies")
+        self.assertEqual(self.model.genre_id, "c")
+        self.assertEqual(self.screen.genres.current_id(), "c")
+        grid = self.screen.grid
+        self.assertEqual(grid.current_index(), 1)
+        self.assertEqual(grid.item(1)["name"], "Comedy 1")
+        self.make_ready("P")
+        self.assertEqual(len(self.played), 1)  # nothing plays twice
+
+    def test_the_films_arriving_again_keep_the_genre_title_and_scroll(self):
+        harbour = [movie(100 + i, f"Harbour {i:03}") for i in range(120)]
+        self.catalog.group_list["movies"].append(("h", "Harbour"))
+        self.catalog.item_map[("movies", "h")] = harbour
+        self.open_movies()
+        self.model.select_genre("h")
+        grid = self.screen.grid
+        grid.set_current_index(90)
+        value = grid.verticalScrollBar().value()
+        self.assertGreater(value, 0)
+        self.reload_movies()
+        self.catalog.sectionReady.emit("movies")  # a stale list reloaded
+        self.assertEqual(self.model.genre_id, "h")
+        self.assertEqual(grid.current_index(), 90)
+        self.assertEqual(grid.item(90)["name"], "Harbour 090")
+        self.assertIsNot(grid.item(90), harbour[90])  # the new list's
+        self.assertEqual(grid.verticalScrollBar().value(), value)
+
+    def test_a_double_click_across_the_films_arriving_again_plays_the_film_pressed(self):
+        self.open_movies()
+        self.model.select_genre("c")
+        grid = self.screen.grid
+        point = grid.item_rect(1).center()
+        QTest.mouseClick(grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)  # current now
+        self.reload_movies()
+        self.catalog.sectionReady.emit("movies")  # lands between the two clicks
+        QTest.mouseDClick(grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+        self.assertEqual(self.played_names(), ["Comedy 1"])
+
+    def test_the_genre_shown_loading_again_keeps_its_titles_meanwhile(self):
+        ctl = self.open_movies()
+        self.model.select_genre("c")
+        ctl.handle(Action.NAV_RIGHT)  # Comedy 1
+        comedy = self.catalog.item_map[("movies", "c")]
+        self.catalog.item_map[("movies", "c")] = None  # a refresh cleared its lists
+        self.catalog.version += 1
+        self.make_ready("P")
+        self.assertIsNone(self.screen.grid._message)  # no "Loading…" over the titles shown
+        self.assertEqual(self.grid_names(), ["Comedy 0", "Comedy 1", "Comedy 2"])
+        self.catalog.item_map[("movies", "c")] = [dict(item) for item in comedy]
+        self.catalog.version += 1
+        self.catalog.sectionReady.emit("movies")
+        grid = self.screen.grid
+        self.assertEqual(grid.current_index(), 1)
+        self.assertIsNot(grid.item(1), comedy[1])  # the new list's, on the same title
+        self.model.select_genre("d")  # another genre: from its first title
+        self.assertEqual(grid.current_index(), 0)
+
+    def test_the_provider_shown_ready_again_keeps_the_series_open(self):
+        self.catalog.season_map["77"] = SEASONS
+        ctl = self.build()
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        ctl.handle(Action.NAV_ACTIVATE)  # the series view
+        self.assertEqual(ctl.mode, "series")
+        self.make_ready("P")  # a refresh of the provider it belongs to
+        self.assertEqual(ctl.mode, "series")
+        self.catalog.name = "Q"
+        self.make_ready("Q")  # the Library went to another provider: its series goes
+        self.assertEqual(ctl.mode, "browse")
 
     def test_refresh_keeps_the_genre_and_title(self):
         ctl = self.open_movies()

@@ -349,6 +349,47 @@ class LibraryModelTests(unittest.TestCase):
         cat.sectionReady.emit("movies")
         self.assertEqual(model.genre_id, "1")
 
+    def two_genres(self):
+        cat = FakeCatalog(
+            {"movies": [("1", "A", 1), ("2", "B", 1)]},
+            {("movies", "1"): [movie(1)], ("movies", "2"): [movie(2)]},
+        )
+        model, _ = build(cat)
+        model.select_genre("2")
+        return cat, model
+
+    def test_the_provider_shown_ready_again_keeps_the_genre(self):
+        # Owner (2.2.0): a film chosen in a genre far down the list; its provider set up again
+        # and the Library went back to its first genre, at the top.
+        cat, model = self.two_genres()
+        cat.requests.clear()
+        cat.version += 1
+        cat.providerReady.emit("P")  # a refresh, a new sign-in: its lists come again
+        self.assertEqual(cat.requests, [("section", "movies")])
+        self.assertEqual(model.genre_id, "2")
+        self.assertEqual(model.items(), [movie(2)])
+        cat.sectionReady.emit("movies")
+        self.assertEqual(model.genre_id, "2")
+
+    def test_the_section_arriving_again_keeps_the_genre_while_it_is_listed(self):
+        cat, model = self.two_genres()
+        cat.version += 1
+        cat.sectionReady.emit("movies")  # a stale list reloaded, or asked for by another page
+        self.assertEqual(model.genre_id, "2")
+        cat.group_list["movies"] = [("1", "A", 1)]  # the provider dropped the genre
+        cat.version += 1
+        cat.sectionReady.emit("movies")
+        self.assertEqual(model.genre_id, "1")
+
+    def test_a_kept_genre_whose_titles_went_with_the_reload_asks_for_them(self):
+        cat, model = self.two_genres()
+        cat.item_map[("movies", "2")] = None  # a portal's genre, loaded on demand
+        cat.requests.clear()
+        cat.version += 1
+        cat.sectionReady.emit("movies")
+        self.assertEqual(model.genre_id, "2")
+        self.assertEqual(cat.requests, [("group", "movies", "2")])
+
     def test_stale_provider_ignored(self):
         cat = FakeCatalog({"movies": [("1", "A", 1)]}, {("movies", "1"): [movie(1)]})
         model = LibraryModel(cat, make_config(), WatchState(make_config()))
@@ -712,7 +753,12 @@ class MixedProvidersTests(unittest.TestCase):
         cat.providerReady.emit(DEMO_TV)  # one provider of the mix is ready
         self.assertEqual(cat.requests, [("section", "movies")])
         self.assertEqual(model.genre_id, f"{HARBOR_IPTV}{SEP}c")
-        cat.providerReady.emit(ALL_PROVIDERS)  # the source changed: start over
+        cat.providerReady.emit(ALL_PROVIDERS)  # the mix ready again: the genre stays
+        cat.sectionReady.emit("movies")
+        self.assertEqual(model.genre_id, f"{HARBOR_IPTV}{SEP}c")
+        cat.mixed, cat.name = False, DEMO_TV  # the source changed: start over
+        cat.providerReady.emit(DEMO_TV)
+        self.assertIsNone(model.genre_id)
         cat.sectionReady.emit("movies")
         self.assertEqual(model.genre_id, "*")
 

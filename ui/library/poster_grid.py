@@ -6,7 +6,7 @@ width.
 """
 
 from bisect import bisect_right
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 import logging
 import time
 from typing import NamedTuple
@@ -105,6 +105,22 @@ def card_hue(title: str) -> float:
 def poster_url(item: dict) -> str:
     """The poster URL of a title: Xtream/M3U `logo`, STB `screenshot_uri`, else `cover`."""
     return str(item.get("logo") or item.get("screenshot_uri") or item.get("cover") or "")
+
+
+def _outward(index: int, count: int) -> Iterator[int]:
+    """0 … count - 1, nearest to `index` first."""
+    if count <= 0:
+        return
+    index = min(max(index, 0), count - 1)
+    yield index
+    for distance in range(1, count):
+        below, above = index - distance, index + distance
+        if below < 0 and above >= count:
+            return
+        if below >= 0:
+            yield below
+        if above < count:
+            yield above
 
 
 def _wrap(fm: QFontMetricsF, text: str, width: float, max_lines: int) -> list[str]:
@@ -223,6 +239,7 @@ class PosterGrid(QAbstractScrollArea):
         self._poster_url: Callable[[dict], str] = poster_url
         self._progress_provider: Callable[[dict], float | None] | None = None
         self._tile_provider: Callable[[dict], bool] | None = None
+        self._key_provider: Callable[[dict], object] | None = None
         self._focused = True
         self._details_cache: tuple[int, dict, Details | None] | None = None
         self._progress_cache: dict[int, float | None] = {}
@@ -277,12 +294,19 @@ class PosterGrid(QAbstractScrollArea):
         """Show titles: [("", items)] in normal mode, titled sections in search mode.
 
         By default the first title becomes current and the view returns to the top (a new
-        genre, sort or search). With `keep_current` (a refresh of the same genre and sort,
-        such as after ★), the current title stays current when it is still listed (found by
-        identity) and the view keeps its place; otherwise the first title becomes current.
+        genre, sort or search). With `keep_current` (a refresh of the same genre and sort:
+        after ★, or its titles loaded again), the current title stays current when it is still
+        listed (the same dict, else the same title by `set_key_provider`'s key) and the view
+        keeps its place, the current row where it was on screen; otherwise the first title
+        becomes current. A poster pressed before is followed the same way, so the double-click
+        that the refresh came between plays the title pressed (never another).
         """
         old_index = self._cur
         old_item = self.item(old_index)
+        old_value = self.verticalScrollBar().value()
+        old_top = self._line_top(self._cur_line) if old_item is not None else 0.0
+        pressed_index = self._pressed
+        pressed = self.item(pressed_index)
         items: list[dict] = []
         kept: list[tuple[str, int, int]] = []
         for title, section_items in sections:
@@ -294,24 +318,47 @@ class PosterGrid(QAbstractScrollArea):
         self._details_cache = None
         self._progress_cache.clear()
         self._cancel_hover()
-        current = -1
+        current, same = -1, False
         if items:
             current = 0
             if keep_current and old_item is not None:
-                if old_index < len(items) and items[old_index] is old_item:
-                    current = old_index
-                else:
-                    current = next((k for k, it in enumerate(items) if it is old_item), 0)
+                found = self._find(items, old_item, old_index)
+                current, same = (found, True) if found >= 0 else (0, False)
         self._cur = current
+        self._pressed = -1
+        if keep_current and pressed is not None:
+            self._pressed = self._find(items, pressed, pressed_index)
         self._layout_rows()
-        same = current >= 0 and items[current] is old_item
+        bar = self.verticalScrollBar()
         if not (keep_current and same):
-            self.verticalScrollBar().setValue(0)
-        elif current != old_index:
-            self._reveal()
+            bar.setValue(0)
+        else:  # the current row stays where it was on screen
+            bar.setValue(round(old_value + self._line_top(self._cur_line) - old_top))
         self.viewport().update()
         if current != old_index or (current >= 0 and not same):
             self.focusChanged.emit(current)
+
+    def _find(self, items: list[dict], item: dict, index: int) -> int:
+        """Where `item` is in `items` (looked for at `index` first): the same dict, else the
+        same title by its key (a list loaded again holds new dicts); -1 when it is not listed."""
+        at_index = 0 <= index < len(items)
+        if at_index and items[index] is item:
+            return index
+        key_of = self._key_provider
+        if key_of is None:
+            return next((k for k, it in enumerate(items) if it is item), -1)
+        key = key_of(item)
+        if at_index and key_of(items[index]) == key:
+            return index
+        found = next((k for k, it in enumerate(items) if it is item), -1)
+        if found < 0:  # nearest first: a genre of 100,000 titles is not read through for it
+            found = next((k for k in _outward(index, len(items)) if key_of(items[k]) == key), -1)
+        return found
+
+    def set_key_provider(self, fn: Callable[[dict], object] | None) -> None:
+        """What tells a title in a list loaded again (new dicts) from the others (None:
+        only the same dict is the same title)."""
+        self._key_provider = fn
 
     def set_details_provider(self, fn: Callable[[dict], Details | None]) -> None:
         self._details_provider = fn
