@@ -93,11 +93,29 @@ def _pcr_bytes(pcr_base: int) -> bytes:
 
 
 def pes_packets(
-    pid, stream_id, payload: bytes, pts, *, rai=False, cc_start=0, pcr=None, scrambled=False
+    pid,
+    stream_id,
+    payload: bytes,
+    pts,
+    *,
+    rai=False,
+    cc_start=0,
+    pcr=None,
+    scrambled=False,
+    dts=None,
 ):
     """Split one PES over packets; returns (packets, next_cc)."""
     if pts is None:
         header = b"\x00\x00\x01" + bytes([stream_id]) + b"\x00\x00" + b"\x80\x00\x00"
+    elif dts is not None:
+        header = (
+            b"\x00\x00\x01"
+            + bytes([stream_id])
+            + b"\x00\x00"
+            + b"\x80\xc0\x0a"
+            + _pts_bytes(pts, 0x30)
+            + _pts_bytes(dts, 0x10)
+        )
     else:
         header = (
             b"\x00\x00\x01"
@@ -148,6 +166,16 @@ def h264_access_unit(idr: bool) -> bytes:
     return au
 
 
+def _presented(i: int, gop: int) -> int:
+    """The presentation index of the picture decoded `i`-th, in IBBP order: each P picture
+    comes before the two B pictures shown ahead of it (a GOP of 3k + 1 pictures)."""
+    k = i % gop
+    if k == 0:
+        return i
+    group, r = divmod(k - 1, 3)
+    return i - k + 3 * group + (3 if r == 0 else r)
+
+
 def make_stream(
     seconds: float,
     *,
@@ -160,29 +188,49 @@ def make_stream(
     resets: tuple[float, ...] = (),
     packet_size=188,
     scrambled=False,
+    bframes=False,
+    jumps: tuple[tuple[float, float], ...] = (),
+    video_gaps: tuple[tuple[float, float], ...] = (),
+    audio_ahead_s=0.0,
 ) -> bytes:
+    """`seconds` of H.264-tagged video (PCR on each picture) and AAC-tagged sound.
+
+    `bframes`: the pictures carry DTS too, in IBBP order (PTS a frame after the presentation
+    time, DTS the decode time; PCR the DTS). `jumps`: (at, by) seconds: from media time `at`
+    on, every timestamp is `by` later, as an encoder's clock that leapt ahead (with B pictures
+    the PTS follows the presentation time, the DTS the decode time: a P picture decoded before
+    the leap but shown after it has its PTS ahead already). `video_gaps`: (from, to) seconds
+    without pictures, the sound going on. `audio_ahead_s`: each sound frame is muxed this much
+    before the pictures of its time."""
     n_frames = int(round(seconds * fps))
     gop_frames = max(1, int(round(gop_s * fps)))
     frame_ticks = round(CLOCK / fps)  # fps may be fractional: 30000 / 1001 gives 3003
     ccs = {0: 0, PMT_PID: 0, VIDEO_PID: 0, AUDIO_PID: 0}
-    events: list[tuple[int, int, int]] = []  # (time_ticks, order, index)
+    events: list[tuple[int, int, int, int]] = []  # (mux time, order, index, media time)
+    gaps = [(round(a * CLOCK), round(b * CLOCK)) for a, b in video_gaps]
     for i in range(n_frames):
-        events.append((i * frame_ticks, 1, i))
+        t = i * frame_ticks
+        if not any(a <= t < b for a, b in gaps):
+            events.append((t, 1, i, t))
     if audio:
+        ahead = round(audio_ahead_s * CLOCK)
         for j in range(int(seconds * CLOCK) // AUDIO_FRAME_TICKS):
-            events.append((j * AUDIO_FRAME_TICKS, 2, j))
+            t = j * AUDIO_FRAME_TICKS
+            events.append((t - ahead, 2, j, t))
     events.sort()
     reset_ticks = sorted(int(r * CLOCK) for r in resets)
+    leaps = [(round(at * CLOCK), round(by * CLOCK)) for at, by in jumps]
 
     def pts_at(t: int) -> int:
         past = [r for r in reset_ticks if t >= r]
-        return pts_start + (t - past[-1] if past else t)
+        leapt = sum(by for at, by in leaps if t >= at)
+        return pts_start + (t - past[-1] if past else t) + leapt
 
     psi_every = CLOCK // 2
     next_psi = 0
     pkts: list[bytes] = []
-    for t, kind, idx in events:
-        while t >= next_psi:
+    for mux, kind, idx, t in events:
+        while mux >= next_psi:
             pkts.append(pat(cc=ccs[0]))
             ccs[0] = (ccs[0] + 1) & 0xF
             pkts.append(
@@ -195,6 +243,10 @@ def make_stream(
         pts = pts_at(t)
         if kind == 1:
             key = idx % gop_frames == 0
+            dts = None
+            if bframes:
+                dts = pts
+                pts = pts_at(_presented(idx, gop_frames) * frame_ticks) + frame_ticks
             ps, ccs[VIDEO_PID] = pes_packets(
                 VIDEO_PID,
                 0xE0,
@@ -202,8 +254,9 @@ def make_stream(
                 pts,
                 rai=rai and key,
                 cc_start=ccs[VIDEO_PID],
-                pcr=pts,
+                pcr=pts if dts is None else dts,
                 scrambled=scrambled,
+                dts=dts,
             )
         else:
             ps, ccs[AUDIO_PID] = pes_packets(
