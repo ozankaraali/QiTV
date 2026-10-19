@@ -169,6 +169,9 @@ class _GzResponse:
             while chunk := f.read(size):
                 yield chunk
 
+    def close(self) -> None:
+        pass
+
 
 def _digest(guide: Any) -> str:
     import orjson

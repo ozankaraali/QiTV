@@ -82,6 +82,29 @@ class WriteXmltvBodyTests(unittest.TestCase):
         self.assert_no_temp_file()
         self.assertFalse(os.path.exists(self.path))
 
+    def assert_nothing_written(self):
+        self.assert_no_temp_file()
+        self.assertFalse(os.path.exists(self.path + ".part"))
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_a_cut_gzip_body_leaves_no_file(self):
+        body = gzip.compress(XML * 2000)
+        with self.assertRaises(EOFError):
+            write_xmltv_body(fake_response(body[: len(body) // 2]), self.path)
+        self.assert_nothing_written()
+
+    def test_a_damaged_zip_body_leaves_no_file(self):
+        with self.assertRaises(zipfile.BadZipFile):
+            write_xmltv_body(fake_response(b"PK\x03\x04" + b"\x00" * 64), self.path)
+        self.assert_nothing_written()
+
+    def test_a_failed_write_leaves_no_earlier_file_to_be_read(self):
+        with open(self.path, "wb") as f:
+            f.write(b"<tv><programme")  # an earlier download, cut short
+        with self.assertRaisesRegex(ValueError, "no XML in archive"):
+            write_xmltv_body(fake_response(zip_bytes({"readme.txt": b"hello"})), self.path)
+        self.assert_nothing_written()
+
 
 if __name__ == "__main__":
     unittest.main()

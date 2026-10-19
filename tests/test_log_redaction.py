@@ -52,6 +52,9 @@ class _Response:
         if not self.ok:
             raise requests.HTTPError(f"{self.status_code} Error for url: {CREDENTIAL_URL}")
 
+    def close(self):
+        pass
+
 
 class RedactTests(unittest.TestCase):
     def test_redact_url_keeps_only_scheme_and_host(self):

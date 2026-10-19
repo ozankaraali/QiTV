@@ -220,7 +220,9 @@ class JobCancellationTests(unittest.TestCase):
                 sent.append(1)
                 yield b"<!-- " + b"x" * 1000 + b" -->"
 
-        response = SimpleNamespace(status_code=200, headers={}, iter_content=endless)
+        response = SimpleNamespace(
+            status_code=200, headers={}, iter_content=endless, close=lambda: None
+        )
         with mock.patch("services.epg_manager.requests.get", return_value=response):
             worker = EpgLoadWorker(manager, force_refresh=True)
             kind, _ = self.run_and_cancel(worker, lambda: len(sent) > 5)

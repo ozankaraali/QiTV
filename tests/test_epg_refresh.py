@@ -46,6 +46,9 @@ class _Response:
     def iter_content(self, size):
         yield self.content
 
+    def close(self):
+        self.closed = True
+
 
 def serving(body):
     return lambda url, **kwargs: _Response(body)

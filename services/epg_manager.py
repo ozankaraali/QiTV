@@ -219,11 +219,14 @@ def write_xmltv_body(response, path: str) -> None:
     `response` is a streamed requests response, or its body's chunks. Headers are not
     trusted: feeds are often served as ``application/octet-stream``, and requests has
     already decoded ``Content-Encoding``. The body is streamed to a temporary ``.download``
-    file first, which is always removed. A cancelled job (the window closing) stops between
-    chunks with Cancelled.
+    file first, and an archive unpacked to a ``.part`` file; both are always removed. ``path``
+    is written only whole: when anything fails (a damaged archive, an archive without XML)
+    there is no file at ``path``, not even an earlier one. A cancelled job (the window
+    closing) stops between chunks with Cancelled.
     """
     chunks = response.iter_content(_CHUNK) if hasattr(response, "iter_content") else response
     temp_path = path + ".download"
+    part_path = path + ".part"
     try:
         with open(temp_path, "wb") as f:
             for chunk in chunks:
@@ -233,20 +236,32 @@ def write_xmltv_body(response, path: str) -> None:
         with open(temp_path, "rb") as f:
             magic = f.read(4)
         if magic[:2] == b"\x1f\x8b":
-            with gzip.open(temp_path, "rb") as src, open(path, "wb") as dst:
+            with gzip.open(temp_path, "rb") as src, open(part_path, "wb") as dst:
                 shutil.copyfileobj(src, dst)
+            os.replace(part_path, path)
         elif magic == b"PK\x03\x04":
             with zipfile.ZipFile(temp_path) as z:
                 name = next((n for n in z.namelist() if n.endswith(".xml")), None)
                 if name is None:
                     raise ValueError("no XML in archive")
-                with z.open(name) as src, open(path, "wb") as dst:
+                with z.open(name) as src, open(part_path, "wb") as dst:
                     shutil.copyfileobj(src, dst)
+            os.replace(part_path, path)
         else:
             os.replace(temp_path, path)
+    except BaseException:
+        _remove_quietly(path)  # an earlier download's, which the caller must not read
+        raise
     finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        _remove_quietly(temp_path)
+        _remove_quietly(part_path)
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:  # not there (or, on Windows, still open somewhere)
+        pass
 
 
 # What reading a saved guide raises when the file is damaged or from another format version
@@ -556,7 +571,7 @@ class EpgManager:
         try:
             return self._index_programs(xmltv_file)
         finally:
-            os.remove(xmltv_file)
+            _remove_quietly(xmltv_file)  # an error removing it must not hide the parse's
 
     def reindex_programs(self):
         """Re-key the guide shown after the XMLTV mapping changed (Settings, GUI thread).
@@ -811,11 +826,14 @@ class EpgManager:
             "ssl_verify", self.config_manager.ssl_verify
         )
 
+        r = None  # the answer in use: every streamed answer is closed
         try:
             # Fetch the XMLTV data from Xtream endpoint, trying HTTPS first if preferred
-            r = None
             body = None  # the chunks of the first non-empty answer, streamed (cancellable)
             for _url in https_fallback_candidates(xmltv_url, prefer_https):
+                if r is not None:
+                    r.close()  # the answer of the candidate passed over
+                    r = None
                 try:
                     r = requests.get(
                         _url,
@@ -832,6 +850,8 @@ class EpgManager:
                             body = itertools.chain([first], chunks)
                             break
                 except requests.RequestException:
+                    if r is not None:
+                        r.close()
                     r = None
             if r is None:
                 raise RuntimeError("Failed to fetch Xtream XMLTV EPG")
@@ -857,6 +877,9 @@ class EpgManager:
         except Exception as e:
             logger.error("Error fetching Xtream EPG: %s", safe_exc(e))
             self._source_failed(provider_hash)
+        finally:
+            if r is not None:
+                r.close()
 
         self.save_index()
 
@@ -898,23 +921,26 @@ class EpgManager:
             headers=CLIENT_HEADERS,
             verify=self.config_manager.ssl_verify,
         )
-        if r.status_code == 200:
-            url_hash = _cache_key(url)
-            xmltv_file_path = os.path.join(self._cache_dir(), f"{url_hash}.xml")
+        try:
+            if r.status_code == 200:
+                url_hash = _cache_key(url)
+                xmltv_file_path = os.path.join(self._cache_dir(), f"{url_hash}.xml")
 
-            try:
-                write_xmltv_body(r, xmltv_file_path)
-            except ValueError as e:
-                # An archive without XML leaves no file, so the index is left untouched.
-                logger.warning("Error fetching XMLTV from %s: %s", redact_url(url), safe_exc(e))
+                try:
+                    write_xmltv_body(r, xmltv_file_path)
+                except ValueError as e:
+                    # An archive without XML leaves no file, so the index is left untouched.
+                    logger.warning("Error fetching XMLTV from %s: %s", redact_url(url), safe_exc(e))
 
-            if os.path.exists(xmltv_file_path):
-                guide = self._index_download(xmltv_file_path)
-                if guide:
-                    source_date = _source_date(r.headers.get("Last-Modified"))
-                    self._store_guide(url_hash, guide, source_date)
-                else:
-                    self._source_failed(url_hash)
+                if os.path.exists(xmltv_file_path):
+                    guide = self._index_download(xmltv_file_path)
+                    if guide:
+                        source_date = _source_date(r.headers.get("Last-Modified"))
+                        self._store_guide(url_hash, guide, source_date)
+                    else:
+                        self._source_failed(url_hash)
+        finally:
+            r.close()
         self.save_index()
 
     def force_refresh_current_epg(self):

@@ -18,6 +18,8 @@ from unittest.mock import patch
 import weakref
 import xml.etree.ElementTree as ET
 
+import requests
+
 from scripts.bench_epg import build_xmltv
 from services import epg_manager as epg_manager_module
 from services.epg_manager import EpgManager, _cache_key, normalize_programme_stop
@@ -388,6 +390,26 @@ class StreamingTests(_FileCase):
         self.assertIs(first["@channel"], second["@channel"])
 
 
+class _Answer:
+    """A streamed answer that notes whether it was closed."""
+
+    def __init__(self, body=b"", status=200, broken=False):
+        self.status_code = status
+        self.headers: Dict[str, str] = {}
+        self.closed = False
+        self._body = body
+        self._broken = broken
+
+    def iter_content(self, size):
+        if self._broken:
+            raise requests.ConnectionError("reset")
+        if self._body:
+            yield self._body
+
+    def close(self):
+        self.closed = True
+
+
 class DownloadedFileTests(_FileCase):
     """A downloaded guide's file is removed also when its parse fails or is cancelled."""
 
@@ -403,12 +425,13 @@ class DownloadedFileTests(_FileCase):
         )
         return EpgManager(config, SimpleNamespace(current_provider={}))
 
-    def download(self, manager, body):
-        response = SimpleNamespace(
-            status_code=200, headers={}, iter_content=lambda size: iter([body])
-        )
-        with patch("services.epg_manager.requests.get", return_value=response):
-            manager._download_epg_from_url(manager.config_manager.epg_url)
+    def download(self, manager, body, status=200):
+        answer = _Answer(body, status)
+        with patch("services.epg_manager.requests.get", return_value=answer):
+            try:
+                manager._download_epg_from_url(manager.config_manager.epg_url)
+            finally:
+                self.assertTrue(answer.closed)
 
     def leftovers(self, manager):
         return [name for name in os.listdir(manager._cache_dir()) if name.endswith(".xml")]
@@ -418,6 +441,23 @@ class DownloadedFileTests(_FileCase):
         with self.assertRaises(ET.ParseError):
             self.download(manager, TRICKY[:500].encode())
         self.assertEqual(self.leftovers(manager), [])
+
+    def test_a_refused_download_is_closed(self):
+        manager = self.manager()
+        self.download(manager, b"busy", status=503)
+        self.assertEqual(self.leftovers(manager), [])
+
+    def test_a_parse_error_is_not_hidden_by_the_file_being_gone(self):
+        path = self.write(TRICKY, "download.xml")
+
+        def gone_then_broken(xmltv_file):
+            os.remove(xmltv_file)
+            raise ET.ParseError("broken")
+
+        manager = self.manager()
+        with patch.object(manager, "_index_programs", side_effect=gone_then_broken):
+            with self.assertRaises(ET.ParseError):
+                manager._index_download(path)
 
     def test_a_cancelled_parse_leaves_no_file(self):
         path = self.write(TRICKY, "download.xml")
@@ -433,6 +473,38 @@ class DownloadedFileTests(_FileCase):
         key = _cache_key(manager.config_manager.epg_url)
         self.assertEqual(manager._epg_source, key)
         self.assertEqual(len(manager.epg["two.test"]), 4)
+
+
+class XtreamAnswersTests(_FileCase):
+    """Every answer of the Xtream guide's candidates (HTTPS, then HTTP) is closed."""
+
+    def fetch(self, *answers):
+        config = SimpleNamespace(
+            prefer_https=True,
+            ssl_verify=True,
+            epg_expiration=3600,
+            xmltv_channel_map=MultiKeyDict(),
+            get_config_dir=lambda: self.directory,
+        )
+        provider = {"type": "XTREAM", "url": "http://h", "username": "u", "password": "p"}
+        manager = EpgManager(config, SimpleNamespace(current_provider=provider))
+        with patch("services.epg_manager.requests.get", side_effect=list(answers)) as get:
+            manager._fetch_epg_from_xtream("http://h", "u", "p")
+        self.assertEqual(get.call_count, len(answers))
+        self.assertEqual([answer.closed for answer in answers], [True] * len(answers))
+        return manager
+
+    def test_a_refused_candidate_is_closed_and_the_next_one_read(self):
+        manager = self.fetch(_Answer(b"busy", 503), _Answer(TRICKY.encode()))
+        self.assertEqual(len(manager.epg["two.test"]), 4)
+
+    def test_an_empty_or_broken_answer_is_closed(self):
+        manager = self.fetch(_Answer(b""), _Answer(TRICKY.encode(), broken=True))
+        self.assertEqual(len(manager.epg), 0)
+
+    def test_a_last_refused_answer_is_closed(self):
+        manager = self.fetch(_Answer(b"", 503), _Answer(b"busy", 503))
+        self.assertEqual(len(manager.epg), 0)
 
 
 class NormalizeStopTests(unittest.TestCase):
