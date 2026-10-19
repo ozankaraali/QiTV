@@ -49,8 +49,9 @@ instead of using others' distributions, which may have malware.**
   it as a provider.
 - **Guide time offset.** Some providers' guides are off by whole hours: Settings → Providers sets
   an offset per provider, and the guide, the banner and the player's title line move together.
-- **Rewind on more channels.** HLS channels that send their sound as a separate stream now get
-  rewind and stay-live too, instead of playing without them.
+- **Rewind on more channels.** HLS channels that send their sound as a separate stream, and
+  channels in the newer fragmented-MP4 HLS format, now get rewind and stay-live too, instead of
+  playing without them. Low-latency HLS channels no longer skip a few seconds every few seconds.
 
 ## Changed
 
