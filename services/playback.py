@@ -370,6 +370,11 @@ class PlaybackSession(QObject):
         """libVLC holds an input, or a worker still ends one: its connection may be open."""
         return self._has_input or self._job is not None
 
+    def decodes_in_software(self) -> bool:
+        """The media playing (or the last one opened) decodes in software: its open asked for
+        it, or its picture froze (a reopen of the stream passes it on)."""
+        return self._software
+
     # --- output -----------------------------------------------------------------------
     def set_window(self, win_id: int) -> None:
         # Sets a variable on the player, without its input lock: allowed during a job.
@@ -1109,6 +1114,8 @@ class Session(Protocol):
 
     def holds_input(self) -> bool: ...
 
+    def decodes_in_software(self) -> bool: ...
+
     def set_window(self, win_id: int) -> None: ...
 
     def play(
@@ -1218,6 +1225,9 @@ class NullSession(QObject):
         return False
 
     def holds_input(self) -> bool:
+        return False
+
+    def decodes_in_software(self) -> bool:
         return False
 
     def set_window(self, win_id: int) -> None:

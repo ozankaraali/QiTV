@@ -246,12 +246,17 @@ class FakeSession(QObject):
         self.shapes = []  # every set_aspect()
         self.deinterlacing = "auto"
         self.stats = {}  # what video_stats() reads
+        self.software = False  # decodes_in_software(): asked for, or the picture froze
 
     def play(self, url, **kwargs):
         self.plays.append((url, kwargs))
         self.play_delays.append(self.delay)
         self.url, self.kind = url, kwargs.get("kind")
+        self.software = bool(kwargs.get("software"))
         self.stateChanged.emit("opening")
+
+    def decodes_in_software(self):
+        return self.software
 
     def stop(self):
         self.stops += 1
@@ -3394,6 +3399,13 @@ class ReconnectTests(PipelineCase):
         self.end_and_reopen(plays + 3)
         self.session.ended.emit()
         self.assertEqual(self.toast.messages()[-1], ("The stream ended", "info"))
+
+    def test_a_reopen_decodes_in_software_as_the_stream_did(self):
+        plays = self.fall_back()
+        self.assertNotIn("software", self.session.plays[-1][1])
+        self.session.software = True  # hardware decoding froze its picture: software since
+        self.end_and_reopen(plays)
+        self.assertIs(self.session.plays[-1][1]["software"], True)
 
     def test_each_tune_may_reconnect_twice(self):
         plays = self.fall_back(0)

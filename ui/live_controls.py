@@ -81,6 +81,15 @@ def stream_options(item: dict) -> dict[str, Any]:
     return options
 
 
+def reopen_options(player, item: dict) -> dict[str, Any]:
+    """An ended stream opened again in `player`: the channel's options, and software decoding
+    when its open decoded in software (a channel whose picture froze before, or since)."""
+    options = stream_options(item)
+    if player.decodes_in_software():
+        options["software"] = True
+    return options
+
+
 def _named(title: str, message: str) -> str:
     """A failure after the channel's name, when it has one."""
     # i18n: an error toast: a channel's, a film's or a provider's name, then what went wrong
@@ -357,7 +366,10 @@ class LiveControls(QObject):
             return  # no stream of its provider to spare (the caller says so)
         logger.info("Opening %s again after its stream ended", target.title)
         session.play(
-            url, kind=kind, latency=self.config.live_latency, **stream_options(target.item)
+            url,
+            kind=kind,
+            latency=self.config.live_latency,
+            **reopen_options(session, target.item),
         )
 
     def _cancel_reopen(self) -> None:

@@ -473,6 +473,17 @@ class PipTests(PipCase):
         self.assertEqual(sorted(self.budget.holders("Home")), holders)
         self.assertEqual(self.pip_live.named("stop"), [])
 
+    def test_the_small_pictures_reopen_decodes_in_software_as_its_stream_did(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.pip_live.play_direct()
+        self.pip_session.software = True  # hardware decoding froze its picture: software since
+        plays = len(self.pip_session.plays)
+        self.pip_session.stateChanged.emit("ended")
+        self.assertTrue(wait_until(lambda: len(self.pip_session.plays) == plays + 1))
+        self.assertIs(self.pip_session.plays[-1][1]["software"], True)
+
     def test_a_time_shifted_small_picture_is_not_reopened_here(self):
         self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
         self.start_large(0)
