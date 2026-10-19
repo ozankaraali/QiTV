@@ -57,6 +57,7 @@ class AudioWeaver:
         self._info = b""  # ... and ES descriptors in the PMT
         self._stream: tuple[int, bytes, int] | None = None  # (type, descriptors, PID) as read
         self._cc = 0  # the counter of the packets built from packed audio
+        self._woven_cc = 0  # the next counter on the audio's PID in the woven TS
         self._next_pts: int | None = None  # packed audio: where its last segment ended
         self._queue: list[Unit] = []  # audio added and not woven yet, in PTS order
         self._tables: tuple[int, set[int]] | None = None  # the last video's (PMT PID, PIDs)
@@ -196,13 +197,25 @@ class AudioWeaver:
                 while clock is not None and k < len(units):
                     if pts_delta((clock + _LEAD_TICKS) % _PTS_MODULO, units[k][0]) > 0:
                         break
-                    out.extend(_on_pid(p, pid) for p in units[k][1])
+                    out.extend(self._on_pid(p, pid) for p in units[k][1])
                     k += 1
             out.append(pkt)
         for _, unit in units[k:]:
-            out.extend(_on_pid(p, pid) for p in unit)
+            out.extend(self._on_pid(p, pid) for p in unit)
         self.woven += 1
         return b"".join(out) + video[len(packets) * PACKET :]
+
+    def _on_pid(self, pkt: bytes, pid: int) -> bytes:
+        """An audio packet on the woven TS's audio PID, its counter the next of that PID's:
+        the weaver writes every packet there, and units it leaves out (overlaps, audio too
+        late) or a rendition's counters restarting each segment leave no break."""
+        counter = self._woven_cc
+        if pkt[3] & 0x10:  # one with a payload counts
+            self._woven_cc = (counter + 1) & 0x0F
+        else:
+            counter = (counter - 1) & 0x0F
+        head = bytes([pkt[0], (pkt[1] & 0xE0) | pid >> 8, pid & 0xFF, (pkt[3] & 0xF0) | counter])
+        return head + pkt[4:]
 
     def _listed(self, pkt: bytes, pmt_pid: int) -> bytes | None:
         """A PMT packet that lists the audio (as it came when it already does); None when its
@@ -451,7 +464,3 @@ def _free_pid(used: set[int]) -> int:
     while pid in used:
         pid += 1
     return pid
-
-
-def _on_pid(pkt: bytes, pid: int) -> bytes:
-    return bytes([pkt[0], (pkt[1] & 0xE0) | pid >> 8, pid & 0xFF]) + pkt[3:]

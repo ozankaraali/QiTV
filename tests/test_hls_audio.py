@@ -240,6 +240,19 @@ class QueuedAudioTests(unittest.TestCase):
         weaver.add(audio_ts(6, 0x102))  # past the video and the lead
         self.assertEqual(weaver.covered(self.video), (len(self.video), None))
 
+    def test_the_audio_pids_counters_run_on_whatever_was_left_out(self):
+        # The replays of 17 public fMP4 channels showed counter breaks on the woven audio:
+        # units left out (overlaps, audio too late) and renditions whose counters restart each
+        # segment. The weaver numbers the packets it writes there itself.
+        weaver = AudioWeaver()
+        weaver.add(audio_ts(4, 0x102))
+        weaver.add(audio_ts(4, 0x102, start=900000 + 2 * CLOCK))  # 2 s again; counters from 0
+        first = weaver.weave_due(self.video, 900000 + 4 * CLOCK)
+        second = weaver.weave_due(self.later, 900000 + 8 * CLOCK)
+        counters = [p[3] & 0x0F for p in packets(first + second) if pid_of(p) == 0x102]
+        self.assertGreater(len(counters), 100)
+        self.assertEqual(counters, [k & 0x0F for k in range(len(counters))])
+
     def test_video_start_is_the_earliest_picture(self):
         self.assertEqual(video_start(self.later), 900000 + 4 * CLOCK)
         self.assertIsNone(video_start(audio_ts(1, 0x102)))
