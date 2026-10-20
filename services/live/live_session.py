@@ -169,10 +169,10 @@ cleanly where it can (2.1): a keyframe, else an intra picture, a start without e
 a debug log says on a stream with video; a keyframe over an intra picture within that band.
 
 Interruptions while playing from the pipeline:
-- VLC's clock lost: it moved since the open, then stood still `_CLOCK_LOST_S` while VLC played
-  with media ahead and the source sending (libVLC 3 reads 0 after a stream's clock stepped
-  back below where it opened, while the picture plays on). It opens again: at live in LIVE,
-  else where VLC got to.
+- VLC's clock lost: it moved since the open, then stood still for `_CLOCK_LOST_S` all while VLC
+  played with media ahead and the source sending (libVLC 3 reads 0 after a stream's clock
+  stepped back below where it opened, while the picture plays on; a stall's time and VLC's
+  refill after it do not count). It opens again: at live in LIVE, else where VLC got to.
 - VLC ended or failed: reopen at the position, or 30 s past the oldest buffered point (half
   way into a shorter buffer) with "Rewound past the buffer" (once until VLC plays again) when
   the ring evicted it (after a long pause, say). Resuming from a pause checks for that eviction first. Nothing is reopened
@@ -505,6 +505,7 @@ class LiveSession(QObject):
         self._failing_since: Optional[float] = None  # first interruption since VLC played
         self._opening = False  # inside playback.play(): its errors are retried on a tick
         self._edge_seen: Optional[float] = None  # the live edge last seen
+        self._lost_since: Optional[float] = None  # VLC's clock suspected lost since (`_clock_lost`)
         self._edge_moved = 0.0  # when it last moved (for bursts: when the last one landed)
         self._last_open = -math.inf  # when the last pipeline play() was made
         self._reopened_at = -math.inf  # when stay-live last reopened at live
@@ -1588,6 +1589,7 @@ class LiveSession(QObject):
                     return
         else:
             self._land_check = None
+            self._lost_since = None
             if not live and not self._paused:
                 self._no_live_edge(snapshot, position)
         self._emit_timeline()
@@ -1947,17 +1949,26 @@ class LiveSession(QObject):
 
     def _clock_lost(self, snapshot: Mapping[str, Any], position: float, stalled: bool) -> bool:
         """VLC plays with media ahead and the source sending, but its clock, which moved since
-        the open, stood still `_CLOCK_LOST_S`: libVLC 3 reads 0 after a stream's clock stepped
-        back below where it opened, as long as hours, while the picture plays on (measured).
-        As a starved VLC (`_clock_frozen`) the position would stand still, stay-live wait and
-        the lag grow a second a second."""
-        return (
+        the open, stood still (`VlcClock.frozen`) all along for `_CLOCK_LOST_S`: libVLC 3
+        reads 0 after a stream's clock stepped back below where it opened, as long as hours,
+        while the picture plays on (measured). As a starved VLC (`_clock_frozen`) the position
+        would stand still, stay-live wait and the lag grow a second a second. Counted from
+        when all of that holds: a stall's or a starvation's own time counts for nothing (VLC
+        says Playing then, and refills after it with its clock standing still)."""
+        suspect = (
             self._playback.state() is PlaybackState.PLAYING
             and self._vlc.changes > 0
-            and self._vlc.still >= _CLOCK_LOST_S
+            and self._vlc.frozen()
             and not stalled
             and self._live_edge(snapshot) - position > _EDGE_S
         )
+        if not suspect:
+            self._lost_since = None
+            return False
+        now = self._clock()
+        if self._lost_since is None:
+            self._lost_since = now
+        return now - self._lost_since >= _CLOCK_LOST_S - 1e-9
 
     def _open_again(self, position: float) -> None:
         """VLC's clock is lost (`_clock_lost`): open again, at live when stay-live is there,
@@ -1966,6 +1977,7 @@ class LiveSession(QObject):
             "VLC's clock stood still %.0f s while it played; opening the stream again.",
             self._vlc.still,
         )
+        self._lost_since = None  # once more after as long, should nothing open
         if self._stay.mode is Mode.LIVE:
             self._go_live(unpause=False, reopen=True)
         else:

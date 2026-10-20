@@ -4298,7 +4298,7 @@ class LostClockTests(LiveSessionCase):
         feed.run(5.0)
         before, plays = self.live.position(), len(self.playback.plays)
         feed.clock_lost = True
-        feed.run(10.5)
+        feed.run(11.0)  # (counted once it stood still past its steps)
         self.assertEqual(len(self.playback.plays), plays + 1)
         self.assertEqual(self.timelines[-1]["mode"], "shifted")
         self.assertAlmostEqual(self.live.position(), before + 10.0, delta=2.5)
@@ -4313,14 +4313,23 @@ class LostClockTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), plays)
 
     def test_a_clock_standing_still_while_the_source_stalls_is_waited_out(self):
-        feed = self.tune()
-        feed.run(20.0)
-        plays = len(self.playback.plays)
-        feed.stalled = True
-        feed.run(30.0)  # VLC ran dry at the edge and waits there
-        feed.stalled = False
-        feed.run(5.0)
-        self.assertEqual(len(self.playback.plays), plays)
+        # As libVLC 3 does: Playing while it ran dry, and a few seconds to refill once data
+        # comes again, its clock still standing; the stall's time counts for nothing.
+        for starved in (PlaybackState.BUFFERING, PlaybackState.PLAYING):
+            with self.subTest(starved=starved):
+                self.live = self.make()
+                self.start(channel="A")
+                self.engine.answer()
+                feed = Feed(
+                    self, self.engine.last_sid, burst=0.0, edge=20.0, starved=starved, recover=3.0
+                ).ready()
+                feed.run(20.0)
+                plays = len(self.playback.plays)
+                feed.stalled = True
+                feed.run(30.0)  # VLC ran dry at the edge and waits there
+                feed.stalled = False
+                feed.run(8.0)
+                self.assertEqual(len(self.playback.plays), plays)
 
 
 class EngineShutdownTests(LiveSessionCase):
