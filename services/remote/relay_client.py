@@ -58,7 +58,7 @@ class RelayClient:
         self._ws: Any = None
         self._conns: dict[int, _Conn] = {}
         # The relay compares the TV's IPv4 with the phone's; IPv6-only networks fall back to any.
-        self._family: int = socket.AF_INET
+        self._family: socket.AddressFamily = socket.AF_INET
 
     def start(self) -> None:
         self._task = asyncio.ensure_future(self._run())
@@ -101,7 +101,8 @@ class RelayClient:
                     self._forget_room()
             except aiohttp.ClientConnectorError as error:
                 logger.info("Phone remote: the relay is out of reach: %s", error)
-                self._family = 0 if self._family == socket.AF_INET else socket.AF_INET
+                fallback = socket.AF_UNSPEC if self._family == socket.AF_INET else socket.AF_INET
+                self._family = fallback
             except (aiohttp.ClientError, OSError, asyncio.TimeoutError, ValueError) as error:
                 logger.info("Phone remote: the relay connection failed: %s", error)
             self._drop_all()
