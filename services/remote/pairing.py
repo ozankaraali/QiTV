@@ -16,13 +16,12 @@ import secrets
 from typing import Any, Optional
 
 from services.remote.noise import Keypair
-from services.remote.protocol import DEFAULT_PORT, RELAY_URL, b64d, b64e
+from services.remote.protocol import DEFAULT_PORT, RELAY_URL, STORE_VERSION, b64d, b64e
 
 logger = logging.getLogger(__name__)
 
-VERSION = 1
+VERSION = STORE_VERSION
 CODE_BYTES = 16
-CODE_ROTATE_S = 60.0
 CODE_GRACE_S = 15.0
 TICKET_S = 60.0
 _ID_BYTES = 8

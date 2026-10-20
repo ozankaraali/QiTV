@@ -70,6 +70,7 @@ class RemoteController(QObject):
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._tick)
         self._names: dict[str, str] = {}
+        self.status: dict = {"home_url": "", "relay": "off"}
 
     # ---- lifecycle -------------------------------------------------------------------------
 
@@ -103,9 +104,13 @@ class RemoteController(QObject):
             self.hub.set_pairing(open_)
 
     def remove_device(self, device_id: str) -> None:
-        if self.hub is None:
-            return
-        self.hub.remove_device(device_id)
+        if self.hub is not None:
+            self.hub.remove_device(device_id)
+        else:  # the remote is off: unpair it in the saved settings
+            data = dict(self._config())
+            devices = [d for d in data.get("devices", []) if isinstance(d, dict)]
+            data["devices"] = [d for d in devices if d.get("id") != device_id]
+            self._persist(data)
         name = self._names.get(device_id)
         if name:
             self._window.screens.notify(translate(REMOVED_TEXT, name=name))
@@ -170,10 +175,14 @@ class RemoteController(QObject):
             self._persist(event.data)
         elif isinstance(event, Paired):
             self._window.screens.notify(translate(PAIRED_TEXT, name=event.name))
+            overlay = getattr(self._window, "pair_overlay", None)
+            if overlay is not None:
+                overlay.dismiss()  # done: one phone per showing
         elif isinstance(event, Code):
             self.codeChanged.emit(event.url)
         elif isinstance(event, Status):
-            self.statusChanged.emit({"home_url": event.home_url, "relay": event.relay})
+            self.status = {"home_url": event.home_url, "relay": event.relay}
+            self.statusChanged.emit(dict(self.status))
 
     def _persist(self, data: dict) -> None:
         config = self._window.config_manager

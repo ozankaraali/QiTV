@@ -54,7 +54,12 @@ class HomeDoorCase(unittest.TestCase):
         (self.web / "app.js").write_text("export {};")
         self.events = Recorder()
         self.hub = RemoteHub(
-            self.events, self.web, ports=[0], tv_name="Living room", handshake_s=0.4
+            self.events,
+            self.web,
+            ports=[0],
+            host="127.0.0.1",
+            tv_name="Living room",
+            handshake_s=0.4,
         )
         self.hub.start({"version": 1, "enabled": True, "relay": False})
         self.assertTrue(self.hub.ready.wait(3))
@@ -221,11 +226,11 @@ class PortTests(unittest.TestCase):
         web = Path(tempfile.mkdtemp())
         (web / "index.html").write_text("x")
         with socket.socket() as busy:
-            busy.bind(("0.0.0.0", 0))
+            busy.bind(("127.0.0.1", 0))
             busy.listen()
             taken = busy.getsockname()[1]
             events = Recorder()
-            hub = RemoteHub(events, web, ports=[taken, 0])
+            hub = RemoteHub(events, web, ports=[taken, 0], host="127.0.0.1")
             hub.start({"version": 1, "enabled": True, "relay": False})
             try:
                 self.assertTrue(hub.ready.wait(3))
@@ -233,6 +238,22 @@ class PortTests(unittest.TestCase):
                 self.assertGreater(hub.port, 0)
             finally:
                 hub.stop()
+
+
+class EarlyCallTests(unittest.TestCase):
+    def test_pairing_asked_before_the_hub_is_up_is_kept(self):
+        web = Path(tempfile.mkdtemp())
+        (web / "index.html").write_text("x")
+        events = Recorder()
+        hub = RemoteHub(events, web, ports=[0], host="127.0.0.1")
+        hub.start({"version": 1, "enabled": True, "relay": False})
+        hub.set_pairing(True)  # at once, as Settings → Show the code does
+        try:
+            url = events.wait(Code, where=lambda e: bool(e.url)).url
+            self.assertTrue(hub.ready.wait(3))
+            self.assertIn(f":{hub.port}/#1.", url)  # the real port, not 0
+        finally:
+            hub.stop()
 
 
 class PrivateTests(unittest.TestCase):

@@ -171,6 +171,7 @@ class Overlays:
     sleep_notice: Any = None  # the sleep timer's last minute (2.3)
     layout_row: Any = None  # the multiview's layouts above its layout chip
     library_toast: Any = None  # the Library page's toast: the menus' messages while it shows
+    pairing: Any = None  # the phone remote's pairing screen (2.5)
 
 
 class TVController(QObject):
@@ -850,6 +851,11 @@ class TVController(QObject):
         """`key` is the Qt key pressed, when it matters (the mixer takes the arrow keys)."""
         if self._closed:
             return
+        pairing = self.overlays.pairing
+        if pairing is not None and pairing.isVisible():
+            pairing.dismiss()  # any key closes the pairing screen; Esc does only that
+            if action is Action.ESCAPE:
+                return
         if self._online is not None and self._online.handle(action, payload):
             return  # the OpenSubtitles search shows: typing, the lists, Enter and Esc
         if self._guide.is_open() and self._guide.handle(action, payload):

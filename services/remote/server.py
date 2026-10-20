@@ -45,7 +45,7 @@ def _page_file(web_dir: Path, path: str) -> Path | None:
 
 
 async def start_home_door(
-    core: HubCore, web_dir: Path, ports: Iterable[int]
+    core: HubCore, web_dir: Path, ports: Iterable[int], host: str = "0.0.0.0"
 ) -> tuple[web.AppRunner, int]:
     """Serve on the first free port of `ports` (0 = any); returns the runner and the port."""
 
@@ -64,7 +64,7 @@ async def start_home_door(
     runner = web.AppRunner(app, access_log=None, handle_signals=False)
     await runner.setup()
     for port in ports:
-        site = web.TCPSite(runner, "0.0.0.0", port)
+        site = web.TCPSite(runner, host, port)
         try:
             await site.start()
         except OSError as error:

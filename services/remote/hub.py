@@ -21,8 +21,9 @@ import time
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from services.remote import net
-from services.remote.pairing import CODE_ROTATE_S, RemoteStore
+from services.remote.pairing import RemoteStore
 from services.remote.protocol import (
+    CODE_ROTATE_S,
     HANDSHAKE_S,
     MAX_FRAME,
     MAX_PENDING,
@@ -75,8 +76,10 @@ class HubCore:
         tv_name: str,
         hello: Callable[[], dict],
         handshake_s: float,
+        host: str,
     ) -> None:
         self.emit = emit
+        self.host = host
         self.web_dir = web_dir
         self.ports = list(ports)
         self.clock = clock
@@ -89,6 +92,8 @@ class HubCore:
         self._runner: Any = None
         self._rotation: Optional[asyncio.TimerHandle] = None
         self._relay_state = "off"
+        self._started = False
+        self._early: list[tuple[Callable[..., Any], tuple[Any, ...]]] = []
 
     # ---- lifecycle -------------------------------------------------------------------------
 
@@ -97,9 +102,20 @@ class HubCore:
 
         self.store = RemoteStore.from_config(config)
         self.store.ensure_identity()
-        self._runner, self.port = await start_home_door(self, self.web_dir, self.ports)
+        self._runner, self.port = await start_home_door(self, self.web_dir, self.ports, self.host)
         logger.info("Phone remote listening on port %s", self.port)
+        self._started = True
         self._status()
+        early, self._early = self._early, []
+        for fn, args in early:
+            fn(*args)
+
+    def when_started(self, fn: Callable[..., Any], *args: Any) -> None:
+        """Run `fn` now, or once start() has loaded the store (calls made meanwhile wait)."""
+        if self._started:
+            fn(*args)
+        else:
+            self._early.append((fn, args))
 
     def apply(self, config: dict) -> None:
         fresh = RemoteStore.from_config(config)
@@ -281,6 +297,7 @@ class RemoteHub:
         tv_name: Optional[str] = None,
         hello: Callable[[], dict] = dict,
         handshake_s: float = HANDSHAKE_S,
+        host: str = "0.0.0.0",
     ) -> None:
         self._emit = emit
         self._core = HubCore(
@@ -291,6 +308,7 @@ class RemoteHub:
             tv_name=tv_name or default_tv_name(),
             hello=hello,
             handshake_s=handshake_s,
+            host=host,
         )
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -345,7 +363,7 @@ class RemoteHub:
 
     def _call(self, fn: Callable[..., Any], *args: Any) -> None:
         if self._loop is not None and self.running:
-            self._loop.call_soon_threadsafe(fn, *args)
+            self._loop.call_soon_threadsafe(self._core.when_started, fn, *args)
 
     def apply(self, config: dict) -> None:
         self._call(self._core.apply, dict(config))

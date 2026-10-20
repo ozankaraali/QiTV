@@ -74,6 +74,7 @@ QiTV's own dependencies:
 | PySide6 | LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only |
 | python-vlc | LGPL-2.1+ |
 | requests | Apache-2.0 |
+| segno | BSD License |
 | tzlocal | MIT |
 | urllib3 | MIT |
 

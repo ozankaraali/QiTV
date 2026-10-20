@@ -18,6 +18,8 @@ RELAY_URL = "https://remote.qitv.app"
 DEFAULT_PORT = 5384
 PORTS = range(DEFAULT_PORT, DEFAULT_PORT + 10)
 PROTO = 1
+STORE_VERSION = 1  # the config's `remote` object (services/remote/pairing.py)
+CODE_ROTATE_S = 60.0  # the pairing code on the TV is replaced this often
 
 DELAY_MS = 400  # a held button's first repeat
 INTERVAL_MS = 40  # then 25 a second

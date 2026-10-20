@@ -119,6 +119,7 @@ from ui.overlays.layout_row import LayoutRow
 from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
 from ui.overlays.pip_label import PipLabel
+from ui.overlays.remote_pair import PairOverlay
 from ui.overlays.sleep_notice import SleepNotice
 from ui.overlays.stats import StatsOverlay
 from ui.overlays.subtitle_search import SubtitleSearchPage
@@ -482,6 +483,7 @@ class TVWindow(QMainWindow):
         self.picture_panel = TrackPanel(host)
         self.stats_overlay = StatsOverlay(host)
         self.sleep_notice = SleepNotice(host)
+        self.pair_overlay = PairOverlay(host)  # the phone remote's pairing QR
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
         self.corner_controls = CornerControls(host)
@@ -504,6 +506,7 @@ class TVWindow(QMainWindow):
             picture_panel=self.picture_panel,
             stats=self.stats_overlay,
             sleep_notice=self.sleep_notice,
+            pairing=self.pair_overlay,
             library_toast=self.library_toast,
             layout_row=self.layout_row,
         )
@@ -538,6 +541,7 @@ class TVWindow(QMainWindow):
             self.subtitle_search,
             self.corner_controls,
             self.sleep_notice,
+            self.pair_overlay,
             self.overlays.toast,
         ):
             host.add_overlay(overlay)
@@ -627,6 +631,9 @@ class TVWindow(QMainWindow):
         )
         self.menus = TVMenus(self, self)
         self.remote = RemoteController(self)  # the phone remote; off until Settings turns it on
+        self.pair_overlay.opened.connect(lambda: self.remote.set_pairing(True))
+        self.pair_overlay.closed.connect(lambda: self.remote.set_pairing(False))
+        self.remote.codeChanged.connect(self.pair_overlay.set_url)
         # The player controls' and the guide's ⌕: the Library's search, as Ctrl/⌘+F.
         self.overlays.transport.searchRequested.connect(self.screens.open_search)
         # ‹ Library on the player controls: back to the Library a title came from, as Esc.
@@ -1271,10 +1278,25 @@ class TVWindow(QMainWindow):
 
     # ---- OptionsDialog host -------------------------------------------------------------------
 
-    def options_dialog(self) -> None:
+    def options_dialog(self, tab: str = "") -> None:
+        """Settings; `tab` "remote" opens it on Phone remote."""
         if not self._closing:
-            OptionsDialog(self).exec()
+            dialog = OptionsDialog(self)
+            if tab == "remote":
+                dialog.options_tab.setCurrentWidget(dialog.remote_tab)
+            dialog.exec()
             self.menus.rebuild_providers()
+
+    def open_phone_remote(self) -> None:
+        """The menu's Phone Remote…: the pairing QR when the remote is on, else its Settings."""
+        if self._closing:
+            return
+        if self.remote.hub is None:
+            self.options_dialog(tab="remote")
+            return
+        if self.screens.library_shown():
+            self.screens.back_to_tv()  # the QR shows over the TV
+        self.pair_overlay.open()
 
     def add_provider(self, link: Optional[ProviderLink] = None) -> None:
         """Settings on the Providers tab, with a new provider to fill in (spec §8); from
