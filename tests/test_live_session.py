@@ -323,7 +323,9 @@ class Feed:
     an HLS discontinuity or a reconnect whose timestamps jump, so VLC's clock moves while what
     it plays does not; with `media_step` the timeline kept the step as media (under 3 s), so
     VLC's place on it moves too. `reported` is the helper's list of the jumps it left out of
-    its timeline: (position, seconds). LiveSession ticks every 0.25 s.
+    its timeline: (position, seconds). With `clock_lost` VLC's get_time() reads 0 while it
+    plays on, until the next open (libVLC 3.0.20 after a stream's clock stepped back below
+    where it opened, measured). LiveSession ticks every 0.25 s.
     """
 
     DT = 0.05
@@ -360,6 +362,7 @@ class Feed:
         self.pcr, self.speed, self.speed_1x = pcr, speed, speed_1x
         self.missing, self.reported = None, []
         self.lead = 0.0  # after each open, VLC's clock reads this far ahead (`sync`)
+        self.clock_lost = False
         self.jump_at, self.jump_by, self.media_step = math.inf, 0.0, False
         self.stamp = self.stamp_offset = self.pending_jump = 0.0
         self.meter = worker.BurstMeter() if metered else None
@@ -416,6 +419,7 @@ class Feed:
             if playback.plays[-1][1] is PlayKind.LIVE_PIPELINE:
                 self.position, self.media = self.case.live.position(), 0.0
                 self.stamp = self.pending_jump = 0.0
+                self.clock_lost = False
                 self.stamp_offset = self.lead  # VLC's clock may start ahead of its picture
                 if self.open_s > 0:
                     self.opening_until = self.case.clock.now + self.open_s
@@ -482,7 +486,7 @@ class Feed:
                     self.stamp_offset += self.pending_jump
                     self.pending_jump = 0.0
                 self.stamp = stamp
-                playback.ms = round((stamp + self.stamp_offset) * 1000)
+                playback.ms = 0 if self.clock_lost else round((stamp + self.stamp_offset) * 1000)
             if now >= self.next_tick - 1e-9:
                 self.next_tick += 0.25
                 case.live._tick()
@@ -4260,6 +4264,63 @@ class InputReleaseTests(LiveSessionCase):
         self.live.stop()
         self.engine.answer()
         self.assertEqual(self.releases, [True])
+
+
+class LostClockTests(LiveSessionCase):
+    """VLC plays on while its clock reads 0 (2.4.2: 8732 s behind with the dot green): the
+    position stood still, stay-live waited as for a starved VLC, and the lag grew a second
+    a second. Past `_CLOCK_LOST_S` with media ahead it opens again."""
+
+    def tune(self, edge=20.0):
+        self.start(channel="A")
+        self.engine.answer()  # the channel before closes
+        return Feed(self, self.engine.last_sid, burst=0.0, edge=edge).ready()
+
+    def test_a_clock_lost_at_live_opens_at_live_again(self):
+        feed = self.tune()
+        feed.run(20.0)
+        plays = len(self.playback.plays)
+        feed.clock_lost = True
+        feed.run(9.0)
+        self.assertEqual(len(self.playback.plays), plays)  # a while, as for a starved VLC
+        feed.run(2.0)
+        self.assertEqual(len(self.playback.plays), plays + 1)
+        feed.run(10.0)
+        self.assertEqual(len(self.playback.plays), plays + 1)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertLess(self.timelines[-1]["lag"], 5.0)
+
+    def test_a_clock_lost_while_time_shifted_opens_where_vlc_got_to(self):
+        feed = self.tune(edge=80.0)
+        feed.run(5.0)
+        self.live.seek_to(20.0)
+        feed.sync()
+        feed.run(5.0)
+        before, plays = self.live.position(), len(self.playback.plays)
+        feed.clock_lost = True
+        feed.run(10.5)
+        self.assertEqual(len(self.playback.plays), plays + 1)
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")
+        self.assertAlmostEqual(self.live.position(), before + 10.0, delta=2.5)
+
+    def test_a_clock_that_never_moved_since_the_open_is_left_alone(self):
+        # Nothing says VLC's clock works on this stream: opening again would not help, and it
+        # would open again and again.
+        feed = self.tune()
+        plays = len(self.playback.plays)
+        feed.clock_lost = True
+        feed.run(40.0)
+        self.assertEqual(len(self.playback.plays), plays)
+
+    def test_a_clock_standing_still_while_the_source_stalls_is_waited_out(self):
+        feed = self.tune()
+        feed.run(20.0)
+        plays = len(self.playback.plays)
+        feed.stalled = True
+        feed.run(30.0)  # VLC ran dry at the edge and waits there
+        feed.stalled = False
+        feed.run(5.0)
+        self.assertEqual(len(self.playback.plays), plays)
 
 
 class EngineShutdownTests(LiveSessionCase):

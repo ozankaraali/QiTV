@@ -169,6 +169,10 @@ cleanly where it can (2.1): a keyframe, else an intra picture, a start without e
 a debug log says on a stream with video; a keyframe over an intra picture within that band.
 
 Interruptions while playing from the pipeline:
+- VLC's clock lost: it moved since the open, then stood still `_CLOCK_LOST_S` while VLC played
+  with media ahead and the source sending (libVLC 3 reads 0 after a stream's clock stepped
+  back below where it opened, while the picture plays on). It opens again: at live in LIVE,
+  else where VLC got to.
 - VLC ended or failed: reopen at the position, or 30 s past the oldest buffered point (half
   way into a shorter buffer) with "Rewound past the buffer" (once until VLC plays again) when
   the ring evicted it (after a long pause, say). Resuming from a pause checks for that eviction first. Nothing is reopened
@@ -282,6 +286,9 @@ _OPEN_SEED_S = 0.5  # VLC's open time (play() to Playing) before any was measure
 _OPEN_MAX_S = 2.0  # a longer open (a stalled source, say) counts as this long
 _OPEN_WEIGHT = 0.3  # of each new measurement in the open time's moving average
 _EDGE_S = 1.0  # VLC this close to the live edge is at it (a starvation, and its restart after)
+# VLC's clock, which moved since the open, standing still this long while VLC plays with media
+# ahead and the source sending is lost (`_clock_lost`): it opens again.
+_CLOCK_LOST_S = 10.0
 _MEASURE_AHEAD_S = 3.0  # rate health counts only ticks with this much ahead at both ends
 _RATE_GRACE_S = 2.0  # and only from this long after an open plays or VLC was at the edge
 _CALM_S = 1.0  # Auto: trouble again within this is the same starvation (VLC refills, starves)
@@ -1549,6 +1556,11 @@ class LiveSession(QObject):
         cushioned = self._ran_out(snapshot)
         self._steer_learned(snapshot, position, stalled, cushioned)
         if live and not self._paused:
+            if self._clock_lost(snapshot, position, stalled):
+                self._open_again(position)
+                if self._phase is _Phase.PIPELINE:
+                    self._emit_timeline()
+                return
             self._back_off(snapshot, position, stalled, cushioned)
             self._stay.target = self._control_target()
             self._stay.slack = self._target(snapshot) - self._stay.target
@@ -1932,6 +1944,32 @@ class LiveSession(QObject):
         if trouble:
             self._learn(learned_only=True)
         return trouble
+
+    def _clock_lost(self, snapshot: Mapping[str, Any], position: float, stalled: bool) -> bool:
+        """VLC plays with media ahead and the source sending, but its clock, which moved since
+        the open, stood still `_CLOCK_LOST_S`: libVLC 3 reads 0 after a stream's clock stepped
+        back below where it opened, as long as hours, while the picture plays on (measured).
+        As a starved VLC (`_clock_frozen`) the position would stand still, stay-live wait and
+        the lag grow a second a second."""
+        return (
+            self._playback.state() is PlaybackState.PLAYING
+            and self._vlc.changes > 0
+            and self._vlc.still >= _CLOCK_LOST_S
+            and not stalled
+            and self._live_edge(snapshot) - position > _EDGE_S
+        )
+
+    def _open_again(self, position: float) -> None:
+        """VLC's clock is lost (`_clock_lost`): open again, at live when stay-live is there,
+        else where VLC got to: the position its clock stood at and what it played since."""
+        _LOG.warning(
+            "VLC's clock stood still %.0f s while it played; opening the stream again.",
+            self._vlc.still,
+        )
+        if self._stay.mode is Mode.LIVE:
+            self._go_live(unpause=False, reopen=True)
+        else:
+            self._seek(position + self._vlc.still * self._rate)
 
     def _starved(self, snapshot: Mapping[str, Any], position: float) -> bool:
         """VLC met the live edge and waits there (libVLC 3 says Playing, its clock stands still)."""
