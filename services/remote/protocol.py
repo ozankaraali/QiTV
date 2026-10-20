@@ -1,11 +1,40 @@
-"""The phone remote's wire vocabulary: constants, encodings, the buttons and the messages."""
+"""The phone remote's wire vocabulary: constants, encodings, the buttons and the messages.
+
+Pure: no Qt, no network. The buttons' meaning for the TV (a key or an action) is in
+ui/remote_buttons.py; here each button id only says whether a hold repeats, which button undoes
+an overshoot, and how it is routed. Phone messages are checked against a fixed allowlist before
+anything else sees them.
+"""
 
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
+import json
+import re
+from typing import Literal, Optional
 
 RELAY_URL = "https://remote.qitv.app"
 DEFAULT_PORT = 5384
+PORTS = range(DEFAULT_PORT, DEFAULT_PORT + 10)
+PROTO = 1
+
+DELAY_MS = 400  # a held button's first repeat
+INTERVAL_MS = 40  # then 25 a second
+KEEPALIVE_MS = 200  # the phone's "still held" while a button is down
+SILENCE_MS = 600  # no word from a holding phone for this long ends the hold
+
+MAX_FRAME = 65535
+MAX_OPENING = 256
+MAX_SESSIONS = 8
+MAX_PENDING = 16
+HANDSHAKE_S = 5.0
+MAX_RATE = 60  # phone messages in any one second
+MAX_QUERY = 100
+MAX_HANDLE = 32
+MAX_STEPS = 100_000
+
+_B64 = re.compile(r"[A-Za-z0-9_-]*")
 
 
 def b64e(data: bytes) -> str:
@@ -15,9 +44,208 @@ def b64e(data: bytes) -> str:
 
 def b64d(text: str) -> bytes:
     """The inverse of b64e; raises ValueError for anything that isn't base64url."""
-    if not isinstance(text, str):
-        raise ValueError("not text")
+    if not isinstance(text, str) or not _B64.fullmatch(text) or len(text) % 4 == 1:
+        raise ValueError("not base64url")
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def steps_for(held_ms: int) -> int:
+    """How many presses a hold of `held_ms` makes: one at once, then from 400 ms every 40 ms.
+
+    The page counts the same way, so a release can say how many steps the phone saw."""
+    if held_ms < DELAY_MS:
+        return 1
+    return 2 + (held_ms - DELAY_MS) // INTERVAL_MS
+
+
+# ---- buttons ---------------------------------------------------------------------------------
+
+Route = Literal["keys", "stay", "player", "screen"]
+
+
+@dataclass(frozen=True)
+class ButtonMeta:
+    route: Route
+    repeat: bool = False
+    reverse: Optional[str] = None  # the button that undoes one overshooting step
+
+
+def _meta() -> dict[str, ButtonMeta]:
+    table: dict[str, ButtonMeta] = {
+        "up": ButtonMeta("keys", True, "down"),
+        "down": ButtonMeta("keys", True, "up"),
+        "left": ButtonMeta("keys", True, "right"),
+        "right": ButtonMeta("keys", True, "left"),
+        "ok": ButtonMeta("keys"),
+        "back": ButtonMeta("keys"),
+        "previous": ButtonMeta("keys"),
+        "search": ButtonMeta("stay"),
+        "fullscreen": ButtonMeta("stay"),
+        "volup": ButtonMeta("stay", True),
+        "voldown": ButtonMeta("stay", True),
+        "mute": ButtonMeta("stay"),
+        "chup": ButtonMeta("player", True),
+        "chdown": ButtonMeta("player", True),
+        "rew": ButtonMeta("player", True),
+        "fwd": ButtonMeta("player", True),
+        "tv": ButtonMeta("screen"),
+        "movies": ButtonMeta("screen"),
+        "series": ButtonMeta("screen"),
+    }
+    for name in ("pp", "live", "info", "guide", "record", "pip", "swap", "multiview", "picture"):
+        table[name] = ButtonMeta("player")
+    for digit in range(10):
+        table[f"d{digit}"] = ButtonMeta("keys")
+    return table
+
+
+BUTTON_META = _meta()
+
+
+# ---- the opening frame -----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Opening:
+    mode: Literal["pair", "kk", "ticket"]
+    key_id: str = ""
+    ticket_id: str = ""
+
+
+def parse_opening(text: str) -> Optional[Opening]:
+    """The connection's first frame, `{"v":1,"mode":…}`; None when it isn't one."""
+    if not isinstance(text, str) or len(text) > MAX_OPENING:
+        return None
     try:
-        return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
-    except (ValueError, TypeError) as error:
-        raise ValueError(f"not base64url: {error}") from error
+        obj = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(obj, dict) or obj.get("v") != PROTO:
+        return None
+    mode = obj.get("mode")
+    if mode == "pair":
+        return Opening("pair")
+    if mode == "kk" and _short_id(obj.get("key")):
+        return Opening("kk", key_id=obj["key"])
+    if mode == "ticket" and _short_id(obj.get("ticket")):
+        return Opening("ticket", ticket_id=obj["ticket"])
+    return None
+
+
+def _short_id(value: object) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= MAX_HANDLE
+
+
+# ---- phone messages --------------------------------------------------------------------------
+
+GUIDE_LISTS = ("all", "favorites", "recent")
+
+
+def _int(value: object) -> Optional[int]:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def parse_phone_message(obj: object) -> Optional[dict]:
+    """A phone's message, normalised, or None when it isn't on the allowlist."""
+    if not isinstance(obj, dict):
+        return None
+    t = obj.get("t")
+    if t in ("held", "where", "forget"):
+        return {"t": t}
+    if t == "down" and obj.get("b") in BUTTON_META:
+        return {"t": "down", "b": obj["b"]}
+    if t == "up" and obj.get("b") in BUTTON_META:
+        n = _int(obj.get("n"))
+        if n is not None and 1 <= n <= MAX_STEPS:
+            return {"t": "up", "b": obj["b"], "n": n}
+        return None
+    if t == "query" and isinstance(obj.get("s"), str):
+        return {"t": "query", "s": obj["s"][:MAX_QUERY]}
+    if t == "open" and _short_id(obj.get("id")):
+        return {"t": "open", "id": obj["id"]}
+    if t == "get":
+        if obj.get("what") == "library":
+            return {"t": "get", "what": "library"}
+        page = _int(obj.get("page"))
+        if obj.get("what") == "guide" and obj.get("list") in GUIDE_LISTS and page is not None:
+            if page >= 0:
+                return {"t": "get", "what": "guide", "list": obj["list"], "page": page}
+    return None
+
+
+# ---- events (the hub thread → the GUI thread) ------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Paired:
+    sid: str
+    device_id: str
+    name: str
+
+
+@dataclass(frozen=True)
+class Opened:
+    sid: str
+    device_id: str
+    door: str
+
+
+@dataclass(frozen=True)
+class Closed:
+    sid: str
+    device_id: Optional[str]
+
+
+@dataclass(frozen=True)
+class Press:
+    sid: str
+    button: str
+    down: bool
+    steps: int
+
+
+@dataclass(frozen=True)
+class Held:
+    sid: str
+
+
+@dataclass(frozen=True)
+class Query:
+    sid: str
+    text: str
+
+
+@dataclass(frozen=True)
+class OpenItem:
+    sid: str
+    handle: str
+
+
+@dataclass(frozen=True)
+class Get:
+    sid: str
+    what: str
+    list: str
+    page: int
+
+
+@dataclass(frozen=True)
+class Forgot:
+    sid: str
+    device_id: str
+
+
+@dataclass(frozen=True)
+class StoreSaved:
+    data: dict
+
+
+@dataclass(frozen=True)
+class Code:
+    url: str  # the pairing QR's address; "" when the pairing screen is closed
+
+
+@dataclass(frozen=True)
+class Status:
+    home_url: str
+    relay: str  # "off", "connecting", "online", "resting" or "error"
