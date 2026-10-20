@@ -93,6 +93,7 @@ class HubCore:
         self._rotation: Optional[asyncio.TimerHandle] = None
         self._relay_state = "off"
         self._started = False
+        self.relay: Any = None  # a RelayClient while the relay is on
         self._early: list[tuple[Callable[..., Any], tuple[Any, ...]]] = []
 
     # ---- lifecycle -------------------------------------------------------------------------
@@ -106,6 +107,7 @@ class HubCore:
         logger.info("Phone remote listening on port %s", self.port)
         self._started = True
         self._status()
+        await self._sync_relay()
         early, self._early = self._early, []
         for fn, args in early:
             fn(*args)
@@ -119,11 +121,33 @@ class HubCore:
 
     def apply(self, config: dict) -> None:
         fresh = RemoteStore.from_config(config)
+        if fresh.relay_url != self.store.relay_url:
+            self.store.room = self.store.room_secret = None  # that relay's room isn't this one's
         self.store.relay, self.store.relay_url = fresh.relay, fresh.relay_url
         self._status()
+        asyncio.ensure_future(self._sync_relay())
+
+    async def _sync_relay(self) -> None:
+        """A relay client while the relay is on, for the relay address now set."""
+        from services.remote.relay_client import RelayClient
+
+        want = self.store.relay_url if self.store.relay else None
+        if self.relay is not None and self.relay.base != (want or "").rstrip("/"):
+            await self.relay.stop()
+            self.relay = None
+            self._relay_state = "off"
+        if want and self.relay is None:
+            self.relay = RelayClient(self, want)
+            self.relay.start()
+        self._status()
+        if self.store.current_code() is not None:
+            self.emit(Code(self.code_url()))
 
     async def stop(self) -> None:
         self.set_pairing(False)
+        if self.relay is not None:
+            await self.relay.stop()
+            self.relay = None
         for conn in list(self.conns.values()):
             if conn.session.established:
                 await _quietly(conn.send(conn.session.bye("stopped")))
