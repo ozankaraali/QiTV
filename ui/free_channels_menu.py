@@ -65,11 +65,14 @@ def build_menu(
     *,
     territory: Optional[str] = None,
     picker: Callable[[Optional[QWidget]], Optional[str]] = pick_country,
+    styled: bool = True,
 ) -> QMenu:
     """The menu: All countries, "<Region> (your region)" when the system's region has a list,
-    and Another country…. `territory` is the system's region code (None: ask the system)."""
+    and Another country…. `territory` is the system's region code (None: ask the system).
+    `styled`: the player's dark menus' look (not inside the menu bar, which has its own)."""
     menu = QMenu(parent)
-    menu.setStyleSheet(menu_style())
+    if styled:
+        menu.setStyleSheet(menu_style())
     menu.addAction(translate(ALL_TEXT)).triggered.connect(lambda _checked=False: choose(None))
     code = free_channels.region_code(system_territory() if territory is None else territory)
     if code is not None:

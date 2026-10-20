@@ -197,6 +197,34 @@ class GroupTitleSplitTests(unittest.TestCase):
         self.assertEqual(playlist["sorted_channels"], {" Kids ": [0], "Uncategorized": [1]})
 
 
+class RepeatedChannelTests(unittest.TestCase):
+    """A playlist grouped by country repeats a channel of several countries, line for line but
+    for its group: one channel, listed in each group and once in All."""
+
+    PLAYLIST = (
+        "#EXTM3U\n"
+        '#EXTINF:-1 tvg-id="One.us" group-title="Canada",One\nhttp://s.test/one.m3u8\n'
+        '#EXTINF:-1 tvg-id="Two.ca" group-title="Canada",Two\nhttp://s.test/two.m3u8\n'
+        '#EXTINF:-1 tvg-id="One.us" group-title="United States",One\nhttp://s.test/one.m3u8\n'
+        '#EXTINF:-1 tvg-id="Uno.us" group-title="United States",One\nhttp://s.test/one.m3u8\n'
+    )
+
+    def test_one_channel_in_each_of_its_groups_and_once_in_all(self):
+        playlist = parse_m3u(self.PLAYLIST, categorize=True)
+        contents = playlist["contents"]
+        # The last line differs (its tvg-id): another channel, though its stream is the same.
+        self.assertEqual([c["xmltv_id"] for c in contents], ["One.us", "Two.ca", "Uno.us"])
+        self.assertEqual([c["number"] for c in contents], ["1", "2", "3"])
+        self.assertEqual(playlist["sorted_channels"], {"Canada": [0, 1], "United States": [0, 2]})
+        self.assertEqual(contents[0]["group"], "Canada")  # as its first line says
+
+    def test_a_line_repeated_in_its_own_group_is_listed_once(self):
+        line = '#EXTINF:-1 group-title="News",Daily\nhttp://s.test/daily.m3u8\n'
+        playlist = parse_m3u("#EXTM3U\n" + line + line, categorize=True)
+        self.assertEqual(len(playlist["contents"]), 1)
+        self.assertEqual(playlist["sorted_channels"], {"News": [0]})
+
+
 class MultiGroupChannelTests(unittest.TestCase):
     """One channel in several groups stays one channel: All, zapping and Favorites."""
 

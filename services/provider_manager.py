@@ -13,6 +13,7 @@ from PySide6.QtCore import QObject, Signal
 import orjson as json
 import tzlocal
 
+from services import free_channels
 from services.atomic_write import atomic_write
 from services.catchup import mark_stb_archives
 from services.lazy_import import lazy_module
@@ -194,13 +195,8 @@ class ProviderManager(QObject):
 
     @staticmethod
     def default_providers():
-        return [
-            {
-                "type": "M3UPLAYLIST",
-                "name": "iptv-org.github.io",
-                "url": "https://iptv-org.github.io/iptv/index.m3u",
-            }
-        ]
+        """No providers file (or an unreadable one): the default config's free list."""
+        return [free_channels.provider_entry(None)]
 
     def _invalidate_cache_path(self, cache_path) -> None:
         """Supersede queued writes for this cache file, then delete it."""

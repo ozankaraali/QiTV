@@ -165,18 +165,29 @@ def _build_categorized_structure(items: List[Dict]) -> Dict:
         - sorted_channels: Dict mapping category_id -> list of item indices
     """
     sorted_channels: Dict[str, List[int]] = {}
+    contents: List[Dict] = []
+    seen: Dict[tuple, int] = {}  # a channel's line but for its group -> its place in contents
+    listed: set[tuple[str, int]] = set()
 
     # Group items by category. The group title is also the category id: it is stable
     # across refreshes/processes and cannot collide. A channel of several groups is listed
-    # in each, as one item: "All" (the contents) has it once.
-    for idx, item in enumerate(items):
+    # in each, as one item: "All" (the contents) has it once. So is one whose lines differ only
+    # in their group (a playlist grouped by country repeats a channel of several countries).
+    for item in items:
         # The group's id and title, stored in English (catalog.shown_label shows it)
         category_ids = split_group_title(item.get("group")) or [N_("Uncategorized")]
-        # Add tv_genre_id for compatibility with STB/Xtream structure
-        item["tv_genre_id"] = category_ids[0]
-        item["number"] = str(idx + 1)
+        key = _repeat_key(item)
+        idx = seen.get(key)
+        if idx is None:
+            idx = seen[key] = len(contents)
+            # Add tv_genre_id for compatibility with STB/Xtream structure
+            item["tv_genre_id"] = category_ids[0]
+            item["number"] = str(idx + 1)
+            contents.append(item)
         for category_id in category_ids:
-            sorted_channels.setdefault(category_id, []).append(idx)
+            if (category_id, idx) not in listed:
+                listed.add((category_id, idx))
+                sorted_channels.setdefault(category_id, []).append(idx)
 
     # Build categories list
     categories = [{"id": "*", "title": N_("All")}]
@@ -184,6 +195,18 @@ def _build_categorized_structure(items: List[Dict]) -> Dict:
 
     return {
         "categories": categories,
-        "contents": items,
+        "contents": contents,
         "sorted_channels": sorted_channels,
     }
+
+
+def _repeat_key(item: Dict) -> tuple:
+    """A channel's line but for its group (and the parser's own id and number): two lines
+    alike in it are one channel."""
+    return tuple(
+        sorted(
+            (key, repr(value))
+            for key, value in item.items()
+            if key not in ("id", "group", "tv_genre_id", "number")
+        )
+    )
