@@ -7,7 +7,7 @@
     {
       "type": "M3UPLAYLIST",
       "name": "iptv-org.github.io",
-      "url": "https://iptv-org.github.io/iptv/index.m3u"
+      "url": "https://iptv-org.github.io/iptv/index.country.m3u"
     }
   ],
   "window_positions": {
