@@ -130,6 +130,7 @@ from ui.overlays.zap_banner import ZapBanner
 from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
+from ui.remote_controller import RemoteController
 from ui.settings_dialog import OptionsDialog
 from ui.subtitle_search import OnlineSetup
 from ui.track_controls import SUBTITLE_FILTER
@@ -625,6 +626,7 @@ class TVWindow(QMainWindow):
             parent=self,
         )
         self.menus = TVMenus(self, self)
+        self.remote = RemoteController(self)  # the phone remote; off until Settings turns it on
         # The player controls' and the guide's ⌕: the Library's search, as Ctrl/⌘+F.
         self.overlays.transport.searchRequested.connect(self.screens.open_search)
         # ‹ Library on the player controls: back to the Library a title came from, as Esc.
@@ -824,6 +826,24 @@ class TVWindow(QMainWindow):
             return True
         return super().event(event)
 
+    def remote_key(self, key: int, text: str = "") -> None:
+        """A phone remote's press of `key` (no modifier): the same path as the keyboard's."""
+        if self._closing:
+            return
+        resolved = resolve(key, Qt.KeyboardModifier.NoModifier, text, context=self._key_context())
+        if resolved is None:
+            return
+        action, payload = resolved
+        with self.screens.from_keys():
+            self._act(action, payload, key=key)
+
+    def remote_action(self, action: Action, payload: str = "") -> None:
+        """A phone remote's button that means one action wherever the TV is (Search, Fullscreen)."""
+        if self._closing:
+            return
+        with self.screens.from_keys():
+            self._act(action, payload, key=0)
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         resolved = None if self._closing else self._resolve(event)
         if resolved is None:
@@ -941,6 +961,7 @@ class TVWindow(QMainWindow):
             self._first_frame = True
             self.player_page.removeEventFilter(self)
             self._load_deferred(deferred_modules())  # after this frame is shown
+            QTimer.singleShot(0, self, self.remote.apply_config)  # a phone remote, if it's on
         elif (
             self._mini_waiting
             and watched is self.windowHandle()
@@ -1357,6 +1378,7 @@ class TVWindow(QMainWindow):
             logger.warning("Couldn't save the settings: %s", safe_message(e))
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
         self.controller.settings_saved()
+        self.remote.apply_config()
 
     def set_provider(self, force_update: bool = False) -> None:
         self.controller.select_provider(force_refresh=force_update)
@@ -1561,6 +1583,7 @@ class TVWindow(QMainWindow):
         self.epg_refresh.stop()
         self._run_steps(
             ("let the next click through", self.screens.shutdown),
+            ("stop the phone remote", self.remote.shutdown),
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
             ("stop the channel list's find", self.finder.shutdown),

@@ -887,6 +887,8 @@
   "{khz} kHz": "{khz} kHz",
   "{mbps} Mb/s": "{mbps} Mb/s",
   "{m}m": "{m} min",
+  "{name} can no longer control QiTV": "{name} ya no puede controlar QiTV",
+  "{name} can now control QiTV": "{name} ya puede controlar QiTV",
   "{name} is already in your providers": "{name} ya está en tus proveedores",
   "{name}: {message}": "{name}: {message}",
   "{n} channel": {

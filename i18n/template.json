@@ -425,6 +425,8 @@
     "{khz} kHz": "the sound's sample rate",
     "{mbps} Mb/s": "a bitrate in megabits per second",
     "{m}m": "a running time in minutes, abbreviated (45m)",
+    "{name} can no longer control QiTV": "a toast; {name} is a phone's name, such as \"iPhone · Safari\"",
+    "{name} can now control QiTV": "a toast; {name} is a phone's name, such as \"iPhone · Safari\"",
     "{name}: {message}": "an error toast: a channel's, a film's or a provider's name, then what went wrong",
     "{n} channel": "a genre's channel count beside it; {n} comes with its thousands separator",
     "{n} download left today, more in {time}": "{time}: a time span, \"8 hours and 38 minutes\"",
@@ -1360,6 +1362,8 @@
   "{khz} kHz": "",
   "{mbps} Mb/s": "",
   "{m}m": "",
+  "{name} can no longer control QiTV": "",
+  "{name} can now control QiTV": "",
   "{name} is already in your providers": "",
   "{name}: {message}": "",
   "{n} channel": {

@@ -871,6 +871,8 @@
   "{khz} kHz": "{khz} kHz",
   "{mbps} Mb/s": "{mbps} Mb/s",
   "{m}m": "{m} dk",
+  "{name} can no longer control QiTV": "{name} artık QiTV'yi kontrol edemez",
+  "{name} can now control QiTV": "{name} artık QiTV'yi kontrol edebilir",
   "{name} is already in your providers": "{name} zaten sağlayıcılarınızda",
   "{name}: {message}": "{name}: {message}",
   "{n} channel": {

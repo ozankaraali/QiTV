@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 import secrets
 import socket
+import sys
 import threading
 import time
 from typing import Any, Awaitable, Callable, Iterable, Optional
@@ -39,6 +40,14 @@ logger = logging.getLogger(__name__)
 
 Emit = Callable[[object], None]
 _STOP_S = 2.0
+
+
+def web_dir() -> Path:
+    """The phone page's files: beside the sources, or in a PyInstaller bundle's data."""
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        return Path(bundle) / "remote_web"
+    return Path(__file__).resolve().parent / "web"
 
 
 def default_tv_name() -> str:

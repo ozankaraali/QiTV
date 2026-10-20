@@ -439,6 +439,10 @@ class ConfigManager:
     # The last multiview grid (2.2, optional; older builds ignore it): {"version": 1, "cells",
     # "focus", "tiles": [a last_live_channel-style record, or None per tile]}.
     multiview = _config_property("multiview", None)
+    # The phone remote (2.5, optional; older builds ignore it): services/remote/pairing.py's
+    # {"version": 1, "enabled", "relay", "relay_url", "port", "room", "room_secret", "identity",
+    # "devices"}. The remote's thread owns it; the GUI only writes what that thread hands over.
+    remote = _config_property("remote", None)
     # The multiview's layouts showed once by themselves, as a hint (optional; older builds
     # ignore it).
     multiview_hinted = _config_property(
