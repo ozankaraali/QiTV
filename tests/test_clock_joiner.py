@@ -207,10 +207,51 @@ class ClockJoinerTests(unittest.TestCase):
                 old, new = make_stream(5), make_stream(5)
                 out = b"".join(joiner.feed(old)) + b"".join(joiner.feed(new, junction=True))
                 out += joiner.discontinuity()
-                after = make_stream(3)
+                after = make_stream(3, pts_start=900000 + 40 * CLOCK)  # a clock that went on
                 self.assertEqual(b"".join(joiner.feed(after)) + joiner.finish(), after)
                 self.assertEqual(joiner.offset_s, 0.0)
                 self.assertEqual(len(out), len(old) + len(new))
+
+    def test_a_reconnect_onto_a_clock_behind_follows_the_last_picture(self):
+        # A new connection whose muxer started over (its clock 2.4 hours back, flagged): libVLC
+        # 3 keeps reading its time as 0 behind where it opened while the picture plays on, so
+        # the new clock follows the last picture by a frame, its counters run on, unflagged.
+        long_run = (2 * 3600 + 25 * 60) * CLOCK
+        for clock in (None, lambda: 0.0):
+            for chunk in (None, 5000):
+                with self.subTest(watching=clock is not None, chunk=chunk):
+                    joiner = ClockJoiner(program=lambda: (VIDEO_PID, 0x1B), clock=clock)
+                    old = make_stream(5, pts_start=900000 + long_run)
+                    after = flag_first(make_stream(5))
+                    out = b"".join(joiner.feed(old)) + joiner.discontinuity()
+                    step = chunk or len(after)
+                    for at in range(0, len(after), step):
+                        pieces = joiner.feed(after[at : at + step])
+                        self.assertEqual(len(pieces), 1)  # the reconnect cut there already
+                        out += pieces[0]
+                    out += joiner.finish()
+                    self.assert_runs_on(out)
+                    self.assertEqual(flags(out), 0)
+                    self.assertAlmostEqual(joiner.offset_s, long_run / CLOCK + 5.0, places=1)
+
+    def test_a_reconnect_slightly_behind_follows_the_last_picture_too(self):
+        # A few seconds back (a backlog sent again on another clock): VLC drops the pictures
+        # it has played the time of as late; following on, it plays them.
+        joiner = ClockJoiner(program=lambda: (VIDEO_PID, 0x1B))
+        old, after = make_stream(8), make_stream(5, pts_start=900000 + 5 * CLOCK)
+        out = b"".join(joiner.feed(old)) + joiner.discontinuity()
+        out += b"".join(joiner.feed(after)) + joiner.finish()
+        self.assert_runs_on(out)
+
+    def test_a_reconnect_onto_a_clock_ahead_passes_as_it_comes(self):
+        # Ahead (an outage the source's clock went on through): the segmenter leaves the step
+        # out of the timeline and says where, as before.
+        joiner = ClockJoiner(program=lambda: (VIDEO_PID, 0x1B), clock=lambda: 0.0)
+        old, after = make_stream(5), make_stream(3, pts_start=900000 + 35 * CLOCK)
+        out = b"".join(joiner.feed(old)) + joiner.discontinuity()
+        out += b"".join(joiner.feed(after)) + joiner.finish()
+        self.assertEqual(out, old + after)
+        self.assertEqual(joiner.offset_s, 0.0)
 
     def test_a_junction_before_any_picture_after_a_reconnect_follows_the_last_one(self):
         # Where a loop the loop trimmer dropped across a reconnect ends: the new content is
@@ -504,13 +545,24 @@ class ForwardJumpTests(unittest.TestCase):
         # After a jump, a discontinuity whose content starts on a clock of its own: from there
         # the bytes pass as they came, as without a jump (the segmenter cuts there).
         first = make_stream(20, jumps=((12.0, 13.0),))
-        other = make_stream(4, pts_start=5_000_000_000)
+        other = make_stream(4, pts_start=900000 + 200 * CLOCK)  # ahead, past the window
         segments = [*at_seconds(first, 4.0, 8.0, 12.0, 16.0), other]
         out, joiner, _ = watched(segments, extinf=[4.0] * 6, marks=(5,))
         self.assertTrue(out.endswith(other))
         self.assertEqual(joiner.offset_s, 0.0)
         self.assertEqual(len(joiner.jumps), 1)
         self.assert_runs_on(out[: len(out) - len(other)])
+
+    def test_a_discontinuity_onto_a_clock_far_behind_follows_the_last_picture(self):
+        # After a jump, an HLS discontinuity whose content starts on a clock far behind (an
+        # inserted break with its own timestamps): it follows the last picture, as a reconnect
+        # onto a clock behind does.
+        first = make_stream(20, pts_start=900000 + 3600 * CLOCK, jumps=((12.0, 13.0),))
+        other = make_stream(4)
+        segments = [*at_seconds(first, 4.0, 8.0, 12.0, 16.0), other]
+        out, joiner, _ = watched(segments, extinf=[4.0] * 6, marks=(5,))
+        self.assert_runs_on(out)
+        self.assertEqual(len(joiner.jumps), 1)
 
 
 if __name__ == "__main__":

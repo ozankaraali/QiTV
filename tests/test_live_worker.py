@@ -28,7 +28,7 @@ import warnings
 from http_fixtures import LocalSource, leaf, tls_server_context
 from process_fixtures import still_running, terminate
 from test_fmp4 import movie, trak, visual
-from ts_fixtures import PMT_PID, VIDEO_PID, make_stream
+from ts_fixtures import CLOCK, PMT_PID, VIDEO_PID, make_stream
 from urllib3.exceptions import InsecureRequestWarning
 
 from services.live import interruptible_http, source as source_module, ts as ts_module, worker
@@ -1732,6 +1732,52 @@ class HeardEdgeTests(unittest.TestCase):
         states = [m[2]["reconnecting"] for m in sent if m[0] == "state"]
         self.assertEqual(heard, [False, True])
         self.assertFalse(states[-1])
+
+    def test_a_reconnect_onto_a_clock_far_behind_reaches_the_buffer_running_on(self):
+        # A new connection's muxer started over, 2.4 hours back: VLC would read its time as 0
+        # for hours while it played on (2.4.2). What the buffer holds runs on by a frame.
+        from test_clock_joiner import FRAME, steps, times
+
+        from services.live.source import Discontinuity, Reconnecting
+
+        long_run = (2 * 3600 + 25 * 60) * CLOCK
+        before, after = make_stream(8, pts_start=900000 + long_run), make_stream(8)
+        helper = SimpleNamespace(
+            root="",
+            send=lambda message, session=None: None,
+            server=SimpleNamespace(add_session=lambda *args: None),
+        )
+        session = worker._Session(helper, "r", "http://provider.test/r.ts", {}, True, RAM, 6.0)
+        held = []
+        segmenting = session._to_segmenter
+
+        def to_segmenter(data):
+            held.append(data)
+            segmenting(data)
+
+        class Source:
+            hls = False
+            burst_s = 0.0
+            user_agent = "test"
+
+            def chunks(self):  # in reads as the source makes them
+                yield from (before[at : at + 65536] for at in range(0, len(before), 65536))
+                yield Reconnecting()
+                yield Discontinuity()
+                yield from (after[at : at + 65536] for at in range(0, len(after), 65536))
+
+            def close(self):
+                pass
+
+            def wait_closed(self, timeout):
+                return True
+
+        with (
+            patch.object(source_module, "open_source", lambda *args, **kwargs: Source()),
+            patch.object(session, "_to_segmenter", to_segmenter),
+        ):
+            session._ingest()
+        self.assertEqual(steps(times(b"".join(held), VIDEO_PID)), {FRAME})
 
     def paused_restart(self, pause, *, restart=True):
         """A raw TS session whose source sends a run, then (with `restart`) a restart's burst

@@ -2586,8 +2586,13 @@ class ClockJoiner:
     reconnect ends): that is re-based onto the last picture before the reconnect. What jumps
     added stays when the first picture after it is within `_REJOIN_WINDOW_TICKS` of the last
     before it as they came (one clock: the bytes in between wait for that picture), so a
-    source that goes on with its clock does not leap ahead again there. Pure logic: the
-    program's video PID is the caller's, and the clock is injected.
+    source that goes on with its clock does not leap ahead again there. A first picture behind
+    the last one passed on (a new connection's muxer started over, a break's own timestamps)
+    is re-based onto it as a junction is, in the piece the discontinuity began: libVLC 3 reads
+    the time of a stream whose clock went back below where it opened as 0 until the clock is
+    there again (measured: hours, while the picture played on), and drops pictures whose time
+    it has just played as late. One ahead passes on as it comes. Pure logic: the program's
+    video PID is the caller's, and the clock is injected.
     """
 
     def __init__(
@@ -2636,6 +2641,7 @@ class ClockJoiner:
         # After a discontinuity, until its first picture: (what jumps added, the pictures'
         # clock before it as it came).
         self._marked: tuple[int, int] | None = None
+        self._rejoin = False  # after a discontinuity, until its first picture (`_decide`)
         # (step it came with, of it what arrival did not explain), in seconds, per jump
         self.jumps: deque[tuple[float, float]] = deque(maxlen=_TRIMS_KEPT)
 
@@ -2738,7 +2744,8 @@ class ClockJoiner:
         the re-basing of restarts ends. A junction that comes before the next connection passed
         a picture (where a loop `LoopTrimmer` dropped across the reconnect ends) is re-based
         onto the last picture before the reconnect, as if that had been a pause. What jumps
-        added goes on if the clock does (see the class docstring)."""
+        added goes on if the clock does, and a clock behind the last picture follows it (see
+        the class docstring): what follows waits for its first picture."""
         marked = self._marked  # a discontinuity before, whose first picture never came
         out = self._end()
         if self._joiner is not None:
@@ -2756,6 +2763,9 @@ class ClockJoiner:
         if marked is not None:
             self._marked = marked
             self._pending = []  # what follows waits for its first picture (`_resume`)
+        elif self._before is not None:
+            self._rejoin = True
+            self._pending = []  # what follows waits for its first picture (`_decide`)
         self._searching = True
         return out
 
@@ -2780,10 +2790,13 @@ class ClockJoiner:
             self._counters[pid] = b3 & 0x0F
 
     def _decide(self, out: list[bytes | None]) -> None:
-        """The junction's first picture came: re-base from the junction on (or leave it be)."""
+        """The junction's first picture came: re-base from the junction on (or leave it be).
+        After a discontinuity (`_rejoin`) only a clock behind the last picture is re-based, in
+        the piece the discontinuity began."""
         pending = self._pending
         assert pending is not None
         self._pending = None
+        rejoin, self._rejoin = self._rejoin, False
         first = pending[-1]
         pts, dts = _pes_times(first, 0)
         top, last_dts = self._top, self._last_dts
@@ -2799,7 +2812,8 @@ class ClockJoiner:
         by_dts = (last_dts + self._frame - (pts if dts is None else dts)) % _PTS_MODULO
         offset = by_pts if pts_delta(by_dts, by_pts) >= 0 else by_dts
         moved = pts_delta(self._offset, offset)
-        if abs(moved) <= 2 * self._frame:  # the clock runs on already: no junction to hide
+        # The clock runs on already (no junction to hide), or a discontinuity's went on ahead.
+        if abs(moved) <= 2 * self._frame or (rejoin and moved < 0):
             self._pass_pending(pending, out)
             return
         step = pts_delta(self._last_pts, pts) if self._last_pts is not None else 0
@@ -2808,13 +2822,17 @@ class ClockJoiner:
             self._joiner = ContinuityJoiner(self._counters)
         else:
             out.append(self._joiner.end())
-        out.append(None)  # the junction: a new run starts
+        if not rejoin:
+            out.append(None)  # the junction: a new run starts (a discontinuity cut already)
         self._active = True
         self._joiner.segment()  # the counters run on across the junction
         self._unflagged = set()
         self._unflag_left = _CLOCK_PENDING_PACKETS
-        self.junctions.append((step / _CLOCK, (step + moved) / _CLOCK))
-        logger.debug("a restart's clock re-based by %.2f s", moved / _CLOCK)
+        if rejoin:
+            logger.info("a clock %.2f s behind after a discontinuity re-based", moved / _CLOCK)
+        else:
+            self.junctions.append((step / _CLOCK, (step + moved) / _CLOCK))
+            logger.debug("a restart's clock re-based by %.2f s", moved / _CLOCK)
         for pkt in pending:
             self._place(pkt, out)
             self._note_packet(pkt)
@@ -2825,15 +2843,19 @@ class ClockJoiner:
         goes on and so does what the jumps added; else what follows passes on as it comes."""
         pending, marked = self._pending, self._marked
         assert pending is not None and marked is not None
-        self._pending = self._marked = None
+        self._marked = None
         jumped, before = marked
         pts, dts = _pes_times(pending[-1], 0)
         now = pts if dts is None else dts
-        if now is not None and abs(pts_delta(before, now)) <= _REJOIN_WINDOW_TICKS:
-            self._offset = self._jumped = jumped
-            self._joiner = ContinuityJoiner(self._counters)  # the counters run on across it
-            self._active = True
-            logger.debug("a jump's re-basing goes on across a discontinuity")
+        if now is None or abs(pts_delta(before, now)) > _REJOIN_WINDOW_TICKS:
+            self._rejoin = self._before is not None  # another clock: behind, it follows on
+            self._decide(out)
+            return
+        self._pending = None
+        self._offset = self._jumped = jumped
+        self._joiner = ContinuityJoiner(self._counters)  # the counters run on across it
+        self._active = True
+        logger.debug("a jump's re-basing goes on across a discontinuity")
         for pkt in pending:
             if not self._active:
                 self._count(pkt, 0)
@@ -2856,6 +2878,7 @@ class ClockJoiner:
             return
         pending, self._pending = self._pending, None
         self._marked = None
+        self._rejoin = False
         for pkt in pending or ():
             if not self._active:
                 self._count(pkt, 0)
