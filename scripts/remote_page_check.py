@@ -213,6 +213,9 @@ def scenario_vectors(rig: Rig) -> None:
 
 
 def scenario_pair_home(rig: Rig) -> None:
+    from services import i18n
+
+    i18n.set_language("tr")  # QiTV in Turkish: the phone follows
     mark = rig.events.mark()
     rig.page.goto(rig.pair_url())
     paired = rig.events.wait(Paired, after=mark)
@@ -220,6 +223,11 @@ def scenario_pair_home(rig: Rig) -> None:
     rig.page.wait_for_selector("[data-screen=remote]:not([hidden])", timeout=5000)
     assert rig.page.evaluate("location.hash") == "", "the code stayed in the address"
     assert paired.name.endswith("Chrome"), paired.name
+    lang = rig.page.evaluate("document.documentElement.lang")
+    assert lang == "tr", f"the page's language is {lang!r}, QiTV's is tr"
+    guide = rig.page.inner_text("[data-tab=guide]")
+    assert guide == i18n.translate("Guide") != "Guide", guide  # QiTV's words arrived
+    i18n.set_language(None)
     rig.shot("remote")
     # Reloading reconnects with the stored key, no code needed.
     mark = rig.events.mark()

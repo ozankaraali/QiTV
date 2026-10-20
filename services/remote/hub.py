@@ -21,6 +21,7 @@ import time
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from services.remote import net
+from services.remote.page_strings import page_hello
 from services.remote.pairing import RemoteStore
 from services.remote.protocol import (
     CODE_ROTATE_S,
@@ -319,7 +320,7 @@ class RemoteHub:
         ports: Iterable[int] = PORTS,
         clock: Callable[[], float] = time.time,
         tv_name: Optional[str] = None,
-        hello: Callable[[], dict] = dict,
+        hello: Callable[[], dict] = page_hello,
         handshake_s: float = HANDSHAKE_S,
         host: str = "0.0.0.0",
     ) -> None:

@@ -56,6 +56,18 @@ libraries, are separate modules QiTV does not use: they are not in the apps.
 - The texts come from the installed Python where it has them (`CPython.txt`) and otherwise from
   each project's own release of that version.
 
+## The phone remote's page
+
+The page QiTV serves to a phone (`services/remote/web/`) bundles these JavaScript libraries,
+rebuilt from their npm releases by `scripts/remote_vendor.sh`.
+
+| Component | Version | License | Text |
+| --- | --- | --- | --- |
+| noble-curves | 2.4.0 | MIT | `licenses/web/noble-curves.txt` |
+| noble-ciphers | 2.4.0 | MIT | `licenses/web/noble-ciphers.txt` |
+| noble-hashes | 2.4.0 | MIT | `licenses/web/noble-hashes.txt` |
+| jsQR | 1.4.0 | Apache-2.0 | `licenses/web/jsQR.txt` |
+
 ## Python libraries
 
 Each license as the installed package's metadata states it.

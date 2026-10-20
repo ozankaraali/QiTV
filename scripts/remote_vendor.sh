@@ -25,4 +25,11 @@ npx esbuild entry.js --bundle --format=esm --minify --legal-comments=inline \
 npx esbuild node_modules/jsqr/dist/jsQR.js --minify --legal-comments=inline \
   --banner:js="/* jsQR 1.4.0 (Apache-2.0, Cosmo Wolfe); minified by scripts/remote_vendor.sh */" \
   --outfile="$OUT/jsqr.js"
-echo "vendored into $OUT"
+# Their license texts, which the app ships (THIRD-PARTY-NOTICES.md names them).
+LICENSES="$(cd "$OUT/../../../.." && pwd)/licenses/web"
+mkdir -p "$LICENSES"
+for package in curves ciphers hashes; do
+  cp "node_modules/@noble/$package/LICENSE" "$LICENSES/noble-$package.txt"
+done
+cp node_modules/jsqr/LICENSE "$LICENSES/jsQR.txt"
+echo "vendored into $OUT, license texts into $LICENSES"

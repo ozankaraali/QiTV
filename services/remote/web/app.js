@@ -82,7 +82,6 @@ function applyStrings(table) {
   Object.assign(strings, table || {});
   for (const el of document.querySelectorAll("[data-t]")) if (strings[el.dataset.t]) el.textContent = strings[el.dataset.t];
   for (const el of document.querySelectorAll("[data-tp]")) if (strings[el.dataset.tp]) el.placeholder = strings[el.dataset.tp];
-  if (strings.lang) document.documentElement.lang = strings.lang;
 }
 
 // ---- the connection -----------------------------------------------------------------------
@@ -162,6 +161,7 @@ export function openSession({ tvId, room = null, opening, pattern, s = null, psk
 function onMessage(message) {
   if (message.t === "hello") {
     applyStrings(message.strings);
+    if (message.lang) document.documentElement.lang = message.lang;
     $("tvName").textContent = message.tv || "QiTV";
     setDot(message.door === "relay" ? "relay" : "online");
     banner("");

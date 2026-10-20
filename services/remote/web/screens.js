@@ -13,7 +13,6 @@ const QUERY_DEBOUNCE_MS = 150;
 
 const words = {
   watching: "Watching",
-  next: "Next",
   continue_watching: "Continue watching",
   my_list: "My list",
   channels: "Channels",

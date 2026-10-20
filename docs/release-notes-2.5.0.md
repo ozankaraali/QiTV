@@ -1,0 +1,27 @@
+# QiTV 2.5.0
+
+QiTV 2.5 turns your phone into the remote: scan a code on the TV once, and the phone's browser
+drives QiTV like its keyboard, with the guide, search and your Library at hand.
+
+**Please always download QiTV from [Releases](https://github.com/ozankaraali/QiTV/releases)
+instead of using others' distributions, which may have malware.**
+
+## New
+
+- **Phone remote.** Turn it on in Settings → Phone remote, choose QiTV → Phone Remote…, and scan
+  the code on the TV with your phone's camera: no app to install. The arrows, OK and Back work
+  as the keyboard's wherever you are, and a held button repeats like a held key and stops where
+  you let go. TV, Movies and Series jump to those pages; volume, channels, play and pause,
+  rewind, Go live and Mute are a thumb away, and More holds the channel numbers, Record,
+  Picture in picture, Swap, Multiview, Picture and Full screen. Prefer swiping? The phone's
+  menu turns the arrows into a touchpad.
+- **A second screen.** The phone shows what's on with its progress, a guide of the channel list
+  the TV is on (or Favorites, or Recent) where a tap tunes the TV, your Continue watching and
+  My list, and the TV's search results as you type on the phone's keyboard.
+- **At home, or anywhere.** At home the phone talks to QiTV directly over Wi-Fi. With Reach QiTV
+  from any network on, it also works on mobile data or another network through the QiTV relay,
+  which passes along end-to-end encrypted messages it can't read; back on your Wi-Fi the phone
+  switches to the direct line by itself.
+- **Pairing you control.** The code on the TV changes every minute, pairs one phone and only
+  works while it shows. Settings → Phone remote lists the paired phones, and Remove cuts one off
+  at once. A phone can pair with several QiTVs and choose between them.
