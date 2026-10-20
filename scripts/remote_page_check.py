@@ -28,7 +28,16 @@ sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 
 from services.remote import net  # noqa: E402
 from services.remote.hub import RemoteHub, web_dir  # noqa: E402
-from services.remote.protocol import Code, Opened, Paired, Press, Status  # noqa: E402
+from services.remote.protocol import (  # noqa: E402
+    Code,
+    Get,
+    Opened,
+    OpenItem,
+    Paired,
+    Press,
+    Query,
+    Status,
+)
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 VECTORS = ROOT / "tests" / "fixtures" / "noise_vectors.json"
@@ -316,6 +325,211 @@ SCENARIOS: dict[str, Callable[[Rig], None]] = {
     "hold": scenario_hold,
     "hidden-releases": scenario_hidden_releases,
 }
+# ---- the second screen (the check answers as QiTV would, with invented content) ----------
+
+NOW = time.time()
+
+
+def programme(title: str, start_min: float, stop_min: float) -> dict:
+    return {"title": title, "start": NOW + start_min * 60, "stop": NOW + stop_min * 60}
+
+
+STATE = {
+    "t": "state",
+    "context": "player",
+    "section": "live",
+    "now": {
+        "kind": "live",
+        "num": "1",
+        "name": "Harbourline News",
+        "now": programme("Evening bulletin", -20, 25),
+        "next": programme("Weather on the hour", 25, 30),
+        "behind_s": 0,
+    },
+    "volume": 40,
+    "muted": False,
+    "recording": False,
+    "pip": False,
+    "multiview": False,
+}
+GUIDE = {
+    "t": "guide",
+    "list": "all",
+    "page": 0,
+    "pages": 1,
+    "rows": [
+        {
+            "id": "h1",
+            "num": "1",
+            "name": "Harbourline News",
+            "playing": True,
+            "now": programme("Evening bulletin", -20, 25),
+            "next": programme("Weather", 25, 30),
+        },
+        {
+            "id": "h2",
+            "num": "2",
+            "name": "Fernvale Sports",
+            "playing": False,
+            "now": programme("Second half", -40, 10),
+            "next": None,
+        },
+        {
+            "id": "h3",
+            "num": "3",
+            "name": "Quillmoor Docs",
+            "playing": False,
+            "now": None,
+            "next": None,
+        },
+    ],
+}
+RESULTS = {
+    "t": "results",
+    "q": "harb",
+    "groups": [
+        {"kind": "live", "items": [{"id": "r1", "title": "Harbourline News", "sub": ""}]},
+        {"kind": "movies", "items": [{"id": "r2", "title": "Harbour Lights", "sub": ""}]},
+    ],
+}
+LIBRARY = {
+    "t": "library",
+    "continue": [{"id": "c1", "title": "Harbour Lights", "sub": "1998", "progress": 0.4}],
+    "mylist": [{"id": "m1", "title": "The Harbourmaster", "sub": "2011"}],
+    "mylist_section": "movies",
+}
+
+
+def paired_sid(rig: Rig) -> str:
+    mark = rig.events.mark()
+    rig.pair()
+    return rig.events.wait(Opened, after=mark).sid
+
+
+def scenario_now_playing(rig: Rig) -> None:
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    rig.page.locator("#nowName", has_text="Harbourline News").wait_for()
+    assert "Evening bulletin" in rig.page.inner_text("#nowShow")
+    width = rig.page.evaluate("parseFloat(document.getElementById('nowProg').style.width)")
+    assert 30 < width < 60, width
+    assert rig.page.locator(".seg [data-section=live].on").count() == 1
+    rig.shot("now-playing")
+    mark = rig.events.mark()
+    rig.page.click("#now")
+    rig.events.wait(Press, where=lambda e: e.button == "info" and not e.down, after=mark)
+
+
+def scenario_guide_tune(rig: Rig) -> None:
+    sid = paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark)
+    assert (ask.list, ask.page) == ("all", 0), ask
+    rig.hub.send(sid, GUIDE)
+    rig.page.wait_for_selector("#guideRows .row >> nth=2")
+    assert rig.page.locator("#guideRows .row.playing").count() == 1
+    rig.shot("guide")
+    mark = rig.events.mark()
+    rig.page.locator("#guideRows .row", has_text="Fernvale Sports").click()
+    assert rig.events.wait(OpenItem, after=mark).handle == "h2"
+    mark = rig.events.mark()
+    rig.page.click("#guideChips [data-list=favorites]")
+    assert rig.events.wait(Get, after=mark).list == "favorites"
+
+
+def scenario_search_mirror(rig: Rig) -> None:
+    sid = paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("#searchButton")
+    rig.events.wait(Press, where=lambda e: e.button == "search" and not e.down, after=mark)
+    rig.page.wait_for_selector("[data-screen=search]:not([hidden])")
+    assert rig.page.evaluate("document.activeElement.id") == "searchInput"
+    mark = rig.events.mark()
+    rig.page.keyboard.type("harb", delay=30)
+    rig.events.wait(Query, where=lambda e: e.text == "harb", after=mark)
+    rig.hub.send(sid, RESULTS)
+    rig.page.wait_for_selector("#searchRows .row >> nth=1")
+    groups = rig.page.locator("#searchRows .group").all_inner_texts()
+    assert len(groups) == 2, groups
+    rig.shot("search")
+    mark = rig.events.mark()
+    rig.page.locator("#searchRows .row", has_text="Harbour Lights").click()
+    assert rig.events.wait(OpenItem, after=mark).handle == "r2"
+    mark = rig.events.mark()
+    rig.page.focus("#searchInput")
+    rig.page.keyboard.press("Enter")
+    rig.events.wait(Press, where=lambda e: e.button == "ok" and not e.down, after=mark)
+
+
+def scenario_library_open(rig: Rig) -> None:
+    sid = paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=library]")
+    rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
+    rig.hub.send(sid, LIBRARY)
+    rig.page.wait_for_selector("#libraryRows .row >> nth=1")
+    rig.shot("library")
+    mark = rig.events.mark()
+    rig.page.locator("#libraryRows .row", has_text="The Harbourmaster").click()
+    assert rig.events.wait(OpenItem, after=mark).handle == "m1"
+
+
+def scenario_more_numpad(rig: Rig) -> None:
+    paired_sid(rig)
+    rig.page.click("#moreButton")
+    rig.page.wait_for_selector("#moreSheet:not([hidden])")
+    rig.shot("more")
+    mark = rig.events.mark()
+    rig.page.click("#moreSheet [data-key=d7]")
+    rig.events.wait(Press, where=lambda e: e.button == "d7" and not e.down, after=mark)
+    rig.page.click("#moreSheet [data-close]")
+    rig.page.wait_for_selector("#moreSheet", state="hidden")
+
+
+def drag(rig: Rig, dx: float, dy: float, hold_ms: int) -> None:
+    box = rig.page.locator("#touchpad").bounding_box()
+    assert box is not None
+    x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+    rig.page.mouse.move(x, y)
+    rig.page.mouse.down()
+    rig.page.mouse.move(x + dx, y + dy, steps=4)
+    rig.page.wait_for_timeout(hold_ms)
+    rig.page.mouse.up()
+
+
+def scenario_touchpad(rig: Rig) -> None:
+    paired_sid(rig)
+    rig.page.click("#menuButton")
+    rig.page.locator("#menuList button", has_text="touchpad").click()
+    rig.page.wait_for_selector("#touchpad:not([hidden])")
+    rig.shot("touchpad")
+    mark = rig.events.mark()
+    drag(rig, 0, 60, 0)  # a flick down: one step
+    up = rig.events.wait(Press, where=lambda e: not e.down, after=mark)
+    assert (up.button, up.steps) == ("down", 1), up
+    mark = rig.events.mark()
+    drag(rig, 60, 0, 1200)  # a drag right that stays down: a held arrow from 250 ms
+    up = rig.events.wait(Press, where=lambda e: not e.down, after=mark)
+    assert up.button == "right" and up.steps >= 14, up  # held ~950 ms: steps_for(950) = 15
+    mark = rig.events.mark()
+    rig.page.click("#touchpad")  # a tap: OK
+    rig.events.wait(Press, where=lambda e: e.button == "ok" and not e.down, after=mark)
+    rig.page.reload()  # remembered on this phone
+    rig.page.wait_for_selector("#touchpad:not([hidden])")
+
+
+SCENARIOS.update(
+    {
+        "now-playing": scenario_now_playing,
+        "guide-tune": scenario_guide_tune,
+        "search-mirror": scenario_search_mirror,
+        "library-open": scenario_library_open,
+        "more-numpad": scenario_more_numpad,
+        "touchpad": scenario_touchpad,
+    }
+)
+
 RELAY_SCENARIOS: dict[str, Callable[[Rig], None]] = {
     "pair-relay": scenario_pair_relay,
     "hop": scenario_hop,

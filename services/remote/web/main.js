@@ -2,6 +2,7 @@
 // answers "home"), then each part registers with app.js, then the page starts.
 import { start } from "./app.js";
 import { install } from "./relay.js";
+import { install as installScreens } from "./screens.js";
 
 let door = "home";
 try {
@@ -11,4 +12,5 @@ try {
   // an unreadable answer: the home door, which works on the home network
 }
 install(door);
+installScreens();
 start();
