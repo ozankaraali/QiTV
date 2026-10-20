@@ -98,6 +98,7 @@ def _context(**values) -> dict:
 
 class LibraryController(QObject):
     notice = Signal(str)  # a message for the window's toast
+    searchChanged = Signal()  # the search's hits changed (the phone remote mirrors them)
 
     def __init__(
         self,
@@ -198,6 +199,7 @@ class LibraryController(QObject):
         nav.sourceRequested.connect(self._show_source_menu)
         screen.search_field.clicked.connect(lambda: self._focus("search"))
         self._search.changed.connect(self._show_hits)
+        self._search.changed.connect(self.searchChanged)
 
     def shutdown(self) -> None:
         """The window is closing: a running search's result and a pending action are dropped."""
@@ -280,6 +282,26 @@ class LibraryController(QObject):
         else:
             self._on_model_changed()
         self._focus("grid")
+
+    def remote_search(self, query: str) -> None:
+        """The phone remote's typing: the search shows and searches `query` as it is now."""
+        if self._closed:
+            return
+        if not query:
+            self._search.set_query("")
+        self.open_search(query)
+
+    def search_hits(self) -> list[Hit]:
+        """What the search shows now (none while it has no query or is still searching)."""
+        return list(self._search.hits or [])
+
+    def activate_hit(self, hit: Hit) -> None:
+        """A search result tapped on the phone remote: as Enter on it."""
+        self._activate_hit(hit, start_over=False)
+
+    def open_series(self, series: dict, provider: str) -> None:
+        """A series from the phone remote's My list: its seasons, back to the grid."""
+        self._open_series(series, provider, back="grid")
 
     def open_search(self, query: str = "") -> None:
         """The search; `query` (typed elsewhere: the channel list's find) is searched at once."""

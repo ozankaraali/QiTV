@@ -2549,6 +2549,15 @@ class TVController(QObject):
             clock=now,
         )
 
+    def now_next(self, channel: dict) -> tuple[Optional[Programme], Optional[Programme]]:
+        """The programme on now on `channel` and the next one (from the loaded guide)."""
+        now = self._now()
+        return now_next(self._programmes(channel, now, 3), now)
+
+    def channel_number(self, channel: dict) -> str:
+        """A channel's number as the banner shows it ("" when it has none)."""
+        return self._number(channel)
+
     def _programmes(self, channel: dict, now: datetime, limit: int) -> list[Programme]:
         try:
             return list(self.catalog.programmes(channel, now, limit=limit))

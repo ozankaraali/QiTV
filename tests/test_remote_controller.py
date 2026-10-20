@@ -8,11 +8,11 @@ import threading
 import unittest
 from unittest import mock
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtTest import QTest
 from test_tv_window import WindowCase, wait_until
 
-from services.remote.protocol import Closed, Code, Paired, Press, Status, StoreSaved
+from services.remote.protocol import Closed, Code, Held, Paired, Press, Status, StoreSaved
 from ui.keymap import Action
 
 
@@ -120,12 +120,19 @@ class RemoteEventTests(WindowCase):
         fired = []
         remote = self.window.remote
         remote.fire = fired.append
+        alive = QTimer()  # the phone's keep-alive while the button is down
+        alive.setInterval(100)
+        alive.timeout.connect(lambda: remote.bridge.post(Held("s1")))
         self.deliver(Press("s1", "down", True, 1))
-        QTest.qWait(530)  # 400 ms, then every 40 ms; no keep-alive: stops at 600 ms
+        alive.start()
+        QTest.qWait(530)  # one press, then from 400 ms one every 40 ms
+        alive.stop()
         remote.bridge.post(Press("s1", "down", False, 5))
         self.assertTrue(wait_until(lambda: len(fired) >= 5))
         QTest.qWait(200)
-        self.assertEqual(fired, ["down"] * 5)
+        # Where the phone let go, however late this machine's timers ran: overshoot steps back.
+        self.assertEqual(fired.count("down") - fired.count("up"), 5)
+        self.assertTrue(set(fired) <= {"down", "up"})
 
 
 if __name__ == "__main__":

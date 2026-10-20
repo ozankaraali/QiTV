@@ -15,20 +15,26 @@ from typing import TYPE_CHECKING, Any, Optional
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 
 from services.i18n import N_, translate
+from services.next_episode import play_context
 from services.redact import safe_message
 from services.remote.protocol import (
     BUTTON_META,
     Closed,
     Code,
+    Get,
     Held,
+    Opened,
+    OpenItem,
     Paired,
     Press,
+    Query,
     Status,
     StoreSaved,
 )
 from ui.keymap import Action
 from ui.remote_buttons import BUTTONS
 from ui.remote_repeat import KeyRepeater
+from ui.remote_snapshots import Handles, guide_page, library_lists, results, state
 
 if TYPE_CHECKING:
     from services.remote.hub import RemoteHub
@@ -41,6 +47,9 @@ PAIRED_TEXT = N_("{name} can now control QiTV")
 REMOVED_TEXT = N_("{name} can no longer control QiTV")
 
 _WINDOW_ACTIONS = (Action.SEARCH, Action.FULLSCREEN)
+DIFF_MS = 500  # what's on is compared this often while a phone is connected
+AFTER_PRESS_MS = 60  # and soon after each press, so the phone sees what it did
+SEEK_DRIFT_MS = 3000  # a film's position this far from where it should be is a seek
 
 
 class RemoteBridge(QObject):
@@ -71,6 +80,17 @@ class RemoteController(QObject):
         self._timer.timeout.connect(self._tick)
         self._names: dict[str, str] = {}
         self.status: dict = {"home_url": "", "relay": "off"}
+        self.handles = Handles()
+        self._phones: set[str] = set()
+        self._last_state: Optional[dict] = None
+        self._last_at = 0
+        self._diff = QTimer(self)
+        self._diff.setInterval(DIFF_MS)
+        self._diff.timeout.connect(self._push_state)
+        self._soon = QTimer(self)
+        self._soon.setSingleShot(True)
+        self._soon.timeout.connect(self._push_state)
+        window.library_controller.searchChanged.connect(self._push_results)
 
     # ---- lifecycle -------------------------------------------------------------------------
 
@@ -95,6 +115,8 @@ class RemoteController(QObject):
 
     def shutdown(self) -> None:
         self._timer.stop()
+        self._diff.stop()
+        self._phones.clear()
         if self.hub is not None:
             self.hub.stop()
             self.hub = None
@@ -142,6 +164,8 @@ class RemoteController(QObject):
             self.fire(button)
         except Exception as error:  # a phone's press must never take QiTV down
             logger.error("Phone remote: %s failed: %s", button, safe_message(error))
+        if self._phones:
+            self._soon.start(AFTER_PRESS_MS)
 
     def _now(self) -> int:
         return int(self._clock.elapsed())
@@ -171,6 +195,19 @@ class RemoteController(QObject):
         elif isinstance(event, Closed):
             self._repeater.drop(event.sid)
             self._schedule()
+            self._phones.discard(event.sid)
+            if not self._phones:
+                self._diff.stop()
+        elif isinstance(event, Opened):
+            self._phones.add(event.sid)
+            self._diff.start()
+            self._send(event.sid, self._state())
+        elif isinstance(event, Get):
+            self._answer(event)
+        elif isinstance(event, Query):
+            self._search(event.text)
+        elif isinstance(event, OpenItem):
+            self._open(event.handle)
         elif isinstance(event, StoreSaved):
             self._persist(event.data)
         elif isinstance(event, Paired):
@@ -183,6 +220,71 @@ class RemoteController(QObject):
         elif isinstance(event, Status):
             self.status = {"home_url": event.home_url, "relay": event.relay}
             self.statusChanged.emit(dict(self.status))
+
+    # ---- the second screen -----------------------------------------------------------------
+
+    def _send(self, sid: str, message: dict) -> None:
+        if self.hub is not None:
+            self.hub.send(sid, message)
+
+    def _state(self) -> dict:
+        snapshot = state(self._window)
+        self._last_state, self._last_at = snapshot, self._now()
+        return snapshot
+
+    def _push_state(self) -> None:
+        """Tell the phones what's on when it changed (a film's clock runs on the phone)."""
+        if not self._phones or self.hub is None:
+            return
+        last, last_at = self._last_state, self._last_at
+        snapshot = state(self._window)
+        if last is not None and not _changed(last, snapshot, self._now() - last_at):
+            return
+        self._last_state, self._last_at = snapshot, self._now()
+        self.hub.broadcast(snapshot)
+
+    def _push_results(self) -> None:
+        if self._phones and self.hub is not None:
+            self.hub.broadcast(results(self._window, self.handles))
+
+    def _answer(self, event: Get) -> None:
+        try:
+            if event.what == "guide":
+                message = guide_page(self._window, event.list, event.page, self.handles)
+            else:
+                message = library_lists(self._window, self.handles)
+        except Exception as error:  # a phone's question must never take QiTV down
+            logger.error("Phone remote: %s failed: %s", event.what, safe_message(error))
+            return
+        self._send(event.sid, message)
+
+    def _search(self, text: str) -> None:
+        screens = self._window.screens
+        if screens.library_shown():
+            self._window.library_controller.remote_search(text)
+        else:
+            screens.open_search(text)
+
+    def _open(self, handle: str) -> None:
+        found = self.handles.get(handle)
+        if found is None:
+            return
+        kind, payload = found
+        window = self._window
+        try:
+            if kind == "channel":
+                window.screens.tune_live(payload)
+            elif kind == "hit":
+                window.library_controller.activate_hit(payload)
+            elif kind == "series":
+                window.screens.open_library("series")
+                window.library_controller.open_series(payload, _provider(payload))
+            elif kind in ("movie", "episode"):
+                window.screens.play(payload, kind, play_context())
+        except Exception as error:
+            logger.error("Phone remote: opening a %s failed: %s", kind, safe_message(error))
+        if self._phones:
+            self._soon.start(AFTER_PRESS_MS)
 
     def _persist(self, data: dict) -> None:
         config = self._window.config_manager
@@ -202,3 +304,24 @@ class RemoteController(QObject):
                 for d in devices
             ]
         )
+
+
+def _provider(item: object) -> str:
+    from services.provider_ids import provider_of
+
+    return provider_of(item) if isinstance(item, dict) else ""
+
+
+def _changed(last: dict, now: dict, elapsed_ms: int) -> bool:
+    """Whether a phone should hear `now`: anything but a playing film's clock moving on."""
+    a, b = dict(last), dict(now)
+    a_now, b_now = dict(a.pop("now") or {}), dict(b.pop("now") or {})
+    if a != b:
+        return True
+    a_pos, b_pos = a_now.pop("pos_ms", None), b_now.pop("pos_ms", None)
+    if a_now != b_now:
+        return True
+    if a_pos is None or b_pos is None:
+        return bool(a_pos != b_pos)
+    expected = a_pos + (elapsed_ms if a_now.get("playing") else 0)
+    return bool(abs(b_pos - expected) > SEEK_DRIFT_MS)
