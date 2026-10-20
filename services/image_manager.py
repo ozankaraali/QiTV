@@ -10,7 +10,7 @@ import threading
 import orjson as json
 
 from services.lazy_import import lazy_module
-from services.redact import safe_exc
+from services.redact import redact_url, safe_exc
 
 logger = logging.getLogger(__name__)
 aiohttp = lazy_module("aiohttp")
@@ -60,6 +60,10 @@ class ImageManager:
                         )
                         await asyncio.sleep(wait_time)
                         continue
+                    if not 200 <= response.status < 300:
+                        # A refusal's or an error's page is no image: never cached as one.
+                        logger.info("Image refused (%d): %s", response.status, redact_url(url))
+                        return None
 
                     # Persist bytes. We skip pre-scaling here to avoid GUI usage off-thread.
                     try:
@@ -135,6 +139,18 @@ class ImageManager:
         """Files an entry may own; entries from older indexes did not record their extension."""
         exts = [entry["ext"]] if entry and entry.get("ext") else ["png", "jpg"]
         return [os.path.join(self.cache_dir, f"{key_hash}.{ext}") for ext in exts]
+
+    def discard(self, cache_path: str) -> None:
+        """Forget a cached file that does not decode (an error page an older QiTV cached as an
+        image, say), so the next load asks for it again."""
+        key = os.path.splitext(os.path.basename(cache_path))[0]
+        with self._lock:
+            entry = self.cache.pop(key, None)
+            self.current_cache_size -= (entry or {}).get("size", 0)
+        try:
+            os.remove(cache_path)
+        except FileNotFoundError:
+            pass
 
     def remove_icon_from_cache(self, url):
         url_hash = self._hash_string(url + "png")
