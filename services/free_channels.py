@@ -1,5 +1,8 @@
-"""iptv-org's free playlists: all countries, or one country's (the welcome card's and the
-sources column's "Free channels…").
+"""iptv-org's free playlists: all countries, or one country's (the welcome card's, the sources
+column's and the Providers menu's "Free channels", and Settings → Providers').
+
+The list of all countries is the one grouped by country, so a new viewer finds theirs first;
+configs from before hold the one grouped by genre (`OLD_ALL_URL`), the same channels.
 
 Data only, no widgets. `provider_entry` gives the config entry to add; the window adds it.
 """
@@ -10,7 +13,8 @@ from typing import Optional
 
 from services.i18n import N_, translate
 
-ALL_URL = "https://iptv-org.github.io/iptv/index.m3u"
+ALL_URL = "https://iptv-org.github.io/iptv/index.country.m3u"
+OLD_ALL_URL = "https://iptv-org.github.io/iptv/index.m3u"  # grouped by genre
 ALL_NAME = "iptv-org.github.io"  # the default config's entry
 _COUNTRY_URL = "https://iptv-org.github.io/iptv/countries/{code}.m3u"
 _NAME_PREFIX = "iptv-org: "
@@ -215,6 +219,14 @@ _NAMES = dict(COUNTRIES)
 
 def country_url(code: str) -> str:
     return _COUNTRY_URL.format(code=code)
+
+
+def same_list(listed: dict, entry: dict) -> bool:
+    """Whether provider `listed` is the free list `entry` (added again, it is only switched
+    to): the same address, or both the list of all countries at either of its addresses."""
+    url, wanted = listed.get("url"), entry.get("url")
+    every = (ALL_URL, OLD_ALL_URL)
+    return bool(url == wanted or (url in every and wanted in every))
 
 
 def region_code(territory_code: str) -> Optional[str]:

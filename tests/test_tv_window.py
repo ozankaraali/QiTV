@@ -1800,8 +1800,8 @@ class LibraryWindowTests(TwoProviderCase):
         self.wait_for_drawer()
         menu = self.window.menus.providers_menu
 
-        def entries():
-            return [(a.text(), a.isChecked()) for a in menu.actions()]
+        def entries():  # the providers (Add provider and Free channels follow them)
+            return [(a.text(), a.isChecked()) for a in menu.actions() if a.isCheckable()]
 
         self.assertEqual(
             entries(), [(ALL_PROVIDERS_TITLE, False), (PROVIDER_NAME, True), (XTREAM, False)]

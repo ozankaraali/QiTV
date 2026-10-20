@@ -1330,7 +1330,7 @@ class TVWindow(QMainWindow):
         if self._closing:
             return
         entry = free_channels.provider_entry(code)
-        name, existing = self._add_provider_entry(entry, lambda p, e: p.get("url") == e["url"])
+        name, existing = self._add_provider_entry(entry, free_channels.same_list)
         self.config_manager.selected_provider_name = name
         self.save_config()
         self.menus.rebuild_providers()

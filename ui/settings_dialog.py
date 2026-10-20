@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 )
 import orjson as json
 
-from services import failure_reasons as reasons, i18n, provider_link, recording
+from services import failure_reasons as reasons, free_channels, i18n, provider_link, recording
 from services.account_check import check_account
 from services.config_manager import ConfigManager
 from services.epg_view import (
@@ -48,6 +48,8 @@ from services.provider_api import CLIENT_HEADERS
 from services.provider_link import parse_provider_link
 from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
+from ui.free_channels_menu import show_menu as show_free_channels_menu
+from ui.provider_drop import unique_name
 from ui.update_dialogs import check_for_updates
 
 
@@ -781,6 +783,11 @@ class OptionsDialog(QDialog):
         self.add_provider_button.clicked.connect(self.add_new_provider)
         self.providers_layout.addWidget(self.add_provider_button)
 
+        # i18n: a Settings button beside Add Provider; opens a menu of free playlists
+        self.free_channels_button = QPushButton(tr("Free channels…"), self.providers_tab)
+        self.free_channels_button.clicked.connect(self.show_free_channels)
+        self.providers_layout.addWidget(self.free_channels_button)
+
         self.remove_provider_button = QPushButton(tr("Remove Provider"), self.providers_tab)
         self.remove_provider_button.clicked.connect(self.remove_provider)
         self.providers_layout.addWidget(self.remove_provider_button)
@@ -1176,6 +1183,34 @@ class OptionsDialog(QDialog):
         self.edited_provider = None
         self.load_providers()
         self.providers_modified = True
+
+    def show_free_channels(self):
+        """Free channels…: iptv-org's lists in the menu under the button (as the TV's)."""
+        button = self.free_channels_button
+        below = button.mapToGlobal(button.rect().bottomLeft())
+        show_free_channels_menu(self, below, self.add_free_channels)
+
+    def add_free_channels(self, code):
+        """List iptv-org's list (all countries, or `code`'s) as a provider, shown in the form;
+        one listed already is only shown. Saved with Save, as any provider added here."""
+        entry = free_channels.provider_entry(code)
+        self._store_provider_edits()
+        index = next(
+            (
+                i
+                for i, listed in enumerate(self.providers)
+                if free_channels.same_list(listed, entry)
+            ),
+            None,
+        )
+        if index is None:
+            entry["name"] = unique_name(entry["name"], (p.get("name") for p in self.providers))
+            self.providers.append(entry)
+            index = len(self.providers) - 1
+            self.providers_modified = True
+        self.selected_provider_index = index
+        self.edited_provider = None
+        self.load_providers()
 
     def start_new_provider(self):
         """Open on the Providers tab with a new, empty provider to fill in (TV: Add provider)."""

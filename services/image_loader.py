@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QImage, QImageReader
 
 from services.lazy_import import lazy_module
+from services.provider_api import CLIENT_HEADERS
 from services.redact import redact_url, safe_exc
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,10 @@ class ImageLoader(QThread):
     def _result(self, image_rank, cache_path) -> dict:
         result = {"rank": image_rank, "cache_path": cache_path, "iconified": self.iconified}
         if self.decode_side:
-            result["image"] = read_scaled(cache_path, self.decode_side)  # on this thread
+            image = read_scaled(cache_path, self.decode_side)  # on this thread
+            if image is None:
+                self.image_manager.discard(cache_path)  # asked for again next time
+            result["image"] = image
         return result
 
     async def load_images(self):
@@ -110,7 +114,10 @@ class ImageLoader(QThread):
             if self.isInterruptionRequested():
                 return
             connector = aiohttp.TCPConnector(ssl=self.verify_ssl)
-            async with aiohttp.ClientSession(connector=connector) as session:
+            # As providers are asked (a public image host refuses a library's default agent).
+            async with aiohttp.ClientSession(
+                connector=connector, headers=CLIENT_HEADERS
+            ) as session:
                 try:
                     for image_rank, url in enumerate(self.image_urls):
                         if self.isInterruptionRequested():

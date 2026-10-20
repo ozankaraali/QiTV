@@ -38,9 +38,18 @@ class EntryTests(unittest.TestCase):
             {
                 "type": "M3UPLAYLIST",
                 "name": "iptv-org.github.io",
-                "url": "https://iptv-org.github.io/iptv/index.m3u",
+                "url": "https://iptv-org.github.io/iptv/index.country.m3u",  # one group a country
             },
         )
+
+    def test_the_list_of_all_countries_is_one_list_at_either_address(self):
+        # Older configs hold the list grouped by genre: the same channels.
+        new = fc.provider_entry(None)
+        old = dict(new, url="https://iptv-org.github.io/iptv/index.m3u")
+        self.assertTrue(fc.same_list(old, new))
+        self.assertTrue(fc.same_list(new, new))
+        self.assertFalse(fc.same_list(fc.provider_entry("uk"), new))
+        self.assertTrue(fc.same_list(fc.provider_entry("uk"), fc.provider_entry("uk")))
 
     def test_a_country(self):
         self.assertEqual(

@@ -5,10 +5,11 @@ keyPressEvent handles those keys through ui.keymap. Modifier combinations are ap
 shortcuts, which the keymap leaves to the menus (a test checks that no screen claims them).
 The player's keys are disabled while the Library shows. The Providers menu is an exclusive
 group of the configured providers, rebuilt when a provider becomes ready or fails and after
-Settings closes. The drawer's Settings and Add provider rows open the same dialogs, its Free
-channels row the free-channels menu, its Open file row the same file dialog, and its header's
-⌕ the same search. File → Open Recordings Folder opens where recordings go (2.2), as Settings'
-Open folder does.
+Settings closes, then Add provider and the free-channels menu (the welcome card that offers
+both shows only without providers, and the last one stays). The drawer's Settings and Add
+provider rows open the same dialogs, its Free channels row the free-channels menu, its Open
+file row the same file dialog, and its header's ⌕ the same search. File → Open Recordings
+Folder opens where recordings go (2.2), as Settings' Open folder does.
 """
 
 from __future__ import annotations
@@ -28,6 +29,10 @@ from services.i18n import N_, tr, translate
 from services.navigation import ADD_PROVIDER_ROW, FREE_CHANNELS_ROW, OPEN_FILE_ROW, SETTINGS_ROW
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
 from ui.brand import logo_pixmap
+from ui.free_channels_menu import (
+    PICKER_TITLE as FREE_CHANNELS_TITLE,
+    build_menu as build_free_channels_menu,
+)
 from ui.keymap import Action
 from ui.overlays.drawer import REFRESH_ACTION, SEARCH_ACTION
 from ui.shortcuts_dialog import ShortcutsDialog
@@ -45,6 +50,7 @@ ABOUT_TEXT = (
     '<p><a href="{home}">{home}</a><br><a href="{issues}">{report}</a></p>'
 )
 NO_PROVIDERS_TEXT = N_("No providers")  # i18n: the Providers menu's only entry, when it is empty
+ADD_PROVIDER_TEXT = N_("Add provider")  # i18n: the Providers menu's entry; opens the provider form
 _SHORTCUT_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier
     | Qt.KeyboardModifier.AltModifier
@@ -105,6 +111,7 @@ class TVMenus(QObject):
         self._window = window
         self._player_actions: list[QAction] = []  # entries of the player's keys
         self._provider_group: Optional[QActionGroup] = None
+        self._free_menu: Optional[QMenu] = None  # the Providers menu's Free channels
         self.providers_menu: QMenu
         # A mouse button was let go on an open menu: the entry it triggers now was clicked
         # (until the event is handled), not chosen by its shortcut or the menu's keys.
@@ -238,13 +245,15 @@ class TVMenus(QObject):
 
     def rebuild_providers(self) -> None:
         """One checkable entry per provider, after "All providers" when there are two or more
-        (as in the channel list's sources), the source the TV page browses checked."""
+        (as in the channel list's sources), the source the TV page browses checked; then Add
+        provider and Free channels."""
         menu = self.providers_menu
         menu.clear()
         catalog = self._window.catalog
         names = catalog.provider_names()
         if not names:
             menu.addAction(translate(NO_PROVIDERS_TEXT)).setEnabled(False)
+            self._add_entries(menu)
             return
         current = catalog.source()
         entries = [(name, name) for name in names]
@@ -261,6 +270,21 @@ class TVMenus(QObject):
             action.triggered.connect(lambda _checked=False, s=source: self._choose_provider(s))
             group.addAction(action)
             menu.addAction(action)
+        self._add_entries(menu)
+
+    def _add_entries(self, menu: QMenu) -> None:
+        """Add provider and the free-channels menu, under the providers."""
+        window = self._window
+        menu.addSeparator()
+        add = menu.addAction(translate(ADD_PROVIDER_TEXT))
+        add.triggered.connect(lambda _checked=False: window.add_provider())
+        if self._free_menu is not None:
+            self._free_menu.deleteLater()  # clear() leaves a submenu it held
+        free = self._free_menu = build_free_channels_menu(
+            menu, lambda code: window.add_free_channels(code), styled=False
+        )
+        free.setTitle(translate(FREE_CHANNELS_TITLE))
+        menu.addMenu(free)
 
     def _choose_provider(self, source: str) -> None:
         """The exclusive group moved the check; providerReady rebuilds the menu (never here:

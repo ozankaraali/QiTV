@@ -96,7 +96,8 @@ class WelcomeFlowTests(NoProviderCase):
         save.assert_called_once_with()
         self.select.assert_called_once_with(None, force_refresh=False)
         self.assertFalse(self.card.isVisible())  # dismissed as after Settings → Save
-        listed = [a.text() for a in self.window.menus.providers_menu.actions()]
+        menu = self.window.menus.providers_menu
+        listed = [a.text() for a in menu.actions() if a.isCheckable()]
         self.assertEqual(listed, [entry["name"]])  # the Providers menu was rebuilt
         # It is on disk too.
         reloaded = type(self.provider_manager)(self.config)
@@ -155,6 +156,85 @@ class AddFlowTests(WindowCase):
         self.assertEqual(self.config.selected_provider_name, f"{clash} (2)")
         self.window.add_free_channels("uk")  # the same URL again: no third
         self.assertEqual(len(self.provider_manager.providers), len(names))
+
+
+class OldAddressTests(WindowCase):
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(self.window.catalog, "select_provider")
+        self.select = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_list_of_all_countries_at_its_old_address_is_only_switched_to(self):
+        old = {
+            "type": "M3UPLAYLIST",
+            "name": free_channels.ALL_NAME,
+            "url": "https://iptv-org.github.io/iptv/index.m3u",
+        }
+        self.provider_manager.providers.append(dict(old))
+        self.window.add_free_channels(None)
+        self.assertEqual(len(self.provider_manager.providers), 2)
+        self.assertEqual(self.provider_manager.providers[-1], old)  # kept as it was
+        self.assertEqual(self.config.selected_provider_name, free_channels.ALL_NAME)
+
+
+class ProvidersMenuTests(WindowCase):
+    """The menu bar's Providers menu adds providers too: the welcome card rarely shows (the
+    last provider stays), and Settings → Providers is not where one looks for free lists."""
+
+    def entries(self):
+        menu = self.window.menus.providers_menu
+        return {action.text(): action for action in menu.actions() if action.text()}
+
+    def test_free_channels_and_add_provider_follow_the_providers(self):
+        menu = self.window.menus.providers_menu
+        texts = [action.text() for action in menu.actions()]
+        self.assertEqual(texts[0], PROVIDER_NAME)
+        self.assertEqual(texts[-2:], ["Add provider", "Free channels"])
+        free = self.entries()["Free channels"].menu()
+        self.assertEqual(free.styleSheet(), "")  # the menu bar's own look
+        self.assertEqual(free.actions()[0].text(), ALL_TEXT)
+        self.assertEqual(free.actions()[-1].text(), OTHER_TEXT)
+        with mock.patch.object(self.window, "add_free_channels") as add:
+            free.actions()[0].trigger()
+        add.assert_called_once_with(None)
+        with mock.patch.object(self.window, "add_provider") as add_provider:
+            self.entries()["Add provider"].trigger()
+        add_provider.assert_called_once_with()
+
+    def test_they_stay_after_a_rebuild(self):
+        self.window.menus.rebuild_providers()
+        self.window.menus.rebuild_providers()
+        texts = [action.text() for action in self.window.menus.providers_menu.actions()]
+        self.assertEqual(texts.count("Free channels"), 1)
+
+
+class SettingsFreeChannelsTests(WindowCase):
+    def test_settings_lists_a_free_list_until_saved(self):
+        from ui.settings_dialog import OptionsDialog
+
+        dialog = OptionsDialog(self.window)
+        self.addCleanup(dialog.deleteLater)
+        with mock.patch("ui.settings_dialog.show_free_channels_menu") as shown:
+            dialog.free_channels_button.click()
+        (parent, point, choose), _ = shown.call_args
+        self.assertIs(parent, dialog)
+        self.assertIsInstance(point, QPoint)
+        choose("uk")
+        entry = free_channels.provider_entry("uk")
+        self.assertEqual(dialog.providers[-1], entry)
+        self.assertEqual(dialog.provider_combo.currentIndex(), len(dialog.providers) - 1)
+        self.assertEqual(dialog.url_input.text(), entry["url"])
+        self.assertEqual(len(self.provider_manager.providers), 1)  # nothing saved yet
+        choose("uk")  # listed already: shown, not added again
+        self.assertEqual(len(dialog.providers), 2)
+        choose(None)
+        self.assertEqual(dialog.providers[-1], free_channels.provider_entry(None))
+        with mock.patch.object(self.window.catalog, "select_provider"):
+            dialog.save_settings()
+        self.assertEqual(
+            self.provider_manager.providers[1:], [entry, free_channels.provider_entry(None)]
+        )
 
 
 class DrawerRowTests(WindowCase):

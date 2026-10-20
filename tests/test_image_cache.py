@@ -130,3 +130,92 @@ class ImageCacheTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImageDownloadTests(unittest.TestCase):
+    """Images over HTTP. One public image host answers a library's default User-Agent with a
+    403 and a line of text; that text was cached as the logo, never decoded, and never asked
+    for again."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtCore import QBuffer, QIODevice
+        from PySide6.QtGui import QGuiApplication, QImage
+
+        cls.app = QGuiApplication.instance() or QGuiApplication([])
+        image = QImage(8, 6, QImage.Format.Format_ARGB32)
+        image.fill(0xFF336699)
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buffer, "PNG")
+        cls.png = bytes(buffer.data())
+
+    def setUp(self):
+        import http.server
+
+        self.directory = tempfile.TemporaryDirectory()
+        self.config = SimpleNamespace(get_config_dir=lambda: self.directory.name)
+        self.manager = ImageManager(self.config, max_cache_size=1_000_000)
+        self.agents: list[str] = []
+        case = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                case.agents.append(self.headers.get("User-Agent", ""))
+                refused = self.path == "/refused.png"
+                body = (
+                    b"Please set a user-agent and respect our robot policy" if refused else case.png
+                )
+                self.send_response(403 if refused else 200)
+                self.send_header("Content-Type", "text/plain" if refused else "image/png")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.directory.cleanup()
+
+    def load(self, urls):
+        from services.image_loader import ImageLoader
+
+        loader = ImageLoader(urls, self.manager, iconified=True, decode_side=64)
+        results = []
+        loader.progress_updated.connect(lambda current, total, data: results.append(data))
+        asyncio.run(loader.load_images())
+        return results
+
+    def test_a_refusal_is_never_cached_as_the_image(self):
+        results = self.load([f"{self.base}/refused.png"])
+        self.assertEqual(results, [{}])
+        self.assertEqual(self.manager.current_cache_size, 0)
+        self.assertEqual([n for n in os.listdir(self.manager.cache_dir) if n.endswith(".png")], [])
+
+    def test_images_are_asked_for_as_providers_are(self):
+        from services.provider_api import CLIENT_HEADERS
+
+        results = self.load([f"{self.base}/logo.png"])
+        self.assertFalse(results[0]["image"].isNull())
+        self.assertEqual(self.agents, [CLIENT_HEADERS["User-Agent"]])
+
+    def test_a_cached_file_that_does_not_decode_is_asked_for_again(self):
+        # What an older QiTV cached from a refusal: the next load drops it, the one after
+        # that downloads the image.
+        url = f"{self.base}/logo.png"
+        stale = os.path.join(
+            self.manager.cache_dir, self.manager._hash_string(url + "png") + ".png"
+        )
+        with open(stale, "wb") as f:
+            f.write(b"Please set a user-agent and respect our robot policy")
+        self.assertIsNone(self.load([url])[0]["image"])
+        self.assertFalse(os.path.exists(stale))
+        self.assertFalse(self.load([url])[0]["image"].isNull())
+        self.assertEqual(len(self.agents), 1)
