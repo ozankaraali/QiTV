@@ -102,6 +102,14 @@ class HomeDoorTests(HomeDoorCase):
 
         self.run_async(go())
 
+    def test_door_json_says_home(self):
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                async with s.get(self.url("/door.json")) as r:
+                    return r.status, await r.json()
+
+        self.assertEqual(self.run_async(go()), (200, {"door": "home"}))
+
     def test_status_names_the_home_address(self):
         status = self.events.wait(Status)
         self.assertEqual(status.relay, "off")

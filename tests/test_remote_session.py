@@ -85,6 +85,7 @@ class PairingTests(SessionCase):
         self.assertEqual(hello["t"], "hello")
         self.assertEqual((hello["proto"], hello["tv"], hello["lang"]), (1, "Living room", "en"))
         self.assertEqual(hello["door"], "relay")
+        self.assertEqual((hello["room"], hello["relay"]), ("room-1", self.store.relay_url))
         self.assertEqual(self.payload["tv"], "Living room")
         self.assertEqual(self.payload["room"], "room-1")
         self.assertEqual(self.payload["relay"], self.store.relay_url)
@@ -94,9 +95,10 @@ class PairingTests(SessionCase):
 
     def test_pair_without_relay_says_so(self):
         self.store.relay = False
-        self.pair()
+        _, _, _, hello = self.pair()
         self.assertIsNone(self.payload["relay"])
         self.assertIsNone(self.payload["room"])
+        self.assertIsNone(hello["room"])
 
     def test_pair_with_previous_code_within_grace(self):
         old = self.store.open_pairing(self.clock.now)

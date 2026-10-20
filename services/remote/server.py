@@ -57,11 +57,17 @@ async def start_home_door(
         headers = {"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"}
         return web.FileResponse(found, headers=headers)
 
+    async def door(request: web.Request) -> web.StreamResponse:
+        # The relay serves the same page with a static door.json saying "relay".
+        return web.json_response({"door": "home"}, headers={"Cache-Control": "no-store"})
+
     app = web.Application(middlewares=[private_only])
     app.router.add_get("/ws", core.handle_ws)
+    app.router.add_get("/door.json", door)
     app.router.add_get("/", page)
     app.router.add_get("/{path:.+}", page)
-    runner = web.AppRunner(app, access_log=None, handle_signals=False)
+    # A phone's open socket must not keep QiTV from quitting (aiohttp waits 60 s by default).
+    runner = web.AppRunner(app, access_log=None, handle_signals=False, shutdown_timeout=1.0)
     await runner.setup()
     for port in ports:
         site = web.TCPSite(runner, host, port)

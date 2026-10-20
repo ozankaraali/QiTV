@@ -24,6 +24,11 @@ const FALLBACK = {
   offline: "Can't reach QiTV. Is it open on the computer?",
   forget: "Forget this TV",
   pair_another: "Pair another TV",
+  choose_tv: "Choose a TV",
+  this_phone: "This phone",
+  tv_offline: "QiTV isn't reachable. Is it open on the computer?",
+  full: "Too many phones are connected to this TV.",
+  connect_directly: "Connect directly",
 };
 export const t = (key) => strings[key] || FALLBACK[key] || key;
 
@@ -61,7 +66,7 @@ export function banner(text, kind = "") {
   el.className = `banner ${kind}`;
 }
 
-function showScan(message) {
+export function showScan(message) {
   show("scan");
   $("scanMessage").textContent = message || strings.scan_hint || $("scanMessage").textContent;
   $("tvName").textContent = "QiTV";
@@ -87,13 +92,15 @@ export function homeSocketUrl() {
 }
 
 // How a TV is reached from this page; the relay door replaces it (relay.js).
-app.socketUrl = () => homeSocketUrl();
+app.socketUrl = (_tvId, _room) => homeSocketUrl();
+app.menuExtras = [];
 
 export function pair({ tvId, code, room }) {
   const key = Keypair.generate();
   show("connecting");
-  open({
+  openSession({
     tvId,
+    room,
     opening: { v: 1, mode: "pair" },
     pattern: "NKpsk0",
     psk: codePsk(b64d(code)),
@@ -117,8 +124,9 @@ export function connect(tvId) {
     showScan();
     return;
   }
-  open({
+  openSession({
     tvId,
+    room: record.room,
     opening: { v: 1, mode: "kk", key: record.keyId },
     pattern: "KK",
     s: Keypair.fromPrivate(b64d(record.priv)),
@@ -127,12 +135,12 @@ export function connect(tvId) {
   });
 }
 
-function open({ tvId, opening, pattern, s = null, psk = null, payload, onanswer }) {
+export function openSession({ tvId, room = null, opening, pattern, s = null, psk = null, payload, onanswer }) {
   clearTimeout(app.retryTimer);
   if (app.conn) app.conn.end(1000, "replaced");
   app.tvId = tvId;
   const conn = new Connection({
-    url: app.socketUrl(tvId),
+    url: app.socketUrl(tvId, room),
     opening,
     pattern,
     s,
@@ -157,7 +165,10 @@ function onMessage(message) {
     $("tvName").textContent = message.tv || "QiTV";
     setDot(message.door === "relay" ? "relay" : "online");
     banner("");
+    if (app.tvId && "room" in message) store.putTv(app.tvId, { room: message.room, relay: message.relay });
+    $("tvButton").classList.toggle("chooser", Object.keys(store.tvs()).length > 1);
     if ($("tabs").hidden) show("remote");
+    if (app.onhello) app.onhello(message);
   } else if (message.t === "bye") {
     if (message.reason === "removed") forget(t("removed"));
   }
@@ -168,6 +179,7 @@ function onMessage(message) {
 function onClose(code, reason, mode) {
   releaseAll();
   setDot("");
+  if (app.onclose && app.onclose(code, reason, mode)) return; // a door's own cases (relay.js)
   if (code === 4401 && reason === "pair-expired") {
     app.conn = null;
     showScan(t("code_expired"));
@@ -177,7 +189,6 @@ function onClose(code, reason, mode) {
     forget(t("removed"));
     return;
   }
-  if (app.onclose && app.onclose(code, reason)) return; // the relay door's own cases
   scheduleRetry();
 }
 
@@ -279,6 +290,18 @@ function bindChrome() {
     });
   }
   $("menuButton").addEventListener("click", openMenu);
+  $("tvButton").addEventListener("click", openChooser);
+}
+
+function openChooser() {
+  const list = $("menuList");
+  list.replaceChildren();
+  $("menuTitle").textContent = t("choose_tv");
+  for (const [id, record] of Object.entries(store.tvs())) {
+    list.append(menuItem(record.name || "QiTV", () => connect(id), id === app.tvId ? "current" : ""));
+  }
+  list.append(menuItem(t("pair_another"), () => showScan()));
+  openSheet("menuSheet");
 }
 
 export function menuItem(text, onClick, className = "") {
@@ -296,7 +319,8 @@ export function menuItem(text, onClick, className = "") {
 function openMenu() {
   const list = $("menuList");
   list.replaceChildren();
-  for (const extra of app.menuExtras || []) {
+  $("menuTitle").textContent = t("this_phone");
+  for (const extra of app.menuExtras) {
     const item = extra();
     if (item) list.append(item);
   }

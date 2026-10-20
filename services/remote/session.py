@@ -208,7 +208,15 @@ class Session:
         self._recv, self._send = self._hs.split()
         self._hs = None
         self._state = "established"
-        hello = {"t": "hello", "proto": PROTO, "tv": self._tv_name, "door": self._door}
+        relay = self._store.relay and bool(self._store.room)
+        hello = {
+            "t": "hello",
+            "proto": PROTO,
+            "tv": self._tv_name,
+            "door": self._door,
+            "room": self._store.room if relay else None,  # so the page's records stay current
+            "relay": self._store.relay_url if relay else None,
+        }
         hello.update(self._hello())
         return Reply([msg2, self.send(hello)], events)
 
