@@ -6,8 +6,11 @@ others' distributions, which may have malware.**
 
 ## New
 
-- **Picture in picture on the phone.** Watching on the phone, the player has a picture-in-picture
-  button beside the channel's name: tap it, and the video keeps playing in a small window when you
-  leave the page. On an iPhone, the player's full screen also goes small by itself as you swipe
-  home, when Settings → General → Picture in Picture → Start PiP Automatically is on. iOS may not
-  offer picture in picture to the remote added to the Home Screen; in Safari it does.
+- **All providers on the phone.** With two providers or more, the phone's channel lists (the
+  Guide and the Remote tab's Channels) have your providers above their groups: All providers
+  first, then each one. Choosing one moves only the phone's lists, never the TV's, and the find
+  boxes search what the phone shows, so in All providers "Find a channel" reaches every channel.
+- **Picture in picture as you leave.** Watching on the phone, the player asks the browser to go
+  small when you leave the page. On an iPhone this works from the player's full screen when
+  Settings → General → Picture in Picture → Start PiP Automatically is on; the player's own
+  picture-in-picture button works as before.
