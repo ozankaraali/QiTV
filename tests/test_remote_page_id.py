@@ -37,6 +37,15 @@ class PageIdTests(unittest.TestCase):
             with self.subTest(files=files):
                 self.assertNotEqual(page_id(self.folder(files)), base)
 
+    def test_windows_line_endings_are_the_same_page(self):
+        # A Windows checkout (git's autocrlf) gives the page's text files CRLF line ends; the
+        # relay's copy has LF: one page, one id, or Windows QiTVs would never meet theirs.
+        lf = self.folder({"index.html": "<p>\nx\n", "app.js": "a;\nb;\n"})
+        crlf = Path(tempfile.mkdtemp())
+        for name in ("index.html", "app.js"):
+            (crlf / name).write_bytes((lf / name).read_bytes().replace(b"\n", b"\r\n"))
+        self.assertEqual(page_id(crlf), page_id(lf))
+
     def test_what_the_relay_adds_and_hidden_files_do_not_count(self):
         files = {"index.html": "x"}
         base = page_id(self.folder(files))

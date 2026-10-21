@@ -24,7 +24,8 @@ def page_id(folder: str | Path) -> str:
         parts = path.relative_to(root).parts
         if parts[0] in _RELAYS_OWN or any(part.startswith(".") for part in parts):
             continue
-        data = path.read_bytes()
+        # CRLF reads as LF: a Windows checkout (git's autocrlf) is the same page as the relay's.
+        data = path.read_bytes().replace(b"\r\n", b"\n")
         digest.update(f"{'/'.join(parts)}\0{len(data)}\0".encode("utf-8"))
         digest.update(data)
     return digest.hexdigest()[:ID_CHARS]
