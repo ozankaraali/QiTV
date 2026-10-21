@@ -181,6 +181,8 @@ class RemoteController(QObject):
                 screens.open_library(b.payload)
         elif b.action in _WINDOW_ACTIONS:
             window.remote_action(b.action, b.payload)
+        elif button == "pip" and window.controller.pip_shown():
+            window.controller.close_pip()  # the phone's button says Close while one shows
         elif b.action is not None:
             if BUTTON_META[button].route == "player" and screens.library_shown():
                 screens.back_to_tv()

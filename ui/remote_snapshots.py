@@ -89,7 +89,6 @@ def state(window: Any) -> dict:
             "behind_s": round(behind),
         }
     live = getattr(controller, "live", None)
-    sessions = getattr(window, "sessions", None)
     return {
         "t": "state",
         "context": window._key_context(),
@@ -98,7 +97,7 @@ def state(window: Any) -> dict:
         "volume": controller.main_level(),
         "muted": controller.main_muted(),
         "recording": bool(live is not None and live.recording()),
-        "pip": bool(sessions is not None and sessions.pip_open()),
+        "pip": controller.pip_shown(),
         "multiview": controller.multiview_shown(),
     }
 

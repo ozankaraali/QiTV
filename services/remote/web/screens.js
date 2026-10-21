@@ -20,6 +20,8 @@ const words = {
   no_programmes: "No programme guide for this channel",
   guide: "Guide",
   library: "Library",
+  pip: "Picture in picture",
+  close_pip: "Close picture in picture",
   groups: "Groups",
   genres: "Genres",
   guide_find: "Find a channel",
@@ -110,6 +112,30 @@ function onState(message) {
   if (guide) guide.classList.toggle("on", message.context === "guide");
   const mute = document.querySelector("[data-key=mute]");
   if (mute) mute.classList.toggle("on", !!message.muted);
+  const pip = document.querySelector("#moreSheet [data-key=pip]");
+  if (pip) {
+    pip.classList.toggle("on", !!message.pip); // a small picture shows: the button closes it
+    pip.querySelector("span").textContent = w(message.pip ? "close_pip" : "pip");
+  }
+  followTv(now && now.kind === "live" ? liveKey(now.num, now.name) : "");
+}
+
+// The TV changed channel (on the computer, or from here): Watching moves; a Guide opened where
+// the TV is follows it, to its row when loaded, else to where the TV's list is now.
+function followTv(live) {
+  if (live === watching) return;
+  watching = live;
+  const box = $("guideRows");
+  let row = null;
+  for (const item of box.querySelectorAll(".row[data-live]")) {
+    const on = !!live && item.dataset.live === live;
+    markWatching(item, on);
+    if (on) row = item;
+  }
+  const shown = !document.querySelector("[data-screen=guide]").hidden;
+  if (!live || !guide.following || !shown || guide.opening) return;
+  if (row) row.scrollIntoView({ block: "nearest" });
+  else openGuideAt("channels");
 }
 
 function drawNow() {
@@ -155,7 +181,10 @@ function drawNow() {
 // find box searches the level shown, the whole of it, on QiTV. A row opens the channel's card
 // (what's on, what follows, Watch); the ▶ at its end tunes at once.
 
-const guide = newList({ level: "channels", key: "", title: "", total: null });
+// `following`: opened where the TV is (the tab): it follows the TV's channel until the phone
+// picks a group or finds; `watching`: the channel the TV shows, as "num|name".
+const guide = newList({ level: "channels", key: "", title: "", total: null, following: false });
+let watching = "";
 let findTimer = null;
 let timetableFor = "";
 
@@ -167,7 +196,8 @@ function showGuideLevel() {
 }
 
 function openGuideAt(level, key = "", title = "") {
-  Object.assign(guide, { level, key, title, total: null, find: "" });
+  const following = level === "channels" && !key; // where the TV is
+  Object.assign(guide, { level, key, title, total: null, find: "", following });
   $("guideFind").value = "";
   showGuideLevel();
   startList($("guideRows"), guide);
@@ -189,8 +219,21 @@ function onGroups(message) {
   placePage($("guideRows"), guide, message, rows, () => openGuideAt("groups"));
 }
 
+function liveKey(num, name) {
+  return `${num || ""}|${name || ""}`;
+}
+
+// The Watching mark on the row of the channel the TV shows, on every page loaded.
+function markWatching(row, on) {
+  row.classList.toggle("playing", on);
+  const badge = row.querySelector(".row-top em");
+  if (on && !badge) row.querySelector(".row-top").append(el("em", "", w("watching")));
+  else if (!on && badge) badge.remove();
+}
+
 function guideRow(row) {
   const item = el("div", `row split${row.playing ? " playing" : ""}`);
+  item.dataset.live = liveKey(row.num, row.name);
   const hit = el("button", "row-tap");
   hit.type = "button";
   hit.append(logoTile(row.name));
@@ -240,6 +283,7 @@ function bindGuide() {
     clearTimeout(findTimer);
     findTimer = setTimeout(() => {
       guide.find = find.value.trim();
+      guide.following = false; // the phone looks for something: the TV's zaps don't move it
       startList($("guideRows"), guide);
       askGuide(0);
     }, QUERY_DEBOUNCE_MS);
