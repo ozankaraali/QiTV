@@ -73,6 +73,45 @@ class RemoteDispatchTests(WindowCase):
             self.remote().fire("pip")
         handle.assert_called_once_with(Action.PIP, "")
 
+    def test_fullscreen_brings_qitv_forward_first_from_the_background(self):
+        """macOS ignores a fullscreen change asked of a window in the background (the phone's
+        button while another app is in front): QiTV comes forward, then changes."""
+        window = self.window
+        active = [False]
+        with (
+            mock.patch("ui.tv_window.app_active", side_effect=lambda: active[0]),
+            mock.patch.object(window, "activateWindow") as activate,
+            mock.patch.object(window, "toggle_fullscreen") as toggle,
+        ):
+            self.remote().fire("fullscreen")
+            activate.assert_called_once()
+            toggle.assert_not_called()  # not yet: macOS would drop it
+            active[0] = True
+            self.assertTrue(wait_until(lambda: toggle.called))
+        toggle.assert_called_once()
+
+    def test_fullscreen_from_the_background_changes_even_if_qitv_stays_behind(self):
+        window = self.window
+        with (
+            mock.patch("ui.tv_window.app_active", return_value=False),
+            mock.patch.object(window, "activateWindow"),
+            mock.patch.object(window, "toggle_fullscreen") as toggle,
+        ):
+            self.remote().fire("fullscreen")
+            self.assertTrue(wait_until(lambda: toggle.called, timeout_ms=3000))
+        toggle.assert_called_once()
+
+    def test_fullscreen_in_front_changes_at_once(self):
+        window = self.window
+        with (
+            mock.patch("ui.tv_window.app_active", return_value=True),
+            mock.patch.object(window, "activateWindow") as activate,
+            mock.patch.object(window, "toggle_fullscreen") as toggle,
+        ):
+            self.remote().fire("fullscreen")
+        toggle.assert_called_once()
+        activate.assert_not_called()
+
     def test_movies_and_tv_screens(self):
         self.show()
         self.remote().fire("movies")
