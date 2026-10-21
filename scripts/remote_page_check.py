@@ -750,6 +750,49 @@ def scenario_watch_here(rig: Rig) -> None:
     assert rig.page.locator("#player").is_hidden()
 
 
+def scenario_providers(rig: Rig) -> None:
+    """With two providers, the groups have the providers above them: All providers, then each;
+    the one chosen is asked for once (source) and its groups come with its name."""
+    sid = paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark), GUIDE)
+    rig.page.wait_for_selector("#guideRows .row >> nth=2")
+    mark = rig.events.mark()
+    rig.page.click("#guideUp")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "groups", after=mark)
+    answer(rig, sid, ask, {**GROUPS, "pick": True, "source": "Provider A"})
+    rig.page.wait_for_selector("#guideRows .row.branch >> nth=2")
+    assert rig.page.inner_text("#guideTitle").startswith("Provider A"), rig.page.inner_text(
+        "#guideTitle"
+    )
+    assert rig.page.locator("#guideUp").is_visible(), "no way up to the providers"
+    assert rig.page.inner_text("#guideUp") == "Providers", rig.page.inner_text("#guideUp")
+    mark = rig.events.mark()
+    rig.page.click("#guideUp")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "sources", after=mark)
+    sources = [
+        {"id": "s0", "title": "All providers"},
+        {"id": "s1", "title": "Provider A", "on": True},
+        {"id": "s2", "title": "Provider B"},
+    ]
+    answer(rig, sid, ask, {"t": "sources", "rows": sources})
+    rig.page.wait_for_selector("#guideRows .row.branch >> nth=2")
+    assert rig.page.locator("#guideRows .row.branch.on", has_text="Provider A").count() == 1
+    assert rig.page.locator("#guideFind").is_hidden() and rig.page.locator("#guideUp").is_hidden()
+    rig.shot("providers")
+    mark = rig.events.mark()
+    rig.page.locator("#guideRows .row.branch", has_text="All providers").click()
+    ask = rig.events.wait(Get, where=lambda e: e.what == "groups", after=mark)
+    assert ask.source == "s0", ask
+    answer(rig, sid, ask, {**GROUPS, "pick": True, "source": "All providers"})
+    rig.page.locator("#guideTitle", has_text="All providers").wait_for(timeout=5000)
+    mark = rig.events.mark()
+    rig.page.fill("#guideFind", "news")  # the find asks again, without choosing again
+    ask = rig.events.wait(Get, where=lambda e: e.what == "groups" and e.find == "news", after=mark)
+    assert ask.source == "", ask
+
+
 def scenario_guide_pages(rig: Rig) -> None:
     """Opened on the TV's channel, page 3 of 5: the channel shows, the pages above and below
     come as the list scrolls, and what shows stays put."""
@@ -1077,6 +1120,7 @@ SCENARIOS.update(
         "guide-tune": scenario_guide_tune,
         "channel-list": scenario_channel_list,
         "find-both": scenario_find_both,
+        "providers": scenario_providers,
         "watch-here": scenario_watch_here,
         "guide-pages": scenario_guide_pages,
         "timetable": scenario_timetable,

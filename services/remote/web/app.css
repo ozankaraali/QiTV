@@ -196,6 +196,7 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .row.branch .title { flex: 1; min-width: 0; font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row.branch .count { padding-left: 10px; flex: none; font-size: 14px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
 .row.branch svg { flex: none; width: 18px; height: 18px; color: var(--faint); }
+.row.branch.on .title { color: var(--accent); }
 .rows { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-anchor: none; margin: 0 -16px; padding-bottom: 12px; -webkit-overflow-scrolling: touch; }
 .group { margin: 14px 16px 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .row { width: 100%; display: flex; gap: 12px; align-items: center; padding: 11px 16px; border-bottom: 1px solid var(--line); text-align: left; }

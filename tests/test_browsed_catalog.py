@@ -173,6 +173,30 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.assertTrue(self.catalogs.is_ready("Harbor IPTV"))
         self.assertEqual(library.sections(), self.catalogs.catalog("Harbor IPTV").sections())
 
+    def test_a_phones_choice_moves_its_lists_only(self):
+        """The phone remote's lists browse with a choice of their own (ui.remote_controller),
+        held in memory: All providers there leaves the TV's page and the settings as they were."""
+        from ui.remote_controller import _PhoneChoice
+
+        tv = self.view("Demo TV")
+        phone = BrowsedCatalog(
+            self.catalogs,
+            _PhoneChoice(self.config),
+            source_key="phone_provider_name",
+            all_key="phone_all_providers",
+        )
+        self.assertEqual(phone.source(), "Demo TV")  # where the TV's list is
+        phone.select_provider(ALL_PROVIDERS)
+        self.assertEqual(phone.source(), ALL_PROVIDERS)
+        headings = {g.provider for g in phone.groups("live") if g.header}
+        self.assertEqual(headings, {"Demo TV", "Harbor IPTV"})
+        phone.select_provider("Harbor IPTV")
+        self.assertEqual(phone.source(), "Harbor IPTV")
+        self.assertEqual(tv.source(), "Demo TV")
+        self.assertEqual(self.config.selected_provider_name, "Demo TV")
+        self.assertFalse(getattr(self.config, "tv_all_providers", False))
+        self.assertFalse(hasattr(self.config, "phone_provider_name"))  # nothing saved
+
     def test_signals_of_other_providers_are_not_this_pages(self):
         view = self.view("Demo TV")
         ready = QSignalSpy(view.sectionReady)

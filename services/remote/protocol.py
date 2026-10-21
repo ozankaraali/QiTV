@@ -176,7 +176,7 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         what = obj.get("what")
         if what in ("library", "genres"):
             return _library_ask(obj)
-        if what in ("guide", "groups", "channels", "chgroups"):
+        if what in ("guide", "groups", "channels", "chgroups", "sources", "chsources"):
             return _guide_ask(obj)
         if what == "timetable" and _short_id(obj.get("id")):
             return {"t": "get", "what": "timetable", "id": obj["id"]}
@@ -204,14 +204,22 @@ def _numbered(obj: dict, ask: dict) -> Optional[dict]:
 
 def _guide_ask(obj: dict) -> Optional[dict]:
     """A page of the Guide's groups, or of a group's channels (its key; "": where the TV's
-    channel list is), with what the phone's find box holds. The Remote tab's channel list asks
-    the same as "chgroups" and "channels"."""
+    channel list is), with what the phone's find box holds; or the providers above the groups.
+    The Remote tab's channel list asks the same as "chgroups", "channels" and "chsources"."""
+    what = obj["what"]
+    if what in ("sources", "chsources"):  # the providers, above the groups (two or more)
+        return _numbered(obj, {"t": "get", "what": what})
     asked = _page_and_find(obj)
     if asked is None:
         return None
-    page, find, what = *asked, obj["what"]
+    page, find = asked
     if what in ("groups", "chgroups"):
-        return _numbered(obj, {"t": "get", "what": what, "page": page, "find": find})
+        ask = {"t": "get", "what": what, "page": page, "find": find}
+        if "source" in obj:  # the provider (or all of them) the phone's lists show from now
+            if not _short_id(obj["source"]):
+                return None
+            ask["source"] = obj["source"]
+        return _numbered(obj, ask)
     group = obj.get("list", "")
     if not (group == "" or _short_id(group)):
         return None
@@ -311,6 +319,7 @@ class Get:
     find: str = ""  # the Guide's find box
     handle: str = ""  # the timetable's channel
     n: int = -1  # the phone's number for the ask, which the answer carries back (-1: none)
+    source: str = ""  # the groups': the provider the phone's lists show from now on (its key)
 
 
 @dataclass(frozen=True)

@@ -8,8 +8,12 @@ whole of it, and every channel besides, as the desktop search does: after the gr
 matches, or after the group's own channels. Groups travel as short keys, channels and
 programmes as handles.
 
+With two providers or more, the providers are a level above the groups: All providers, then
+each. The phone's lists browse through a catalog of their own (`catalog`), whose choice moves
+them and never the TV's.
+
 The Remote tab's channel list is a bare one: the same groups and channels, without programmes
-(its messages "chgroups" and "channels"), so it loads no programme guide.
+(its messages "chgroups", "channels" and "chsources"), so it loads no programme guide.
 """
 
 from __future__ import annotations
@@ -20,8 +24,9 @@ from typing import Any, Callable, ClassVar, Optional, cast
 from PySide6.QtCore import QObject, QTimer
 
 from services.catchup import programme_in_archive
+from services.i18n import translate
 from services.navigation import NavModel, NavNode, item_key, section_title
-from services.provider_ids import provider_of
+from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, provider_of
 from services.search import SearchIndex, search_index
 from services.text_fold import fold, fold_all
 from services.zapping import ZapContext
@@ -45,18 +50,28 @@ class PhoneGuide(QObject):
     """`send(message)` reaches this phone. Each ask answers at once; a list or a programme guide
     that lands later sends the view's first page again when what it shows changed."""
 
-    # Every live channel for the find, its name folded: one per catalog version, for every list.
-    _index: ClassVar[tuple[tuple, SearchIndex]] = ((), [])
+    # Every live channel for the find, its name folded: one per catalog and version, for every
+    # list browsing through that catalog (a phone's two lists share theirs).
+    _indexes: ClassVar[dict[int, tuple[object, SearchIndex]]] = {}
 
     def __init__(
-        self, window: Any, send: Callable[[dict], None], parent=None, bare: bool = False
+        self,
+        window: Any,
+        send: Callable[[dict], None],
+        parent=None,
+        bare: bool = False,
+        catalog: Any = None,
     ) -> None:
         super().__init__(parent)
         self._window = window
         self._send = send
         self._bare = bare
-        self._kinds = ("chgroups", "channels") if bare else ("groups", "guide")
-        self.nav = NavModel(window.catalog, window.config_manager, self)
+        self._kinds = (
+            ("chgroups", "channels", "chsources") if bare else ("groups", "guide", "sources")
+        )
+        self._catalog = catalog if catalog is not None else window.catalog
+        self._sources: dict[str, str] = {}  # the phone's key → a provider (or ALL_PROVIDERS)
+        self.nav = NavModel(self._catalog, window.config_manager, self)
         self.nav.reset_to("live")
         self.handles = Handles()
         self.providers: set[str] = set()  # those of the channels shown: their guides load
@@ -78,9 +93,32 @@ class PhoneGuide(QObject):
 
     # ---- the phone's asks ------------------------------------------------------------------
 
-    def groups(self, page: int, find: str, n: int = -1) -> None:
+    def groups(self, page: int, find: str, n: int = -1, source: str = "") -> None:
+        """A page of the groups; `source` (a key `sources` gave) shows another provider's, or
+        all of them, from now on."""
+        name = self._sources.get(source) if source else None
+        if name is not None and name != self._catalog.source():
+            self._catalog.select_provider(name)
         self._wanted = None
         self._ask(("groups", find), page, n)
+
+    def sources(self, n: int = -1) -> None:
+        """The providers above the groups: All providers (two or more), then each one, the one
+        shown marked."""
+        names = list(self._catalog.provider_names())
+        shown = self._catalog.source()
+        rows = []
+        for name in ([ALL_PROVIDERS] if len(names) >= 2 else []) + names:
+            key = stable_key(f"source:{name}")
+            self._sources[key] = name
+            row: dict[str, Any] = {"id": key, "title": _source_title(name)[:TITLE_CHARS]}
+            if name == shown:
+                row["on"] = True
+            rows.append(row)
+        message: dict = {"t": self._kinds[2], "rows": rows}
+        if n >= 0:
+            message["n"] = n
+        self._send(message)
 
     def channels(self, key: str, page: int, find: str, n: int = -1) -> None:
         """A group's channels; `key` "" is the group the TV's channel list is in, on the page of
@@ -260,6 +298,9 @@ class PhoneGuide(QObject):
             "channels": rows,
             "found": len(hits),
             "loading": loading,
+            # The providers' level above, with two or more; and which one these groups are.
+            "pick": len(self._catalog.provider_names()) >= 2,
+            "source": _source_title(self._catalog.source())[:TITLE_CHARS],
         }
         if not nodes and error:
             message["failed"] = True
@@ -279,17 +320,21 @@ class PhoneGuide(QObject):
         return [h.item for h in hits if (provider_of(h.item), item_key(h.item)) not in listed]
 
     def _live_index(self) -> SearchIndex:
-        catalog = self._window.catalog
-        version = (id(catalog), catalog.content_version())
-        if PhoneGuide._index[0] != version:
+        catalog = self._catalog
+        version = catalog.content_version()
+        kept = PhoneGuide._indexes.get(id(catalog))
+        if kept is None or kept[0] != version:
             items = self.nav.all_live_items()
             names = [str(item.get("name") or "") for item in items]
             index = [
                 (provider_of(item), "live", folded, name, item)
                 for item, name, folded in zip(items, names, fold_all(names))
             ]
-            PhoneGuide._index = (version, index)
-        return PhoneGuide._index[1]
+            kept = (version, index)
+            if len(PhoneGuide._indexes) >= 4:  # catalogs gone (phones that left) give way
+                PhoneGuide._indexes.pop(next(iter(PhoneGuide._indexes)))
+            PhoneGuide._indexes[id(catalog)] = kept
+        return kept[1]
 
     def _entry(self, node: NavNode) -> dict:
         title = node.title[:TITLE_CHARS]
@@ -382,6 +427,10 @@ class PhoneGuide(QObject):
         if signature != self._shown:
             self._shown = signature
             self._send(message)
+
+
+def _source_title(name: str) -> str:
+    return translate(ALL_PROVIDERS_TITLE) if name == ALL_PROVIDERS else name
 
 
 def _matching(nodes: list[NavNode], needle: str) -> list[NavNode]:
