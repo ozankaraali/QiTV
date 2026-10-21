@@ -136,5 +136,18 @@ class Base64Tests(unittest.TestCase):
             b64d("%%%")
 
 
+class ReviewFixProtocolTests(unittest.TestCase):
+    def test_unhashable_values_are_refused_not_raised(self):
+        for obj in (
+            {"t": "down", "b": [1]},
+            {"t": "up", "b": {"a": 1}, "n": 1},
+            {"t": "get", "what": "guide", "list": ["all"], "page": 0},
+            {"t": "open", "id": ["x"]},
+            {"t": ["down"]},
+        ):
+            with self.subTest(obj=obj):
+                self.assertIsNone(parse_phone_message(obj))
+
+
 if __name__ == "__main__":
     unittest.main()

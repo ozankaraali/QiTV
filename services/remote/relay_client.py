@@ -16,6 +16,7 @@ import json
 import logging
 import secrets
 import socket
+import time
 from typing import TYPE_CHECKING, Any, Optional
 
 from services.remote import net
@@ -28,7 +29,10 @@ logger = logging.getLogger(__name__)
 
 MIN_BACKOFF_S = 1.0
 MAX_BACKOFF_S = 60.0
-RESTING_S = 600.0
+STABLE_S = 60.0  # a connection up this long counts as working: the backoff starts over
+RESTING_S = 600.0  # the relay is over its daily limit
+REPLACED_S = 300.0  # another QiTV took this room (a copied config): don't fight over it
+MAX_RETRY_AFTER_S = 300
 HEARTBEAT_S = 30.0  # protocol pings: free on the relay, and they keep the NAT open
 BINARY, OPENED, CLOSED, TEXT = 0, 1, 2, 3
 _RESTING_CODES = (429, 1027)
@@ -50,6 +54,22 @@ class _Resting(Exception):
     pass
 
 
+def next_backoff(backoff: float, uptime_s: float) -> float:
+    """The wait after the next one: doubling, from the start again after a stable connection."""
+    base = MIN_BACKOFF_S if uptime_s >= STABLE_S else backoff
+    return min(base * 2, MAX_BACKOFF_S)
+
+
+def _retry_after(error: Any) -> Optional[int]:
+    """A short Retry-After on a refusal (the relay's own per-address limit), in seconds."""
+    headers = getattr(error, "headers", None) or {}
+    try:
+        value = int(headers.get("Retry-After", ""))
+    except TypeError, ValueError:
+        return None
+    return value if 0 <= value <= MAX_RETRY_AFTER_S else None
+
+
 class RelayClient:
     def __init__(self, core: HubCore, base_url: str) -> None:
         self.core = core
@@ -59,6 +79,7 @@ class RelayClient:
         self._conns: dict[int, _Conn] = {}
         # The relay compares the TV's IPv4 with the phone's; IPv6-only networks fall back to any.
         self._family: socket.AddressFamily = socket.AF_INET
+        self._up_since = 0.0
 
     def start(self) -> None:
         self._task = asyncio.ensure_future(self._run())
@@ -80,18 +101,26 @@ class RelayClient:
         while True:
             self.core.set_relay_state("connecting")
             connector = aiohttp.TCPConnector(family=self._family)
+            self._up_since = 0.0
             try:
                 async with aiohttp.ClientSession(connector=connector) as http:
                     store = self.core.store
                     if not (store.room and store.room_secret):
                         await self._mint(http)
-                    if await self._serve(http):
-                        backoff = MIN_BACKOFF_S
+                    if await self._serve(http) == "replaced":
+                        logger.warning("Phone remote: another QiTV uses this relay room")
+                        self.core.set_relay_state("replaced")
+                        await asyncio.sleep(REPLACED_S)
+                        continue
             except _Resting:
                 self.core.set_relay_state("resting")
                 await asyncio.sleep(RESTING_S)
                 continue
             except aiohttp.WSServerHandshakeError as error:
+                pause = _retry_after(error) if error.status == 429 else None
+                if pause is not None:  # the relay's per-address limit: a short pause
+                    await asyncio.sleep(pause)
+                    continue
                 if error.status in _RESTING_CODES:
                     self.core.set_relay_state("resting")
                     await asyncio.sleep(RESTING_S)
@@ -105,10 +134,13 @@ class RelayClient:
                 self._family = fallback
             except (aiohttp.ClientError, OSError, asyncio.TimeoutError, ValueError) as error:
                 logger.info("Phone remote: the relay connection failed: %s", error)
+            except Exception as error:  # nothing may end the loop but stop()
+                logger.error("Phone remote: the relay client failed: %s", error, exc_info=True)
             self._drop_all()
             self.core.set_relay_state("connecting")
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, MAX_BACKOFF_S)
+            uptime = time.monotonic() - self._up_since if self._up_since else 0.0
+            await asyncio.sleep(MIN_BACKOFF_S if uptime >= STABLE_S else backoff)
+            backoff = next_backoff(backoff, uptime)
 
     async def _mint(self, http: Any) -> None:
         async with http.post(f"{self.base}/rooms") as response:
@@ -130,8 +162,9 @@ class RelayClient:
         store.room = store.room_secret = None
         self.core.emit(StoreSaved(store.to_config()))
 
-    async def _serve(self, http: Any) -> bool:
-        """Serve one connection to the room; True once it was up (the backoff starts over)."""
+    async def _serve(self, http: Any) -> str:
+        """Serve one connection to the room until it ends: "replaced" when another QiTV took the
+        room, else "closed"."""
         from aiohttp import WSMsgType
 
         store = self.core.store
@@ -141,6 +174,7 @@ class RelayClient:
             url, headers=headers, heartbeat=HEARTBEAT_S, max_msg_size=MAX_FRAME * 2
         )
         self._ws = ws
+        self._up_since = time.monotonic()
         self.core.set_relay_state("online")
         try:
             await ws.send_str(json.dumps({"v6": net.ipv6_prefixes()}))
@@ -154,7 +188,7 @@ class RelayClient:
             self._drop_all()
         if ws.close_code in _RESTING_CODES:
             raise _Resting()
-        return True
+        return "replaced" if ws.close_code == 4000 else "closed"
 
     # ---- frames ----------------------------------------------------------------------------
 
@@ -172,7 +206,7 @@ class RelayClient:
             existing = self._conns.get(conn)
             if existing is not None:
                 frame: bytes | str = payload.decode("utf-8", "replace") if kind == TEXT else payload
-                await self.core.deliver(existing, existing.session.receive(frame))
+                await self.core.deliver(existing, self.core.receive(existing, frame))
 
     async def _opened(self, conn: int, payload: bytes) -> None:
         from services.remote.hub import _Conn

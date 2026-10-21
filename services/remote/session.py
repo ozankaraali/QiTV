@@ -79,6 +79,7 @@ class Session:
         self._prologue = b""
         self._hs: Optional[HandshakeState] = None
         self._ticket_device = ""
+        self._key_id = ""
         self._device_id: Optional[str] = None
         self._send: Optional[CipherState] = None
         self._recv: Optional[CipherState] = None
@@ -125,6 +126,7 @@ class Session:
             found = self._store.find_key(opening.key_id)
             if found is None:
                 return self._close(4401, "unknown")
+            self._key_id = opening.key_id
             self._device_id = found[0].id
             self._hs = HandshakeState(
                 "KK", initiator=False, prologue=self._prologue, s=identity, rs=found[1].pub
@@ -198,6 +200,8 @@ class Session:
                 events += [Opened(self.sid, self._device_id, self._door)]
                 events.append(StoreSaved(self._store.to_config()))
             else:
+                if self._store.find_key(self._key_id) is None:
+                    return self._close(4401, "unknown")  # removed while it shook hands
                 answer = {}
                 assert self._device_id is not None
                 events.append(Opened(self.sid, self._device_id, self._door))

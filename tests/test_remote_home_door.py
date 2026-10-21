@@ -297,5 +297,91 @@ class PrivateTests(unittest.TestCase):
         self.assertEqual(asyncio.run(go()), 403)
 
 
+class ReviewFixHubTests(HomeDoorCase):
+    def test_remove_device_closes_a_pending_handshake(self):
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                phone, ws, answer, _ = await self.pair(s)
+                tv_pub = code_from(self.events.wait(Code, where=lambda e: bool(e.url)).url)[0]
+                again = PhoneClient(tv_pub, mode="kk", key=phone.key, key_id=answer["key"])
+                pending = await s.ws_connect(self.url("/ws"))
+                await pending.send_str(again.opening())
+                await asyncio.sleep(0.05)
+                self.hub.remove_device(answer["device"])
+                message = await pending.receive()
+                return message.type, pending.close_code
+
+        kind, code = self.run_async(go())
+        self.assertEqual(kind, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(code, 4401)
+
+    def test_forget_closes_the_devices_other_sessions(self):
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                phone, first, answer, _ = await self.pair(s)
+                tv_pub = code_from(self.events.wait(Code, where=lambda e: bool(e.url)).url)[0]
+                again = PhoneClient(tv_pub, mode="kk", key=phone.key, key_id=answer["key"])
+                second = await s.ws_connect(self.url("/ws"))
+                await second.send_str(again.opening())
+                await second.send_bytes(again.first())
+                again.finish((await second.receive()).data)
+                again.open((await second.receive()).data)  # its hello (counted, as a phone does)
+                await first.send_bytes(phone.seal({"t": "forget"}))
+                bye = again.open((await second.receive()).data)
+                end = await second.receive()
+                return bye, end.type, second.close_code
+
+        bye, kind, code = self.run_async(go())
+        self.assertEqual(bye, {"t": "bye", "reason": "removed"})
+        self.assertEqual((kind, code), (aiohttp.WSMsgType.CLOSE, 4403))
+
+    def test_a_receive_that_raises_closes_4400_and_the_door_stays_up(self):
+        from services.remote.session import Session
+
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                with mock.patch.object(Session, "receive", side_effect=RuntimeError("boom")):
+                    ws = await s.ws_connect(self.url("/ws"))
+                    await ws.send_str('{"v":1,"mode":"pair"}')
+                    await ws.receive()
+                    code = ws.close_code
+                async with s.get(self.url("/")) as r:
+                    return code, r.status
+
+        self.assertEqual(self.run_async(go()), (4400, 200))
+
+    def test_stop_is_quick_with_a_phone_that_never_reads(self):
+        sock = socket.create_connection(("127.0.0.1", self.port))
+        sock.sendall(
+            b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )
+        time.sleep(0.2)  # upgraded; it never reads or answers a close again
+        started = time.monotonic()
+        self.hub.stop()
+        self.assertLess(time.monotonic() - started, 1.6)
+        sock.close()
+
+
+class RelayStateQrTests(unittest.TestCase):
+    def test_qr_names_the_home_door_while_the_relay_is_not_online(self):
+        web = Path(tempfile.mkdtemp())
+        (web / "index.html").write_text("x")
+        events = Recorder()
+        hub = RemoteHub(events, web, ports=[0], host="127.0.0.1")
+        config = {"version": 1, "enabled": True, "relay": True, "relay_url": "http://127.0.0.1:9"}
+        config.update({"room": "R" * 32, "room_secret": "s"})
+        hub.start(config)
+        try:
+            self.assertTrue(hub.ready.wait(3))
+            mark = events.mark()
+            hub.set_pairing(True)
+            url = events.wait(Code, where=lambda e: bool(e.url), after=mark).url
+            self.assertTrue(url.startswith("http://"), url)
+            self.assertNotIn("R" * 32, url)
+        finally:
+            hub.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

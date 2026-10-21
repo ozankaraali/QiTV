@@ -31,6 +31,7 @@ from services.remote.protocol import (
     MAX_SESSIONS,
     PORTS,
     Code,
+    Forgot,
     Paired,
     Status,
     StoreSaved,
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 Emit = Callable[[object], None]
 _STOP_S = 2.0
+_GOODBYE_S = 0.3  # a goodbye to a phone that doesn't answer stops waiting after this
 
 
 def web_dir() -> Path:
@@ -151,8 +153,8 @@ class HubCore:
             self.relay = None
         for conn in list(self.conns.values()):
             if conn.session.established:
-                await _quietly(conn.send(conn.session.bye("stopped")))
-            await _quietly(conn.close(1001, "stopped"))
+                await _briefly(conn.send(conn.session.bye("stopped")))
+            await _briefly(conn.close(1001, "stopped"))
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
@@ -168,7 +170,8 @@ class HubCore:
         if code is None:
             return ""
         tv_pub = b64e(self.store.identity_pub())
-        if self.store.relay and self.store.room:
+        # The relay's address only while QiTV is in its room: a phone at home pairs either way.
+        if self.store.relay and self.store.room and self._relay_state == "online":
             return f"{self.store.relay_url}/#1.{self.store.room}.{tv_pub}.{b64e(code)}"
         home = self.home_url() or f"http://127.0.0.1:{self.port}/"
         return f"{home}#1.-.{tv_pub}.{b64e(code)}"
@@ -177,8 +180,11 @@ class HubCore:
         self.emit(Status(self.home_url(), self._relay_state if self.store.relay else "off"))
 
     def set_relay_state(self, state: str) -> None:
+        changed = state != self._relay_state
         self._relay_state = state
         self._status()
+        if changed and self.store.current_code() is not None:
+            self.emit(Code(self.code_url()))  # the QR follows: relay or home door
 
     def set_pairing(self, open_: bool) -> None:
         if self._rotation is not None:
@@ -227,6 +233,14 @@ class HubCore:
         if conn.session.sid in self.conns and not conn.session.established:
             asyncio.ensure_future(_quietly(conn.close(4408, "too slow")))
 
+    def receive(self, conn: _Conn, frame: bytes | str) -> Reply:
+        """A phone's frame into its session; a fault in there closes that phone, nothing else."""
+        try:
+            return conn.session.receive(frame)
+        except Exception as error:
+            logger.error("Phone remote: a frame broke its session: %s", error, exc_info=True)
+            return Reply(close=(4400, "error"))
+
     async def deliver(self, conn: _Conn, reply: Reply) -> None:
         """Write a session's reply out and pass its events on."""
         for frame in reply.frames:
@@ -235,6 +249,8 @@ class HubCore:
             self.emit(event)
             if isinstance(event, Paired) and self.store.current_code() is not None:
                 self.emit(Code(self.code_url()))  # the code was burnt: show the next one
+            if isinstance(event, Forgot):
+                self._end_device(event.device_id, but=conn)
         if reply.close is not None:
             await _quietly(conn.close(*reply.close))
 
@@ -247,9 +263,18 @@ class HubCore:
         if not self.store.remove_device(device_id):
             return
         self.emit(StoreSaved(self.store.to_config()))
+        self._end_device(device_id)
+
+    def _end_device(self, device_id: str, but: Optional[_Conn] = None) -> None:
+        """Close every connection of a device that is gone: established ones with a goodbye,
+        those still shaking hands with 4401 (their handshake would fail anyway)."""
         for conn in list(self.conns.values()):
-            if conn.session.device_id == device_id and conn.session.established:
+            if conn is but or conn.session.device_id != device_id:
+                continue
+            if conn.session.established:
                 asyncio.ensure_future(self._bye(conn, "removed", 4403))
+            else:
+                asyncio.ensure_future(_quietly(conn.close(4401, "unknown")))
 
     async def _bye(self, conn: _Conn, reason: str, code: int) -> None:
         await _quietly(conn.send(conn.session.bye(reason)))
@@ -258,7 +283,12 @@ class HubCore:
     def send(self, sid: str, message: dict) -> None:
         conn = self.conns.get(sid)
         if conn is not None and conn.session.established:
-            asyncio.ensure_future(_quietly(conn.send(conn.session.send(message))))
+            asyncio.ensure_future(self._seal_and_send(conn, message))
+
+    async def _seal_and_send(self, conn: _Conn, message: dict) -> None:
+        # Sealed when written, so the phone gets messages in nonce order whatever else is sent.
+        if conn.session.established:
+            await _quietly(conn.send(conn.session.send(message)))
 
     def broadcast(self, message: dict) -> None:
         for sid in list(self.conns):
@@ -294,12 +324,20 @@ class HubCore:
                     frame = message.data
                 else:
                     break
-                await self.deliver(conn, conn.session.receive(frame))
+                await self.deliver(conn, self.receive(conn, frame))
                 if ws.closed:
                     break
         finally:
             self.unregister(conn)
         return ws
+
+
+async def _briefly(awaitable: Awaitable[Any]) -> None:
+    """Like _quietly, but gives up after _GOODBYE_S (a phone that never answers a close)."""
+    try:
+        await asyncio.wait_for(_quietly(awaitable), _GOODBYE_S)
+    except asyncio.TimeoutError:
+        pass
 
 
 async def _quietly(awaitable: Awaitable[Any]) -> None:

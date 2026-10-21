@@ -15,6 +15,9 @@ from typing import Callable, Optional
 
 from services.remote.protocol import BUTTON_META, DELAY_MS, INTERVAL_MS, SILENCE_MS
 
+# A release may ask for steps QiTV hasn't fired yet (network jitter); at most a second's worth.
+CATCH_UP_MAX = 1000 // INTERVAL_MS
+
 
 @dataclass
 class _Hold:
@@ -49,7 +52,7 @@ class KeyRepeater:
             return  # it went quiet before the release arrived
         self._hold = None
         if steps > hold.fired:
-            for _ in range(steps - hold.fired):
+            for _ in range(min(steps - hold.fired, CATCH_UP_MAX)):
                 self._fire(button)
         reverse = BUTTON_META[button].reverse
         if steps < hold.fired and reverse is not None:

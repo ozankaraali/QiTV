@@ -16,7 +16,7 @@ import secrets
 from typing import Any, Optional
 
 from services.remote.noise import Keypair
-from services.remote.protocol import DEFAULT_PORT, RELAY_URL, STORE_VERSION, b64d, b64e
+from services.remote.protocol import RELAY_URL, STORE_VERSION, b64d, b64e
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,7 @@ VERSION = STORE_VERSION
 CODE_BYTES = 16
 CODE_GRACE_S = 15.0
 TICKET_S = 60.0
+MAX_HOME_KEYS = 4  # a phone's keys for home addresses (one per address it has opened QiTV at)
 _ID_BYTES = 8
 
 
@@ -64,7 +65,6 @@ class RemoteStore:
         self.enabled = False
         self.relay = True
         self.relay_url = RELAY_URL
-        self.port = DEFAULT_PORT
         self.room: Optional[str] = None
         self.room_secret: Optional[str] = None
         self.devices: list[Device] = []
@@ -83,9 +83,9 @@ class RemoteStore:
         if data.get("version") != VERSION:
             logger.warning("Phone remote settings of version %r ignored", data.get("version"))
             return store
-        for name, kind in (("enabled", bool), ("relay", bool), ("relay_url", str), ("port", int)):
+        for name, kind in (("enabled", bool), ("relay", bool), ("relay_url", str)):
             value = data.get(name)
-            if isinstance(value, kind) and not (kind is int and isinstance(value, bool)):
+            if isinstance(value, kind):
                 setattr(store, name, value)
             elif value is not None:
                 logger.warning("Phone remote setting %s dropped: %r", name, value)
@@ -116,7 +116,6 @@ class RemoteStore:
             "enabled": self.enabled,
             "relay": self.relay,
             "relay_url": self.relay_url,
-            "port": self.port,
             "room": self.room,
             "room_secret": self.room_secret,
             "devices": [
@@ -194,6 +193,9 @@ class RemoteStore:
             raise KeyError(device_id)
         key = DeviceKey(_new_id(), pub, door)
         device.keys.append(key)
+        homes = [k for k in device.keys if k.door == "home"]
+        for old in homes[: max(0, len(homes) - MAX_HOME_KEYS)]:
+            device.keys.remove(old)  # the oldest home addresses' keys stop opening sessions
         return key
 
     def find_key(self, key_id: str) -> Optional[tuple[Device, DeviceKey]]:

@@ -329,5 +329,26 @@ class LifecycleTests(SessionCase):
         self.assertEqual(session.closed_event(), Closed(session.sid, self.payload["device"]))
 
 
+class ReviewFixTests(SessionCase):
+    def test_a_phone_removed_mid_handshake_cannot_finish_it(self):
+        phone, _, _, _ = self.pair()
+        key_id = self.payload["key"]
+        again = PhoneClient(self.tv_pub, mode="kk", key=phone.key, key_id=key_id)
+        session = self.session()
+        self.assertIsNone(session.receive(again.opening()).close)
+        self.store.remove_device(self.payload["device"])
+        reply = session.receive(again.first())
+        self.assertEqual(reply.close, (4401, "unknown"))
+        self.assertFalse(session.established)
+        self.assertEqual(reply.events, [])
+
+    def test_a_list_for_a_button_closes_nothing_raises(self):
+        phone, session, _, _ = self.pair()
+        for bad in ({"t": "down", "b": [1]}, {"t": "up", "b": {"x": 1}, "n": 1}):
+            reply = session.receive(phone.seal(bad))
+            self.assertIsNone(reply.close)
+            self.assertEqual(reply.events, [])
+
+
 if __name__ == "__main__":
     unittest.main()

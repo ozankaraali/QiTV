@@ -114,5 +114,13 @@ class RepeatTests(RepeaterCase):
         self.assertIsNone(self.r.next_due())
 
 
+class ReviewFixRepeatTests(RepeaterCase):
+    def test_catch_up_is_capped_at_a_second_of_repeats(self):
+        self.r.down("a", "chdown", 0)
+        self.r.up("a", "chdown", 100_000, 50)
+        self.assertLessEqual(len(self.fired), 1 + 25)
+        self.assertGreater(len(self.fired), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

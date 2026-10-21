@@ -154,9 +154,11 @@ def parse_phone_message(obj: object) -> Optional[dict]:
     t = obj.get("t")
     if t in ("held", "where", "forget"):
         return {"t": t}
-    if t == "down" and obj.get("b") in BUTTON_META:
+    button = obj.get("b")
+    known = isinstance(button, str) and button in BUTTON_META  # a list or dict isn't hashable
+    if t == "down" and known:
         return {"t": "down", "b": obj["b"]}
-    if t == "up" and obj.get("b") in BUTTON_META:
+    if t == "up" and known:
         n = _int(obj.get("n"))
         if n is not None and 1 <= n <= MAX_STEPS:
             return {"t": "up", "b": obj["b"], "n": n}

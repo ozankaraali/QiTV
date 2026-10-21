@@ -27,8 +27,10 @@ def frame(conn: int, kind: int, payload: bytes = b"") -> bytes:
 class FakeRelay:
     """POST /rooms and GET /room/<id>?role=tv, on the test's own loop."""
 
-    def __init__(self, refuse: int = 0) -> None:
+    def __init__(self, refuse: int = 0, retry_after: str = "") -> None:
         self.refuse = refuse
+        self.retry_after = retry_after
+        self.attempts = 0
         self.posts = 0
         self.auth: list[str] = []
         self.texts: list[dict] = []
@@ -57,8 +59,10 @@ class FakeRelay:
         return web.json_response({"room": ROOM})
 
     async def room(self, request):
+        self.attempts += 1
         if self.refuse:
-            return web.Response(status=self.refuse)
+            headers = {"Retry-After": self.retry_after} if self.retry_after else {}
+            return web.Response(status=self.refuse, headers=headers)
         self.auth.append(request.headers.get("Authorization", ""))
         ws = web.WebSocketResponse()
         await ws.prepare(request)
@@ -299,6 +303,100 @@ class RelayClientTests(RelayCase):
                 await relay.stop()
 
         self.assertEqual(self.run_async(go()), (0, False))
+
+
+class ReviewFixRelayTests(RelayCase):
+    def test_qr_goes_back_home_when_the_relay_drops(self):
+        async def go():
+            relay = FakeRelay()
+            base = await relay.start()
+            hub = self.hub(base)
+            await self.wait_for(Status, where=lambda e: e.relay == "online")
+            hub.set_pairing(True)
+            await self.wait_for(Code, where=lambda e: ROOM in e.url)
+            mark = self.events.mark()
+            await relay.stop()
+            return await self.wait_for(
+                Code, where=lambda e: e.url and ROOM not in e.url, after=mark
+            )
+
+        self.assertTrue(self.run_async(go()).url.startswith("http://192.168.1.20:"))
+
+    def test_replaced_by_another_qitv_backs_off_and_says_so(self):
+        async def go():
+            relay = FakeRelay()
+            base = await relay.start()
+            try:
+                self.hub(base)
+                await asyncio.wait_for(relay.connected.wait(), 5)
+                await relay.tv.close(code=4000, message=b"replaced")
+                state = await self.wait_for(Status, where=lambda e: e.relay == "replaced")
+                await asyncio.sleep(1.0)
+                return state, len(relay.auth)
+            finally:
+                await relay.stop()
+
+        state, connects = self.run_async(go())
+        self.assertEqual(state.relay, "replaced")
+        self.assertEqual(connects, 1)
+
+    def test_a_bad_frame_never_kills_the_relay_client(self):
+        async def go():
+            relay = FakeRelay()
+            base = await relay.start()
+            try:
+                hub = self.hub(base)
+                phone, _, _ = await self.pair(relay, hub)
+                await relay.phone_says(1, phone.seal({"t": "down", "b": [1]}))
+                mark = self.events.mark()
+                await relay.phone_says(1, phone.seal({"t": "down", "b": "ok"}))
+                return await self.wait_for(Press, after=mark)
+            finally:
+                await relay.stop()
+
+        self.assertEqual(self.run_async(go()).button, "ok")
+
+    def test_a_crash_while_delivering_reconnects(self):
+        from services.remote.hub import HubCore
+
+        async def go():
+            relay = FakeRelay()
+            base = await relay.start()
+            try:
+                with mock.patch.object(HubCore, "deliver", side_effect=RuntimeError("boom")):
+                    self.hub(base)
+                    await asyncio.wait_for(relay.connected.wait(), 5)
+                    await relay.to_tv(1, OPENED, b'{"same": false}')
+                    await relay.to_tv(1, TEXT, b'{"v":1,"mode":"pair"}')
+                    await asyncio.sleep(1.0)
+                return len(relay.auth)
+            finally:
+                await relay.stop()
+
+        self.assertGreaterEqual(self.run_async(go()), 2)
+
+    def test_a_short_429_is_a_pause_not_a_rest(self):
+        async def go():
+            relay = FakeRelay(refuse=429, retry_after="1")
+            base = await relay.start()
+            try:
+                self.hub(base, {"room": ROOM, "room_secret": "s"})
+                await asyncio.sleep(2.6)
+                states = [e.relay for e in self.events.events if isinstance(e, Status)]
+                return relay.attempts, states
+            finally:
+                await relay.stop()
+
+        attempts, states = self.run_async(go())
+        self.assertGreaterEqual(attempts, 2)
+        self.assertNotIn("resting", states)
+
+    def test_backoff_starts_over_only_after_a_minute_up(self):
+        from services.remote.relay_client import next_backoff
+
+        self.assertEqual(next_backoff(8.0, uptime_s=5.0), 16.0)
+        self.assertEqual(next_backoff(8.0, uptime_s=61.0), relay_client.MIN_BACKOFF_S * 2)
+        self.assertEqual(next_backoff(60.0, uptime_s=0.0), relay_client.MAX_BACKOFF_S)
 
 
 if __name__ == "__main__":

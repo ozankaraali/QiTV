@@ -27,7 +27,7 @@ class RemoteStoreTests(unittest.TestCase):
 
     def test_defaults(self):
         s = RemoteStore.from_config(None)
-        self.assertEqual((s.enabled, s.relay, s.relay_url, s.port), (False, True, RELAY_URL, 5384))
+        self.assertEqual((s.enabled, s.relay, s.relay_url), (False, True, RELAY_URL))
         self.assertEqual(s.devices, [])
 
     def test_unknown_or_broken_config_starts_clean(self):
@@ -36,8 +36,8 @@ class RemoteStoreTests(unittest.TestCase):
                 with self.assertNoLogs(level="ERROR"):
                     s = RemoteStore.from_config(data)  # type: ignore[arg-type]
                 self.assertEqual(s.devices, [])
-        broken_identity = RemoteStore.from_config({"version": 1, "identity": "%%%", "port": "x"})
-        self.assertEqual(broken_identity.port, 5384)
+        broken_identity = RemoteStore.from_config({"version": 1, "identity": "%%%", "relay": "x"})
+        self.assertTrue(broken_identity.relay)
         self.assertEqual(len(broken_identity.ensure_identity().pub), 32)
 
     def test_ids_are_11_characters(self):
@@ -119,6 +119,22 @@ class RemoteStoreTests(unittest.TestCase):
         device, _ = s.add_device("Phone A", PUB, "relay", 0.0)
         s.touch(device.id, 99.0)
         self.assertEqual(s.devices[0].last_used, 99.0)
+
+
+class ReviewFixStoreTests(unittest.TestCase):
+    def test_home_keys_are_capped_oldest_dropped(self):
+        s = RemoteStore.from_config(None)
+        device, relay_key = s.add_device("Phone A", PUB, "relay", 0.0)
+        homes = [s.add_key(device.id, Keypair.generate().pub, "home") for _ in range(7)]
+        kept = [k.id for k in s.devices[0].keys]
+        self.assertIn(relay_key.id, kept)  # the relay door's key is never dropped for a home one
+        self.assertEqual(
+            [k.id for k in s.devices[0].keys if k.door == "home"], [h.id for h in homes[-4:]]
+        )
+        self.assertIsNone(s.find_key(homes[0].id))
+
+    def test_no_port_field(self):
+        self.assertNotIn("port", RemoteStore.from_config(None).to_config())
 
 
 if __name__ == "__main__":
