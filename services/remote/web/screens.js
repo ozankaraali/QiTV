@@ -1,7 +1,7 @@
 // The second screen: what QiTV says is on, the guide, the search's results and the Library,
 // drawn from QiTV's snapshots (ui/remote_snapshots.py). Taps send back the opaque handles QiTV
 // gave; nothing here knows a stream's address. Also the d-pad's touchpad mode.
-import app, { banner, press, release, send, show, t, tap } from "./app.js";
+import app, { banner, nameField, press, release, send, show, t, tap } from "./app.js";
 import * as store from "./store.js";
 
 const $ = (id) => document.getElementById(id);
@@ -269,6 +269,7 @@ function channelList({ ids, asks, top, row, shown }) {
     setTitle($(ids.title), title, level === "channels" ? list.total : null);
     $(ids.find).hidden = level === "sources";
     $(ids.find).placeholder = level === "groups" ? w("find_group") : w("guide_find");
+    nameField($(ids.find));
   };
   const askPage = (page) => {
     if (list.level === "sources") {
@@ -620,6 +621,7 @@ function showLibraryLevel() {
   $("libraryChips").hidden = !genres;
   setTitle($("libraryTitle"), genres ? w("library") : library.title, genres ? null : library.total);
   $("libraryFind").placeholder = genres ? w("find_genre") : w("find_title");
+  nameField($("libraryFind"));
 }
 
 function openLibraryAt(level, genre = "", title = "") {

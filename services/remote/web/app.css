@@ -181,6 +181,8 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .list-head h1 { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; margin: 2px 0 0; }
 .field { width: 100%; height: 40px; padding: 0 12px; border-radius: 12px; border: 0; background: var(--raised); color: var(--text); font: inherit; font-size: 16px; outline: none; -webkit-user-select: text; user-select: text; }
 .field::placeholder { color: var(--faint); }
+/* A find box's own name, unseen: AutoFill takes the text before a box for its label otherwise. */
+.sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .field:focus { box-shadow: inset 0 0 0 1.5px var(--accent); }
 .searchbar { display: flex; align-items: center; gap: 12px; }
 .done { font-size: 15px; font-weight: 600; color: var(--accent); }

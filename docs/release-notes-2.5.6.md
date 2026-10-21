@@ -14,3 +14,9 @@ others' distributions, which may have malware.**
   small when you leave the page. On an iPhone this works from the player's full screen when
   Settings → General → Picture in Picture → Start PiP Automatically is on; the player's own
   picture-in-picture button works as before.
+
+## Fixed
+
+- **No phone numbers in the channel search.** On an iPhone, the find box under the TV | Phone
+  switch offered phone numbers to fill in: iOS took the switch's "Phone" for the box's label.
+  Every find box now has its own.

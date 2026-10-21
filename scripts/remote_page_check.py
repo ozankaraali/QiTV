@@ -520,6 +520,21 @@ def channels_page(page: int, pages: int, playing: int = -1) -> dict:
     return {**head, "page": page, "pages": pages, "rows": rows, "loading": False}
 
 
+def labelled(rig: Rig, field: str) -> None:
+    """A find box is named by a label of its own, just before it, saying what its placeholder
+    says: iOS AutoFill read the switch beside the Remote tab's ("Phone") as its label and
+    offered phone numbers."""
+    found = rig.page.evaluate(
+        """(id) => { const input = document.getElementById(id);
+          const label = input.previousElementSibling;
+          return [label && label.tagName === 'LABEL' && label.htmlFor === id,
+                  label ? label.textContent : '', input.placeholder]; }""",
+        field,
+    )
+    named, text, placeholder = found
+    assert named and text and text == placeholder, (field, found)
+
+
 def answer(rig: Rig, sid: str, ask: Any, message: dict) -> None:
     """QiTV's answer to `ask`, carrying its number back as QiTV's do (an unnumbered message
     reads as QiTV's own resend, which the page takes only for what it shows)."""
@@ -573,6 +588,7 @@ def scenario_guide_tune(rig: Rig) -> None:
     assert (ask.page, ask.find) == (0, ""), ask
     answer(rig, sid, ask, GROUPS)
     rig.page.wait_for_selector("#guideRows .row.branch >> nth=2")
+    labelled(rig, "guideFind")  # the groups' placeholder, the label with it
     assert rig.page.locator("#guideRows .group", has_text="Provider A").count() == 1
     assert rig.page.locator("#guideUp").is_hidden()
     rig.shot("groups")
@@ -609,6 +625,7 @@ def scenario_channel_list(rig: Rig) -> None:
     assert rig.page.locator("[data-key=volup]").is_visible(), "the volume went"
     assert rig.page.locator("#zapRows .row.playing").count() == 1
     assert rig.page.inner_text("#zapTitle").startswith("All"), rig.page.inner_text("#zapTitle")
+    labelled(rig, "zapFind")
     rig.shot("channel-list")
     mark = rig.events.mark()  # a row tunes
     rig.page.locator("#zapRows .row", has_text="Fernvale Sports").click()

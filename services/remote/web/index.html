@@ -89,6 +89,7 @@
         <h1 id="zapTitle"></h1>
         <div class="where" id="where" role="group"><button type="button" class="on" data-where="tv" data-t="tv">TV</button><button type="button" data-where="phone" data-t="phone">Phone</button></div>
       </div>
+      <label class="sr" for="zapFind"></label>
       <input class="field" id="zapFind" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search">
       <div class="rows" id="zapRows"></div>
     </div>
@@ -137,6 +138,7 @@
       <button type="button" class="back" id="guideUp" hidden><svg><use href="#i-left"/></svg><span data-t="groups">Groups</span></button>
       <h1 id="guideTitle">Guide</h1>
     </div>
+    <label class="sr" for="guideFind"></label>
     <input class="field" id="guideFind" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search">
     <div class="rows" id="guideRows"></div>
   </section>
@@ -152,6 +154,7 @@
 
   <section class="screen list" data-screen="search" hidden>
     <div class="searchbar">
+      <label class="sr" for="searchInput"></label>
       <input class="field" id="searchInput" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search" placeholder="Search channels, movies and series" data-tp="search_hint">
       <button type="button" class="done" id="searchDone" data-t="done">Done</button>
     </div>
@@ -167,6 +170,7 @@
       <button type="button" class="on" data-lib="movies" data-t="movies">Movies</button>
       <button type="button" data-lib="series" data-t="series">Series</button>
     </div>
+    <label class="sr" for="libraryFind"></label>
     <input class="field" id="libraryFind" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search">
     <div class="rows" id="libraryRows"></div>
   </section>
