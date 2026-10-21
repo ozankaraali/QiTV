@@ -1083,6 +1083,26 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.session.plays, [])
         self.assertEqual(len(self.watch.plays), 1)
 
+    def test_play_elsewhere_hands_the_link_once_the_in_app_stream_is_gone(self):
+        """A phone's Watch on this phone: what plays, its link handed on as Play in VLC hands
+        one; the in-app stream stops first, so the provider counts one."""
+        self.play(0)
+        handed = []
+
+        def launch(target, url):
+            handed.append((target.item["name"], url))
+            return True, ""
+
+        self.assertTrue(self.controller.play_elsewhere(launch))
+        self.ready("http://stream/1")  # its link, asked for the hand-off
+        self.assertEqual(handed, [("One", "http://stream/1")])
+        self.assertEqual(self.session.stops, 1)
+        self.assertEqual(self.played_urls(), ["http://stream/1"])  # nothing more plays here
+
+    def test_play_elsewhere_with_nothing_current(self):
+        self.assertFalse(self.controller.play_elsewhere(lambda target, url: (True, "")))
+        self.assertEqual(self.catalog.links, [])
+
     def test_external_failure_toasts(self):
         self.config.play_in_mpv = True
         self.external.result = (

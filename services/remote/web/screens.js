@@ -1,7 +1,7 @@
 // The second screen: what QiTV says is on, the guide, the search's results and the Library,
 // drawn from QiTV's snapshots (ui/remote_snapshots.py). Taps send back the opaque handles QiTV
 // gave; nothing here knows a stream's address. Also the d-pad's touchpad mode.
-import app, { press, release, send, show, t, tap } from "./app.js";
+import app, { banner, press, release, send, show, t, tap } from "./app.js";
 import * as store from "./store.js";
 
 const $ = (id) => document.getElementById(id);
@@ -38,6 +38,9 @@ const words = {
   loading: "Loading…",
   use_touchpad: "Use a touchpad",
   use_buttons: "Use buttons",
+  watch_here: "Watch on this phone",
+  opening_here: "Opening on this phone…",
+  watch_failed: "Play a channel, film or episode on the TV first, then watch it here.",
 };
 const w = (key) => (t(key) === key ? words[key] || key : t(key));
 
@@ -732,6 +735,43 @@ function bindChannelList() {
   useChannelList(store.setting("remote", "buttons") === "channels", false); // opens on the hello
 }
 
+// ---- watch on this phone ------------------------------------------------------------------
+// QiTV lets go of what the TV plays and sends its link: the phone's own player opens it (Safari
+// plays HLS full screen, with AirPlay). Only http(s) links open.
+
+const NOTE_MS = 4000;
+let noteTimer = null;
+
+function note(text) {
+  banner(text);
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(() => {
+    if ($("banner").textContent === text) banner("");
+  }, NOTE_MS);
+}
+
+function onPlay(message) {
+  const url = typeof message.url === "string" ? message.url : "";
+  if (/^https?:\/\//i.test(url)) {
+    banner("");
+    location.assign(url);
+  } else {
+    note(w("watch_failed"));
+  }
+}
+
+function bindWatchHere() {
+  const button = $("watchHere");
+  pressable(button);
+  button.addEventListener("click", () => {
+    if (navigator.vibrate) navigator.vibrate(8);
+    document.getElementById("veil").hidden = true;
+    for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
+    note(w("opening_here"));
+    send({ t: "watch" });
+  });
+}
+
 // ---- wiring -------------------------------------------------------------------------------
 
 // A reconnect (the phone slept, the network changed) is a new session: the rows shown carry the
@@ -758,6 +798,7 @@ app.handlers.timetable = onTimetable;
 app.handlers.results = onResults;
 app.handlers.genres = onGenres;
 app.handlers.library = onLibrary;
+app.handlers.play = onPlay;
 app.handlers["tab:guide"] = openGuide;
 app.handlers["tab:library"] = openLibrary;
 app.menuExtras.push(() => {
@@ -779,6 +820,7 @@ export function install() {
   bindTouchpad();
   useTouchpad(store.setting("dpad", "buttons") === "touchpad");
   bindChannelList();
+  bindWatchHere();
   setInterval(() => {
     if (current && !document.hidden) drawNow();
   }, 1000);

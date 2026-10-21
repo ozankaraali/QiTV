@@ -41,6 +41,7 @@ from services.remote.protocol import (  # noqa: E402
     Press,
     Query,
     Status,
+    WatchHere,
 )
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -688,6 +689,32 @@ def scenario_find_both(rig: Rig) -> None:
     assert rig.events.wait(OpenItem, after=mark).handle == "h1"
 
 
+def scenario_watch_here(rig: Rig) -> None:
+    """More's Watch on this phone asks QiTV for what the TV plays; with nothing to hand on the
+    phone says so, and a link QiTV sends opens in the phone's own player (here: the address)."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    rig.page.click("#moreButton")
+    rig.page.wait_for_selector("#moreSheet:not([hidden])")
+    rig.shot("more-watch-here")
+    mark = rig.events.mark()
+    rig.page.click("#watchHere")
+    rig.events.wait(WatchHere, after=mark)
+    assert rig.page.locator("#moreSheet").is_hidden(), "the sheet stayed open"
+    rig.hub.send(sid, {"t": "play", "failed": True})
+    rig.page.locator("#banner", has_text="first").wait_for(timeout=5000)
+    rig.page.evaluate("document.getElementById('banner').hidden = true")
+    rig.hub.send(sid, {"t": "play", "url": "javascript:alert(1)"})  # only http(s) opens
+    rig.page.locator("#banner", has_text="first").wait_for(timeout=5000)
+    mark = rig.events.mark()
+    rig.page.click("#moreButton")
+    rig.page.click("#watchHere")
+    rig.events.wait(WatchHere, after=mark)
+    link = f"{rig.base}icon-192.png?stream=7"  # a file the hub serves: the address counts
+    rig.hub.send(sid, {"t": "play", "url": link})
+    rig.page.wait_for_url(link, wait_until="commit", timeout=5000)
+
+
 def scenario_guide_pages(rig: Rig) -> None:
     """Opened on the TV's channel, page 3 of 5: the channel shows, the pages above and below
     come as the list scrolls, and what shows stays put."""
@@ -1015,6 +1042,7 @@ SCENARIOS.update(
         "guide-tune": scenario_guide_tune,
         "channel-list": scenario_channel_list,
         "find-both": scenario_find_both,
+        "watch-here": scenario_watch_here,
         "guide-pages": scenario_guide_pages,
         "timetable": scenario_timetable,
         "search-mirror": scenario_search_mirror,

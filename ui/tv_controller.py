@@ -2922,6 +2922,20 @@ class TVController(QObject):
         if not self._closed and target is not None:
             self._context.show_players(target, anchor, self.overlays.transport)
 
+    def play_elsewhere(self, launch: Callable[[Target, str], tuple[bool, str]]) -> bool:
+        """What plays now, handed to `launch` with its link (a phone's player) as Play in VLC
+        hands it: the in-app stream is released first, so the provider counts one. False when
+        nothing from a provider is current (a file opened from the disk stays here)."""
+        target = self._current
+        if self._closed or target is None or target.local:
+            return False
+        self._lanes.request_side(
+            target,
+            lambda url: self._play_external(target, url, lambda link: launch(target, link)),
+            play=True,
+        )
+        return True
+
     def _play_external(self, target: Target, url: str, launcher: Launcher) -> None:
         """The context menu's external play: the newest choice, once the in-app stream is gone."""
         if self._closed:

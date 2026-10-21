@@ -236,6 +236,9 @@ mark { background: none; color: var(--accent); font-weight: 600; }
 .numpad button { height: 54px; border-radius: 16px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); font-size: 24px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .numpad button.w { font-size: 13px; font-weight: 600; color: var(--muted); }
 .numpad button.pressed { background: var(--accent-fill); }
+.here { flex: none; height: 52px; display: flex; align-items: center; justify-content: center; gap: 10px; border-radius: 16px; font-size: 16px; font-weight: 600; background: var(--accent-fill); color: var(--text); }
+.here svg { color: var(--accent); }
+.here.pressed { background: rgba(224, 138, 95, 0.34); }
 .acts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .acts button { height: 74px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; border-radius: 16px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); font-size: 12px; font-weight: 600; color: var(--muted); text-align: center; padding: 0 4px; }
 .acts button svg { color: var(--text); }

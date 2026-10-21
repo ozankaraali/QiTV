@@ -153,7 +153,7 @@ def parse_phone_message(obj: object) -> Optional[dict]:
     if not isinstance(obj, dict):
         return None
     t = obj.get("t")
-    if t in ("held", "where", "forget"):
+    if t in ("held", "where", "forget", "watch"):
         return {"t": t}
     button = obj.get("b")
     known = isinstance(button, str) and button in BUTTON_META  # a list or dict isn't hashable
@@ -272,6 +272,13 @@ class Held:
 class Query:
     sid: str
     text: str
+
+
+@dataclass(frozen=True)
+class WatchHere:
+    """The phone asks to play what the TV plays itself (its own player opens the link)."""
+
+    sid: str
 
 
 @dataclass(frozen=True)

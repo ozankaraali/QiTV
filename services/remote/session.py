@@ -34,6 +34,7 @@ from services.remote.protocol import (
     Press,
     Query,
     StoreSaved,
+    WatchHere,
     b64d,
     parse_opening,
     parse_phone_message,
@@ -270,6 +271,8 @@ class Session:
             return Reply(events=[Get(sid, what, m.get("list", ""), page, *extra, m.get("n", -1))])
         if t == "where":
             return Reply([self.send(self._where(now))])
+        if t == "watch":
+            return Reply(events=[WatchHere(sid)])
         # "forget": the phone leaves for good.
         device_id = self._device_id or ""
         self._store.remove_device(device_id)

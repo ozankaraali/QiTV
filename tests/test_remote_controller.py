@@ -12,8 +12,19 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtTest import QTest
 from test_tv_window import WindowCase, wait_until
 
-from services.remote.protocol import Closed, Code, Held, Paired, Press, Status, StoreSaved
+from services.remote.protocol import (
+    Closed,
+    Code,
+    Held,
+    Paired,
+    Press,
+    Status,
+    StoreSaved,
+    WatchHere,
+)
 from ui.keymap import Action
+from ui.link_lanes import Target
+from ui.remote_controller import PHONE_GONE_TEXT
 
 
 class RemoteDispatchTests(WindowCase):
@@ -240,3 +251,65 @@ class ReviewFixControllerTests(WindowCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WatchHereTests(WindowCase):
+    """The phone's Watch on this phone: QiTV hands it the link of what the TV plays, as Play in
+    VLC hands one, the TV's own stream closed first so the provider counts one."""
+
+    def setUp(self):
+        super().setUp()
+        remote = self.window.remote
+        self.hub = mock.Mock()
+        remote.hub = self.hub
+        self.addCleanup(setattr, remote, "hub", None)
+        remote._phones.add("s8")
+        self.addCleanup(remote._phones.discard, "s8")
+
+    def plays(self):
+        calls = self.hub.send.call_args_list
+        return [c.args[1] for c in calls if c.args[0] == "s8" and c.args[1]["t"] == "play"]
+
+    def hand_off(self, url, gone=False):
+        """The TV's controller handing `url` on at once, as it does once the link is in."""
+        target = Target({"name": "News", "cmd": url}, "live", "News")
+        results = []
+
+        def play_elsewhere(launch):
+            if gone:
+                self.window.remote._phones.discard("s8")
+            results.append(launch(target, url))
+            return True
+
+        controller = self.window.controller
+        with (
+            mock.patch.object(controller, "play_elsewhere", side_effect=play_elsewhere),
+            mock.patch.object(self.window.screens, "notify") as notify,
+        ):
+            self.window.remote.bridge.post(WatchHere("s8"))
+            self.assertTrue(wait_until(lambda: results))
+        return results[0], notify
+
+    def test_hands_the_phone_the_link_and_the_tv_says_so(self):
+        result, notify = self.hand_off("http://p.test/news.m3u8")
+        self.assertEqual(result, (True, ""))
+        self.assertEqual(self.plays(), [{"t": "play", "url": "http://p.test/news.m3u8"}])
+        notify.assert_called_once_with("Playing on the phone")
+
+    def test_a_phone_gone_before_its_link_came(self):
+        result, notify = self.hand_off("http://p.test/news.m3u8", gone=True)
+        self.assertEqual(result, (False, PHONE_GONE_TEXT))
+        self.assertEqual(self.plays(), [])
+        notify.assert_not_called()
+
+    def test_nothing_playing_tells_the_phone(self):
+        self.window.remote.bridge.post(WatchHere("s8"))
+        self.assertTrue(wait_until(self.plays))
+        self.assertEqual(self.plays()[-1], {"t": "play", "failed": True})
+
+    def test_an_xtream_channel_goes_as_hls(self):
+        remote = self.window.remote
+        entry = {"type": "XTREAM", "username": "u", "password": "p"}
+        with mock.patch.object(self.window.catalog, "provider_entry", return_value=entry):
+            link = remote._phone_link({"name": "News"}, "http://p.test/live/u/p/7.ts")
+        self.assertEqual(link, "http://p.test/live/u/p/7.m3u8")

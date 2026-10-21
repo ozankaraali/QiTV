@@ -89,6 +89,7 @@ class MessageTests(unittest.TestCase):
             parse_phone_message({"t": "up", "b": "ok", "n": 3}), {"t": "up", "b": "ok", "n": 3}
         )
         self.assertEqual(parse_phone_message({"t": "held"}), {"t": "held"})
+        self.assertEqual(parse_phone_message({"t": "watch", "x": 1}), {"t": "watch"})
         q = parse_phone_message({"t": "query", "s": "h" * 150})
         self.assertEqual(len(q["s"]), 100)
         self.assertEqual(

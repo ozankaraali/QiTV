@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 
 from services.i18n import N_, translate
+from services.provider_api import xtream_hls
+from services.provider_ids import provider_of
 from services.redact import safe_message
 from services.remote.protocol import (
     BUTTON_META,
@@ -30,6 +32,7 @@ from services.remote.protocol import (
     Query,
     Status,
     StoreSaved,
+    WatchHere,
 )
 from ui.keymap import Action
 from ui.remote_buttons import BUTTONS
@@ -40,6 +43,7 @@ from ui.remote_snapshots import Handles, results, state
 
 if TYPE_CHECKING:
     from services.remote.hub import RemoteHub
+    from ui.link_lanes import Target
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +51,11 @@ logger = logging.getLogger(__name__)
 PAIRED_TEXT = N_("{name} can now control QiTV")
 # i18n: a toast; {name} is a phone's name, such as "iPhone · Safari"
 REMOVED_TEXT = N_("{name} can no longer control QiTV")
+# i18n: a toast: the TV's stream went to a phone's own player; {name} is the phone's name
+PLAYING_ON_TEXT = N_("Playing on {name}")
+PLAYING_ON_PHONE_TEXT = N_("Playing on the phone")  # i18n: a toast, the phone's name unknown
+# i18n: a message when a phone that asked for the stream disconnected before it was sent
+PHONE_GONE_TEXT = N_("The phone left before the stream reached it")
 # i18n: the pairing screen when the phone remote couldn't start (no free network port)
 START_FAILED_TEXT = N_("The phone remote couldn't start. Is another program using its port?")
 _SWITCHES = ("enabled", "relay", "relay_url")  # Settings' own: the hub never changes them
@@ -88,6 +97,7 @@ class RemoteController(QObject):
         self._guides: dict[str, PhoneGuide] = {}  # each phone's own Guide, by session
         self._libraries: dict[str, PhoneLibrary] = {}  # and its own Library
         self._channel_lists: dict[str, PhoneGuide] = {}  # and the Remote tab's channel list
+        self._devices: dict[str, str] = {}  # each phone's device id, by session
         self.result_handles = Handles(limit=500)  # the search's
         self._removing: dict[str, str] = {}  # device id → name, until the hub confirms
         self._phones: set[str] = set()
@@ -226,6 +236,7 @@ class RemoteController(QObject):
             self._repeater.drop(event.sid)
             self._schedule()
             self._phones.discard(event.sid)
+            self._devices.pop(event.sid, None)
             for browsing in (self._guides, self._libraries, self._channel_lists):
                 gone = browsing.pop(event.sid, None)
                 if gone is not None:
@@ -235,6 +246,7 @@ class RemoteController(QObject):
                 self._diff.stop()
         elif isinstance(event, Opened):
             self._phones.add(event.sid)
+            self._devices[event.sid] = event.device_id
             self._diff.start()
             self._send(event.sid, self._state())
         elif isinstance(event, Get):
@@ -243,6 +255,8 @@ class RemoteController(QObject):
             self._search(event.text)
         elif isinstance(event, OpenItem):
             self._open(event.sid, event.handle)
+        elif isinstance(event, WatchHere):
+            self._watch_here(event.sid)
         elif isinstance(event, StoreSaved):
             self._persist(event.data)
         elif isinstance(event, Paired):
@@ -346,6 +360,33 @@ class RemoteController(QObject):
             )
             self._libraries[sid] = library
         return library
+
+    def _watch_here(self, sid: str) -> None:
+        """What the TV plays, on the phone that asked: its own player opens the link."""
+
+        def launch(target: "Target", url: str) -> tuple[bool, str]:
+            if sid not in self._phones:
+                return False, PHONE_GONE_TEXT
+            self._send(sid, {"t": "play", "url": self._phone_link(target.item, url)})
+            name = self._names.get(self._devices.get(sid, ""), "")
+            text = PLAYING_ON_TEXT if name else PLAYING_ON_PHONE_TEXT
+            self._window.screens.notify(translate(text, name=name))
+            return True, ""
+
+        if not self._window.controller.play_elsewhere(launch):
+            self._send(sid, {"t": "play", "failed": True})
+
+    def _phone_link(self, item: dict, url: str) -> str:
+        """`url` as a phone's browser plays it: an Xtream channel as HLS (Safari plays no
+        MPEG-TS); any other as it is."""
+        catalog = self._window.catalog
+        try:
+            entry = catalog.provider_entry(provider_of(item) or catalog.current_provider_name())
+        except KeyError:
+            return url
+        if str(entry.get("type") or "").upper() != "XTREAM":
+            return url
+        return xtream_hls(url, str(entry.get("username") or ""), str(entry.get("password") or ""))
 
     def _search(self, text: str) -> None:
         screens = self._window.screens
