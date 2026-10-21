@@ -299,9 +299,10 @@ class LibraryController(QObject):
         """A search result tapped on the phone remote: as Enter on it."""
         self._activate_hit(hit, start_over=False)
 
-    def open_series(self, series: dict, provider: str) -> None:
-        """A series from the phone remote's My list: its seasons, back to the grid."""
-        self._open_series(series, provider, back="grid")
+    def activate_title(self, item: dict, kind: str, genre_items: Optional[list]) -> None:
+        """A title tapped in the phone remote's Library: as Enter on its poster there."""
+        provider = provider_of(item) or self._catalog.current_provider_name()
+        self._activate_item(item, provider, kind, False, genre_items)
 
     def open_search(self, query: str = "") -> None:
         """The search; `query` (typed elsewhere: the channel list's find) is searched at once."""
@@ -710,13 +711,18 @@ class LibraryController(QObject):
             return
         provider = provider_of(item) or self._browse_provider()
         kind = self._model.item_kind(item)
+        self._activate_item(item, provider, kind, start_over, self._model.items())
+
+    def _activate_item(
+        self, item: dict, provider: str, kind: str, start_over: bool, genre_items
+    ) -> None:
         if kind == "series":
             self._request(provider, lambda: self._open_series(item, provider, back="browse"))
         elif kind == "episode":  # Continue in Series: no series dict, so no autoplay
             context = _context(start_over=start_over)
             self._request(provider, lambda: self._play(item, "episode", context))
         else:
-            context = _context(start_over=start_over, genre_items=self._model.items())
+            context = _context(start_over=start_over, genre_items=genre_items)
             self._request(provider, lambda: self._play(item, "movie", context))
 
     def _activate_hit(self, hit: Hit, start_over: bool) -> None:

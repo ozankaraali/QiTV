@@ -141,6 +141,7 @@ def _short_id(value: object) -> bool:
 # ---- phone messages --------------------------------------------------------------------------
 
 GUIDE_LISTS = ("all", "favorites", "recent")
+LIBRARY_SECTIONS = ("movies", "series")
 
 
 def _int(value: object) -> Optional[int]:
@@ -169,12 +170,22 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         return {"t": "open", "id": obj["id"]}
     if t == "get":
         if obj.get("what") == "library":
-            return {"t": "get", "what": "library"}
+            return _library_ask(obj)
         page = _int(obj.get("page"))
         if obj.get("what") == "guide" and obj.get("list") in GUIDE_LISTS and page is not None:
             if page >= 0:
                 return {"t": "get", "what": "guide", "list": obj["list"], "page": page}
     return None
+
+
+def _library_ask(obj: dict) -> Optional[dict]:
+    """A page of the Library: a section, a genre's key ("": QiTV's first shelf) and a page."""
+    section, genre, page = obj.get("section", "movies"), obj.get("genre", ""), obj.get("page", 0)
+    if not isinstance(section, str) or section not in LIBRARY_SECTIONS:
+        return None
+    if not (genre == "" or _short_id(genre)) or _int(page) is None or page < 0:
+        return None
+    return {"t": "get", "what": "library", "section": section, "genre": genre, "page": page}
 
 
 # ---- events (the hub thread → the GUI thread) ------------------------------------------------
@@ -231,6 +242,8 @@ class Get:
     what: str
     list: str
     page: int
+    section: str = ""  # the Library's: movies or series
+    genre: str = ""  # the Library's: a genre's key, or "" for QiTV's first shelf
 
 
 @dataclass(frozen=True)

@@ -264,7 +264,9 @@ class Session:
         if t == "open":
             return Reply(events=[OpenItem(sid, m["id"])])
         if t == "get":
-            return Reply(events=[Get(sid, m["what"], m.get("list", ""), m.get("page", 0))])
+            what, page = m["what"], m.get("page", 0)
+            extra = (m.get("section", ""), m.get("genre", ""))
+            return Reply(events=[Get(sid, what, m.get("list", ""), page, *extra)])
         if t == "where":
             return Reply([self.send(self._where(now))])
         # "forget": the phone leaves for good.

@@ -96,7 +96,14 @@ class MessageTests(unittest.TestCase):
             {"t": "get", "what": "guide", "list": "favorites", "page": 2},
         )
         self.assertEqual(
-            parse_phone_message({"t": "get", "what": "library"}), {"t": "get", "what": "library"}
+            parse_phone_message(
+                {"t": "get", "what": "library", "section": "series", "genre": "g3", "page": 2}
+            ),
+            {"t": "get", "what": "library", "section": "series", "genre": "g3", "page": 2},
+        )
+        self.assertEqual(  # what QiTV chooses: Movies, its first shelf, the first page
+            parse_phone_message({"t": "get", "what": "library"}),
+            {"t": "get", "what": "library", "section": "movies", "genre": "", "page": 0},
         )
         for t in ("where", "forget"):
             self.assertEqual(parse_phone_message({"t": t}), {"t": t})
@@ -114,6 +121,11 @@ class MessageTests(unittest.TestCase):
             {"t": "get", "what": "guide", "list": "all", "page": -1},
             {"t": "get", "what": "guide", "list": "secret", "page": 0},
             {"t": "get", "what": "settings"},
+            {"t": "get", "what": "library", "section": "live"},
+            {"t": "get", "what": "library", "genre": "g" * 33},
+            {"t": "get", "what": "library", "genre": 3},
+            {"t": "get", "what": "library", "page": -1},
+            {"t": "get", "what": "library", "page": "1"},
             {"t": "open", "id": "x" * 33},
             {"t": "query", "s": 5},
             ["t", "held"],

@@ -70,8 +70,10 @@ PAGE_STRINGS: dict[str, str] = {
     # i18n: the phone remote's menu: skip the relay, talk to QiTV over the home Wi-Fi
     "connect_directly": N_("Connect directly"),
     "watching": N_("Watching"),  # i18n: the phone remote's guide: the channel on the TV now
-    "continue_watching": N_("Continue watching"),  # i18n: the phone remote's Library heading
-    "my_list": N_("My list"),  # i18n: the phone remote's Library heading
+    "genre": N_("Genre"),  # i18n: the phone remote's Library: the genre picker, read aloud
+    # i18n: the phone remote's Library: a list that failed to arrive
+    "load_failed": N_("Couldn't load this list"),
+    "try_again": N_("Try again"),  # i18n: the phone remote: a button under a failed list
     "channels": N_("Channels"),  # i18n: the phone remote's search: a group of results
     "no_results": N_("Nothing found"),  # i18n: the phone remote's search found nothing
     "nothing_here": N_("Nothing here yet"),  # i18n: an empty list on the phone remote

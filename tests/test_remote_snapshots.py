@@ -11,14 +11,11 @@ import unittest
 from unittest import mock
 
 from PySide6.QtTest import QTest
-from test_tv_window import WindowCase, wait_until
+from test_tv_window import LIBRARY_WAIT_MS, XTREAM, TwoProviderCase, WindowCase, wait_until
 
-from services.library import continue_items
-from services.remote.protocol import Get, Opened, OpenItem, Press, Query
-from services.watch_state import WatchState
-from ui.remote_snapshots import Handles, guide_page, library_lists, state
-
-MOVIE = {"stream_id": 7001, "name": "Harbour Lights", "year": "1998"}
+from services.remote.protocol import Closed, Get, Opened, OpenItem, Press, Query
+from tests.fixtures import local_xtream
+from ui.remote_snapshots import Handles, guide_page, state
 
 
 class SnapshotTests(WindowCase):
@@ -78,42 +75,62 @@ class SnapshotTests(WindowCase):
         self.assertIsNone(handles.get("made-up"))
 
 
-class LibraryShelfTests(WindowCase):
-    def prepare_config(self):
-        super().prepare_config()
-        provider = "Local fixture"
-        cid = WatchState.content_id(provider, MOVIE, item_type="movie")
-        self.config.watch_history = [
-            {
-                "content_id": cid,
-                "item_data": MOVIE,
-                "item_type": "movie",
-                "provider_name": provider,
-                "timestamp": 100.0,
-                "name": MOVIE["name"],
-            }
-        ]
-        self.config.playback_positions = {cid: {"position": 600_000, "duration": 6_000_000}}
+class PhoneLibraryWindowTests(TwoProviderCase):
+    """The phone's Library over a provider's films: QiTV answers that phone, a tap plays the film,
+    and the TV's own Library stays as it was."""
 
-    def test_library_lists_shape(self):
-        lists = library_lists(self.window, Handles())
-        self.assertEqual(lists["t"], "library")
-        [item] = lists["continue"]
-        self.assertEqual(item["title"], "Harbour Lights")
-        self.assertAlmostEqual(item["progress"], 0.1)
-        self.assertEqual(set(item), {"id", "title", "sub", "progress"})
-        self.assertIn("mylist", lists)
+    selected = XTREAM
 
-    def test_extracted_library_functions_match_model(self):
-        model = self.window.screens.library_model
-        model.set_section("movies")
-        watch = self.window.controller.watch
-        for providers in (model._history_providers(), {"Local fixture"}, set()):
-            with mock.patch.object(model, "_history_providers", return_value=providers):
-                self.assertEqual(
-                    model._continue_items(), continue_items(self.config, watch, providers, "movie")
-                )
-        self.assertEqual(len(continue_items(self.config, watch, {"Local fixture"}, "movie")), 1)
+    def setUp(self):
+        super().setUp()
+        self.hub = mock.Mock()
+        self.window.remote.hub = self.hub
+        self.window.remote.apply_config = lambda: None
+        self.addCleanup(setattr, self.window.remote, "hub", None)
+
+    def libraries(self, sid="s1"):
+        return [c.args[1] for c in self.hub.send.call_args_list if c.args[0] == sid]
+
+    def test_a_film_tapped_on_the_phone_plays(self):
+        plays = self.play_spy()
+        self.show()
+        self.wait_ready(XTREAM)
+        remote = self.window.remote
+        remote.bridge.post(Get("s1", "library", "", 0, "movies", ""))
+
+        def titles():
+            found = [m for m in self.libraries() if m["t"] == "library" and m["items"]]
+            return found[-1] if found else None
+
+        self.assertTrue(wait_until(lambda: titles() is not None, LIBRARY_WAIT_MS))
+        message = titles()
+        self.assertTrue(message["genres"])
+        self.assertNotIn("http", json.dumps(message))
+        self.assertFalse(self.window.screens.library_shown())  # the TV stayed where it was
+        second = message["items"][1]
+        self.assertIn(second["title"], local_xtream.movie_titles())
+        remote.bridge.post(OpenItem("s1", second["id"]))
+        self.assertTrue(wait_until(lambda: len(plays) == 1, LIBRARY_WAIT_MS))
+        self.assertTrue(plays[0].startswith(self.xtream.url))
+        remote.bridge.post(Closed("s1", "d1"))  # the phone left: its Library goes
+        self.assertTrue(wait_until(lambda: "s1" not in remote._libraries))
+
+    def test_a_series_tapped_on_the_phone_opens_its_seasons_on_the_tv(self):
+        self.show()
+        self.wait_ready(XTREAM)
+        remote = self.window.remote
+        remote.bridge.post(Get("s1", "library", "", 0, "series", ""))
+
+        def titles():
+            found = [m for m in self.libraries() if m["t"] == "library" and m["items"]]
+            return found[-1] if found else None
+
+        self.assertTrue(wait_until(lambda: titles() is not None, LIBRARY_WAIT_MS))
+        self.assertEqual(titles()["section"], "series")
+        remote.bridge.post(OpenItem("s1", titles()["items"][0]["id"]))
+        library = self.window.library_controller
+        self.assertTrue(wait_until(lambda: library.mode == "series", LIBRARY_WAIT_MS))
+        self.assertTrue(self.window.screens.library_shown())
 
 
 class PushTests(WindowCase):
@@ -156,7 +173,7 @@ class PushTests(WindowCase):
         self.open_first_channel()
         remote = self.window.remote
         remote.bridge.post(Get("s2", "guide", "all", 0))
-        remote.bridge.post(Get("s2", "library", "", 0))
+        remote.bridge.post(Get("s2", "library", "", 0, "movies", ""))
         self.assertTrue(
             wait_until(lambda: {m["t"] for m in self.sent("s2")} >= {"guide", "library"})
         )

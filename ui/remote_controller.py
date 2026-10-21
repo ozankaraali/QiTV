@@ -10,12 +10,11 @@ where the TV is, channel and playback buttons first leave the Library.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 
 from services.i18n import N_, translate
-from services.next_episode import play_context
 from services.redact import safe_message
 from services.remote.protocol import (
     BUTTON_META,
@@ -34,8 +33,9 @@ from services.remote.protocol import (
 )
 from ui.keymap import Action
 from ui.remote_buttons import BUTTONS
+from ui.remote_library import PhoneLibrary
 from ui.remote_repeat import KeyRepeater
-from ui.remote_snapshots import Handles, guide_page, library_lists, results, state
+from ui.remote_snapshots import Handles, guide_page, results, state
 
 if TYPE_CHECKING:
     from services.remote.hub import RemoteHub
@@ -84,7 +84,8 @@ class RemoteController(QObject):
         self._timer.timeout.connect(self._tick)
         self._names: dict[str, str] = {}
         self.status: dict = {"home_url": "", "relay": "off"}
-        self.handles = Handles()  # the guide's and the Library's
+        self.handles = Handles()  # the guide's
+        self._libraries: dict[str, PhoneLibrary] = {}  # each phone's own Library, by session
         self.result_handles = Handles(limit=500)  # the search's: a long search can't push them out
         self._removing: dict[str, str] = {}  # device id → name, until the hub confirms
         self._phones: set[str] = set()
@@ -221,6 +222,9 @@ class RemoteController(QObject):
             self._repeater.drop(event.sid)
             self._schedule()
             self._phones.discard(event.sid)
+            library = self._libraries.pop(event.sid, None)
+            if library is not None:
+                library.deleteLater()
             if not self._phones:
                 self._diff.stop()
         elif isinstance(event, Opened):
@@ -232,7 +236,7 @@ class RemoteController(QObject):
         elif isinstance(event, Query):
             self._search(event.text)
         elif isinstance(event, OpenItem):
-            self._open(event.handle)
+            self._open(event.sid, event.handle)
         elif isinstance(event, StoreSaved):
             self._persist(event.data)
         elif isinstance(event, Paired):
@@ -280,12 +284,25 @@ class RemoteController(QObject):
         try:
             if event.what == "guide":
                 message = guide_page(self._window, event.list, event.page, self.handles)
+                self._send(event.sid, message)
             else:
-                message = library_lists(self._window, self.handles)
+                self._library(event.sid).ask(event.section or "movies", event.genre, event.page)
         except Exception as error:  # a phone's question must never take QiTV down
             logger.error("Phone remote: %s failed: %s", event.what, safe_message(error))
-            return
-        self._send(event.sid, message)
+
+    def _library(self, sid: str) -> PhoneLibrary:
+        library = self._libraries.get(sid)
+        if library is None:
+            window = self._window
+            library = PhoneLibrary(
+                window.library_catalog,
+                window.config_manager,
+                window.watch,
+                lambda message: self._send(sid, message),
+                self,
+            )
+            self._libraries[sid] = library
+        return library
 
     def _search(self, text: str) -> None:
         screens = self._window.screens
@@ -294,8 +311,13 @@ class RemoteController(QObject):
         else:
             screens.open_search(text)
 
-    def _open(self, handle: str) -> None:
-        found = self.handles.get(handle) or self.result_handles.get(handle)
+    def _open(self, sid: str, handle: str) -> None:
+        library = self._libraries.get(sid)
+        found = (
+            self.handles.get(handle)
+            or self.result_handles.get(handle)
+            or (library.handles.get(handle) if library is not None else None)
+        )
         if found is None:
             return
         kind, payload = found
@@ -305,11 +327,11 @@ class RemoteController(QObject):
                 window.screens.tune_live(payload)
             elif kind == "hit":
                 window.library_controller.activate_hit(payload)
-            elif kind == "series":
-                window.screens.open_library("series")
-                window.library_controller.open_series(payload, _provider(payload))
-            elif kind in ("movie", "episode"):
-                window.screens.play(payload, kind, play_context())
+            elif kind == "title":
+                item, item_kind, genre_items = cast(tuple, payload)
+                if item_kind == "series":  # its seasons show in the Library
+                    window.screens.open_library("series")
+                window.library_controller.activate_title(item, item_kind, genre_items)
         except Exception as error:
             logger.error("Phone remote: opening a %s failed: %s", kind, safe_message(error))
         if self._phones:
@@ -344,12 +366,6 @@ class RemoteController(QObject):
                 for d in devices
             ]
         )
-
-
-def _provider(item: object) -> str:
-    from services.provider_ids import provider_of
-
-    return provider_of(item) if isinstance(item, dict) else ""
 
 
 def _changed(last: dict, now: dict, elapsed_ms: int) -> bool:

@@ -1,5 +1,5 @@
 """What the phone remote shows of QiTV, as plain dicts: what's on, a guide page, the search's
-results, the Library's shelves. GUI thread only (they read the controller and the catalog).
+results (the Library's pages: ui/remote_library.py). GUI thread only (they read the controller).
 
 Nothing a phone receives names a stream, a link or a credential: titles, numbers, times and
 opaque handles only. A handle is a random id for something the phone may tap later (a channel, a
@@ -15,15 +15,12 @@ import secrets
 from typing import Any, Optional
 
 from services.epg_view import Programme
-from services.library import continue_items, title_of
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode
 from services.remote.protocol import b64e
-from services.watch_state import WatchState
 from services.zapping import ZapContext
 
 GUIDE_PAGE = 50
 RESULTS_PER_GROUP = 30
-SHELF = 30
 _SECTIONS = ("live", "movies", "series")
 
 
@@ -164,45 +161,3 @@ def results(window: Any, handles: Handles) -> dict:
         "q": library.query,
         "groups": [{"kind": s, "items": grouped[s]} for s in _SECTIONS if grouped[s]],
     }
-
-
-def library_lists(window: Any, handles: Handles) -> dict:
-    """Continue watching (films and episodes) and My list of the Library's section shown."""
-    config = window.config_manager
-    watch = window.controller.watch
-    providers = window.catalog.provider_names()
-    positions = config.playback_positions or {}
-    shelf = []
-    for kind in ("movie", "episode"):
-        for item in continue_items(config, watch, providers, kind):
-            cid = WatchState.content_id(_provider(item), item, item_type=kind)
-            place = positions.get(cid) or {}
-            length = place.get("duration") or 0
-            shelf.append(
-                {
-                    "id": handles.issue(kind, item),
-                    "title": title_of(item),
-                    "sub": str(item.get("year") or item.get("series_name") or ""),
-                    "progress": round(place.get("position", 0) / length, 3) if length else 0.0,
-                }
-            )
-    model = window.screens.library_model
-    section = model.section if model.section in ("movies", "series") else ""
-    mine = []
-    if section:
-        kind = "series" if section == "series" else "movie"
-        for item in model.my_list()[:SHELF]:
-            mine.append(
-                {
-                    "id": handles.issue(kind, item),
-                    "title": title_of(item),
-                    "sub": str(item.get("year") or ""),
-                }
-            )
-    return {"t": "library", "continue": shelf[:SHELF], "mylist": mine, "mylist_section": section}
-
-
-def _provider(item: dict) -> str:
-    from services.provider_ids import provider_of
-
-    return provider_of(item) or ""

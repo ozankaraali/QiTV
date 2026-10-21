@@ -14,8 +14,9 @@ const QUERY_DEBOUNCE_MS = 150;
 const words = {
   nothing_playing: "Nothing playing",
   watching: "Watching",
-  continue_watching: "Continue watching",
-  my_list: "My list",
+  genre: "Genre",
+  load_failed: "Couldn't load this list",
+  try_again: "Try again",
   channels: "Channels",
   movies: "Movies",
   series: "Series",
@@ -265,13 +266,24 @@ function bindSearch() {
 }
 
 // ---- the Library --------------------------------------------------------------------------
+// Movies or Series, a genre (QiTV's first shelf until one is chosen), a page at a time. QiTV
+// browses with the phone's own copy of its Library: the TV stays where it is until a tap.
 
-function openLibrary() {
-  $("libraryRows").replaceChildren(el("div", "empty", w("loading")));
-  send({ t: "get", what: "library" });
+const library = { section: "movies", genre: "", page: 0, pages: 1, count: 0, shown: "", asking: false };
+
+function askLibrary(page) {
+  library.asking = true;
+  send({ t: "get", what: "library", section: library.section, genre: library.genre, page });
 }
 
-function libraryRow(item, withProgress) {
+function openLibrary() {
+  library.page = 0;
+  library.count = 0;
+  $("libraryRows").replaceChildren(el("div", "empty", w("loading")));
+  askLibrary(0);
+}
+
+function libraryRow(item) {
   const row = el("button", "row");
   row.type = "button";
   row.append(logoTile(item.title, "poster"));
@@ -280,10 +292,10 @@ function libraryRow(item, withProgress) {
   top.append(el("span", "title", item.title));
   main.append(top);
   if (item.sub) main.append(el("div", "row-next", item.sub));
-  if (withProgress) {
+  if (typeof item.progress === "number") {
     const bar = el("div", "prog");
     const fill = el("i");
-    fill.style.width = `${((item.progress || 0) * 100).toFixed(1)}%`;
+    fill.style.width = `${(item.progress * 100).toFixed(1)}%`;
     bar.append(fill);
     main.append(bar);
   }
@@ -292,18 +304,81 @@ function libraryRow(item, withProgress) {
   return row;
 }
 
-function onLibrary(message) {
+function drawGenres(genres, chosen) {
   const nodes = [];
-  if (message.continue && message.continue.length) {
-    nodes.push(el("div", "group", w("continue_watching")));
-    for (const item of message.continue) nodes.push(libraryRow(item, true));
+  let heading = null; // a provider's genres sit under its name
+  for (const genre of genres) {
+    if (genre.header) {
+      heading = document.createElement("optgroup");
+      heading.label = genre.title;
+      nodes.push(heading);
+      continue;
+    }
+    const option = document.createElement("option");
+    option.value = genre.id;
+    option.textContent = typeof genre.count === "number" ? `${genre.title} (${genre.count})` : genre.title;
+    if (heading) heading.append(option);
+    else nodes.push(option);
   }
-  if (message.mylist && message.mylist.length) {
-    nodes.push(el("div", "group", w("my_list")));
-    for (const item of message.mylist) nodes.push(libraryRow(item, false));
+  const pick = $("libraryGenre");
+  pick.replaceChildren(...nodes);
+  pick.value = chosen;
+  $("libraryPick").hidden = !nodes.length;
+}
+
+function failedNotice() {
+  const box = el("div", "empty", w("load_failed"));
+  const again = el("button", "again", w("try_again"));
+  again.type = "button";
+  again.addEventListener("click", openLibrary);
+  box.append(el("br"), again);
+  return box;
+}
+
+function onLibrary(message) {
+  if (message.section !== library.section) return; // the other section's, overtaken by a tap
+  if (message.page > 0 && message.genre !== library.genre) return;
+  library.asking = false;
+  if (message.genres) drawGenres(message.genres, message.genre);
+  library.genre = message.genre;
+  library.pages = message.pages || 1;
+  library.page = message.page;
+  const box = $("libraryRows");
+  const rows = message.items.map(libraryRow);
+  if (message.page > 0) {
+    box.append(...rows);
+    library.count += rows.length;
+    return;
   }
-  if (!nodes.length) nodes.push(el("div", "empty", w("nothing_here")));
-  $("libraryRows").replaceChildren(...nodes);
+  library.count = rows.length;
+  if (rows.length) box.replaceChildren(...rows);
+  else if (message.failed) box.replaceChildren(failedNotice());
+  else box.replaceChildren(el("div", "empty", w(message.loading ? "loading" : "nothing_here")));
+  const shown = `${message.section} ${message.genre}`;
+  if (shown !== library.shown) box.scrollTop = 0; // a later load of the same list keeps the place
+  library.shown = shown;
+}
+
+function bindLibrary() {
+  for (const chip of document.querySelectorAll("#libraryChips [data-lib]")) {
+    chip.addEventListener("click", () => {
+      for (const other of document.querySelectorAll("#libraryChips [data-lib]")) other.classList.toggle("on", other === chip);
+      library.section = chip.dataset.lib;
+      library.genre = "";
+      openLibrary();
+    });
+  }
+  const pick = $("libraryGenre");
+  pick.setAttribute("aria-label", w("genre"));
+  pick.addEventListener("change", () => {
+    library.genre = pick.value;
+    openLibrary();
+  });
+  $("libraryRows").addEventListener("scroll", () => {
+    const box = $("libraryRows");
+    const near = box.scrollTop + box.clientHeight > box.scrollHeight - 400;
+    if (near && !library.asking && library.count && library.page + 1 < library.pages) askLibrary(library.page + 1);
+  });
 }
 
 // ---- the touchpad -------------------------------------------------------------------------
@@ -376,6 +451,7 @@ app.menuExtras.push(() => {
 
 export function install() {
   bindGuide();
+  bindLibrary();
   bindSearch();
   bindTouchpad();
   useTouchpad(store.setting("dpad", "buttons") === "touchpad");

@@ -133,6 +133,11 @@
 
   <section class="screen list" data-screen="library" hidden>
     <div class="list-head"><h1 data-t="library">Library</h1></div>
+    <div class="chips" id="libraryChips">
+      <button type="button" class="on" data-lib="movies" data-t="movies">Movies</button>
+      <button type="button" data-lib="series" data-t="series">Series</button>
+    </div>
+    <label class="pick" id="libraryPick" hidden><select class="field" id="libraryGenre"></select><svg><use href="#i-down"/></svg></label>
     <div class="rows" id="libraryRows"></div>
   </section>
 

@@ -14,7 +14,7 @@ import heapq
 import logging
 import math
 import re
-from typing import Any, Callable, Collection, Optional, TypeVar, cast
+from typing import Any, Callable, Optional, TypeVar, cast
 
 from PySide6.QtCore import QObject, Signal
 
@@ -286,33 +286,6 @@ def history_season(history, provider: str, series: dict, seasons: list[dict]) ->
     return None
 
 
-def history_entries(config: Any, providers: Collection[str], kind: str) -> list[dict]:
-    """The watch history's entries of `kind` ("movie" or "episode") at `providers`, newest first."""
-    return [
-        h
-        for h in (config.watch_history or [])
-        if h.get("provider_name") in providers
-        and h.get("item_type") == kind
-        and isinstance(h.get("item_data"), dict)
-    ]
-
-
-def continue_items(
-    config: Any, watch: WatchState, providers: Collection[str], kind: str
-) -> list[dict]:
-    """Continue watching: each title of `kind` with a resume position, newest first, stamped with
-    the provider that played it (so it plays there, whatever page is on another provider)."""
-    out: list[dict] = []
-    seen: set[str] = set()
-    for entry in history_entries(config, providers, kind):
-        cid = WatchState.content_id(entry["provider_name"], entry["item_data"], item_type=kind)
-        if cid in seen or watch.resume_position(cid) is None:
-            continue
-        seen.add(cid)
-        out.append(with_provider(entry["item_data"], entry["provider_name"]))
-    return out
-
-
 class LibraryModel(QObject):
     changed = Signal()
     failed = Signal(str)
@@ -471,16 +444,19 @@ class LibraryModel(QObject):
     def _favorites(self) -> tuple:
         return favorites.fingerprint(self._config)
 
-    def _history_kind(self) -> str:
-        return "episode" if self._section == "series" else "movie"
-
-    def _history_providers(self) -> set[str]:
-        if self._mixed():  # every provider still in the list, newest first
-            return set(self._catalog.provider_names())
-        return {self._catalog.current_provider_name()}
-
     def _history_entries(self) -> list[dict]:
-        return history_entries(self._config, self._history_providers(), self._history_kind())
+        wanted = "episode" if self._section == "series" else "movie"
+        if self._mixed():  # every provider still in the list, newest first
+            names = set(self._catalog.provider_names())
+        else:
+            names = {self._catalog.current_provider_name()}
+        return [
+            h
+            for h in (self._config.watch_history or [])
+            if h.get("provider_name") in names
+            and h.get("item_type") == wanted
+            and isinstance(h.get("item_data"), dict)
+        ]
 
     def _entry_content_id(self, entry: dict) -> str:
         """The resume key of a watch-history entry (at the provider that played it)."""
@@ -607,13 +583,18 @@ class LibraryModel(QObject):
         return self._memoized(("new", self._section, self._catalog.content_version()), build)
 
     def _continue_items(self) -> list[dict]:
-        return continue_items(
-            self._config, self._watch, self._history_providers(), self._history_kind()
-        )
-
-    def my_list(self) -> list[dict]:
-        """My list of the section shown (the titles loaded so far), as the shelf lists it."""
-        return self._my_list_items()
+        out: list[dict] = []
+        seen: set[str] = set()
+        for entry in self._history_entries():
+            cid = self._entry_content_id(entry)
+            if cid in seen or self._watch.resume_position(cid) is None:
+                continue
+            seen.add(cid)
+            item = entry["item_data"]
+            # Stamped with the provider that played it (older history has no stamp), so it
+            # plays, stars and asks for its link there, whatever page is on another provider.
+            out.append(with_provider(item, entry["provider_name"]))
+        return out
 
     def _my_list_items(self) -> list[dict]:
         is_kept = favorites.matcher(self._config)

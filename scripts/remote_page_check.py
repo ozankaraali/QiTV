@@ -402,10 +402,31 @@ RESULTS = {
 }
 LIBRARY = {
     "t": "library",
-    "continue": [{"id": "c1", "title": "Harbour Lights", "sub": "1998", "progress": 0.4}],
-    "mylist": [{"id": "m1", "title": "The Harbourmaster", "sub": "2011"}],
-    "mylist_section": "movies",
+    "section": "movies",
+    "genre": "g1",
+    "page": 0,
+    "pages": 1,
+    "loading": False,
+    "genres": [
+        {"id": "g1", "title": "Continue", "count": 2},
+        {"title": "Provider A", "header": True},
+        {"id": "g2", "title": "Drama", "count": 60},
+    ],
+    "items": [
+        {"id": "c1", "title": "Harbour Lights", "sub": "1998", "progress": 0.4},
+        {"id": "m1", "title": "The Harbourmaster", "sub": "2011"},
+    ],
 }
+
+
+def library_page(genre: str, page: int, count: int) -> dict:
+    items = [
+        {"id": f"d{page}-{i}", "title": f"Drama {page}-{i}", "sub": "2001"} for i in range(count)
+    ]
+    message = dict(LIBRARY, genre=genre, page=page, pages=2, items=items)
+    if page:
+        del message["genres"]
+    return message
 
 
 def paired_sid(rig: Rig) -> str:
@@ -474,13 +495,40 @@ def scenario_library_open(rig: Rig) -> None:
     sid = paired_sid(rig)
     mark = rig.events.mark()
     rig.page.click("[data-tab=library]")
-    rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
+    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
+    assert (ask.section, ask.genre, ask.page) == ("movies", "", 0), ask
     rig.hub.send(sid, LIBRARY)
     rig.page.wait_for_selector("#libraryRows .row >> nth=1")
+    assert rig.page.input_value("#libraryGenre") == "g1"
+    assert rig.page.locator("#libraryGenre optgroup[label='Provider A'] option").count() == 1
     rig.shot("library")
     mark = rig.events.mark()
     rig.page.locator("#libraryRows .row", has_text="The Harbourmaster").click()
     assert rig.events.wait(OpenItem, after=mark).handle == "m1"
+    mark = rig.events.mark()  # another genre, then its second page as the list scrolls
+    rig.page.select_option("#libraryGenre", "g2")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
+    assert (ask.section, ask.genre, ask.page) == ("movies", "g2", 0), ask
+    rig.hub.send(sid, library_page("g2", 0, 50))
+    rig.page.wait_for_selector("#libraryRows .row >> nth=49")
+    mark = rig.events.mark()
+    rig.page.locator("#libraryRows .row >> nth=49").scroll_into_view_if_needed()
+    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
+    assert (ask.genre, ask.page) == ("g2", 1), ask
+    rig.hub.send(sid, library_page("g2", 1, 10))
+    rig.page.wait_for_selector("#libraryRows .row >> nth=59")
+    mark = rig.events.mark()  # Series: QiTV's first shelf there; a failed load offers a retry
+    rig.page.click("#libraryChips [data-lib=series]")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
+    assert (ask.section, ask.genre, ask.page) == ("series", "", 0), ask
+    failed = {"t": "library", "section": "series", "genre": "", "page": 0, "pages": 1}
+    rig.hub.send(sid, dict(failed, items=[], loading=False, failed=True, genres=[]))
+    rig.page.wait_for_selector("#libraryRows .again")
+    assert rig.page.locator("#libraryPick").is_hidden()
+    mark = rig.events.mark()
+    rig.page.click("#libraryRows .again")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
+    assert (ask.section, ask.page) == ("series", 0), ask
 
 
 def scenario_more_numpad(rig: Rig) -> None:
