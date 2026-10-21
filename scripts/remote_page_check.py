@@ -716,12 +716,20 @@ def scenario_watch_here(rig: Rig) -> None:
     watch = rig.events.wait(WatchHere, after=mark)
     assert watch.handle == "h2", watch
     assert not rig.events.of(OpenItem, after=mark), "the TV was tuned"
-    link = f"{rig.base}icon-192.png?stream=2"  # a file the hub serves: no video, so it errs
+    # A provider's stream is on another address than the page: the page's policy lets it in
+    # (localhost is another origin than 127.0.0.1; the file is no video, so the player errs).
+    rig.page.evaluate(
+        "window.blocked = []; document.addEventListener('securitypolicyviolation', "
+        "(e) => window.blocked.push(e.violatedDirective + ' ' + e.blockedURI))"
+    )
+    link = f"http://localhost:{rig.hub.port}/icon-192.png?stream=2"
     rig.hub.send(sid, {"t": "play", "url": link, "name": "Fernvale Sports", "num": "2"})
     rig.page.locator("#playerOut").wait_for(timeout=8000)  # it can't play this: the way out
     src = rig.page.evaluate("document.getElementById('video').getAttribute('src')")
     assert src == link, src
     assert rig.page.inner_text("#playerName") == "Fernvale Sports"
+    blocked = rig.page.evaluate("window.blocked")
+    assert not blocked, f"the page's policy blocked the stream: {blocked}"
     rig.shot("watch-here")
     rig.hub.send(sid, {"t": "play", "url": "javascript:alert(1)"})  # only http(s) plays
     rig.page.wait_for_timeout(300)
