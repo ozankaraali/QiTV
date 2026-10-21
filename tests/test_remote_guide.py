@@ -230,6 +230,60 @@ class PhoneGuideTests(WindowCase):
         guides.assert_called_with({PROVIDER_NAME})
 
 
+class ChannelListTests(WindowCase):
+    """The Remote tab's channel list: the Guide's groups and channels, without programmes."""
+
+    def setUp(self):
+        super().setUp()
+        self.sent = []
+        self.list = PhoneGuide(self.window, self.sent.append, bare=True)
+        self.addCleanup(self.list.deleteLater)
+
+    def last(self, kind):
+        found = [m for m in self.sent if m["t"] == kind]
+        return found[-1] if found else None
+
+    def test_lists_channels_without_programmes_and_loads_no_guide(self):
+        self.open_first_channel()
+        self.list.channels("", 0, "")
+        self.assertTrue(wait_until(lambda: self.last("channels") and self.last("channels")["rows"]))
+        message = self.last("channels")
+        self.assertEqual([r["name"] for r in message["rows"]], ["Channel 1", "Channel 2"])
+        self.assertEqual([r["name"] for r in message["rows"] if r["playing"]], ["Channel 1"])
+        self.assertFalse(any("now" in r or "next" in r for r in message["rows"]))
+        self.assertEqual(self.list.providers, set())  # nothing to show: no guide downloads
+        self.assertIsNone(self.last("guide"))
+
+    def test_lists_the_groups(self):
+        self.list.groups(0, "")
+        self.assertTrue(wait_until(lambda: self.last("chgroups") and self.last("chgroups")["rows"]))
+        titles = [g["title"] for g in self.last("chgroups")["rows"]]
+        self.assertIn("All", titles)
+        self.assertIsNone(self.last("groups"))
+
+    def test_the_remote_keeps_it_apart_from_the_guide_and_a_tap_tunes(self):
+        self.open_first_channel()
+        remote = self.window.remote
+        hub = mock.Mock()
+        remote.hub = hub
+        self.addCleanup(setattr, remote, "hub", None)
+
+        def sent(kind):
+            return [c.args[1] for c in hub.send.call_args_list if c.args[1]["t"] == kind]
+
+        remote.bridge.post(Get("s5", "guide", "", 0))
+        remote.bridge.post(Get("s5", "channels", "", 0))
+        self.assertTrue(wait_until(lambda: sent("guide") and sent("channels")))
+        self.assertTrue(wait_until(lambda: sent("channels")[-1]["rows"]))
+        self.assertIn("s5", remote._guides)
+        self.assertIn("s5", remote._channel_lists)
+        self.assertIsNot(remote._guides["s5"], remote._channel_lists["s5"])
+        second = sent("channels")[-1]["rows"][1]
+        remote.bridge.post(OpenItem("s5", second["id"]))
+        controller = self.window.controller
+        self.assertTrue(wait_until(lambda: (controller._channel or {}).get("name") == "Channel 2"))
+
+
 class GuidesInUseTests(WindowCase):
     def test_the_phones_providers_join_the_guides_in_use(self):
         controller = self.window.controller

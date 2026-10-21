@@ -5,6 +5,9 @@ Each phone reads the groups through its own NavModel (★ Favorites, ⟲ Recent,
 provider's groups), so its browsing leaves the TV's channel list where it is; it opens where the
 TV's list is, on the page of the channel playing. The find box searches the level shown, the
 whole of it. Groups travel as short keys, channels and programmes as handles.
+
+The Remote tab's channel list is a bare one: the same groups and channels, without programmes
+(its messages "chgroups" and "channels"), so it loads no programme guide.
 """
 
 from __future__ import annotations
@@ -38,10 +41,14 @@ class PhoneGuide(QObject):
     """`send(message)` reaches this phone. Each ask answers at once; a list or a programme guide
     that lands later sends the view's first page again when what it shows changed."""
 
-    def __init__(self, window: Any, send: Callable[[dict], None], parent=None) -> None:
+    def __init__(
+        self, window: Any, send: Callable[[dict], None], parent=None, bare: bool = False
+    ) -> None:
         super().__init__(parent)
         self._window = window
         self._send = send
+        self._bare = bare
+        self._kinds = ("chgroups", "channels") if bare else ("groups", "guide")
         self.nav = NavModel(window.catalog, window.config_manager, self)
         self.nav.reset_to("live")
         self.handles = Handles()
@@ -59,7 +66,8 @@ class PhoneGuide(QObject):
         self._settle.setInterval(SETTLE_MS)
         self._settle.timeout.connect(self._push)
         self.nav.changed.connect(self._changed)
-        window.catalog.epgReady.connect(self._on_guide_loaded)
+        if not bare:
+            window.catalog.epgReady.connect(self._on_guide_loaded)
 
     # ---- the phone's asks ------------------------------------------------------------------
 
@@ -224,7 +232,7 @@ class PhoneGuide(QObject):
         loading = not nodes and not error and self.nav.is_loading(section)
         shown = nodes[page * GROUPS_PAGE : (page + 1) * GROUPS_PAGE]
         message: dict = {
-            "t": "groups",
+            "t": self._kinds[0],
             "find": find,
             "page": page,
             "pages": _pages(len(nodes), GROUPS_PAGE),
@@ -263,21 +271,22 @@ class PhoneGuide(QObject):
         playing = controller._channel
         rows, shows = [], []
         for channel in shown:
-            on, upcoming = controller.now_next(channel)
-            rows.append(
-                {
-                    "id": self.handles.issue("channel", (channel, group or "", channels or [])),
-                    "num": controller.channel_number(channel),
-                    "name": str(channel.get("name") or "")[:TITLE_CHARS],
-                    "now": programme_dict(on),
-                    "next": programme_dict(upcoming),
-                    "playing": playing is not None and ZapContext.same(channel, playing),
-                }
-            )
+            row = {
+                "id": self.handles.issue("channel", (channel, group or "", channels or [])),
+                "num": controller.channel_number(channel),
+                "name": str(channel.get("name") or "")[:TITLE_CHARS],
+                "playing": playing is not None and ZapContext.same(channel, playing),
+            }
+            on = None
+            if not self._bare:
+                on, upcoming = controller.now_next(channel)
+                row.update(now=programme_dict(on), next=programme_dict(upcoming))
+            rows.append(row)
             shows.append((id(channel), on.title if on else None))
-        self.providers = {provider_of(c) for c in shown} - {""}
+        if not self._bare:
+            self.providers = {provider_of(c) for c in shown} - {""}
         message: dict = {
-            "t": "guide",
+            "t": self._kinds[1],
             "list": self._key(group),
             "title": node.title[:TITLE_CHARS] if node is not None else "",
             "count": len(found),

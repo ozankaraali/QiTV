@@ -86,7 +86,8 @@ PAGE_STRINGS: dict[str, str] = {
     # i18n: the phone remote's Library: a list that failed to arrive
     "load_failed": N_("Couldn't load this list"),
     "try_again": N_("Try again"),  # i18n: the phone remote: a button under a failed list
-    "channels": N_("Channels"),  # i18n: the phone remote's search: a group of results
+    # i18n: the phone remote: a group of search results, and the button showing the channel list
+    "channels": N_("Channels"),
     "no_results": N_("Nothing found"),  # i18n: the phone remote's search found nothing
     "nothing_here": N_("Nothing here yet"),  # i18n: an empty list on the phone remote
     "loading": N_("Loading…"),  # i18n: the phone remote: a list on its way

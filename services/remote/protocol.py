@@ -172,7 +172,7 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         what = obj.get("what")
         if what in ("library", "genres"):
             return _library_ask(obj)
-        if what in ("guide", "groups"):
+        if what in ("guide", "groups", "channels", "chgroups"):
             return _guide_ask(obj)
         if what == "timetable" and _short_id(obj.get("id")):
             return {"t": "get", "what": "timetable", "id": obj["id"]}
@@ -200,17 +200,18 @@ def _numbered(obj: dict, ask: dict) -> Optional[dict]:
 
 def _guide_ask(obj: dict) -> Optional[dict]:
     """A page of the Guide's groups, or of a group's channels (its key; "": where the TV's
-    channel list is), with what the phone's find box holds."""
+    channel list is), with what the phone's find box holds. The Remote tab's channel list asks
+    the same as "chgroups" and "channels"."""
     asked = _page_and_find(obj)
     if asked is None:
         return None
-    page, find = asked
-    if obj["what"] == "groups":
-        return _numbered(obj, {"t": "get", "what": "groups", "page": page, "find": find})
+    page, find, what = *asked, obj["what"]
+    if what in ("groups", "chgroups"):
+        return _numbered(obj, {"t": "get", "what": what, "page": page, "find": find})
     group = obj.get("list", "")
     if not (group == "" or _short_id(group)):
         return None
-    ask = {"t": "get", "what": "guide", "list": group, "page": page, "find": find}
+    ask = {"t": "get", "what": what, "list": group, "page": page, "find": find}
     return _numbered(obj, ask)
 
 

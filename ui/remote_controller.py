@@ -87,6 +87,7 @@ class RemoteController(QObject):
         self.status: dict = {"home_url": "", "relay": "off"}
         self._guides: dict[str, PhoneGuide] = {}  # each phone's own Guide, by session
         self._libraries: dict[str, PhoneLibrary] = {}  # and its own Library
+        self._channel_lists: dict[str, PhoneGuide] = {}  # and the Remote tab's channel list
         self.result_handles = Handles(limit=500)  # the search's
         self._removing: dict[str, str] = {}  # device id → name, until the hub confirms
         self._phones: set[str] = set()
@@ -225,7 +226,7 @@ class RemoteController(QObject):
             self._repeater.drop(event.sid)
             self._schedule()
             self._phones.discard(event.sid)
-            for browsing in (self._guides, self._libraries):
+            for browsing in (self._guides, self._libraries, self._channel_lists):
                 gone = browsing.pop(event.sid, None)
                 if gone is not None:
                     gone.deleteLater()
@@ -294,6 +295,10 @@ class RemoteController(QObject):
                 self._guide(sid).channels(event.list, event.page, event.find, event.n)
             elif event.what == "timetable":
                 self._guide(sid).timetable(event.handle)
+            elif event.what == "chgroups":
+                self._channel_list(sid).groups(event.page, event.find, event.n)
+            elif event.what == "channels":
+                self._channel_list(sid).channels(event.list, event.page, event.find, event.n)
             elif event.what == "genres":
                 self._library(sid).genres(section, event.page, event.find, event.n)
             else:
@@ -320,6 +325,13 @@ class RemoteController(QObject):
             self._guides[sid] = guide
         return guide
 
+    def _channel_list(self, sid: str) -> PhoneGuide:
+        listed = self._channel_lists.get(sid)
+        if listed is None:
+            listed = PhoneGuide(self._window, lambda m: self._send(sid, m), self, bare=True)
+            self._channel_lists[sid] = listed
+        return listed
+
     def _library(self, sid: str) -> PhoneLibrary:
         library = self._libraries.get(sid)
         if library is None:
@@ -344,7 +356,8 @@ class RemoteController(QObject):
 
     def _open(self, sid: str, handle: str) -> None:
         found = self.result_handles.get(handle)
-        for browsing in (self._guides.get(sid), self._libraries.get(sid)):
+        lists = (self._guides.get(sid), self._channel_lists.get(sid), self._libraries.get(sid))
+        for browsing in lists:
             if found is None and browsing is not None:
                 found = browsing.handles.get(handle)
         if found is None:

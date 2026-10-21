@@ -157,6 +157,23 @@ class MessageTests(unittest.TestCase):
             parse_phone_message({"t": "open", "id": "abc"}), {"t": "open", "id": "abc"}
         )
 
+    def test_the_remote_tabs_channel_list_asks_as_the_guide_does(self):
+        self.assertEqual(
+            parse_phone_message({"t": "get", "what": "channels", "list": "g4", "page": 2}),
+            {"t": "get", "what": "channels", "list": "g4", "page": 2, "find": ""},
+        )
+        self.assertEqual(
+            parse_phone_message({"t": "get", "what": "chgroups", "find": "new", "n": 3}),
+            {"t": "get", "what": "chgroups", "page": 0, "find": "new", "n": 3},
+        )
+        for obj in (
+            {"t": "get", "what": "channels", "list": "g" * 33},
+            {"t": "get", "what": "channels", "page": -1},
+            {"t": "get", "what": "chgroups", "find": 5},
+        ):
+            with self.subTest(obj=obj):
+                self.assertIsNone(parse_phone_message(obj))
+
     def test_bad_messages(self):
         for obj in (
             {"t": "nope"},

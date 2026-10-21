@@ -451,6 +451,11 @@ GUIDE = {
         },
     ],
 }
+CHANNELS = {  # the Remote tab's list: the Guide's rows without programmes
+    **GUIDE,
+    "t": "channels",
+    "rows": [{k: v for k, v in r.items() if k not in ("now", "next")} for r in GUIDE["rows"]],
+}
 RESULTS = {
     "t": "results",
     "q": "harb",
@@ -584,6 +589,62 @@ def scenario_guide_tune(rig: Rig) -> None:
     rig.page.fill("#guideFind", "fern")
     ask = rig.events.wait(Get, where=lambda e: e.what == "guide" and e.find == "fern", after=mark)
     assert (ask.list, ask.page) == ("g3", 0), ask
+
+
+def scenario_channel_list(rig: Rig) -> None:
+    """Channels swaps the remote's arrows for the channel list, where the TV is, with the volume
+    and channel buttons still below; a row tunes; groups and find as the Guide's; Channels again
+    brings the arrows back, and the choice holds when the page opens again."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    mark = rig.events.mark()
+    rig.page.click("#listButton")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "channels", after=mark)
+    assert (ask.list, ask.page, ask.find) == ("", 0, ""), ask
+    answer(rig, sid, ask, CHANNELS)
+    rig.page.wait_for_selector("#zapRows .row >> nth=2")
+    assert rig.page.locator("#pad").is_hidden(), "the arrows still show"
+    assert rig.page.locator("[data-key=volup]").is_visible(), "the volume went"
+    assert rig.page.locator("#zapRows .row.playing").count() == 1
+    assert rig.page.inner_text("#zapTitle").startswith("All"), rig.page.inner_text("#zapTitle")
+    rig.shot("channel-list")
+    mark = rig.events.mark()  # a row tunes
+    rig.page.locator("#zapRows .row", has_text="Fernvale Sports").click()
+    assert rig.events.wait(OpenItem, after=mark).handle == "h2"
+    tuned = {**STATE["now"], "num": "2", "name": "Fernvale Sports"}
+    rig.hub.send(sid, {**STATE, "now": tuned})  # the TV tuned: Watching moves
+    rig.page.locator("#zapRows .row.playing", has_text="Fernvale Sports").wait_for(timeout=5000)
+    assert rig.page.locator("#zapRows .row.playing").count() == 1
+    mark = rig.events.mark()  # up to the groups, into one, then find in it
+    rig.page.click("#zapUp")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "chgroups", after=mark)
+    answer(rig, sid, ask, {**GROUPS, "t": "chgroups"})
+    rig.page.wait_for_selector("#zapRows .row.branch >> nth=2")
+    rig.shot("channel-list-groups")
+    mark = rig.events.mark()
+    rig.page.locator("#zapRows .row.branch", has_text="News").click()
+    ask = rig.events.wait(Get, where=lambda e: e.what == "channels", after=mark)
+    assert ask.list == "g3", ask
+    mark = rig.events.mark()
+    rig.page.fill("#zapFind", "fern")
+    ask = rig.events.wait(
+        Get, where=lambda e: e.what == "channels" and e.find == "fern", after=mark
+    )
+    assert ask.list == "g3", ask
+    rig.page.click("#listButton")  # the arrows again
+    assert rig.page.locator("#pad").is_visible() and rig.page.locator("#zap").is_hidden()
+    mark = rig.events.mark()
+    rig.page.click("#listButton")
+    rig.events.wait(Get, where=lambda e: e.what == "channels", after=mark)
+    mark = rig.events.mark()
+    rig.page.reload()  # opened again: the list, where the TV is
+    ask = rig.events.wait(Get, where=lambda e: e.what == "channels", after=mark, timeout=10)
+    assert ask.list == "", ask
+    assert rig.page.locator("#zap").is_visible() and rig.page.locator("#pad").is_hidden()
+    rig.page.set_viewport_size({"width": 320, "height": 568})
+    answer(rig, rig.events.wait(Opened, after=mark).sid, ask, CHANNELS)
+    rig.page.wait_for_selector("#zapRows .row >> nth=2")
+    rig.shot("channel-list-narrow")
 
 
 def scenario_guide_pages(rig: Rig) -> None:
@@ -911,6 +972,7 @@ SCENARIOS.update(
         "hello-keeps-now": scenario_hello_keeps_now,
         "now-playing": scenario_now_playing,
         "guide-tune": scenario_guide_tune,
+        "channel-list": scenario_channel_list,
         "guide-pages": scenario_guide_pages,
         "timetable": scenario_timetable,
         "search-mirror": scenario_search_mirror,
