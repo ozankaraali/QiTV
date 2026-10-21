@@ -1,6 +1,6 @@
 # QiTV - IPTV and STB Client
 
-## Please always download this free software from [RELEASES](https://github.com/ozankaraali/QiTV/releases) instead of using others' distributions, which may have malware.
+## Please always download this free software from [qitv.app](https://qitv.app), its website, or [RELEASES](https://github.com/ozankaraali/QiTV/releases) instead of using others' distributions, which may have malware.
 
 QiTV is a free TV player for IPTV. It plays M3U playlists (lists of channel links), Xtream accounts (a server address with a username and password) and STB portals (a set-top-box portal address and a MAC address), on Windows, macOS and Linux.
 
