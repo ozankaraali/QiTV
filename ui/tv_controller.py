@@ -700,6 +700,10 @@ class TVController(QObject):
         title it went small for is on its way."""
         return not self._closed and (self._has_media() or self._title_on_its_way())
 
+    def showing_here(self) -> bool:
+        """The TV's own player has a stream (opening, playing or paused), not one handed on."""
+        return not self._closed and self._state in _ACTIVE_STATES
+
     def _title_on_its_way(self) -> bool:
         sessions = self.sessions
         return self._freed_for is not None and sessions is not None and sessions.pip_open()
@@ -2921,6 +2925,22 @@ class TVController(QObject):
         target = self._current
         if not self._closed and target is not None:
             self._context.show_players(target, anchor, self.overlays.transport)
+
+    def play_elsewhere(
+        self, launch: Callable[[Target, str], tuple[bool, str]], target: Optional[Target] = None
+    ) -> bool:
+        """What plays now, or `target`, handed to `launch` with its link (a phone's player) as
+        Play in VLC hands it: the in-app stream is released first, so the provider counts one.
+        False when nothing from a provider is current (a file opened from the disk stays here)."""
+        target = target or self._current
+        if self._closed or target is None or target.local:
+            return False
+        self._lanes.request_side(
+            target,
+            lambda url: self._play_external(target, url, lambda link: launch(target, link)),
+            play=True,
+        )
+        return True
 
     def _play_external(self, target: Target, url: str, launcher: Launcher) -> None:
         """The context menu's external play: the newest choice, once the in-app stream is gone."""

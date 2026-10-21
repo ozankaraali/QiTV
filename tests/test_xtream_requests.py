@@ -12,6 +12,7 @@ from services.catalog import format_xtream_episodes
 from services.provider_api import (
     xtream_base,
     xtream_choose_resolved_base,
+    xtream_hls,
     xtream_player_api_url,
     xtream_stream_url,
     xtream_xmltv_url,
@@ -306,6 +307,29 @@ class XtreamBaseTests(unittest.TestCase):
         season = {"episodes": [{"id": 31, "container_extension": "mp4"}]}
         [episode] = format_xtream_episodes(season, base, "ts", "u", "p")
         self.assertEqual(episode["cmd"], f"{base}/series/u/p/31.mp4")
+
+
+class XtreamHlsTests(unittest.TestCase):
+    """A channel's address as a phone's browser plays it: Safari plays HLS, not MPEG-TS."""
+
+    def test_a_channels_ts_address_becomes_its_m3u8(self):
+        base = "http://panel.example.test:8080/xc"
+        self.assertEqual(xtream_hls(f"{base}/live/u/p/7.ts", "u", "p"), f"{base}/live/u/p/7.m3u8")
+        self.assertEqual(  # https, a query and a password with a slash all hold
+            xtream_hls("https://p.example.test/live/u/a/b/7.ts?token=x", "u", "a/b"),
+            "https://p.example.test/live/u/a/b/7.m3u8?token=x",
+        )
+
+    def test_other_addresses_stay(self):
+        for url in (
+            "http://p.example.test/live/u/p/7.m3u8",  # HLS already
+            "http://p.example.test/movie/u/p/9.mp4",  # a film plays as it is
+            "http://p.example.test/series/u/p/31.mkv",
+            "http://p.example.test/live/someone/else/7.ts",  # not this account's
+            "http://p.example.test/channel.ts",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(xtream_hls(url, "u", "p"), url)
 
 
 class XtreamItemTests(unittest.TestCase):

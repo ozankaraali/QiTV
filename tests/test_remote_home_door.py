@@ -99,6 +99,8 @@ class HomeDoorTests(HomeDoorCase):
                 for path in ("/../pyproject.toml", "/%2e%2e/pyproject.toml", "/nope.js", "/sub/"):
                     async with s.get(self.url(path)) as r:
                         self.assertEqual(r.status, 404, path)
+                        # text a browser shows, not a file it offers to download
+                        self.assertIn("text/plain", r.headers["Content-Type"], path)
 
         self.run_async(go())
 
@@ -300,13 +302,33 @@ class PrivateTests(unittest.TestCase):
             transport.get_extra_info.side_effect = lambda name, default=None: (
                 ("8.8.8.8", 4444) if name == "peername" else default
             )
-            request = make_mocked_request("GET", "/", transport=transport)
+            request = make_mocked_request("GET", "/ws", transport=transport)
             handler = mock.AsyncMock(return_value="page")
             response = await private_only(request, handler)
             handler.assert_not_called()
-            return response.status
+            return response.status, response.content_type
 
-        self.assertEqual(asyncio.run(go()), 403)
+        status, kind = asyncio.run(go())
+        self.assertEqual(status, 403)
+        self.assertEqual(kind, "text/plain")  # Safari offered an empty reply as a download
+
+    def test_a_refused_hop_goes_back_to_the_relay(self):
+        """The relay's page hopping home to an address QiTV refuses: the page it gets sends the
+        phone back to the relay, to stay there (#b.), instead of leaving it on an error."""
+
+        async def go():
+            transport = mock.Mock()
+            transport.get_extra_info.side_effect = lambda name, default=None: (
+                ("100.64.0.7", 4444) if name == "peername" else default
+            )
+            request = make_mocked_request("GET", "/", transport=transport)
+            response = await private_only(request, mock.AsyncMock())
+            return response.status, response.content_type, response.text
+
+        status, kind, body = asyncio.run(go())
+        self.assertEqual((status, kind), (403, "text/html"))
+        self.assertIn("location.replace", body)
+        self.assertIn("#b.", body)
 
 
 class ReviewFixHubTests(HomeDoorCase):

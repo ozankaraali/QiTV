@@ -12,8 +12,20 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtTest import QTest
 from test_tv_window import WindowCase, wait_until
 
-from services.remote.protocol import Closed, Code, Held, Paired, Press, Status, StoreSaved
+from services.remote.protocol import (
+    Closed,
+    Code,
+    Held,
+    Paired,
+    Press,
+    Status,
+    StoreSaved,
+    ToTv,
+    WatchHere,
+)
 from ui.keymap import Action
+from ui.link_lanes import Target
+from ui.remote_controller import PHONE_GONE_TEXT
 
 
 class RemoteDispatchTests(WindowCase):
@@ -240,3 +252,126 @@ class ReviewFixControllerTests(WindowCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WatchHereTests(WindowCase):
+    """The phone's Watch on this phone: QiTV hands it the link of what the TV plays, or of a
+    channel of its own list, as Play in VLC hands one; the TV's stream closed first, so the
+    provider counts one. One screen at a time: the TV playing again stops the phone."""
+
+    def connect(self):
+        remote = self.window.remote
+        self.hub = mock.Mock()
+        remote.hub = self.hub
+        self.addCleanup(setattr, remote, "hub", None)
+        remote._phones.add("s8")
+        self.addCleanup(remote._phones.discard, "s8")
+
+    def sent(self, kind):
+        calls = self.hub.send.call_args_list
+        return [c.args[1] for c in calls if c.args[0] == "s8" and c.args[1]["t"] == kind]
+
+    def plays(self):
+        return self.sent("play")
+
+    def hand_off(self, url, gone=False, handle=""):
+        """The TV's controller handing `url` on at once, as it does once the link is in."""
+        target = Target({"name": "News", "cmd": url}, "live", "News")
+        results = []
+
+        def play_elsewhere(launch, chosen=None):
+            if gone:
+                self.window.remote._phones.discard("s8")
+            results.append(launch(chosen or target, url))
+            return True
+
+        controller = self.window.controller
+        with (
+            mock.patch.object(controller, "play_elsewhere", side_effect=play_elsewhere),
+            mock.patch.object(self.window.screens, "notify") as notify,
+        ):
+            self.window.remote.bridge.post(WatchHere("s8", handle))
+            self.assertTrue(wait_until(lambda: results))
+        return results[0], notify
+
+    def test_hands_the_phone_the_link_and_the_tv_says_so(self):
+        self.connect()
+        result, notify = self.hand_off("http://p.test/news.m3u8")
+        self.assertEqual(result, (True, ""))
+        [play] = self.plays()
+        self.assertEqual((play["url"], play["name"]), ("http://p.test/news.m3u8", "News"))
+        notify.assert_called_once_with("Playing on the phone")
+
+    def test_a_phone_gone_before_its_link_came(self):
+        self.connect()
+        result, notify = self.hand_off("http://p.test/news.m3u8", gone=True)
+        self.assertEqual(result, (False, PHONE_GONE_TEXT))
+        self.assertEqual(self.plays(), [])
+        notify.assert_not_called()
+
+    def test_nothing_playing_tells_the_phone(self):
+        self.connect()
+        self.window.remote.bridge.post(WatchHere("s8"))
+        self.assertTrue(wait_until(self.plays))
+        self.assertEqual(self.plays()[-1], {"t": "play", "failed": True})
+
+    def listed_row(self, index):
+        self.open_first_channel()
+        self.connect()
+        listed = self.window.remote._channel_list("s8")
+        listed.channels("", 0, "")
+        self.assertTrue(
+            wait_until(lambda: self.sent("channels") and self.sent("channels")[-1]["rows"])
+        )
+        return self.sent("channels")[-1]["rows"][index]
+
+    def test_a_channel_of_the_phones_list_plays_there(self):
+        row = self.listed_row(1)
+        self.hand_off("http://p.test/two.m3u8", handle=row["id"])
+        play = self.plays()[-1]
+        self.assertEqual((play["url"], play["name"]), ("http://p.test/two.m3u8", "Channel 2"))
+
+    def test_a_handle_the_phone_never_had(self):
+        self.connect()
+        self.window.remote.bridge.post(WatchHere("s8", "nope"))
+        self.assertTrue(wait_until(self.plays))
+        self.assertEqual(self.plays()[-1], {"t": "play", "failed": True})
+
+    def test_back_to_the_tv_tunes_what_the_phone_played(self):
+        row = self.listed_row(1)
+        self.hand_off("http://p.test/two.m3u8", handle=row["id"])
+        with mock.patch.object(self.window.screens, "tune_live") as tune:
+            self.window.remote.bridge.post(ToTv("s8"))
+            self.assertTrue(wait_until(lambda: tune.called))
+        channel = tune.call_args.args[0]
+        self.assertEqual(channel["name"], "Channel 2")
+        self.assertEqual(self.sent("stop"), [])  # the phone let go itself
+
+    def test_the_tv_playing_again_stops_the_phone(self):
+        self.connect()
+        self.hand_off("http://p.test/news.m3u8")
+        remote = self.window.remote
+        with mock.patch.object(self.window.controller, "showing_here", return_value=True):
+            remote._push_state()
+            remote._push_state()  # once
+        self.assertEqual(self.sent("stop"), [{"t": "stop"}])
+
+    def test_a_phone_that_slept_hands_back_from_its_new_session(self):
+        row = self.listed_row(1)
+        remote = self.window.remote
+        remote._devices["s8"] = "d1"
+        self.hand_off("http://p.test/two.m3u8", handle=row["id"])
+        remote._devices["s9"] = "d1"  # the same phone, connected again
+        remote._phones.add("s9")
+        self.addCleanup(remote._phones.discard, "s9")
+        with mock.patch.object(self.window.screens, "tune_live") as tune:
+            remote.bridge.post(ToTv("s9"))
+            self.assertTrue(wait_until(lambda: tune.called))
+        self.assertEqual(tune.call_args.args[0]["name"], "Channel 2")
+
+    def test_an_xtream_channel_goes_as_hls(self):
+        remote = self.window.remote
+        entry = {"type": "XTREAM", "username": "u", "password": "p"}
+        with mock.patch.object(self.window.catalog, "provider_entry", return_value=entry):
+            link = remote._phone_link({"name": "News"}, "http://p.test/live/u/p/7.ts")
+        self.assertEqual(link, "http://p.test/live/u/p/7.m3u8")

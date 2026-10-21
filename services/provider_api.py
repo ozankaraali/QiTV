@@ -1,6 +1,6 @@
 import logging
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 from services.redact import redact_url, safe_exc
 from services.vlc_profile import DEFAULT_USER_AGENT
@@ -324,6 +324,21 @@ def xtream_stream_url(
     """A stream's address on an Xtream panel: {base}/{kind}/{username}/{password}/{id}.{ext},
     `kind` being live, movie or series (an episode)."""
     return f"{base}/{kind}/{username}/{password}/{stream_id}.{ext}"
+
+
+def xtream_hls(url: str, username: str, password: str) -> str:
+    """An Xtream channel's MPEG-TS address (`{base}/live/{username}/{password}/{id}.ts`) as the
+    HLS one the panel serves beside it (`….m3u8`), which a phone's browser plays; any other
+    address as it is."""
+    parts = urlsplit(url)
+    marker = f"/live/{username}/{password}/"
+    at = parts.path.find(marker) if username and password else -1
+    if at < 0:
+        return url
+    stem, dot, ext = parts.path[at + len(marker) :].rpartition(".")
+    if not dot or ext.lower() != "ts" or not stem or "/" in stem:
+        return url
+    return urlunsplit(parts._replace(path=f"{parts.path[: at + len(marker)]}{stem}.m3u8"))
 
 
 def provider_prefers_https(provider: Dict[str, Any], global_default: bool) -> bool:

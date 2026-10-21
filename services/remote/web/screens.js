@@ -1,7 +1,7 @@
 // The second screen: what QiTV says is on, the guide, the search's results and the Library,
 // drawn from QiTV's snapshots (ui/remote_snapshots.py). Taps send back the opaque handles QiTV
 // gave; nothing here knows a stream's address. Also the d-pad's touchpad mode.
-import app, { press, release, send, show, t, tap } from "./app.js";
+import app, { banner, press, release, send, show, t, tap } from "./app.js";
 import * as store from "./store.js";
 
 const $ = (id) => document.getElementById(id);
@@ -38,6 +38,12 @@ const words = {
   loading: "Loading…",
   use_touchpad: "Use a touchpad",
   use_buttons: "Use buttons",
+  watch_here: "Watch on this phone",
+  opening_here: "Opening on this phone…",
+  phone: "Phone",
+  pick_here: "Pick a channel below to watch it here",
+  now_on_tv: "Now playing on the TV",
+  open_player: "Open in the phone's player",
 };
 const w = (key) => (t(key) === key ? words[key] || key : t(key));
 
@@ -228,7 +234,17 @@ function zapRow(row) {
   if (row.playing) top.append(el("em", "", w("watching")));
   main.append(top);
   item.append(main);
-  tapRow(item, row.id); // tunes the TV
+  pressable(item);
+  item.addEventListener("click", () => {
+    if (navigator.vibrate) navigator.vibrate(8);
+    if (!here) {
+      send({ t: "open", id: row.id }); // tunes the TV
+      return;
+    }
+    unlock();
+    caption(row.num, row.name);
+    send({ t: "watch", id: row.id }); // plays here
+  });
   return item;
 }
 
@@ -732,6 +748,120 @@ function bindChannelList() {
   useChannelList(store.setting("remote", "buttons") === "channels", false); // opens on the hello
 }
 
+// ---- watching on this phone --------------------------------------------------------------
+// Phone, in the channel list's TV | Phone: a player docks above the list and a tap on a channel
+// plays it here, QiTV letting go of its own stream (one screen at a time); TV hands it back.
+// More's Watch on this phone brings what the TV plays. A secure page (the relay's) can't play a
+// plain-http stream inside it: that one opens in the phone's own player instead.
+
+const NOTE_MS = 4000;
+let noteTimer = null;
+let here = false; // watching on this phone
+let hereLink = "";
+
+function note(text) {
+  banner(text);
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(() => {
+    if ($("banner").textContent === text) banner("");
+  }, NOTE_MS);
+}
+
+function caption(num, name) {
+  $("playerNum").textContent = num || "";
+  $("playerName").textContent = name || "";
+}
+
+function stopVideo() {
+  const video = $("video");
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  hereLink = "";
+  $("playerOut").hidden = true;
+}
+
+// In a tap: a phone plays sound only from one, and once its player started from a tap it may
+// start again later (the next channel, its link arriving after the tap).
+function unlock() {
+  const video = $("video");
+  if (hereLink || video.dataset.unlocked) return;
+  video.dataset.unlocked = "1";
+  video.play().catch(() => {});
+}
+
+function useHere(on) {
+  here = on;
+  if (on && !zapping()) useChannelList(true);
+  document.querySelector("[data-screen=remote]").classList.toggle("on-phone", on);
+  $("player").hidden = !on;
+  for (const button of document.querySelectorAll("#where [data-where]")) {
+    button.classList.toggle("on", (button.dataset.where === "phone") === on);
+  }
+  if (!on) stopVideo();
+}
+
+function startHere() {
+  if (navigator.vibrate) navigator.vibrate(8);
+  useHere(true);
+  unlock();
+  caption("", w("opening_here"));
+  send({ t: "watch" }); // what the TV plays, if anything
+}
+
+function onPlay(message) {
+  const url = typeof message.url === "string" ? message.url : "";
+  if (!/^https?:\/\//i.test(url)) {
+    if (here && !hereLink) caption("", w("pick_here"));
+    return;
+  }
+  if (!here) useHere(true);
+  caption(message.num, message.name);
+  if (location.protocol === "https:" && url.startsWith("http:")) {
+    location.assign(url); // the phone's own player
+    return;
+  }
+  hereLink = url;
+  $("playerOut").hidden = true;
+  const video = $("video");
+  video.src = url;
+  video.play().catch(() => {}); // the first may wait for a tap on its ▶
+}
+
+function onStop() {
+  if (!here) return;
+  useHere(false);
+  note(w("now_on_tv"));
+}
+
+function bindHere() {
+  for (const button of document.querySelectorAll("#where [data-where]")) {
+    button.addEventListener("click", () => {
+      const phone = button.dataset.where === "phone";
+      if (phone === here) return;
+      if (phone) {
+        startHere();
+      } else {
+        send({ t: "totv" });
+        useHere(false);
+      }
+    });
+  }
+  const watch = $("watchHere");
+  pressable(watch);
+  watch.addEventListener("click", () => {
+    document.getElementById("veil").hidden = true;
+    for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
+    if (!here) startHere();
+  });
+  $("video").addEventListener("error", () => {
+    if (hereLink) $("playerOut").hidden = false; // a stream this browser can't play
+  });
+  $("playerOut").addEventListener("click", () => {
+    if (hereLink) location.assign(hereLink);
+  });
+}
+
 // ---- wiring -------------------------------------------------------------------------------
 
 // A reconnect (the phone slept, the network changed) is a new session: the rows shown carry the
@@ -758,6 +888,8 @@ app.handlers.timetable = onTimetable;
 app.handlers.results = onResults;
 app.handlers.genres = onGenres;
 app.handlers.library = onLibrary;
+app.handlers.play = onPlay;
+app.handlers.stop = onStop;
 app.handlers["tab:guide"] = openGuide;
 app.handlers["tab:library"] = openLibrary;
 app.menuExtras.push(() => {
@@ -779,6 +911,7 @@ export function install() {
   bindTouchpad();
   useTouchpad(store.setting("dpad", "buttons") === "touchpad");
   bindChannelList();
+  bindHere();
   setInterval(() => {
     if (current && !document.hidden) drawNow();
   }, 1000);

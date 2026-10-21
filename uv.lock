@@ -982,7 +982,7 @@ wheels = [
 
 [[package]]
 name = "qitv"
-version = "2.5.3"
+version = "2.5.4"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp", extra = ["speedups"] },

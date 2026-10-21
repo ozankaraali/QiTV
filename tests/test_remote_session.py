@@ -16,6 +16,8 @@ from services.remote.protocol import (
     Press,
     Query,
     StoreSaved,
+    ToTv,
+    WatchHere,
 )
 from services.remote.session import MessageTooBig, Session
 
@@ -201,6 +203,9 @@ class KkTests(SessionCase):
             {"t": "get", "what": "timetable", "id": "h7"},
             {"t": "get", "what": "genres", "section": "series", "n": 4},
             {"t": "get", "what": "library", "section": "series", "genre": "g2", "page": 1},
+            {"t": "watch"},
+            {"t": "watch", "id": "h3"},
+            {"t": "totv"},
         ):
             got += session.receive(phone.seal(message)).events
         self.assertEqual(
@@ -212,6 +217,9 @@ class KkTests(SessionCase):
                 Get(sid, "timetable", "", 0, handle="h7"),
                 Get(sid, "genres", "", 0, "series", n=4),
                 Get(sid, "library", "", 1, "series", "g2"),
+                WatchHere(sid),
+                WatchHere(sid, "h3"),
+                ToTv(sid),
             ],
         )
 
