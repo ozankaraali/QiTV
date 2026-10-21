@@ -27,6 +27,7 @@ KEEPALIVE_MS = 200  # the phone's "still held" while a button is down
 SILENCE_MS = 600  # no word from a holding phone for this long ends the hold
 
 MAX_FRAME = 65535
+MAX_MESSAGE = MAX_FRAME - 16  # a message and its 16-byte seal fit one frame (the relay's)
 MAX_OPENING = 256
 MAX_SESSIONS = 8
 MAX_PENDING = 16

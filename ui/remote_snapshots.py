@@ -40,11 +40,14 @@ def _stamp(when: Optional[datetime]) -> Optional[float]:
     return when.timestamp() if when is not None else None
 
 
+TITLE_CHARS = 80  # a name or title as much as a phone's row shows: messages stay frame-sized
+
+
 def programme_dict(programme: Optional[Programme]) -> Optional[dict]:
     if programme is None:
         return None
     return {
-        "title": programme.title,
+        "title": programme.title[:TITLE_CHARS],
         "start": _stamp(programme.start),
         "stop": _stamp(programme.stop),
     }
@@ -61,8 +64,8 @@ def state(window: Any) -> dict:
         session = controller.session
         now = {
             "kind": current.section if current.section in ("movies", "series") else "file",
-            "name": current.title,
-            "sub": current.subtitle or "",
+            "name": str(current.title or "")[:TITLE_CHARS],
+            "sub": str(current.subtitle or "")[:TITLE_CHARS],
             "pos_ms": _int(session, "time_ms"),
             "len_ms": _int(session, "length_ms"),
             "playing": _playing(session),  # the phone runs the clock itself while it plays
@@ -73,7 +76,7 @@ def state(window: Any) -> dict:
         now = {
             "kind": "live",
             "num": controller.channel_number(channel),
-            "name": str(channel.get("name") or ""),
+            "name": str(channel.get("name") or "")[:TITLE_CHARS],
             "now": programme_dict(on),
             "next": programme_dict(upcoming),
             "behind_s": round(behind),
@@ -116,7 +119,8 @@ def results(window: Any, handles: Handles) -> dict:
         group = grouped.get(hit.section)
         if group is None or len(group) >= RESULTS_PER_GROUP:
             continue
-        group.append({"id": handles.issue("hit", hit), "title": hit.title, "sub": ""})
+        title = str(hit.title or "")[:TITLE_CHARS]
+        group.append({"id": handles.issue("hit", hit), "title": title, "sub": ""})
     return {
         "t": "results",
         "q": library.query,

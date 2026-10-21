@@ -39,7 +39,7 @@ from services.remote.protocol import (
     StoreSaved,
     b64e,
 )
-from services.remote.session import Reply, Session
+from services.remote.session import MessageTooBig, Reply, Session
 
 logger = logging.getLogger(__name__)
 
@@ -317,8 +317,14 @@ class HubCore:
 
     async def _seal_and_send(self, conn: _Conn, message: dict) -> None:
         # Sealed when written, so the phone gets messages in nonce order whatever else is sent.
-        if conn.session.established:
-            await _quietly(conn.send(conn.session.send(message)))
+        if not conn.session.established:
+            return
+        try:
+            frame = conn.session.send(message)
+        except MessageTooBig as error:  # never sent: a frame that big would cost every phone
+            logger.warning("Phone remote: a message too big to send was dropped (%s)", error)
+            return
+        await _quietly(conn.send(frame))
 
     def broadcast(self, message: dict) -> None:
         for sid in list(self.conns):

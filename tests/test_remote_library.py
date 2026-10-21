@@ -16,6 +16,7 @@ from timer_fixtures import wait_until
 
 from services import library
 from services.library import LibraryCache, LibraryModel
+from services.remote.protocol import MAX_MESSAGE
 from services.watch_state import WatchState
 from ui.remote_library import GENRES_PAGE, LIBRARY_PAGE, PhoneLibrary
 
@@ -223,6 +224,21 @@ class PhoneLibraryTests(unittest.TestCase):
         kind, (item, item_kind, genre_items) = self.library.handles.get(first["id"])
         self.assertEqual((kind, item["name"], item_kind), ("title", "Movie 0", "movie"))
         self.assertEqual(len(genre_items), 120)
+
+    def test_the_largest_pages_fit_a_frame_in_any_script(self):
+        long = "字" * 300  # 3 bytes a letter; titles are cut to what a row shows
+        titles = [movie(i, f"{long}{i}", year=long) for i in range(120)]
+        genres = [(str(i), f"{long}{i}", 120) for i in range(150)]
+        self.catalog.group_list["movies"] = genres
+        for gid, _title, _count in genres:
+            self.catalog.item_map[("movies", gid)] = titles
+        keys = self.opened()
+        self.library.genres("movies", 0, "字字")  # 100 genres and 50 titles at once
+        self.library.titles("movies", next(iter(keys.values())), 0, "")
+        for message in (self.last("genres"), self.last("library")):
+            encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
+            self.assertLessEqual(len(encoded), MAX_MESSAGE, message["t"])
+        self.assertEqual(len(self.last("genres")["titles"]), LIBRARY_PAGE)
 
     def test_many_genres_come_a_page_at_a_time_inside_a_frame(self):
         many = [(str(i), f"Genre {i} " + "x" * 200, 1) for i in range(450)]

@@ -5,6 +5,7 @@ from remote_phone import PhoneClient
 from services.remote.noise import Keypair
 from services.remote.pairing import RemoteStore
 from services.remote.protocol import (
+    MAX_MESSAGE,
     Closed,
     Forgot,
     Get,
@@ -16,7 +17,7 @@ from services.remote.protocol import (
     Query,
     StoreSaved,
 )
-from services.remote.session import Session
+from services.remote.session import MessageTooBig, Session
 
 
 class Clock:
@@ -75,6 +76,24 @@ class SessionCase(unittest.TestCase):
         if reply.close is None:
             phone.finish(reply.frames[0])
         return phone, session, reply
+
+
+class MessageSizeTests(SessionCase):
+    """What QiTV sends stays inside a relay frame, in any script."""
+
+    def test_letters_go_as_utf8_not_escapes(self):
+        phone, session, _, _ = self.pair()
+        title = "Добрый вечер" * 20  # Cyrillic: 2 bytes a letter, not a 6-byte \uXXXX
+        sealed = session.send({"t": "x", "title": title})
+        self.assertLess(len(sealed), len(title) * 2 + 64)
+        self.assertEqual(phone.open(sealed)["title"], title)
+
+    def test_a_message_too_big_is_refused_before_it_is_sealed(self):
+        phone, session, _, _ = self.pair()
+        with self.assertRaises(MessageTooBig):
+            session.send({"t": "x", "rows": ["字" * 80] * (MAX_MESSAGE // 200)})
+        # nothing was sealed, so the phone's count stays in step: the next message opens
+        self.assertEqual(phone.open(session.send({"t": "ok"})), {"t": "ok"})
 
 
 class PairingTests(SessionCase):

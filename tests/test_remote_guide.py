@@ -13,7 +13,7 @@ from unittest import mock
 from test_tv_window import WindowCase, wait_until
 
 from services.epg_view import Programme
-from services.remote.protocol import Get, OpenItem
+from services.remote.protocol import MAX_MESSAGE, Get, OpenItem
 from tests.fixtures import local_provider
 from tests.fixtures.local_provider import PROVIDER_NAME
 from ui.remote_guide import GUIDE_PAGE, PhoneGuide
@@ -95,6 +95,33 @@ class PhoneGuideTests(WindowCase):
         message = self.last()
         self.assertEqual((message["page"], message["pages"]), (130 // GUIDE_PAGE, 4))
         self.assertEqual([r["name"] for r in message["rows"] if r["playing"]], ["Channel 130"])
+
+    def test_the_largest_messages_fit_a_frame_in_any_script(self):
+        self.start()
+        long = "字" * 300  # 3 bytes a letter; titles and descriptions are cut to what shows
+        now = datetime.now(timezone.utc)
+        listed = [
+            Programme(
+                title=long,
+                start=now + timedelta(minutes=30 * i),
+                stop=now + timedelta(minutes=30 * (i + 1)),
+                description=long,
+            )
+            for i in range(80)
+        ]
+        many = [{"name": f"{long}{i}", "cmd": f"file:///{i}", "id": i} for i in range(80)]
+        controller = self.window.controller
+        with (
+            mock.patch.object(self.window.catalog, "programmes", return_value=listed),
+            mock.patch.object(controller, "now_next", return_value=(listed[0], listed[1])),
+            mock.patch.object(self.guide, "_channels", return_value=many),
+        ):
+            self.guide.channels(self.last()["list"], 0, "")
+            self.guide.timetable(self.last()["rows"][0]["id"])
+        for message in (self.last(), self.last("timetable")):
+            encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
+            self.assertLessEqual(len(encoded), MAX_MESSAGE, message["t"])
+        self.assertEqual(len(self.last()["rows"]), GUIDE_PAGE)
 
     def test_a_tap_tunes_within_the_group(self):
         self.start()

@@ -21,6 +21,7 @@ from services.remote.noise import CipherState, HandshakeState, NoiseError
 from services.remote.pairing import RemoteStore
 from services.remote.protocol import (
     MAX_FRAME,
+    MAX_MESSAGE,
     MAX_RATE,
     PROTO,
     Closed,
@@ -295,10 +296,15 @@ class Session:
     # ---- frames out ------------------------------------------------------------------------
 
     def send(self, message: dict) -> bytes:
-        """`message` sealed for this phone (the session must be established)."""
+        """`message` sealed for this phone (the session must be established). A message too
+        big for one frame raises MessageTooBig before it is sealed: the phone's count of
+        messages stays in step and the session goes on."""
         if self._send is None:
             raise RuntimeError("session not established")
-        return self._send.encrypt_with_ad(b"", json.dumps(message).encode("utf-8"))
+        data = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(data) > MAX_MESSAGE:
+            raise MessageTooBig(f"{message.get('t')!r}: {len(data)} bytes")
+        return self._send.encrypt_with_ad(b"", data)
 
     def bye(self, reason: str) -> bytes:
         return self.send({"t": "bye", "reason": reason})
@@ -308,6 +314,10 @@ class Session:
         self._hs = None
         logger.debug("Phone remote session %s closed: %s %s", self.sid, code, reason)
         return Reply(close=(code, reason))
+
+
+class MessageTooBig(ValueError):
+    """A message that wouldn't fit one frame once sealed (see Session.send)."""
 
 
 def _pairing_payload(payload: bytes, *, named: bool) -> Optional[tuple[bytes, str]]:
