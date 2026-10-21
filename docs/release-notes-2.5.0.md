@@ -3,8 +3,9 @@
 QiTV 2.5 turns your phone into the remote: scan a code on the TV once, and the phone's browser
 drives QiTV like its keyboard, with the guide, search and your Library at hand.
 
-**Please always download QiTV from [Releases](https://github.com/ozankaraali/QiTV/releases)
-instead of using others' distributions, which may have malware.**
+**Download QiTV from [qitv.app](https://qitv.app), which picks the right build for your
+computer, or from [Releases](https://github.com/ozankaraali/QiTV/releases). Please don't use
+others' distributions, which may have malware.**
 
 ## New
 
