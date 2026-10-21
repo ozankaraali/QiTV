@@ -761,8 +761,9 @@ def scenario_pip_close(rig: Rig) -> None:
     rig.page.wait_for_selector("#moreSheet:not([hidden])")
     pip = rig.page.locator("#moreSheet [data-key=pip]")
     assert pip.inner_text().strip() == "Picture in picture", pip.inner_text()
-    rig.hub.send(sid, dict(STATE, pip=True))
+    rig.hub.send(sid, dict(STATE, pip=True, recording=True))
     rig.page.locator("#moreSheet [data-key=pip].on").wait_for()
+    assert rig.page.locator("#moreSheet [data-key=record].on").count() == 1  # lit as it records
     assert pip.inner_text().strip() == "Close picture in picture", pip.inner_text()
     rig.shot("more-pip")
     mark = rig.events.mark()

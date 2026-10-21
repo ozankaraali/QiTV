@@ -112,6 +112,10 @@ function onState(message) {
   if (guide) guide.classList.toggle("on", message.context === "guide");
   const mute = document.querySelector("[data-key=mute]");
   if (mute) mute.classList.toggle("on", !!message.muted);
+  for (const [key, on] of [["record", message.recording], ["multiview", message.multiview]]) {
+    const button = document.querySelector(`#moreSheet [data-key=${key}]`);
+    if (button) button.classList.toggle("on", !!on); // lit while the TV does it
+  }
   const pip = document.querySelector("#moreSheet [data-key=pip]");
   if (pip) {
     pip.classList.toggle("on", !!message.pip); // a small picture shows: the button closes it
