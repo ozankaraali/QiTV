@@ -24,7 +24,7 @@ const words = {
   genres: "Genres",
   guide_find: "Find a channel",
   find_group: "Find a group",
-  find_genre: "Find a genre",
+  find_genre: "Find a genre or title",
   find_title: "Find a title",
   load_failed: "Couldn't load this list",
   try_again: "Try again",
@@ -368,7 +368,7 @@ function placePage(box, list, message, rows, retry) {
     list.lo = list.hi = page;
     if (rows.length) box.replaceChildren(...rows);
     else if (message.failed) box.replaceChildren(failedNotice(retry));
-    else box.replaceChildren(el("div", "empty", w(message.loading ? "loading" : "nothing_here")));
+    else box.replaceChildren(el("div", "empty", w(message.loading ? "loading" : message.find ? "no_results" : "nothing_here")));
     box.scrollTop = 0;
   } else if (old.length) {
     old[0].before(...rows);
@@ -510,6 +510,9 @@ function libraryRow(item) {
 function onGenres(message) {
   if (library.level !== "genres" || message.section !== library.section || message.find !== library.find) return;
   const rows = message.rows.map((genre) => branchRow(genre, () => openLibraryAt("titles", genre.id, genre.title)));
+  const titles = message.titles || []; // what the find found in the whole section, below its genres
+  if (titles.length && message.page === 0) rows.push(el("div", "group", w(library.section)));
+  rows.push(...titles.map(libraryRow));
   placePage($("libraryRows"), library, message, rows, () => openLibraryAt("genres"));
 }
 

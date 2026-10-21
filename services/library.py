@@ -736,6 +736,17 @@ class LibraryModel(QObject):
 
         return list(self._memoized(key, build))
 
+    def search_index(self) -> list[tuple[str, str, str, str, dict]]:
+        """The section's titles as services.search indexes them (each title folded), worked out
+        once per catalog version: the phone remote finds titles with the desktop's rules."""
+
+        def build() -> list[tuple[str, str, str, str, dict]]:
+            section = self._section
+            return [("", section, fold(title_of(i)), title_of(i), i) for i in self._loaded_items()]
+
+        key = ("search", self._section, self._catalog.content_version())
+        return list(self._memoized(key, build))
+
     def folded_titles(self) -> list[str]:
         """The titles of items(), folded for a find, in its order; worked out once per list."""
         items = self.items() or []

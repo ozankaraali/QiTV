@@ -77,6 +77,39 @@ class PhoneLibraryTests(unittest.TestCase):
         self.library.genres("movies", 0, "com")
         self.assertEqual([g["title"] for g in self.last("genres")["rows"]], ["Comedy"])
 
+    def test_finding_genres_finds_titles_too_as_the_desktop_search_does(self):
+        self.opened()
+        self.library.genres("movies", 0, "comedy")
+        message = self.last("genres")
+        self.assertEqual([g["title"] for g in message["rows"]], ["Comedy"])
+        self.assertEqual([t["title"] for t in message["titles"]], ["Comedy one"])
+        self.library.genres("movies", 0, "one comedy")  # every word, in any order
+        self.assertEqual([t["title"] for t in self.last("genres")["titles"]], ["Comedy one"])
+        kind, (item, item_kind, _genre) = self.library.handles.get(
+            self.last("genres")["titles"][0]["id"]
+        )
+        self.assertEqual((kind, item["name"], item_kind), ("title", "Comedy one", "movie"))
+
+    def test_found_titles_come_a_page_at_a_time_the_first_word_first(self):
+        self.catalog.item_map[("movies", "2")].append(movie(501, "Old movie"))
+        self.opened()
+        self.library.genres("movies", 0, "movie")
+        message = self.last("genres")
+        self.assertEqual(message["found"], 121)
+        self.assertEqual((len(message["titles"]), message["pages"]), (LIBRARY_PAGE, 3))
+        self.assertEqual(message["titles"][0]["title"], "Movie 0")  # starts with the word
+        self.library.genres("movies", 2, "movie")
+        last = self.last("genres")
+        self.assertEqual(last["rows"], [])  # the genres came with the first page
+        self.assertEqual(last["titles"][-1]["title"], "Old movie")  # only has the word
+
+    def test_one_letter_finds_genres_only(self):
+        self.opened()
+        self.library.genres("movies", 0, "c")
+        message = self.last("genres")
+        self.assertEqual([g["title"] for g in message["rows"]], ["Comedy"])
+        self.assertEqual(message["titles"], [])
+
     def test_a_genres_titles_a_page_at_a_time(self):
         drama = self.opened()["Drama"]
         self.library.titles("movies", drama, 0, "")

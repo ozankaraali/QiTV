@@ -177,8 +177,8 @@ class PhoneGuide(QObject):
         return [n.payload for n in nodes if isinstance(n.payload, dict)]
 
     def _found_channels(self, channels: list[dict], find: str) -> list[dict]:
-        needle = fold(find.strip())
-        if not needle:
+        words = fold(find).split()  # every word, in any order: as the desktop search
+        if not words:
             return channels
         if self._folded[:2] != (id(channels), len(channels)):
             names = [fold(str(c.get("name") or "")) for c in channels]
@@ -187,7 +187,8 @@ class PhoneGuide(QObject):
         return [
             c
             for c, name in zip(channels, names)
-            if needle in name or str(ZapContext.number_of(c) or "").startswith(needle)
+            if all(w in name for w in words)
+            or str(ZapContext.number_of(c) or "").startswith(words[0])
         ]
 
     def _retry_failed(self) -> None:

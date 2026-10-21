@@ -654,6 +654,22 @@ def scenario_library_open(rig: Rig) -> None:
     assert rig.page.locator("#libraryRows .group", has_text="Provider A").count() == 1
     assert rig.page.locator("#libraryChips").is_visible()
     rig.shot("genres")
+    mark = rig.events.mark()  # the find finds genres and, below them, the section's titles
+    rig.page.fill("#libraryFind", "harb")
+    rig.events.wait(Get, where=lambda e: e.what == "genres" and e.find == "harb", after=mark)
+    harbour = {"id": "c1", "title": "Harbour Lights", "sub": "1998"}
+    found = {**GENRES, "find": "harb", "rows": [], "titles": [harbour], "found": 1}
+    rig.hub.send(sid, found)
+    rig.page.locator("#libraryRows .group", has_text="Movies").wait_for()
+    rig.shot("genres-find")
+    mark = rig.events.mark()
+    rig.page.locator("#libraryRows .row", has_text="Harbour Lights").click()
+    assert rig.events.wait(OpenItem, after=mark).handle == "c1"
+    mark = rig.events.mark()
+    rig.page.fill("#libraryFind", "")
+    rig.events.wait(Get, where=lambda e: e.what == "genres" and e.find == "", after=mark)
+    rig.hub.send(sid, GENRES)
+    rig.page.wait_for_selector("#libraryRows .row.branch >> nth=1")
     mark = rig.events.mark()  # into a genre; its titles come as the list scrolls
     rig.page.locator("#libraryRows .row.branch", has_text="Drama").click()
     ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)

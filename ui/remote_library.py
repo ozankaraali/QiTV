@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional
 from PySide6.QtCore import QObject, QTimer
 
 from services.library import Genre, LibraryCache, LibraryModel, title_of
+from services.search import search_index
 from services.text_fold import fold
 from ui.remote_snapshots import Handles
 
@@ -109,17 +110,28 @@ class PhoneLibrary(QObject):
         return self._titles_page(page)
 
     def _genres_page(self, page: int) -> tuple[dict, tuple]:
+        """The genres; with a find, the genres it matches on the first page and the section's
+        titles it finds (the desktop search's rules) a page at a time after them."""
         model, find = self.model, self._find()
         genres = model.genres(find.strip())
+        hits = search_index(model.search_index(), find) if find.strip() else []
+        if hits:
+            shown = genres[:GENRES_PAGE] if page == 0 else []
+            pages = _pages(len(hits), LIBRARY_PAGE)
+        else:
+            shown = genres[page * GENRES_PAGE : (page + 1) * GENRES_PAGE]
+            pages = _pages(len(genres), GENRES_PAGE)
+        found = [hit.item for hit in hits[page * LIBRARY_PAGE : (page + 1) * LIBRARY_PAGE]]
         loading = not model.ready and not self._failed
-        shown = genres[page * GENRES_PAGE : (page + 1) * GENRES_PAGE]
         message: dict = {
             "t": "genres",
             "section": model.section,
             "find": find,
             "page": page,
-            "pages": _pages(len(genres), GENRES_PAGE),
+            "pages": pages,
             "rows": [self._genre(g) for g in shown],
+            "titles": [self._title_row(item, None) for item in found],
+            "found": len(hits),
             "loading": loading,
         }
         if self._failed and not genres:
@@ -127,11 +139,25 @@ class PhoneLibrary(QObject):
         signature = (
             model.section,
             tuple((g.id, g.title, g.count) for g in shown),
-            message["pages"],
+            tuple(title_of(i) for i in found),
+            pages,
             loading,
             self._failed,
         )
         return message, signature
+
+    def _title_row(self, item: dict, genre_items: Optional[list]) -> dict:
+        model = self.model
+        kind = model.item_kind(item)
+        row: dict[str, Any] = {
+            "id": self.handles.issue("title", (item, kind, genre_items)),
+            "title": title_of(item)[:TITLE_CHARS],
+            "sub": str(item.get("year") or item.get("series_name") or "")[:TITLE_CHARS],
+        }
+        progress = model.progress(item)
+        if progress is not None:
+            row["progress"] = round(progress, 3)
+        return row
 
     def _genre(self, genre: Genre) -> dict:
         title = genre.title[:TITLE_CHARS]
@@ -143,11 +169,11 @@ class PhoneLibrary(QObject):
         return shown
 
     def _found(self, items: list[dict], find: str) -> list[dict]:
-        needle = fold(find.strip())
-        if not needle:
+        words = fold(find).split()  # every word, in any order: as the desktop search
+        if not words:
             return items
         titles = self.model.folded_titles()  # the shared cache's, beside the sorted list
-        return [i for i, title in zip(items, titles) if needle in title]
+        return [i for i, title in zip(items, titles) if all(w in title for w in words)]
 
     def _titles_page(self, page: int) -> tuple[dict, tuple]:
         model, find = self.model, self._find()
@@ -155,18 +181,7 @@ class PhoneLibrary(QObject):
         found = self._found(items, find) if items is not None else []
         shown = found[page * LIBRARY_PAGE : (page + 1) * LIBRARY_PAGE]
         genre = model.genre_id
-        rows = []
-        for item in shown:
-            kind = model.item_kind(item)
-            row: dict[str, Any] = {
-                "id": self.handles.issue("title", (item, kind, items)),
-                "title": title_of(item)[:TITLE_CHARS],
-                "sub": str(item.get("year") or item.get("series_name") or "")[:TITLE_CHARS],
-            }
-            progress = model.progress(item)
-            if progress is not None:
-                row["progress"] = round(progress, 3)
-            rows.append(row)
+        rows = [self._title_row(item, items) for item in shown]
         title = next((g.title for g in model.genres() if g.id == genre), "")
         message: dict = {
             "t": "library",
