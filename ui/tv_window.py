@@ -119,6 +119,7 @@ from ui.overlays.layout_row import LayoutRow
 from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
 from ui.overlays.pip_label import PipLabel
+from ui.overlays.remote_pair import PairOverlay
 from ui.overlays.sleep_notice import SleepNotice
 from ui.overlays.stats import StatsOverlay
 from ui.overlays.subtitle_search import SubtitleSearchPage
@@ -130,6 +131,7 @@ from ui.overlays.zap_banner import ZapBanner
 from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
+from ui.remote_controller import RemoteController
 from ui.settings_dialog import OptionsDialog
 from ui.subtitle_search import OnlineSetup
 from ui.track_controls import SUBTITLE_FILTER
@@ -481,6 +483,7 @@ class TVWindow(QMainWindow):
         self.picture_panel = TrackPanel(host)
         self.stats_overlay = StatsOverlay(host)
         self.sleep_notice = SleepNotice(host)
+        self.pair_overlay = PairOverlay(host)  # the phone remote's pairing QR
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
         self.corner_controls = CornerControls(host)
@@ -503,6 +506,7 @@ class TVWindow(QMainWindow):
             picture_panel=self.picture_panel,
             stats=self.stats_overlay,
             sleep_notice=self.sleep_notice,
+            pairing=self.pair_overlay,
             library_toast=self.library_toast,
             layout_row=self.layout_row,
         )
@@ -537,6 +541,7 @@ class TVWindow(QMainWindow):
             self.subtitle_search,
             self.corner_controls,
             self.sleep_notice,
+            self.pair_overlay,
             self.overlays.toast,
         ):
             host.add_overlay(overlay)
@@ -625,6 +630,10 @@ class TVWindow(QMainWindow):
             parent=self,
         )
         self.menus = TVMenus(self, self)
+        self.remote = RemoteController(self)  # the phone remote; off until Settings turns it on
+        self.pair_overlay.opened.connect(lambda: self.remote.set_pairing(True))
+        self.pair_overlay.closed.connect(lambda: self.remote.set_pairing(False))
+        self.remote.codeChanged.connect(self.pair_overlay.set_url)
         # The player controls' and the guide's ⌕: the Library's search, as Ctrl/⌘+F.
         self.overlays.transport.searchRequested.connect(self.screens.open_search)
         # ‹ Library on the player controls: back to the Library a title came from, as Esc.
@@ -824,6 +833,24 @@ class TVWindow(QMainWindow):
             return True
         return super().event(event)
 
+    def remote_key(self, key: int, text: str = "") -> None:
+        """A phone remote's press of `key` (no modifier): the same path as the keyboard's."""
+        if self._closing:
+            return
+        resolved = resolve(key, Qt.KeyboardModifier.NoModifier, text, context=self._key_context())
+        if resolved is None:
+            return
+        action, payload = resolved
+        with self.screens.from_keys():
+            self._act(action, payload, key=key)
+
+    def remote_action(self, action: Action, payload: str = "") -> None:
+        """A phone remote's button that means one action wherever the TV is (Search, Fullscreen)."""
+        if self._closing:
+            return
+        with self.screens.from_keys():
+            self._act(action, payload, key=0)
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         resolved = None if self._closing else self._resolve(event)
         if resolved is None:
@@ -941,6 +968,7 @@ class TVWindow(QMainWindow):
             self._first_frame = True
             self.player_page.removeEventFilter(self)
             self._load_deferred(deferred_modules())  # after this frame is shown
+            QTimer.singleShot(0, self, self.remote.apply_config)  # a phone remote, if it's on
         elif (
             self._mini_waiting
             and watched is self.windowHandle()
@@ -1250,10 +1278,27 @@ class TVWindow(QMainWindow):
 
     # ---- OptionsDialog host -------------------------------------------------------------------
 
-    def options_dialog(self) -> None:
+    def options_dialog(self, tab: str = "") -> None:
+        """Settings; `tab` "remote" opens it on Phone remote."""
         if not self._closing:
-            OptionsDialog(self).exec()
+            dialog = OptionsDialog(self)
+            if tab == "remote":
+                dialog.options_tab.setCurrentWidget(dialog.remote_tab)
+            dialog.exec()
             self.menus.rebuild_providers()
+
+    def open_phone_remote(self) -> None:
+        """The menu's Phone Remote…: turns the remote on if it is off, then the pairing QR."""
+        if self._closing:
+            return
+        if self.remote.hub is None:
+            self.remote.turn_on()
+            if self.remote.hub is None:  # settings of a newer QiTV: its Settings tab says so
+                self.options_dialog(tab="remote")
+                return
+        if self.screens.library_shown():
+            self.screens.back_to_tv()  # the QR shows over the TV
+        self.pair_overlay.open()
 
     def add_provider(self, link: Optional[ProviderLink] = None) -> None:
         """Settings on the Providers tab, with a new provider to fill in (spec §8); from
@@ -1357,6 +1402,7 @@ class TVWindow(QMainWindow):
             logger.warning("Couldn't save the settings: %s", safe_message(e))
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
         self.controller.settings_saved()
+        self.remote.apply_config()
 
     def set_provider(self, force_update: bool = False) -> None:
         self.controller.select_provider(force_refresh=force_update)
@@ -1561,6 +1607,7 @@ class TVWindow(QMainWindow):
         self.epg_refresh.stop()
         self._run_steps(
             ("let the next click through", self.screens.shutdown),
+            ("stop the phone remote", self.remote.shutdown),
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
             ("stop the channel list's find", self.finder.shutdown),

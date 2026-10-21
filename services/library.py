@@ -286,12 +286,27 @@ def history_season(history, provider: str, series: dict, seasons: list[dict]) ->
     return None
 
 
+class LibraryCache:
+    """What Library models work out from one catalog (a genre's sorted list, the shelves, the
+    parsed dates), by provider and content version: the TV's Library and the phone remote's
+    copies of it share one, so a list of 185,000 films is sorted once for all of them."""
+
+    def __init__(self) -> None:
+        self.memo: OrderedDict[tuple, Any] = OrderedDict()
+        # Parsed `added` times for one content version, by item identity (the item is kept
+        # too, so its id cannot be reused while the entry lives).
+        self.added_times: dict[int, tuple[dict, Optional[float]]] = {}
+        self.added_version: Optional[int] = None
+
+
 class LibraryModel(QObject):
     changed = Signal()
     failed = Signal(str)
     notice = Signal(str)
 
-    def __init__(self, catalog, config, watch: WatchState, parent=None):
+    def __init__(
+        self, catalog, config, watch: WatchState, parent=None, cache: Optional[LibraryCache] = None
+    ):
         super().__init__(parent)
         self._catalog = catalog
         self._config = config
@@ -304,11 +319,7 @@ class LibraryModel(QObject):
         self._pinned_sig: tuple = ()
         self._chosen_sort: Optional[Sort] = None
         self._available = True  # the provider offers the section
-        self._memo: OrderedDict[tuple, Any] = OrderedDict()
-        # Parsed `added` times for the current content version, by item identity (the
-        # item is kept too, so its id cannot be reused while the entry lives).
-        self._added_times: dict[int, tuple[dict, Optional[float]]] = {}
-        self._added_version: Optional[int] = None
+        self.cache = cache if cache is not None else LibraryCache()
         catalog.sectionReady.connect(self._on_section_ready)
         catalog.sectionFailed.connect(self._on_section_failed)
         catalog.groupReady.connect(self._on_group_ready)
@@ -317,12 +328,21 @@ class LibraryModel(QObject):
 
     # --- state ------------------------------------------------------------------------
     @property
+    def _memo(self) -> OrderedDict[tuple, Any]:
+        return self.cache.memo
+
+    @property
     def section(self) -> str:
         return self._section
 
     @property
     def genre_id(self) -> Optional[str]:
         return self._genre
+
+    @property
+    def ready(self) -> bool:
+        """Whether the section's lists arrived (or the provider has no such section)."""
+        return self._requested and self._ready
 
     @property
     def sort(self) -> Sort:
@@ -341,7 +361,7 @@ class LibraryModel(QObject):
         self._provider = self._catalog.current_provider_name()
         self._requested = True
         self._genre = None
-        self._memo.clear()
+        # The cache stays: its entries name their provider, section and content version.
         # A section the provider lacks (an M3U playlist's movies) is ready and empty.
         self._available = section in self._catalog.sections()
         self._ready = not self._available
@@ -471,7 +491,12 @@ class LibraryModel(QObject):
             hist.append((cid, (positions.get(cid) or {}).get("position")))
         return (self._catalog.content_version(), self._favorites(), tuple(hist))
 
+    def _key(self, key: tuple) -> tuple:
+        """A cache entry's key: `key` at the provider shown (a shared cache serves several)."""
+        return (self._catalog.current_provider_name(),) + key
+
     def _memoized(self, key: tuple, build: Callable[[], T]) -> T:
+        key = self._key(key)
         if key in self._memo:
             self._memo.move_to_end(key)
         else:
@@ -482,11 +507,11 @@ class LibraryModel(QObject):
 
     def _added_lookup(self) -> Callable[[dict], Optional[float]]:
         """`_added(item)`, parsed once per content version (look up a batch with one call)."""
-        version = self._catalog.content_version()
-        if version != self._added_version:
-            self._added_times = {}
-            self._added_version = version
-        times = self._added_times
+        version, cache = self._catalog.content_version(), self.cache
+        if version != cache.added_version:
+            cache.added_times = {}
+            cache.added_version = version
+        times = cache.added_times
 
         def lookup(item: dict) -> Optional[float]:
             entry = times.get(id(item))
@@ -677,7 +702,7 @@ class LibraryModel(QObject):
             return None
         if self._genre in PINNED_TITLES:
             return self._genre_items()
-        key = ("raw", self._section, self._genre, self._catalog.content_version())
+        key = self._key(("raw", self._section, self._genre, self._catalog.content_version()))
         if key in self._memo:
             return cast(Optional[list[dict]], self._memo[key])
         items = self._genre_items()
@@ -710,6 +735,25 @@ class LibraryModel(QObject):
             return sorted(raw, key=globals()[_SORT_KEYS[sort]])
 
         return list(self._memoized(key, build))
+
+    def search_index(self) -> list[tuple[str, str, str, str, dict]]:
+        """The section's titles as services.search indexes them (each title folded), worked out
+        once per catalog version: the phone remote finds titles with the desktop's rules."""
+
+        def build() -> list[tuple[str, str, str, str, dict]]:
+            section = self._section
+            return [("", section, fold(title_of(i)), title_of(i), i) for i in self._loaded_items()]
+
+        key = ("search", self._section, self._catalog.content_version())
+        return list(self._memoized(key, build))
+
+    def folded_titles(self) -> list[str]:
+        """The titles of items(), folded for a find, in its order; worked out once per list."""
+        items = self.items() or []
+        if self._genre in PINNED_TITLES:  # a shelf changes with the history, not the version
+            return [fold(title_of(i)) for i in items]
+        key = ("folded", self._section, self._genre, self.sort, self._catalog.content_version())
+        return list(self._memoized(key, lambda: [fold(title_of(i)) for i in items]))
 
     def letter_index(self) -> dict[str, int]:
         if self._genre in PINNED_TITLES or self.sort != Sort.AZ:

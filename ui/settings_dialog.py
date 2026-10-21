@@ -50,6 +50,7 @@ from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
 from ui.free_channels_menu import show_menu as show_free_channels_menu
 from ui.provider_drop import unique_name
+from ui.remote_settings import build_remote_tab, save_remote_settings
 from ui.update_dialogs import check_for_updates
 
 
@@ -331,6 +332,7 @@ class OptionsDialog(QDialog):
         self.create_settings_ui()
         self.create_timeshift_ui()
         self.create_subtitles_ui()
+        build_remote_tab(self)
 
         # Add tab with providers
         self.create_providers_ui()
@@ -1321,6 +1323,7 @@ class OptionsDialog(QDialog):
         except Exception:
             pass
 
+        save_remote_settings(self)
         # Save the configuration
         self.parent().save_config()
 

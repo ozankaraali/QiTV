@@ -37,6 +37,12 @@ class FakeWorker(QObject):
             self.finished.emit(self.result)
 
 
+class ShowingWorker(FakeWorker):
+    """A guide load that can say its saved guide is up before it finishes."""
+
+    shown = Signal()
+
+
 class FakeFactory:
     """Records calls; returns FakeWorkers with canned results."""
 
@@ -169,6 +175,39 @@ class CatalogServiceTests(unittest.TestCase):
         self.assertEqual(ready, [("X",)])
         self.assertEqual(len(epg), 1)
         self.assertTrue(service.epg_ready())
+
+    def test_a_saved_guide_shown_while_a_fresh_one_loads_reads_at_once(self):
+        runner, factory = ManualRunner(), FakeFactory()
+        service, _, _, _ = make_service(
+            {"name": "X", "type": "XTREAM", "url": "h:1"}, factory, runner
+        )
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
+        loading = ShowingWorker({})
+        factory.epg = lambda manager, force: loading
+        ready = collect(service.epgReady)
+        service.select_provider()
+        runner.complete(0)  # the provider is ready: its guide loads
+        self.assertFalse(service.epg_ready())
+        loading.shown.emit()  # the saved guide is up; the download goes on
+        self.assertTrue(service.epg_ready())
+        self.assertEqual(len(ready), 1)
+        runner.complete(1)  # the fresh guide is in
+        self.assertEqual(len(ready), 2)
+
+    def test_a_saved_guide_shown_after_its_release_is_not_read(self):
+        runner, factory = ManualRunner(), FakeFactory()
+        service, _, _, epg = make_service(
+            {"name": "X", "type": "XTREAM", "url": "h:1"}, factory, runner
+        )
+        epg.release = lambda: None
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
+        loading = ShowingWorker({})
+        factory.epg = lambda manager, force: loading
+        service.select_provider()
+        runner.complete(0)
+        service.release_epg()  # no longer in use
+        loading.shown.emit()
+        self.assertFalse(service.epg_ready())
 
     def test_provider_failure_is_reported(self):
         service, _, factory, _ = make_service({"name": "X", "type": "XTREAM", "url": "h:1"})

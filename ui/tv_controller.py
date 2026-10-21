@@ -171,6 +171,7 @@ class Overlays:
     sleep_notice: Any = None  # the sleep timer's last minute (2.3)
     layout_row: Any = None  # the multiview's layouts above its layout chip
     library_toast: Any = None  # the Library page's toast: the menus' messages while it shows
+    pairing: Any = None  # the phone remote's pairing screen (2.5)
 
 
 class TVController(QObject):
@@ -253,6 +254,7 @@ class TVController(QObject):
         self._wired = False
         self._closed = False
         self._guides_applied: Optional[set[str]] = None  # what the hub was last told
+        self._phone_guides: set[str] = set()  # the providers the phone remote lists
         self._lanes = LinkLanes(catalog, self)
         # The live channel's time-shift side: pipeline tunes, its controls and reports.
         self._live_controls = LiveControls(
@@ -753,10 +755,32 @@ class TVController(QObject):
         if not self._closed:
             self._flow.resume_live()
 
-    def tune_live(self, channel: dict) -> None:
-        """A live channel from the Library's search: ↑/↓ then walk every channel (group "*")."""
+    def tune_live(
+        self, channel: dict, group_key: str = ALL_GROUP_ID, channels: Optional[list] = None
+    ) -> None:
+        """A live channel from the Library's search (↑/↓ then walk every channel: group "*") or
+        from the phone remote's Guide (its group's channels)."""
         self._flow.leave_library()
-        self.tune(channel, group_key=ALL_GROUP_ID, channels=self._all_live())
+        listed = self._all_live() if channels is None else channels
+        self.tune(channel, group_key=group_key, channels=listed)
+
+    def watch_from_start(
+        self, channel: dict, programme: Programme, group_key: str, channels: list
+    ) -> None:
+        """A past programme from the phone remote's timetable: as the guide's Watch from the
+        start."""
+        self._flow.leave_library()
+        self._on_guide_catchup(channel, programme, group_key, channels)
+
+    def timetable(
+        self, channel: dict, limit: int, back: timedelta
+    ) -> tuple[datetime, list[Programme]]:
+        """Now, and `channel`'s programmes from the one on now (from up to `back` earlier when
+        its archive plays), oldest first."""
+        now = self._now()
+        days = self.archive_days(channel)
+        since = now - min(back, timedelta(days=days)) if days > 0 else now
+        return now, self._programmes(channel, since, limit)
 
     def play_file(self, path: str) -> None:
         """Play a local media file (File → Open File…) as a movie: no link, no history.
@@ -850,6 +874,11 @@ class TVController(QObject):
         """`key` is the Qt key pressed, when it matters (the mixer takes the arrow keys)."""
         if self._closed:
             return
+        pairing = self.overlays.pairing
+        if pairing is not None and pairing.isVisible():
+            pairing.dismiss()  # any key closes the pairing screen; Esc does only that
+            if action is Action.ESCAPE:
+                return
         if self._online is not None and self._online.handle(action, payload):
             return  # the OpenSubtitles search shows: typing, the lists, Enter and Esc
         if self._guide.is_open() and self._guide.handle(action, payload):
@@ -2145,6 +2174,16 @@ class TVController(QObject):
         lag = timeline.get("lag") if timeline is not None else None
         return float(lag) if isinstance(lag, (int, float)) else None
 
+    def behind_live(self) -> float:
+        """How far the large picture plays behind live once the viewer left live (paused, went
+        back, or another speed): 0 while it stays live, its buffer aside, as the player shows
+        Go live only then."""
+        lag = self._live_lag()
+        timeline = self._tuner.timeline
+        if lag is None or not isinstance(timeline, dict) or timeline.get("mode", "live") == "live":
+            return 0.0
+        return lag
+
     def _live_info(self) -> dict:
         """The statistics' source and lag for the large picture."""
         live = self.live
@@ -2278,6 +2317,7 @@ class TVController(QObject):
         if self._grid is not None:
             items.extend(self._grid.channels())  # the multiview's tiles'
         names.update(provider_of(item) for item in items if item)
+        names.update(self._phone_guides)  # the channels the phone remote lists
         source = self.catalog.current_provider_name()
         if source != ALL_PROVIDERS:
             names.add(source)
@@ -2287,6 +2327,30 @@ class TVController(QObject):
             names.update(self._drawer_providers())
         names.discard("")
         return names
+
+    def use_phone_guides(self, names: set[str]) -> None:
+        """The providers of the channels the phone remote lists: their guides load too."""
+        self._phone_guides = set(names)
+        self._update_guides()
+
+    def guide_loading(self, channel: dict) -> bool:
+        """Whether `channel`'s provider guide is on its way (a load runs or waits, or its
+        provider still sets up and then loads it): an empty timetable then says so instead of
+        "no guide". A load that failed is not on its way."""
+        name = provider_of(channel) or self.catalog.current_provider_name()
+        catalogs = self.catalog.catalogs
+        if name not in catalogs.names():
+            return False
+        catalog = catalogs.catalog(name)
+        if catalog.epg_ready() or not catalog.epg_enabled:
+            return bool(catalog.epg_loading())
+        return bool(catalog.epg_loading() or catalog.is_loading())
+
+    def channel_list_group(self) -> str:
+        """The live group the channel list is in: the drawer's, else the one zapped through
+        ("" when neither)."""
+        group = self._drawer_group()
+        return group.key if group is not None else self.zap.context.group_key
 
     def _guide_context(self) -> ZapContext:
         """What the guide lists: the zap group's channels, but in all mode the live group the
@@ -2542,6 +2606,15 @@ class TVController(QObject):
             is_live=True,
             clock=now,
         )
+
+    def now_next(self, channel: dict) -> tuple[Optional[Programme], Optional[Programme]]:
+        """The programme on now on `channel` and the next one (from the loaded guide)."""
+        now = self._now()
+        return now_next(self._programmes(channel, now, 3), now)
+
+    def channel_number(self, channel: dict) -> str:
+        """A channel's number as the banner shows it ("" when it has none)."""
+        return self._number(channel)
 
     def _programmes(self, channel: dict, now: datetime, limit: int) -> list[Programme]:
         try:

@@ -474,6 +474,7 @@ class TVWindowTests(WindowCase):
                 ("About QiTV", ""),
                 ("Check for Updates…", ""),
                 ("Settings…", "Ctrl+,"),
+                ("Phone Remote…", ""),
                 ("Quit", "Ctrl+Q"),
             ],
         )

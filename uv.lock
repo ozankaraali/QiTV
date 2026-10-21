@@ -982,7 +982,7 @@ wheels = [
 
 [[package]]
 name = "qitv"
-version = "2.4.4"
+version = "2.5.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp", extra = ["speedups"] },
@@ -995,6 +995,7 @@ dependencies = [
     { name = "pyside6" },
     { name = "python-vlc" },
     { name = "requests" },
+    { name = "segno" },
     { name = "tzlocal" },
     { name = "urllib3" },
 ]
@@ -1022,6 +1023,7 @@ requires-dist = [
     { name = "pyside6", specifier = ">=6.11.2,<6.12" },
     { name = "python-vlc", specifier = "==3.0.21203" },
     { name = "requests", specifier = ">=2.34.2" },
+    { name = "segno", specifier = ">=1.6.6" },
     { name = "tzlocal", specifier = ">=5.4.4" },
     { name = "urllib3", specifier = ">=2.8.0" },
 ]
@@ -1050,6 +1052,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ac/c3/e2a2b89f2d3e2179abd6d00ebd70bff6273f37fb3e0cc209f48b39d00cbf/requests-2.34.2.tar.gz", hash = "sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed", size = 142856, upload-time = "2026-05-14T19:25:27.735Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl", hash = "sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0", size = 73075, upload-time = "2026-05-14T19:25:26.443Z" },
+]
+
+[[package]]
+name = "segno"
+version = "1.6.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1c/2e/b396f750c53f570055bf5a9fc1ace09bed2dff013c73b7afec5702a581ba/segno-1.6.6.tar.gz", hash = "sha256:e60933afc4b52137d323a4434c8340e0ce1e58cec71439e46680d4db188f11b3", size = 1628586, upload-time = "2025-03-12T22:12:53.324Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d6/02/12c73fd423eb9577b97fc1924966b929eff7074ae6b2e15dd3d30cb9e4ae/segno-1.6.6-py3-none-any.whl", hash = "sha256:28c7d081ed0cf935e0411293a465efd4d500704072cdb039778a2ab8736190c7", size = 76503, upload-time = "2025-03-12T22:12:48.106Z" },
 ]
 
 [[package]]

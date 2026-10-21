@@ -294,6 +294,17 @@ Watch several live channels side by side: press <kbd>V</kbd>, choose **View → 
 
 Each tile's label shows LIVE, or how far behind live it plays (−00:42). Tiles without the focus play at normal speed and only jump back to live when they fall far behind (never while paused); each can be paused from its own controls, and rewound like the big picture once it has the focus. Its time-shift buffer is in memory: the focused tile gets the memory per stream (**Settings**), the others a short one of 64 MiB (`"multiview_tile_ram_mib"` in `config.json` changes it; at least 48, enough for a 4K channel). A tile you paused or rewound keeps what it plays until it is back at live.
 
+### Phone remote
+
+Use your phone as the remote, in its browser: no app to install. Choose **QiTV → Phone Remote…** (it turns the remote on the first time): a code shows on the TV. Scan it with the phone's camera; the browser opens the remote, and the phone is paired from then on (add the page to the home screen to keep it one tap away).
+
+- The arrows, OK and Back work as the keyboard's, wherever you are (the channel list, the Library, the guide); a held button repeats like a held key and stops where you let go. **TV**, **Movies** and **Series** jump to those pages; the volume and channel rockers, ⏪ ⏯ ⏩, Mute and **Go live** sit below. **More** holds the channel numbers, Record, Picture in picture, Swap, Multiview, Picture and Full screen. The phone's menu (⋯) switches the arrows for a touchpad: flick for a step, drag and hold to keep moving, tap for OK.
+- The phone also shows what's on, a **Guide** and the **Library**. The Guide opens where the TV's channel list is, on the channel playing; ‹ Groups goes up to the groups (Favorites, Recent and the provider's own). A channel opens its card: its timetable and **Watch** (a past programme plays from the start when the provider keeps an archive); the ▶ at the end of its row tunes at once. The Library lists Movies' and Series' genres, Continue first, then a genre's titles; its find box finds genres and, below them, the section's films or series, as QiTV's search does. Every find box searches the whole list shown, and browsing on the phone leaves the TV where it is until you tap. **Search** types on the phone and shows the TV's results on both.
+- At home the phone talks to QiTV directly over your Wi-Fi. With **Reach QiTV from any network** on (Settings → Phone remote), it also works on mobile data or another network, through the QiTV relay; the relay passes along scrambled messages it can't read (Noise, end to end), and sees only that a phone and a QiTV talk, how much, and from which addresses. When the phone is on the TV's network it switches to the direct connection by itself.
+- The code on the TV changes every minute, pairs one phone, and only works while it shows. **Settings → Phone remote** lists the paired phones; **Remove** cuts one off at once. A phone can pair with several QiTVs and choose between them.
+- The first time the remote is turned on, the system may ask whether QiTV may accept incoming connections (Windows always, macOS when its firewall is on): allow it for your home network. QiTV answers only addresses of a home network.
+- What it doesn't protect against: someone who can change the traffic on your home network, and a phone that is stolen unlocked (remove it in Settings).
+
 ## The guide
 
 Press <kbd>G</kbd> (or the guide button in the player controls) for the programme guide (EPG): the channels of the group you are watching, from the current half hour on, up to 24 hours ahead. Move with the arrow keys, type a number to jump to a channel, and press <kbd>Enter</kbd> to watch it. With the mouse, click a channel and double-click it to watch; **‹** and **›** beside the day move in time, and **⌕**, **⛶** (fullscreen) and **×** (close) are at the top right. The bottom shows the highlighted programme's description. On channels whose provider keeps an archive, the guide also goes back in time and plays past programmes from their start (see [Catch-up](#catch-up-your-providers-archive)).
@@ -441,6 +452,7 @@ QiTV is licensed under [MIT](LICENSE). The release downloads also contain other 
 | PySide6 | LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only |
 | python-vlc | LGPL-2.1+ |
 | requests | Apache-2.0 |
+| segno | BSD License |
 | tzlocal | MIT |
 | urllib3 | MIT |
 

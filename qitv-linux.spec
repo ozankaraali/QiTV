@@ -55,9 +55,12 @@ a = Analysis(
         # buttons and file dialogs) come with PyInstaller's QtCore hook, under
         # PySide6/Qt/translations.
         ('i18n/*.json', 'i18n'),
+        # The phone remote's page (services/remote/hub.py serves it on the home network).
+        ('services/remote/web', 'remote_web'),
         ('licenses', 'licenses'),
     ],
     hiddenimports=[
+        'segno',  # the phone remote's pairing QR (imported where it is drawn)
         # The live time-shift helper process (spawned) and what its source imports.
         'services.live.worker',
         'm3u8',

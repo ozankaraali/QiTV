@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss: https:; base-uri 'none'; form-action 'none'">
+<meta name="theme-color" content="#0b0f14">
+<meta name="color-scheme" content="dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="QiTV">
+<meta name="referrer" content="no-referrer">
+<title>QiTV remote</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<svg width="0" height="0" class="sprite" aria-hidden="true">
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="i-left" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></symbol>
+  <symbol id="i-right" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.7" class="solid"/><circle cx="12" cy="12" r="1.7" class="solid"/><circle cx="19" cy="12" r="1.7" class="solid"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="i-rew" viewBox="0 0 24 24"><path d="M11 6v12L3 12z" class="solid"/><path d="M21 6v12l-8-6z" class="solid"/></symbol>
+  <symbol id="i-fwd" viewBox="0 0 24 24"><path d="M3 6v12l8-6z" class="solid"/><path d="M13 6v12l8-6z" class="solid"/></symbol>
+  <symbol id="i-pp" viewBox="0 0 24 24"><path d="M4 6v12l8-6z" class="solid"/><path d="M16 6v12M20 6v12"/></symbol>
+  <symbol id="i-mute" viewBox="0 0 24 24"><path d="M3 9.5h4l5-4v13l-5-4H3z"/><path d="M16.5 9.5l5 5M21.5 9.5l-5 5"/></symbol>
+  <symbol id="i-remote" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-guide" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h11"/></symbol>
+  <symbol id="i-lib" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M8 4.5v15M16 4.5v15"/></symbol>
+  <symbol id="i-rec" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" class="solid"/></symbol>
+  <symbol id="i-pip" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="12" y="11.5" width="6.5" height="5" rx="1" class="solid"/></symbol>
+  <symbol id="i-swap" viewBox="0 0 24 24"><path d="M5 8h13l-3.5-3.5M19 16H6l3.5 3.5"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="7.5" height="6.5" rx="1.2"/><rect x="13" y="4.5" width="7.5" height="6.5" rx="1.2"/><rect x="3.5" y="13" width="7.5" height="6.5" rx="1.2"/><rect x="13" y="13" width="7.5" height="6.5" rx="1.2"/></symbol>
+  <symbol id="i-aspect" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 10V8.5h2.5M17 14v1.5h-2.5"/></symbol>
+  <symbol id="i-full" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" class="solid"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></symbol>
+</svg>
+
+<main id="app">
+  <header class="top">
+    <button class="conn" id="tvButton" type="button"><i id="dot"></i><span id="tvName">QiTV</span></button>
+    <button class="menu" id="menuButton" type="button" aria-label="Menu" data-tl="menu"><svg><use href="#i-more"/></svg></button>
+  </header>
+  <div class="banner" id="banner" hidden></div>
+
+  <section class="screen center" data-screen="connecting">
+    <div class="spinner" aria-hidden="true"></div>
+    <p data-t="connecting">Connecting to QiTV…</p>
+  </section>
+
+  <section class="screen center" data-screen="scan" hidden>
+    <h1 data-t="scan_title">Scan the code on the TV</h1>
+    <p id="scanMessage" class="muted" data-t="scan_hint">On the computer, open QiTV's menu → Phone Remote…, then scan the code with your phone's camera.</p>
+    <button class="wide accent" id="scanButton" type="button" hidden><svg><use href="#i-camera"/></svg><span data-t="scan_camera">Scan with the camera</span></button>
+    <div class="scanner" id="scanner" hidden><video id="scanVideo" playsinline muted></video><canvas id="scanCanvas" hidden></canvas></div>
+  </section>
+
+  <section class="screen remote" data-screen="remote" hidden>
+    <button class="now" id="now" type="button" data-key="info">
+      <div class="logo" id="nowLogo">TV</div>
+      <div class="now-main">
+        <div class="line"><span class="live" id="nowLive" hidden data-t="live">LIVE</span><span class="num" id="nowNum"></span><span class="name" id="nowName">Nothing playing</span></div>
+        <div class="sub" id="nowShow"></div>
+        <div class="prog"><i id="nowProg"></i></div>
+      </div>
+    </button>
+    <div class="seg" role="group">
+      <button type="button" data-key="tv" data-section="live" data-t="tv">TV</button>
+      <button type="button" data-key="movies" data-section="movies" data-t="movies">Movies</button>
+      <button type="button" data-key="series" data-section="series" data-t="series">Series</button>
+      <button type="button" data-key="guide" data-t="guide">Guide</button>
+    </div>
+    <div class="pad" id="pad">
+      <button type="button" class="wedge up" data-key="up" aria-label="Up"><svg><use href="#i-up"/></svg></button>
+      <button type="button" class="wedge right" data-key="right" aria-label="Right"><svg><use href="#i-right"/></svg></button>
+      <button type="button" class="wedge down" data-key="down" aria-label="Down"><svg><use href="#i-down"/></svg></button>
+      <button type="button" class="wedge left" data-key="left" aria-label="Left"><svg><use href="#i-left"/></svg></button>
+      <button type="button" class="ok" data-key="ok" data-t="ok">OK</button>
+      <div class="touchpad" id="touchpad" hidden><span data-t="touchpad_hint">Swipe to move · tap for OK</span></div>
+    </div>
+    <div class="trio">
+      <button type="button" class="round" data-key="back"><span class="b"><svg><use href="#i-back"/></svg></span><span data-t="back">Back</span></button>
+      <button type="button" class="round" data-key="search" id="searchButton"><span class="b"><svg><use href="#i-search"/></svg></span><span data-t="search">Search</span></button>
+      <button type="button" class="round" id="moreButton"><span class="b"><svg><use href="#i-more"/></svg></span><span data-t="more">More</span></button>
+    </div>
+    <div class="cluster">
+      <div class="rocker">
+        <button type="button" data-key="volup" aria-label="Volume up"><svg><use href="#i-plus"/></svg></button>
+        <span data-t="vol">Vol</span>
+        <button type="button" data-key="voldown" aria-label="Volume down"><svg><use href="#i-minus"/></svg></button>
+      </div>
+      <div class="mid">
+        <button type="button" class="sq" data-key="rew" aria-label="Back 10 seconds"><svg><use href="#i-rew"/></svg></button>
+        <button type="button" class="sq" data-key="pp" aria-label="Play or pause"><svg><use href="#i-pp"/></svg></button>
+        <button type="button" class="sq" data-key="fwd" aria-label="Forward 10 seconds"><svg><use href="#i-fwd"/></svg></button>
+        <button type="button" class="sq" data-key="mute" aria-label="Mute"><svg><use href="#i-mute"/></svg></button>
+        <button type="button" class="golive" data-key="live"><i></i><span data-t="go_live">Go live</span></button>
+      </div>
+      <div class="rocker">
+        <button type="button" data-key="chup" aria-label="Channel up"><svg><use href="#i-up"/></svg></button>
+        <span data-t="ch">Ch</span>
+        <button type="button" data-key="chdown" aria-label="Channel down"><svg><use href="#i-down"/></svg></button>
+      </div>
+    </div>
+  </section>
+
+  <section class="screen list" data-screen="guide" hidden>
+    <div class="list-head">
+      <button type="button" class="back" id="guideUp" hidden><svg><use href="#i-left"/></svg><span data-t="groups">Groups</span></button>
+      <h1 id="guideTitle">Guide</h1>
+    </div>
+    <input class="field" id="guideFind" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search">
+    <div class="rows" id="guideRows"></div>
+  </section>
+
+  <section class="screen list" data-screen="timetable" hidden>
+    <div class="tt-head">
+      <button type="button" class="back" id="timetableBack"><svg><use href="#i-left"/></svg><span data-t="guide">Guide</span></button>
+      <h1 id="timetableName"></h1>
+      <button type="button" class="again" id="timetableWatch" data-t="watch">Watch</button>
+    </div>
+    <div class="rows" id="timetableRows"></div>
+  </section>
+
+  <section class="screen list" data-screen="search" hidden>
+    <div class="searchbar">
+      <input class="field" id="searchInput" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search" placeholder="Search channels, movies and series" data-tp="search_hint">
+      <button type="button" class="done" id="searchDone" data-t="done">Done</button>
+    </div>
+    <div class="rows" id="searchRows"></div>
+  </section>
+
+  <section class="screen list" data-screen="library" hidden>
+    <div class="list-head">
+      <button type="button" class="back" id="libraryUp" hidden><svg><use href="#i-left"/></svg><span data-t="genres">Genres</span></button>
+      <h1 id="libraryTitle">Library</h1>
+    </div>
+    <div class="chips" id="libraryChips">
+      <button type="button" class="on" data-lib="movies" data-t="movies">Movies</button>
+      <button type="button" data-lib="series" data-t="series">Series</button>
+    </div>
+    <input class="field" id="libraryFind" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search">
+    <div class="rows" id="libraryRows"></div>
+  </section>
+
+  <nav class="tabs" id="tabs" hidden>
+    <button type="button" class="on" data-tab="remote"><svg><use href="#i-remote"/></svg><span data-t="remote">Remote</span></button>
+    <button type="button" data-tab="guide"><svg><use href="#i-guide"/></svg><span data-t="guide">Guide</span></button>
+    <button type="button" data-tab="library"><svg><use href="#i-lib"/></svg><span data-t="library">Library</span></button>
+  </nav>
+</main>
+
+<div class="veil" id="veil" hidden></div>
+<div class="sheet" id="moreSheet" hidden>
+  <div class="grab"></div>
+  <div class="sh" data-t="channel_number">Channel number</div>
+  <div class="numpad">
+    <button type="button" data-key="d1">1</button><button type="button" data-key="d2">2</button><button type="button" data-key="d3">3</button>
+    <button type="button" data-key="d4">4</button><button type="button" data-key="d5">5</button><button type="button" data-key="d6">6</button>
+    <button type="button" data-key="d7">7</button><button type="button" data-key="d8">8</button><button type="button" data-key="d9">9</button>
+    <button type="button" class="w" data-key="previous" data-t="previous">Previous</button><button type="button" data-key="d0">0</button><button type="button" class="w" data-close="moreSheet" data-t="done">Done</button>
+  </div>
+  <div class="sh" data-t="more">More</div>
+  <div class="acts">
+    <button type="button" class="rec" data-key="record"><svg><use href="#i-rec"/></svg><span data-t="record">Record</span></button>
+    <button type="button" data-key="pip"><svg><use href="#i-pip"/></svg><span data-t="pip">Picture in picture</span></button>
+    <button type="button" data-key="swap"><svg><use href="#i-swap"/></svg><span data-t="swap">Swap pictures</span></button>
+    <button type="button" data-key="multiview"><svg><use href="#i-grid"/></svg><span data-t="multiview">Multiview</span></button>
+    <button type="button" data-key="picture"><svg><use href="#i-aspect"/></svg><span data-t="picture">Picture</span></button>
+    <button type="button" data-key="fullscreen"><svg><use href="#i-full"/></svg><span data-t="fullscreen">Full screen</span></button>
+  </div>
+</div>
+<div class="sheet" id="menuSheet" hidden>
+  <div class="grab"></div>
+  <div class="sh" id="menuTitle" data-t="this_phone">This phone</div>
+  <div class="menu-list" id="menuList"></div>
+</div>
+
+<script type="module" src="main.js"></script>
+</body>
+</html>

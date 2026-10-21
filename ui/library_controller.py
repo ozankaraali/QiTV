@@ -98,6 +98,7 @@ def _context(**values) -> dict:
 
 class LibraryController(QObject):
     notice = Signal(str)  # a message for the window's toast
+    searchChanged = Signal()  # the search's hits changed (the phone remote mirrors them)
 
     def __init__(
         self,
@@ -198,6 +199,7 @@ class LibraryController(QObject):
         nav.sourceRequested.connect(self._show_source_menu)
         screen.search_field.clicked.connect(lambda: self._focus("search"))
         self._search.changed.connect(self._show_hits)
+        self._search.changed.connect(self.searchChanged)
 
     def shutdown(self) -> None:
         """The window is closing: a running search's result and a pending action are dropped."""
@@ -280,6 +282,27 @@ class LibraryController(QObject):
         else:
             self._on_model_changed()
         self._focus("grid")
+
+    def remote_search(self, query: str) -> None:
+        """The phone remote's typing: the search shows and searches `query` as it is now."""
+        if self._closed:
+            return
+        if not query:
+            self._search.set_query("")
+        self.open_search(query)
+
+    def search_hits(self) -> list[Hit]:
+        """What the search shows now (none while it has no query or is still searching)."""
+        return list(self._search.hits or [])
+
+    def activate_hit(self, hit: Hit) -> None:
+        """A search result tapped on the phone remote: as Enter on it."""
+        self._activate_hit(hit, start_over=False)
+
+    def activate_title(self, item: dict, kind: str, genre_items: Optional[list]) -> None:
+        """A title tapped in the phone remote's Library: as Enter on its poster there."""
+        provider = provider_of(item) or self._catalog.current_provider_name()
+        self._activate_item(item, provider, kind, False, genre_items)
 
     def open_search(self, query: str = "") -> None:
         """The search; `query` (typed elsewhere: the channel list's find) is searched at once."""
@@ -688,13 +711,18 @@ class LibraryController(QObject):
             return
         provider = provider_of(item) or self._browse_provider()
         kind = self._model.item_kind(item)
+        self._activate_item(item, provider, kind, start_over, self._model.items())
+
+    def _activate_item(
+        self, item: dict, provider: str, kind: str, start_over: bool, genre_items
+    ) -> None:
         if kind == "series":
             self._request(provider, lambda: self._open_series(item, provider, back="browse"))
         elif kind == "episode":  # Continue in Series: no series dict, so no autoplay
             context = _context(start_over=start_over)
             self._request(provider, lambda: self._play(item, "episode", context))
         else:
-            context = _context(start_over=start_over, genre_items=self._model.items())
+            context = _context(start_over=start_over, genre_items=genre_items)
             self._request(provider, lambda: self._play(item, "movie", context))
 
     def _activate_hit(self, hit: Hit, start_over: bool) -> None:
