@@ -171,7 +171,17 @@ class MessageTests(unittest.TestCase):
             parse_phone_message({"t": "get", "what": "chgroups", "find": "new", "n": 3}),
             {"t": "get", "what": "chgroups", "page": 0, "find": "new", "n": 3},
         )
+        self.assertEqual(  # the providers above the groups, and the groups of one of them
+            parse_phone_message({"t": "get", "what": "chsources", "n": 4}),
+            {"t": "get", "what": "chsources", "n": 4},
+        )
+        self.assertEqual(
+            parse_phone_message({"t": "get", "what": "groups", "source": "g1a"}),
+            {"t": "get", "what": "groups", "page": 0, "find": "", "source": "g1a"},
+        )
         for obj in (
+            {"t": "get", "what": "groups", "source": "g" * 33},
+            {"t": "get", "what": "chgroups", "source": 5},
             {"t": "get", "what": "channels", "list": "g" * 33},
             {"t": "get", "what": "channels", "page": -1},
             {"t": "get", "what": "chgroups", "find": 5},

@@ -38,6 +38,13 @@ const FALLBACK = {
 };
 export const t = (key) => strings[key] || FALLBACK[key] || key;
 
+// A find box's label (just before it, unseen) says what its placeholder says: iOS AutoFill takes
+// the text before a box for its label otherwise (the Remote tab's TV | Phone: phone numbers).
+export function nameField(input) {
+  const label = input.previousElementSibling;
+  if (label && label.tagName === "LABEL") label.textContent = input.placeholder;
+}
+
 const app = {
   tvId: null, // the TV's public key, base64url
   conn: null,
@@ -90,6 +97,7 @@ function applyStrings(table) {
   Object.assign(strings, table || {});
   for (const el of document.querySelectorAll("[data-t]")) if (strings[el.dataset.t]) el.textContent = strings[el.dataset.t];
   for (const el of document.querySelectorAll("[data-tp]")) if (strings[el.dataset.tp]) el.placeholder = strings[el.dataset.tp];
+  for (const el of document.querySelectorAll("[data-tp]")) nameField(el);
 }
 
 // ---- the connection -----------------------------------------------------------------------

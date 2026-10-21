@@ -206,6 +206,8 @@ class KkTests(SessionCase):
             {"t": "watch"},
             {"t": "watch", "id": "h3"},
             {"t": "totv"},
+            {"t": "get", "what": "sources", "n": 2},
+            {"t": "get", "what": "chgroups", "source": "g1a", "n": 3},
         ):
             got += session.receive(phone.seal(message)).events
         self.assertEqual(
@@ -220,6 +222,8 @@ class KkTests(SessionCase):
                 WatchHere(sid),
                 WatchHere(sid, "h3"),
                 ToTv(sid),
+                Get(sid, "sources", "", 0, n=2),
+                Get(sid, "chgroups", "", 0, n=3, source="g1a"),
             ],
         )
 

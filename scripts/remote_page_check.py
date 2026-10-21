@@ -520,6 +520,21 @@ def channels_page(page: int, pages: int, playing: int = -1) -> dict:
     return {**head, "page": page, "pages": pages, "rows": rows, "loading": False}
 
 
+def labelled(rig: Rig, field: str) -> None:
+    """A find box is named by a label of its own, just before it, saying what its placeholder
+    says: iOS AutoFill read the switch beside the Remote tab's ("Phone") as its label and
+    offered phone numbers."""
+    found = rig.page.evaluate(
+        """(id) => { const input = document.getElementById(id);
+          const label = input.previousElementSibling;
+          return [label && label.tagName === 'LABEL' && label.htmlFor === id,
+                  label ? label.textContent : '', input.placeholder]; }""",
+        field,
+    )
+    named, text, placeholder = found
+    assert named and text and text == placeholder, (field, found)
+
+
 def answer(rig: Rig, sid: str, ask: Any, message: dict) -> None:
     """QiTV's answer to `ask`, carrying its number back as QiTV's do (an unnumbered message
     reads as QiTV's own resend, which the page takes only for what it shows)."""
@@ -573,6 +588,7 @@ def scenario_guide_tune(rig: Rig) -> None:
     assert (ask.page, ask.find) == (0, ""), ask
     answer(rig, sid, ask, GROUPS)
     rig.page.wait_for_selector("#guideRows .row.branch >> nth=2")
+    labelled(rig, "guideFind")  # the groups' placeholder, the label with it
     assert rig.page.locator("#guideRows .group", has_text="Provider A").count() == 1
     assert rig.page.locator("#guideUp").is_hidden()
     rig.shot("groups")
@@ -609,6 +625,7 @@ def scenario_channel_list(rig: Rig) -> None:
     assert rig.page.locator("[data-key=volup]").is_visible(), "the volume went"
     assert rig.page.locator("#zapRows .row.playing").count() == 1
     assert rig.page.inner_text("#zapTitle").startswith("All"), rig.page.inner_text("#zapTitle")
+    labelled(rig, "zapFind")
     rig.shot("channel-list")
     mark = rig.events.mark()  # a row tunes
     rig.page.locator("#zapRows .row", has_text="Fernvale Sports").click()
@@ -730,6 +747,9 @@ def scenario_watch_here(rig: Rig) -> None:
     assert rig.page.inner_text("#playerName") == "Fernvale Sports"
     blocked = rig.page.evaluate("window.blocked")
     assert not blocked, f"the page's policy blocked the stream: {blocked}"
+    # Picture in picture as the page is left, where the browser does it (its own controls have
+    # the button).
+    assert rig.page.get_attribute("#video", "autopictureinpicture") is not None
     rig.shot("watch-here")
     rig.hub.send(sid, {"t": "play", "url": "javascript:alert(1)"})  # only http(s) plays
     rig.page.wait_for_timeout(300)
@@ -745,6 +765,49 @@ def scenario_watch_here(rig: Rig) -> None:
     rig.page.click("#where [data-where=tv]")
     rig.events.wait(ToTv, after=mark)
     assert rig.page.locator("#player").is_hidden()
+
+
+def scenario_providers(rig: Rig) -> None:
+    """With two providers, the groups have the providers above them: All providers, then each;
+    the one chosen is asked for once (source) and its groups come with its name."""
+    sid = paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark), GUIDE)
+    rig.page.wait_for_selector("#guideRows .row >> nth=2")
+    mark = rig.events.mark()
+    rig.page.click("#guideUp")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "groups", after=mark)
+    answer(rig, sid, ask, {**GROUPS, "pick": True, "source": "Provider A"})
+    rig.page.wait_for_selector("#guideRows .row.branch >> nth=2")
+    assert rig.page.inner_text("#guideTitle").startswith("Provider A"), rig.page.inner_text(
+        "#guideTitle"
+    )
+    assert rig.page.locator("#guideUp").is_visible(), "no way up to the providers"
+    assert rig.page.inner_text("#guideUp") == "Providers", rig.page.inner_text("#guideUp")
+    mark = rig.events.mark()
+    rig.page.click("#guideUp")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "sources", after=mark)
+    sources = [
+        {"id": "s0", "title": "All providers"},
+        {"id": "s1", "title": "Provider A", "on": True},
+        {"id": "s2", "title": "Provider B"},
+    ]
+    answer(rig, sid, ask, {"t": "sources", "rows": sources})
+    rig.page.wait_for_selector("#guideRows .row.branch >> nth=2")
+    assert rig.page.locator("#guideRows .row.branch.on", has_text="Provider A").count() == 1
+    assert rig.page.locator("#guideFind").is_hidden() and rig.page.locator("#guideUp").is_hidden()
+    rig.shot("providers")
+    mark = rig.events.mark()
+    rig.page.locator("#guideRows .row.branch", has_text="All providers").click()
+    ask = rig.events.wait(Get, where=lambda e: e.what == "groups", after=mark)
+    assert ask.source == "s0", ask
+    answer(rig, sid, ask, {**GROUPS, "pick": True, "source": "All providers"})
+    rig.page.locator("#guideTitle", has_text="All providers").wait_for(timeout=5000)
+    mark = rig.events.mark()
+    rig.page.fill("#guideFind", "news")  # the find asks again, without choosing again
+    ask = rig.events.wait(Get, where=lambda e: e.what == "groups" and e.find == "news", after=mark)
+    assert ask.source == "", ask
 
 
 def scenario_guide_pages(rig: Rig) -> None:
@@ -1074,6 +1137,7 @@ SCENARIOS.update(
         "guide-tune": scenario_guide_tune,
         "channel-list": scenario_channel_list,
         "find-both": scenario_find_both,
+        "providers": scenario_providers,
         "watch-here": scenario_watch_here,
         "guide-pages": scenario_guide_pages,
         "timetable": scenario_timetable,

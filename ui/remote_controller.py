@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 
+from services.browsed_catalog import BrowsedCatalog
 from services.i18n import N_, translate
 from services.provider_api import xtream_hls
 from services.provider_ids import provider_of
@@ -59,6 +60,24 @@ PLAYING_ON_PHONE_TEXT = N_("Playing on the phone")  # i18n: a toast, the phone's
 PHONE_GONE_TEXT = N_("The phone left before the stream reached it")
 # i18n: the pairing screen when the phone remote couldn't start (no free network port)
 START_FAILED_TEXT = N_("The phone remote couldn't start. Is another program using its port?")
+
+
+class _PhoneChoice:
+    """A phone's provider choice for its lists: held here, never saved (the settings keep the
+    TV's), starting where the TV's list is. Every other setting reads the settings."""
+
+    def __init__(self, config: Any) -> None:
+        self.__dict__["_config"] = config
+        self.phone_provider_name = str(getattr(config, "selected_provider_name", "") or "")
+        self.phone_all_providers = bool(getattr(config, "tv_all_providers", False))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.__dict__["_config"], name)
+
+    def save_config(self) -> None:
+        """Nothing to save: the choice is the phone's, while QiTV runs."""
+
+
 _SWITCHES = ("enabled", "relay", "relay_url")  # Settings' own: the hub never changes them
 
 _WINDOW_ACTIONS = (Action.SEARCH, Action.FULLSCREEN)
@@ -99,6 +118,8 @@ class RemoteController(QObject):
         self._libraries: dict[str, PhoneLibrary] = {}  # and its own Library
         self._channel_lists: dict[str, PhoneGuide] = {}  # and the Remote tab's channel list
         self._devices: dict[str, str] = {}  # each phone's device id, by session
+        # Each phone's catalog for its lists (its own provider choice), by device.
+        self._phone_catalogs: dict[str, BrowsedCatalog] = {}
         # What a phone plays in its own player, and the group it was picked in (for the TV), by
         # device: a phone that slept comes back as another session.
         self._watching: dict[str, tuple[Target, Optional[tuple[str, list]]]] = {}
@@ -311,13 +332,17 @@ class RemoteController(QObject):
         sid, section = event.sid, event.section or "movies"
         try:
             if event.what == "groups":
-                self._guide(sid).groups(event.page, event.find, event.n)
+                self._guide(sid).groups(event.page, event.find, event.n, event.source)
+            elif event.what == "sources":
+                self._guide(sid).sources(event.n)
+            elif event.what == "chsources":
+                self._channel_list(sid).sources(event.n)
             elif event.what == "guide":
                 self._guide(sid).channels(event.list, event.page, event.find, event.n)
             elif event.what == "timetable":
                 self._guide(sid).timetable(event.handle)
             elif event.what == "chgroups":
-                self._channel_list(sid).groups(event.page, event.find, event.n)
+                self._channel_list(sid).groups(event.page, event.find, event.n, event.source)
             elif event.what == "channels":
                 self._channel_list(sid).channels(event.list, event.page, event.find, event.n)
             elif event.what == "genres":
@@ -342,16 +367,36 @@ class RemoteController(QObject):
     def _guide(self, sid: str) -> PhoneGuide:
         guide = self._guides.get(sid)
         if guide is None:
-            guide = PhoneGuide(self._window, lambda message: self._send(sid, message), self)
+            send = lambda message: self._send(sid, message)  # noqa: E731
+            guide = PhoneGuide(self._window, send, self, catalog=self._phone_catalog(sid))
             self._guides[sid] = guide
         return guide
 
     def _channel_list(self, sid: str) -> PhoneGuide:
         listed = self._channel_lists.get(sid)
         if listed is None:
-            listed = PhoneGuide(self._window, lambda m: self._send(sid, m), self, bare=True)
+            send = lambda m: self._send(sid, m)  # noqa: E731
+            catalog = self._phone_catalog(sid)
+            listed = PhoneGuide(self._window, send, self, bare=True, catalog=catalog)
             self._channel_lists[sid] = listed
         return listed
+
+    def _phone_catalog(self, sid: str) -> BrowsedCatalog:
+        """The catalog a phone's lists browse: its own provider choice (All providers, or one),
+        kept while QiTV runs, so a phone that slept comes back where it was."""
+        device = self._device(sid)
+        catalog = self._phone_catalogs.get(device)
+        if catalog is None:
+            window = self._window
+            catalog = BrowsedCatalog(
+                window.catalogs,
+                _PhoneChoice(window.config_manager),
+                source_key="phone_provider_name",
+                all_key="phone_all_providers",
+                parent=self,
+            )
+            self._phone_catalogs[device] = catalog
+        return catalog
 
     def _library(self, sid: str) -> PhoneLibrary:
         library = self._libraries.get(sid)

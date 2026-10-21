@@ -269,7 +269,8 @@ class Session:
         if t == "get":
             what, page = m["what"], m.get("page", 0)
             extra = (m.get("section", ""), m.get("genre", ""), m.get("find", ""), m.get("id", ""))
-            return Reply(events=[Get(sid, what, m.get("list", ""), page, *extra, m.get("n", -1))])
+            n, source = m.get("n", -1), m.get("source", "")
+            return Reply(events=[Get(sid, what, m.get("list", ""), page, *extra, n, source)])
         if t == "where":
             return Reply([self.send(self._where(now))])
         if t == "watch":

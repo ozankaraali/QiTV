@@ -14,6 +14,7 @@ from test_tv_window import WindowCase, wait_until
 
 from services.epg_view import Programme
 from services.navigation import NavNode
+from services.provider_ids import ALL_PROVIDERS
 from services.remote.protocol import MAX_MESSAGE, Get, OpenItem
 from services.text_fold import fold
 from tests.fixtures import local_provider
@@ -400,6 +401,70 @@ class ChannelListTests(WindowCase):
         remote.bridge.post(OpenItem("s5", second["id"]))
         controller = self.window.controller
         self.assertTrue(wait_until(lambda: (controller._channel or {}).get("name") == "Channel 2"))
+
+
+class ProviderLevelTests(WindowCase):
+    """With two providers or more, the phone's lists have the providers above the groups (All
+    providers, then each); the phone's choice moves its own lists, never the TV's."""
+
+    def setUp(self):
+        super().setUp()
+        self.sent = []
+        remote = self.window.remote
+        self.catalog = remote._phone_catalog("s9")
+        self.list = PhoneGuide(self.window, self.sent.append, bare=True, catalog=self.catalog)
+        self.addCleanup(self.list.deleteLater)
+
+    def last(self, kind):
+        found = [m for m in self.sent if m["t"] == kind]
+        return found[-1] if found else None
+
+    def two_providers(self):
+        names = [PROVIDER_NAME, "Other"]
+        return mock.patch.object(self.catalog, "provider_names", return_value=names)
+
+    def test_one_provider_has_no_level_above_its_groups(self):
+        self.list.groups(0, "")
+        self.assertTrue(wait_until(lambda: self.last("chgroups") and self.last("chgroups")["rows"]))
+        self.assertFalse(self.last("chgroups")["pick"])
+        self.list.sources()
+        self.assertEqual([r["title"] for r in self.last("chsources")["rows"]], [PROVIDER_NAME])
+
+    def test_two_providers_all_first_the_shown_one_marked(self):
+        with self.two_providers():
+            self.list.sources(n=4)
+            message = self.last("chsources")
+            self.list.groups(0, "")
+        titles = [r["title"] for r in message["rows"]]
+        self.assertEqual(titles, ["All providers", PROVIDER_NAME, "Other"])
+        self.assertEqual([r["title"] for r in message["rows"] if r.get("on")], [PROVIDER_NAME])
+        self.assertEqual(message["n"], 4)
+        groups = self.last("chgroups")
+        self.assertTrue(groups["pick"])
+        self.assertEqual(groups["source"], PROVIDER_NAME)
+
+    def test_choosing_moves_the_phones_lists_only(self):
+        config = self.window.config_manager
+        before = (config.selected_provider_name, config.tv_all_providers)
+        with self.two_providers():
+            self.list.sources()
+            every = self.last("chsources")["rows"][0]["id"]
+            with mock.patch.object(self.catalog, "select_provider") as select:
+                self.list.groups(0, "", source=every)
+        select.assert_called_once_with(ALL_PROVIDERS)
+        self.catalog.select_provider(ALL_PROVIDERS)  # the phone's catalog, for real
+        self.assertTrue(self.catalog.all_providers())
+        self.assertFalse(self.window.catalog.all_providers())  # the TV's list stays
+        self.assertEqual((config.selected_provider_name, config.tv_all_providers), before)
+
+    def test_a_phones_lists_share_its_choice_and_not_the_tvs(self):
+        remote = self.window.remote
+        guide, listed = remote._guide("s9"), remote._channel_list("s9")
+        self.addCleanup(remote._guides.pop, "s9", None)
+        self.addCleanup(remote._channel_lists.pop, "s9", None)
+        self.assertIs(guide.nav.catalog, self.catalog)
+        self.assertIs(listed.nav.catalog, self.catalog)
+        self.assertIsNot(self.catalog, self.window.catalog)
 
 
 class GuidesInUseTests(WindowCase):

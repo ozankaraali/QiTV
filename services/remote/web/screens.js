@@ -1,7 +1,7 @@
 // The second screen: what QiTV says is on, the guide, the search's results and the Library,
 // drawn from QiTV's snapshots (ui/remote_snapshots.py). Taps send back the opaque handles QiTV
 // gave; nothing here knows a stream's address. Also the d-pad's touchpad mode.
-import app, { banner, press, release, send, show, t, tap } from "./app.js";
+import app, { banner, nameField, press, release, send, show, t, tap } from "./app.js";
 import * as store from "./store.js";
 
 const $ = (id) => document.getElementById(id);
@@ -26,6 +26,7 @@ const words = {
   genres: "Genres",
   guide_find: "Find a channel",
   find_group: "Find a group or channel",
+  providers: "Providers",
   find_genre: "Find a genre or title",
   find_title: "Find a title",
   load_failed: "Couldn't load this list",
@@ -251,30 +252,58 @@ function zapRow(row) {
 // `ids`: its elements; `asks`: what it asks QiTV for, the groups and a group's channels (QiTV's
 // answers are of the same names); `following`: opened where the TV is, it follows the TV's
 // channel until the phone picks a group or finds.
+// With two providers or more, the providers are a level above the groups (`pick`): All
+// providers, then each; the one chosen is the phone's lists' (`source`), never the TV's.
 function channelList({ ids, asks, top, row, shown }) {
-  const list = newList({ level: "channels", key: "", title: "", total: null, following: false });
+  const list = newList({ level: "channels", key: "", title: "", total: null, following: false, pick: false, source: "", switchTo: "" });
   const box = () => $(ids.rows);
   let findTimer = null;
   const showLevel = () => {
-    const groups = list.level === "groups";
-    $(ids.up).hidden = groups;
-    setTitle($(ids.title), groups ? w(top) : list.title || w(top), groups ? null : list.total);
-    $(ids.find).placeholder = groups ? w("find_group") : w("guide_find");
+    const level = list.level;
+    const up = $(ids.up);
+    up.hidden = level === "sources" || (level === "groups" && !list.pick);
+    up.querySelector("span").textContent = w(level === "channels" ? "groups" : "providers");
+    let title = list.title || w(top);
+    if (level === "sources") title = w("providers");
+    else if (level === "groups") title = (list.pick && list.source) || w(top);
+    setTitle($(ids.title), title, level === "channels" ? list.total : null);
+    $(ids.find).hidden = level === "sources";
+    $(ids.find).placeholder = level === "groups" ? w("find_group") : w("guide_find");
+    nameField($(ids.find));
   };
   const askPage = (page) => {
-    if (list.level === "groups") ask(list, { what: asks[0], page, find: list.find });
-    else ask(list, { what: asks[1], list: list.key, page, find: list.find });
+    if (list.level === "sources") {
+      ask(list, { what: asks[2] });
+    } else if (list.level === "groups") {
+      const message = { what: asks[0], page, find: list.find };
+      if (list.switchTo) message.source = list.switchTo; // the provider chosen, once
+      list.switchTo = "";
+      ask(list, message);
+    } else {
+      ask(list, { what: asks[1], list: list.key, page, find: list.find });
+    }
   };
-  const openAt = (level, key = "", title = "") => {
+  const openAt = (level, key = "", title = "", source = "") => {
     const following = level === "channels" && !key; // where the TV is
-    Object.assign(list, { level, key, title, total: null, find: "", following });
+    Object.assign(list, { level, key, title, total: null, find: "", following, switchTo: source });
     $(ids.find).value = "";
     showLevel();
     startList(box(), list);
     askPage(0);
   };
+  const onSources = (message) => {
+    if (list.level !== "sources" || !answers(list, message)) return;
+    const rows = message.rows.map((source) => {
+      const item = branchRow(source, () => openAt("groups", "", "", source.id));
+      item.classList.toggle("on", !!source.on);
+      return item;
+    });
+    placePage(box(), list, { ...message, page: 0, pages: 1, find: "" }, rows, () => openAt("sources"));
+  };
   const onGroups = (message) => {
     if (list.level !== "groups" || message.find !== list.find || !answers(list, message)) return;
+    Object.assign(list, { pick: !!message.pick, source: message.source || "" });
+    showLevel();
     const rows = message.rows.map((group) => branchRow(group, () => openAt("channels", group.id, group.title)));
     const found = message.channels || []; // what the find found among every channel, below its groups
     if (found.length && message.page === 0) rows.push(el("div", "group", w("channels")));
@@ -306,7 +335,7 @@ function channelList({ ids, asks, top, row, shown }) {
     else openAt("channels");
   };
   const bind = () => {
-    $(ids.up).addEventListener("click", () => openAt("groups"));
+    $(ids.up).addEventListener("click", () => openAt(list.level === "channels" ? "groups" : "sources"));
     const find = $(ids.find);
     find.addEventListener("input", () => {
       clearTimeout(findTimer);
@@ -323,19 +352,20 @@ function channelList({ ids, asks, top, row, shown }) {
   const reopen = () => openAt(list.level, list.level === "channels" ? list.key : "", list.title);
   app.handlers[asks[0]] = onGroups;
   app.handlers[asks[1]] = onChannels;
+  app.handlers[asks[2]] = onSources;
   return { list, openAt, reopen, follow, bind };
 }
 
 const guide = channelList({
   ids: { rows: "guideRows", up: "guideUp", title: "guideTitle", find: "guideFind" },
-  asks: ["groups", "guide"],
+  asks: ["groups", "guide", "sources"],
   top: "guide",
   row: guideRow,
   shown: () => !document.querySelector("[data-screen=guide]").hidden,
 });
 const zap = channelList({
   ids: { rows: "zapRows", up: "zapUp", title: "zapTitle", find: "zapFind" },
-  asks: ["chgroups", "channels"],
+  asks: ["chgroups", "channels", "chsources"],
   top: "channels",
   row: zapRow,
   shown: () => zapping() && !document.querySelector("[data-screen=remote]").hidden,
@@ -591,6 +621,7 @@ function showLibraryLevel() {
   $("libraryChips").hidden = !genres;
   setTitle($("libraryTitle"), genres ? w("library") : library.title, genres ? null : library.total);
   $("libraryFind").placeholder = genres ? w("find_genre") : w("find_title");
+  nameField($("libraryFind"));
 }
 
 function openLibraryAt(level, genre = "", title = "") {
