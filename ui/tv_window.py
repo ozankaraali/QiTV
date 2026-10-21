@@ -155,6 +155,8 @@ MINI_WIDTH_FRACTION = 0.25
 MINI_MARGIN = 10
 FULLSCREEN_EXIT_MS = 1500  # the longest wait for the platform to finish leaving fullscreen
 FULLSCREEN_SETTLE_MS = 5000  # the longest wait for macOS to report a fullscreen change
+FORWARD_WAIT_MS = 1000  # the longest wait for QiTV to come forward before a remote's fullscreen
+FORWARD_POLL_MS = 50
 # config.json could not be written (locked by antivirus, read-only, a full disk).
 SAVE_FAILED_TEXT = N_("Couldn't save the settings; changes will be lost when QiTV closes")
 ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
@@ -171,6 +173,11 @@ _CLICK_EVENTS = (
     QEvent.Type.MouseButtonDblClick,
     QEvent.Type.MouseButtonRelease,
 )
+
+
+def app_active() -> bool:
+    """Whether QiTV is the app in front."""
+    return QGuiApplication.applicationState() == Qt.ApplicationState.ApplicationActive
 
 
 def _local_now() -> datetime:
@@ -848,8 +855,27 @@ class TVWindow(QMainWindow):
         """A phone remote's button that means one action wherever the TV is (Search, Fullscreen)."""
         if self._closing:
             return
+        if action is Action.FULLSCREEN and not app_active():
+            # macOS ignores a fullscreen change asked of a window in the background: QiTV comes
+            # forward first, and changes once in front (or after a moment, whatever happened).
+            self.raise_()
+            self.activateWindow()
+            self._when_in_front(lambda: self._remote_act(action, payload), FORWARD_WAIT_MS)
+            return
+        self._remote_act(action, payload)
+
+    def _remote_act(self, action: Action, payload: str) -> None:
+        if self._closing:
+            return
         with self.screens.from_keys():
             self._act(action, payload, key=0)
+
+    def _when_in_front(self, then: Callable[[], None], left_ms: int) -> None:
+        if app_active() or left_ms <= 0:
+            then()
+            return
+        after = left_ms - FORWARD_POLL_MS
+        QTimer.singleShot(FORWARD_POLL_MS, self, lambda: self._when_in_front(then, after))
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         resolved = None if self._closing else self._resolve(event)

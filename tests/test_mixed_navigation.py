@@ -264,7 +264,7 @@ class MixedNavigationTests(unittest.TestCase):
         self.config.favorites = ["News"]
         favorites = [(provider_of(n.payload), n.title) for n in self.items_of(FAVORITES_GROUP)]
         self.assertEqual(favorites, [("Demo TV", "News"), ("Harbor IPTV", "News")])
-        keys = [(provider_of(i), item_key(i)) for i in self.nav._all_live_items()]
+        keys = [(provider_of(i), item_key(i)) for i in self.nav.all_live_items()]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertIn(("Demo TV", "1"), keys)
         self.assertIn(("Harbor IPTV", "1"), keys)

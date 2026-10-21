@@ -289,6 +289,11 @@ function bindButtons() {
   window.addEventListener("pageshow", (event) => {
     if (event.persisted && app.tvId && !(app.conn && app.conn.open)) connect(app.tvId);
   });
+  // A code scanned while this page is open only changes what follows the # in its address, and
+  // the browser stays on the page: load it again, to read the code as a page opened on it does.
+  window.addEventListener("hashchange", () => {
+    if (location.hash.length > 1) location.reload();
+  });
   window.addEventListener("blur", releaseAll);
 }
 

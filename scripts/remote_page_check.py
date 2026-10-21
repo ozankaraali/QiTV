@@ -6,11 +6,12 @@
 Nothing shows on screen: Chrome runs headless and the hub listens on 127.0.0.1 only. Each
 scenario prints PASS or FAIL; the exit code is 1 if any failed. Needs Google Chrome installed
 (or --chrome PATH) and Playwright (`--with playwright`). Scenarios: vectors (the page's Noise
-against tests/fixtures/noise_vectors.json), pair-home, hold, hidden-releases and the second
-screen's; with --relay (a local `wrangler dev` of the QiTV relay, e.g. http://127.0.0.1:8787, or
-the deployed one): pair-relay, hop, hop-once, hop-memory, hop-back-on-loss, relay-banner, two-tvs,
-and page-versions when QITV_KEPT_PAGE names a page the relay keeps beside the newest (a copy of
-its public/p/<id>/ at public/p/<another id>/, that id added to public/pages.json's "kept").
+against tests/fixtures/noise_vectors.json), pair-home, scan-again, hold, hidden-releases and the
+second screen's; with --relay (a local `wrangler dev` of the QiTV relay, e.g. http://127.0.0.1:8787,
+or the deployed one): pair-relay, hop, hop-once, hop-memory, hop-back-on-loss, relay-banner,
+two-tvs, scan-again-relay, and page-versions when QITV_KEPT_PAGE names a page the relay keeps
+beside the newest (a copy of its public/p/<id>/ at public/p/<another id>/, that id added to
+public/pages.json's "kept").
 """
 
 from __future__ import annotations
@@ -239,6 +240,18 @@ def scenario_pair_home(rig: Rig) -> None:
     assert not rig.events.of(Paired, after=mark), "a reload paired again"
 
 
+def scenario_scan_again(rig: Rig) -> None:
+    """A code scanned with the camera while the page is open only changes the open page's
+    address after the #, without loading it again: the page pairs from it all the same."""
+    rig.pair()
+    mark = rig.events.mark()
+    rig.page.goto(rig.pair_url())  # the same page, another code: the browser stays on the page
+    rig.events.wait(Paired, after=mark, timeout=10)
+    rig.events.wait(Opened, after=mark)
+    rig.page.wait_for_selector("[data-screen=remote]:not([hidden])", timeout=5000)
+    assert rig.page.evaluate("location.hash") == "", "the code stayed in the address"
+
+
 def scenario_hold(rig: Rig) -> None:
     rig.pair()
     mark = rig.events.mark()
@@ -337,6 +350,17 @@ def scenario_hop_back_on_loss(rig: Rig) -> None:
     assert rig.page.url.startswith(rig.relay or ""), "it hopped back to the dead address"
 
 
+def scenario_scan_again_relay(rig: Rig) -> None:
+    """scan-again on the relay's page: the code reaches the page open at the relay's address."""
+    scenario_pair_relay(rig)
+    mark = rig.events.mark()
+    rig.page.goto(f"{rig.relay}/#b.")  # the relay page without hopping
+    rig.events.wait(Opened, where=lambda e: e.door == "relay", after=mark, timeout=10)
+    mark = rig.events.mark()
+    rig.page.goto(rig.pair_url())  # the same page, another code
+    rig.events.wait(Paired, after=mark, timeout=10)
+
+
 def scenario_two_tvs(rig: Rig) -> None:
     scenario_pair_relay(rig)
     other_events = Recorder()
@@ -360,6 +384,7 @@ def scenario_two_tvs(rig: Rig) -> None:
 SCENARIOS: dict[str, Callable[[Rig], None]] = {
     "vectors": scenario_vectors,
     "pair-home": scenario_pair_home,
+    "scan-again": scenario_scan_again,
     "hold": scenario_hold,
     "hidden-releases": scenario_hidden_releases,
 }
@@ -425,6 +450,11 @@ GUIDE = {
             "next": None,
         },
     ],
+}
+CHANNELS = {  # the Remote tab's list: the Guide's rows without programmes
+    **GUIDE,
+    "t": "channels",
+    "rows": [{k: v for k, v in r.items() if k not in ("now", "next")} for r in GUIDE["rows"]],
 }
 RESULTS = {
     "t": "results",
@@ -559,6 +589,103 @@ def scenario_guide_tune(rig: Rig) -> None:
     rig.page.fill("#guideFind", "fern")
     ask = rig.events.wait(Get, where=lambda e: e.what == "guide" and e.find == "fern", after=mark)
     assert (ask.list, ask.page) == ("g3", 0), ask
+
+
+def scenario_channel_list(rig: Rig) -> None:
+    """Channels swaps the remote's arrows for the channel list, where the TV is, with the volume
+    and channel buttons still below; a row tunes; groups and find as the Guide's; Channels again
+    brings the arrows back, and the choice holds when the page opens again."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    mark = rig.events.mark()
+    rig.page.click("#listButton")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "channels", after=mark)
+    assert (ask.list, ask.page, ask.find) == ("", 0, ""), ask
+    answer(rig, sid, ask, CHANNELS)
+    rig.page.wait_for_selector("#zapRows .row >> nth=2")
+    assert rig.page.locator("#pad").is_hidden(), "the arrows still show"
+    assert rig.page.locator("[data-key=volup]").is_visible(), "the volume went"
+    assert rig.page.locator("#zapRows .row.playing").count() == 1
+    assert rig.page.inner_text("#zapTitle").startswith("All"), rig.page.inner_text("#zapTitle")
+    rig.shot("channel-list")
+    mark = rig.events.mark()  # a row tunes
+    rig.page.locator("#zapRows .row", has_text="Fernvale Sports").click()
+    assert rig.events.wait(OpenItem, after=mark).handle == "h2"
+    tuned = {**STATE["now"], "num": "2", "name": "Fernvale Sports"}
+    rig.hub.send(sid, {**STATE, "now": tuned})  # the TV tuned: Watching moves
+    rig.page.locator("#zapRows .row.playing", has_text="Fernvale Sports").wait_for(timeout=5000)
+    assert rig.page.locator("#zapRows .row.playing").count() == 1
+    mark = rig.events.mark()  # up to the groups, into one, then find in it
+    rig.page.click("#zapUp")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "chgroups", after=mark)
+    answer(rig, sid, ask, {**GROUPS, "t": "chgroups"})
+    rig.page.wait_for_selector("#zapRows .row.branch >> nth=2")
+    rig.shot("channel-list-groups")
+    mark = rig.events.mark()
+    rig.page.locator("#zapRows .row.branch", has_text="News").click()
+    ask = rig.events.wait(Get, where=lambda e: e.what == "channels", after=mark)
+    assert ask.list == "g3", ask
+    mark = rig.events.mark()
+    rig.page.fill("#zapFind", "fern")
+    ask = rig.events.wait(
+        Get, where=lambda e: e.what == "channels" and e.find == "fern", after=mark
+    )
+    assert ask.list == "g3", ask
+    rig.page.click("#listButton")  # the arrows again
+    assert rig.page.locator("#pad").is_visible() and rig.page.locator("#zap").is_hidden()
+    mark = rig.events.mark()
+    rig.page.click("#listButton")
+    rig.events.wait(Get, where=lambda e: e.what == "channels", after=mark)
+    mark = rig.events.mark()
+    rig.page.reload()  # opened again: the list, where the TV is
+    ask = rig.events.wait(Get, where=lambda e: e.what == "channels", after=mark, timeout=10)
+    assert ask.list == "", ask
+    assert rig.page.locator("#zap").is_visible() and rig.page.locator("#pad").is_hidden()
+    rig.page.set_viewport_size({"width": 320, "height": 568})
+    answer(rig, rig.events.wait(Opened, after=mark).sid, ask, CHANNELS)
+    rig.page.wait_for_selector("#zapRows .row >> nth=2")
+    rig.shot("channel-list-narrow")
+
+
+def scenario_find_both(rig: Rig) -> None:
+    """On the groups, the find shows the groups it matches and, below them, the channels it
+    finds: in the Guide (a row's ▶ tunes) and in the Remote tab's list (a row tunes)."""
+    sid = paired_sid(rig)
+    news = [row for row in GROUPS["rows"] if row["title"] == "News"]
+    found = {**GROUPS, "find": "new", "rows": news, "channels": GUIDE["rows"][:1], "found": 1}
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark)
+    mark = rig.events.mark()
+    rig.page.click("#guideUp")
+    rig.events.wait(Get, where=lambda e: e.what == "groups", after=mark)
+    assert "channel" in (rig.page.get_attribute("#guideFind", "placeholder") or "")
+    mark = rig.events.mark()
+    rig.page.fill("#guideFind", "new")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "groups" and e.find == "new", after=mark)
+    answer(rig, sid, ask, found)
+    rig.page.locator("#guideRows .group", has_text="Channels").wait_for(timeout=5000)
+    assert rig.page.locator("#guideRows .row.branch").count() == 1
+    rig.shot("guide-find-both")
+    mark = rig.events.mark()
+    rig.page.locator("#guideRows .row", has_text="Harbourline News").locator(".side").click()
+    assert rig.events.wait(OpenItem, after=mark).handle == "h1"
+    rig.page.click("[data-tab=remote]")
+    mark = rig.events.mark()
+    rig.page.click("#listButton")
+    rig.events.wait(Get, where=lambda e: e.what == "channels", after=mark)
+    mark = rig.events.mark()
+    rig.page.click("#zapUp")
+    rig.events.wait(Get, where=lambda e: e.what == "chgroups", after=mark)
+    mark = rig.events.mark()
+    rig.page.fill("#zapFind", "new")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "chgroups" and e.find == "new", after=mark)
+    bare = [{k: v for k, v in r.items() if k not in ("now", "next")} for r in GUIDE["rows"][:1]]
+    answer(rig, sid, ask, {**found, "t": "chgroups", "channels": bare})
+    rig.page.locator("#zapRows .group", has_text="Channels").wait_for(timeout=5000)
+    mark = rig.events.mark()
+    rig.page.locator("#zapRows .row", has_text="Harbourline News").click()
+    assert rig.events.wait(OpenItem, after=mark).handle == "h1"
 
 
 def scenario_guide_pages(rig: Rig) -> None:
@@ -886,6 +1013,8 @@ SCENARIOS.update(
         "hello-keeps-now": scenario_hello_keeps_now,
         "now-playing": scenario_now_playing,
         "guide-tune": scenario_guide_tune,
+        "channel-list": scenario_channel_list,
+        "find-both": scenario_find_both,
         "guide-pages": scenario_guide_pages,
         "timetable": scenario_timetable,
         "search-mirror": scenario_search_mirror,
@@ -952,6 +1081,7 @@ RELAY_SCENARIOS: dict[str, Callable[[Rig], None]] = {
     "page-versions": scenario_page_versions,
     "hop-back-on-loss": scenario_hop_back_on_loss,
     "two-tvs": scenario_two_tvs,
+    "scan-again-relay": scenario_scan_again_relay,
 }
 
 

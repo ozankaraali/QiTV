@@ -79,14 +79,16 @@ PAGE_STRINGS: dict[str, str] = {
     "no_programmes": N_("No programme guide for this channel"),
     "groups": N_("Groups"),  # i18n: the phone remote's guide: back to the channel list's groups
     "genres": N_("Genres"),  # i18n: the phone remote's Library: back to a section's genres
-    "find_group": N_("Find a group"),  # i18n: the phone remote's guide field, over its groups
+    # i18n: the phone remote's guide field, over its groups: finds groups and channels
+    "find_group": N_("Find a group or channel"),
     # i18n: the phone remote's Library field: finds genres and the section's films or series
     "find_genre": N_("Find a genre or title"),
     "find_title": N_("Find a title"),  # i18n: the phone remote's Library field, over a genre
     # i18n: the phone remote's Library: a list that failed to arrive
     "load_failed": N_("Couldn't load this list"),
     "try_again": N_("Try again"),  # i18n: the phone remote: a button under a failed list
-    "channels": N_("Channels"),  # i18n: the phone remote's search: a group of results
+    # i18n: the phone remote: a group of search results, and the button showing the channel list
+    "channels": N_("Channels"),
     "no_results": N_("Nothing found"),  # i18n: the phone remote's search found nothing
     "nothing_here": N_("Nothing here yet"),  # i18n: an empty list on the phone remote
     "loading": N_("Loading…"),  # i18n: the phone remote: a list on its way

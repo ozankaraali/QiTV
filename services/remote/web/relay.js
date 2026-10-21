@@ -301,6 +301,5 @@ function scanned(text) {
     location.href = url.href;
     return;
   }
-  location.hash = url.hash;
-  location.reload();
+  location.hash = url.hash; // the page loads again on it (app.js)
 }

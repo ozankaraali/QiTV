@@ -72,8 +72,25 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 /* ---- remote ---- */
 .remote { justify-content: space-evenly; gap: 10px; padding: 4px 20px 10px; }
 .remote > * { flex: none; }
-.now { width: 100%; display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 18px; text-align: left; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
+.nowbar { display: flex; gap: 8px; }
+.now { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 18px; text-align: left; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
 .now.pressed { background: var(--raised-2); }
+/* Channels: the remote's middle (sections, arrows, Back/Search/More) becomes the channel list. */
+.lister { flex: none; width: 70px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border-radius: 18px; font-size: 11px; font-weight: 600; color: var(--muted); background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
+.lister.on { color: var(--accent); background: var(--accent-fill); box-shadow: none; }
+.lister.pressed { background: var(--raised-2); }
+.remote.zapping { justify-content: flex-start; }
+.remote.zapping > .seg, .remote.zapping > .pad, .remote.zapping > .trio { display: none; }
+.zap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+.zap > * { flex: none; }
+.zap-head { display: flex; align-items: baseline; gap: 10px; min-height: 26px; }
+.zap-head .back { margin: 0 0 0 -6px; }
+.zap-head h1 { flex: 1; min-width: 0; margin: 0; font-size: 20px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zap-head h1 small { margin-left: 6px; font-size: 14px; font-weight: 600; color: var(--muted); }
+.zap .rows { flex: 1 1 auto; margin: 0 -20px; padding-bottom: 4px; border-top: 1px solid var(--line); }
+.zap .row { padding: 8px 20px; }
+.zap .row .logo { width: 34px; height: 34px; border-radius: 9px; font-size: 12px; }
+.zap .group { margin: 12px 20px 4px; }
 .logo { width: 46px; height: 46px; flex: none; border-radius: 12px; display: grid; place-items: center; font-size: 15px; font-weight: 700; color: #fff; background: #2f5d73; letter-spacing: 0.02em; }
 .now-main { flex: 1; min-width: 0; }
 .line { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; }

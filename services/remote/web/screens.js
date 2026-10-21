@@ -25,7 +25,7 @@ const words = {
   groups: "Groups",
   genres: "Genres",
   guide_find: "Find a channel",
-  find_group: "Find a group",
+  find_group: "Find a group or channel",
   find_genre: "Find a genre or title",
   find_title: "Find a title",
   load_failed: "Couldn't load this list",
@@ -124,24 +124,6 @@ function onState(message) {
   followTv(now && now.kind === "live" ? liveKey(now.num, now.name) : "");
 }
 
-// The TV changed channel (on the computer, or from here): Watching moves; a Guide opened where
-// the TV is follows it, to its row when loaded, else to where the TV's list is now.
-function followTv(live) {
-  if (live === watching) return;
-  watching = live;
-  const box = $("guideRows");
-  let row = null;
-  for (const item of box.querySelectorAll(".row[data-live]")) {
-    const on = !!live && item.dataset.live === live;
-    markWatching(item, on);
-    if (on) row = item;
-  }
-  const shown = !document.querySelector("[data-screen=guide]").hidden;
-  if (!live || !guide.following || !shown || guide.opening) return;
-  if (row) row.scrollIntoView({ block: "nearest" });
-  else openGuideAt("channels");
-}
-
 function drawNow() {
   const now = current && current.now;
   const name = $("nowName");
@@ -179,49 +161,15 @@ function drawNow() {
   }
 }
 
-// ---- the guide ----------------------------------------------------------------------------
+// ---- channel lists: the Guide's and the Remote tab's ---------------------------------------
 // The channel list as the TV has it: its groups (★ Favorites, ⟲ Recent, the provider's), then a
 // group's channels a page at a time. It opens where the TV's list is, on the channel playing. The
-// find box searches the level shown, the whole of it, on QiTV. A row opens the channel's card
-// (what's on, what follows, Watch); the ▶ at its end tunes at once.
+// find box searches the level shown, the whole of it, on QiTV. In the Guide a row opens the
+// channel's card (what's on, what follows, Watch) and the ▶ at its end tunes at once; the Remote
+// tab's list shows no programmes, and a row tunes.
 
-// `following`: opened where the TV is (the tab): it follows the TV's channel until the phone
-// picks a group or finds; `watching`: the channel the TV shows, as "num|name".
-const guide = newList({ level: "channels", key: "", title: "", total: null, following: false });
+// `watching`: the channel the TV shows, as "num|name".
 let watching = "";
-let findTimer = null;
-let timetableFor = "";
-
-function showGuideLevel() {
-  const groups = guide.level === "groups";
-  $("guideUp").hidden = groups;
-  setTitle($("guideTitle"), groups ? w("guide") : guide.title || w("guide"), groups ? null : guide.total);
-  $("guideFind").placeholder = groups ? w("find_group") : w("guide_find");
-}
-
-function openGuideAt(level, key = "", title = "") {
-  const following = level === "channels" && !key; // where the TV is
-  Object.assign(guide, { level, key, title, total: null, find: "", following });
-  $("guideFind").value = "";
-  showGuideLevel();
-  startList($("guideRows"), guide);
-  askGuide(0);
-}
-
-function openGuide() {
-  openGuideAt("channels"); // where the TV's channel list is
-}
-
-function askGuide(page) {
-  if (guide.level === "groups") ask(guide, { what: "groups", page, find: guide.find });
-  else ask(guide, { what: "guide", list: guide.key, page, find: guide.find });
-}
-
-function onGroups(message) {
-  if (guide.level !== "groups" || message.find !== guide.find || !answers(guide, message)) return;
-  const rows = message.rows.map((group) => branchRow(group, () => openGuideAt("channels", group.id, group.title)));
-  placePage($("guideRows"), guide, message, rows, () => openGuideAt("groups"));
-}
 
 function liveKey(num, name) {
   return `${num || ""}|${name || ""}`;
@@ -268,31 +216,131 @@ function guideRow(row) {
   return item;
 }
 
-function onGuide(message) {
-  if (guide.level !== "channels" || message.find !== guide.find || !answers(guide, message)) return;
-  if (!("n" in message) && message.list !== guide.key) return; // QiTV's own resend: of this group
-  const opening = guide.opening;
-  Object.assign(guide, { key: message.list, title: message.title, total: message.count });
-  showGuideLevel();
-  const retry = () => openGuideAt("channels", guide.key, guide.title);
-  placePage($("guideRows"), guide, message, message.rows.map(guideRow), retry);
-  const on = opening && $("guideRows").querySelector(".playing");
-  if (on) on.scrollIntoView({ block: "center" }); // the TV's channel, in view
+function zapRow(row) {
+  const item = el("button", `row${row.playing ? " playing" : ""}`);
+  item.type = "button";
+  item.dataset.live = liveKey(row.num, row.name);
+  item.append(logoTile(row.name));
+  const main = el("div", "row-main");
+  const top = el("div", "row-top");
+  if (row.num) top.append(el("span", "num", row.num));
+  top.append(el("span", "title", row.name));
+  if (row.playing) top.append(el("em", "", w("watching")));
+  main.append(top);
+  item.append(main);
+  tapRow(item, row.id); // tunes the TV
+  return item;
 }
 
+// `ids`: its elements; `asks`: what it asks QiTV for, the groups and a group's channels (QiTV's
+// answers are of the same names); `following`: opened where the TV is, it follows the TV's
+// channel until the phone picks a group or finds.
+function channelList({ ids, asks, top, row, shown }) {
+  const list = newList({ level: "channels", key: "", title: "", total: null, following: false });
+  const box = () => $(ids.rows);
+  let findTimer = null;
+  const showLevel = () => {
+    const groups = list.level === "groups";
+    $(ids.up).hidden = groups;
+    setTitle($(ids.title), groups ? w(top) : list.title || w(top), groups ? null : list.total);
+    $(ids.find).placeholder = groups ? w("find_group") : w("guide_find");
+  };
+  const askPage = (page) => {
+    if (list.level === "groups") ask(list, { what: asks[0], page, find: list.find });
+    else ask(list, { what: asks[1], list: list.key, page, find: list.find });
+  };
+  const openAt = (level, key = "", title = "") => {
+    const following = level === "channels" && !key; // where the TV is
+    Object.assign(list, { level, key, title, total: null, find: "", following });
+    $(ids.find).value = "";
+    showLevel();
+    startList(box(), list);
+    askPage(0);
+  };
+  const onGroups = (message) => {
+    if (list.level !== "groups" || message.find !== list.find || !answers(list, message)) return;
+    const rows = message.rows.map((group) => branchRow(group, () => openAt("channels", group.id, group.title)));
+    const found = message.channels || []; // what the find found among every channel, below its groups
+    if (found.length && message.page === 0) rows.push(el("div", "group", w("channels")));
+    rows.push(...found.map(row));
+    placePage(box(), list, message, rows, () => openAt("groups"));
+  };
+  const onChannels = (message) => {
+    if (list.level !== "channels" || message.find !== list.find || !answers(list, message)) return;
+    if (!("n" in message) && message.list !== list.key) return; // QiTV's own resend: of this group
+    const opening = list.opening;
+    Object.assign(list, { key: message.list, title: message.title, total: message.count });
+    showLevel();
+    const retry = () => openAt("channels", list.key, list.title);
+    placePage(box(), list, message, message.rows.map(row), retry);
+    const on = opening && box().querySelector(".playing");
+    if (on) on.scrollIntoView({ block: "center" }); // the TV's channel, in view
+  };
+  // The TV changed channel (on the computer, or from here): Watching moves; opened where the TV
+  // is, the list follows it, to its row when loaded, else to where the TV's list is now.
+  const follow = (live) => {
+    let found = null;
+    for (const item of box().querySelectorAll(".row[data-live]")) {
+      const on = !!live && item.dataset.live === live;
+      markWatching(item, on);
+      if (on) found = item;
+    }
+    if (!live || !list.following || !shown() || list.opening) return;
+    if (found) found.scrollIntoView({ block: "nearest" });
+    else openAt("channels");
+  };
+  const bind = () => {
+    $(ids.up).addEventListener("click", () => openAt("groups"));
+    const find = $(ids.find);
+    find.addEventListener("input", () => {
+      clearTimeout(findTimer);
+      findTimer = setTimeout(() => {
+        list.find = find.value.trim();
+        list.following = false; // the phone looks for something: the TV's zaps don't move it
+        startList(box(), list);
+        askPage(0);
+      }, QUERY_DEBOUNCE_MS);
+    });
+    pageOnScroll(box(), list, askPage);
+  };
+  // A reconnect is a new session: what shows comes again (its groups' keys hold).
+  const reopen = () => openAt(list.level, list.level === "channels" ? list.key : "", list.title);
+  app.handlers[asks[0]] = onGroups;
+  app.handlers[asks[1]] = onChannels;
+  return { list, openAt, reopen, follow, bind };
+}
+
+const guide = channelList({
+  ids: { rows: "guideRows", up: "guideUp", title: "guideTitle", find: "guideFind" },
+  asks: ["groups", "guide"],
+  top: "guide",
+  row: guideRow,
+  shown: () => !document.querySelector("[data-screen=guide]").hidden,
+});
+const zap = channelList({
+  ids: { rows: "zapRows", up: "zapUp", title: "zapTitle", find: "zapFind" },
+  asks: ["chgroups", "channels"],
+  top: "channels",
+  row: zapRow,
+  shown: () => zapping() && !document.querySelector("[data-screen=remote]").hidden,
+});
+
+function followTv(live) {
+  if (live === watching) return;
+  watching = live;
+  guide.follow(live);
+  zap.follow(live);
+}
+
+function openGuide() {
+  guide.openAt("channels"); // where the TV's channel list is
+}
+
+let timetableFor = "";
+
 function bindGuide() {
-  $("guideUp").addEventListener("click", () => openGuideAt("groups"));
-  const find = $("guideFind");
-  find.addEventListener("input", () => {
-    clearTimeout(findTimer);
-    findTimer = setTimeout(() => {
-      guide.find = find.value.trim();
-      guide.following = false; // the phone looks for something: the TV's zaps don't move it
-      startList($("guideRows"), guide);
-      askGuide(0);
-    }, QUERY_DEBOUNCE_MS);
-  });
-  pageOnScroll($("guideRows"), guide, askGuide);
+  guide.bind();
+  zap.bind();
   $("timetableBack").addEventListener("click", () => show("guide"));
   $("timetableWatch").addEventListener("click", () => {
     if (navigator.vibrate) navigator.vibrate(8);
@@ -659,6 +707,31 @@ function bindTouchpad() {
   for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) pad.addEventListener(type, end);
 }
 
+// ---- the Remote tab's channel list --------------------------------------------------------
+// Channels turns the remote's middle (sections, arrows, Back/Search/More) into the channel list,
+// with what's on above it and the volume, play and channel buttons below; tapped again, back.
+
+function zapping() {
+  return !$("zap").hidden;
+}
+
+function useChannelList(on, open = true) {
+  $("zap").hidden = !on;
+  document.querySelector("[data-screen=remote]").classList.toggle("zapping", on);
+  const button = $("listButton");
+  button.classList.toggle("on", on);
+  button.setAttribute("aria-pressed", String(on));
+  store.setSetting("remote", on ? "channels" : "buttons");
+  if (on && open) zap.openAt("channels"); // where the TV's channel list is
+}
+
+function bindChannelList() {
+  const button = $("listButton");
+  pressable(button);
+  button.addEventListener("click", () => useChannelList(!zapping()));
+  useChannelList(store.setting("remote", "buttons") === "channels", false); // opens on the hello
+}
+
 // ---- wiring -------------------------------------------------------------------------------
 
 // A reconnect (the phone slept, the network changed) is a new session: the rows shown carry the
@@ -667,12 +740,13 @@ let hellos = 0;
 
 function onHello() {
   hellos += 1;
-  if (hellos === 1) return; // the first: nothing is open yet
+  if (zapping()) zap.reopen(); // the Remote tab's list, on the first hello too
+  if (hellos === 1) return; // the first: nothing else is open yet
   const shown = (document.querySelector("[data-screen]:not([hidden])") || {}).dataset;
   const screen = shown ? shown.screen : "";
   if (screen === "guide" || screen === "timetable") {
     show("guide");
-    openGuideAt(guide.level, guide.level === "channels" ? guide.key : "", guide.title);
+    guide.reopen();
   } else if (screen === "library") {
     openLibraryAt(library.level, library.genre, library.title);
   }
@@ -680,8 +754,6 @@ function onHello() {
 
 app.handlers.hello = onHello;
 app.handlers.state = onState;
-app.handlers.groups = onGroups;
-app.handlers.guide = onGuide;
 app.handlers.timetable = onTimetable;
 app.handlers.results = onResults;
 app.handlers.genres = onGenres;
@@ -706,6 +778,7 @@ export function install() {
   bindSearch();
   bindTouchpad();
   useTouchpad(store.setting("dpad", "buttons") === "touchpad");
+  bindChannelList();
   setInterval(() => {
     if (current && !document.hidden) drawNow();
   }, 1000);
