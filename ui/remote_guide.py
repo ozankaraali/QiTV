@@ -19,7 +19,7 @@ from services.navigation import NavModel, NavNode, section_title
 from services.provider_ids import provider_of
 from services.text_fold import fold
 from services.zapping import ZapContext
-from ui.remote_snapshots import Handles, programme_dict
+from ui.remote_snapshots import Handles, programme_dict, stable_key
 
 GROUPS_PAGE = 100
 GUIDE_PAGE = 50
@@ -46,9 +46,10 @@ class PhoneGuide(QObject):
         self.nav.reset_to("live")
         self.handles = Handles()
         self.providers: set[str] = set()  # those of the channels shown: their guides load
-        self._keys: dict[str, str] = {}  # group key → the phone's key
-        self._ids: dict[str, str] = {}  # the phone's key → group key
+        self._ids: dict[str, str] = {}  # the phone's key → group key, the groups seen so far
         self._view: Optional[tuple] = None  # ("groups", find) or ("guide", group, find)
+        # A group asked for before the lists listed it: its key, or "" for where the TV is.
+        self._wanted: Optional[str] = None
         self._anchor = 0  # the page the view opened on: the one sent again
         self._shown: Optional[tuple] = None  # what that page showed, as last sent
         self._timetable: Optional[str] = None  # the channel whose timetable was asked last
@@ -62,18 +63,18 @@ class PhoneGuide(QObject):
 
     # ---- the phone's asks ------------------------------------------------------------------
 
-    def groups(self, page: int, find: str) -> None:
-        self._ask(("groups", find), page)
+    def groups(self, page: int, find: str, n: int = -1) -> None:
+        self._wanted = None
+        self._ask(("groups", find), page, n)
 
-    def channels(self, key: str, page: int, find: str) -> None:
+    def channels(self, key: str, page: int, find: str, n: int = -1) -> None:
         """A group's channels; `key` "" is the group the TV's channel list is in, on the page of
-        the channel playing."""
-        if key:
-            group: Optional[str] = self._ids.get(key)
-        else:
-            group = self._tv_group()
+        the channel playing. A group the lists don't hold yet opens once they do."""
+        group = self._group_of(key) if key else self._tv_group()
+        if not key:
             page = self._playing_page(group)
-        self._ask(("guide", group, find), page)
+        self._wanted = key if group is None else None
+        self._ask(("guide", group, find), page, n)
 
     def timetable(self, handle: str) -> None:
         """`handle`'s channel: its programmes from the one on now (with an archive, from earlier,
@@ -119,7 +120,7 @@ class PhoneGuide(QObject):
             message["loading"] = True  # sent again once the guide is in
         self._send(message)
 
-    def _ask(self, view: tuple, page: int) -> None:
+    def _ask(self, view: tuple, page: int, n: int = -1) -> None:
         if view != self._view:
             self._view, self._anchor = view, page
         if page == self._anchor:
@@ -127,6 +128,8 @@ class PhoneGuide(QObject):
         message, signature = self._answer(page)
         if page == self._anchor:
             self._shown = signature
+        if n >= 0:
+            message["n"] = n  # the ask it answers; a later push carries none
         self._send(message)
 
     # ---- the groups ------------------------------------------------------------------------
@@ -162,10 +165,17 @@ class PhoneGuide(QObject):
     def _key(self, group: Optional[str]) -> str:
         if group is None:
             return ""
-        if group not in self._keys:
-            key = f"g{len(self._keys) + 1}"
-            self._keys[group], self._ids[key] = key, group
-        return self._keys[group]
+        key = stable_key(group)
+        self._ids[key] = group
+        return key
+
+    def _group_of(self, key: str) -> Optional[str]:
+        listed = [n.key for n in self._group_nodes() if n.layer == "group"]
+        if key not in self._ids:
+            for each in listed:
+                self._ids[stable_key(each)] = each
+        found = self._ids.get(key)
+        return found if found in listed else None
 
     def _channels(self, node: NavNode) -> Optional[list[dict]]:
         nodes = self.nav.children(node)
@@ -296,6 +306,14 @@ class PhoneGuide(QObject):
     def _push(self) -> None:
         if self._view is None:
             return
+        if self._view[0] == "guide" and self._view[1] is None and self._wanted is not None:
+            # The lists arrived: the group asked for (or where the TV is) is listed now.
+            group = self._group_of(self._wanted) if self._wanted else self._tv_group()
+            if group is not None:
+                by_position = not self._wanted
+                self._wanted = None
+                self._view = ("guide", group, self._view[2])
+                self._anchor = self._playing_page(group) if by_position else 0
         message, signature = self._answer(self._anchor)
         if signature != self._shown:
             self._shown = signature

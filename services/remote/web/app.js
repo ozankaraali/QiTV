@@ -10,7 +10,12 @@ import * as store from "./store.js";
 const DELAY_MS = 400;
 const INTERVAL_MS = 40;
 const KEEPALIVE_MS = 200;
-const RETRY_MS = [500, 1000, 2000, 5000];
+// Retries slow down to once a minute and rest after ten minutes without QiTV (QiTV closed, the
+// computer asleep): through the relay each try costs a request of its quota, and a phone left
+// on the remote would otherwise try all day. Looking at the page again, or tapping the banner,
+// tries once more.
+const RETRY_MS = [500, 1000, 2000, 5000, 10000, 30000, 60000];
+const REST_AFTER_MS = 10 * 60 * 1000;
 
 // The same count as services/remote/protocol.py steps_for.
 export const stepsFor = (ms) => (ms < DELAY_MS ? 1 : 2 + Math.floor((ms - DELAY_MS) / INTERVAL_MS));
@@ -29,6 +34,7 @@ const FALLBACK = {
   tv_offline: "QiTV isn't reachable. Is it open on the computer?",
   full: "Too many phones are connected to this TV.",
   connect_directly: "Connect directly",
+  tap_retry: "Tap here to try again.",
 };
 export const t = (key) => strings[key] || FALLBACK[key] || key;
 
@@ -150,6 +156,7 @@ export function openSession({ tvId, room = null, opening, pattern, s = null, psk
     payload,
     onopen: (answer) => {
       app.retry = 0;
+      app.failingSince = 0;
       onanswer(answer);
     },
     onmessage: (message) => onMessage(message),
@@ -207,6 +214,12 @@ function forget(message) {
 }
 
 function scheduleRetry(keepBanner = false) {
+  if (!app.failingSince) app.failingSince = Date.now();
+  clearTimeout(app.retryTimer);
+  if (Date.now() - app.failingSince > REST_AFTER_MS) {
+    banner(`${t("offline")} ${t("tap_retry")}`); // resting: a look or a tap tries again
+    return;
+  }
   const delay = RETRY_MS[Math.min(app.retry, RETRY_MS.length - 1)];
   app.retry += 1;
   if (!keepBanner) banner(app.retry > RETRY_MS.length ? t("offline") : t("reconnecting"));
@@ -267,6 +280,9 @@ function bindButtons() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") releaseAll();
     else if (app.tvId && !(app.conn && app.conn.open)) connect(app.tvId);
+  });
+  $("banner").addEventListener("click", () => {
+    if (app.tvId && !(app.conn && app.conn.open)) connect(app.tvId); // tap to try again
   });
   window.addEventListener("pagehide", releaseAll);
   // Back from another page restores this one from the browser's cache, its socket closed.

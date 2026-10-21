@@ -16,7 +16,7 @@ from PySide6.QtCore import QObject, QTimer
 from services.library import Genre, LibraryCache, LibraryModel, title_of
 from services.search import search_index
 from services.text_fold import fold
-from ui.remote_snapshots import Handles
+from ui.remote_snapshots import Handles, stable_key
 
 GENRES_PAGE = 100
 LIBRARY_PAGE = 50
@@ -45,8 +45,8 @@ class PhoneLibrary(QObject):
         self.model = LibraryModel(catalog, config, watch, self, cache=cache)
         self.handles = Handles()
         self._send = send
-        self._keys: dict[str, str] = {}  # genre id → key
-        self._ids: dict[str, str] = {}  # key → genre id
+        self._ids: dict[str, str] = {}  # key → genre id, the genres seen so far
+        self._wanted: Optional[str] = None  # a genre asked for before its section listed it
         self._asked = False
         self._failed = False
         self._view: Optional[tuple] = None  # ("genres", find) or ("titles", find)
@@ -61,18 +61,36 @@ class PhoneLibrary(QObject):
 
     # ---- the phone's asks ------------------------------------------------------------------
 
-    def genres(self, section: str, page: int, find: str) -> None:
+    def genres(self, section: str, page: int, find: str, n: int = -1) -> None:
         self._section(section, page)
-        self._answer_page(("genres", section, find), page)
+        self._wanted = None
+        self._answer_page(("genres", section, find), page, n)
 
-    def titles(self, section: str, genre_key: str, page: int, find: str) -> None:
-        """A genre's titles; `genre_key` "" is the section's first shelf (or the genre shown)."""
+    def titles(self, section: str, genre_key: str, page: int, find: str, n: int = -1) -> None:
+        """A genre's titles; `genre_key` "" is the section's first shelf (or the genre shown).
+        A key the section doesn't list yet (its lists still on their way) opens once it does."""
         self._section(section, page)
-        genre = self._ids.get(genre_key)
-        model = self.model
-        if genre is not None and genre != model.genre_id and genre in self._listed():
-            model.select_genre(genre)
-        self._answer_page(("titles", section, model.genre_id, find), page)
+        self._wanted = genre_key or None
+        self._choose_wanted()
+        self._answer_page(("titles", section, self.model.genre_id, find), page, n)
+
+    def _choose_wanted(self) -> None:
+        if self._wanted is None:
+            return
+        genre = self._genre_of(self._wanted)
+        if genre is None:
+            return  # not listed (yet)
+        self._wanted = None
+        if genre != self.model.genre_id:
+            self.model.select_genre(genre)
+
+    def _genre_of(self, key: str) -> Optional[str]:
+        listed = self._listed()
+        if key not in self._ids:
+            for each in listed:
+                self._ids[stable_key(each)] = each
+        found = self._ids.get(key)
+        return found if found in listed else None
 
     def _section(self, section: str, page: int) -> None:
         model = self.model
@@ -80,12 +98,14 @@ class PhoneLibrary(QObject):
             self._asked, self._failed = True, False
             model.set_section(section)  # a failed load is asked for again
 
-    def _answer_page(self, view: tuple, page: int) -> None:
+    def _answer_page(self, view: tuple, page: int, n: int = -1) -> None:
         if view != self._view:
             self._view, self._anchor = view, page
         message, signature = self._answer(page)
         if page == self._anchor:
             self._shown = signature
+        if n >= 0:
+            message["n"] = n  # the ask it answers; a later push carries none
         self._send(message)
 
     # ---- what the phone sees ---------------------------------------------------------------
@@ -96,10 +116,9 @@ class PhoneLibrary(QObject):
     def _key(self, genre_id: Optional[str]) -> str:
         if genre_id is None:
             return ""
-        if genre_id not in self._keys:
-            key = f"g{len(self._keys) + 1}"
-            self._keys[genre_id], self._ids[key] = key, genre_id
-        return self._keys[genre_id]
+        key = stable_key(genre_id)
+        self._ids[key] = genre_id
+        return key
 
     def _find(self) -> str:
         return str(self._view[-1]) if self._view is not None else ""
@@ -227,6 +246,9 @@ class PhoneLibrary(QObject):
         self._settle.start()
 
     def _push(self) -> None:
+        if self._view is not None and self._view[0] == "titles" and self._wanted:
+            self._choose_wanted()  # the genre asked for is listed now
+            self._view = (*self._view[:2], self.model.genre_id, self._view[3])
         message, signature = self._answer(self._anchor)
         if signature != self._shown:
             self._shown = signature

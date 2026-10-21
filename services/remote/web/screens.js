@@ -179,13 +179,12 @@ function openGuide() {
 }
 
 function askGuide(page) {
-  guide.asking = true;
-  if (guide.level === "groups") send({ t: "get", what: "groups", page, find: guide.find });
-  else send({ t: "get", what: "guide", list: guide.key, page, find: guide.find });
+  if (guide.level === "groups") ask(guide, { what: "groups", page, find: guide.find });
+  else ask(guide, { what: "guide", list: guide.key, page, find: guide.find });
 }
 
 function onGroups(message) {
-  if (guide.level !== "groups" || message.find !== guide.find) return;
+  if (guide.level !== "groups" || message.find !== guide.find || !answers(guide, message)) return;
   const rows = message.rows.map((group) => branchRow(group, () => openGuideAt("channels", group.id, group.title)));
   placePage($("guideRows"), guide, message, rows, () => openGuideAt("groups"));
 }
@@ -223,8 +222,8 @@ function guideRow(row) {
 }
 
 function onGuide(message) {
-  if (guide.level !== "channels" || message.find !== guide.find) return;
-  if (guide.key && message.list !== guide.key) return; // another group's, overtaken by a tap
+  if (guide.level !== "channels" || message.find !== guide.find || !answers(guide, message)) return;
+  if (!("n" in message) && message.list !== guide.key) return; // QiTV's own resend: of this group
   const opening = guide.opening;
   Object.assign(guide, { key: message.list, title: message.title, total: message.count });
   showGuideLevel();
@@ -319,7 +318,22 @@ function onTimetable(message) {
 // ---- lists a page at a time ---------------------------------------------------------------
 
 function newList(extra) {
-  return { find: "", lo: 0, hi: 0, pages: 1, asking: false, opening: false, ...extra };
+  return { find: "", lo: 0, hi: 0, pages: 1, asking: false, askedAt: 0, ask: 0, opening: false, ...extra };
+}
+
+// Each ask is numbered and its answer carries the number back: a list takes only the answer to
+// its latest ask (an earlier tap's comes too late to show), and QiTV's own resends (a list or a
+// programme guide that arrived; no number) only while it isn't waiting for one.
+let asks = 0;
+
+function ask(list, message) {
+  asks += 1;
+  Object.assign(list, { ask: asks, asking: true, askedAt: Date.now() });
+  send({ t: "get", ...message, n: asks });
+}
+
+function answers(list, message) {
+  return "n" in message ? message.n === list.ask : !list.opening;
 }
 
 function setTitle(h1, text, total) {
@@ -384,11 +398,13 @@ function placePage(box, list, message, rows, retry) {
   }
 }
 
-function pageOnScroll(box, list, ask) {
+const UNANSWERED_MS = 5000; // an ask never answered (QiTV went away) no longer holds the list
+
+function pageOnScroll(box, list, more) {
   box.addEventListener("scroll", () => {
-    if (list.asking || list.opening) return;
-    if (box.scrollTop + box.clientHeight > box.scrollHeight - 400 && list.hi + 1 < list.pages) ask(list.hi + 1);
-    else if (box.scrollTop < 400 && list.lo > 0) ask(list.lo - 1);
+    if (list.opening || (list.asking && Date.now() - list.askedAt < UNANSWERED_MS)) return;
+    if (box.scrollTop + box.clientHeight > box.scrollHeight - 400 && list.hi + 1 < list.pages) more(list.hi + 1);
+    else if (box.scrollTop < 400 && list.lo > 0) more(list.lo - 1);
   });
 }
 
@@ -480,10 +496,9 @@ function openLibrary() {
 }
 
 function askLibrary(page) {
-  library.asking = true;
   const { section, find } = library;
-  if (library.level === "genres") send({ t: "get", what: "genres", section, page, find });
-  else send({ t: "get", what: "library", section, genre: library.genre, page, find });
+  if (library.level === "genres") ask(library, { what: "genres", section, page, find });
+  else ask(library, { what: "library", section, genre: library.genre, page, find });
 }
 
 function libraryRow(item) {
@@ -509,6 +524,7 @@ function libraryRow(item) {
 
 function onGenres(message) {
   if (library.level !== "genres" || message.section !== library.section || message.find !== library.find) return;
+  if (!answers(library, message)) return;
   const rows = message.rows.map((genre) => branchRow(genre, () => openLibraryAt("titles", genre.id, genre.title)));
   const titles = message.titles || []; // what the find found in the whole section, below its genres
   if (titles.length && message.page === 0) rows.push(el("div", "group", w(library.section)));
@@ -518,7 +534,8 @@ function onGenres(message) {
 
 function onLibrary(message) {
   if (library.level !== "titles" || message.section !== library.section || message.find !== library.find) return;
-  if (library.genre && message.genre !== library.genre) return; // another genre's, overtaken
+  if (!answers(library, message)) return;
+  if (!("n" in message) && message.genre !== library.genre) return; // QiTV's own resend: of this genre
   Object.assign(library, { genre: message.genre, title: message.title, total: message.count });
   showLibraryLevel();
   const retry = () => openLibraryAt("titles", library.genre, library.title);
@@ -596,6 +613,24 @@ function bindTouchpad() {
 
 // ---- wiring -------------------------------------------------------------------------------
 
+// A reconnect (the phone slept, the network changed) is a new session: the rows shown carry the
+// old one's handles, so what shows comes again (its groups' and genres' keys hold).
+let hellos = 0;
+
+function onHello() {
+  hellos += 1;
+  if (hellos === 1) return; // the first: nothing is open yet
+  const shown = (document.querySelector("[data-screen]:not([hidden])") || {}).dataset;
+  const screen = shown ? shown.screen : "";
+  if (screen === "guide" || screen === "timetable") {
+    show("guide");
+    openGuideAt(guide.level, guide.level === "channels" ? guide.key : "", guide.title);
+  } else if (screen === "library") {
+    openLibraryAt(library.level, library.genre, library.title);
+  }
+}
+
+app.handlers.hello = onHello;
 app.handlers.state = onState;
 app.handlers.groups = onGroups;
 app.handlers.guide = onGuide;

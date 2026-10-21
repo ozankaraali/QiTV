@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MIN_BACKOFF_S = 1.0
-MAX_BACKOFF_S = 60.0
+MAX_BACKOFF_S = 300.0  # a relay that keeps refusing: each try costs a request of its quota
 STABLE_S = 60.0  # a connection up this long counts as working: the backoff starts over
 RESTING_S = 600.0  # the relay is over its daily limit
 REPLACED_S = 300.0  # another QiTV took this room (a copied config): don't fight over it

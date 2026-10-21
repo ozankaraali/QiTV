@@ -287,15 +287,15 @@ class RemoteController(QObject):
         sid, section = event.sid, event.section or "movies"
         try:
             if event.what == "groups":
-                self._guide(sid).groups(event.page, event.find)
+                self._guide(sid).groups(event.page, event.find, event.n)
             elif event.what == "guide":
-                self._guide(sid).channels(event.list, event.page, event.find)
+                self._guide(sid).channels(event.list, event.page, event.find, event.n)
             elif event.what == "timetable":
                 self._guide(sid).timetable(event.handle)
             elif event.what == "genres":
-                self._library(sid).genres(section, event.page, event.find)
+                self._library(sid).genres(section, event.page, event.find, event.n)
             else:
-                self._library(sid).titles(section, event.genre, event.page, event.find)
+                self._library(sid).titles(section, event.genre, event.page, event.find, event.n)
         except Exception as error:  # a phone's question must never take QiTV down
             logger.error("Phone remote: %s failed: %s", event.what, safe_message(error))
         if event.what in ("guide", "timetable"):

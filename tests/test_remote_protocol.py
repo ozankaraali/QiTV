@@ -109,6 +109,9 @@ class MessageTests(unittest.TestCase):
             parse_phone_message({"t": "get", "what": "groups", "page": 1, "find": "news"}),
             {"t": "get", "what": "groups", "page": 1, "find": "news"},
         )
+        self.assertEqual(  # the phone numbers its asks; the answer says which it answers
+            parse_phone_message({"t": "get", "what": "groups", "n": 7})["n"], 7
+        )
         self.assertEqual(
             parse_phone_message({"t": "get", "what": "genres", "section": "series"}),
             {"t": "get", "what": "genres", "section": "series", "page": 0, "find": ""},
@@ -170,6 +173,9 @@ class MessageTests(unittest.TestCase):
             {"t": "get", "what": "library", "section": "live"},
             {"t": "get", "what": "library", "find": 3},
             {"t": "get", "what": "groups", "page": -1},
+            {"t": "get", "what": "groups", "n": -1},
+            {"t": "get", "what": "groups", "n": 2**31},
+            {"t": "get", "what": "genres", "n": "7"},
             {"t": "get", "what": "genres", "section": "live"},
             {"t": "get", "what": "library", "genre": "g" * 33},
             {"t": "get", "what": "library", "genre": 3},

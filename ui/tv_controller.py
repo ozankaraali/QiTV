@@ -2334,14 +2334,17 @@ class TVController(QObject):
         self._update_guides()
 
     def guide_loading(self, channel: dict) -> bool:
-        """Whether `channel`'s provider guide is on its way (loading, or wanted and not yet
-        loaded): an empty timetable then says so instead of "no guide"."""
+        """Whether `channel`'s provider guide is on its way (a load runs or waits, or its
+        provider still sets up and then loads it): an empty timetable then says so instead of
+        "no guide". A load that failed is not on its way."""
         name = provider_of(channel) or self.catalog.current_provider_name()
         catalogs = self.catalog.catalogs
         if name not in catalogs.names():
             return False
         catalog = catalogs.catalog(name)
-        return bool(catalog.epg_loading() or (catalog.epg_enabled and not catalog.epg_ready()))
+        if catalog.epg_ready() or not catalog.epg_enabled:
+            return bool(catalog.epg_loading())
+        return bool(catalog.epg_loading() or catalog.is_loading())
 
     def channel_list_group(self) -> str:
         """The live group the channel list is in: the drawer's, else the one zapped through

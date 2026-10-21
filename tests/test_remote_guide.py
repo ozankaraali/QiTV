@@ -76,6 +76,16 @@ class PhoneGuideTests(WindowCase):
         self.assertEqual(self.last()["list"], recent)
         self.assertEqual(self.rows()[-1], "Channel 2")
 
+    def test_keys_hold_across_reconnects(self):
+        self.start()
+        fixture = self.group_keys()["Fixture"]
+        again = PhoneGuide(self.window, self.sent.append)  # a new session after a reconnect
+        self.addCleanup(again.deleteLater)
+        again.channels(fixture, 0, "", 3)
+        message = self.last()
+        self.assertEqual((message["list"], message["title"], message["n"]), (fixture, "Fixture", 3))
+        self.assertEqual([r["name"] for r in message["rows"]], ["Channel 1", "Channel 2"])
+
     def test_find_searches_the_whole_group(self):
         self.start()
         self.guide.channels(self.last()["list"], 0, "nnel 2")

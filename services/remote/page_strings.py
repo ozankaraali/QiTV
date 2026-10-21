@@ -57,6 +57,8 @@ PAGE_STRINGS: dict[str, str] = {
     "reconnecting": N_("Reconnecting…"),  # i18n: the phone remote: the connection dropped
     # i18n: the phone remote: QiTV can't be reached
     "offline": N_("Can't reach QiTV. Is it open on the computer?"),
+    # i18n: the phone remote: after "Can't reach QiTV…", once it stopped trying by itself
+    "tap_retry": N_("Tap here to try again."),
     "forget": N_("Forget this TV"),  # i18n: the phone remote's menu: unpair this phone
     "pair_another": N_("Pair another TV"),  # i18n: the phone remote's menu
     "choose_tv": N_("Choose a TV"),  # i18n: the phone remote: the list of paired TVs

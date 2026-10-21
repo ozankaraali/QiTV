@@ -179,11 +179,23 @@ def parse_phone_message(obj: object) -> Optional[dict]:
     return None
 
 
+MAX_ASK = 2**31 - 1  # an ask's number (see _numbered)
+
+
 def _page_and_find(obj: dict) -> Optional[tuple[int, str]]:
     page, find = _int(obj.get("page", 0)), obj.get("find", "")
     if page is None or page < 0 or not isinstance(find, str):
         return None
     return page, find[:MAX_QUERY]
+
+
+def _numbered(obj: dict, ask: dict) -> Optional[dict]:
+    """`ask` with the phone's number for it ("n"), which its answer carries back: the phone
+    keeps only the answer to its latest ask. None when the number is malformed."""
+    if "n" not in obj:
+        return ask
+    n = _int(obj["n"])
+    return {**ask, "n": n} if n is not None and 0 <= n <= MAX_ASK else None
 
 
 def _guide_ask(obj: dict) -> Optional[dict]:
@@ -194,11 +206,12 @@ def _guide_ask(obj: dict) -> Optional[dict]:
         return None
     page, find = asked
     if obj["what"] == "groups":
-        return {"t": "get", "what": "groups", "page": page, "find": find}
+        return _numbered(obj, {"t": "get", "what": "groups", "page": page, "find": find})
     group = obj.get("list", "")
     if not (group == "" or _short_id(group)):
         return None
-    return {"t": "get", "what": "guide", "list": group, "page": page, "find": find}
+    ask = {"t": "get", "what": "guide", "list": group, "page": page, "find": find}
+    return _numbered(obj, ask)
 
 
 def _library_ask(obj: dict) -> Optional[dict]:
@@ -209,12 +222,13 @@ def _library_ask(obj: dict) -> Optional[dict]:
         return None
     page, find = asked
     if obj["what"] == "genres":
-        return {"t": "get", "what": "genres", "section": section, "page": page, "find": find}
+        ask = {"t": "get", "what": "genres", "section": section, "page": page, "find": find}
+        return _numbered(obj, ask)
     genre = obj.get("genre", "")
     if not (genre == "" or _short_id(genre)):
         return None
     message = {"t": "get", "what": "library", "section": section, "genre": genre}
-    return {**message, "page": page, "find": find}
+    return _numbered(obj, {**message, "page": page, "find": find})
 
 
 # ---- events (the hub thread → the GUI thread) ------------------------------------------------
@@ -275,6 +289,7 @@ class Get:
     genre: str = ""  # the Library's: a genre's key, or "" for QiTV's first shelf
     find: str = ""  # the Guide's find box
     handle: str = ""  # the timetable's channel
+    n: int = -1  # the phone's number for the ask, which the answer carries back (-1: none)
 
 
 @dataclass(frozen=True)

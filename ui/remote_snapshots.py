@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import datetime
+import hashlib
 import secrets
 from typing import Any, Optional
 
@@ -41,6 +42,12 @@ def _stamp(when: Optional[datetime]) -> Optional[float]:
 
 
 TITLE_CHARS = 80  # a name or title as much as a phone's row shows: messages stay frame-sized
+
+
+def stable_key(list_id: str) -> str:
+    """A group's or genre's key for the phone: the same in every session, so a phone's keys
+    hold across reconnects (and QiTV restarts), and naming nothing of the id."""
+    return "g" + hashlib.sha256(list_id.encode("utf-8")).hexdigest()[:12]
 
 
 def programme_dict(programme: Optional[Programme]) -> Optional[dict]:

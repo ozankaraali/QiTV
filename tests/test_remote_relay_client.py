@@ -396,7 +396,10 @@ class ReviewFixRelayTests(RelayCase):
 
         self.assertEqual(next_backoff(8.0, uptime_s=5.0), 16.0)
         self.assertEqual(next_backoff(8.0, uptime_s=61.0), relay_client.MIN_BACKOFF_S * 2)
-        self.assertEqual(next_backoff(60.0, uptime_s=0.0), relay_client.MAX_BACKOFF_S)
+        self.assertEqual(next_backoff(200.0, uptime_s=0.0), relay_client.MAX_BACKOFF_S)
+        # A relay that keeps refusing is tried at most every five minutes: each try is a
+        # request of its daily quota (288 a day at most, from a QiTV it never takes).
+        self.assertEqual(next_backoff(256.0, uptime_s=0.0), 300.0)
 
 
 if __name__ == "__main__":

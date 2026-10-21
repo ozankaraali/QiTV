@@ -73,6 +73,22 @@ class PhoneLibraryTests(unittest.TestCase):
         self.assertEqual(rows[0]["count"], 120)
         self.assertNotIn(rows[0]["id"], ("1", "2"))  # the phone sees keys, not genre ids
 
+    def test_keys_hold_across_reconnects(self):
+        comedy = self.opened()["Comedy"]  # not the first genre, which an unknown key gets
+        again = self.make()  # the phone reconnected: a new session, a new Library
+        again.titles("movies", comedy, 0, "")  # a key from before, without listing genres first
+        self.ready()
+        self.assertTrue(wait_until(lambda: self.last("library")["items"]))
+        message = self.last("library")
+        self.assertEqual((message["genre"], message["title"]), (comedy, "Comedy"))
+
+    def test_an_answer_carries_its_asks_number_and_a_push_none(self):
+        self.library.genres("movies", 0, "", 7)
+        self.assertEqual(self.last("genres")["n"], 7)
+        self.ready()  # the lists arrive: QiTV sends the page again, of itself
+        self.assertTrue(wait_until(lambda: not self.last("genres")["loading"]))
+        self.assertNotIn("n", self.last("genres"))
+
     def test_find_searches_the_genres(self):
         self.opened()
         self.library.genres("movies", 0, "com")
@@ -154,7 +170,7 @@ class PhoneLibraryTests(unittest.TestCase):
             folded = spy.call_count
             self.library.titles("movies", drama, 0, "movie 11")
         self.assertGreaterEqual(folded, 120)
-        self.assertLessEqual(spy.call_count - folded, 1)  # only the find itself
+        self.assertLessEqual(spy.call_count - folded, 3)  # the find and lookups, not 120 titles
 
     def test_browsing_leaves_the_tvs_library_alone(self):
         tv = LibraryModel(self.catalog, self.config, WatchState(self.config), cache=self.cache)
