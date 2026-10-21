@@ -94,11 +94,14 @@ function pressable(node) {
   for (const type of ["pointerup", "pointercancel", "pointerleave"]) node.addEventListener(type, () => node.classList.remove("pressed"));
 }
 
-function tapRow(row, handle) {
+// A tap opens `handle` on the TV; watching on this phone, one that `plays` (a channel, a film,
+// an episode) plays here instead, `name` (and `num`) above it meanwhile.
+function tapRow(row, handle, { plays = false, num = "", name = "" } = {}) {
   pressable(row);
   row.addEventListener("click", () => {
     if (navigator.vibrate) navigator.vibrate(8);
-    send({ t: "open", id: handle });
+    if (here && plays) watchHandle(handle, num, name);
+    else send({ t: "open", id: handle });
   });
 }
 
@@ -218,7 +221,7 @@ function guideRow(row) {
   side.type = "button";
   side.setAttribute("aria-label", w("watch"));
   side.innerHTML = '<svg><use href="#i-play"/></svg>';
-  tapRow(side, row.id); // tunes the TV
+  tapRow(side, row.id, { plays: true, num: row.num, name: row.name }); // tunes the TV, or plays here
   item.append(hit, side);
   return item;
 }
@@ -235,17 +238,7 @@ function zapRow(row) {
   if (row.playing) top.append(el("em", "", w("watching")));
   main.append(top);
   item.append(main);
-  pressable(item);
-  item.addEventListener("click", () => {
-    if (navigator.vibrate) navigator.vibrate(8);
-    if (!here) {
-      send({ t: "open", id: row.id }); // tunes the TV
-      return;
-    }
-    unlock();
-    caption(row.num, row.name);
-    send({ t: "watch", id: row.id }); // plays here
-  });
+  tapRow(item, row.id, { plays: true, num: row.num, name: row.name }); // the TV, or here
   return item;
 }
 
@@ -390,7 +383,9 @@ function bindGuide() {
   $("timetableBack").addEventListener("click", () => show("guide"));
   $("timetableWatch").addEventListener("click", () => {
     if (navigator.vibrate) navigator.vibrate(8);
-    if (timetableFor) send({ t: "open", id: timetableFor });
+    if (!timetableFor) return;
+    if (here) watchHandle(timetableFor, "", $("timetableName").textContent);
+    else send({ t: "open", id: timetableFor });
   });
 }
 
@@ -661,7 +656,7 @@ function libraryRow(item) {
     main.append(bar);
   }
   row.append(main);
-  tapRow(row, item.id);
+  tapRow(row, item.id, { plays: !!item.plays, name: item.title });
   return row;
 }
 
@@ -826,10 +821,16 @@ function useHere(on) {
   if (on && !zapping()) useChannelList(true);
   document.querySelector("[data-screen=remote]").classList.toggle("on-phone", on);
   $("player").hidden = !on;
-  for (const button of document.querySelectorAll("#where [data-where]")) {
+  for (const button of document.querySelectorAll(".where [data-where]")) {
     button.classList.toggle("on", (button.dataset.where === "phone") === on);
   }
   if (!on) stopVideo();
+}
+
+function watchHandle(handle, num, name) {
+  unlock();
+  caption(num, name);
+  send({ t: "watch", id: handle }); // plays here
 }
 
 function startHere() {
@@ -866,7 +867,7 @@ function onStop() {
 }
 
 function bindHere() {
-  for (const button of document.querySelectorAll("#where [data-where]")) {
+  for (const button of document.querySelectorAll(".where [data-where]")) {
     button.addEventListener("click", () => {
       const phone = button.dataset.where === "phone";
       if (phone === here) return;

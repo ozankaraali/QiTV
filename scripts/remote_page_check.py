@@ -725,7 +725,7 @@ def scenario_watch_here(rig: Rig) -> None:
     rig.page.wait_for_selector("#zapRows .row >> nth=2")
     assert rig.page.locator("#player").is_visible(), "no player"
     assert rig.page.locator("[data-key=volup]").is_hidden(), "the TV's buttons still show"
-    assert rig.page.locator("#where [data-where=phone].on").count() == 1
+    assert rig.page.locator("#zap .where [data-where=phone].on").count() == 1
     rig.hub.send(sid, {"t": "play", "failed": True})  # nothing on the TV: pick one here
     rig.page.locator("#playerName", has_text="below").wait_for(timeout=5000)
     mark = rig.events.mark()
@@ -754,15 +754,43 @@ def scenario_watch_here(rig: Rig) -> None:
     rig.hub.send(sid, {"t": "play", "url": "javascript:alert(1)"})  # only http(s) plays
     rig.page.wait_for_timeout(300)
     assert rig.page.evaluate("document.getElementById('video').getAttribute('src')") == link
+    # The Library, watching here: the player stays above it, the switch says Phone; a film
+    # plays here, a series opens its seasons on the TV.
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=library]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark), GENRES)
+    rig.page.wait_for_selector("#libraryRows .row.branch >> nth=1")
+    assert rig.page.locator("#player").is_visible(), "the player went with the tab"
+    assert rig.page.locator("[data-screen=library] .where [data-where=phone].on").count() == 1
+    mark = rig.events.mark()
+    rig.page.locator("#libraryRows .row.branch", has_text="Drama").click()
+    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
+    titles = [
+        {"id": "m1", "title": "Harbour Lights", "sub": "1998", "plays": True},
+        {"id": "s1", "title": "Harbour Watch", "sub": ""},
+    ]
+    head = {"t": "library", "section": "movies", "genre": "g2", "title": "Drama", "count": 2}
+    answer(rig, sid, ask, {**head, "find": "", "page": 0, "pages": 1, "items": titles})
+    rig.page.wait_for_selector("#libraryRows .row >> nth=1")
+    rig.shot("watch-here-library")
+    mark = rig.events.mark()
+    rig.page.locator("#libraryRows .row", has_text="Harbour Lights").click()
+    assert rig.events.wait(WatchHere, after=mark).handle == "m1"
+    assert rig.page.inner_text("#playerName") == "Harbour Lights"
+    mark = rig.events.mark()
+    rig.page.locator("#libraryRows .row", has_text="Harbour Watch").click()
+    assert rig.events.wait(OpenItem, after=mark).handle == "s1"
+    assert not rig.events.of(WatchHere, after=mark), "a series played here"
+    rig.page.click("[data-tab=remote]")
     rig.hub.send(sid, {"t": "stop"})  # the TV took over
     rig.page.locator("#banner", has_text="TV").wait_for(timeout=5000)
     assert rig.page.locator("#player").is_hidden() and rig.page.locator("#now").is_visible()
-    assert rig.page.locator("#where [data-where=tv].on").count() == 1
+    assert rig.page.locator("#zap .where [data-where=tv].on").count() == 1
     mark = rig.events.mark()
-    rig.page.click("#where [data-where=phone]")
+    rig.page.click("#zap .where [data-where=phone]")
     rig.events.wait(WatchHere, after=mark)
     mark = rig.events.mark()
-    rig.page.click("#where [data-where=tv]")
+    rig.page.click("#zap .where [data-where=tv]")
     rig.events.wait(ToTv, after=mark)
     assert rig.page.locator("#player").is_hidden()
 

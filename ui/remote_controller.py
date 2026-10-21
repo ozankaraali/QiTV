@@ -420,13 +420,19 @@ class RemoteController(QObject):
         chosen: Optional[Target] = None
         group: Optional[tuple[str, list]] = None
         if handle:
-            found = self._find_handle(sid, handle)
-            if found is None or found[0] != "channel":
+            found = self._find_handle(sid, handle) or ("", None)
+            kind, payload = found
+            if kind == "channel":
+                channel, group_key, channels = cast(tuple, payload)
+                name = str(channel.get("name") or "")
+                chosen = Target(channel, "live", name, group_key=group_key)
+                group = (group_key, channels) if group_key else None
+            elif kind == "title" and cast(tuple, payload)[1] in ("movie", "episode"):
+                item, item_kind, _genre_items = cast(tuple, payload)
+                chosen = controller.title_target(item, item_kind)
+            else:  # a series opens on the TV; anything else plays nowhere but there
                 self._send(sid, {"t": "play", "failed": True})
                 return
-            channel, group_key, channels = cast(tuple, found[1])
-            chosen = Target(channel, "live", str(channel.get("name") or ""), group_key=group_key)
-            group = (group_key, channels) if group_key else None
 
         def launch(target: Target, url: str) -> tuple[bool, str]:
             if sid not in self._phones:

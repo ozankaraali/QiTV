@@ -185,6 +185,8 @@ class PhoneLibrary(QObject):
         progress = model.progress(item) if kind == model.item_kind(item) else None
         if progress is not None:  # (a series found on Continue has none of its own)
             row["progress"] = round(progress, 3)
+        if kind != "series":  # a film or an episode: it can play on the phone
+            row["plays"] = True
         return row
 
     def _genre(self, genre: Genre) -> dict:

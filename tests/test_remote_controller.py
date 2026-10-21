@@ -369,6 +369,29 @@ class WatchHereTests(WindowCase):
             self.assertTrue(wait_until(lambda: tune.called))
         self.assertEqual(tune.call_args.args[0]["name"], "Channel 2")
 
+    def test_a_film_of_the_phones_library_plays_there_and_goes_back(self):
+        self.connect()
+        remote = self.window.remote
+        film = {"id": 7, "name": "Harbour Lights", "cmd": "http://p.test/movie/u/p/7.mp4"}
+        handle = remote._library("s8").handles.issue("title", (film, "movie", None))
+        self.hand_off("http://p.test/movie/u/p/7.mp4", handle=handle)
+        play = self.plays()[-1]
+        self.assertEqual((play["name"], "num" in play), ("Harbour Lights", False))
+        with mock.patch.object(self.window.controller, "play_vod") as play_vod:
+            remote.bridge.post(ToTv("s8"))
+            self.assertTrue(wait_until(lambda: play_vod.called))
+        item, kind = play_vod.call_args.args[:2]
+        self.assertEqual((item["name"], kind), ("Harbour Lights", "movie"))
+
+    def test_a_series_does_not_play_on_the_phone(self):
+        self.connect()
+        remote = self.window.remote
+        show = {"id": "s1", "name": "Harbour Watch"}
+        handle = remote._library("s8").handles.issue("title", (show, "series", None))
+        remote.bridge.post(WatchHere("s8", handle))
+        self.assertTrue(wait_until(self.plays))
+        self.assertEqual(self.plays()[-1], {"t": "play", "failed": True})
+
     def test_an_xtream_channel_goes_as_hls(self):
         remote = self.window.remote
         entry = {"type": "XTREAM", "username": "u", "password": "p"}

@@ -1199,6 +1199,21 @@ class TVController(QObject):
             return None, []
         return key, channels
 
+    def title_target(self, item: dict, kind: str, context: Optional[dict] = None) -> Target:
+        """A movie or an episode (`kind`) as what plays: its title, and the Library's `context`
+        (see play_vod)."""
+        context = play_context(context)
+        episode = kind == "episode"
+        series = context["series"]
+        return Target(
+            item,
+            "series" if episode else "movies",
+            item_title(item, episode=episode),
+            subtitle=item_title(series) if episode and isinstance(series, dict) else "",
+            context=context,
+            start_over=bool(context["start_over"]),
+        )
+
     def play_vod(
         self,
         item: dict,
@@ -1222,19 +1237,9 @@ class TVController(QObject):
             from_library = self._flow.in_library()
         self.leave_multiview()  # live only: the focused tile is the big picture again
         self._flow.leave_library()
-        context = play_context(context)
-        episode = kind == "episode"
-        series = context["series"]
-        title = item_title(item, episode=episode)
+        target = self.title_target(item, kind, context)
+        title = target.title
         beside = self._title_beside_channel()  # what plays large is a title, a channel small
-        target = Target(
-            item,
-            "series" if episode else "movies",
-            title,
-            subtitle=item_title(series) if episode and isinstance(series, dict) else "",
-            context=context,
-            start_over=bool(context["start_over"]),
-        )
         if self._pip is not None:
             self._pip.forget_room()  # what an older title would have closed
         kept = False

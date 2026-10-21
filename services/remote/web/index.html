@@ -53,6 +53,11 @@
     <button class="menu" id="menuButton" type="button" aria-label="Menu" data-tl="menu"><svg><use href="#i-more"/></svg></button>
   </header>
   <div class="banner" id="banner" hidden></div>
+  <div class="player" id="player" hidden>
+    <video id="video" playsinline controls preload="none" autopictureinpicture></video>
+    <div class="player-cap"><span class="num" id="playerNum"></span><span class="name" id="playerName"></span></div>
+    <button type="button" class="player-out" id="playerOut" hidden data-t="open_player">Open in the phone's player</button>
+  </div>
 
   <section class="screen center" data-screen="connecting">
     <div class="spinner" aria-hidden="true"></div>
@@ -67,11 +72,6 @@
   </section>
 
   <section class="screen remote" data-screen="remote" hidden>
-    <div class="player" id="player" hidden>
-      <video id="video" playsinline controls preload="none" autopictureinpicture></video>
-      <div class="player-cap"><span class="num" id="playerNum"></span><span class="name" id="playerName"></span></div>
-      <button type="button" class="player-out" id="playerOut" hidden data-t="open_player">Open in the phone's player</button>
-    </div>
     <div class="nowbar">
       <button class="now" id="now" type="button" data-key="info">
         <div class="logo" id="nowLogo">TV</div>
@@ -87,7 +87,7 @@
       <div class="zap-head">
         <button type="button" class="back" id="zapUp" hidden><svg><use href="#i-left"/></svg><span data-t="groups">Groups</span></button>
         <h1 id="zapTitle"></h1>
-        <div class="where" id="where" role="group"><button type="button" class="on" data-where="tv" data-t="tv">TV</button><button type="button" data-where="phone" data-t="phone">Phone</button></div>
+        <div class="where" role="group"><button type="button" class="on" data-where="tv" data-t="tv">TV</button><button type="button" data-where="phone" data-t="phone">Phone</button></div>
       </div>
       <label class="sr" for="zapFind"></label>
       <input class="field" id="zapFind" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search">
@@ -137,6 +137,7 @@
     <div class="list-head">
       <button type="button" class="back" id="guideUp" hidden><svg><use href="#i-left"/></svg><span data-t="groups">Groups</span></button>
       <h1 id="guideTitle">Guide</h1>
+      <div class="where" role="group"><button type="button" class="on" data-where="tv" data-t="tv">TV</button><button type="button" data-where="phone" data-t="phone">Phone</button></div>
     </div>
     <label class="sr" for="guideFind"></label>
     <input class="field" id="guideFind" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search">
@@ -165,6 +166,7 @@
     <div class="list-head">
       <button type="button" class="back" id="libraryUp" hidden><svg><use href="#i-left"/></svg><span data-t="genres">Genres</span></button>
       <h1 id="libraryTitle">Library</h1>
+      <div class="where" role="group"><button type="button" class="on" data-where="tv" data-t="tv">TV</button><button type="button" data-where="phone" data-t="phone">Phone</button></div>
     </div>
     <div class="chips" id="libraryChips">
       <button type="button" class="on" data-lib="movies" data-t="movies">Movies</button>
