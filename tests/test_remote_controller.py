@@ -53,6 +53,26 @@ class RemoteDispatchTests(WindowCase):
         self.remote().fire("chdown")
         self.assertTrue(wait_until(lambda: not self.window.screens.library_shown()))
 
+    def test_pip_closes_the_small_picture_whatever_the_tv_shows(self):
+        self.show()
+        self.wait_for_drawer()  # the channel list is open: P there opens its highlighted channel
+        controller = self.window.controller
+        with (
+            mock.patch.object(controller, "pip_shown", return_value=True),
+            mock.patch.object(controller, "close_pip") as close,
+            mock.patch.object(controller, "handle") as handle,
+        ):
+            self.remote().fire("pip")
+        close.assert_called_once_with()
+        handle.assert_not_called()
+
+    def test_pip_opens_as_the_p_key_while_none_is_open(self):
+        self.show()
+        controller = self.window.controller
+        with mock.patch.object(controller, "handle") as handle:
+            self.remote().fire("pip")
+        handle.assert_called_once_with(Action.PIP, "")
+
     def test_movies_and_tv_screens(self):
         self.show()
         self.remote().fire("movies")

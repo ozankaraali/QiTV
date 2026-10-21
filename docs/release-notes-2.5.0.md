@@ -3,8 +3,9 @@
 QiTV 2.5 turns your phone into the remote: scan a code on the TV once, and the phone's browser
 drives QiTV like its keyboard, with the guide, search and your Library at hand.
 
-**Please always download QiTV from [Releases](https://github.com/ozankaraali/QiTV/releases)
-instead of using others' distributions, which may have malware.**
+**Download QiTV from [qitv.app](https://qitv.app), which picks the right build for your
+computer, or from [Releases](https://github.com/ozankaraali/QiTV/releases). Please don't use
+others' distributions, which may have malware.**
 
 ## New
 
@@ -22,8 +23,7 @@ instead of using others' distributions, which may have malware.**
   tunes at once; the **Library**'s Movies and Series by genre, Continue first, then a genre's
   titles, its find box finding genres and the section's films or series alike; and the TV's
   search results as you type on the phone's keyboard. Every find box searches the whole list
-  shown, 185,000 films included, and browsing on the phone leaves the TV where it is until you
-  tap.
+  shown, however long, and browsing on the phone leaves the TV where it is until you tap.
 - **At home, or anywhere.** At home the phone talks to QiTV directly over Wi-Fi. With Reach QiTV
   from any network on, it also works on mobile data or another network through the QiTV relay,
   which passes along end-to-end encrypted messages it can't read; back on your Wi-Fi the phone

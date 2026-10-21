@@ -29,3 +29,6 @@ A PySide6 IPTV player on libVLC (VLC 3.0.20 ships inside the app). What each rel
   what QiTV actually uses in `THIRD-PARTY-NOTICES.md`.
 - Anything that plays real streams on a developer's machine runs muted (`QITV_SMOKE_MUTE=1`) and briefly.
 - Releases publish only from `main`: a push to `main` runs the release job.
+- The phone page (`services/remote/web/`) is also served by the private relay at remote.qitv.app,
+  which keeps every released page: a release that changes the page has the relay synced and
+  deployed first (the owner's relay repository has the steps and its own AGENTS.md).

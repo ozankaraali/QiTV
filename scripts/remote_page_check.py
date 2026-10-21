@@ -754,6 +754,65 @@ def scenario_more_numpad(rig: Rig) -> None:
     rig.page.wait_for_selector("#moreSheet", state="hidden")
 
 
+def scenario_pip_close(rig: Rig) -> None:
+    """While the TV shows a small picture, More's button says it closes it."""
+    sid = paired_sid(rig)
+    rig.page.click("#moreButton")
+    rig.page.wait_for_selector("#moreSheet:not([hidden])")
+    pip = rig.page.locator("#moreSheet [data-key=pip]")
+    assert pip.inner_text().strip() == "Picture in picture", pip.inner_text()
+    rig.hub.send(sid, dict(STATE, pip=True, recording=True))
+    rig.page.locator("#moreSheet [data-key=pip].on").wait_for()
+    assert rig.page.locator("#moreSheet [data-key=record].on").count() == 1  # lit as it records
+    assert pip.inner_text().strip() == "Close picture in picture", pip.inner_text()
+    rig.shot("more-pip")
+    mark = rig.events.mark()
+    pip.click()
+    rig.events.wait(Press, where=lambda e: e.button == "pip" and not e.down, after=mark)
+    rig.hub.send(sid, dict(STATE, pip=False))
+    rig.page.locator("#moreSheet [data-key=pip]:not(.on)").wait_for()
+    assert pip.inner_text().strip() == "Picture in picture", pip.inner_text()
+
+
+def scenario_guide_follows_tv(rig: Rig) -> None:
+    """A Guide opened where the TV is follows the TV's channel: Watching moves, and a channel
+    beyond the rows shown opens the Guide where the TV is again; a group the phone chose stays."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark), GUIDE)
+    rig.page.locator("#guideRows .row.playing", has_text="Harbourline News").wait_for()
+    sports = dict(STATE["now"], num="2", name="Fernvale Sports")
+    mark = rig.events.mark()
+    rig.hub.send(sid, dict(STATE, now=sports))  # zapped on the computer, within the rows
+    rig.page.locator("#guideRows .row.playing", has_text="Fernvale Sports").wait_for()
+    assert rig.page.locator("#guideRows .row.playing").count() == 1
+    assert rig.page.locator("#guideRows .row.playing em").inner_text() == "Watching"
+    rig.page.wait_for_timeout(500)
+    assert not rig.events.of(Get, after=mark), "a channel in the rows needs no new list"
+    far = dict(STATE["now"], num="77", name="Larkspur Kids")
+    mark = rig.events.mark()
+    rig.hub.send(sid, dict(STATE, now=far))  # a channel beyond the rows: where the TV is now
+    ask = rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark)
+    assert (ask.list, ask.page, ask.find) == ("", 0, ""), ask
+    answer(rig, sid, ask, GUIDE)
+    rig.page.wait_for_selector("#guideRows .row >> nth=2")
+    mark = rig.events.mark()  # the phone picks a group: the Guide stops following
+    rig.page.click("#guideUp")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "groups", after=mark), GROUPS)
+    mark = rig.events.mark()
+    rig.page.locator("#guideRows .row.branch", has_text="News").click()
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark), GUIDE)
+    rig.page.wait_for_selector("#guideRows .row >> nth=2")
+    mark = rig.events.mark()
+    rig.hub.send(sid, dict(STATE, now=far))
+    rig.hub.send(sid, dict(STATE, now=sports))
+    rig.page.locator("#guideRows .row.playing", has_text="Fernvale Sports").wait_for()
+    rig.page.wait_for_timeout(800)
+    assert not rig.events.of(Get, after=mark), "a group the phone chose followed the TV"
+
+
 def drag(rig: Rig, dx: float, dy: float, hold_ms: int) -> None:
     box = rig.page.locator("#touchpad").bounding_box()
     assert box is not None
@@ -833,6 +892,8 @@ SCENARIOS.update(
         "library-open": scenario_library_open,
         "lists-after-reconnect": scenario_lists_after_reconnect,
         "more-numpad": scenario_more_numpad,
+        "pip-close": scenario_pip_close,
+        "guide-follows-tv": scenario_guide_follows_tv,
         "touchpad": scenario_touchpad,
     }
 )

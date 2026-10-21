@@ -2,7 +2,7 @@
 titles a page at a time. GUI thread only.
 
 Each phone browses with its own LibraryModel, so the phone leaves the TV's Library where it is,
-over the TV's cache: a genre the TV sorted is not sorted again (185,000 films take a second).
+over the TV's cache: a genre the TV sorted is not sorted again (a large one takes a second).
 The find box searches the level shown, the whole of it. Genres travel as short keys and titles
 as handles: nothing a phone receives names a stream, a link or a provider's own ids.
 """

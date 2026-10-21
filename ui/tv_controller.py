@@ -2328,6 +2328,17 @@ class TVController(QObject):
         names.discard("")
         return names
 
+    def pip_shown(self) -> bool:
+        """Whether the small picture (picture in picture) shows or is opening."""
+        sessions = self.sessions
+        return sessions is not None and bool(sessions.pip_open() or sessions.pip_opening())
+
+    def close_pip(self) -> None:
+        """Close the small picture, whatever shows (the phone remote's Close picture in
+        picture; P opens the channel list's highlighted channel while the list shows)."""
+        if not self._closed and self._pip is not None:
+            self._pip.close()
+
     def use_phone_guides(self, names: set[str]) -> None:
         """The providers of the channels the phone remote lists: their guides load too."""
         self._phone_guides = set(names)

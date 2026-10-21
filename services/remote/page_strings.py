@@ -43,6 +43,8 @@ PAGE_STRINGS: dict[str, str] = {
     "previous": N_("Previous"),  # i18n: the phone remote's numpad: the previous channel
     "record": N_("Record"),  # i18n: the phone remote: a button (verb)
     "pip": N_("Picture in picture"),  # i18n: the phone remote: a button
+    # i18n: the phone remote: the same button while the TV shows a small picture
+    "close_pip": N_("Close picture in picture"),
     "swap": N_("Swap pictures"),  # i18n: the phone remote: a button
     "multiview": N_("Multiview"),  # i18n: the phone remote: a button
     "picture": N_("Picture"),  # i18n: the phone remote: a button (aspect, sleep timer)

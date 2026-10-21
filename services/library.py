@@ -289,7 +289,7 @@ def history_season(history, provider: str, series: dict, seasons: list[dict]) ->
 class LibraryCache:
     """What Library models work out from one catalog (a genre's sorted list, the shelves, the
     parsed dates), by provider and content version: the TV's Library and the phone remote's
-    copies of it share one, so a list of 185,000 films is sorted once for all of them."""
+    copies of it share one, so a large provider's list is sorted once for all of them."""
 
     def __init__(self) -> None:
         self.memo: OrderedDict[tuple, Any] = OrderedDict()
