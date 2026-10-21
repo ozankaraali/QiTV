@@ -69,14 +69,14 @@ def state(window: Any) -> dict:
         }
     elif channel is not None:
         on, upcoming = controller.now_next(channel)
-        lag = controller._live_lag()
+        behind = controller.behind_live()
         now = {
             "kind": "live",
             "num": controller.channel_number(channel),
             "name": str(channel.get("name") or ""),
             "now": programme_dict(on),
             "next": programme_dict(upcoming),
-            "behind_s": round(lag) if lag is not None and lag >= 3 else 0,
+            "behind_s": round(behind),
         }
     live = getattr(controller, "live", None)
     sessions = getattr(window, "sessions", None)

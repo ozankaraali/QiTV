@@ -2174,6 +2174,16 @@ class TVController(QObject):
         lag = timeline.get("lag") if timeline is not None else None
         return float(lag) if isinstance(lag, (int, float)) else None
 
+    def behind_live(self) -> float:
+        """How far the large picture plays behind live once the viewer left live (paused, went
+        back, or another speed): 0 while it stays live, its buffer aside, as the player shows
+        Go live only then."""
+        lag = self._live_lag()
+        timeline = self._tuner.timeline
+        if lag is None or not isinstance(timeline, dict) or timeline.get("mode", "live") == "live":
+            return 0.0
+        return lag
+
     def _live_info(self) -> dict:
         """The statistics' source and lag for the large picture."""
         live = self.live

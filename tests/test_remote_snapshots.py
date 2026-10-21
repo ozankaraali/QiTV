@@ -33,6 +33,21 @@ class SnapshotTests(WindowCase):
         for key in ("volume", "muted", "recording", "pip", "multiview", "section"):
             self.assertIn(key, snapshot)
 
+    def test_behind_live_only_once_the_viewer_left_live(self):
+        controller = self.window.controller
+        self.addCleanup(setattr, controller._tuner, "timeline", None)
+        with mock.patch.object(controller, "_live_lag", return_value=4.2):
+            controller._tuner.timeline = {"lag": 4.2, "mode": "live"}  # its buffer: still live
+            self.assertEqual(controller.behind_live(), 0.0)
+            controller._tuner.timeline = {"lag": 4.2, "mode": "shifted"}  # paused or rewound
+            self.assertEqual(controller.behind_live(), 4.2)
+        self.open_first_channel()
+        self.assertTrue(wait_until(lambda: state(self.window)["now"] is not None))
+        with mock.patch.object(controller, "behind_live", return_value=38.4):
+            self.assertEqual(state(self.window)["now"]["behind_s"], 38)
+        with mock.patch.object(controller, "behind_live", return_value=0.0):
+            self.assertEqual(state(self.window)["now"]["behind_s"], 0)
+
     def test_state_before_anything_plays(self):
         snapshot = state(self.window)
         self.assertIsNone(snapshot["now"])
