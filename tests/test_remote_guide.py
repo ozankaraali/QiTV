@@ -301,6 +301,23 @@ class GuideFindTests(WindowCase):
             self.assertTrue(wait_until(lambda: guides.called))
         guides.assert_called_with({PROVIDER_NAME})
 
+    def test_finding_in_a_group_reaches_every_channel(self):
+        """ "Find a channel" inside a group: the group's own first, then any other channel."""
+        self.open_first_channel()
+        guide = self.make(bare=True)
+        elsewhere = {"name": "Channel 9 Elsewhere", "id": 9, "cmd": "file:///9"}
+        index = guide._live_index() + [("P", "live", fold(elsewhere["name"]), "", elsewhere)]
+        with mock.patch.object(guide, "_live_index", return_value=index):
+            guide.channels("", 0, "channel")
+            message = self.found("channels", "channel")
+        names = [r["name"] for r in message["rows"]]
+        self.assertEqual(names, ["Channel 1", "Channel 2", "Channel 9 Elsewhere"])
+        self.assertEqual(message["count"], 3)
+        kind, (channel, group, channels) = guide.handles.get(message["rows"][2]["id"])
+        self.assertEqual((channel["name"], group, channels), ("Channel 9 Elsewhere", "", []))
+        kind, (channel, group, channels) = guide.handles.get(message["rows"][0]["id"])
+        self.assertTrue(group and channels)  # the group's own: tuned within it
+
     def test_a_group_and_no_channel(self):
         self.open_first_channel()
         guide = self.make()

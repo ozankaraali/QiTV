@@ -4,8 +4,9 @@ a time with what's on and next, and a channel's timetable. GUI thread only.
 Each phone reads the groups through its own NavModel (★ Favorites, ⟲ Recent, then the
 provider's groups), so its browsing leaves the TV's channel list where it is; it opens where the
 TV's list is, on the page of the channel playing. The find box searches the level shown, the
-whole of it; on the groups it also finds the channels, as the desktop search does, after the
-groups it matches. Groups travel as short keys, channels and programmes as handles.
+whole of it, and every channel besides, as the desktop search does: after the groups it
+matches, or after the group's own channels. Groups travel as short keys, channels and
+programmes as handles.
 
 The Remote tab's channel list is a bare one: the same groups and channels, without programmes
 (its messages "chgroups" and "channels"), so it loads no programme guide.
@@ -19,7 +20,7 @@ from typing import Any, Callable, ClassVar, Optional, cast
 from PySide6.QtCore import QObject, QTimer
 
 from services.catchup import programme_in_archive
-from services.navigation import NavModel, NavNode, section_title
+from services.navigation import NavModel, NavNode, item_key, section_title
 from services.provider_ids import provider_of
 from services.search import SearchIndex, search_index
 from services.text_fold import fold, fold_all
@@ -271,6 +272,12 @@ class PhoneGuide(QObject):
         )
         return message, signature
 
+    def _elsewhere(self, channels: list[dict], find: str) -> list[dict]:
+        """The channels outside `channels` that the find finds among every channel."""
+        listed = {(provider_of(c), item_key(c)) for c in channels}
+        hits = search_index(self._live_index(), find)
+        return [h.item for h in hits if (provider_of(h.item), item_key(h.item)) not in listed]
+
     def _live_index(self) -> SearchIndex:
         catalog = self._window.catalog
         version = (id(catalog), catalog.content_version())
@@ -301,9 +308,18 @@ class PhoneGuide(QObject):
         if node is None and not error and not self.nav.is_loading(self._section()):
             channels = []  # no such group: nothing to list
         found = self._found_channels(channels, find) if channels is not None else []
-        shown = found[page * GUIDE_PAGE : (page + 1) * GUIDE_PAGE]
+        own = len(found)  # the group's own; any other channel the find finds follows them
+        if channels is not None and find.strip():
+            found = found + self._elsewhere(channels, find)
+        start = page * GUIDE_PAGE
+        shown = found[start : start + GUIDE_PAGE]
         playing = self._window.controller._channel
-        rows = [self._channel_row(c, group, channels, playing) for c in shown]
+        rows = []
+        for at, channel in enumerate(shown, start):
+            if at < own:  # tuned within the group
+                rows.append(self._channel_row(channel, group, channels, playing))
+            else:  # found elsewhere: tuned on its own, as the desktop search's results
+                rows.append(self._channel_row(channel, None, None, playing))
         shows = [(id(c), (r.get("now") or {}).get("title")) for c, r in zip(shown, rows)]
         if not self._bare:
             self.providers = {provider_of(c) for c in shown} - {""}
