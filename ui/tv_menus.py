@@ -133,7 +133,7 @@ class TVMenus(QObject):
         )
         # i18n: a menu entry (opens the Settings window)
         add(app_menu, tr("Settings…"), "Ctrl+,", window.options_dialog, role.PreferencesRole)
-        # i18n: a menu entry: the phone remote's pairing code (or its Settings while it's off)
+        # i18n: a menu entry: the phone remote's pairing code (turning the remote on if it's off)
         add(
             app_menu,
             tr("Phone Remote…"),

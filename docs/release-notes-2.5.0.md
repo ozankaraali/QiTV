@@ -8,11 +8,11 @@ instead of using others' distributions, which may have malware.**
 
 ## New
 
-- **Phone remote.** Turn it on in Settings → Phone remote, choose QiTV → Phone Remote…, and scan
-  the code on the TV with your phone's camera: no app to install. The arrows, OK and Back work
-  as the keyboard's wherever you are, and a held button repeats like a held key and stops where
-  you let go. TV, Movies and Series jump to those pages; volume, channels, play and pause,
-  rewind, Go live and Mute are a thumb away, and More holds the channel numbers, Record,
+- **Phone remote.** Choose QiTV → Phone Remote… (it turns the remote on the first time) and
+  scan the code on the TV with your phone's camera: no app to install. The arrows, OK and Back
+  work as the keyboard's wherever you are, and a held button repeats like a held key and stops
+  where you let go. TV, Movies and Series jump to those pages; volume, channels, play and
+  pause, rewind, Go live and Mute are a thumb away, and More holds the channel numbers, Record,
   Picture in picture, Swap, Multiview, Picture and Full screen. Prefer swiping? The phone's
   menu turns the arrows into a touchpad.
 - **A second screen.** The phone shows what's on with its progress; a **Guide** that opens
