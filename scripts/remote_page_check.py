@@ -704,6 +704,21 @@ def scenario_touchpad(rig: Rig) -> None:
     mark = rig.events.mark()
     rig.page.click("#touchpad")  # a tap: OK
     rig.events.wait(Press, where=lambda e: e.button == "ok" and not e.down, after=mark)
+    # The narrowest phone, the longest hint (Turkish): the hint stays inside the touchpad.
+    rig.page.set_viewport_size({"width": 320, "height": 568})
+    turkish = "Gezinmek için kaydırın · Tamam için dokunun"
+    rig.page.evaluate("t => { document.querySelector('#touchpad span').textContent = t; }", turkish)
+    pad = rig.page.locator("#touchpad").bounding_box()
+    hint = rig.page.locator("#touchpad span").bounding_box()
+    assert pad and hint, (pad, hint)
+    inside = (
+        hint["x"] >= pad["x"]
+        and hint["y"] >= pad["y"]
+        and hint["x"] + hint["width"] <= pad["x"] + pad["width"]
+        and hint["y"] + hint["height"] <= pad["y"] + pad["height"]
+    )
+    assert inside, (pad, hint)
+    rig.shot("touchpad-narrow")
     rig.page.reload()  # remembered on this phone
     rig.page.wait_for_selector("#touchpad:not([hidden])")
 
