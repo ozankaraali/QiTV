@@ -648,6 +648,7 @@ class ProviderSetupWorker(QObject):
 class EpgLoadWorker(QObject):
     finished = Signal(object)
     error = Signal(str)
+    shown = Signal()  # an outdated saved guide is up while the fresh one downloads
 
     def __init__(self, epg_manager, force_refresh: bool = False):
         super().__init__()
@@ -659,7 +660,7 @@ class EpgLoadWorker(QObject):
             if self.force_refresh:
                 self.epg_manager.force_refresh_current_epg()
             else:
-                self.epg_manager.set_current_epg()
+                self.epg_manager.set_current_epg(on_shown=self.shown.emit)
             self.finished.emit({})
         except Exception as e:
             logger.warning("EPG load failed (%s)", type(e).__name__)

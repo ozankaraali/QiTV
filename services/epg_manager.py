@@ -9,7 +9,7 @@ import logging
 import os
 import pickle
 import threading
-from typing import Any, Dict, Generator, Iterator, List, Optional, Set, Tuple, cast
+from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, Set, Tuple, cast
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -349,10 +349,11 @@ class EpgManager:
         self._publish(None, MultiKeyDict())
         self._saved = None
 
-    def _load_cached_epg(self, cache_key):
+    def _load_cached_epg(self, cache_key, touch: bool = True):
         """Load a previously indexed EPG from disk; return False if it is missing.
 
         The guide shown is kept when it is the one in that file and the file is unchanged.
+        `touch`: note it as used now (a URL guide's next check counts from then).
         """
         path = self._guide_path(cache_key)
         if not os.path.exists(path):
@@ -379,7 +380,8 @@ class EpgManager:
                 return False
             self._publish(cache_key, guide)
             self._saved = (path, stamp, guide)
-        self.index[cache_key]["last_access"] = datetime.now().strftime(_INDEX_TIME_FORMAT)
+        if touch:
+            self.index[cache_key]["last_access"] = datetime.now().strftime(_INDEX_TIME_FORMAT)
         return True
 
     def _store_guide(self, cache_key, guide, source_date=None):
@@ -586,10 +588,11 @@ class EpgManager:
         for key, value in merged.items():  # other providers' entries are known here now
             self.index.setdefault(key, value)
 
-    def set_current_epg(self):
+    def set_current_epg(self, on_shown: Optional[Callable[[], None]] = None):
         """Show the configured source's guide: a source indexed as None has none; an outdated
-        one is fetched again; otherwise its saved guide is shown. A source never indexed, or
-        whose guide file is gone, is fetched."""
+        one is fetched again, its saved guide shown meanwhile (`on_shown` says when, so the
+        catalog reads it before the download ends); otherwise its saved guide is shown. A
+        source never indexed, or whose guide file is gone, is fetched."""
         if not self.config_manager.channel_epg:
             self._publish(None, MultiKeyDict())
             return
@@ -607,8 +610,10 @@ class EpgManager:
                 return
             if epg_info and self._out_of_date(kind, args, epg_info):
                 # The saved guide shows while the fresh one loads (a large one takes minutes);
-                # a failed fetch keeps it (see _source_failed).
-                self._load_cached_epg(key)
+                # a failed fetch keeps it (see _source_failed). Its last check stays as it
+                # was, so a URL guide whose fetch fails is checked again next time.
+                if self._load_cached_epg(key, touch=False) and on_shown is not None:
+                    on_shown()
                 self._fetch(kind, args, seen)
                 return
             if self._load_cached_epg(key):

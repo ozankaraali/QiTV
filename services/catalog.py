@@ -433,6 +433,7 @@ class CatalogService(QObject):
         self._pending_setup: Optional[tuple[Optional[str], bool]] = None
         self._setup_target: Optional[str] = None  # the provider the running setup loads
         self._pending_epg: Optional[bool] = None  # a queued EPG load (its force flag)
+        self._epg_load: Optional[tuple] = None  # (generation, provider, releases) of the load
         # Catalog network jobs: keys are (generation, kind, ...) for queued and running jobs;
         # a running job's key maps to the provider whose portal it asks.
         self._catalog_queue: list[_CatalogRequest] = []
@@ -607,7 +608,22 @@ class CatalogService(QObject):
         self._state_job = "epg"
         worker = self.factory.epg(self.epg_manager, force)
         data = (force, self._epg_releases)
+        self._epg_load = (self._generation, self.current_provider_name(), self._epg_releases)
+        shown = getattr(worker, "shown", None)
+        if shown is not None:
+            shown.connect(self._on_epg_shown)
         self._start(worker, "epg", data, self._on_epg_ready, self._on_epg_error)
+
+    def _on_epg_shown(self) -> None:
+        """The load put the saved guide up and goes on downloading a fresh one: programmes are
+        read from it now (when the load is still this provider's and the guide still wanted)."""
+        load = (self._generation, self.current_provider_name(), self._epg_releases)
+        if self._closed or not self.epg_enabled or self._state_job != "epg":
+            return
+        if load != self._epg_load:
+            return
+        self._epg_ready = True
+        self.epgReady.emit()
 
     def _on_epg_ready(self, job: _Job, payload) -> None:
         if self._next_state_job() or not self._current(job):
