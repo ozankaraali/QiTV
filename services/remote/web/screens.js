@@ -12,6 +12,7 @@ const HOLD_MS = 250;
 const QUERY_DEBOUNCE_MS = 150;
 
 const words = {
+  nothing_playing: "Nothing playing",
   watching: "Watching",
   continue_watching: "Continue watching",
   my_list: "My list",
@@ -100,7 +101,7 @@ function drawNow() {
   const name = $("nowName");
   const live = $("nowLive");
   if (!now) {
-    name.textContent = t("nothing_playing") === "nothing_playing" ? "Nothing playing" : t("nothing_playing");
+    name.textContent = w("nothing_playing");
     $("nowNum").textContent = "";
     $("nowShow").textContent = "";
     $("nowProg").style.width = "0%";

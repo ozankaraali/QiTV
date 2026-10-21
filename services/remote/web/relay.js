@@ -41,13 +41,21 @@ function installRelay() {
   };
   app.handlers.where = (message) => {
     app.where = message;
-    const go = message.home && message.ticket && (message.same || app.forceHop);
+    // QiTV says when its last ticket for this phone was never used: home was out of reach
+    // (guest Wi-Fi, an isolated network), so only "Connect directly" hops then.
+    const go = message.home && message.ticket && (app.forceHop || (message.same && !message.unreachable));
     app.forceHop = false;
     if (go) hop(message);
   };
   app.onclose = (code, reason) => {
-    if (code === 4404) banner(t("tv_offline"));
-    else if (code === 4429 && reason === "full") banner(t("full"), "error");
+    if (code === 4404) {
+      banner(t("tv_offline"));
+      return "banner"; // retry, keeping this message
+    }
+    if (code === 4429 && reason === "full") {
+      banner(t("full"), "error");
+      return "banner";
+    }
     return false; // retry as usual
   };
   app.menuExtras.push(() =>
@@ -78,19 +86,35 @@ function installHome() {
     const [, tid, secret, tvId, room, relayB64] = hash.split(".");
     let relay = null;
     try {
-      relay = decoder.decode(b64d(relayB64 || ""));
+      relay = webOrigin(decoder.decode(b64d(relayB64 || "")));
     } catch {
       relay = null;
     }
     if (!tid || !secret || !tvId) return false;
-    redeem({ tid, secret, tvId, room: room || null, relay });
+    const ticket = { tid, secret, tvId, room: room || null, relay };
+    if (store.getTv(tvId)) {
+      // This address already has its key: use it, and spend the ticket only if it was removed.
+      app.pendingTicket = ticket;
+      app.pendingRelay = relay;
+      connect(tvId);
+    } else {
+      redeem(ticket);
+    }
     return true;
   };
   app.onhello = () => {
     clearTimeout(bounceTimer);
     bounceTimer = null;
+    app.pendingTicket = null;
   };
   app.onclose = (code, reason, mode) => {
+    if (mode === "kk" && code === 4401 && app.pendingTicket) {
+      const ticket = app.pendingTicket; // this address's key is gone: the ticket makes a new one
+      app.pendingTicket = null;
+      store.forgetTv(ticket.tvId);
+      redeem(ticket);
+      return true;
+    }
     if (mode === "ticket" && code === 4401) {
       // The ticket was used or too old: the relay hands out a fresh one.
       if (app.pendingRelay) {
@@ -132,11 +156,23 @@ function redeem({ tid, secret, tvId, room, relay }) {
 function armBounce() {
   if (bounceTimer) return;
   const record = store.getTv(app.tvId);
-  if (!record || !record.relay) return;
+  const relay = (record && record.relay) || app.pendingRelay; // a first redeem has no record yet
+  if (!relay || !app.tvId) return;
+  const tvId = app.tvId;
   bounceTimer = setTimeout(() => {
     bounceTimer = null;
-    if (!(app.conn && app.conn.open)) location.replace(`${record.relay}/#b.${app.tvId}`);
+    if (!(app.conn && app.conn.open)) location.replace(`${relay}/#b.${tvId}`);
   }, BOUNCE_MS);
+}
+
+// An http(s) origin, or null: nothing else is ever navigated to.
+function webOrigin(text) {
+  try {
+    const url = new URL(text);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.origin : null;
+  } catch {
+    return null;
+  }
 }
 
 // ---- the camera scanner (secure pages only: the relay door, or a home-screen copy of it) ---
@@ -204,6 +240,7 @@ function scanned(text) {
   } catch {
     return showScan();
   }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return showScan();
   // Another relay or a home address: go there, it pairs itself from the code in the address.
   if (url.origin !== location.origin) {
     location.href = url.href;

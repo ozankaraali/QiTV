@@ -24,6 +24,8 @@ VERSION = STORE_VERSION
 CODE_BYTES = 16
 CODE_GRACE_S = 15.0
 TICKET_S = 60.0
+HOP_SETTLE_S = 2.0  # a ticket younger than this may still be on its way home
+HOP_WINDOW_S = 120.0  # an unused ticket younger than this: home was out of the phone's reach
 MAX_HOME_KEYS = 4  # a phone's keys for home addresses (one per address it has opened QiTV at)
 _ID_BYTES = 8
 
@@ -72,6 +74,7 @@ class RemoteStore:
         self._code: Optional[bytes] = None
         self._previous: Optional[tuple[bytes, float]] = None  # (code, accepted until)
         self._tickets: dict[str, _Ticket] = {}
+        self._issued: dict[str, float] = {}  # device id → its last hop ticket, until redeemed
 
     # ---- config ----------------------------------------------------------------------------
 
@@ -228,13 +231,21 @@ class RemoteStore:
         self._tickets = {t: v for t, v in self._tickets.items() if v.expires > now}
         tid, secret = _new_id(), secrets.token_bytes(32)
         self._tickets[tid] = _Ticket(device_id, secret, now + TICKET_S)
+        self._issued[device_id] = now
         return f"{tid}.{b64e(secret)}"
+
+    def hop_unanswered(self, device_id: str, now: float) -> bool:
+        """The device's last hop ticket, issued a little while ago, was never used: the phone
+        couldn't reach QiTV's home address (guest Wi-Fi, an isolated network)."""
+        issued = self._issued.get(device_id)
+        return issued is not None and HOP_SETTLE_S <= now - issued < HOP_WINDOW_S
 
     def redeem_ticket(self, tid: str, now: float) -> Optional[tuple[str, bytes]]:
         """(device id, psk) for a live ticket, used up by this call; None otherwise."""
         ticket = self._tickets.pop(tid, None)
         if ticket is None or ticket.expires <= now or self._device(ticket.device_id) is None:
             return None
+        self._issued.pop(ticket.device_id, None)
         return ticket.device_id, ticket.psk
 
 

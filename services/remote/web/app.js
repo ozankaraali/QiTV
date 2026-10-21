@@ -68,6 +68,7 @@ export function banner(text, kind = "") {
 
 export function showScan(message) {
   show("scan");
+  banner("");
   $("scanMessage").textContent = message || strings.scan_hint || $("scanMessage").textContent;
   $("tvName").textContent = "QiTV";
   setDot("");
@@ -179,7 +180,9 @@ function onMessage(message) {
 function onClose(code, reason, mode) {
   releaseAll();
   setDot("");
-  if (app.onclose && app.onclose(code, reason, mode)) return; // a door's own cases (relay.js)
+  // A door's own cases (relay.js): true when it took over, "banner" when its message stays up.
+  const handled = app.onclose ? app.onclose(code, reason, mode) : false;
+  if (handled === true) return;
   if (code === 4401 && reason === "pair-expired") {
     app.conn = null;
     showScan(t("code_expired"));
@@ -189,21 +192,23 @@ function onClose(code, reason, mode) {
     forget(t("removed"));
     return;
   }
-  scheduleRetry();
+  scheduleRetry(handled === "banner");
 }
 
 function forget(message) {
   if (app.tvId) store.forgetTv(app.tvId);
-  if (app.conn) app.conn.end(1000, "forgotten");
-  app.conn = null;
+  const conn = app.conn;
+  app.conn = null; // first: its close must not schedule a reconnect
   app.tvId = null;
+  clearTimeout(app.retryTimer);
+  if (conn) conn.end(1000, "forgotten");
   showScan(message);
 }
 
-function scheduleRetry() {
+function scheduleRetry(keepBanner = false) {
   const delay = RETRY_MS[Math.min(app.retry, RETRY_MS.length - 1)];
   app.retry += 1;
-  banner(app.retry > RETRY_MS.length ? t("offline") : t("reconnecting"));
+  if (!keepBanner) banner(app.retry > RETRY_MS.length ? t("offline") : t("reconnecting"));
   clearTimeout(app.retryTimer);
   app.retryTimer = setTimeout(() => {
     if (app.tvId && document.visibilityState !== "hidden") connect(app.tvId);

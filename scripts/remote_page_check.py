@@ -6,9 +6,9 @@
 Nothing shows on screen: Chrome runs headless and the hub listens on 127.0.0.1 only. Each
 scenario prints PASS or FAIL; the exit code is 1 if any failed. Needs Google Chrome installed
 (or --chrome PATH) and Playwright (`--with playwright`). Scenarios: vectors (the page's Noise
-against tests/fixtures/noise_vectors.json), pair-home, hold, hidden-releases; with --relay (a
-local `wrangler dev` of relay/, e.g. http://127.0.0.1:8787): pair-relay, hop, hop-back-on-loss,
-two-tvs.
+against tests/fixtures/noise_vectors.json), pair-home, hold, hidden-releases and the second
+screen's; with --relay (a local `wrangler dev` of the QiTV relay, e.g. http://127.0.0.1:8787, or
+the deployed one): pair-relay, hop, hop-once, hop-memory, hop-back-on-loss, relay-banner, two-tvs.
 """
 
 from __future__ import annotations
@@ -527,8 +527,30 @@ def scenario_touchpad(rig: Rig) -> None:
     rig.page.wait_for_selector("#touchpad:not([hidden])")
 
 
+def scenario_forget_clean(rig: Rig) -> None:
+    paired_sid(rig)
+    rig.page.click("#menuButton")
+    rig.page.locator("#menuList button", has_text="Forget this TV").click()
+    rig.page.wait_for_selector("[data-screen=scan]:not([hidden])")
+    rig.page.wait_for_timeout(1500)  # past any retry
+    assert rig.page.locator("#banner").is_hidden(), rig.page.inner_text("#banner")
+
+
+def scenario_hello_keeps_now(rig: Rig) -> None:
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    rig.page.locator("#nowName", has_text="Harbourline News").wait_for()
+    rig.hub.send(
+        sid, {"t": "hello", "proto": 1, "tv": "Living room", "door": "home", "strings": {}}
+    )
+    rig.page.wait_for_timeout(300)
+    assert rig.page.inner_text("#nowName") == "Harbourline News", rig.page.inner_text("#nowName")
+
+
 SCENARIOS.update(
     {
+        "forget-clean": scenario_forget_clean,
+        "hello-keeps-now": scenario_hello_keeps_now,
         "now-playing": scenario_now_playing,
         "guide-tune": scenario_guide_tune,
         "search-mirror": scenario_search_mirror,
@@ -538,7 +560,51 @@ SCENARIOS.update(
     }
 )
 
+
+def scenario_hop_once(rig: Rig) -> None:
+    scenario_pair_relay(rig)
+    for _ in range(2):  # the home-screen icon, opened twice more at home
+        mark = rig.events.mark()
+        rig.page.goto(f"{rig.relay}/")
+        rig.events.wait(Opened, where=lambda e: e.door == "home", after=mark, timeout=10)
+        wait_url(rig, rig.base)
+    keys = rig.hub._core.store.devices[0].keys
+    assert len(keys) == 2, [k.door for k in keys]  # its relay key and one home key, not more
+
+
+def scenario_hop_memory(rig: Rig) -> None:
+    net.home_ipv4 = lambda: "127.0.0.2"  # an address this phone can't reach (guest Wi-Fi)
+    try:
+        mark = rig.events.mark()
+        rig.page.goto(rig.pair_url())
+        rig.events.wait(Paired, after=mark, timeout=10)
+        rig.page.wait_for_timeout(2500)  # it hopped and found nothing
+        mark = rig.events.mark()
+        rig.page.goto(f"{rig.relay}/")  # opened again: no second hop into the void
+        rig.events.wait(Opened, where=lambda e: e.door == "relay", after=mark, timeout=10)
+        rig.page.wait_for_timeout(2000)
+        assert rig.page.url.startswith(rig.relay or ""), rig.page.url
+        rig.page.click("#menuButton")
+        assert rig.page.locator("#menuList button", has_text="Connect directly").count() == 1
+    finally:
+        net.home_ipv4 = lambda: "127.0.0.1"
+
+
+def scenario_relay_banner(rig: Rig) -> None:
+    scenario_pair_relay(rig)
+    mark = rig.events.mark()
+    rig.page.goto(f"{rig.relay}/#b.")
+    rig.events.wait(Opened, where=lambda e: e.door == "relay", after=mark, timeout=10)
+    rig.hub.stop()  # QiTV quits: the relay tells the phone it's offline
+    rig.page.locator("#banner", has_text="reachable").wait_for(timeout=8000)
+    rig.page.wait_for_timeout(1500)
+    assert "reachable" in rig.page.inner_text("#banner"), rig.page.inner_text("#banner")
+
+
 RELAY_SCENARIOS: dict[str, Callable[[Rig], None]] = {
+    "hop-once": scenario_hop_once,
+    "hop-memory": scenario_hop_memory,
+    "relay-banner": scenario_relay_banner,
     "pair-relay": scenario_pair_relay,
     "hop": scenario_hop,
     "hop-back-on-loss": scenario_hop_back_on_loss,
@@ -562,7 +628,8 @@ def main() -> int:
     failed = 0
     with sync_playwright() as playwright:
         for name in names:
-            rig = Rig(playwright, args.chrome, args.shots, args.relay)
+            relay = args.relay if name in RELAY_SCENARIOS else None  # home ones: no relay at all
+            rig = Rig(playwright, args.chrome, args.shots, relay)
             try:
                 every[name](rig)
                 if rig.errors:

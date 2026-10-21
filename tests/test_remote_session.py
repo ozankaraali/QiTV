@@ -350,5 +350,15 @@ class ReviewFixTests(SessionCase):
             self.assertEqual(reply.events, [])
 
 
+class HopAnsweredSessionTests(SessionCase):
+    def test_where_says_when_the_last_hop_never_arrived(self):
+        phone, session, _, _ = self.pair(door="relay", same=True)
+        first = phone.open(session.receive(phone.seal({"t": "where"})).frames[0])
+        self.assertFalse(first["unreachable"])
+        self.clock.now += 10  # its ticket was never used: home didn't answer
+        second = phone.open(session.receive(phone.seal({"t": "where"})).frames[0])
+        self.assertTrue(second["unreachable"])
+
+
 if __name__ == "__main__":
     unittest.main()

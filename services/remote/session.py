@@ -277,10 +277,18 @@ class Session:
     def _where(self, now: float) -> dict:
         relay = self._door == "relay"
         home = self._home_url() if relay else ""
+        device = self._device_id or ""
+        unreachable = relay and self._store.hop_unanswered(device, now)
         ticket = None
-        if relay and home and self._device_id:
-            ticket = self._store.issue_ticket(self._device_id, now)
-        return {"t": "where", "same": bool(self._same), "home": home or None, "ticket": ticket}
+        if relay and home and device:
+            ticket = self._store.issue_ticket(device, now)
+        return {
+            "t": "where",
+            "same": bool(self._same),
+            "home": home or None,
+            "ticket": ticket,
+            "unreachable": unreachable,  # the last hop never arrived: don't hop by itself
+        }
 
     # ---- frames out ------------------------------------------------------------------------
 

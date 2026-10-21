@@ -137,5 +137,19 @@ class ReviewFixStoreTests(unittest.TestCase):
         self.assertNotIn("port", RemoteStore.from_config(None).to_config())
 
 
+class HopAnsweredTests(unittest.TestCase):
+    def test_an_unredeemed_ticket_means_home_was_out_of_reach(self):
+        s = RemoteStore.from_config(None)
+        device, _ = s.add_device("Phone A", PUB, "relay", 0.0)
+        self.assertFalse(s.hop_unanswered(device.id, 0.0))
+        tid, _ = s.issue_ticket(device.id, 10.0).split(".")
+        self.assertFalse(s.hop_unanswered(device.id, 11.0))  # just issued: give it a moment
+        self.assertTrue(s.hop_unanswered(device.id, 20.0))
+        self.assertFalse(s.hop_unanswered(device.id, 140.0))  # long ago: try home again
+        tid, _ = s.issue_ticket(device.id, 200.0).split(".")
+        s.redeem_ticket(tid, 205.0)
+        self.assertFalse(s.hop_unanswered(device.id, 210.0))
+
+
 if __name__ == "__main__":
     unittest.main()
