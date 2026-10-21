@@ -254,6 +254,7 @@ class TVController(QObject):
         self._wired = False
         self._closed = False
         self._guides_applied: Optional[set[str]] = None  # what the hub was last told
+        self._phone_guides: set[str] = set()  # the providers the phone remote lists
         self._lanes = LinkLanes(catalog, self)
         # The live channel's time-shift side: pipeline tunes, its controls and reports.
         self._live_controls = LiveControls(
@@ -2306,6 +2307,7 @@ class TVController(QObject):
         if self._grid is not None:
             items.extend(self._grid.channels())  # the multiview's tiles'
         names.update(provider_of(item) for item in items if item)
+        names.update(self._phone_guides)  # the channels the phone remote lists
         source = self.catalog.current_provider_name()
         if source != ALL_PROVIDERS:
             names.add(source)
@@ -2315,6 +2317,27 @@ class TVController(QObject):
             names.update(self._drawer_providers())
         names.discard("")
         return names
+
+    def use_phone_guides(self, names: set[str]) -> None:
+        """The providers of the channels the phone remote lists: their guides load too."""
+        self._phone_guides = set(names)
+        self._update_guides()
+
+    def guide_loading(self, channel: dict) -> bool:
+        """Whether `channel`'s provider guide is on its way (loading, or wanted and not yet
+        loaded): an empty timetable then says so instead of "no guide"."""
+        name = provider_of(channel) or self.catalog.current_provider_name()
+        catalogs = self.catalog.catalogs
+        if name not in catalogs.names():
+            return False
+        catalog = catalogs.catalog(name)
+        return bool(catalog.epg_loading() or (catalog.epg_enabled and not catalog.epg_ready()))
+
+    def channel_list_group(self) -> str:
+        """The live group the channel list is in: the drawer's, else the one zapped through
+        ("" when neither)."""
+        group = self._drawer_group()
+        return group.key if group is not None else self.zap.context.group_key
 
     def _guide_context(self) -> ZapContext:
         """What the guide lists: the zap group's channels, but in all mode the live group the

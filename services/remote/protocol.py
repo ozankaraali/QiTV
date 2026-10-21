@@ -169,38 +169,51 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         return {"t": "open", "id": obj["id"]}
     if t == "get":
         what = obj.get("what")
-        if what == "library":
+        if what in ("library", "genres"):
             return _library_ask(obj)
-        if what == "guide":
+        if what in ("guide", "groups"):
             return _guide_ask(obj)
         if what == "timetable" and _short_id(obj.get("id")):
             return {"t": "get", "what": "timetable", "id": obj["id"]}
     return None
 
 
+def _page_and_find(obj: dict) -> Optional[tuple[int, str]]:
+    page, find = _int(obj.get("page", 0)), obj.get("find", "")
+    if page is None or page < 0 or not isinstance(find, str):
+        return None
+    return page, find[:MAX_QUERY]
+
+
 def _guide_ask(obj: dict) -> Optional[dict]:
-    """A page of the Guide: a group's key ("": the one the TV zaps through), a page and what the
-    phone's find box holds."""
-    group, page, find = obj.get("list", ""), _int(obj.get("page", 0)), obj.get("find", "")
-    if not (group == "" or _short_id(group)) or page is None or page < 0:
+    """A page of the Guide's groups, or of a group's channels (its key; "": where the TV's
+    channel list is), with what the phone's find box holds."""
+    asked = _page_and_find(obj)
+    if asked is None:
         return None
-    if not isinstance(find, str):
+    page, find = asked
+    if obj["what"] == "groups":
+        return {"t": "get", "what": "groups", "page": page, "find": find}
+    group = obj.get("list", "")
+    if not (group == "" or _short_id(group)):
         return None
-    return {"t": "get", "what": "guide", "list": group, "page": page, "find": find[:MAX_QUERY]}
+    return {"t": "get", "what": "guide", "list": group, "page": page, "find": find}
 
 
 def _library_ask(obj: dict) -> Optional[dict]:
-    """A page of the Library: a section, a genre's key ("": QiTV's first shelf) and a page."""
-    section, genre, page = (
-        obj.get("section", "movies"),
-        obj.get("genre", ""),
-        _int(obj.get("page", 0)),
-    )
-    if not isinstance(section, str) or section not in LIBRARY_SECTIONS:
+    """A page of a Library section's genres, or of a genre's titles (its key; "": the first
+    shelf), with what the phone's find box holds."""
+    asked, section = _page_and_find(obj), obj.get("section", "movies")
+    if asked is None or not isinstance(section, str) or section not in LIBRARY_SECTIONS:
         return None
-    if not (genre == "" or _short_id(genre)) or page is None or page < 0:
+    page, find = asked
+    if obj["what"] == "genres":
+        return {"t": "get", "what": "genres", "section": section, "page": page, "find": find}
+    genre = obj.get("genre", "")
+    if not (genre == "" or _short_id(genre)):
         return None
-    return {"t": "get", "what": "library", "section": section, "genre": genre, "page": page}
+    message = {"t": "get", "what": "library", "section": section, "genre": genre}
+    return {**message, "page": page, "find": find}
 
 
 # ---- events (the hub thread → the GUI thread) ------------------------------------------------

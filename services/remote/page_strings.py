@@ -68,13 +68,16 @@ PAGE_STRINGS: dict[str, str] = {
     "connect_directly": N_("Connect directly"),
     "watching": N_("Watching"),  # i18n: the phone remote's guide: the channel on the TV now
     "watch": N_("Watch"),  # i18n: the phone remote's timetable: tune this channel (a verb)
-    "timetable": N_("Timetable"),  # i18n: the phone remote's guide: a channel's programmes
     "on_now": N_("Now"),  # i18n: the phone remote's timetable: the programme on now (short)
     # i18n: the phone remote's timetable: a past programme, from the provider's archive
     "from_start": N_("Watch from the start"),
     # i18n: the phone remote's timetable when the channel has no programme guide
     "no_programmes": N_("No programme guide for this channel"),
-    "genre": N_("Genre"),  # i18n: the phone remote's Library: the genre picker, read aloud
+    "groups": N_("Groups"),  # i18n: the phone remote's guide: back to the channel list's groups
+    "genres": N_("Genres"),  # i18n: the phone remote's Library: back to a section's genres
+    "find_group": N_("Find a group"),  # i18n: the phone remote's guide field, over its groups
+    "find_genre": N_("Find a genre"),  # i18n: the phone remote's Library field, over genres
+    "find_title": N_("Find a title"),  # i18n: the phone remote's Library field, over a genre
     # i18n: the phone remote's Library: a list that failed to arrive
     "load_failed": N_("Couldn't load this list"),
     "try_again": N_("Try again"),  # i18n: the phone remote: a button under a failed list

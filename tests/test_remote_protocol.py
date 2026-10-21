@@ -106,14 +106,47 @@ class MessageTests(unittest.TestCase):
             {"t": "get", "what": "timetable", "id": "h1"},
         )
         self.assertEqual(
+            parse_phone_message({"t": "get", "what": "groups", "page": 1, "find": "news"}),
+            {"t": "get", "what": "groups", "page": 1, "find": "news"},
+        )
+        self.assertEqual(
+            parse_phone_message({"t": "get", "what": "genres", "section": "series"}),
+            {"t": "get", "what": "genres", "section": "series", "page": 0, "find": ""},
+        )
+        self.assertEqual(
+            parse_phone_message({"t": "get", "what": "library", "genre": "g2", "find": "harb"}),
+            {
+                "t": "get",
+                "what": "library",
+                "section": "movies",
+                "genre": "g2",
+                "page": 0,
+                "find": "harb",
+            },
+        )
+        self.assertEqual(
             parse_phone_message(
                 {"t": "get", "what": "library", "section": "series", "genre": "g3", "page": 2}
             ),
-            {"t": "get", "what": "library", "section": "series", "genre": "g3", "page": 2},
+            {
+                "t": "get",
+                "what": "library",
+                "section": "series",
+                "genre": "g3",
+                "page": 2,
+                "find": "",
+            },
         )
         self.assertEqual(  # what QiTV chooses: Movies, its first shelf, the first page
             parse_phone_message({"t": "get", "what": "library"}),
-            {"t": "get", "what": "library", "section": "movies", "genre": "", "page": 0},
+            {
+                "t": "get",
+                "what": "library",
+                "section": "movies",
+                "genre": "",
+                "page": 0,
+                "find": "",
+            },
         )
         for t in ("where", "forget"):
             self.assertEqual(parse_phone_message({"t": t}), {"t": t})
@@ -135,6 +168,9 @@ class MessageTests(unittest.TestCase):
             {"t": "get", "what": "timetable", "id": "x" * 33},
             {"t": "get", "what": "settings"},
             {"t": "get", "what": "library", "section": "live"},
+            {"t": "get", "what": "library", "find": 3},
+            {"t": "get", "what": "groups", "page": -1},
+            {"t": "get", "what": "genres", "section": "live"},
             {"t": "get", "what": "library", "genre": "g" * 33},
             {"t": "get", "what": "library", "genre": 3},
             {"t": "get", "what": "library", "page": -1},

@@ -15,12 +15,17 @@ const words = {
   nothing_playing: "Nothing playing",
   watching: "Watching",
   watch: "Watch",
-  timetable: "Timetable",
   on_now: "Now",
   from_start: "Watch from the start",
   no_programmes: "No programme guide for this channel",
   guide: "Guide",
-  genre: "Genre",
+  library: "Library",
+  groups: "Groups",
+  genres: "Genres",
+  guide_find: "Find a channel",
+  find_group: "Find a group",
+  find_genre: "Find a genre",
+  find_title: "Find a title",
   load_failed: "Couldn't load this list",
   try_again: "Try again",
   channels: "Channels",
@@ -75,9 +80,13 @@ function logoTile(name, className = "logo") {
   return tile;
 }
 
+function pressable(node) {
+  node.addEventListener("pointerdown", () => node.classList.add("pressed"));
+  for (const type of ["pointerup", "pointercancel", "pointerleave"]) node.addEventListener(type, () => node.classList.remove("pressed"));
+}
+
 function tapRow(row, handle) {
-  row.addEventListener("pointerdown", () => row.classList.add("pressed"));
-  for (const type of ["pointerup", "pointercancel", "pointerleave"]) row.addEventListener(type, () => row.classList.remove("pressed"));
+  pressable(row);
   row.addEventListener("click", () => {
     if (navigator.vibrate) navigator.vibrate(8);
     send({ t: "open", id: handle });
@@ -141,24 +150,44 @@ function drawNow() {
 }
 
 // ---- the guide ----------------------------------------------------------------------------
-// The channel list's groups as the TV lists them (★ Favorites, ⟲ Recent, then the provider's),
-// opening on the one the TV zaps through; a page of channels at a time, found by QiTV in the
-// whole group. A row tunes; its clock opens the channel's timetable.
+// The channel list as the TV has it: its groups (★ Favorites, ⟲ Recent, the provider's), then a
+// group's channels a page at a time. It opens where the TV's list is, on the channel playing. The
+// find box searches the level shown, the whole of it, on QiTV. A row opens the channel's card
+// (what's on, what follows, Watch); the ▶ at its end tunes at once.
 
-const guide = { list: "", find: "", page: 0, pages: 1, count: 0, shown: "", asking: false };
+const guide = newList({ level: "channels", key: "", title: "", total: null });
 let findTimer = null;
 let timetableFor = "";
 
-function askGuide(page) {
-  guide.asking = true;
-  send({ t: "get", what: "guide", list: guide.list, page, find: guide.find });
+function showGuideLevel() {
+  const groups = guide.level === "groups";
+  $("guideUp").hidden = groups;
+  setTitle($("guideTitle"), groups ? w("guide") : guide.title || w("guide"), groups ? null : guide.total);
+  $("guideFind").placeholder = groups ? w("find_group") : w("guide_find");
+}
+
+function openGuideAt(level, key = "", title = "") {
+  Object.assign(guide, { level, key, title, total: null, find: "" });
+  $("guideFind").value = "";
+  showGuideLevel();
+  startList($("guideRows"), guide);
+  askGuide(0);
 }
 
 function openGuide() {
-  guide.page = 0;
-  guide.count = 0;
-  $("guideRows").replaceChildren(el("div", "empty", w("loading")));
-  askGuide(0);
+  openGuideAt("channels"); // where the TV's channel list is
+}
+
+function askGuide(page) {
+  guide.asking = true;
+  if (guide.level === "groups") send({ t: "get", what: "groups", page, find: guide.find });
+  else send({ t: "get", what: "guide", list: guide.key, page, find: guide.find });
+}
+
+function onGroups(message) {
+  if (guide.level !== "groups" || message.find !== guide.find) return;
+  const rows = message.rows.map((group) => branchRow(group, () => openGuideAt("channels", group.id, group.title)));
+  placePage($("guideRows"), guide, message, rows, () => openGuideAt("groups"));
 }
 
 function guideRow(row) {
@@ -182,38 +211,38 @@ function guideRow(row) {
   }
   if (row.next) main.append(el("div", "row-next", `${clock(row.next.start)} ${row.next.title}`));
   hit.append(main);
-  tapRow(hit, row.id);
+  pressable(hit);
+  hit.addEventListener("click", () => openTimetable(row.id, row.num, row.name));
   const side = el("button", "side");
   side.type = "button";
-  side.setAttribute("aria-label", w("timetable"));
-  side.innerHTML = '<svg><use href="#i-clock"/></svg>';
-  side.addEventListener("click", () => openTimetable(row.id, row.num, row.name));
+  side.setAttribute("aria-label", w("watch"));
+  side.innerHTML = '<svg><use href="#i-play"/></svg>';
+  tapRow(side, row.id); // tunes the TV
   item.append(hit, side);
   return item;
 }
 
 function onGuide(message) {
-  if (message.page > 0 && (message.list !== guide.list || message.find !== guide.find)) return;
-  guide.asking = false;
-  if (message.groups) drawPicker("guidePick", "guideGroup", message.groups, message.list, w("guide"));
-  guide.list = message.list;
-  guide.pages = message.pages || 1;
-  guide.page = message.page;
-  showPage($("guideRows"), guide, message, message.rows.map(guideRow), openGuide);
+  if (guide.level !== "channels" || message.find !== guide.find) return;
+  if (guide.key && message.list !== guide.key) return; // another group's, overtaken by a tap
+  const opening = guide.opening;
+  Object.assign(guide, { key: message.list, title: message.title, total: message.count });
+  showGuideLevel();
+  const retry = () => openGuideAt("channels", guide.key, guide.title);
+  placePage($("guideRows"), guide, message, message.rows.map(guideRow), retry);
+  const on = opening && $("guideRows").querySelector(".playing");
+  if (on) on.scrollIntoView({ block: "center" }); // the TV's channel, in view
 }
 
 function bindGuide() {
-  const pick = $("guideGroup");
-  pick.addEventListener("change", () => {
-    guide.list = pick.value;
-    openGuide();
-  });
+  $("guideUp").addEventListener("click", () => openGuideAt("groups"));
   const find = $("guideFind");
   find.addEventListener("input", () => {
     clearTimeout(findTimer);
     findTimer = setTimeout(() => {
       guide.find = find.value.trim();
-      openGuide();
+      startList($("guideRows"), guide);
+      askGuide(0);
     }, QUERY_DEBOUNCE_MS);
   });
   pageOnScroll($("guideRows"), guide, askGuide);
@@ -224,7 +253,7 @@ function bindGuide() {
   });
 }
 
-// ---- a channel's timetable ----------------------------------------------------------------
+// ---- a channel's card: its timetable ------------------------------------------------------
 
 function timetableTitle(num, name) {
   const title = $("timetableName");
@@ -281,35 +310,39 @@ function onTimetable(message) {
     rows.push(slotRow(slot, nowS));
   }
   const box = $("timetableRows");
-  box.replaceChildren(...(rows.length ? rows : [el("div", "empty", w("no_programmes"))]));
+  const empty = el("div", "empty", w(message.loading ? "loading" : "no_programmes"));
+  box.replaceChildren(...(rows.length ? rows : [empty]));
   const on = box.querySelector(".slot.playing");
   box.scrollTop = on ? on.offsetTop - box.offsetTop : 0; // what's on at the top, earlier above
 }
 
 // ---- lists a page at a time ---------------------------------------------------------------
 
-// A picker of a list's groups or genres; a provider's own sit under its name.
-function drawPicker(wrapId, selectId, entries, chosen, label) {
-  const nodes = [];
-  let heading = null;
-  for (const entry of entries) {
-    if (entry.header) {
-      heading = document.createElement("optgroup");
-      heading.label = entry.title;
-      nodes.push(heading);
-      continue;
-    }
-    const option = document.createElement("option");
-    option.value = entry.id;
-    option.textContent = typeof entry.count === "number" ? `${entry.title} (${entry.count})` : entry.title;
-    if (heading) heading.append(option);
-    else nodes.push(option);
-  }
-  const pick = $(selectId);
-  pick.replaceChildren(...nodes);
-  pick.value = chosen;
-  pick.setAttribute("aria-label", label);
-  $(wrapId).hidden = !nodes.length;
+function newList(extra) {
+  return { find: "", lo: 0, hi: 0, pages: 1, asking: false, opening: false, ...extra };
+}
+
+function setTitle(h1, text, total) {
+  h1.replaceChildren(text || "");
+  if (typeof total === "number") h1.append(el("small", "", total.toLocaleString()));
+}
+
+function startList(box, list) {
+  Object.assign(list, { opening: true, lo: 0, hi: 0, pages: 1 });
+  box.replaceChildren(el("div", "empty", w("loading")));
+}
+
+// A group or a genre: a tap goes into it. A provider's heading only names whose follow.
+function branchRow(entry, open) {
+  if (entry.header) return el("div", "group", entry.title);
+  const row = el("button", "row branch");
+  row.type = "button";
+  row.append(el("span", "title", entry.title));
+  if (typeof entry.count === "number") row.append(el("span", "count", entry.count.toLocaleString()));
+  row.insertAdjacentHTML("beforeend", '<svg><use href="#i-right"/></svg>');
+  pressable(row);
+  row.addEventListener("click", open);
+  return row;
 }
 
 function failedNotice(retry) {
@@ -321,26 +354,41 @@ function failedNotice(retry) {
   return box;
 }
 
-// A page of rows into `box`: the first replaces the list, the others follow it.
-function showPage(box, list, message, rows, retry) {
-  if (message.page > 0) {
+// A page into `box`. The view's first replaces what showed; one QiTV sends again (a list that
+// arrived, a programme guide that loaded) changes its rows in place; the next go below, the
+// earlier above without moving what shows.
+function placePage(box, list, message, rows, retry) {
+  list.asking = false;
+  list.pages = message.pages || 1;
+  const page = message.page;
+  for (const row of rows) row.dataset.page = page;
+  const old = list.opening ? [] : [...box.querySelectorAll(`[data-page="${page}"]`)];
+  if (list.opening || (!old.length && page >= list.lo && page <= list.hi)) {
+    list.opening = false;
+    list.lo = list.hi = page;
+    if (rows.length) box.replaceChildren(...rows);
+    else if (message.failed) box.replaceChildren(failedNotice(retry));
+    else box.replaceChildren(el("div", "empty", w(message.loading ? "loading" : "nothing_here")));
+    box.scrollTop = 0;
+  } else if (old.length) {
+    old[0].before(...rows);
+    for (const node of old) node.remove();
+  } else if (page === list.hi + 1) {
     box.append(...rows);
-    list.count += rows.length;
-    return;
+    list.hi = page;
+  } else if (page === list.lo - 1) {
+    const before = box.scrollHeight;
+    box.prepend(...rows);
+    box.scrollTop += box.scrollHeight - before;
+    list.lo = page;
   }
-  list.count = rows.length;
-  if (rows.length) box.replaceChildren(...rows);
-  else if (message.failed) box.replaceChildren(failedNotice(retry));
-  else box.replaceChildren(el("div", "empty", w(message.loading ? "loading" : "nothing_here")));
-  const shown = `${message.section || ""} ${message.list || message.genre || ""} ${message.find || ""}`;
-  if (shown !== list.shown) box.scrollTop = 0; // a later load of the same list keeps the place
-  list.shown = shown;
 }
 
 function pageOnScroll(box, list, ask) {
   box.addEventListener("scroll", () => {
-    const near = box.scrollTop + box.clientHeight > box.scrollHeight - 400;
-    if (near && !list.asking && list.count && list.page + 1 < list.pages) ask(list.page + 1);
+    if (list.asking || list.opening) return;
+    if (box.scrollTop + box.clientHeight > box.scrollHeight - 400 && list.hi + 1 < list.pages) ask(list.hi + 1);
+    else if (box.scrollTop < 400 && list.lo > 0) ask(list.lo - 1);
   });
 }
 
@@ -402,21 +450,40 @@ function bindSearch() {
 }
 
 // ---- the Library --------------------------------------------------------------------------
-// Movies or Series, a genre (QiTV's first shelf until one is chosen), a page at a time. QiTV
-// browses with the phone's own copy of its Library: the TV stays where it is until a tap.
+// A section's genres as the TV lists them (Continue, New and My list first), then a genre's
+// titles a page at a time; the find box searches the level shown. QiTV browses with the phone's
+// own copy of its Library: the TV stays where it is until a title is tapped.
 
-const library = { section: "movies", genre: "", page: 0, pages: 1, count: 0, shown: "", asking: false };
+const library = newList({ section: "movies", level: "genres", genre: "", title: "", total: null });
+let libraryTimer = null;
 
-function askLibrary(page) {
-  library.asking = true;
-  send({ t: "get", what: "library", section: library.section, genre: library.genre, page });
+function showLibraryLevel() {
+  const genres = library.level === "genres";
+  $("libraryUp").hidden = genres;
+  $("libraryChips").hidden = !genres;
+  setTitle($("libraryTitle"), genres ? w("library") : library.title, genres ? null : library.total);
+  $("libraryFind").placeholder = genres ? w("find_genre") : w("find_title");
+}
+
+function openLibraryAt(level, genre = "", title = "") {
+  Object.assign(library, { level, genre, title, total: null, find: "" });
+  $("libraryFind").value = "";
+  showLibraryLevel();
+  startList($("libraryRows"), library);
+  askLibrary(0);
 }
 
 function openLibrary() {
-  library.page = 0;
-  library.count = 0;
-  $("libraryRows").replaceChildren(el("div", "empty", w("loading")));
-  askLibrary(0);
+  // the tab: where the phone was
+  if (library.level === "titles") openLibraryAt("titles", library.genre, library.title);
+  else openLibraryAt("genres");
+}
+
+function askLibrary(page) {
+  library.asking = true;
+  const { section, find } = library;
+  if (library.level === "genres") send({ t: "get", what: "genres", section, page, find });
+  else send({ t: "get", what: "library", section, genre: library.genre, page, find });
 }
 
 function libraryRow(item) {
@@ -440,15 +507,19 @@ function libraryRow(item) {
   return row;
 }
 
+function onGenres(message) {
+  if (library.level !== "genres" || message.section !== library.section || message.find !== library.find) return;
+  const rows = message.rows.map((genre) => branchRow(genre, () => openLibraryAt("titles", genre.id, genre.title)));
+  placePage($("libraryRows"), library, message, rows, () => openLibraryAt("genres"));
+}
+
 function onLibrary(message) {
-  if (message.section !== library.section) return; // the other section's, overtaken by a tap
-  if (message.page > 0 && message.genre !== library.genre) return;
-  library.asking = false;
-  if (message.genres) drawPicker("libraryPick", "libraryGenre", message.genres, message.genre, w("genre"));
-  library.genre = message.genre;
-  library.pages = message.pages || 1;
-  library.page = message.page;
-  showPage($("libraryRows"), library, message, message.items.map(libraryRow), openLibrary);
+  if (library.level !== "titles" || message.section !== library.section || message.find !== library.find) return;
+  if (library.genre && message.genre !== library.genre) return; // another genre's, overtaken
+  Object.assign(library, { genre: message.genre, title: message.title, total: message.count });
+  showLibraryLevel();
+  const retry = () => openLibraryAt("titles", library.genre, library.title);
+  placePage($("libraryRows"), library, message, message.items.map(libraryRow), retry);
 }
 
 function bindLibrary() {
@@ -456,14 +527,18 @@ function bindLibrary() {
     chip.addEventListener("click", () => {
       for (const other of document.querySelectorAll("#libraryChips [data-lib]")) other.classList.toggle("on", other === chip);
       library.section = chip.dataset.lib;
-      library.genre = "";
-      openLibrary();
+      openLibraryAt("genres");
     });
   }
-  const pick = $("libraryGenre");
-  pick.addEventListener("change", () => {
-    library.genre = pick.value;
-    openLibrary();
+  $("libraryUp").addEventListener("click", () => openLibraryAt("genres"));
+  const find = $("libraryFind");
+  find.addEventListener("input", () => {
+    clearTimeout(libraryTimer);
+    libraryTimer = setTimeout(() => {
+      library.find = find.value.trim();
+      startList($("libraryRows"), library);
+      askLibrary(0);
+    }, QUERY_DEBOUNCE_MS);
   });
   pageOnScroll($("libraryRows"), library, askLibrary);
 }
@@ -519,9 +594,11 @@ function bindTouchpad() {
 // ---- wiring -------------------------------------------------------------------------------
 
 app.handlers.state = onState;
+app.handlers.groups = onGroups;
 app.handlers.guide = onGuide;
 app.handlers.timetable = onTimetable;
 app.handlers.results = onResults;
+app.handlers.genres = onGenres;
 app.handlers.library = onLibrary;
 app.handlers["tab:guide"] = openGuide;
 app.handlers["tab:library"] = openLibrary;

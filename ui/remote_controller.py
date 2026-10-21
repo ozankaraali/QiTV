@@ -227,6 +227,7 @@ class RemoteController(QObject):
                 gone = browsing.pop(event.sid, None)
                 if gone is not None:
                     gone.deleteLater()
+            self._phone_guides()
             if not self._phones:
                 self._diff.stop()
         elif isinstance(event, Opened):
@@ -283,15 +284,32 @@ class RemoteController(QObject):
             self.hub.broadcast(results(self._window, self.result_handles))
 
     def _answer(self, event: Get) -> None:
+        sid, section = event.sid, event.section or "movies"
         try:
-            if event.what == "guide":
-                self._guide(event.sid).ask(event.list, event.page, event.find)
+            if event.what == "groups":
+                self._guide(sid).groups(event.page, event.find)
+            elif event.what == "guide":
+                self._guide(sid).channels(event.list, event.page, event.find)
             elif event.what == "timetable":
-                self._guide(event.sid).timetable(event.handle)
+                self._guide(sid).timetable(event.handle)
+            elif event.what == "genres":
+                self._library(sid).genres(section, event.page, event.find)
             else:
-                self._library(event.sid).ask(event.section or "movies", event.genre, event.page)
+                self._library(sid).titles(section, event.genre, event.page, event.find)
         except Exception as error:  # a phone's question must never take QiTV down
             logger.error("Phone remote: %s failed: %s", event.what, safe_message(error))
+        if event.what in ("guide", "timetable"):
+            self._phone_guides()
+
+    def _phone_guides(self) -> None:
+        """The guides of the channels the phones list load, as those the TV shows do."""
+        names: set[str] = set()
+        for guide in self._guides.values():
+            names |= guide.providers
+        try:
+            self._window.controller.use_phone_guides(names)
+        except Exception as error:
+            logger.error("Phone remote: the guides in use: %s", safe_message(error))
 
     def _guide(self, sid: str) -> PhoneGuide:
         guide = self._guides.get(sid)
@@ -310,6 +328,7 @@ class RemoteController(QObject):
                 window.watch,
                 lambda message: self._send(sid, message),
                 self,
+                cache=window.screens.library_model.cache,  # the TV's: a sorted list serves both
             )
             self._libraries[sid] = library
         return library

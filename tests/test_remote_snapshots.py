@@ -76,7 +76,7 @@ class PhoneLibraryWindowTests(TwoProviderCase):
 
         self.assertTrue(wait_until(lambda: titles() is not None, LIBRARY_WAIT_MS))
         message = titles()
-        self.assertTrue(message["genres"])
+        self.assertTrue(message["title"])  # the genre shown: the first one
         self.assertNotIn("http", json.dumps(message))
         self.assertFalse(self.window.screens.library_shown())  # the TV stayed where it was
         second = message["items"][1]

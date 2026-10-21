@@ -853,5 +853,53 @@ class LargeGenreTests(unittest.TestCase):
         self.assertEqual(model.items()[0]["id"], "9")
 
 
+class SharedCacheTests(unittest.TestCase):
+    """The TV's Library and the phone remote's copies read one cache: a list is sorted once."""
+
+    def setUp(self):
+        self.items = [movie(i, f"T{i}") for i in range(500)]
+        self.cat = FakeCatalog(
+            {"movies": [("1", "Drama", 500), ("2", "Comedy", 2)]},
+            {("movies", "1"): self.items, ("movies", "2"): self.items[:2]},
+        )
+        self.cfg = make_config()
+
+    def model(self, cache):
+        model = LibraryModel(self.cat, self.cfg, WatchState(self.cfg), cache=cache)
+        model.set_section("movies")
+        self.cat.sectionReady.emit("movies")
+        model.select_genre("1")
+        model.set_sort(Sort.AZ)
+        return model
+
+    def test_a_second_model_reads_the_first_ones_sorted_list(self):
+        cache = library.LibraryCache()
+        tv = self.model(cache)
+        tv.items()
+        phone = self.model(cache)
+        with mock.patch.object(library, "_az_key", wraps=library._az_key) as spy:
+            self.assertEqual(phone.items(), tv.items())
+        self.assertEqual(spy.call_count, 0)
+
+    def test_another_models_section_keeps_the_lists(self):
+        cache = library.LibraryCache()
+        tv = self.model(cache)
+        tv.items()
+        phone = self.model(cache)
+        phone.set_section("series")  # the phone browses Series: the TV's films stay sorted
+        with mock.patch.object(library, "_az_key", wraps=library._az_key) as spy:
+            tv.items()
+        self.assertEqual(spy.call_count, 0)
+
+    def test_another_provider_never_reads_the_first_ones_list(self):
+        cache = library.LibraryCache()
+        first = self.model(cache)
+        first.items()
+        self.cat.name = "Q"  # the same genre id and content version at another provider
+        self.cat.item_map[("movies", "1")] = [movie(900, "Other")]
+        second = self.model(cache)
+        self.assertEqual([i["name"] for i in second.items()], ["Other"])
+
+
 if __name__ == "__main__":
     unittest.main()

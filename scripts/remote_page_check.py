@@ -363,15 +363,12 @@ STATE = {
 GUIDE = {
     "t": "guide",
     "list": "g2",
+    "title": "All",
+    "count": 3,
     "find": "",
     "page": 0,
     "pages": 1,
     "loading": False,
-    "groups": [
-        {"id": "g1", "title": "★ Favorites", "count": 1},
-        {"id": "g2", "title": "All", "count": 3},
-        {"id": "g3", "title": "News", "count": 1},
-    ],
     "rows": [
         {
             "id": "h1",
@@ -407,33 +404,58 @@ RESULTS = {
         {"kind": "movies", "items": [{"id": "r2", "title": "Harbour Lights", "sub": ""}]},
     ],
 }
-LIBRARY = {
-    "t": "library",
-    "section": "movies",
-    "genre": "g1",
+GROUPS = {
+    "t": "groups",
+    "find": "",
     "page": 0,
     "pages": 1,
     "loading": False,
-    "genres": [
+    "rows": [
+        {"id": "g1", "title": "★ Favorites", "count": 1},
+        {"title": "Provider A", "header": True},
+        {"id": "g2", "title": "All", "count": 3},
+        {"id": "g3", "title": "News", "count": 1},
+    ],
+}
+GENRES = {
+    "t": "genres",
+    "section": "movies",
+    "find": "",
+    "page": 0,
+    "pages": 1,
+    "loading": False,
+    "rows": [
         {"id": "g1", "title": "Continue", "count": 2},
         {"title": "Provider A", "header": True},
         {"id": "g2", "title": "Drama", "count": 60},
     ],
-    "items": [
-        {"id": "c1", "title": "Harbour Lights", "sub": "1998", "progress": 0.4},
-        {"id": "m1", "title": "The Harbourmaster", "sub": "2011"},
-    ],
 }
 
 
-def library_page(genre: str, page: int, count: int) -> dict:
+def titles_page(page: int, count: int, find: str = "") -> dict:
     items = [
         {"id": f"d{page}-{i}", "title": f"Drama {page}-{i}", "sub": "2001"} for i in range(count)
     ]
-    message = dict(LIBRARY, genre=genre, page=page, pages=2, items=items)
-    if page:
-        del message["genres"]
-    return message
+    if page == 0:
+        items[0] = {"id": "c1", "title": "Harbour Lights", "sub": "1998", "progress": 0.4}
+    head = {"t": "library", "section": "movies", "genre": "g2", "title": "Drama", "count": 60}
+    return {**head, "find": find, "page": page, "pages": 2, "items": items, "loading": False}
+
+
+def channels_page(page: int, pages: int, playing: int = -1) -> dict:
+    rows = [
+        {
+            "id": f"c{page}-{i}",
+            "num": str(page * 50 + i + 1),
+            "name": f"Channel {page * 50 + i + 1}",
+            "playing": i == playing,
+            "now": None,
+            "next": None,
+        }
+        for i in range(50)
+    ]
+    head = {"t": "guide", "list": "g2", "title": "All", "count": pages * 50, "find": ""}
+    return {**head, "page": page, "pages": pages, "rows": rows, "loading": False}
 
 
 def paired_sid(rig: Rig) -> str:
@@ -459,25 +481,75 @@ def scenario_now_playing(rig: Rig) -> None:
 def scenario_guide_tune(rig: Rig) -> None:
     sid = paired_sid(rig)
     mark = rig.events.mark()
-    rig.page.click("[data-tab=guide]")
+    rig.page.click("[data-tab=guide]")  # where the TV's channel list is
     ask = rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark)
     assert (ask.list, ask.page, ask.find) == ("", 0, ""), ask
     rig.hub.send(sid, GUIDE)
     rig.page.wait_for_selector("#guideRows .row >> nth=2")
     assert rig.page.locator("#guideRows .row.playing").count() == 1
-    assert rig.page.input_value("#guideGroup") == "g2"
+    assert rig.page.inner_text("#guideTitle").startswith("All"), rig.page.inner_text("#guideTitle")
+    assert rig.page.locator("#guideUp").is_visible()
     rig.shot("guide")
-    mark = rig.events.mark()
-    rig.page.locator("#guideRows .row", has_text="Fernvale Sports").locator(".row-tap").click()
+    mark = rig.events.mark()  # ▶ tunes at once
+    rig.page.locator("#guideRows .row", has_text="Fernvale Sports").locator(".side").click()
     assert rig.events.wait(OpenItem, after=mark).handle == "h2"
-    mark = rig.events.mark()  # another group
-    rig.page.select_option("#guideGroup", "g3")
+    mark = rig.events.mark()  # the row opens the channel's card, tuning nothing
+    rig.page.locator("#guideRows .row", has_text="Fernvale Sports").locator(".row-tap").click()
+    ask = rig.events.wait(Get, where=lambda e: e.what == "timetable", after=mark)
+    assert ask.handle == "h2", ask
+    assert not rig.events.of(OpenItem, after=mark)
+    rig.page.click("#timetableBack")
+    mark = rig.events.mark()  # up to the groups, into another, then find in it
+    rig.page.click("#guideUp")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "groups", after=mark)
+    assert (ask.page, ask.find) == (0, ""), ask
+    rig.hub.send(sid, GROUPS)
+    rig.page.wait_for_selector("#guideRows .row.branch >> nth=2")
+    assert rig.page.locator("#guideRows .group", has_text="Provider A").count() == 1
+    assert rig.page.locator("#guideUp").is_hidden()
+    rig.shot("groups")
+    mark = rig.events.mark()
+    rig.page.fill("#guideFind", "new")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "groups" and e.find == "new", after=mark)
+    news = [row for row in GROUPS["rows"] if row["title"] == "News"]
+    rig.hub.send(sid, dict(GROUPS, find="new", rows=news))
+    rig.page.wait_for_selector("#guideRows .row.branch")
+    assert rig.page.locator("#guideRows .row.branch").count() == 1
+    mark = rig.events.mark()
+    rig.page.locator("#guideRows .row.branch", has_text="News").click()
     ask = rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark)
-    assert (ask.list, ask.page) == ("g3", 0), ask
-    mark = rig.events.mark()  # the find box asks QiTV, which searches the whole group
+    assert (ask.list, ask.page, ask.find) == ("g3", 0, ""), ask
+    mark = rig.events.mark()
     rig.page.fill("#guideFind", "fern")
     ask = rig.events.wait(Get, where=lambda e: e.what == "guide" and e.find == "fern", after=mark)
     assert (ask.list, ask.page) == ("g3", 0), ask
+
+
+def scenario_guide_pages(rig: Rig) -> None:
+    """Opened on the TV's channel, page 3 of 5: the channel shows, the pages above and below
+    come as the list scrolls, and what shows stays put."""
+    sid = paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark)
+    mark = rig.events.mark()
+    rig.hub.send(sid, channels_page(2, 5, playing=10))
+    rig.page.wait_for_selector("#guideRows .row.playing")
+    assert rig.page.locator("#guideRows .row.playing").is_visible()
+    ask = rig.events.wait(Get, where=lambda e: e.what == "guide" and e.page == 1, after=mark)
+    assert ask.list == "g2", ask
+    top = rig.page.evaluate(
+        "document.querySelector('#guideRows .playing').getBoundingClientRect().top"
+    )
+    rig.hub.send(sid, channels_page(1, 5))
+    rig.page.wait_for_selector("#guideRows .row >> nth=99")
+    moved = rig.page.evaluate(
+        "document.querySelector('#guideRows .playing').getBoundingClientRect().top"
+    )
+    assert abs(moved - top) < 2, (top, moved)  # the page above went above
+    mark = rig.events.mark()
+    rig.page.locator("#guideRows .row >> nth=99").scroll_into_view_if_needed()
+    rig.events.wait(Get, where=lambda e: e.what == "guide" and e.page == 3, after=mark)
 
 
 def scenario_timetable(rig: Rig) -> None:
@@ -486,10 +558,13 @@ def scenario_timetable(rig: Rig) -> None:
     rig.hub.send(sid, GUIDE)
     rig.page.wait_for_selector("#guideRows .row >> nth=2")
     mark = rig.events.mark()
-    rig.page.locator("#guideRows .row", has_text="Harbourline News").locator(".side").click()
+    rig.page.locator("#guideRows .row", has_text="Harbourline News").locator(".row-tap").click()
     ask = rig.events.wait(Get, where=lambda e: e.what == "timetable", after=mark)
     assert ask.handle == "h1", ask
     rig.page.wait_for_selector("[data-screen=timetable]:not([hidden])")
+    loading = {"t": "timetable", "id": "h1", "name": "Harbourline News", "num": "1", "rows": []}
+    rig.hub.send(sid, dict(loading, loading=True))  # its guide is still on its way
+    rig.page.locator("#timetableRows .empty", has_text="Loading").wait_for()
     rows = [
         dict(programme("Morning edition", -140, -80), id="p1"),  # the archive keeps it
         dict(programme("Midday", -80, -20)),  # past, not kept
@@ -498,8 +573,7 @@ def scenario_timetable(rig: Rig) -> None:
     ]
     for row in rows:
         row.setdefault("on", False)
-    table = {"t": "timetable", "id": "h1", "name": "Harbourline News", "num": "1", "rows": rows}
-    rig.hub.send(sid, table)
+    rig.hub.send(sid, dict(loading, rows=rows))
     rig.page.wait_for_selector("#timetableRows .slot >> nth=3")
     assert rig.page.locator("#timetableRows .slot.playing").count() == 1
     assert rig.page.locator("#timetableRows .slot.still").count() == 1
@@ -543,39 +617,50 @@ def scenario_library_open(rig: Rig) -> None:
     sid = paired_sid(rig)
     mark = rig.events.mark()
     rig.page.click("[data-tab=library]")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark)
+    assert (ask.section, ask.page, ask.find) == ("movies", 0, ""), ask
+    rig.hub.send(sid, GENRES)
+    rig.page.wait_for_selector("#libraryRows .row.branch >> nth=1")
+    assert rig.page.locator("#libraryRows .group", has_text="Provider A").count() == 1
+    assert rig.page.locator("#libraryChips").is_visible()
+    rig.shot("genres")
+    mark = rig.events.mark()  # into a genre; its titles come as the list scrolls
+    rig.page.locator("#libraryRows .row.branch", has_text="Drama").click()
     ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
-    assert (ask.section, ask.genre, ask.page) == ("movies", "", 0), ask
-    rig.hub.send(sid, LIBRARY)
-    rig.page.wait_for_selector("#libraryRows .row >> nth=1")
-    assert rig.page.input_value("#libraryGenre") == "g1"
-    assert rig.page.locator("#libraryGenre optgroup[label='Provider A'] option").count() == 1
+    assert (ask.section, ask.genre, ask.page, ask.find) == ("movies", "g2", 0, ""), ask
+    rig.hub.send(sid, titles_page(0, 50))
+    rig.page.wait_for_selector("#libraryRows .row >> nth=49")
+    assert rig.page.inner_text("#libraryTitle").startswith("Drama")
+    assert rig.page.locator("#libraryChips").is_hidden()
+    assert rig.page.locator("#libraryUp").is_visible()
     rig.shot("library")
     mark = rig.events.mark()
-    rig.page.locator("#libraryRows .row", has_text="The Harbourmaster").click()
-    assert rig.events.wait(OpenItem, after=mark).handle == "m1"
-    mark = rig.events.mark()  # another genre, then its second page as the list scrolls
-    rig.page.select_option("#libraryGenre", "g2")
-    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
-    assert (ask.section, ask.genre, ask.page) == ("movies", "g2", 0), ask
-    rig.hub.send(sid, library_page("g2", 0, 50))
-    rig.page.wait_for_selector("#libraryRows .row >> nth=49")
-    mark = rig.events.mark()
     rig.page.locator("#libraryRows .row >> nth=49").scroll_into_view_if_needed()
-    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
-    assert (ask.genre, ask.page) == ("g2", 1), ask
-    rig.hub.send(sid, library_page("g2", 1, 10))
+    ask = rig.events.wait(Get, where=lambda e: e.what == "library" and e.page == 1, after=mark)
+    assert ask.genre == "g2", ask
+    rig.hub.send(sid, titles_page(1, 10))
     rig.page.wait_for_selector("#libraryRows .row >> nth=59")
-    mark = rig.events.mark()  # Series: QiTV's first shelf there; a failed load offers a retry
+    mark = rig.events.mark()
+    rig.page.locator("#libraryRows .row", has_text="Harbour Lights").click()
+    assert rig.events.wait(OpenItem, after=mark).handle == "c1"
+    mark = rig.events.mark()  # the find box searches the genre, on QiTV
+    rig.page.fill("#libraryFind", "harb")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "library" and e.find == "harb", after=mark)
+    assert (ask.genre, ask.page) == ("g2", 0), ask
+    mark = rig.events.mark()  # back up; Series; a failed load offers a retry
+    rig.page.click("#libraryUp")
+    rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark)
+    mark = rig.events.mark()
     rig.page.click("#libraryChips [data-lib=series]")
-    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
-    assert (ask.section, ask.genre, ask.page) == ("series", "", 0), ask
-    failed = {"t": "library", "section": "series", "genre": "", "page": 0, "pages": 1}
-    rig.hub.send(sid, dict(failed, items=[], loading=False, failed=True, genres=[]))
+    ask = rig.events.wait(
+        Get, where=lambda e: e.what == "genres" and e.section == "series", after=mark
+    )
+    failed = {"t": "genres", "section": "series", "find": "", "page": 0, "pages": 1, "rows": []}
+    rig.hub.send(sid, dict(failed, loading=False, failed=True))
     rig.page.wait_for_selector("#libraryRows .again")
-    assert rig.page.locator("#libraryPick").is_hidden()
     mark = rig.events.mark()
     rig.page.click("#libraryRows .again")
-    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
+    ask = rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark)
     assert (ask.section, ask.page) == ("series", 0), ask
 
 
@@ -649,6 +734,7 @@ SCENARIOS.update(
         "hello-keeps-now": scenario_hello_keeps_now,
         "now-playing": scenario_now_playing,
         "guide-tune": scenario_guide_tune,
+        "guide-pages": scenario_guide_pages,
         "timetable": scenario_timetable,
         "search-mirror": scenario_search_mirror,
         "library-open": scenario_library_open,

@@ -10,14 +10,12 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import datetime
-import json
 import secrets
 from typing import Any, Optional
 
 from services.epg_view import Programme
 from services.remote.protocol import b64e
 
-MAX_BYTES = 48_000  # a message stays well inside one frame (65535 bytes) with its seal
 RESULTS_PER_GROUP = 30
 _SECTIONS = ("live", "movies", "series")
 
@@ -124,23 +122,3 @@ def results(window: Any, handles: Handles) -> dict:
         "q": library.query,
         "groups": [{"kind": s, "items": grouped[s]} for s in _SECTIONS if grouped[s]],
     }
-
-
-def fit_entries(message: dict, entries: list[dict], current: str) -> list[dict]:
-    """As many of a picker's `entries` (a guide's groups, a Library's genres) as fit `message`,
-    the one shown (`current`) always among them."""
-    budget = MAX_BYTES - _size({**message, "entries": []})
-    kept: list[dict] = []
-    used = sum(_size(e) + 2 for e in entries if current and e.get("id") == current)
-    for entry in entries:  # each one costs itself and its ", "
-        mine = current and entry.get("id") == current
-        size = 0 if mine else _size(entry) + 2
-        if used + size > budget:
-            continue
-        used += size
-        kept.append(entry)
-    return kept
-
-
-def _size(value: object) -> int:
-    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))

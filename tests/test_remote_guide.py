@@ -1,5 +1,5 @@
-"""A phone's Guide (ui/remote_guide.py): the channel list's groups as the TV lists them, a page of
-channels with what's on, and a channel's timetable; and what a tap on them does on the TV."""
+"""A phone's Guide (ui/remote_guide.py): the channel list's groups as the TV lists them, a group's
+channels with what's on, a channel's timetable; and what a tap on them does on the TV."""
 
 import os
 
@@ -31,70 +31,75 @@ class PhoneGuideTests(WindowCase):
         self.addCleanup(self.guide.deleteLater)
 
     def start(self):
-        """Channel 1 on, Channel 2 watched before; the phone's Guide open on the TV's group."""
+        """Channel 1 on, Channel 2 watched before; the phone's Guide open where the TV is."""
         self.open_first_channel()
         config = self.window.config_manager
         watched = local_provider.channels()[1]
         entry = {"item_data": watched, "item_type": "channel", "provider_name": PROVIDER_NAME}
         config.watch_history = [entry] + list(config.watch_history or [])
-        self.guide.ask("", 0, "")
+        self.guide.channels("", 0, "")
         self.assertTrue(wait_until(lambda: self.last() and self.last()["rows"]))
 
     def last(self, kind="guide"):
         found = [m for m in self.sent if m["t"] == kind]
         return found[-1] if found else None
 
-    def groups(self):
-        return {g["title"]: g["id"] for g in self.last()["groups"] if not g.get("header")}
+    def group_keys(self):
+        self.guide.groups(0, "")
+        return {g["title"]: g["id"] for g in self.last("groups")["rows"] if "id" in g}
 
     def rows(self):
         return [row["name"] for row in self.last()["rows"]]
 
-    def test_lists_the_groups_and_opens_on_the_tvs(self):
+    def test_opens_where_the_tv_is_with_its_channel(self):
         self.start()
         message = self.last()
-        titles = [g["title"] for g in message["groups"]]
-        self.assertTrue(any("Recent" in t for t in titles), titles)
-        self.assertIn("Fixture", titles)
         self.assertEqual(self.rows(), ["Channel 1", "Channel 2"])
         self.assertEqual([r["name"] for r in message["rows"] if r["playing"]], ["Channel 1"])
-        self.assertEqual(message["page"], 0)
+        self.assertEqual((message["title"], message["count"]), ("All", 2))
         self.assertNotIn("file:", json.dumps(message))
-        for key in self.groups().values():
-            self.assertTrue(key.startswith("g"), key)  # the phone sees keys, not group ids
 
-    def test_another_group_by_its_key(self):
+    def test_lists_the_groups_as_keys(self):
         self.start()
-        recent = next(key for title, key in self.groups().items() if "Recent" in title)
-        self.guide.ask(recent, 0, "")
+        keys = self.group_keys()
+        self.assertTrue(any("Recent" in title for title in keys), keys)
+        self.assertIn("Fixture", keys)
+        for key in keys.values():
+            self.assertTrue(key.startswith("g"), key)  # the phone sees keys, not group ids
+        self.guide.groups(0, "fix")  # the find box searches the groups
+        self.assertEqual([g["title"] for g in self.last("groups")["rows"]], ["Fixture"])
+
+    def test_a_group_by_its_key(self):
+        self.start()
+        recent = next(key for title, key in self.group_keys().items() if "Recent" in title)
+        self.guide.channels(recent, 0, "")
         self.assertEqual(self.last()["list"], recent)
         self.assertEqual(self.rows()[-1], "Channel 2")
 
     def test_find_searches_the_whole_group(self):
         self.start()
-        self.guide.ask(self.last()["list"], 0, "nnel 2")
+        self.guide.channels(self.last()["list"], 0, "nnel 2")
         self.assertEqual(self.rows(), ["Channel 2"])
-        self.guide.ask(self.last()["list"], 0, "2")  # a channel's number
+        self.guide.channels(self.last()["list"], 0, "2")  # a channel's number
         self.assertEqual(self.rows(), ["Channel 2"])
 
-    def test_pages(self):
-        many = [{"name": f"Channel {i}", "cmd": f"file:///{i}", "id": i} for i in range(120)]
-        with mock.patch.object(self.guide.nav, "children", return_value=None):
-            self.guide.ask("", 0, "")
-        self.assertTrue(self.last()["loading"])
-        self.guide._channels = lambda node: many
-        self.guide._group_nodes = lambda: [
-            mock.Mock(layer="group", key="k", title="Big", count=120)
-        ]
-        self.guide.ask("", 2, "")
-        self.assertEqual(
-            (self.last()["pages"], len(self.last()["rows"])), (3, 120 - 2 * GUIDE_PAGE)
-        )
+    def test_opens_on_the_page_of_the_channel_playing(self):
+        self.start()
+        many = [{"name": f"Channel {i}", "cmd": f"file:///{i}", "id": i} for i in range(200)]
+        playing = many[130]
+        with (
+            mock.patch.object(self.window.controller, "_channel", playing),
+            mock.patch.object(self.guide, "_channels", return_value=many),
+        ):
+            self.guide.channels("", 0, "")
+        message = self.last()
+        self.assertEqual((message["page"], message["pages"]), (130 // GUIDE_PAGE, 4))
+        self.assertEqual([r["name"] for r in message["rows"] if r["playing"]], ["Channel 130"])
 
     def test_a_tap_tunes_within_the_group(self):
         self.start()
-        fixture = self.groups()["Fixture"]
-        self.guide.ask(fixture, 0, "")
+        fixture = self.group_keys()["Fixture"]
+        self.guide.channels(fixture, 0, "")
         second = self.last()["rows"][1]
         remote = self.window.remote
         remote._guides["s1"] = self.guide
@@ -108,12 +113,11 @@ class PhoneGuideTests(WindowCase):
         self.start()
         now = datetime.now(timezone.utc)
         listed = [
-            programme("Morning", now - timedelta(minutes=50)),
             programme("Noon", now - timedelta(minutes=10)),
             programme("Evening", now + timedelta(minutes=20)),
         ]
         channel = self.last()["rows"][0]["id"]
-        with mock.patch.object(self.window.catalog, "programmes", return_value=listed[1:]):
+        with mock.patch.object(self.window.catalog, "programmes", return_value=listed):
             self.guide.timetable(channel)
         table = self.last("timetable")
         self.assertEqual((table["id"], table["name"]), (channel, "Channel 1"))
@@ -122,7 +126,25 @@ class PhoneGuideTests(WindowCase):
         self.assertTrue(on["on"])
         self.assertIn("id", on)  # watching what's on: the channel live
         self.assertNotIn("id", later)
-        self.assertAlmostEqual(on["start"], listed[1].start.timestamp())
+        self.assertAlmostEqual(on["start"], listed[0].start.timestamp())
+        self.assertNotIn("loading", table)
+
+    def test_an_empty_timetable_says_when_the_guide_is_still_loading(self):
+        self.start()
+        channel = self.last()["rows"][0]["id"]
+        controller = self.window.controller
+        with (
+            mock.patch.object(self.window.catalog, "programmes", return_value=[]),
+            mock.patch.object(controller, "guide_loading", return_value=True),
+        ):
+            self.guide.timetable(channel)
+        self.assertTrue(self.last("timetable")["loading"])
+        now = datetime.now(timezone.utc)
+        with mock.patch.object(
+            self.window.catalog, "programmes", return_value=[programme("Noon", now)]
+        ):
+            self.window.catalog.epgReady.emit()  # the guide is in: the timetable comes again
+            self.assertEqual([r["title"] for r in self.last("timetable")["rows"]], ["Noon"])
 
     def test_timetable_offers_the_archive(self):
         self.start()
@@ -155,17 +177,29 @@ class PhoneGuideTests(WindowCase):
             self.assertTrue(wait_until(lambda: self.last()["rows"][0]["now"] is not None))
         self.assertEqual(self.last()["rows"][0]["now"]["title"], "Noon")
 
-    def test_the_remote_answers_each_phone_from_its_own_guide(self):
+    def test_the_remote_answers_each_phone_and_loads_the_guides_it_lists(self):
         self.open_first_channel()
         remote = self.window.remote
         hub = mock.Mock()
         remote.hub = hub
         self.addCleanup(setattr, remote, "hub", None)
-        remote.bridge.post(Get("s2", "guide", "", 0))
-        self.assertTrue(
-            wait_until(lambda: any(c.args[1]["t"] == "guide" for c in hub.send.call_args_list))
-        )
+        controller = self.window.controller
+        with mock.patch.object(controller, "use_phone_guides") as guides:
+            remote.bridge.post(Get("s2", "guide", "", 0))
+            self.assertTrue(
+                wait_until(lambda: any(c.args[1]["t"] == "guide" for c in hub.send.call_args_list))
+            )
         self.assertIn("s2", remote._guides)
+        guides.assert_called_with({PROVIDER_NAME})
+
+
+class GuidesInUseTests(WindowCase):
+    def test_the_phones_providers_join_the_guides_in_use(self):
+        controller = self.window.controller
+        controller.use_phone_guides({"Another provider"})
+        self.assertIn("Another provider", controller.guides_in_use())
+        controller.use_phone_guides(set())
+        self.assertNotIn("Another provider", controller.guides_in_use())
 
 
 if __name__ == "__main__":

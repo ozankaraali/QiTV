@@ -158,11 +158,16 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .chips { display: flex; gap: 8px; overflow-x: auto; }
 .chips button { flex: none; padding: 7px 12px; border-radius: 16px; font-size: 13px; font-weight: 600; background: var(--raised); color: var(--muted); }
 .chips button.on { background: var(--accent-fill); color: var(--text); }
-.pick { position: relative; display: block; }
-.pick[hidden] { display: none; }
-.pick select { appearance: none; -webkit-appearance: none; padding-right: 40px; font-weight: 600; text-overflow: ellipsis; }
-.pick svg { position: absolute; right: 12px; top: 50%; width: 18px; height: 18px; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
-.rows { flex: 1 1 auto; min-height: 0; overflow-y: auto; margin: 0 -16px; padding-bottom: 12px; -webkit-overflow-scrolling: touch; }
+.back { display: flex; align-items: center; gap: 2px; margin: 0 0 2px -6px; font-size: 15px; font-weight: 600; color: var(--accent); }
+.back[hidden] { display: none; }
+.back svg { width: 20px; height: 20px; }
+.list-head h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.list-head h1 small { margin-left: 8px; font-size: 17px; font-weight: 600; color: var(--muted); }
+.row.branch { padding-top: 13px; padding-bottom: 13px; }
+.row.branch .title { flex: 1; min-width: 0; font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row.branch .count { padding-left: 10px; flex: none; font-size: 14px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+.row.branch svg { flex: none; width: 18px; height: 18px; color: var(--faint); }
+.rows { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-anchor: none; margin: 0 -16px; padding-bottom: 12px; -webkit-overflow-scrolling: touch; }
 .group { margin: 14px 16px 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .row { width: 100%; display: flex; gap: 12px; align-items: center; padding: 11px 16px; border-bottom: 1px solid var(--line); text-align: left; }
 .row.playing { background: rgba(224, 138, 95, 0.08); box-shadow: inset 3px 0 0 var(--accent); }
@@ -179,12 +184,11 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .empty { margin: 32px 24px; text-align: center; color: var(--muted); font-size: 15px; line-height: 1.5; }
 .row.split { padding: 0; }
 .row-tap { flex: 1; min-width: 0; display: flex; gap: 12px; align-items: center; padding: 11px 0 11px 16px; text-align: left; }
-.row .side { flex: none; align-self: stretch; width: 56px; display: grid; place-items: center; color: var(--muted); }
-.row .side svg { width: 21px; height: 21px; }
+.row .side { flex: none; align-self: stretch; width: 60px; display: grid; place-items: center; color: var(--accent); }
+.row .side svg { width: 22px; height: 22px; }
 .row .side.pressed, .row-tap.pressed { background: var(--raised); }
 .tt-head { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 6px 12px; }
-.tt-head .back { grid-column: 1 / -1; justify-self: start; display: flex; align-items: center; gap: 2px; margin-left: -6px; font-size: 15px; font-weight: 600; color: var(--accent); }
-.tt-head .back svg { width: 20px; height: 20px; }
+.tt-head .back { grid-column: 1 / -1; justify-self: start; margin-bottom: 0; }
 .tt-head h1 { margin: 0; font-size: 24px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tt-head h1 .num { margin-right: 8px; color: var(--muted); }
 .tt-head .again { margin-top: 0; }
