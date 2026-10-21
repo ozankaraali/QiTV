@@ -4,7 +4,8 @@ a time with what's on and next, and a channel's timetable. GUI thread only.
 Each phone reads the groups through its own NavModel (★ Favorites, ⟲ Recent, then the
 provider's groups), so its browsing leaves the TV's channel list where it is; it opens where the
 TV's list is, on the page of the channel playing. The find box searches the level shown, the
-whole of it. Groups travel as short keys, channels and programmes as handles.
+whole of it; on the groups it also finds the channels, as the desktop search does, after the
+groups it matches. Groups travel as short keys, channels and programmes as handles.
 
 The Remote tab's channel list is a bare one: the same groups and channels, without programmes
 (its messages "chgroups" and "channels"), so it loads no programme guide.
@@ -13,19 +14,21 @@ The Remote tab's channel list is a bare one: the same groups and channels, witho
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any, Callable, Optional, cast
+from typing import Any, Callable, ClassVar, Optional, cast
 
 from PySide6.QtCore import QObject, QTimer
 
 from services.catchup import programme_in_archive
 from services.navigation import NavModel, NavNode, section_title
 from services.provider_ids import provider_of
-from services.text_fold import fold
+from services.search import SearchIndex, search_index
+from services.text_fold import fold, fold_all
 from services.zapping import ZapContext
 from ui.remote_snapshots import Handles, programme_dict, stable_key
 
 GROUPS_PAGE = 100
 GUIDE_PAGE = 50
+FOUND_PAGE = 25  # the channels a find finds below the groups: with 100 groups, a frame's worth
 TIMETABLE_LIMIT = 60
 TIMETABLE_BACK = timedelta(hours=12)  # how far back a timetable lists a channel's archive
 TITLE_CHARS = 80
@@ -40,6 +43,9 @@ def _pages(count: int, size: int) -> int:
 class PhoneGuide(QObject):
     """`send(message)` reaches this phone. Each ask answers at once; a list or a programme guide
     that lands later sends the view's first page again when what it shows changed."""
+
+    # Every live channel for the find, its name folded: one per catalog version, for every list.
+    _index: ClassVar[tuple[tuple, SearchIndex]] = ((), [])
 
     def __init__(
         self, window: Any, send: Callable[[dict], None], parent=None, bare: bool = False
@@ -225,29 +231,58 @@ class PhoneGuide(QObject):
         return self._channels_page(page)
 
     def _groups_page(self, page: int) -> tuple[dict, tuple]:
+        """The groups; with a find, the groups it matches on the first page and the channels it
+        finds (the desktop search's rules) a page at a time after them."""
         find = self._view[1] if self._view is not None else ""
         nodes = _matching(self._group_nodes(), fold(find.strip()))
+        hits = search_index(self._live_index(), find) if find.strip() else []
+        if hits:
+            shown = nodes[:GROUPS_PAGE] if page == 0 else []
+            pages = _pages(len(hits), FOUND_PAGE)
+        else:
+            shown = nodes[page * GROUPS_PAGE : (page + 1) * GROUPS_PAGE]
+            pages = _pages(len(nodes), GROUPS_PAGE)
+        found = [hit.item for hit in hits[page * FOUND_PAGE : (page + 1) * FOUND_PAGE]]
         section = self._section()
         error = self.nav.load_error(section)
         loading = not nodes and not error and self.nav.is_loading(section)
-        shown = nodes[page * GROUPS_PAGE : (page + 1) * GROUPS_PAGE]
+        playing = self._window.controller._channel
+        rows = [self._channel_row(c, None, None, playing) for c in found]
+        if found and not self._bare:
+            self.providers = {provider_of(c) for c in found} - {""}
         message: dict = {
             "t": self._kinds[0],
             "find": find,
             "page": page,
-            "pages": _pages(len(nodes), GROUPS_PAGE),
+            "pages": pages,
             "rows": [self._entry(node) for node in shown],
+            "channels": rows,
+            "found": len(hits),
             "loading": loading,
         }
         if not nodes and error:
             message["failed"] = True
         signature = (
             tuple((n.layer, n.key, n.title, n.count) for n in shown),
-            message["pages"],
+            tuple((r["name"], r.get("now")) for r in rows),
+            pages,
             loading,
             bool(error),
         )
         return message, signature
+
+    def _live_index(self) -> SearchIndex:
+        catalog = self._window.catalog
+        version = (id(catalog), catalog.content_version())
+        if PhoneGuide._index[0] != version:
+            items = self.nav.all_live_items()
+            names = [str(item.get("name") or "") for item in items]
+            index = [
+                (provider_of(item), "live", folded, name, item)
+                for item, name, folded in zip(items, names, fold_all(names))
+            ]
+            PhoneGuide._index = (version, index)
+        return PhoneGuide._index[1]
 
     def _entry(self, node: NavNode) -> dict:
         title = node.title[:TITLE_CHARS]
@@ -267,22 +302,9 @@ class PhoneGuide(QObject):
             channels = []  # no such group: nothing to list
         found = self._found_channels(channels, find) if channels is not None else []
         shown = found[page * GUIDE_PAGE : (page + 1) * GUIDE_PAGE]
-        controller = self._window.controller
-        playing = controller._channel
-        rows, shows = [], []
-        for channel in shown:
-            row = {
-                "id": self.handles.issue("channel", (channel, group or "", channels or [])),
-                "num": controller.channel_number(channel),
-                "name": str(channel.get("name") or "")[:TITLE_CHARS],
-                "playing": playing is not None and ZapContext.same(channel, playing),
-            }
-            on = None
-            if not self._bare:
-                on, upcoming = controller.now_next(channel)
-                row.update(now=programme_dict(on), next=programme_dict(upcoming))
-            rows.append(row)
-            shows.append((id(channel), on.title if on else None))
+        playing = self._window.controller._channel
+        rows = [self._channel_row(c, group, channels, playing) for c in shown]
+        shows = [(id(c), (r.get("now") or {}).get("title")) for c, r in zip(shown, rows)]
         if not self._bare:
             self.providers = {provider_of(c) for c in shown} - {""}
         message: dict = {
@@ -300,6 +322,23 @@ class PhoneGuide(QObject):
             message["failed"] = True
         signature = (group, message["pages"], message["loading"], bool(error), tuple(shows))
         return message, signature
+
+    def _channel_row(
+        self, channel: dict, group: Optional[str], channels: Optional[list], playing: Any
+    ) -> dict:
+        """A channel's row; a tap tunes it within `group` (its `channels`), or found by the
+        find, as the desktop search's results do."""
+        controller = self._window.controller
+        row: dict[str, Any] = {
+            "id": self.handles.issue("channel", (channel, group or "", channels or [])),
+            "num": controller.channel_number(channel),
+            "name": str(channel.get("name") or "")[:TITLE_CHARS],
+            "playing": playing is not None and ZapContext.same(channel, playing),
+        }
+        if not self._bare:
+            on, upcoming = controller.now_next(channel)
+            row.update(now=programme_dict(on), next=programme_dict(upcoming))
+        return row
 
     # ---- lists and programme guides landing later ------------------------------------------
 

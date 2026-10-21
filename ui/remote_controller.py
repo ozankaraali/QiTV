@@ -305,7 +305,7 @@ class RemoteController(QObject):
                 self._library(sid).titles(section, event.genre, event.page, event.find, event.n)
         except Exception as error:  # a phone's question must never take QiTV down
             logger.error("Phone remote: %s failed: %s", event.what, safe_message(error))
-        if event.what in ("guide", "timetable"):
+        if event.what in ("groups", "guide", "timetable"):
             self._phone_guides()
 
     def _phone_guides(self) -> None:

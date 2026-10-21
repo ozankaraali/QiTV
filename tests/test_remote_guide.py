@@ -13,7 +13,9 @@ from unittest import mock
 from test_tv_window import WindowCase, wait_until
 
 from services.epg_view import Programme
+from services.navigation import NavNode
 from services.remote.protocol import MAX_MESSAGE, Get, OpenItem
+from services.text_fold import fold
 from tests.fixtures import local_provider
 from tests.fixtures.local_provider import PROVIDER_NAME
 from ui.remote_guide import GUIDE_PAGE, PhoneGuide
@@ -228,6 +230,105 @@ class PhoneGuideTests(WindowCase):
             )
         self.assertIn("s2", remote._guides)
         guides.assert_called_with({PROVIDER_NAME})
+
+
+class GuideFindTests(WindowCase):
+    """The find on the groups finds groups and channels alike, as the Library's finds genres and
+    titles: the channels with the desktop search's rules, after the groups it matches."""
+
+    def setUp(self):
+        super().setUp()
+        self.sent = []
+        self.addCleanup(lambda: [g.deleteLater() for g in self.lists])
+        self.lists = []
+
+    def make(self, bare=False):
+        made = PhoneGuide(self.window, self.sent.append, bare=bare)
+        self.lists.append(made)
+        return made
+
+    def last(self, kind):
+        found = [m for m in self.sent if m["t"] == kind]
+        return found[-1] if found else None
+
+    def found(self, kind, find):
+        def ready():
+            message = self.last(kind)
+            return message and message["find"] == find and not message["loading"]
+
+        self.assertTrue(wait_until(ready))
+        return self.last(kind)
+
+    def test_finds_channels_after_the_groups(self):
+        self.open_first_channel()
+        guide = self.make()
+        guide.groups(0, "channel 2")
+        message = self.found("groups", "channel 2")
+        self.assertEqual([c["name"] for c in message["channels"]], ["Channel 2"])
+        self.assertEqual(message["found"], 1)
+        self.assertIn("now", message["channels"][0])  # the Guide's rows: with what's on
+
+    def test_the_largest_find_fits_a_frame_in_any_script(self):
+        """A page of 100 groups found, and the channels found below them with what's on."""
+        self.open_first_channel()
+        guide = self.make()
+        long = "字" * 300  # 3 bytes a letter
+        now = datetime.now(timezone.utc)
+        on = programme(long, now - timedelta(minutes=5))
+        nodes = [NavNode("group", f"g{i}", f"{long}{i}", None, 9999) for i in range(150)]
+        names = [f"{long}{i}" for i in range(80)]
+        index = [("P", "live", fold(n), n, {"name": n, "id": i}) for i, n in enumerate(names)]
+        controller = self.window.controller
+        with (
+            mock.patch.object(guide, "_group_nodes", return_value=nodes),
+            mock.patch.object(guide, "_live_index", return_value=index),
+            mock.patch.object(controller, "now_next", return_value=(on, on)),
+        ):
+            guide.groups(0, "字字")
+        message = self.last("groups")
+        self.assertEqual(len(message["rows"]), 100)
+        self.assertTrue(message["channels"])
+        encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
+        self.assertLessEqual(len(encoded), MAX_MESSAGE)
+
+    def test_the_guides_of_the_channels_found_load(self):
+        self.open_first_channel()
+        remote = self.window.remote
+        remote.hub = mock.Mock()
+        self.addCleanup(setattr, remote, "hub", None)
+        with mock.patch.object(self.window.controller, "use_phone_guides") as guides:
+            remote.bridge.post(Get("s7", "groups", "", 0, find="channel 2"))
+            self.assertTrue(wait_until(lambda: guides.called))
+        guides.assert_called_with({PROVIDER_NAME})
+
+    def test_a_group_and_no_channel(self):
+        self.open_first_channel()
+        guide = self.make()
+        guide.groups(0, "fixt")
+        message = self.found("groups", "fixt")
+        self.assertIn("Fixture", [g["title"] for g in message["rows"]])
+        self.assertEqual((message["channels"], message["found"]), ([], 0))
+
+    def test_the_remote_tabs_list_finds_channels_without_programmes(self):
+        self.open_first_channel()
+        listed = self.make(bare=True)
+        listed.groups(0, "chan")
+        message = self.found("chgroups", "chan")
+        self.assertEqual([c["name"] for c in message["channels"]], ["Channel 1", "Channel 2"])
+        self.assertFalse(any("now" in c for c in message["channels"]))
+        self.assertTrue(message["channels"][0]["playing"])
+
+    def test_a_found_channel_tunes(self):
+        self.open_first_channel()
+        guide = self.make()
+        guide.groups(0, "channel 2")
+        handle = self.found("groups", "channel 2")["channels"][0]["id"]
+        remote = self.window.remote
+        remote._guides["s6"] = guide
+        self.addCleanup(remote._guides.pop, "s6", None)
+        remote.bridge.post(OpenItem("s6", handle))
+        controller = self.window.controller
+        self.assertTrue(wait_until(lambda: (controller._channel or {}).get("name") == "Channel 2"))
 
 
 class ChannelListTests(WindowCase):

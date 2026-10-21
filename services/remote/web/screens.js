@@ -25,7 +25,7 @@ const words = {
   groups: "Groups",
   genres: "Genres",
   guide_find: "Find a channel",
-  find_group: "Find a group",
+  find_group: "Find a group or channel",
   find_genre: "Find a genre or title",
   find_title: "Find a title",
   load_failed: "Couldn't load this list",
@@ -260,6 +260,9 @@ function channelList({ ids, asks, top, row, shown }) {
   const onGroups = (message) => {
     if (list.level !== "groups" || message.find !== list.find || !answers(list, message)) return;
     const rows = message.rows.map((group) => branchRow(group, () => openAt("channels", group.id, group.title)));
+    const found = message.channels || []; // what the find found among every channel, below its groups
+    if (found.length && message.page === 0) rows.push(el("div", "group", w("channels")));
+    rows.push(...found.map(row));
     placePage(box(), list, message, rows, () => openAt("groups"));
   };
   const onChannels = (message) => {

@@ -647,6 +647,47 @@ def scenario_channel_list(rig: Rig) -> None:
     rig.shot("channel-list-narrow")
 
 
+def scenario_find_both(rig: Rig) -> None:
+    """On the groups, the find shows the groups it matches and, below them, the channels it
+    finds: in the Guide (a row's ▶ tunes) and in the Remote tab's list (a row tunes)."""
+    sid = paired_sid(rig)
+    news = [row for row in GROUPS["rows"] if row["title"] == "News"]
+    found = {**GROUPS, "find": "new", "rows": news, "channels": GUIDE["rows"][:1], "found": 1}
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark)
+    mark = rig.events.mark()
+    rig.page.click("#guideUp")
+    rig.events.wait(Get, where=lambda e: e.what == "groups", after=mark)
+    assert "channel" in (rig.page.get_attribute("#guideFind", "placeholder") or "")
+    mark = rig.events.mark()
+    rig.page.fill("#guideFind", "new")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "groups" and e.find == "new", after=mark)
+    answer(rig, sid, ask, found)
+    rig.page.locator("#guideRows .group", has_text="Channels").wait_for(timeout=5000)
+    assert rig.page.locator("#guideRows .row.branch").count() == 1
+    rig.shot("guide-find-both")
+    mark = rig.events.mark()
+    rig.page.locator("#guideRows .row", has_text="Harbourline News").locator(".side").click()
+    assert rig.events.wait(OpenItem, after=mark).handle == "h1"
+    rig.page.click("[data-tab=remote]")
+    mark = rig.events.mark()
+    rig.page.click("#listButton")
+    rig.events.wait(Get, where=lambda e: e.what == "channels", after=mark)
+    mark = rig.events.mark()
+    rig.page.click("#zapUp")
+    rig.events.wait(Get, where=lambda e: e.what == "chgroups", after=mark)
+    mark = rig.events.mark()
+    rig.page.fill("#zapFind", "new")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "chgroups" and e.find == "new", after=mark)
+    bare = [{k: v for k, v in r.items() if k not in ("now", "next")} for r in GUIDE["rows"][:1]]
+    answer(rig, sid, ask, {**found, "t": "chgroups", "channels": bare})
+    rig.page.locator("#zapRows .group", has_text="Channels").wait_for(timeout=5000)
+    mark = rig.events.mark()
+    rig.page.locator("#zapRows .row", has_text="Harbourline News").click()
+    assert rig.events.wait(OpenItem, after=mark).handle == "h1"
+
+
 def scenario_guide_pages(rig: Rig) -> None:
     """Opened on the TV's channel, page 3 of 5: the channel shows, the pages above and below
     come as the list scrolls, and what shows stays put."""
@@ -973,6 +1014,7 @@ SCENARIOS.update(
         "now-playing": scenario_now_playing,
         "guide-tune": scenario_guide_tune,
         "channel-list": scenario_channel_list,
+        "find-both": scenario_find_both,
         "guide-pages": scenario_guide_pages,
         "timetable": scenario_timetable,
         "search-mirror": scenario_search_mirror,

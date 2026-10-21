@@ -540,7 +540,7 @@ class NavModel(QObject):
         self._events += 1
         self.changed.emit()
 
-    def _all_live_items(self) -> list[dict]:
+    def all_live_items(self) -> list[dict]:
         """Every live channel once; the same id at two providers is two channels."""
         seen, result = set(), []
         for group in self.catalog.groups("live"):
@@ -566,7 +566,7 @@ class NavModel(QObject):
         is_kept = favorites.matcher(self.config)
         if is_kept is None:
             return []
-        return [i for i in self._all_live_items() if is_kept(i)]
+        return [i for i in self.all_live_items() if is_kept(i)]
 
     def _compute_recent(self) -> list[dict]:
         # What was watched at any provider in the list, newest first (a removed provider's

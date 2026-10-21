@@ -79,7 +79,8 @@ PAGE_STRINGS: dict[str, str] = {
     "no_programmes": N_("No programme guide for this channel"),
     "groups": N_("Groups"),  # i18n: the phone remote's guide: back to the channel list's groups
     "genres": N_("Genres"),  # i18n: the phone remote's Library: back to a section's genres
-    "find_group": N_("Find a group"),  # i18n: the phone remote's guide field, over its groups
+    # i18n: the phone remote's guide field, over its groups: finds groups and channels
+    "find_group": N_("Find a group or channel"),
     # i18n: the phone remote's Library field: finds genres and the section's films or series
     "find_genre": N_("Find a genre or title"),
     "find_title": N_("Find a title"),  # i18n: the phone remote's Library field, over a genre
