@@ -32,18 +32,19 @@ from services.remote.protocol import (
     Query,
     Status,
     StoreSaved,
+    ToTv,
     WatchHere,
 )
 from ui.keymap import Action
+from ui.link_lanes import Target
 from ui.remote_buttons import BUTTONS
 from ui.remote_guide import PhoneGuide
 from ui.remote_library import PhoneLibrary
 from ui.remote_repeat import KeyRepeater
-from ui.remote_snapshots import Handles, results, state
+from ui.remote_snapshots import TITLE_CHARS, Handles, results, state
 
 if TYPE_CHECKING:
     from services.remote.hub import RemoteHub
-    from ui.link_lanes import Target
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,9 @@ class RemoteController(QObject):
         self._libraries: dict[str, PhoneLibrary] = {}  # and its own Library
         self._channel_lists: dict[str, PhoneGuide] = {}  # and the Remote tab's channel list
         self._devices: dict[str, str] = {}  # each phone's device id, by session
+        # What a phone plays in its own player, and the group it was picked in (for the TV), by
+        # device: a phone that slept comes back as another session.
+        self._watching: dict[str, tuple[Target, Optional[tuple[str, list]]]] = {}
         self.result_handles = Handles(limit=500)  # the search's
         self._removing: dict[str, str] = {}  # device id → name, until the hub confirms
         self._phones: set[str] = set()
@@ -256,7 +260,9 @@ class RemoteController(QObject):
         elif isinstance(event, OpenItem):
             self._open(event.sid, event.handle)
         elif isinstance(event, WatchHere):
-            self._watch_here(event.sid)
+            self._watch_here(event.sid, event.handle)
+        elif isinstance(event, ToTv):
+            self._to_tv(event.sid)
         elif isinstance(event, StoreSaved):
             self._persist(event.data)
         elif isinstance(event, Paired):
@@ -289,6 +295,7 @@ class RemoteController(QObject):
         """Tell the phones what's on when it changed (a film's clock runs on the phone)."""
         if not self._phones or self.hub is None:
             return
+        self._stop_phones()
         last, last_at = self._last_state, self._last_at
         snapshot = state(self._window)
         if last is not None and not _changed(last, snapshot, self._now() - last_at):
@@ -361,20 +368,64 @@ class RemoteController(QObject):
             self._libraries[sid] = library
         return library
 
-    def _watch_here(self, sid: str) -> None:
-        """What the TV plays, on the phone that asked: its own player opens the link."""
+    def _watch_here(self, sid: str, handle: str = "") -> None:
+        """What the TV plays, or the channel `handle` of the phone's lists, in the phone's own
+        player. QiTV lets go of its own stream first: one screen at a time."""
+        controller = self._window.controller
+        chosen: Optional[Target] = None
+        group: Optional[tuple[str, list]] = None
+        if handle:
+            found = self._find_handle(sid, handle)
+            if found is None or found[0] != "channel":
+                self._send(sid, {"t": "play", "failed": True})
+                return
+            channel, group_key, channels = cast(tuple, found[1])
+            chosen = Target(channel, "live", str(channel.get("name") or ""), group_key=group_key)
+            group = (group_key, channels) if group_key else None
 
-        def launch(target: "Target", url: str) -> tuple[bool, str]:
+        def launch(target: Target, url: str) -> tuple[bool, str]:
             if sid not in self._phones:
                 return False, PHONE_GONE_TEXT
-            self._send(sid, {"t": "play", "url": self._phone_link(target.item, url)})
-            name = self._names.get(self._devices.get(sid, ""), "")
-            text = PLAYING_ON_TEXT if name else PLAYING_ON_PHONE_TEXT
-            self._window.screens.notify(translate(text, name=name))
+            first = self._device(sid) not in self._watching
+            self._watching[self._device(sid)] = (target, group)
+            message = {"t": "play", "url": self._phone_link(target.item, url)}
+            message["name"] = target.title[:TITLE_CHARS]
+            if target.live:
+                message["num"] = str(controller.channel_number(target.item) or "")
+            self._send(sid, message)
+            if first:  # a zap on the phone after that says nothing more
+                name = self._names.get(self._devices.get(sid, ""), "")
+                text = PLAYING_ON_TEXT if name else PLAYING_ON_PHONE_TEXT
+                self._window.screens.notify(translate(text, name=name))
             return True, ""
 
-        if not self._window.controller.play_elsewhere(launch):
+        if not controller.play_elsewhere(launch, chosen):
             self._send(sid, {"t": "play", "failed": True})
+
+    def _to_tv(self, sid: str) -> None:
+        """The phone hands back what it played: the TV plays it."""
+        watched = self._watching.pop(self._device(sid), None)
+        if watched is None:
+            return
+        target, group = watched
+        window = self._window
+        if target.live:
+            window.screens.tune_live(target.item, group)
+            return
+        if window.screens.library_shown():
+            window.screens.back_to_tv()
+        window.controller.play_vod(target.item, target.item_type, target.context)
+
+    def _stop_phones(self) -> None:
+        """The TV plays again: phones watching on their own let go (one screen at a time)."""
+        if self._watching and self._window.controller.showing_here():
+            for sid in self._phones:
+                if self._device(sid) in self._watching:
+                    self._send(sid, {"t": "stop"})
+            self._watching.clear()
+
+    def _device(self, sid: str) -> str:
+        return self._devices.get(sid) or sid
 
     def _phone_link(self, item: dict, url: str) -> str:
         """`url` as a phone's browser plays it: an Xtream channel as HLS (Safari plays no
@@ -395,12 +446,16 @@ class RemoteController(QObject):
         else:
             screens.open_search(text)
 
-    def _open(self, sid: str, handle: str) -> None:
+    def _find_handle(self, sid: str, handle: str) -> Optional[tuple[str, object]]:
         found = self.result_handles.get(handle)
         lists = (self._guides.get(sid), self._channel_lists.get(sid), self._libraries.get(sid))
         for browsing in lists:
             if found is None and browsing is not None:
                 found = browsing.handles.get(handle)
+        return found
+
+    def _open(self, sid: str, handle: str) -> None:
+        found = self._find_handle(sid, handle)
         if found is None:
             return
         kind, payload = found

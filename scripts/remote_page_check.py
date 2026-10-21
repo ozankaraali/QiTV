@@ -41,6 +41,7 @@ from services.remote.protocol import (  # noqa: E402
     Press,
     Query,
     Status,
+    ToTv,
     WatchHere,
 )
 
@@ -690,8 +691,9 @@ def scenario_find_both(rig: Rig) -> None:
 
 
 def scenario_watch_here(rig: Rig) -> None:
-    """More's Watch on this phone asks QiTV for what the TV plays; with nothing to hand on the
-    phone says so, and a link QiTV sends opens in the phone's own player (here: the address)."""
+    """Watching on this phone: More's Watch on this phone docks a player above the channel list
+    and asks for what the TV plays; a channel tapped then plays here (its link in the player);
+    the TV taking over stops it; TV | Phone switches, TV handing it back."""
     sid = paired_sid(rig)
     rig.hub.send(sid, STATE)
     rig.page.click("#moreButton")
@@ -699,20 +701,42 @@ def scenario_watch_here(rig: Rig) -> None:
     rig.shot("more-watch-here")
     mark = rig.events.mark()
     rig.page.click("#watchHere")
-    rig.events.wait(WatchHere, after=mark)
-    assert rig.page.locator("#moreSheet").is_hidden(), "the sheet stayed open"
-    rig.hub.send(sid, {"t": "play", "failed": True})
-    rig.page.locator("#banner", has_text="first").wait_for(timeout=5000)
-    rig.page.evaluate("document.getElementById('banner').hidden = true")
-    rig.hub.send(sid, {"t": "play", "url": "javascript:alert(1)"})  # only http(s) opens
-    rig.page.locator("#banner", has_text="first").wait_for(timeout=5000)
+    watch = rig.events.wait(WatchHere, after=mark)
+    assert watch.handle == "", watch
+    ask = rig.events.wait(Get, where=lambda e: e.what == "channels", after=mark)
+    answer(rig, sid, ask, CHANNELS)
+    rig.page.wait_for_selector("#zapRows .row >> nth=2")
+    assert rig.page.locator("#player").is_visible(), "no player"
+    assert rig.page.locator("[data-key=volup]").is_hidden(), "the TV's buttons still show"
+    assert rig.page.locator("#where [data-where=phone].on").count() == 1
+    rig.hub.send(sid, {"t": "play", "failed": True})  # nothing on the TV: pick one here
+    rig.page.locator("#playerName", has_text="below").wait_for(timeout=5000)
     mark = rig.events.mark()
-    rig.page.click("#moreButton")
-    rig.page.click("#watchHere")
+    rig.page.locator("#zapRows .row", has_text="Fernvale Sports").click()
+    watch = rig.events.wait(WatchHere, after=mark)
+    assert watch.handle == "h2", watch
+    assert not rig.events.of(OpenItem, after=mark), "the TV was tuned"
+    link = f"{rig.base}icon-192.png?stream=2"  # a file the hub serves: no video, so it errs
+    rig.hub.send(sid, {"t": "play", "url": link, "name": "Fernvale Sports", "num": "2"})
+    rig.page.locator("#playerOut").wait_for(timeout=8000)  # it can't play this: the way out
+    src = rig.page.evaluate("document.getElementById('video').getAttribute('src')")
+    assert src == link, src
+    assert rig.page.inner_text("#playerName") == "Fernvale Sports"
+    rig.shot("watch-here")
+    rig.hub.send(sid, {"t": "play", "url": "javascript:alert(1)"})  # only http(s) plays
+    rig.page.wait_for_timeout(300)
+    assert rig.page.evaluate("document.getElementById('video').getAttribute('src')") == link
+    rig.hub.send(sid, {"t": "stop"})  # the TV took over
+    rig.page.locator("#banner", has_text="TV").wait_for(timeout=5000)
+    assert rig.page.locator("#player").is_hidden() and rig.page.locator("#now").is_visible()
+    assert rig.page.locator("#where [data-where=tv].on").count() == 1
+    mark = rig.events.mark()
+    rig.page.click("#where [data-where=phone]")
     rig.events.wait(WatchHere, after=mark)
-    link = f"{rig.base}icon-192.png?stream=7"  # a file the hub serves: the address counts
-    rig.hub.send(sid, {"t": "play", "url": link})
-    rig.page.wait_for_url(link, wait_until="commit", timeout=5000)
+    mark = rig.events.mark()
+    rig.page.click("#where [data-where=tv]")
+    rig.events.wait(ToTv, after=mark)
+    assert rig.page.locator("#player").is_hidden()
 
 
 def scenario_guide_pages(rig: Rig) -> None:

@@ -90,6 +90,10 @@ class MessageTests(unittest.TestCase):
         )
         self.assertEqual(parse_phone_message({"t": "held"}), {"t": "held"})
         self.assertEqual(parse_phone_message({"t": "watch", "x": 1}), {"t": "watch"})
+        self.assertEqual(  # a channel of the phone's list, to play on the phone
+            parse_phone_message({"t": "watch", "id": "h3"}), {"t": "watch", "id": "h3"}
+        )
+        self.assertEqual(parse_phone_message({"t": "totv"}), {"t": "totv"})
         q = parse_phone_message({"t": "query", "s": "h" * 150})
         self.assertEqual(len(q["s"]), 100)
         self.assertEqual(
@@ -200,6 +204,8 @@ class MessageTests(unittest.TestCase):
             {"t": "get", "what": "library", "page": -1},
             {"t": "get", "what": "library", "page": "1"},
             {"t": "open", "id": "x" * 33},
+            {"t": "watch", "id": "x" * 33},
+            {"t": "watch", "id": 3},
             {"t": "query", "s": 5},
             ["t", "held"],
             "held",

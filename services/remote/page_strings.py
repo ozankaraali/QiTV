@@ -41,8 +41,14 @@ PAGE_STRINGS: dict[str, str] = {
     # i18n: the phone remote: plays what the TV plays in the phone's own player instead
     "watch_here": N_("Watch on this phone"),
     "opening_here": N_("Opening on this phone…"),  # i18n: the phone remote, while it waits
-    # i18n: the phone remote, when nothing the TV shows can go to the phone
-    "watch_failed": N_("Play a channel, film or episode on the TV first, then watch it here."),
+    # i18n: the phone remote's channel list: where a tap plays, on the TV or on the phone
+    "phone": N_("Phone"),
+    # i18n: the phone remote, watching on the phone, when nothing plays there yet
+    "pick_here": N_("Pick a channel below to watch it here"),
+    # i18n: the phone remote, when the TV took over what the phone played
+    "now_on_tv": N_("Now playing on the TV"),
+    # i18n: the phone remote: a stream its page can't play opens in the phone's own player
+    "open_player": N_("Open in the phone's player"),
     "remote": N_("Remote"),  # i18n: the phone remote: the tab with the buttons
     "channel_number": N_("Channel number"),  # i18n: the phone remote: the numpad's heading
     "previous": N_("Previous"),  # i18n: the phone remote's numpad: the previous channel

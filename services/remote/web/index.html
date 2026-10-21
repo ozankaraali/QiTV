@@ -67,6 +67,11 @@
   </section>
 
   <section class="screen remote" data-screen="remote" hidden>
+    <div class="player" id="player" hidden>
+      <video id="video" playsinline controls preload="none"></video>
+      <div class="player-cap"><span class="num" id="playerNum"></span><span class="name" id="playerName"></span></div>
+      <button type="button" class="player-out" id="playerOut" hidden data-t="open_player">Open in the phone's player</button>
+    </div>
     <div class="nowbar">
       <button class="now" id="now" type="button" data-key="info">
         <div class="logo" id="nowLogo">TV</div>
@@ -82,6 +87,7 @@
       <div class="zap-head">
         <button type="button" class="back" id="zapUp" hidden><svg><use href="#i-left"/></svg><span data-t="groups">Groups</span></button>
         <h1 id="zapTitle"></h1>
+        <div class="where" id="where" role="group"><button type="button" class="on" data-where="tv" data-t="tv">TV</button><button type="button" data-where="phone" data-t="phone">Phone</button></div>
       </div>
       <input class="field" id="zapFind" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search">
       <div class="rows" id="zapRows"></div>

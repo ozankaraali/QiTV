@@ -1087,6 +1087,7 @@ class LinkPipelineTests(ControllerTestCase):
         """A phone's Watch on this phone: what plays, its link handed on as Play in VLC hands
         one; the in-app stream stops first, so the provider counts one."""
         self.play(0)
+        self.assertTrue(self.controller.showing_here())
         handed = []
 
         def launch(target, url):
@@ -1098,6 +1099,26 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(handed, [("One", "http://stream/1")])
         self.assertEqual(self.session.stops, 1)
         self.assertEqual(self.played_urls(), ["http://stream/1"])  # nothing more plays here
+        self.assertFalse(self.controller.playing())
+        self.assertFalse(self.controller.showing_here())  # what the remote tells a TV play by
+
+    def test_play_elsewhere_a_chosen_channel(self):
+        """The phone's own list: a channel the TV doesn't play goes to the phone, and the TV's
+        stream stops for it all the same."""
+        self.play(0)
+        handed = []
+
+        def launch(target, url):
+            handed.append((target.item["name"], url))
+            return True, ""
+
+        chosen = Target(CHANNELS[2], "live", "Three", group_key="10")
+        self.assertTrue(self.controller.play_elsewhere(launch, chosen))
+        self.assertEqual(self.requested()[-1], "Three")
+        self.ready("http://stream/3")
+        self.assertEqual(handed, [("Three", "http://stream/3")])
+        self.assertEqual(self.session.stops, 1)
+        self.assertFalse(self.controller.playing())
 
     def test_play_elsewhere_with_nothing_current(self):
         self.assertFalse(self.controller.play_elsewhere(lambda target, url: (True, "")))
