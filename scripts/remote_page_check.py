@@ -6,11 +6,12 @@
 Nothing shows on screen: Chrome runs headless and the hub listens on 127.0.0.1 only. Each
 scenario prints PASS or FAIL; the exit code is 1 if any failed. Needs Google Chrome installed
 (or --chrome PATH) and Playwright (`--with playwright`). Scenarios: vectors (the page's Noise
-against tests/fixtures/noise_vectors.json), pair-home, hold, hidden-releases and the second
-screen's; with --relay (a local `wrangler dev` of the QiTV relay, e.g. http://127.0.0.1:8787, or
-the deployed one): pair-relay, hop, hop-once, hop-memory, hop-back-on-loss, relay-banner, two-tvs,
-and page-versions when QITV_KEPT_PAGE names a page the relay keeps beside the newest (a copy of
-its public/p/<id>/ at public/p/<another id>/, that id added to public/pages.json's "kept").
+against tests/fixtures/noise_vectors.json), pair-home, scan-again, hold, hidden-releases and the
+second screen's; with --relay (a local `wrangler dev` of the QiTV relay, e.g. http://127.0.0.1:8787,
+or the deployed one): pair-relay, hop, hop-once, hop-memory, hop-back-on-loss, relay-banner,
+two-tvs, scan-again-relay, and page-versions when QITV_KEPT_PAGE names a page the relay keeps
+beside the newest (a copy of its public/p/<id>/ at public/p/<another id>/, that id added to
+public/pages.json's "kept").
 """
 
 from __future__ import annotations
@@ -239,6 +240,18 @@ def scenario_pair_home(rig: Rig) -> None:
     assert not rig.events.of(Paired, after=mark), "a reload paired again"
 
 
+def scenario_scan_again(rig: Rig) -> None:
+    """A code scanned with the camera while the page is open only changes the open page's
+    address after the #, without loading it again: the page pairs from it all the same."""
+    rig.pair()
+    mark = rig.events.mark()
+    rig.page.goto(rig.pair_url())  # the same page, another code: the browser stays on the page
+    rig.events.wait(Paired, after=mark, timeout=10)
+    rig.events.wait(Opened, after=mark)
+    rig.page.wait_for_selector("[data-screen=remote]:not([hidden])", timeout=5000)
+    assert rig.page.evaluate("location.hash") == "", "the code stayed in the address"
+
+
 def scenario_hold(rig: Rig) -> None:
     rig.pair()
     mark = rig.events.mark()
@@ -337,6 +350,17 @@ def scenario_hop_back_on_loss(rig: Rig) -> None:
     assert rig.page.url.startswith(rig.relay or ""), "it hopped back to the dead address"
 
 
+def scenario_scan_again_relay(rig: Rig) -> None:
+    """scan-again on the relay's page: the code reaches the page open at the relay's address."""
+    scenario_pair_relay(rig)
+    mark = rig.events.mark()
+    rig.page.goto(f"{rig.relay}/#b.")  # the relay page without hopping
+    rig.events.wait(Opened, where=lambda e: e.door == "relay", after=mark, timeout=10)
+    mark = rig.events.mark()
+    rig.page.goto(rig.pair_url())  # the same page, another code
+    rig.events.wait(Paired, after=mark, timeout=10)
+
+
 def scenario_two_tvs(rig: Rig) -> None:
     scenario_pair_relay(rig)
     other_events = Recorder()
@@ -360,6 +384,7 @@ def scenario_two_tvs(rig: Rig) -> None:
 SCENARIOS: dict[str, Callable[[Rig], None]] = {
     "vectors": scenario_vectors,
     "pair-home": scenario_pair_home,
+    "scan-again": scenario_scan_again,
     "hold": scenario_hold,
     "hidden-releases": scenario_hidden_releases,
 }
@@ -952,6 +977,7 @@ RELAY_SCENARIOS: dict[str, Callable[[Rig], None]] = {
     "page-versions": scenario_page_versions,
     "hop-back-on-loss": scenario_hop_back_on_loss,
     "two-tvs": scenario_two_tvs,
+    "scan-again-relay": scenario_scan_again_relay,
 }
 
 
