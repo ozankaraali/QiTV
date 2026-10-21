@@ -130,7 +130,7 @@ class PhoneLibrary(QObject):
             "page": page,
             "pages": pages,
             "rows": [self._genre(g) for g in shown],
-            "titles": [self._title_row(item, None) for item in found],
+            "titles": [self._found_row(item) for item in found],
             "found": len(hits),
             "loading": loading,
         }
@@ -146,16 +146,25 @@ class PhoneLibrary(QObject):
         )
         return message, signature
 
-    def _title_row(self, item: dict, genre_items: Optional[list]) -> dict:
+    def _found_row(self, item: dict) -> dict:
+        """A title the find found in the section: a film or a series whatever genre the model
+        is on (on Continue in Series its titles are episodes)."""
+        if self.model.section == "series":
+            return self._title_row(item, None, "series")
+        return self._title_row(item, None, "movie")
+
+    def _title_row(
+        self, item: dict, genre_items: Optional[list], kind: Optional[str] = None
+    ) -> dict:
         model = self.model
-        kind = model.item_kind(item)
+        kind = kind or model.item_kind(item)
         row: dict[str, Any] = {
             "id": self.handles.issue("title", (item, kind, genre_items)),
             "title": title_of(item)[:TITLE_CHARS],
             "sub": str(item.get("year") or item.get("series_name") or "")[:TITLE_CHARS],
         }
-        progress = model.progress(item)
-        if progress is not None:
+        progress = model.progress(item) if kind == model.item_kind(item) else None
+        if progress is not None:  # (a series found on Continue has none of its own)
             row["progress"] = round(progress, 3)
         return row
 

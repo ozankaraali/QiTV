@@ -90,6 +90,22 @@ class PhoneLibraryTests(unittest.TestCase):
         )
         self.assertEqual((kind, item["name"], item_kind), ("title", "Comedy one", "movie"))
 
+    def test_a_found_series_is_a_series_while_an_episode_is_in_progress(self):
+        series = {"id": "s1", "name": "Harbour Watch"}
+        self.catalog.item_map[("series", "9")] = [series]
+        episode = {"id": "e1", "name": "Harbour Watch 1x01", "series_name": "Harbour Watch"}
+        history(self.config, episode, "episode")
+        resume(self.config, episode, "episode")
+        self.library.genres("series", 0, "")
+        self.ready("series")
+        self.assertTrue(wait_until(lambda: not self.last("genres")["loading"]))
+        self.assertEqual(self.library.model.genre_id, library.CONTINUE)  # the shelf it sits on
+        self.library.genres("series", 0, "watch")
+        found = self.last("genres")["titles"]
+        self.assertEqual([t["title"] for t in found], ["Harbour Watch"])
+        kind, (item, item_kind, _genre) = self.library.handles.get(found[0]["id"])
+        self.assertEqual((item["id"], item_kind), ("s1", "series"))
+
     def test_found_titles_come_a_page_at_a_time_the_first_word_first(self):
         self.catalog.item_map[("movies", "2")].append(movie(501, "Old movie"))
         self.opened()
