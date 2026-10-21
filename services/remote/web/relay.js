@@ -10,6 +10,7 @@ import { Keypair } from "./noise.js";
 import * as store from "./store.js";
 
 const BOUNCE_MS = 5000;
+const HOP_DEADLINE_MS = 5000; // the home page takes over in well under this, when it can
 const SCAN_EVERY_MS = 150;
 const decoder = new TextDecoder();
 const $ = (id) => document.getElementById(id);
@@ -73,7 +74,14 @@ function installRelay() {
 function hop(where) {
   const record = store.getTv(app.tvId) || {};
   const relay = b64e(utf8(location.origin));
-  location.replace(`${where.home}#h.${where.ticket}.${app.tvId}.${record.room || ""}.${relay}`);
+  app.noHop = true; // whatever happens, this page doesn't hop again by itself
+  // assign, not replace: if that address fails at once (another network), Back returns here.
+  location.assign(`${where.home}#h.${where.ticket}.${app.tvId}.${record.room || ""}.${relay}`);
+  // An unreachable address can also just hang: still here after the deadline, stay.
+  setTimeout(() => {
+    window.stop();
+    if (!(app.conn && app.conn.open)) connect(app.tvId);
+  }, HOP_DEADLINE_MS);
 }
 
 // ---- the home door ------------------------------------------------------------------------

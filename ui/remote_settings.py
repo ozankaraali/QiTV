@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -102,12 +101,8 @@ def build_remote_tab(dialog: Any) -> QWidget:
     relay_hint = QLabel(translate(RELAY_HINT), tab)
     relay_hint.setWordWrap(True)
     form.addRow(relay_hint)
-    dialog.remote_relay_url_input = QLineEdit(tab)
-    dialog.remote_relay_url_input.setPlaceholderText(RELAY_URL)
-    url = data.get("relay_url")
-    if isinstance(url, str) and url != RELAY_URL:
-        dialog.remote_relay_url_input.setText(url)
-    form.addRow(tr("Relay address"), dialog.remote_relay_url_input)  # i18n: a Settings label
+    dialog.remote_relay_checkbox.setEnabled(dialog.remote_enabled_checkbox.isChecked())
+    dialog.remote_enabled_checkbox.toggled.connect(dialog.remote_relay_checkbox.setEnabled)
     remote = dialog.parent().remote
     dialog.remote_home_label = QLabel(remote.status.get("home_url") or "—", tab)
     dialog.remote_home_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -186,7 +181,6 @@ def build_remote_tab(dialog: Any) -> QWidget:
         for widget in (
             dialog.remote_enabled_checkbox,
             dialog.remote_relay_checkbox,
-            dialog.remote_relay_url_input,
             dialog.remote_phones_list,
             dialog.remote_show_code_button,
         ):
@@ -206,7 +200,7 @@ def save_remote_settings(dialog: Any) -> None:
     data["version"] = STORE_VERSION
     data["enabled"] = dialog.remote_enabled_checkbox.isChecked()
     data["relay"] = dialog.remote_relay_checkbox.isChecked()
-    data["relay_url"] = dialog.remote_relay_url_input.text().strip().rstrip("/") or RELAY_URL
+    data.setdefault("relay_url", RELAY_URL)  # set in config.json only (testing a relay)
     config.remote = data
 
 

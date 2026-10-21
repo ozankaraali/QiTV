@@ -10,11 +10,12 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import QElapsedTimer, QEvent, QObject, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QMouseEvent, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import QFont, QMouseEvent, QPainter, QPaintEvent
 from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_, translate
 from services.remote.protocol import CODE_ROTATE_S
+from ui.brand import logo_aspect, logo_pixmap
 from ui.keymap import key_hint
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, fill_round
@@ -32,6 +33,7 @@ PAIR_STARTING = N_("Starting the phone remote…")
 PAIR_CLOSE = N_("Close")
 
 _QUIET = 4  # modules of white around the QR, as the standard asks
+LOGO_SHARE = 0.22  # the logo's side, as a share of the code's
 
 
 class PairOverlay(Overlay):
@@ -136,7 +138,9 @@ class PairOverlay(Overlay):
             flags = Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap
             inside = square.adjusted(un.px(1.5), 0, -un.px(1.5), 0)
             p.drawText(inside, int(flags), self._error or translate(PAIR_STARTING))
-        below = square.bottom() + un.px(1.6)
+        if self._matrix:
+            self._paint_bar(p, un, square)
+        below = square.bottom() + un.px(2.0)
         p.setPen(qcolor(PALETTE.text))
         p.setFont(un.font(1.8))
         hint = QRectF(0, below, self.width(), un.px(3.0))
@@ -145,8 +149,6 @@ class PairOverlay(Overlay):
         p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
         small = QRectF(0, below + un.px(3.2), self.width(), un.px(2.4))
         p.drawText(small, Qt.AlignmentFlag.AlignCenter, translate(PAIR_ROTATES))
-        if self._matrix:
-            self._paint_ring(p, un, square)
 
     def _paint_qr(self, p: QPainter, square: QRectF) -> None:
         count = len(self._matrix)
@@ -163,20 +165,35 @@ class PairOverlay(Overlay):
                         ),
                         dark,
                     )
+        # QiTV's logo in the middle, on a white tile: the code is made with error correction H
+        # (30%), and the tile covers about 5% of it.
+        logo_side = (count * cell) * LOGO_SHARE
+        tile = QRectF(0, 0, logo_side + 2 * cell, logo_side + 2 * cell)
+        tile.moveCenter(square.center())
+        fill_round(p, tile, qcolor("#ffffff"), cell * 1.5)
+        pixmap = logo_pixmap(logo_side, self.devicePixelRatioF())
+        if pixmap is not None:
+            spot = QRectF(0, 0, logo_side * logo_aspect(), logo_side)
+            spot.moveCenter(square.center())
+            p.drawPixmap(spot, pixmap, QRectF(pixmap.rect()))
 
-    def _paint_ring(self, p: QPainter, un: Units, square: QRectF) -> None:
+    def _paint_bar(self, p: QPainter, un: Units, square: QRectF) -> None:
+        """The minute the code has left: a thin bar under the QR that shrinks to nothing."""
         left = max(0.0, 1.0 - self._since.elapsed() / 1000.0 / CODE_ROTATE_S)
-        size = un.px(2.2)
-        ring = QRectF(square.right() - size, square.bottom() + un.px(1.9), size, size)
-        p.setPen(QPen(qcolor(PALETTE.text, 0.18), un.px(0.3)))
-        p.drawEllipse(ring)
-        p.setPen(QPen(qcolor(PALETTE.accent), un.px(0.3)))
-        p.drawArc(ring, 90 * 16, int(360 * 16 * left))
+        height = max(2.0, un.px(0.3))
+        track = QRectF(square.left(), square.bottom() + un.px(0.7), square.width(), height)
+        fill_round(p, track, qcolor(PALETTE.text, 0.14), height / 2)
+        fill_round(
+            p,
+            QRectF(track.left(), track.top(), track.width() * left, height),
+            qcolor(PALETTE.accent),
+            height / 2,
+        )
 
 
 def _matrix(url: str) -> list[bytes]:
     """The QR's modules, row by row (1 = dark), without the quiet zone."""
     import segno
 
-    code = segno.make(url, error="m", micro=False)
+    code = segno.make(url, error="h", micro=False)
     return [bytes(row) for row in code.matrix]

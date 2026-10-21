@@ -44,6 +44,9 @@ logger = logging.getLogger(__name__)
 Emit = Callable[[object], None]
 _STOP_S = 2.0
 _GOODBYE_S = 0.3  # a goodbye to a phone that doesn't answer stops waiting after this
+# With the relay on, the pairing screen waits this long for it before showing the home door's
+# address: pairing through the relay keeps the phone's keys at the address it keeps (its icon).
+RELAY_WAIT_S = 8.0
 
 
 def web_dir() -> Path:
@@ -96,6 +99,7 @@ class HubCore:
         self._rotation: Optional[asyncio.TimerHandle] = None
         self._relay_state = "off"
         self._started = False
+        self._relay_wait_until = 0.0  # monotonic; the pairing screen waits for the relay till then
         self.relay: Any = None  # a RelayClient while the relay is on
         self._early: list[tuple[Callable[..., Any], tuple[Any, ...]]] = []
 
@@ -173,6 +177,8 @@ class HubCore:
         # The relay's address only while QiTV is in its room: a phone at home pairs either way.
         if self.store.relay and self.store.room and self._relay_state == "online":
             return f"{self.store.relay_url}/#1.{self.store.room}.{tv_pub}.{b64e(code)}"
+        if self.store.relay and time.monotonic() < self._relay_wait_until:
+            return ""  # "Starting…": the relay may answer in a moment
         home = self.home_url() or f"http://127.0.0.1:{self.port}/"
         return f"{home}#1.-.{tv_pub}.{b64e(code)}"
 
@@ -193,9 +199,18 @@ class HubCore:
         if open_:
             self.store.open_pairing(self.clock())
             self._schedule_rotation()
+            if self.store.relay and self._relay_state != "online":
+                self._relay_wait_until = time.monotonic() + RELAY_WAIT_S
+                asyncio.get_running_loop().call_later(RELAY_WAIT_S, self._relay_wait_over)
         else:
             self.store.close_pairing()
+            self._relay_wait_until = 0.0
         self.emit(Code(self.code_url()))
+
+    def _relay_wait_over(self) -> None:
+        self._relay_wait_until = 0.0
+        if self.store.current_code() is not None and self._relay_state != "online":
+            self.emit(Code(self.code_url()))  # no relay: the home door's address after all
 
     def _schedule_rotation(self) -> None:
         loop = asyncio.get_running_loop()

@@ -364,7 +364,12 @@ class ReviewFixHubTests(HomeDoorCase):
 
 
 class RelayStateQrTests(unittest.TestCase):
-    def test_qr_names_the_home_door_while_the_relay_is_not_online(self):
+    def test_qr_waits_for_the_relay_then_names_the_home_door(self):
+        from services.remote import hub as hub_module
+
+        patch = mock.patch.object(hub_module, "RELAY_WAIT_S", 0.5)
+        patch.start()
+        self.addCleanup(patch.stop)
         web = Path(tempfile.mkdtemp())
         (web / "index.html").write_text("x")
         events = Recorder()
@@ -376,6 +381,8 @@ class RelayStateQrTests(unittest.TestCase):
             self.assertTrue(hub.ready.wait(3))
             mark = events.mark()
             hub.set_pairing(True)
+            first = events.wait(Code, after=mark)
+            self.assertEqual(first.url, "")  # "Starting…" while the relay may still answer
             url = events.wait(Code, where=lambda e: bool(e.url), after=mark).url
             self.assertTrue(url.startswith("http://"), url)
             self.assertNotIn("R" * 32, url)

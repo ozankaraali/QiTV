@@ -123,6 +123,20 @@ class RemoteController(QObject):
         else:
             self.hub.apply(data)
 
+    def turn_on(self) -> None:
+        """Phone Remote… while it's off: on, as Settings would turn it (the relay as it was)."""
+        data = dict(self._config())
+        if data.get("version") not in (None, STORE_VERSION):
+            return
+        data.update({"version": STORE_VERSION, "enabled": True})
+        data.setdefault("relay", True)
+        self._window.config_manager.remote = data
+        try:
+            self._window.config_manager.save_config()
+        except Exception as error:
+            logger.warning("Couldn't save the phone remote's switch: %s", safe_message(error))
+        self.apply_config()
+
     def shutdown(self) -> None:
         self._timer.stop()
         self._diff.stop()

@@ -578,7 +578,11 @@ def scenario_hop_memory(rig: Rig) -> None:
         mark = rig.events.mark()
         rig.page.goto(rig.pair_url())
         rig.events.wait(Paired, after=mark, timeout=10)
-        rig.page.wait_for_timeout(2500)  # it hopped and found nothing
+        rig.page.wait_for_timeout(6500)  # it hopped; the address hangs; the deadline passes
+        assert rig.page.url.startswith(rig.relay or ""), rig.page.url
+        mark = rig.events.mark()
+        rig.page.click("[data-key=ok]")  # still a working remote, through the relay
+        rig.events.wait(Press, where=lambda e: e.button == "ok", after=mark, timeout=5)
         mark = rig.events.mark()
         rig.page.goto(f"{rig.relay}/")  # opened again: no second hop into the void
         rig.events.wait(Opened, where=lambda e: e.door == "relay", after=mark, timeout=10)

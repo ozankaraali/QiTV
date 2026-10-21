@@ -268,6 +268,10 @@ function bindButtons() {
     else if (app.tvId && !(app.conn && app.conn.open)) connect(app.tvId);
   });
   window.addEventListener("pagehide", releaseAll);
+  // Back from another page restores this one from the browser's cache, its socket closed.
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted && app.tvId && !(app.conn && app.conn.open)) connect(app.tvId);
+  });
   window.addEventListener("blur", releaseAll);
 }
 

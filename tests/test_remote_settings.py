@@ -113,11 +113,20 @@ class PairingScreenTests(base.WindowCase):
     def test_menu_has_phone_remote(self):
         self.assertIn("Phone Remote…", self.menu_actions())
 
-    def test_phone_remote_when_off_opens_its_settings(self):
-        with mock.patch.object(self.window, "options_dialog") as options:
+    def test_phone_remote_when_off_turns_it_on_and_shows_the_code(self):
+        self.show()
+        with mock.patch("services.remote.hub.RemoteHub") as hub:
             self.window.open_phone_remote()
-        options.assert_called_once_with(tab="remote")
-        self.assertFalse(self.window.pair_overlay.isVisible())
+        self.assertTrue(ConfigManager().remote["enabled"])
+        hub.return_value.start.assert_called_once()
+        self.assertTrue(self.window.pair_overlay.isVisible())
+        self.window.remote.hub = None  # the stub isn't a real thread to stop
+
+    def test_phone_remote_sits_in_the_mac_app_menu(self):
+        from PySide6.QtGui import QAction
+
+        action = self.menu_actions()["Phone Remote…"]
+        self.assertEqual(action.menuRole(), QAction.MenuRole.ApplicationSpecificRole)
 
     def test_phone_remote_when_on_shows_the_code(self):
         self.show()
@@ -179,6 +188,39 @@ class ReviewFixSettingsTests(base.WindowCase):
             overlay.open()
         self.window.remote.bridge.post(Status("", "error"))
         self.assertTrue(overlay.error_text())
+        overlay.grab()
+
+
+class OwnerCheckSettingsTests(base.WindowCase):
+    def dialog(self):
+        dialog = OptionsDialog(self.window)
+        self.addCleanup(dialog.deleteLater)
+        return dialog
+
+    def test_relay_box_follows_the_remote_box(self):
+        dialog = self.dialog()
+        self.assertFalse(dialog.remote_enabled_checkbox.isChecked())
+        self.assertFalse(dialog.remote_relay_checkbox.isEnabled())
+        dialog.remote_enabled_checkbox.setChecked(True)
+        self.assertTrue(dialog.remote_relay_checkbox.isEnabled())
+
+    def test_no_relay_address_field_and_the_saved_one_stays(self):
+        self.config.remote = {"version": 1, "relay_url": "https://relay.example"}
+        dialog = self.dialog()
+        self.assertFalse(hasattr(dialog, "remote_relay_url_input"))
+        dialog.save_settings()
+        self.assertEqual(ConfigManager().remote["relay_url"], "https://relay.example")
+
+    def test_qr_has_room_for_the_logo(self):
+        self.show()
+        overlay = self.window.pair_overlay
+        with mock.patch.object(self.window.remote, "set_pairing"):
+            overlay.open()
+        url = "https://remote.qitv.app/#1." + "R" * 32 + "." + "P" * 43 + "." + "C" * 22
+        self.window.remote.codeChanged.emit(url)
+        import segno
+
+        self.assertEqual(overlay.module_count(), len(segno.make(url, error="h").matrix))
         overlay.grab()
 
 

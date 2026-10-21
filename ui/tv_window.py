@@ -1288,12 +1288,14 @@ class TVWindow(QMainWindow):
             self.menus.rebuild_providers()
 
     def open_phone_remote(self) -> None:
-        """The menu's Phone Remote…: the pairing QR when the remote is on, else its Settings."""
+        """The menu's Phone Remote…: turns the remote on if it is off, then the pairing QR."""
         if self._closing:
             return
         if self.remote.hub is None:
-            self.options_dialog(tab="remote")
-            return
+            self.remote.turn_on()
+            if self.remote.hub is None:  # settings of a newer QiTV: its Settings tab says so
+                self.options_dialog(tab="remote")
+                return
         if self.screens.library_shown():
             self.screens.back_to_tv()  # the QR shows over the TV
         self.pair_overlay.open()
