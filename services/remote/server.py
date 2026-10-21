@@ -26,10 +26,31 @@ mimetypes.add_type("application/manifest+json", ".webmanifest")
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
 
+# A hop from the relay's page that QiTV refuses (the phone's address is no home network's: a VPN's,
+# say): the phone goes back to the relay, to stay there (#b.), instead of being left on an error.
+# The hop's address ends #h.<ticket id>.<secret>.<tv>.<room>.<the relay's origin, base64url>.
+REFUSED_PAGE = """<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width"><title>QiTV</title><p>403: Forbidden</p>
+<script>
+try {
+  const part = location.hash.slice(1).split(".");
+  const b64 = (part[5] || "").replace(/-/g, "+").replace(/_/g, "/");
+  const relay = atob(b64 + "===".slice((b64.length + 3) % 4));
+  const tv = part[3] || "";
+  const secure = /^https:\\/\\/[a-z0-9.-]+(:\\d+)?$/i.test(relay);
+  if (part[0] === "h" && /^[\\w-]{1,64}$/.test(tv) && secure) location.replace(relay + "/#b." + tv);
+} catch (e) {}
+</script>
+"""
+
+
 @web.middleware
 async def private_only(request: web.Request, handler: Handler) -> web.StreamResponse:
     if not is_private(request.remote):
-        return web.Response(status=403)
+        logger.info("Phone remote: refused %s, not a home network's address", request.remote)
+        if request.path == "/":
+            return web.Response(status=403, text=REFUSED_PAGE, content_type="text/html")
+        return web.Response(status=403, text="403: Forbidden")  # text: an empty reply's a file
     return await handler(request)
 
 
@@ -53,7 +74,7 @@ async def start_home_door(
         path = request.match_info.get("path") or "index.html"
         found = _page_file(web_dir, path)
         if found is None:
-            return web.Response(status=404)
+            return web.Response(status=404, text="404: Not Found")
         headers = {"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"}
         return web.FileResponse(found, headers=headers)
 
