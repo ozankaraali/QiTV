@@ -15,10 +15,54 @@ const SCAN_EVERY_MS = 150;
 const decoder = new TextDecoder();
 const $ = (id) => document.getElementById(id);
 
-export function install(door) {
+// Resolves true when this page is leaving for another (see the page each QiTV carries).
+export async function install(door) {
   app.door = door;
-  if (door === "relay") installRelay();
-  else installHome();
+  if (door !== "relay") {
+    installHome();
+    return false;
+  }
+  installRelay();
+  return earlyMove();
+}
+
+// ---- the page each QiTV carries -----------------------------------------------------------
+// The relay keeps every page it has served at /p/<id>/ and lists them in /pages.json (the newest
+// is also at the root); QiTV's hello names the page it carries. A page of another one moves there
+// (the pairing stays: one origin), so a relay updated for a newer QiTV still gives an older one
+// the page it speaks with. A page the relay doesn't keep (a development build's) stays put.
+
+const PAGE_ID = /^[0-9a-f]{16}$/;
+let kept = new Set(); // the pages the relay keeps; none listed: nothing moves
+let ownPage = null;
+
+async function readPages() {
+  try {
+    const response = await fetch("/pages.json", { cache: "no-store" });
+    const pages = response.ok ? await response.json() : null;
+    if (!pages || !PAGE_ID.test(pages.newest) || !Array.isArray(pages.kept)) return;
+    kept = new Set(pages.kept.filter((page) => typeof page === "string" && PAGE_ID.test(page)));
+    const folder = location.pathname.match(/^\/p\/([0-9a-f]{16})\/$/);
+    ownPage = folder ? folder[1] : pages.newest;
+  } catch {
+    // an unreadable list: this page stays the one shown
+  }
+}
+
+function moveTo(page, hash) {
+  if (!ownPage || !page || page === ownPage || !kept.has(page)) return false;
+  location.replace(`/p/${page}/${hash}`);
+  return true;
+}
+
+// Before connecting: the page the TV it opens on carried last time, when this is another.
+async function earlyMove() {
+  await readPages();
+  const hash = location.hash;
+  if (hash.startsWith("#1.")) return false; // pairing: here, then the hello says
+  const tvId = (hash.startsWith("#b.") && hash.slice(3)) || store.lastTv();
+  const record = tvId ? store.getTv(tvId) : null;
+  return Boolean(record && moveTo(record.page, hash.startsWith("#b.") ? hash : ""));
 }
 
 // ---- the relay door -----------------------------------------------------------------------
@@ -37,7 +81,10 @@ function installRelay() {
     else showScan();
     return true;
   };
-  app.onhello = () => {
+  app.onhello = (message) => {
+    if (app.tvId && message.page) store.putTv(app.tvId, { page: message.page });
+    const stay = app.noHop && app.tvId ? `#b.${app.tvId}` : ""; // back from home: stay there too
+    if (moveTo(message.page, stay)) return;
     if (!app.noHop) send({ t: "where" });
   };
   app.handlers.where = (message) => {

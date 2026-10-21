@@ -1,8 +1,8 @@
 {
   "name": "QiTV remote",
   "short_name": "QiTV",
-  "start_url": "./",
-  "scope": "./",
+  "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#0b0f14",

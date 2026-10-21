@@ -102,6 +102,18 @@ class HomeDoorTests(HomeDoorCase):
 
         self.run_async(go())
 
+    def test_the_hello_names_the_page_this_qitv_carries(self):
+        from services.remote.page_id import page_id
+
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                _phone, ws, _answer, hello = await self.pair(s)
+                await ws.close()
+                return hello
+
+        hello = self.run_async(go())
+        self.assertEqual(hello["page"], page_id(self.web))
+
     def test_door_json_says_home(self):
         async def go():
             async with aiohttp.ClientSession() as s:

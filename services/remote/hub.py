@@ -20,7 +20,9 @@ import threading
 import time
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
+from services.redact import safe_exc
 from services.remote import net
+from services.remote.page_id import page_id
 from services.remote.page_strings import page_hello
 from services.remote.pairing import RemoteStore
 from services.remote.protocol import (
@@ -90,7 +92,10 @@ class HubCore:
         self.ports = list(ports)
         self.clock = clock
         self.tv_name = tv_name
-        self.hello = hello
+        self._page_hello = hello
+        self._page_id: Optional[str] = (
+            None  # the page's files, read on this thread when first asked
+        )
         self.handshake_s = handshake_s
         self.store = RemoteStore()
         self.port = 0
@@ -234,6 +239,16 @@ class HubCore:
             tv_name=self.tv_name,
             hello=self.hello,
         )
+
+    def hello(self) -> dict:
+        """What the hello adds: the page's words, and which page this QiTV carries."""
+        if self._page_id is None:
+            try:
+                self._page_id = page_id(self.web_dir)
+            except OSError as error:
+                logger.warning("Phone remote: couldn't read the page: %s", safe_exc(error))
+                self._page_id = ""
+        return {**self._page_hello(), "page": self._page_id}
 
     def capacity_left(self) -> bool:
         established = sum(1 for c in self.conns.values() if c.session.established)

@@ -11,6 +11,7 @@ try {
 } catch {
   // an unreadable answer: the home door, which works on the home network
 }
-install(door);
-installScreens();
-start();
+if (!(await install(door))) {
+  installScreens();
+  start();
+}

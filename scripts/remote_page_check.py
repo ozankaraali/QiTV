@@ -8,7 +8,9 @@ scenario prints PASS or FAIL; the exit code is 1 if any failed. Needs Google Chr
 (or --chrome PATH) and Playwright (`--with playwright`). Scenarios: vectors (the page's Noise
 against tests/fixtures/noise_vectors.json), pair-home, hold, hidden-releases and the second
 screen's; with --relay (a local `wrangler dev` of the QiTV relay, e.g. http://127.0.0.1:8787, or
-the deployed one): pair-relay, hop, hop-once, hop-memory, hop-back-on-loss, relay-banner, two-tvs.
+the deployed one): pair-relay, hop, hop-once, hop-memory, hop-back-on-loss, relay-banner, two-tvs,
+and page-versions when QITV_KEPT_PAGE names a page the relay keeps beside the newest (a copy of
+its public/p/<id>/ at public/p/<another id>/, that id added to public/pages.json's "kept").
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 import sys
 import threading
@@ -282,6 +285,33 @@ def scenario_pair_relay(rig: Rig) -> None:
     assert home.device_id == paired.device_id
     wait_url(rig, rig.base)
     assert "#" not in rig.page.url, "the ticket stayed in the address"
+
+
+def scenario_page_versions(rig: Rig) -> None:
+    """A QiTV carrying an older page the relay keeps: the phone moves to that page, and opens there
+    next time; a page the relay doesn't keep leaves the phone where it is. QITV_KEPT_PAGE names a
+    kept page beside the newest (this script's docstring says how to set one up)."""
+    older = os.environ.get("QITV_KEPT_PAGE", "")
+    assert rig.relay and older, "needs --relay and QITV_KEPT_PAGE"
+    core = rig.hub._core
+    core._page_id = older
+    mark = rig.events.mark()
+    rig.page.goto(rig.pair_url())  # pairs on the newest page, which moves to the older one
+    rig.events.wait(Paired, after=mark, timeout=10)
+    rig.events.wait(Opened, where=lambda e: e.door == "home", after=mark, timeout=15)
+    tv = rig.page.evaluate("JSON.parse(localStorage.getItem('qitv-remote')).last")
+    mark = rig.events.mark()
+    rig.page.goto(f"{rig.relay}/#b.{tv}")  # the relay again, staying there: the older page at once
+    wait_url(rig, f"{rig.relay}/p/{older}/")
+    rig.events.wait(Opened, where=lambda e: e.door == "relay", after=mark, timeout=10)
+    core._page_id = "f" * 16  # a page the relay doesn't keep (a development build's)
+    mark = rig.events.mark()
+    rig.page.goto(f"{rig.relay}/#b.{tv}")  # to the older page it remembers; there it stays
+    rig.events.wait(Opened, where=lambda e: e.door == "relay", after=mark, timeout=10)
+    rig.page.wait_for_timeout(1500)
+    url = rig.page.evaluate("location.href")  # (Playwright's page.url lags a replace)
+    assert url.startswith(f"{rig.relay}/p/{older}/"), url
+    rig.page.wait_for_selector("[data-screen=remote]:not([hidden])")
 
 
 def scenario_hop(rig: Rig) -> None:
@@ -809,6 +839,7 @@ RELAY_SCENARIOS: dict[str, Callable[[Rig], None]] = {
     "relay-banner": scenario_relay_banner,
     "pair-relay": scenario_pair_relay,
     "hop": scenario_hop,
+    "page-versions": scenario_page_versions,
     "hop-back-on-loss": scenario_hop_back_on_loss,
     "two-tvs": scenario_two_tvs,
 }
@@ -825,6 +856,8 @@ def main() -> int:
 
     every = {**SCENARIOS, **(RELAY_SCENARIOS if args.relay else {})}
     names = list(every) if args.scenario == "all" else [args.scenario]
+    if args.scenario == "all" and not os.environ.get("QITV_KEPT_PAGE"):
+        names = [name for name in names if name != "page-versions"]  # needs a kept page
     if args.relay:
         net.home_ipv4 = lambda: "127.0.0.1"  # the hubs listen on loopback: hop there
     failed = 0
