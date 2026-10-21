@@ -68,8 +68,8 @@
 
   <section class="screen remote" data-screen="remote" hidden>
     <div class="player" id="player" hidden>
-      <video id="video" playsinline controls preload="none"></video>
-      <div class="player-cap"><span class="num" id="playerNum"></span><span class="name" id="playerName"></span></div>
+      <video id="video" playsinline controls preload="none" autopictureinpicture></video>
+      <div class="player-cap"><span class="num" id="playerNum"></span><span class="name" id="playerName"></span><button type="button" class="player-pip" id="playerPip" hidden><svg><use href="#i-pip"/></svg></button></div>
       <button type="button" class="player-out" id="playerOut" hidden data-t="open_player">Open in the phone's player</button>
     </div>
     <div class="nowbar">
