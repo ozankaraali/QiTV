@@ -42,6 +42,7 @@ class PairOverlay(Overlay):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._url = ""
+        self._error = ""
         self._matrix: list[bytes] = []
         self._since = QElapsedTimer()
         self._since.start()
@@ -83,6 +84,15 @@ class PairOverlay(Overlay):
     def url(self) -> str:
         return self._url
 
+    def set_error(self, text: str) -> None:
+        """Instead of the code: why there is none (the remote couldn't start); "" clears it."""
+        if text != self._error:
+            self._error = text
+            self.update()
+
+    def error_text(self) -> str:
+        return self._error
+
     def module_count(self) -> int:
         return len(self._matrix)
 
@@ -122,8 +132,10 @@ class PairOverlay(Overlay):
         else:
             fill_round(p, square, qcolor(PALETTE.panel_raised), RADIUS_PANEL)
             p.setFont(un.font(1.4))
-            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
-            p.drawText(square, Qt.AlignmentFlag.AlignCenter, translate(PAIR_STARTING))
+            p.setPen(qcolor(PALETTE.warn) if self._error else qcolor(PALETTE.text, 0.62))
+            flags = Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap
+            inside = square.adjusted(un.px(1.5), 0, -un.px(1.5), 0)
+            p.drawText(inside, int(flags), self._error or translate(PAIR_STARTING))
         below = square.bottom() + un.px(1.6)
         p.setPen(qcolor(PALETTE.text))
         p.setFont(un.font(1.8))

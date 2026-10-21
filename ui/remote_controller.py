@@ -19,6 +19,7 @@ from services.next_episode import play_context
 from services.redact import safe_message
 from services.remote.protocol import (
     BUTTON_META,
+    STORE_VERSION,
     Closed,
     Code,
     Get,
@@ -45,6 +46,9 @@ logger = logging.getLogger(__name__)
 PAIRED_TEXT = N_("{name} can now control QiTV")
 # i18n: a toast; {name} is a phone's name, such as "iPhone · Safari"
 REMOVED_TEXT = N_("{name} can no longer control QiTV")
+# i18n: the pairing screen when the phone remote couldn't start (no free network port)
+START_FAILED_TEXT = N_("The phone remote couldn't start. Is another program using its port?")
+_SWITCHES = ("enabled", "relay", "relay_url")  # Settings' own: the hub never changes them
 
 _WINDOW_ACTIONS = (Action.SEARCH, Action.FULLSCREEN)
 DIFF_MS = 500  # what's on is compared this often while a phone is connected
@@ -80,7 +84,9 @@ class RemoteController(QObject):
         self._timer.timeout.connect(self._tick)
         self._names: dict[str, str] = {}
         self.status: dict = {"home_url": "", "relay": "off"}
-        self.handles = Handles()
+        self.handles = Handles()  # the guide's and the Library's
+        self.result_handles = Handles(limit=500)  # the search's: a long search can't push them out
+        self._removing: dict[str, str] = {}  # device id → name, until the hub confirms
         self._phones: set[str] = set()
         self._last_state: Optional[dict] = None
         self._last_at = 0
@@ -102,6 +108,10 @@ class RemoteController(QObject):
         """Start, update or stop the remote to match the saved settings."""
         data = self._config()
         self._names_from(data)
+        if data.get("version") not in (None, STORE_VERSION):
+            logger.warning("Phone remote settings of a newer QiTV: the remote stays off")
+            self.shutdown()
+            return
         if data.get("enabled") is not True:
             self.shutdown()
             return
@@ -126,14 +136,15 @@ class RemoteController(QObject):
             self.hub.set_pairing(open_)
 
     def remove_device(self, device_id: str) -> None:
+        name = self._names.get(device_id, "")
         if self.hub is not None:
+            self._removing[device_id] = name  # the toast once the hub has removed it
             self.hub.remove_device(device_id)
-        else:  # the remote is off: unpair it in the saved settings
-            data = dict(self._config())
-            devices = [d for d in data.get("devices", []) if isinstance(d, dict)]
-            data["devices"] = [d for d in devices if d.get("id") != device_id]
-            self._persist(data)
-        name = self._names.get(device_id)
+            return
+        data = dict(self._config())  # the remote is off: unpair it in the saved settings
+        devices = [d for d in data.get("devices", []) if isinstance(d, dict)]
+        data["devices"] = [d for d in devices if d.get("id") != device_id]
+        self._persist(data)
         if name:
             self._window.screens.notify(translate(REMOVED_TEXT, name=name))
 
@@ -220,6 +231,10 @@ class RemoteController(QObject):
         elif isinstance(event, Status):
             self.status = {"home_url": event.home_url, "relay": event.relay}
             self.statusChanged.emit(dict(self.status))
+            overlay = getattr(self._window, "pair_overlay", None)
+            if overlay is not None:
+                failed = event.relay == "error" and not event.home_url
+                overlay.set_error(translate(START_FAILED_TEXT) if failed else "")
 
     # ---- the second screen -----------------------------------------------------------------
 
@@ -245,7 +260,7 @@ class RemoteController(QObject):
 
     def _push_results(self) -> None:
         if self._phones and self.hub is not None:
-            self.hub.broadcast(results(self._window, self.handles))
+            self.hub.broadcast(results(self._window, self.result_handles))
 
     def _answer(self, event: Get) -> None:
         try:
@@ -266,7 +281,7 @@ class RemoteController(QObject):
             screens.open_search(text)
 
     def _open(self, handle: str) -> None:
-        found = self.handles.get(handle)
+        found = self.handles.get(handle) or self.result_handles.get(handle)
         if found is None:
             return
         kind, payload = found
@@ -288,6 +303,11 @@ class RemoteController(QObject):
 
     def _persist(self, data: dict) -> None:
         config = self._window.config_manager
+        current = self._config()
+        data = dict(data)
+        for switch in _SWITCHES:  # a save queued behind a Settings change must not undo it
+            if switch in current:
+                data[switch] = current[switch]
         config.remote = data
         try:
             config.save_config()
@@ -297,6 +317,12 @@ class RemoteController(QObject):
 
     def _names_from(self, data: dict) -> None:
         devices = [d for d in data.get("devices", []) if isinstance(d, dict)]
+        present = {str(d.get("id")) for d in devices}
+        for device_id, name in list(self._removing.items()):
+            if device_id not in present:
+                del self._removing[device_id]
+                if name:
+                    self._window.screens.notify(translate(REMOVED_TEXT, name=name))
         self._names = {str(d.get("id")): str(d.get("name", "")) for d in devices}
         self.devicesChanged.emit(
             [

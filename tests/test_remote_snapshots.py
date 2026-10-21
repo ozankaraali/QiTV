@@ -195,6 +195,15 @@ class PushTests(WindowCase):
         self.assertFalse(self.hub.broadcast.called)
 
 
+class HandlePoolTests(WindowCase):
+    def test_search_results_do_not_evict_guide_handles(self):
+        remote = self.window.remote
+        guide_handle = remote.handles.issue("channel", {"name": "Channel 1"})
+        for i in range(2100):
+            remote.result_handles.issue("hit", i)
+        self.assertEqual(remote.handles.get(guide_handle), ("channel", {"name": "Channel 1"}))
+
+
 if __name__ == "__main__":
     unittest.main()
 

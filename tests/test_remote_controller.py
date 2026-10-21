@@ -135,5 +135,49 @@ class RemoteEventTests(WindowCase):
         self.assertTrue(set(fired) <= {"down", "up"})
 
 
+class ReviewFixControllerTests(WindowCase):
+    def deliver(self, event):
+        self.window.remote.bridge.post(event)
+        QTest.qWait(10)
+
+    def test_store_saved_keeps_the_settings_switches(self):
+        device = {"id": "d1", "name": "Phone A", "paired_at": 1.0, "last_used": 2.0, "keys": []}
+        self.window.config_manager.remote = {
+            "version": 1,
+            "enabled": True,
+            "relay": False,
+            "relay_url": "https://relay.example",
+        }
+        self.deliver(
+            StoreSaved(
+                {
+                    "version": 1,
+                    "enabled": False,
+                    "relay": True,
+                    "relay_url": "https://remote.qitv.app",
+                    "devices": [device],
+                }
+            )
+        )
+        saved = self.window.config_manager.remote
+        self.assertEqual((saved["enabled"], saved["relay"]), (True, False))
+        self.assertEqual(saved["relay_url"], "https://relay.example")
+        self.assertEqual(saved["devices"], [device])
+
+    def test_removal_toast_waits_for_the_hub(self):
+        from unittest import mock as _mock
+
+        device = {"id": "d1", "name": "Phone A", "paired_at": 1.0, "last_used": 2.0, "keys": []}
+        self.window.config_manager.remote = {"version": 1, "devices": [device]}
+        self.window.remote.apply_config = lambda: None
+        self.window.remote._names_from(self.window.config_manager.remote)
+        self.window.remote.hub = _mock.Mock()
+        self.addCleanup(setattr, self.window.remote, "hub", None)
+        self.window.remote.remove_device("d1")
+        self.assertNotIn(("Phone A can no longer control QiTV", "info"), self.toasts)
+        self.deliver(StoreSaved({"version": 1, "devices": []}))
+        self.assertIn(("Phone A can no longer control QiTV", "info"), self.toasts)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -128,5 +128,59 @@ class PairingScreenTests(base.WindowCase):
         self.window.remote.hub.set_pairing.assert_called_with(True)
 
 
+class ReviewFixSettingsTests(base.WindowCase):
+    def dialog(self):
+        dialog = OptionsDialog(self.window)
+        self.addCleanup(dialog.deleteLater)
+        return dialog
+
+    def test_relay_status_follows(self):
+        dialog = self.dialog()
+        remote = self.window.remote
+        remote.statusChanged.emit({"home_url": "http://192.168.1.20:5384/", "relay": "resting"})
+        self.assertIn("daily limit", dialog.remote_relay_label.text())
+        remote.statusChanged.emit({"home_url": "http://192.168.1.20:5384/", "relay": "online"})
+        self.assertEqual(dialog.remote_relay_label.text(), "Connected")
+        remote.statusChanged.emit({"home_url": "", "relay": "replaced"})
+        self.assertIn("Another QiTV", dialog.remote_relay_label.text())
+
+    def test_phone_list_follows_pairings_while_open(self):
+        dialog = self.dialog()
+        self.window.remote.devicesChanged.emit([{"id": "d9", "name": "Phone B", "last_used": 1.0}])
+        self.assertIn("Phone B", dialog.remote_phones_list.item(0).text())
+
+    def test_a_closed_dialog_leaves_no_listeners(self):
+        from PySide6.QtCore import QCoreApplication, QEvent
+
+        dialog = OptionsDialog(self.window)
+        dialog.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+        with mock.patch("sys.excepthook") as hook:  # PySide reports a slot's error there
+            self.window.remote.statusChanged.emit({"home_url": "", "relay": "off"})
+            self.window.remote.devicesChanged.emit([])
+        hook.assert_not_called()
+
+    def test_a_newer_builds_settings_are_left_alone(self):
+        newer = {"version": 2, "enabled": True, "future": "kept"}
+        self.config.remote = dict(newer)
+        dialog = self.dialog()
+        self.assertFalse(dialog.remote_enabled_checkbox.isEnabled())
+        dialog.save_settings()
+        self.assertEqual(ConfigManager().remote, newer)
+        self.window.remote.apply_config()
+        self.assertIsNone(self.window.remote.hub)
+
+    def test_overlay_says_when_the_remote_could_not_start(self):
+        from services.remote.protocol import Status
+
+        self.show()
+        overlay = self.window.pair_overlay
+        with mock.patch.object(self.window.remote, "set_pairing"):
+            overlay.open()
+        self.window.remote.bridge.post(Status("", "error"))
+        self.assertTrue(overlay.error_text())
+        overlay.grab()
+
+
 if __name__ == "__main__":
     unittest.main()
