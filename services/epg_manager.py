@@ -606,6 +606,9 @@ class EpgManager:
             if epg_info is None:
                 return
             if epg_info and self._out_of_date(kind, args, epg_info):
+                # The saved guide shows while the fresh one loads (a large one takes minutes);
+                # a failed fetch keeps it (see _source_failed).
+                self._load_cached_epg(key)
                 self._fetch(kind, args, seen)
                 return
             if self._load_cached_epg(key):

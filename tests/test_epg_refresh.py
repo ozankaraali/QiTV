@@ -255,6 +255,22 @@ class EpgRefreshTests(_GuideCase):
         self.assertEqual(self.titles(restarted), ["Old"])
         self.assertIsNotNone(restarted.index[self.key])
 
+    def test_a_restarted_session_shows_the_saved_guide_while_a_fresh_one_loads(self):
+        first = self.manager()
+        self.load(first)
+        self.expire(first)
+        restarted = self.manager()  # nothing in memory; an outdated guide on disk
+        seen = []
+
+        def slow_download(url, **kwargs):
+            seen.append(self.titles(restarted))  # what the TV and the phone read meanwhile
+            return _Response(xmltv("New"))
+
+        with patch("services.epg_manager.requests.get", side_effect=slow_download):
+            restarted.set_current_epg()
+        self.assertEqual(seen, [["Old"]])
+        self.assertEqual(self.titles(restarted), ["New"])
+
     # --- unchanged: no previous guide, or another source -----------------------------------
     def test_a_failure_without_any_guide_marks_the_source_unavailable(self):
         manager = self.manager()
