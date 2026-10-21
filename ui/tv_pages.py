@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import logging
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 from PySide6.QtCore import QObject, QPoint, QThread
 from PySide6.QtWidgets import QFileDialog, QWidget
@@ -210,14 +210,29 @@ class TVPages(QObject):
         self._set_return_to_library(True)
         window.controller.play_vod(item, kind, context, from_library=from_library)
 
-    def tune_live(self, channel: dict) -> None:
-        """A live channel from the Library's search."""
+    def tune_live(self, channel: dict, group: Optional[tuple[str, list]] = None) -> None:
+        """A live channel from the Library's search, or from the phone remote's Guide with its
+        `group` (key, channels)."""
         window = self._window
         if window.closing():
             return
         self._show_page(window.player_page)
         self._set_return_to_library(False)
-        window.controller.tune_live(channel)
+        if group is None:
+            window.controller.tune_live(channel)
+        else:
+            window.controller.tune_live(channel, *group)
+
+    def watch_from_start(
+        self, channel: dict, programme: Any, group_key: str, channels: list
+    ) -> None:
+        """A past programme from the phone remote's timetable, from the channel's archive."""
+        window = self._window
+        if window.closing():
+            return
+        self._show_page(window.player_page)
+        self._set_return_to_library(False)
+        window.controller.watch_from_start(channel, programme, group_key, channels)
 
     def back_to_tv(self) -> None:
         """Live TV: the last channel again, or the drawer."""

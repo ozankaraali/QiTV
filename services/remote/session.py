@@ -265,7 +265,7 @@ class Session:
             return Reply(events=[OpenItem(sid, m["id"])])
         if t == "get":
             what, page = m["what"], m.get("page", 0)
-            extra = (m.get("section", ""), m.get("genre", ""))
+            extra = (m.get("section", ""), m.get("genre", ""), m.get("find", ""), m.get("id", ""))
             return Reply(events=[Get(sid, what, m.get("list", ""), page, *extra)])
         if t == "where":
             return Reply([self.send(self._where(now))])

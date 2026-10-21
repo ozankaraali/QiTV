@@ -7,16 +7,14 @@ nothing a phone receives names a stream, a link or a provider's own ids. GUI thr
 
 from __future__ import annotations
 
-import json
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer
 
 from services.library import Genre, LibraryModel, title_of
-from ui.remote_snapshots import Handles
+from ui.remote_snapshots import Handles, fit_entries
 
 LIBRARY_PAGE = 50
-MAX_BYTES = 48_000  # a message stays well inside one frame (65535 bytes) with its seal
 TITLE_CHARS = 80
 SETTLE_MS = 250  # loads arriving together (several providers) answer once
 
@@ -112,7 +110,8 @@ class PhoneLibrary(QObject):
         if view["failed"]:
             message["failed"] = True
         if view["genres"] is not None:
-            message["genres"] = self._fit(message, [self._genre(g) for g in view["genres"]])
+            genres = [self._genre(g) for g in view["genres"]]
+            message["genres"] = fit_entries(message, genres, message["genre"])
         return message
 
     def _genre(self, genre: Genre) -> dict:
@@ -123,22 +122,6 @@ class PhoneLibrary(QObject):
         if genre.count is not None:
             shown["count"] = genre.count
         return shown
-
-    @staticmethod
-    def _fit(message: dict, genres: list[dict]) -> list[dict]:
-        """As many genres as fit the message, the one shown always among them."""
-        budget = MAX_BYTES - _size({**message, "genres": []})
-        current = message["genre"]
-        kept: list[dict] = []
-        used = sum(_size(g) + 2 for g in genres if g.get("id") == current and current)
-        for genre in genres:  # each one costs itself and its ", "
-            mine = current and genre.get("id") == current
-            size = 0 if mine else _size(genre) + 2
-            if used + size > budget:
-                continue
-            used += size
-            kept.append(genre)
-        return kept
 
     # ---- loads landing later ---------------------------------------------------------------
 
@@ -163,7 +146,3 @@ def _signature(view: dict) -> tuple:
     titles = tuple(title_of(item) for item in view["items"])
     flags = (view["section"], view["genre"], view["pages"], view["loading"], view["failed"])
     return flags + (genres, titles)
-
-
-def _size(value: object) -> int:
-    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))

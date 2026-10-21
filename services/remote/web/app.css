@@ -177,6 +177,21 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .row .prog { margin-top: 6px; height: 2px; }
 .row-next { margin-top: 5px; font-size: 12px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .empty { margin: 32px 24px; text-align: center; color: var(--muted); font-size: 15px; line-height: 1.5; }
+.row.split { padding: 0; }
+.row-tap { flex: 1; min-width: 0; display: flex; gap: 12px; align-items: center; padding: 11px 0 11px 16px; text-align: left; }
+.row .side { flex: none; align-self: stretch; width: 56px; display: grid; place-items: center; color: var(--muted); }
+.row .side svg { width: 21px; height: 21px; }
+.row .side.pressed, .row-tap.pressed { background: var(--raised); }
+.tt-head { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 6px 12px; }
+.tt-head .back { grid-column: 1 / -1; justify-self: start; display: flex; align-items: center; gap: 2px; margin-left: -6px; font-size: 15px; font-weight: 600; color: var(--accent); }
+.tt-head .back svg { width: 20px; height: 20px; }
+.tt-head h1 { margin: 0; font-size: 24px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tt-head h1 .num { margin-right: 8px; color: var(--muted); }
+.tt-head .again { margin-top: 0; }
+.slot { align-items: flex-start; }
+.slot-time { flex: none; min-width: 48px; padding-top: 1px; white-space: nowrap; font-size: 14px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.slot.still { opacity: 0.55; }
+.slot .about { margin-top: 3px; font-size: 13px; line-height: 1.35; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .again { margin-top: 12px; padding: 8px 16px; border-radius: 16px; font-size: 14px; font-weight: 600; background: var(--accent-fill); color: var(--text); }
 mark { background: none; color: var(--accent); font-weight: 600; }
 

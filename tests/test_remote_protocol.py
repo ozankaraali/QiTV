@@ -92,8 +92,18 @@ class MessageTests(unittest.TestCase):
         q = parse_phone_message({"t": "query", "s": "h" * 150})
         self.assertEqual(len(q["s"]), 100)
         self.assertEqual(
-            parse_phone_message({"t": "get", "what": "guide", "list": "favorites", "page": 2}),
-            {"t": "get", "what": "guide", "list": "favorites", "page": 2},
+            parse_phone_message(
+                {"t": "get", "what": "guide", "list": "g4", "page": 2, "find": "n" * 150}
+            ),
+            {"t": "get", "what": "guide", "list": "g4", "page": 2, "find": "n" * 100},
+        )
+        self.assertEqual(  # the group the TV zaps through, the first page
+            parse_phone_message({"t": "get", "what": "guide"}),
+            {"t": "get", "what": "guide", "list": "", "page": 0, "find": ""},
+        )
+        self.assertEqual(
+            parse_phone_message({"t": "get", "what": "timetable", "id": "h1"}),
+            {"t": "get", "what": "timetable", "id": "h1"},
         )
         self.assertEqual(
             parse_phone_message(
@@ -119,7 +129,10 @@ class MessageTests(unittest.TestCase):
             {"t": "up", "b": "ok", "n": True},
             {"t": "up", "b": "ok", "n": 100001},
             {"t": "get", "what": "guide", "list": "all", "page": -1},
-            {"t": "get", "what": "guide", "list": "secret", "page": 0},
+            {"t": "get", "what": "guide", "list": "g" * 33, "page": 0},
+            {"t": "get", "what": "guide", "list": "g1", "find": 5},
+            {"t": "get", "what": "timetable"},
+            {"t": "get", "what": "timetable", "id": "x" * 33},
             {"t": "get", "what": "settings"},
             {"t": "get", "what": "library", "section": "live"},
             {"t": "get", "what": "library", "genre": "g" * 33},

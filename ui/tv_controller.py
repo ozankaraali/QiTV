@@ -754,10 +754,32 @@ class TVController(QObject):
         if not self._closed:
             self._flow.resume_live()
 
-    def tune_live(self, channel: dict) -> None:
-        """A live channel from the Library's search: ↑/↓ then walk every channel (group "*")."""
+    def tune_live(
+        self, channel: dict, group_key: str = ALL_GROUP_ID, channels: Optional[list] = None
+    ) -> None:
+        """A live channel from the Library's search (↑/↓ then walk every channel: group "*") or
+        from the phone remote's Guide (its group's channels)."""
         self._flow.leave_library()
-        self.tune(channel, group_key=ALL_GROUP_ID, channels=self._all_live())
+        listed = self._all_live() if channels is None else channels
+        self.tune(channel, group_key=group_key, channels=listed)
+
+    def watch_from_start(
+        self, channel: dict, programme: Programme, group_key: str, channels: list
+    ) -> None:
+        """A past programme from the phone remote's timetable: as the guide's Watch from the
+        start."""
+        self._flow.leave_library()
+        self._on_guide_catchup(channel, programme, group_key, channels)
+
+    def timetable(
+        self, channel: dict, limit: int, back: timedelta
+    ) -> tuple[datetime, list[Programme]]:
+        """Now, and `channel`'s programmes from the one on now (from up to `back` earlier when
+        its archive plays), oldest first."""
+        now = self._now()
+        days = self.archive_days(channel)
+        since = now - min(back, timedelta(days=days)) if days > 0 else now
+        return now, self._programmes(channel, since, limit)
 
     def play_file(self, path: str) -> None:
         """Play a local media file (File → Open File…) as a movie: no link, no history.

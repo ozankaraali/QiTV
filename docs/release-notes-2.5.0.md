@@ -15,9 +15,12 @@ instead of using others' distributions, which may have malware.**
   rewind, Go live and Mute are a thumb away, and More holds the channel numbers, Record,
   Picture in picture, Swap, Multiview, Picture and Full screen. Prefer swiping? The phone's
   menu turns the arrows into a touchpad.
-- **A second screen.** The phone shows what's on with its progress, a guide of the channel list
-  the TV is on (or Favorites, or Recent) where a tap tunes the TV, your Continue watching and
-  My list, and the TV's search results as you type on the phone's keyboard.
+- **A second screen.** The phone shows what's on with its progress; a **Guide** of the channel
+  list's groups (Favorites, Recent and the provider's own), where a tap tunes the TV and the
+  clock beside a channel opens its timetable (a past programme plays from the start when the
+  provider keeps an archive); the **Library**'s Movies and Series by genre, Continue first; and
+  the TV's search results as you type on the phone's keyboard. Browsing on the phone leaves the
+  TV where it is until you tap.
 - **At home, or anywhere.** At home the phone talks to QiTV directly over Wi-Fi. With Reach QiTV
   from any network on, it also works on mobile data or another network through the QiTV relay,
   which passes along end-to-end encrypted messages it can't read; back on your Wi-Fi the phone

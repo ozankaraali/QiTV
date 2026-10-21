@@ -1,5 +1,5 @@
-"""What the phone remote shows of QiTV, as plain dicts: what's on, a guide page, the search's
-results (the Library's pages: ui/remote_library.py). GUI thread only (they read the controller).
+"""What the phone remote shows of QiTV, as plain dicts: what's on and the search's results (the
+Guide's and the Library's pages: ui/remote_guide.py, ui/remote_library.py). GUI thread only.
 
 Nothing a phone receives names a stream, a link or a credential: titles, numbers, times and
 opaque handles only. A handle is a random id for something the phone may tap later (a channel, a
@@ -10,16 +10,14 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import datetime
-import math
+import json
 import secrets
 from typing import Any, Optional
 
 from services.epg_view import Programme
-from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode
 from services.remote.protocol import b64e
-from services.zapping import ZapContext
 
-GUIDE_PAGE = 50
+MAX_BYTES = 48_000  # a message stays well inside one frame (65535 bytes) with its seal
 RESULTS_PER_GROUP = 30
 _SECTIONS = ("live", "movies", "series")
 
@@ -44,7 +42,7 @@ def _stamp(when: Optional[datetime]) -> Optional[float]:
     return when.timestamp() if when is not None else None
 
 
-def _programme(programme: Optional[Programme]) -> Optional[dict]:
+def programme_dict(programme: Optional[Programme]) -> Optional[dict]:
     if programme is None:
         return None
     return {
@@ -78,8 +76,8 @@ def state(window: Any) -> dict:
             "kind": "live",
             "num": controller.channel_number(channel),
             "name": str(channel.get("name") or ""),
-            "now": _programme(on),
-            "next": _programme(upcoming),
+            "now": programme_dict(on),
+            "next": programme_dict(upcoming),
             "behind_s": round(lag) if lag is not None and lag >= 3 else 0,
         }
     live = getattr(controller, "live", None)
@@ -112,41 +110,6 @@ def _playing(session: Any) -> bool:
         return False
 
 
-def _guide_channels(window: Any, list_name: str) -> list[dict]:
-    if list_name == "all":
-        return list(window.controller.zap.context.channels or [])
-    key = FAVORITES_GROUP if list_name == "favorites" else RECENT_GROUP
-    nodes = window.nav.children(NavNode("group", key, "")) or []
-    return [node.payload for node in nodes if isinstance(node.payload, dict)]
-
-
-def guide_page(window: Any, list_name: str, page: int, handles: Handles) -> dict:
-    """A page of the channel list the TV is on (or Favorites, or Recent) with now and next."""
-    controller = window.controller
-    channels = _guide_channels(window, list_name)
-    playing = controller._channel
-    rows = []
-    for channel in channels[page * GUIDE_PAGE : (page + 1) * GUIDE_PAGE]:
-        on, upcoming = controller.now_next(channel)
-        rows.append(
-            {
-                "id": handles.issue("channel", channel),
-                "num": controller.channel_number(channel),
-                "name": str(channel.get("name") or ""),
-                "now": _programme(on),
-                "next": _programme(upcoming),
-                "playing": playing is not None and ZapContext.same(channel, playing),
-            }
-        )
-    return {
-        "t": "guide",
-        "list": list_name,
-        "page": page,
-        "pages": max(1, math.ceil(len(channels) / GUIDE_PAGE)),
-        "rows": rows,
-    }
-
-
 def results(window: Any, handles: Handles) -> dict:
     """The search's hits, grouped by section, 30 a group."""
     library = window.library_controller
@@ -161,3 +124,23 @@ def results(window: Any, handles: Handles) -> dict:
         "q": library.query,
         "groups": [{"kind": s, "items": grouped[s]} for s in _SECTIONS if grouped[s]],
     }
+
+
+def fit_entries(message: dict, entries: list[dict], current: str) -> list[dict]:
+    """As many of a picker's `entries` (a guide's groups, a Library's genres) as fit `message`,
+    the one shown (`current`) always among them."""
+    budget = MAX_BYTES - _size({**message, "entries": []})
+    kept: list[dict] = []
+    used = sum(_size(e) + 2 for e in entries if current and e.get("id") == current)
+    for entry in entries:  # each one costs itself and its ", "
+        mine = current and entry.get("id") == current
+        size = 0 if mine else _size(entry) + 2
+        if used + size > budget:
+            continue
+        used += size
+        kept.append(entry)
+    return kept
+
+
+def _size(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))

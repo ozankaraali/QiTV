@@ -140,7 +140,6 @@ def _short_id(value: object) -> bool:
 
 # ---- phone messages --------------------------------------------------------------------------
 
-GUIDE_LISTS = ("all", "favorites", "recent")
 LIBRARY_SECTIONS = ("movies", "series")
 
 
@@ -169,21 +168,37 @@ def parse_phone_message(obj: object) -> Optional[dict]:
     if t == "open" and _short_id(obj.get("id")):
         return {"t": "open", "id": obj["id"]}
     if t == "get":
-        if obj.get("what") == "library":
+        what = obj.get("what")
+        if what == "library":
             return _library_ask(obj)
-        page = _int(obj.get("page"))
-        if obj.get("what") == "guide" and obj.get("list") in GUIDE_LISTS and page is not None:
-            if page >= 0:
-                return {"t": "get", "what": "guide", "list": obj["list"], "page": page}
+        if what == "guide":
+            return _guide_ask(obj)
+        if what == "timetable" and _short_id(obj.get("id")):
+            return {"t": "get", "what": "timetable", "id": obj["id"]}
     return None
+
+
+def _guide_ask(obj: dict) -> Optional[dict]:
+    """A page of the Guide: a group's key ("": the one the TV zaps through), a page and what the
+    phone's find box holds."""
+    group, page, find = obj.get("list", ""), _int(obj.get("page", 0)), obj.get("find", "")
+    if not (group == "" or _short_id(group)) or page is None or page < 0:
+        return None
+    if not isinstance(find, str):
+        return None
+    return {"t": "get", "what": "guide", "list": group, "page": page, "find": find[:MAX_QUERY]}
 
 
 def _library_ask(obj: dict) -> Optional[dict]:
     """A page of the Library: a section, a genre's key ("": QiTV's first shelf) and a page."""
-    section, genre, page = obj.get("section", "movies"), obj.get("genre", ""), obj.get("page", 0)
+    section, genre, page = (
+        obj.get("section", "movies"),
+        obj.get("genre", ""),
+        _int(obj.get("page", 0)),
+    )
     if not isinstance(section, str) or section not in LIBRARY_SECTIONS:
         return None
-    if not (genre == "" or _short_id(genre)) or _int(page) is None or page < 0:
+    if not (genre == "" or _short_id(genre)) or page is None or page < 0:
         return None
     return {"t": "get", "what": "library", "section": section, "genre": genre, "page": page}
 
@@ -244,6 +259,8 @@ class Get:
     page: int
     section: str = ""  # the Library's: movies or series
     genre: str = ""  # the Library's: a genre's key, or "" for QiTV's first shelf
+    find: str = ""  # the Guide's find box
+    handle: str = ""  # the timetable's channel
 
 
 @dataclass(frozen=True)

@@ -15,7 +15,7 @@ from test_tv_window import LIBRARY_WAIT_MS, XTREAM, TwoProviderCase, WindowCase,
 
 from services.remote.protocol import Closed, Get, Opened, OpenItem, Press, Query
 from tests.fixtures import local_xtream
-from ui.remote_snapshots import Handles, guide_page, state
+from ui.remote_snapshots import Handles, state
 
 
 class SnapshotTests(WindowCase):
@@ -36,34 +36,6 @@ class SnapshotTests(WindowCase):
     def test_state_before_anything_plays(self):
         snapshot = state(self.window)
         self.assertIsNone(snapshot["now"])
-
-    def test_guide_page_paginates_and_marks_playing(self):
-        self.open_first_channel()
-        handles = Handles()
-        page = guide_page(self.window, "all", 0, handles)
-        self.assertEqual(page["t"], "guide")
-        self.assertEqual((page["list"], page["page"]), ("all", 0))
-        self.assertGreaterEqual(page["pages"], 1)
-        self.assertLessEqual(len(page["rows"]), 50)
-        playing = [row for row in page["rows"] if row["playing"]]
-        self.assertEqual([row["name"] for row in playing], ["Channel 1"])
-        row = page["rows"][0]
-        self.assertEqual(set(row), {"id", "num", "name", "now", "next", "playing"})
-        self.assertNotIn("http", json.dumps(page))
-        self.assertEqual(guide_page(self.window, "all", 99, handles)["rows"], [])
-
-    def test_guide_lists_without_a_channel_list(self):
-        page = guide_page(self.window, "favorites", 0, Handles())
-        self.assertEqual(page["rows"], [])
-
-    def test_open_handle_tunes_the_channel(self):
-        self.open_first_channel()
-        remote = self.window.remote
-        page = guide_page(self.window, "all", 0, remote.handles)
-        second = next(row for row in page["rows"] if row["name"] == "Channel 2")
-        remote.bridge.post(OpenItem("s1", second["id"]))
-        controller = self.window.controller
-        self.assertTrue(wait_until(lambda: (controller._channel or {}).get("name") == "Channel 2"))
 
     def test_handles_are_capped(self):
         handles = Handles(limit=2000)
@@ -172,7 +144,7 @@ class PushTests(WindowCase):
     def test_get_guide_and_library_answer_that_phone(self):
         self.open_first_channel()
         remote = self.window.remote
-        remote.bridge.post(Get("s2", "guide", "all", 0))
+        remote.bridge.post(Get("s2", "guide", "", 0))
         remote.bridge.post(Get("s2", "library", "", 0, "movies", ""))
         self.assertTrue(
             wait_until(lambda: {m["t"] for m in self.sent("s2")} >= {"guide", "library"})
@@ -210,15 +182,6 @@ class PushTests(WindowCase):
         self.hub.broadcast.reset_mock()
         QTest.qWait(700)  # past a diff tick
         self.assertFalse(self.hub.broadcast.called)
-
-
-class HandlePoolTests(WindowCase):
-    def test_search_results_do_not_evict_guide_handles(self):
-        remote = self.window.remote
-        guide_handle = remote.handles.issue("channel", {"name": "Channel 1"})
-        for i in range(2100):
-            remote.result_handles.issue("hit", i)
-        self.assertEqual(remote.handles.get(guide_handle), ("channel", {"name": "Channel 1"}))
 
 
 if __name__ == "__main__":

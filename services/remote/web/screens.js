@@ -14,6 +14,12 @@ const QUERY_DEBOUNCE_MS = 150;
 const words = {
   nothing_playing: "Nothing playing",
   watching: "Watching",
+  watch: "Watch",
+  timetable: "Timetable",
+  on_now: "Now",
+  from_start: "Watch from the start",
+  no_programmes: "No programme guide for this channel",
+  guide: "Guide",
   genre: "Genre",
   load_failed: "Couldn't load this list",
   try_again: "Try again",
@@ -135,34 +141,31 @@ function drawNow() {
 }
 
 // ---- the guide ----------------------------------------------------------------------------
+// The channel list's groups as the TV lists them (★ Favorites, ⟲ Recent, then the provider's),
+// opening on the one the TV zaps through; a page of channels at a time, found by QiTV in the
+// whole group. A row tunes; its clock opens the channel's timetable.
 
-const guide = { list: "all", page: 0, pages: 1, rows: [], asking: false };
+const guide = { list: "", find: "", page: 0, pages: 1, count: 0, shown: "", asking: false };
+let findTimer = null;
+let timetableFor = "";
 
-function askGuide(list, page) {
+function askGuide(page) {
   guide.asking = true;
-  send({ t: "get", what: "guide", list, page });
+  send({ t: "get", what: "guide", list: guide.list, page, find: guide.find });
 }
 
 function openGuide() {
-  guide.rows = [];
   guide.page = 0;
+  guide.count = 0;
   $("guideRows").replaceChildren(el("div", "empty", w("loading")));
-  askGuide(guide.list, 0);
-}
-
-function onGuide(message) {
-  if (message.list !== guide.list) return;
-  guide.asking = false;
-  guide.pages = message.pages || 1;
-  guide.page = message.page;
-  guide.rows = message.page === 0 ? message.rows : guide.rows.concat(message.rows);
-  drawGuide();
+  askGuide(0);
 }
 
 function guideRow(row) {
-  const item = el("button", `row${row.playing ? " playing" : ""}`);
-  item.type = "button";
-  item.append(logoTile(row.name));
+  const item = el("div", `row split${row.playing ? " playing" : ""}`);
+  const hit = el("button", "row-tap");
+  hit.type = "button";
+  hit.append(logoTile(row.name));
   const main = el("div", "row-main");
   const top = el("div", "row-top");
   if (row.num) top.append(el("span", "num", row.num));
@@ -178,33 +181,166 @@ function guideRow(row) {
     main.append(bar);
   }
   if (row.next) main.append(el("div", "row-next", `${clock(row.next.start)} ${row.next.title}`));
-  item.append(main);
-  tapRow(item, row.id);
+  hit.append(main);
+  tapRow(hit, row.id);
+  const side = el("button", "side");
+  side.type = "button";
+  side.setAttribute("aria-label", w("timetable"));
+  side.innerHTML = '<svg><use href="#i-clock"/></svg>';
+  side.addEventListener("click", () => openTimetable(row.id, row.num, row.name));
+  item.append(hit, side);
   return item;
 }
 
-function drawGuide() {
-  const find = $("guideFind").value.trim().toLowerCase();
-  const rows = find
-    ? guide.rows.filter((r) => `${r.num} ${r.name} ${r.now ? r.now.title : ""}`.toLowerCase().includes(find))
-    : guide.rows;
-  const box = $("guideRows");
-  box.replaceChildren(...(rows.length ? rows.map(guideRow) : [el("div", "empty", w("nothing_here"))]));
+function onGuide(message) {
+  if (message.page > 0 && (message.list !== guide.list || message.find !== guide.find)) return;
+  guide.asking = false;
+  if (message.groups) drawPicker("guidePick", "guideGroup", message.groups, message.list, w("guide"));
+  guide.list = message.list;
+  guide.pages = message.pages || 1;
+  guide.page = message.page;
+  showPage($("guideRows"), guide, message, message.rows.map(guideRow), openGuide);
 }
 
 function bindGuide() {
-  for (const chip of document.querySelectorAll("#guideChips [data-list]")) {
-    chip.addEventListener("click", () => {
-      for (const other of document.querySelectorAll("#guideChips [data-list]")) other.classList.toggle("on", other === chip);
-      guide.list = chip.dataset.list;
+  const pick = $("guideGroup");
+  pick.addEventListener("change", () => {
+    guide.list = pick.value;
+    openGuide();
+  });
+  const find = $("guideFind");
+  find.addEventListener("input", () => {
+    clearTimeout(findTimer);
+    findTimer = setTimeout(() => {
+      guide.find = find.value.trim();
       openGuide();
-    });
+    }, QUERY_DEBOUNCE_MS);
+  });
+  pageOnScroll($("guideRows"), guide, askGuide);
+  $("timetableBack").addEventListener("click", () => show("guide"));
+  $("timetableWatch").addEventListener("click", () => {
+    if (navigator.vibrate) navigator.vibrate(8);
+    if (timetableFor) send({ t: "open", id: timetableFor });
+  });
+}
+
+// ---- a channel's timetable ----------------------------------------------------------------
+
+function timetableTitle(num, name) {
+  const title = $("timetableName");
+  title.replaceChildren();
+  if (num) title.append(el("span", "num", num));
+  title.append(name || "");
+}
+
+function openTimetable(id, num, name) {
+  timetableFor = id;
+  timetableTitle(num, name);
+  $("timetableRows").replaceChildren(el("div", "empty", w("loading")));
+  show("timetable");
+  send({ t: "get", what: "timetable", id });
+}
+
+function slotRow(slot, nowS) {
+  const past = slot.stop <= nowS;
+  const row = el(slot.id ? "button" : "div", `row slot${slot.on ? " playing" : ""}${past && !slot.id ? " still" : ""}`);
+  if (slot.id) row.type = "button";
+  row.append(el("div", "slot-time", clock(slot.start)));
+  const main = el("div", "row-main");
+  const top = el("div", "row-top");
+  top.append(el("span", "title", slot.title));
+  if (slot.on) top.append(el("em", "", w("on_now")));
+  main.append(top);
+  if (slot.on) {
+    const bar = el("div", "prog");
+    const fill = el("i");
+    fill.style.width = `${(share(slot, nowS) * 100).toFixed(1)}%`;
+    bar.append(fill);
+    main.append(bar);
+  } else if (past && slot.id) {
+    main.append(el("div", "row-next", w("from_start")));
   }
-  $("guideFind").addEventListener("input", drawGuide);
-  $("guideRows").addEventListener("scroll", () => {
-    const box = $("guideRows");
+  if (slot.about) main.append(el("div", "about", slot.about));
+  row.append(main);
+  if (slot.id) tapRow(row, slot.id);
+  return row;
+}
+
+function onTimetable(message) {
+  if (message.id !== timetableFor) return;
+  timetableTitle(message.num, message.name);
+  const nowS = Date.now() / 1000;
+  const rows = [];
+  let day = new Date().toDateString();
+  for (const slot of message.rows) {
+    const date = new Date(slot.start * 1000);
+    if (date.toDateString() !== day) {
+      day = date.toDateString(); // past midnight (or before it): the day it is
+      rows.push(el("div", "group", date.toLocaleDateString([], { weekday: "long", day: "numeric", month: "short" })));
+    }
+    rows.push(slotRow(slot, nowS));
+  }
+  const box = $("timetableRows");
+  box.replaceChildren(...(rows.length ? rows : [el("div", "empty", w("no_programmes"))]));
+  const on = box.querySelector(".slot.playing");
+  box.scrollTop = on ? on.offsetTop - box.offsetTop : 0; // what's on at the top, earlier above
+}
+
+// ---- lists a page at a time ---------------------------------------------------------------
+
+// A picker of a list's groups or genres; a provider's own sit under its name.
+function drawPicker(wrapId, selectId, entries, chosen, label) {
+  const nodes = [];
+  let heading = null;
+  for (const entry of entries) {
+    if (entry.header) {
+      heading = document.createElement("optgroup");
+      heading.label = entry.title;
+      nodes.push(heading);
+      continue;
+    }
+    const option = document.createElement("option");
+    option.value = entry.id;
+    option.textContent = typeof entry.count === "number" ? `${entry.title} (${entry.count})` : entry.title;
+    if (heading) heading.append(option);
+    else nodes.push(option);
+  }
+  const pick = $(selectId);
+  pick.replaceChildren(...nodes);
+  pick.value = chosen;
+  pick.setAttribute("aria-label", label);
+  $(wrapId).hidden = !nodes.length;
+}
+
+function failedNotice(retry) {
+  const box = el("div", "empty", w("load_failed"));
+  const again = el("button", "again", w("try_again"));
+  again.type = "button";
+  again.addEventListener("click", retry);
+  box.append(el("br"), again);
+  return box;
+}
+
+// A page of rows into `box`: the first replaces the list, the others follow it.
+function showPage(box, list, message, rows, retry) {
+  if (message.page > 0) {
+    box.append(...rows);
+    list.count += rows.length;
+    return;
+  }
+  list.count = rows.length;
+  if (rows.length) box.replaceChildren(...rows);
+  else if (message.failed) box.replaceChildren(failedNotice(retry));
+  else box.replaceChildren(el("div", "empty", w(message.loading ? "loading" : "nothing_here")));
+  const shown = `${message.section || ""} ${message.list || message.genre || ""} ${message.find || ""}`;
+  if (shown !== list.shown) box.scrollTop = 0; // a later load of the same list keeps the place
+  list.shown = shown;
+}
+
+function pageOnScroll(box, list, ask) {
+  box.addEventListener("scroll", () => {
     const near = box.scrollTop + box.clientHeight > box.scrollHeight - 400;
-    if (near && !guide.asking && guide.page + 1 < guide.pages) askGuide(guide.list, guide.page + 1);
+    if (near && !list.asking && list.count && list.page + 1 < list.pages) ask(list.page + 1);
   });
 }
 
@@ -304,59 +440,15 @@ function libraryRow(item) {
   return row;
 }
 
-function drawGenres(genres, chosen) {
-  const nodes = [];
-  let heading = null; // a provider's genres sit under its name
-  for (const genre of genres) {
-    if (genre.header) {
-      heading = document.createElement("optgroup");
-      heading.label = genre.title;
-      nodes.push(heading);
-      continue;
-    }
-    const option = document.createElement("option");
-    option.value = genre.id;
-    option.textContent = typeof genre.count === "number" ? `${genre.title} (${genre.count})` : genre.title;
-    if (heading) heading.append(option);
-    else nodes.push(option);
-  }
-  const pick = $("libraryGenre");
-  pick.replaceChildren(...nodes);
-  pick.value = chosen;
-  $("libraryPick").hidden = !nodes.length;
-}
-
-function failedNotice() {
-  const box = el("div", "empty", w("load_failed"));
-  const again = el("button", "again", w("try_again"));
-  again.type = "button";
-  again.addEventListener("click", openLibrary);
-  box.append(el("br"), again);
-  return box;
-}
-
 function onLibrary(message) {
   if (message.section !== library.section) return; // the other section's, overtaken by a tap
   if (message.page > 0 && message.genre !== library.genre) return;
   library.asking = false;
-  if (message.genres) drawGenres(message.genres, message.genre);
+  if (message.genres) drawPicker("libraryPick", "libraryGenre", message.genres, message.genre, w("genre"));
   library.genre = message.genre;
   library.pages = message.pages || 1;
   library.page = message.page;
-  const box = $("libraryRows");
-  const rows = message.items.map(libraryRow);
-  if (message.page > 0) {
-    box.append(...rows);
-    library.count += rows.length;
-    return;
-  }
-  library.count = rows.length;
-  if (rows.length) box.replaceChildren(...rows);
-  else if (message.failed) box.replaceChildren(failedNotice());
-  else box.replaceChildren(el("div", "empty", w(message.loading ? "loading" : "nothing_here")));
-  const shown = `${message.section} ${message.genre}`;
-  if (shown !== library.shown) box.scrollTop = 0; // a later load of the same list keeps the place
-  library.shown = shown;
+  showPage($("libraryRows"), library, message, message.items.map(libraryRow), openLibrary);
 }
 
 function bindLibrary() {
@@ -369,16 +461,11 @@ function bindLibrary() {
     });
   }
   const pick = $("libraryGenre");
-  pick.setAttribute("aria-label", w("genre"));
   pick.addEventListener("change", () => {
     library.genre = pick.value;
     openLibrary();
   });
-  $("libraryRows").addEventListener("scroll", () => {
-    const box = $("libraryRows");
-    const near = box.scrollTop + box.clientHeight > box.scrollHeight - 400;
-    if (near && !library.asking && library.count && library.page + 1 < library.pages) askLibrary(library.page + 1);
-  });
+  pageOnScroll($("libraryRows"), library, askLibrary);
 }
 
 // ---- the touchpad -------------------------------------------------------------------------
@@ -433,6 +520,7 @@ function bindTouchpad() {
 
 app.handlers.state = onState;
 app.handlers.guide = onGuide;
+app.handlers.timetable = onTimetable;
 app.handlers.results = onResults;
 app.handlers.library = onLibrary;
 app.handlers["tab:guide"] = openGuide;

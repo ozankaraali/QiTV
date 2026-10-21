@@ -178,7 +178,8 @@ class KkTests(SessionCase):
         for message in (
             {"t": "query", "s": "harb"},
             {"t": "open", "id": "h1"},
-            {"t": "get", "what": "guide", "list": "all", "page": 1},
+            {"t": "get", "what": "guide", "list": "g2", "page": 1, "find": "news"},
+            {"t": "get", "what": "timetable", "id": "h7"},
             {"t": "get", "what": "library", "section": "series", "genre": "g2", "page": 1},
         ):
             got += session.receive(phone.seal(message)).events
@@ -187,7 +188,8 @@ class KkTests(SessionCase):
             [
                 Query(sid, "harb"),
                 OpenItem(sid, "h1"),
-                Get(sid, "guide", "all", 1),
+                Get(sid, "guide", "g2", 1, find="news"),
+                Get(sid, "timetable", "", 0, handle="h7"),
                 Get(sid, "library", "", 1, "series", "g2"),
             ],
         )

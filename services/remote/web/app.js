@@ -54,9 +54,10 @@ export function phoneName() {
 
 export function show(name) {
   for (const section of document.querySelectorAll("[data-screen]")) section.hidden = section.dataset.screen !== name;
-  const tabbed = ["remote", "guide", "library", "search"].includes(name);
+  const tabbed = ["remote", "guide", "timetable", "library", "search"].includes(name);
   $("tabs").hidden = !tabbed;
-  for (const tab of document.querySelectorAll("[data-tab]")) tab.classList.toggle("on", tab.dataset.tab === name);
+  const under = name === "timetable" ? "guide" : name; // a channel's timetable is the Guide's
+  for (const tab of document.querySelectorAll("[data-tab]")) tab.classList.toggle("on", tab.dataset.tab === under);
 }
 
 export function banner(text, kind = "") {

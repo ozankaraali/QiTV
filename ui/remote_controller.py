@@ -33,9 +33,10 @@ from services.remote.protocol import (
 )
 from ui.keymap import Action
 from ui.remote_buttons import BUTTONS
+from ui.remote_guide import PhoneGuide
 from ui.remote_library import PhoneLibrary
 from ui.remote_repeat import KeyRepeater
-from ui.remote_snapshots import Handles, guide_page, results, state
+from ui.remote_snapshots import Handles, results, state
 
 if TYPE_CHECKING:
     from services.remote.hub import RemoteHub
@@ -84,9 +85,9 @@ class RemoteController(QObject):
         self._timer.timeout.connect(self._tick)
         self._names: dict[str, str] = {}
         self.status: dict = {"home_url": "", "relay": "off"}
-        self.handles = Handles()  # the guide's
-        self._libraries: dict[str, PhoneLibrary] = {}  # each phone's own Library, by session
-        self.result_handles = Handles(limit=500)  # the search's: a long search can't push them out
+        self._guides: dict[str, PhoneGuide] = {}  # each phone's own Guide, by session
+        self._libraries: dict[str, PhoneLibrary] = {}  # and its own Library
+        self.result_handles = Handles(limit=500)  # the search's
         self._removing: dict[str, str] = {}  # device id → name, until the hub confirms
         self._phones: set[str] = set()
         self._last_state: Optional[dict] = None
@@ -222,9 +223,10 @@ class RemoteController(QObject):
             self._repeater.drop(event.sid)
             self._schedule()
             self._phones.discard(event.sid)
-            library = self._libraries.pop(event.sid, None)
-            if library is not None:
-                library.deleteLater()
+            for browsing in (self._guides, self._libraries):
+                gone = browsing.pop(event.sid, None)
+                if gone is not None:
+                    gone.deleteLater()
             if not self._phones:
                 self._diff.stop()
         elif isinstance(event, Opened):
@@ -283,12 +285,20 @@ class RemoteController(QObject):
     def _answer(self, event: Get) -> None:
         try:
             if event.what == "guide":
-                message = guide_page(self._window, event.list, event.page, self.handles)
-                self._send(event.sid, message)
+                self._guide(event.sid).ask(event.list, event.page, event.find)
+            elif event.what == "timetable":
+                self._guide(event.sid).timetable(event.handle)
             else:
                 self._library(event.sid).ask(event.section or "movies", event.genre, event.page)
         except Exception as error:  # a phone's question must never take QiTV down
             logger.error("Phone remote: %s failed: %s", event.what, safe_message(error))
+
+    def _guide(self, sid: str) -> PhoneGuide:
+        guide = self._guides.get(sid)
+        if guide is None:
+            guide = PhoneGuide(self._window, lambda message: self._send(sid, message), self)
+            self._guides[sid] = guide
+        return guide
 
     def _library(self, sid: str) -> PhoneLibrary:
         library = self._libraries.get(sid)
@@ -312,19 +322,21 @@ class RemoteController(QObject):
             screens.open_search(text)
 
     def _open(self, sid: str, handle: str) -> None:
-        library = self._libraries.get(sid)
-        found = (
-            self.handles.get(handle)
-            or self.result_handles.get(handle)
-            or (library.handles.get(handle) if library is not None else None)
-        )
+        found = self.result_handles.get(handle)
+        for browsing in (self._guides.get(sid), self._libraries.get(sid)):
+            if found is None and browsing is not None:
+                found = browsing.handles.get(handle)
         if found is None:
             return
         kind, payload = found
         window = self._window
         try:
             if kind == "channel":
-                window.screens.tune_live(payload)
+                channel, group_key, channels = cast(tuple, payload)
+                group = (group_key, channels) if group_key else None
+                window.screens.tune_live(channel, group)
+            elif kind == "catchup":
+                window.screens.watch_from_start(*cast(tuple, payload))
             elif kind == "hit":
                 window.library_controller.activate_hit(payload)
             elif kind == "title":

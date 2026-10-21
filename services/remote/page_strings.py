@@ -36,9 +36,6 @@ PAGE_STRINGS: dict[str, str] = {
     "vol": N_("Vol"),  # i18n: the phone remote: the volume rocker's label (very short)
     "go_live": N_("Go live"),  # i18n: the phone remote: a button
     "ch": N_("Ch"),  # i18n: the phone remote: the channel rocker's label (very short)
-    "all_channels": N_("All channels"),  # i18n: the phone remote's guide: a filter
-    "favorites": N_("Favorites"),  # i18n: the phone remote's guide: a filter
-    "recent": N_("Recent"),  # i18n: the phone remote's guide: a filter
     "done": N_("Done"),  # i18n: the phone remote: closes the search or the numbers
     "library": N_("Library"),  # i18n: the phone remote: a tab
     "remote": N_("Remote"),  # i18n: the phone remote: the tab with the buttons
@@ -51,7 +48,7 @@ PAGE_STRINGS: dict[str, str] = {
     "picture": N_("Picture"),  # i18n: the phone remote: a button (aspect, sleep timer)
     "fullscreen": N_("Full screen"),  # i18n: the phone remote: a button
     "this_phone": N_("This phone"),  # i18n: the phone remote: its menu's title
-    "guide_find": N_("Find a channel or programme"),  # i18n: the phone remote's guide field
+    "guide_find": N_("Find a channel"),  # i18n: the phone remote's guide field
     "search_hint": N_("Search channels, movies and series"),  # i18n: the search field
     # i18n: the phone remote: the pairing code shown on the TV changed meanwhile
     "code_expired": N_("The code expired. Scan the new code on the TV."),
@@ -70,6 +67,13 @@ PAGE_STRINGS: dict[str, str] = {
     # i18n: the phone remote's menu: skip the relay, talk to QiTV over the home Wi-Fi
     "connect_directly": N_("Connect directly"),
     "watching": N_("Watching"),  # i18n: the phone remote's guide: the channel on the TV now
+    "watch": N_("Watch"),  # i18n: the phone remote's timetable: tune this channel (a verb)
+    "timetable": N_("Timetable"),  # i18n: the phone remote's guide: a channel's programmes
+    "on_now": N_("Now"),  # i18n: the phone remote's timetable: the programme on now (short)
+    # i18n: the phone remote's timetable: a past programme, from the provider's archive
+    "from_start": N_("Watch from the start"),
+    # i18n: the phone remote's timetable when the channel has no programme guide
+    "no_programmes": N_("No programme guide for this channel"),
     "genre": N_("Genre"),  # i18n: the phone remote's Library: the genre picker, read aloud
     # i18n: the phone remote's Library: a list that failed to arrive
     "load_failed": N_("Couldn't load this list"),

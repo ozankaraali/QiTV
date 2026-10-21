@@ -41,6 +41,7 @@
   <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="7.5" height="6.5" rx="1.2"/><rect x="13" y="4.5" width="7.5" height="6.5" rx="1.2"/><rect x="3.5" y="13" width="7.5" height="6.5" rx="1.2"/><rect x="13" y="13" width="7.5" height="6.5" rx="1.2"/></symbol>
   <symbol id="i-aspect" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 10V8.5h2.5M17 14v1.5h-2.5"/></symbol>
   <symbol id="i-full" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
   <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></symbol>
 </svg>
 
@@ -114,13 +115,18 @@
 
   <section class="screen list" data-screen="guide" hidden>
     <div class="list-head"><h1 data-t="guide">Guide</h1></div>
-    <input class="field" id="guideFind" type="search" autocomplete="off" placeholder="Find a channel or programme" data-tp="guide_find">
-    <div class="chips" id="guideChips">
-      <button type="button" class="on" data-list="all" data-t="all_channels">All channels</button>
-      <button type="button" data-list="favorites" data-t="favorites">Favorites</button>
-      <button type="button" data-list="recent" data-t="recent">Recent</button>
-    </div>
+    <input class="field" id="guideFind" type="search" autocomplete="off" placeholder="Find a channel" data-tp="guide_find">
+    <label class="pick" id="guidePick" hidden><select class="field" id="guideGroup"></select><svg><use href="#i-down"/></svg></label>
     <div class="rows" id="guideRows"></div>
+  </section>
+
+  <section class="screen list" data-screen="timetable" hidden>
+    <div class="tt-head">
+      <button type="button" class="back" id="timetableBack"><svg><use href="#i-left"/></svg><span data-t="guide">Guide</span></button>
+      <h1 id="timetableName"></h1>
+      <button type="button" class="again" id="timetableWatch" data-t="watch">Watch</button>
+    </div>
+    <div class="rows" id="timetableRows"></div>
   </section>
 
   <section class="screen list" data-screen="search" hidden>

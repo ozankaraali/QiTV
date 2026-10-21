@@ -362,9 +362,16 @@ STATE = {
 }
 GUIDE = {
     "t": "guide",
-    "list": "all",
+    "list": "g2",
+    "find": "",
     "page": 0,
     "pages": 1,
+    "loading": False,
+    "groups": [
+        {"id": "g1", "title": "★ Favorites", "count": 1},
+        {"id": "g2", "title": "All", "count": 3},
+        {"id": "g3", "title": "News", "count": 1},
+    ],
     "rows": [
         {
             "id": "h1",
@@ -454,17 +461,58 @@ def scenario_guide_tune(rig: Rig) -> None:
     mark = rig.events.mark()
     rig.page.click("[data-tab=guide]")
     ask = rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark)
-    assert (ask.list, ask.page) == ("all", 0), ask
+    assert (ask.list, ask.page, ask.find) == ("", 0, ""), ask
     rig.hub.send(sid, GUIDE)
     rig.page.wait_for_selector("#guideRows .row >> nth=2")
     assert rig.page.locator("#guideRows .row.playing").count() == 1
+    assert rig.page.input_value("#guideGroup") == "g2"
     rig.shot("guide")
     mark = rig.events.mark()
-    rig.page.locator("#guideRows .row", has_text="Fernvale Sports").click()
+    rig.page.locator("#guideRows .row", has_text="Fernvale Sports").locator(".row-tap").click()
     assert rig.events.wait(OpenItem, after=mark).handle == "h2"
+    mark = rig.events.mark()  # another group
+    rig.page.select_option("#guideGroup", "g3")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark)
+    assert (ask.list, ask.page) == ("g3", 0), ask
+    mark = rig.events.mark()  # the find box asks QiTV, which searches the whole group
+    rig.page.fill("#guideFind", "fern")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "guide" and e.find == "fern", after=mark)
+    assert (ask.list, ask.page) == ("g3", 0), ask
+
+
+def scenario_timetable(rig: Rig) -> None:
+    sid = paired_sid(rig)
+    rig.page.click("[data-tab=guide]")
+    rig.hub.send(sid, GUIDE)
+    rig.page.wait_for_selector("#guideRows .row >> nth=2")
     mark = rig.events.mark()
-    rig.page.click("#guideChips [data-list=favorites]")
-    assert rig.events.wait(Get, after=mark).list == "favorites"
+    rig.page.locator("#guideRows .row", has_text="Harbourline News").locator(".side").click()
+    ask = rig.events.wait(Get, where=lambda e: e.what == "timetable", after=mark)
+    assert ask.handle == "h1", ask
+    rig.page.wait_for_selector("[data-screen=timetable]:not([hidden])")
+    rows = [
+        dict(programme("Morning edition", -140, -80), id="p1"),  # the archive keeps it
+        dict(programme("Midday", -80, -20)),  # past, not kept
+        dict(programme("Evening bulletin", -20, 25), on=True, id="h1", about="The day's news."),
+        dict(programme("Weather", 25, 55)),
+    ]
+    for row in rows:
+        row.setdefault("on", False)
+    table = {"t": "timetable", "id": "h1", "name": "Harbourline News", "num": "1", "rows": rows}
+    rig.hub.send(sid, table)
+    rig.page.wait_for_selector("#timetableRows .slot >> nth=3")
+    assert rig.page.locator("#timetableRows .slot.playing").count() == 1
+    assert rig.page.locator("#timetableRows .slot.still").count() == 1
+    assert rig.page.locator("[data-tab=guide].on").count() == 1
+    rig.shot("timetable")
+    mark = rig.events.mark()
+    rig.page.locator("#timetableRows .slot", has_text="Morning edition").click()
+    assert rig.events.wait(OpenItem, after=mark).handle == "p1"
+    mark = rig.events.mark()
+    rig.page.click("#timetableWatch")
+    assert rig.events.wait(OpenItem, after=mark).handle == "h1"
+    rig.page.click("#timetableBack")
+    rig.page.wait_for_selector("[data-screen=guide]:not([hidden])")
 
 
 def scenario_search_mirror(rig: Rig) -> None:
@@ -601,6 +649,7 @@ SCENARIOS.update(
         "hello-keeps-now": scenario_hello_keeps_now,
         "now-playing": scenario_now_playing,
         "guide-tune": scenario_guide_tune,
+        "timetable": scenario_timetable,
         "search-mirror": scenario_search_mirror,
         "library-open": scenario_library_open,
         "more-numpad": scenario_more_numpad,

@@ -14,7 +14,8 @@ from timer_fixtures import wait_until
 
 from services.library import LibraryModel
 from services.watch_state import WatchState
-from ui.remote_library import LIBRARY_PAGE, MAX_BYTES, PhoneLibrary
+from ui.remote_library import LIBRARY_PAGE, PhoneLibrary
+from ui.remote_snapshots import MAX_BYTES
 
 
 def catalog_with(count=120):
