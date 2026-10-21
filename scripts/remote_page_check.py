@@ -730,13 +730,9 @@ def scenario_watch_here(rig: Rig) -> None:
     assert rig.page.inner_text("#playerName") == "Fernvale Sports"
     blocked = rig.page.evaluate("window.blocked")
     assert not blocked, f"the page's policy blocked the stream: {blocked}"
-    # Picture in picture: asked of the browser for when the page is left, and a button for it
-    # wherever the browser has it (none in headless Chrome).
+    # Picture in picture as the page is left, where the browser does it (its own controls have
+    # the button).
     assert rig.page.get_attribute("#video", "autopictureinpicture") is not None
-    supported = rig.page.evaluate("!!document.pictureInPictureEnabled")
-    assert rig.page.locator("#playerPip").is_visible() == supported, supported
-    if supported:
-        rig.page.click("#playerPip")  # refused for this file, quietly: no page error follows
     rig.shot("watch-here")
     rig.hub.send(sid, {"t": "play", "url": "javascript:alert(1)"})  # only http(s) plays
     rig.page.wait_for_timeout(300)

@@ -772,44 +772,13 @@ function caption(num, name) {
   $("playerName").textContent = name || "";
 }
 
-// Picture in picture, where the browser has it: the button's, or the browser's own as the page
-// is left (autopictureinpicture; iOS does it from full screen). A page can't start it by itself.
-function pipSupported() {
-  const video = $("video");
-  if (document.pictureInPictureEnabled) return true;
-  return typeof video.webkitSupportsPresentationMode === "function" && video.webkitSupportsPresentationMode("picture-in-picture");
-}
-
-function inPip() {
-  const video = $("video");
-  return document.pictureInPictureElement === video || video.webkitPresentationMode === "picture-in-picture";
-}
-
-async function togglePip() {
-  const video = $("video");
-  try {
-    if (inPip()) {
-      if (document.exitPictureInPicture && document.pictureInPictureElement) await document.exitPictureInPicture();
-      else video.webkitSetPresentationMode("inline");
-    } else if (video.requestPictureInPicture) {
-      await video.requestPictureInPicture();
-    } else {
-      video.webkitSetPresentationMode("picture-in-picture");
-    }
-  } catch {
-    // refused (a Home Screen copy of the page, for one): the full screen's own way remains
-  }
-}
-
 function stopVideo() {
   const video = $("video");
-  if (inPip()) togglePip(); // the small picture goes with it
   video.pause();
   video.removeAttribute("src");
   video.load();
   hereLink = "";
   $("playerOut").hidden = true;
-  $("playerPip").hidden = true;
 }
 
 // In a tap: a phone plays sound only from one, and once its player started from a tap it may
@@ -854,7 +823,6 @@ function onPlay(message) {
   }
   hereLink = url;
   $("playerOut").hidden = true;
-  $("playerPip").hidden = !pipSupported();
   const video = $("video");
   video.src = url;
   video.play().catch(() => {}); // the first may wait for a tap on its ▶
@@ -889,10 +857,6 @@ function bindHere() {
   $("video").addEventListener("error", () => {
     if (hereLink) $("playerOut").hidden = false; // a stream this browser can't play
   });
-  const pip = $("playerPip");
-  pip.setAttribute("aria-label", w("pip"));
-  pressable(pip);
-  pip.addEventListener("click", togglePip);
   $("playerOut").addEventListener("click", () => {
     if (hereLink) location.assign(hereLink);
   });
