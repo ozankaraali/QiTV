@@ -22,6 +22,10 @@ Design notes:
   slot is free.
 * PiP must never wait behind the main stream. A caller passes ``queue=False``;
   when no slot is free, ``request`` returns :data:`DENIED` and queues nothing.
+* A limit can be learned for the run (2.6: a provider that keeps only the newest stream
+  while a recording holds one): ``learn`` lowers it, never raises it; ``limit_for`` and
+  ``request`` apply it (``cap``), so every caller sees it. ``free`` says whether a purpose
+  could take a stream beside the others now.
 """
 
 from __future__ import annotations
@@ -52,10 +56,36 @@ class ConnectionBudget(QObject):
         self._active: dict[int, tuple[str, str]] = {}  # ticket -> (provider, purpose)
         self._waiting: dict[str, list[_Waiter]] = {}  # provider -> FIFO
         self._pending_emit: set[int] = set()
+        self._learned: dict[str, int] = {}  # provider -> a limit learned for this run (2.6)
+
+    def learn(self, provider_name: str, limit: int) -> None:
+        """For the rest of the run, `provider_name` allows `limit` streams at most."""
+        if limit > 0:
+            known = self._learned.get(provider_name)
+            self._learned[provider_name] = limit if known is None else min(known, limit)
+
+    def cap(self, provider_name: str, limit: Optional[int]) -> Optional[int]:
+        """`limit` under what was learned for `provider_name` (None: unlimited)."""
+        learned = self._learned.get(provider_name)
+        if learned is None:
+            return limit
+        return learned if limit is None else min(limit, learned)
+
+    def free(self, provider_name: str, limit: Optional[int], *, purpose: str) -> bool:
+        """`purpose` could take a stream of `provider_name` beside the others' now."""
+        capped = self.cap(provider_name, limit)
+        if capped is None:
+            return True
+        others = [p for p in self.holders(provider_name) if p != purpose]
+        return len(others) < capped
+
+    def limit_for(self, provider: dict[str, Any], xtream_max: Optional[int]) -> Optional[int]:
+        """Streams allowed at once, under what was learned this run; None means unlimited."""
+        return self.cap(str(provider.get("name", "")), self._given_limit(provider, xtream_max))
 
     @staticmethod
-    def limit_for(provider: dict[str, Any], xtream_max: Optional[int]) -> Optional[int]:
-        """Streams allowed at once; None means unlimited."""
+    def _given_limit(provider: dict[str, Any], xtream_max: Optional[int]) -> Optional[int]:
+        """Streams allowed at once as the provider's settings say; None means unlimited."""
         try:
             override = int(provider.get("max_streams") or 0)
         except TypeError, ValueError:
@@ -92,6 +122,7 @@ class ConnectionBudget(QObject):
     ) -> int:
         ticket = self._next
         self._next += 1
+        limit = self.cap(provider_name, limit)
         free = limit is None or self.in_use(provider_name) < limit
         if free:
             self._take(ticket, provider_name, purpose)
@@ -159,7 +190,8 @@ class ConnectionBudget(QObject):
         waiting = self._waiting.get(provider_name, [])
         while waiting:
             head = waiting[0]
-            if head.limit is not None and self.in_use(provider_name) >= head.limit:
+            limit = self.cap(provider_name, head.limit)
+            if limit is not None and self.in_use(provider_name) >= limit:
                 break
             waiting.pop(0)
             self._take(head.ticket, provider_name, head.purpose)

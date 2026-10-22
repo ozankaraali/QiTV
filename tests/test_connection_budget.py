@@ -201,3 +201,36 @@ class BudgetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LearnedLimitTests(unittest.TestCase):
+    """2.6: a limit learned for the run (a provider that keeps only the newest stream while a
+    recording holds one), and whether a stream is free for a purpose."""
+
+    def setUp(self):
+        self.b = ConnectionBudget()
+
+    def test_a_learned_limit_caps_requests(self):
+        self.b.learn("P", 1)
+        self.assertNotEqual(self.b.request("P", None, purpose="rec"), DENIED)
+        self.assertEqual(self.b.request("P", None, purpose="main", queue=False), DENIED)
+
+    def test_it_caps_every_providers_limit(self):
+        self.b.learn("P", 1)
+        self.assertEqual(self.b.limit_for({"name": "P", "type": "M3U"}, None), 1)
+        self.assertEqual(self.b.limit_for({"name": "P", "type": "XTREAM"}, 3), 1)
+        self.assertIsNone(self.b.limit_for({"name": "Q", "type": "M3U"}, None))
+        self.assertEqual((self.b.cap("P", 2), self.b.cap("Q", 2)), (1, 2))
+
+    def test_learning_never_raises_a_limit(self):
+        self.b.learn("P", 1)
+        self.b.learn("P", 3)
+        self.assertEqual(self.b.cap("P", None), 1)
+
+    def test_free_counts_the_other_purposes(self):
+        self.b.request("P", 2, purpose="rec")
+        self.assertTrue(self.b.free("P", 2, purpose="main"))
+        self.b.request("P", 2, purpose="pip")
+        self.assertFalse(self.b.free("P", 2, purpose="main"))
+        self.assertTrue(self.b.free("P", 2, purpose="pip"))  # its own does not count
+        self.assertTrue(self.b.free("P", None, purpose="main"))
