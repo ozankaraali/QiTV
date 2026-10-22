@@ -61,7 +61,7 @@ class BudgetedStream(QObject):
         self.purpose = purpose
         self.ticket: Optional[int] = None  # the pending or running stream's
         self.disk = False  # the running stream keeps its time-shift on disk
-        self.kept: Optional[KeptBuffers] = None  # 2.6: where its stops park their channel
+        self._kept: Optional[KeptBuffers] = None  # 2.6: where its stops park their channel
         self._granted = False
         self._running = False  # live.start() was called and not stopped since
         self._releasing: list[int] = []  # given back once the stopped upstream is closed
@@ -70,6 +70,19 @@ class BudgetedStream(QObject):
         self._cap.timeout.connect(self._on_cap)
         budget.granted.connect(self._on_granted)
         live.released.connect(self._on_released)
+
+    @property
+    def kept(self) -> Optional[KeptBuffers]:
+        return self._kept
+
+    @kept.setter
+    def kept(self, kept: Optional[KeptBuffers]) -> None:
+        """2.6: the registry its stops park into; a buffer with kept history that the session
+        lets go otherwise (a fallback) goes there too."""
+        self._kept = kept
+        set_keeper = getattr(self.live, "set_keeper", None)
+        if set_keeper is not None:
+            set_keeper(kept.put if kept is not None else None)
 
     def request(self, provider: str, limit: Optional[int], *, queue: bool = True) -> int:
         """Ask for a ticket for the next start, in place of any held one.
@@ -114,6 +127,7 @@ class BudgetedStream(QObject):
             ring = self.kept.take(str(channel))
             if ring is not None:
                 kwargs["kept"] = ring  # taken back where the user was
+                self.disk = ring.disk  # it stays the kind it is
         try:
             self.live.start(*args, **kwargs)
         except Exception:

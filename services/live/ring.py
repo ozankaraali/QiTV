@@ -258,10 +258,33 @@ class Ring(ABC):
         # Metadata is removed before the storage is freed, so no reader looks it up again.
         with self._state_lock:
             self._segments.pop(segment.seq, None)
-        self._unlink(segment)
-        with self._state_lock:
-            self._bytes -= segment.size
-            self._charged -= segment.charge
+        try:
+            self._unlink(segment)
+        finally:  # gone from the ring either way: the accounting follows (2.6)
+            with self._state_lock:
+                self._bytes -= segment.size
+                self._charged -= segment.charge
+
+    def clear_failure(self) -> None:
+        """Write again after a failure (2.6: a kept ring's resume tries its disk anew)."""
+        with self._disk_lock:
+            self._failure = ""
+
+    def drop_open(self) -> None:
+        """Let the open segment go, whatever it holds (2.6: a write to it failed; its number is
+        used again by the next one). Its storage is freed as far as it can be."""
+        with self._disk_lock:
+            segment = self._open
+            if segment is None or self.closed:
+                return
+            with self.changed:
+                self._open = None
+                segment.retired = True
+                self.changed.notify_all()
+            try:
+                self._delete_locked(segment)
+            except OSError:
+                pass  # its file stays behind; the folder goes with the ring
 
     def oldest_wall(self) -> float | None:
         """When the oldest completed segment completed (Unix time); None without one."""
@@ -690,10 +713,25 @@ class DiskBudget:
             rings = list(self._rings.values())
             while sum(ring.charged for ring, _ in rings) > self.max_bytes:
                 victim = self._victim(rings)
-                if victim is None or not victim[0].retire_oldest():
+                if victim is None:
                     break
-                if victim[1] and victim[0] not in changed:
-                    changed.append(victim[0])
+                ring, parked = victim
+                try:
+                    if not ring.retire_oldest():
+                        break
+                except OSError, RingError:
+                    # Its files went (a temp cleaner) or cannot be removed now: the ring is let
+                    # go whole, quietly, never troubling the writer that asked.
+                    _LOG.info("A kept time-shift buffer could not be trimmed; it goes.")
+                    rings.remove(victim)
+                    self._rings.pop(id(ring), None)
+                    try:
+                        ring.close()
+                    except OSError:
+                        pass  # its folder is swept with the session's
+                    parked = True  # its owner says so, whatever it was
+                if parked and ring not in changed:
+                    changed.append(ring)
         return changed
 
     @staticmethod

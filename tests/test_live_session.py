@@ -37,6 +37,7 @@ LOADING = "Still loading…"
 RECONNECTING = "Reconnecting…"
 KEPT_ONLY = "This channel can't open right now. Playing what was kept."
 KEPT_END = "That's all that was kept. The channel can't open right now."
+KEPT_DISK = "The disk buffer failed. Playing what was kept; Go live plays the channel again."
 DIRECT = (URL, PlayKind.LIVE, "normal")
 MiB = 1024 * 1024
 
@@ -651,14 +652,14 @@ class KeptTests(LiveSessionCase):
         super().setUp()
         self.live._wall = lambda: 20_000.0  # the time of day the parts are placed against
 
-    def resume(self, kept, **kwargs):
+    def resume(self, kept, disk=False, **kwargs):
         self.live.start(
             URL,
             headers={"User-Agent": "QiTV-Test"},
             verify_ssl=True,
             latency="normal",
             user_agent="QiTV-Test",
-            disk=False,
+            disk=disk,
             max_bytes=128 * MiB,
             channel="k1",
             kept=kept,
@@ -773,6 +774,57 @@ class KeptTests(LiveSessionCase):
         self.assertIn("gone", self.engine.closed)
         self.assertEqual(len(self.engine.opened), 1)
         self.assertEqual(self.engine.resumes, [])
+
+    def test_leaving_while_taking_back_from_live_keeps_it(self):
+        # Review I1: a double scroll leaves before the new run's first segment came.
+        self.engine.buffer("k", segments(0, 10), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(None, False)))
+        kept = self.live.park()
+        self.assertEqual(kept, KeptRing("k", "k1", False, Where(None, False)))
+        self.assertEqual(self.engine.parks, ["k"])
+        self.assertNotIn("k", self.engine.closed)
+
+    def test_a_taken_back_buffer_keeps_its_own_kind(self):
+        # Review I3: a memory buffer taken back by a disk tune parks as memory.
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(20.0, True)), disk=True)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertFalse(self.live.park().disk)
+
+    def test_a_disk_failure_after_taking_back_then_go_live(self):
+        # Review C1: what was kept plays on and says why; Go live tries the channel again,
+        # and after a second disk failure starts it afresh (the helper's own memory fallback).
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", True, Where(20.0, False)), disk=True)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionResumed.emit("k")
+        self.engine.sessionFailed.emit("k", "disk", "The disk buffer failed.")
+        self.assertEqual(self.notices[-1], KEPT_DISK)
+        self.live.go_live()
+        self.assertEqual(len(self.engine.resumes), 2)
+        self.engine.sessionFailed.emit("k", "disk", "The disk buffer failed.")
+        self.live.go_live()
+        self.assertIn("k", self.engine.closed)
+        self.engine.answer()
+        self.assertEqual(len(self.engine.opened), 1)  # a fresh session for the channel
+
+    def test_a_provider_drop_after_taking_back_keeps_the_history(self):
+        # Review I6: a final failure at the live edge plays the channel directly, as before,
+        # but hours of kept history are not thrown away with the session.
+        kept_aside = []
+        self.live.set_keeper(kept_aside.append)
+        parts = [[0, 0.0, 1_000.0], [10, 20.0, 9_000.0]]
+        self.engine.buffer("k", segments(0, 30), parts=parts)
+        self.resume(KeptRing("k", "k1", False, Where(None, False)))
+        self.engine.sessionResumed.emit("k")
+        self.step(2.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionFailed.emit("k", "network", "The channel stopped answering.")
+        self.assertEqual(self.engine.parks, ["k"])
+        self.assertNotIn("k", self.engine.closed)
+        self.assertEqual([(r.sid, r.channel) for r in kept_aside], [("k", "k1")])
+        self.engine.sessionParked.emit("k")
+        self.assertEqual(self.playback.plays[-1], DIRECT)
 
     def test_the_timeline_says_how_far_behind_in_real_time(self):
         parts = [[0, 0.0, 1_000.0], [10, 20.0, 19_000.0]]

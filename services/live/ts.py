@@ -363,6 +363,12 @@ class Segmenter:
         self._scan(data, wall, events)
         return events
 
+    def abandon(self) -> None:
+        """Forget the open segment without closing it (2.6: the ring could not take it): the
+        next segment opened takes its number, and the input starts afresh."""
+        self._open = False
+        self.discontinuity()
+
     def finish(self) -> list[Event]:
         """Close the open segment at the end of the input: the last packet goes first (it
         waited for a next input), then the close."""

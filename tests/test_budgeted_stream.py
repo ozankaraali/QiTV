@@ -252,3 +252,11 @@ class KeptStreamTests(_Fixture):
         self.running_stream()
         self.stream.stop()
         self.assertEqual(self.live.calls[-1], ("stop",))
+
+    def test_a_taken_back_memory_buffer_is_not_disk(self):
+        # Review I3: whether it is on disk follows the buffer taken back.
+        self.kept.put(KeptRing("s1", "k1", False, Where(None, False)))
+        self.stream.request(P, 2)
+        self.pump()
+        self.stream.start("http://provider.test/1.ts", channel="k1", disk=True)
+        self.assertFalse(self.stream.disk)

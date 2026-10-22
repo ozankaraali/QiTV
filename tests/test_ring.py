@@ -680,3 +680,20 @@ class DiskBudgetTests(unittest.TestCase):
         self.now += 2 * STALE_S
         self.assertEqual(ring.retire_before(self.now - STALE_S), 1)
         self.assertEqual(ring.oldest_seq, 1)
+
+    def test_a_kept_ring_whose_files_went_is_let_go(self):
+        # Review I4: a segment that cannot be deleted never stops the trim; that ring is
+        # closed (its owner says so), and the accounting stays right.
+        kept, live = self.ring(), self.ring()
+        self.fill(kept, 2)
+        self.fill(live, 2)
+        budget = DiskBudget(kept.charged + live.charged)
+        budget.register(kept, parked=True)
+        budget.register(live)
+        with patch.object(DiskRing, "_unlink", side_effect=OSError("gone")):
+            self.fill(live, 1)
+            changed = budget.trim()
+        self.assertEqual(changed, [kept])
+        self.assertTrue(kept.closed)
+        self.assertEqual(live.oldest_seq, 0)
+        self.assertLessEqual(live.charged, budget.max_bytes)

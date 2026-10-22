@@ -143,6 +143,13 @@ class Timeline:
         self._open = None
         return span
 
+    def drop_open(self) -> None:
+        """Forget the open segment (2.6: the ring could not take it); a part it began goes."""
+        opened, self._open = self._open, None
+        if opened is not None and self._parts and self._parts[-1].first_seq == opened.seq:
+            self._parts.pop()
+            self._part_wall = None
+
     def on_evicted(self, seq: int) -> None:
         self._spans = [span for span in self._spans if span.seq > seq]
         parts: List[Part] = []

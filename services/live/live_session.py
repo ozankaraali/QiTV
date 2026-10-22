@@ -289,6 +289,9 @@ RECONNECTING = N_("Reconnecting…")  # i18n: toast: the channel's stream is ope
 KEPT_ONLY = N_("This channel can't open right now. Playing what was kept.")
 # i18n: toast: playback reached the end of a channel's kept buffer; the channel cannot open
 KEPT_END = N_("That's all that was kept. The channel can't open right now.")
+# i18n: toast: the disk under a channel's kept buffer failed; what was kept plays, Go live
+# plays the channel live again
+KEPT_DISK = N_("The disk buffer failed. Playing what was kept; Go live plays the channel again.")
 _DIRECT_RETRIES_MS = (3000, 5000, 10000)  # a fallback's direct play, failing at once ...
 _DIRECT_QUICK_S = 5.0  # ... within this of its play call (a timeout is reported at once)
 LOADING = N_("Still loading…")  # i18n: toast: a channel takes long to start
@@ -585,6 +588,10 @@ class LiveSession(QObject):
         self._kept_only = False
         self._live_after_resume = False
         self._from_kept = False
+        self._disk_failures = 0  # of the kept buffer taken back, this tune: a second starts afresh
+        # Where a session with kept history goes when it is let go otherwise than by `park`
+        # (a fallback, a refusal): the players' registry (`set_keeper`); None: it closes.
+        self._keeper: Optional[Callable[[KeptRing], None]] = None
         self._on_disk = False  # the buffer is on disk (not moved to memory by a disk failure)
         self._wall: Callable[[], float] = time.time  # the time of day the parts are placed by
         self._wire_engine(engine, connect=True)
@@ -681,6 +688,7 @@ class LiveSession(QObject):
         self.stop()
         self._kept = kept
         self._resuming = self._kept_only = self._live_after_resume = self._from_kept = False
+        self._disk_failures = 0
         self._on_disk = disk
         self._url, self._user_agent, self._referrer = url, user_agent, referrer
         self._channel = channel
@@ -738,11 +746,19 @@ class LiveSession(QObject):
         recording stops and keeps its file (`recordingEnded` follows)."""
         self._halt(park=False)
 
+    def set_keeper(self, keeper: Optional[Callable[[KeptRing], None]]) -> None:
+        """Where a buffer with kept history goes when the session lets go of it otherwise than
+        by `park()`: a fallback to direct play or a refusal after a resume (2.6). None (the
+        default): it closes, as any session does."""
+        self._keeper = keeper
+
     def keepable(self) -> bool:
-        """It plays a channel with a key from its time-shift buffer, something is buffered and
-        nothing records: leaving it can keep the buffer (2.6, `park`)."""
+        """It plays a channel with a key from its time-shift buffer (or takes a kept one back,
+        still waiting for its new run), something is buffered and nothing records: leaving it
+        can keep the buffer (2.6, `park`)."""
+        taking_back = self._phase is _Phase.WAITING and self._from_kept
         return (
-            self._phase is _Phase.PIPELINE
+            (self._phase is _Phase.PIPELINE or taking_back)
             and self._sid is not None
             and bool(self._channel)
             and self._recording is None
@@ -869,8 +885,12 @@ class LiveSession(QObject):
 
     def go_live(self) -> None:
         """The Go live button: back to the live edge at 1x, playing (not paused). While a
-        kept buffer plays without its stream (2.6), the channel is tried again first."""
+        kept buffer plays without its stream (2.6), the channel is tried again first; after
+        its disk failed twice, it starts afresh (the helper's own memory fallback)."""
         if self._kept_only and self._sid is not None and self._phase is _Phase.PIPELINE:
+            if self._disk_failures >= 2:
+                self._start_afresh()
+                return
             self._kept_only = False
             self._resuming = self._live_after_resume = True
             self._send_resume(self._sid)
@@ -1117,6 +1137,7 @@ class LiveSession(QObject):
         new run's first segment came, on that run only (`_start_lags`)."""
         self._sid = kept.sid
         self._from_kept = self._resuming = True
+        self._on_disk = kept.disk  # it stays the kind it is, whatever this tune asked for
         self._send_resume(kept.sid)
         position = kept.where.position
         if position is None:
@@ -1157,6 +1178,36 @@ class LiveSession(QObject):
         elif self._phase is _Phase.PIPELINE and self._live_after_resume:
             self._live_after_resume = False
             self._go_live(unpause=True, merge=False)
+
+    def _start_afresh(self) -> None:
+        """Let the kept buffer go and open the channel anew, once it closed (2.6)."""
+        sid, self._sid = self._sid, None
+        self._stop_timers()
+        self._playback.stop()
+        self._phase = _Phase.STARTING
+        self._kept_only = self._resuming = self._live_after_resume = self._from_kept = False
+        self._ended = self._paused = False
+        self._disk_failures = 0
+        self._stay.user_go_live()
+        if sid is not None:
+            self._close(sid)
+        if not self._unclosed:
+            self._begin()
+
+    def _keeps_history(self) -> bool:
+        """The session holds a kept buffer's older parts (2.6): letting it go keeps them."""
+        if self._keeper is None or self._sid is None or not self._channel:
+            return False
+        return len(live_parts.from_state(self._snapshot().get("parts"))) > 1
+
+    def _let_go(self, sid: str, keep: bool) -> None:
+        """Close the session, or (`keep`) park it and hand its buffer to the keeper."""
+        if not keep or self._keeper is None:
+            self._close(sid)
+            return
+        self._engine.park_session(sid)
+        self._await_close(sid)
+        self._keeper(KeptRing(sid, self._channel, self._on_disk, Where(None, False)))
 
     def _kept_fallback(self, notice: str = KEPT_ONLY) -> None:
         """The channel's stream could not open again (2.6): what was kept plays on, from its
@@ -1203,6 +1254,7 @@ class LiveSession(QObject):
             return
         self._end_recording()  # a direct play has no buffer to record from
         self._stop_timers()
+        keep = self._keeps_history()
         sid, self._sid = self._sid, None
         self._phase = _Phase.FALLING_BACK
         self._fallback_notice = message
@@ -1212,7 +1264,7 @@ class LiveSession(QObject):
         self._deferred = None
         self._after_update = self._retry = self._failing_since = None
         if sid is not None:
-            self._close(sid)
+            self._let_go(sid, keep)  # 2.6: a kept buffer's history is kept
         if not self._unclosed:
             self._play_direct()
 
@@ -1220,6 +1272,7 @@ class LiveSession(QObject):
         """The provider refused for its connection limit: close it all, play nothing."""
         self._end_recording()
         self._stop_timers()
+        keep = self._keeps_history()
         sid, self._sid = self._sid, None
         self._phase = _Phase.REFUSED
         played, self._mode = self._mode, ""
@@ -1228,7 +1281,7 @@ class LiveSession(QObject):
         self._after_update = self._retry = self._failing_since = None
         self._playback.stop()
         if sid is not None:
-            self._close(sid)
+            self._let_go(sid, keep)  # 2.6: a kept buffer's history is kept
         if played:
             self.modeChanged.emit(self._mode)
         self.failed.emit(self._limited or STREAM_LIMIT)
@@ -1512,7 +1565,9 @@ class LiveSession(QObject):
         if self._from_kept and (self._resuming or kind == "disk") and kind != "internal":
             # 2.6: the kept buffer's channel did not open again, or its disk failed (the
             # helper parked it as it stands): what was kept plays on.
-            self._kept_fallback(DISK if kind == "disk" else KEPT_ONLY)
+            if kind == "disk":
+                self._disk_failures += 1
+            self._kept_fallback(KEPT_DISK if kind == "disk" else KEPT_ONLY)
             return
         if self._ended:
             return

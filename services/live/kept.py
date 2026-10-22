@@ -37,12 +37,23 @@ class KeptBuffers:
     here (`put`), a start of a channel takes its own back (`take`). A memory buffer costs
     memory as long as it is kept, so one is kept at most: the channel left last. Disk buffers
     are all kept: their total is the user's disk amount, which the helper keeps them under.
-    Letting one go closes its session at the engine.
+    Letting one go closes its session at the engine; one the helper emptied (the disk amount,
+    the day's limit, its files gone) goes by itself once its state says so.
     """
 
     def __init__(self, engine: Any) -> None:
         self._engine = engine
         self._rings: dict[str, KeptRing] = {}  # by channel key, the oldest put first
+        self._listen(engine)
+
+    def _listen(self, engine: Any) -> None:
+        updated = getattr(engine, "sessionUpdated", None)
+        if updated is not None:
+            updated.connect(self._on_updated)
+
+    def _on_updated(self, sid: str, snapshot: dict) -> None:
+        if snapshot.get("oldest") is None and any(r.sid == sid for r in self._rings.values()):
+            self.drop(sid)  # nothing of it is left
 
     def put(self, ring: KeptRing) -> None:
         old = self._rings.pop(ring.channel, None)
@@ -73,6 +84,7 @@ class KeptBuffers:
         """A new engine (a restart after a self-update): the old one's sessions went with it."""
         self._engine = engine
         self._rings.clear()
+        self._listen(engine)
 
     def rings(self) -> list[KeptRing]:
         return list(self._rings.values())

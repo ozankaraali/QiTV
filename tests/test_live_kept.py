@@ -5,6 +5,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
 from services.live.kept import KeptBuffers, KeptRing, Where
@@ -14,8 +15,11 @@ app = QApplication.instance() or QApplication([])
 LIVE = Where(None, False)
 
 
-class FakeEngine:
+class FakeEngine(QObject):
+    sessionUpdated = Signal(str, dict)
+
     def __init__(self):
+        super().__init__()
         self.closed = []
 
     def close_session(self, sid):
@@ -67,6 +71,16 @@ class KeptBuffersTests(unittest.TestCase):
         self.kept.drop("a")
         self.assertEqual(self.engine.closed, ["a"])
         self.assertEqual(self.kept.rings(), [])
+
+    def test_a_kept_buffer_left_empty_goes(self):
+        # Review I5: the disk amount or the day's limit took all of it.
+        self.kept.put(KeptRing("a", "k1", True, LIVE))
+        self.kept.put(KeptRing("b", "k2", True, LIVE))
+        self.engine.sessionUpdated.emit("a", {"oldest": 3})
+        self.engine.sessionUpdated.emit("x", {"oldest": None})  # not a kept one
+        self.engine.sessionUpdated.emit("a", {"oldest": None})
+        self.assertEqual(self.engine.closed, ["a"])
+        self.assertEqual([r.sid for r in self.kept.rings()], ["b"])
 
     def test_a_new_engine_forgets_the_old_ones_sessions(self):
         self.kept.put(KeptRing("a", "k1", True, LIVE))

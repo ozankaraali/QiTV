@@ -1564,6 +1564,56 @@ class ParkResumeTests(unittest.TestCase):
         helper.wait_for(lambda m: m == ("ended", "f"))
         self.assertGreater(len(self.spans(helper, "f")), len(kept))
 
+    def test_a_disk_failure_clears_with_the_next_resume(self):
+        # Review C1: a write that failed through the ring's guard must not refuse every later
+        # resume, and the segment it could not write leaves no span behind.
+        from services.live.ring import DiskRing
+
+        first = self.source({SECRET_PATH: (200, {}, make_stream(6))})
+        second = self.source({SECRET_PATH: (200, {}, make_stream(6, pts_start=AHEAD))})
+        third = self.source({SECRET_PATH: (200, {}, make_stream(6, pts_start=2 * AHEAD))})
+        helper = InProcessHelper(self)
+        root = Path(helper.helper.root)
+        directory = ".qitv-timeshift-" + secrets.token_hex(16)
+        ring = {"kind": "disk", "root": str(root), "dir": directory, "max_bytes": 1 << 30}
+        helper.parent.send(("open", "c", first.url + SECRET_PATH, {}, True, ring, 6.0))
+        helper.wait_for(lambda m: m == ("ended", "c"))
+        kept = self.spans(helper, "c")
+        helper.parent.send(("park", "c"))
+        helper.wait_for(lambda m: m == ("parked", "c"))
+        failing = patch.object(DiskRing, "_write", side_effect=OSError("the disk failed"))
+        failing.start()
+        helper.parent.send(("resume", "c", second.url + SECRET_PATH, {}, True, 6.0))
+        helper.wait_for(lambda m: m[:3] == ("error", "c", "disk"))
+        helper.wait_for(lambda m: m == ("parked", "c"))
+        failing.stop()
+        helper.parent.send(("resume", "c", third.url + SECRET_PATH, {}, True, 6.0))
+        helper.wait_for(lambda m: m == ("resumed", "c"))
+        helper.wait_for(lambda m: m == ("ended", "c"))
+        after = self.spans(helper, "c")
+        seqs = [span[0] for span in after]
+        self.assertGreater(len(after), len(kept))
+        self.assertEqual(seqs, list(range(seqs[0], seqs[0] + len(seqs))))
+        for seq in seqs:  # every span is there to read: none was left by the failed write
+            self.assertGreater(len(self.read(helper, "c", seq)), 0, seq)
+
+    def test_a_resume_sent_while_parking_follows_the_park(self):
+        # Review I2: another player takes the ring back before "parked" came.
+        stop, hung_up = threading.Event(), threading.Event()
+        self.addCleanup(stop.set)
+        upstream = self.source({SECRET_PATH: paced_route(make_stream(60), stop, hung_up)})
+        good = self.source({SECRET_PATH: (200, {}, make_stream(6, pts_start=AHEAD))})
+        helper = InProcessHelper(self)
+        helper.parent.send(("open", "q", upstream.url + SECRET_PATH, {}, True, RAM, 6.0))
+        helper.wait_for(lambda m: m == ("ready", "q"))
+        helper.wait_for(lambda m: m[:2] == ("state", "q") and len(self.spans(helper, "q")) >= 2)
+        # Both at once, as the command loop would run them back to back: the resume comes
+        # while the park still waits for the upstream to close.
+        helper.helper._dispatch(("park", "q"))
+        helper.helper._dispatch(("resume", "q", good.url + SECRET_PATH, {}, True, 6.0))
+        helper.wait_for(lambda m: m == ("parked", "q"))
+        helper.wait_for(lambda m: m == ("resumed", "q"))
+
     def test_disk_failure_on_a_resumed_ring_keeps_it(self):
         from services.live.ring import DiskRing, RingError
 
@@ -1631,6 +1681,31 @@ class KeptSpaceTests(unittest.TestCase):
         ring_b = helper.helper._sessions["b"]._ring
         self.assertLessEqual(ring_a.charged + ring_b.charged, amount)
         self.assertEqual(self.oldest(helper, "b"), 0)  # the channel watched kept its own
+
+    def test_a_kept_buffer_with_missing_files_goes_quietly(self):
+        # Review I4: its segments went (a temp cleaner); trimming it never troubles the
+        # channel watched, and the kept one is let go (its state says it is empty).
+        helper = InProcessHelper(self)
+        root = Path(helper.helper.root)
+        ring_a = self.disk(root, 1 << 30)
+        helper.parent.send(("open", "a", self.source(make_stream(8)), {}, True, ring_a, 6.0))
+        helper.wait_for(lambda m: m == ("ended", "a"))
+        helper.parent.send(("park", "a"))
+        helper.wait_for(lambda m: m == ("parked", "a"))
+        for segment in (root / ring_a["dir"]).glob("segment-*.ts"):
+            segment.unlink()
+        amount = helper.helper._sessions["a"]._ring.charged + 64 * 1024
+        helper.parent.send(
+            ("open", "b", self.source(make_stream(8)), {}, True, self.disk(root, amount), 6.0)
+        )
+        helper.wait_for(lambda m: m == ("ended", "b"))
+        self.assertEqual([m for m in helper.messages if m[:2] == ("error", "b")], [])
+
+        def emptied(m):
+            return m[:2] == ("state", "a") and m[2]["oldest"] is None
+
+        if not any(emptied(m) for m in helper.messages):
+            helper.wait_for(emptied)
 
     def test_a_day_old_segment_goes(self):
         from services.live import ring as ring_module

@@ -771,6 +771,7 @@
   "The clipboard holds no provider link.": "El portapapeles no contiene ningún enlace de proveedor.",
   "The code changes every minute and pairs one phone": "El código cambia cada minuto y empareja un teléfono",
   "The code expired. Scan the new code on the TV.": "El código caducó. Escanea el nuevo código de la TV.",
+  "The disk buffer failed. Playing what was kept; Go live plays the channel again.": "El búfer en disco falló. Se reproduce lo que se guardó; «Ir al directo» vuelve a reproducir el canal.",
   "The external player could not start": "No se pudo iniciar el reproductor externo",
   "The film didn't open. Tap TV to watch it there.": "La película no se abrió. Toca TV para verla allí.",
   "The mixer's other row (while it shows)": "La otra fila del mezclador (mientras se muestra)",

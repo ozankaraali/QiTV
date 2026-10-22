@@ -568,6 +568,7 @@ class _Session:
             if self.cancelled:
                 return
             source = self._source
+            self._resume_args = None  # a resume that has not begun never begins
             reading = not self.released.is_set()
             if reading:
                 self._parking = True
@@ -593,16 +594,12 @@ class _Session:
         """Called by the command loop ("resume"); never blocks: the session thread opens the
         new upstream. Ignored unless the session reads nothing (parked, or its input ended)."""
         with self.lock:
-            accepted = not self.cancelled and self.released.is_set()
-            accepted = accepted and self._resume_args is None
+            # Parked, its input ended, or a park still on its way (another player took the
+            # buffer back before "parked" came): the resume follows the park.
+            ready = self.released.is_set() or self._parking
+            accepted = not self.cancelled and ready and self._resume_args is None
             if accepted:
                 self._resume_args = (url, headers, verify_ssl, live_delay, start or {})
-                self._parked = self._parking = self._ended = False
-                self.released.clear()
-                self._interrupt.clear()
-                ring = self._ring
-        if accepted and ring is not None:
-            self._helper.ring_parked(ring, False)
         if not accepted:
             _LOG.warning("A live session that still reads was asked to resume; ignored.")
             return
@@ -657,6 +654,10 @@ class _Session:
                     return False
                 args, self._resume_args = self._resume_args, None
                 self._wake.clear()
+                if args is not None:  # from here a park interrupts the resumed run
+                    self._parked = self._parking = self._ended = False
+                    self.released.clear()
+                    self._interrupt.clear()
             if args is not None:
                 self._begin_run(*args)
                 return True
@@ -675,6 +676,10 @@ class _Session:
         self._live_delay, self._start = live_delay, start
         with self.lock:
             self._source = None
+        ring = self._ring
+        if ring is not None:
+            ring.clear_failure()  # its disk is tried anew
+            self._helper.ring_parked(ring, False)
         self._kept_history = self._resuming = True
         self._new_part = self._open_junction = self._junction_next = True
         self._received, self._answered, self._caught_up = 0, False, False
@@ -915,8 +920,13 @@ class _Session:
         self._check()
         if self._kept_history:
             # 2.6: a kept history is never given up for a RAM ring, which would remove it:
-            # the session parks with the disk ring as it stands, still served.
+            # the session parks with the disk ring as it stands, still served. The segment it
+            # could not write goes, leaving no span; the next resume writes again.
             self._send(("error", self.sid, "disk", message))
+            ring.drop_open()
+            self._timeline.drop_open()
+            self._segmenter.abandon()
+            self._new_part = self._resuming  # a run with nothing written begins none
             with self.lock:
                 self._parking = True
             self._interrupt.set()
