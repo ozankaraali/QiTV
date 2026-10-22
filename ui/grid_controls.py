@@ -91,6 +91,12 @@ NEEDS_HARDWARE = N_(
 # picture in picture already has; a tile's player is made when it first takes the focus or a
 # channel, one at a time: a "+" tile has none).
 TILE_NAMES = ("main", "pip", "t2", "t3", "t4", "t5", "t6", "t7", "t8")
+
+
+def _records(slot: Slot) -> bool:
+    return bool(getattr(slot.live, "recording", lambda: False)())
+
+
 # The texts are kept in English and shown translated (no_stream_text for NO_STREAM).
 # i18n: a multiview tile's card and a toast: the provider's connections are all in use
 NO_STREAM = N_("No stream to spare at {provider}")
@@ -404,9 +410,13 @@ class GridControls(QObject):
             self._layouts.dismiss()
         sessions.end_mix()  # before the tiles stop: the big picture is heard (normal rule)
         keep = self._kept() if keep_pip else None
+        aside = {slot.name for slot in sessions.background()}
         for slot in sessions.slots():  # a tile left by a smaller layout too
-            if slot.name not in (large, keep):
-                self._stop(slot.name)
+            if slot.name in (large, keep) or slot.name in aside:
+                continue
+            if _records(slot) and sessions.keep_recording(slot.name):
+                continue  # 2.6: it records on in the background
+            self._stop(slot.name)
         if self._forget is not None:
             for name in self._names:  # no link on its way opens a tile any more
                 self._forget(name)
@@ -857,11 +867,16 @@ class GridControls(QObject):
     def _fill(self, names: list[str], cells: int) -> list[str]:
         """`names`, then the next tiles' slot names up to `cells` (their players are made
         when they first take the focus or a channel: `_ensure_slot`)."""
-        filled = list(names)[:cells]
-        for name in TILE_NAMES:
-            if len(filled) >= cells:
-                break
-            if name not in filled:
+        aside = {slot.name for slot in self.sessions.background()}  # 2.6: never tiles
+        filled = [name for name in names if name not in aside][:cells]
+        number = len(TILE_NAMES)
+        names_left = list(TILE_NAMES)
+        while len(filled) < cells:
+            if not names_left:  # background players took some of the names
+                names_left.append(f"t{number}")
+                number += 1
+            name = names_left.pop(0)
+            if name not in filled and name not in aside:
                 filled.append(name)
         return filled
 

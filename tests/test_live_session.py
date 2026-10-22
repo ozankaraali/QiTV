@@ -875,6 +875,19 @@ class KeptTests(LiveSessionCase):
         self.engine.sessionParked.emit("k")
         self.assertEqual(self.playback.plays[-1], DIRECT)
 
+    def test_a_recording_set_aside_pauses_and_comes_back_live_offering_where_it_was(self):
+        offers = self.back_offers()
+        self.ready(segments(0, 30), channel="k1")
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.set_aside()  # its channel was left while it records: it waits, paused
+        self.assertEqual(self.playback.paused[-1], True)
+        self.live.bring_back()
+        self.assertGreaterEqual(self.seq_of(self.playback.plays[-1]), 25)  # live
+        self.assertEqual(len(offers), 1)
+        self.assertAlmostEqual(offers[0][0], 20.0, delta=2.0)
+
     def test_a_disk_buffer_is_labelled_and_where_the_user_was_noted(self):
         sid = self.start(disk=True, channel="k1")
         self.assertEqual(self.engine.labels, [(sid, {"channel": "k1"})])

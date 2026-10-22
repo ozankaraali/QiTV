@@ -104,7 +104,9 @@ def one_disk_ring(*tuners: "LiveTuner") -> None:
     every tuner when one is added (a multiview tile's)."""
 
     def allowed(others: list[LiveTuner]) -> Callable[[], bool]:
-        return lambda: not any(other.on_disk() for other in others)
+        # 2.6: a recording in the background does not count: the disk amount is the total
+        # of every disk buffer (the helper's DiskBudget).
+        return lambda: not any(other.on_disk() and not other.background for other in others)
 
     for tuner in tuners:
         tuner.set_disk_allowed(allowed([other for other in tuners if other is not tuner]))
@@ -143,6 +145,7 @@ class LiveTuner(QObject):
         self.budget = budget if budget is not None else ConnectionBudget(self)
         self.purpose = purpose
         self.timeline: Optional[dict] = None  # the running tune's last timelineChanged state
+        self.background = False  # 2.6: its slot records in the background (SessionManager)
         self._pending: Optional[LiveStart] = None  # a tune waiting for its slot or the release
         self._disk_allowed: Callable[[], bool] = lambda: True
         # The pipeline tune's budget slot, its start and the wait for its release.

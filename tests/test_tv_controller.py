@@ -724,6 +724,12 @@ class FakeLiveSession(QObject):
     def go_back_to(self, t):
         self.calls.append(("go_back_to", t))
 
+    def set_aside(self):  # 2.6: its recording goes on while its channel was left
+        self.calls.append(("set_aside",))
+
+    def bring_back(self):
+        self.calls.append(("bring_back",))
+
     def __init__(self, playback):
         super().__init__()
         self.playback = playback

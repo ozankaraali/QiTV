@@ -67,6 +67,7 @@ class FakeLive(QObject):
     timelineChanged = Signal(dict)
     modeChanged = Signal(str)
     failed = Signal(str)
+    recordingChanged = Signal(bool)  # 2.2
 
     def __init__(self, name, log):
         super().__init__()
@@ -949,6 +950,67 @@ class GridMixTests(_Tiles):
         self.manager.leave_grid(None)
         self.manager.set_muted("t2", False)
         self.assertEqual((self.manager.mixed(), self.mixes), (False, []))
+
+
+class SetAsideTests(_Fixture):
+    """2.6: a recording slot leaves its role and records on in the background; another slot
+    (one made for it, else an idle one) takes the role."""
+
+    def setUp(self):
+        super().setUp()
+        self.made = []
+
+        def make_slot(name):
+            live = FakeLive(name, self.log)
+            tuner = FakeTuner(live, self.budget, self.cap_ms, purpose=name)
+            slot = Slot(name, FakePlayback(name, self.log), live, tuner=tuner)
+            self.manager.add_slot(slot)
+            self.made.append(name)
+            return slot
+
+        self.manager.set_slot_factory(make_slot)
+        self.aside, self.back = [], []
+        self.manager.setAside.connect(lambda name, fresh: self.aside.append((name, fresh)))
+        self.manager.broughtBack.connect(lambda name, old: self.back.append((name, old)))
+
+    def test_a_recording_large_slot_goes_to_the_background(self):
+        self.assertEqual(self.manager.set_aside("main"), "b1")
+        self.assertEqual(self.made, ["b1"])
+        self.assertEqual(self.manager.large().name, "b1")
+        self.assertEqual([s.name for s in self.manager.background()], ["main"])
+        self.assertEqual(self.main_tuner.stops, 0)  # it streams and records on
+        self.assertTrue(self.manager.muted("main"))
+        self.assertFalse(self.manager.muted("b1"))  # the user's sound goes with the role
+        self.assertEqual(self.manager.other().name, "pip")
+        self.assertEqual(self.aside, [("main", "b1")])
+
+    def test_it_comes_back_and_its_stand_in_is_used_again(self):
+        self.manager.set_aside("main")
+        self.assertEqual(self.manager.bring_back("main"), "b1")
+        self.assertEqual(self.manager.large().name, "main")
+        self.assertEqual(self.manager.background(), [])
+        self.assertFalse(self.manager.muted("main"))
+        self.assertEqual(self.back, [("main", "b1")])
+        self.assertEqual(self.manager.set_aside("main"), "b1")  # no other slot is made
+        self.assertEqual(self.made, ["b1"])
+
+    def test_it_shows_small_without_a_stream(self):
+        self.manager.set_aside("main")
+        starts = [c for c in self.log if c[1:3] == ("live", "start")]
+        self.assertTrue(self.manager.show_small("main"))
+        self.assertEqual(self.manager.small().name, "main")
+        self.assertTrue(self.manager.pip_open())
+        self.assertEqual([c for c in self.log if c[1:3] == ("live", "start")], starts)
+
+    def test_the_end_of_its_recording_lets_it_go(self):
+        self.manager.set_aside("main")
+        self.main.live.recordingChanged.emit(False)
+        self.assertEqual(self.manager.background(), [])
+        self.assertEqual(self.main_tuner.stops, 1)  # it leaves its channel as any player does
+
+    def test_not_while_the_grid_shows(self):
+        self.manager.enter_grid()
+        self.assertIsNone(self.manager.set_aside("main"))
 
 
 if __name__ == "__main__":

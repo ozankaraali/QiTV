@@ -456,6 +456,7 @@ class TVWindow(QMainWindow):
                 self.budget,
                 parent=self,
             )
+            self.sessions.set_slot_factory(self._make_slot)  # 2.6: recordings' stand-ins
             self._join_tuners()
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
         # Each channel's sound sync (J/K, the Sound panel), written off the GUI thread.

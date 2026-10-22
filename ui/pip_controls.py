@@ -85,6 +85,11 @@ NOTICE_MS = 3000  # a small picture's stream notice, after its channel's name
 _QUIET_NOTICES = (LOADING, UNAVAILABLE)
 
 
+def _records(slot: Slot) -> bool:
+    """Slot `slot`'s channel records (2.2's Record)."""
+    return bool(getattr(slot.live, "recording", lambda: False)())
+
+
 @dataclass
 class _Room:
     """What a title on its way closes once its link comes, and the toast that says so."""
@@ -189,6 +194,8 @@ class PipControls(QObject):
         sessions.denied.connect(self._on_denied)
         sessions.pipFailed.connect(self._on_failed)
         sessions.slotTimeline.connect(self._on_timeline)
+        sessions.setAside.connect(self._on_set_aside)
+        sessions.shownSmall.connect(lambda _name: self.follow_roles())
         for slot in sessions.slots():
             self.watch_slot(slot)
         self._lanes.sideFailed.connect(self._on_link_failed)
@@ -356,6 +363,10 @@ class PipControls(QObject):
             return
         if self.small_showing(channel) is not None:
             return  # already small
+        background = self.sessions.background_showing(channel)
+        if background is not None:
+            self._show_background(background.name, context)
+            return
         if self._limit_reached(channel):
             return
         title = str(channel.get("name") or "")
@@ -495,16 +506,57 @@ class PipControls(QObject):
         self._toast(limit_message(limit), "error", ERROR_MS)
         return True
 
-    def close(self) -> None:
-        """Close the small picture, or forget the one waiting to open."""
+    def close(self, *, keep_recording: bool = True) -> None:
+        """Close the small picture, or forget the one waiting to open. 2.6: a small picture
+        that records records on in the background, unless not `keep_recording` (the quit)."""
         if self._room is not None and self._room.close_small:
             self._room = None  # closed already: nothing to close, or say, for the title
         self._wanted = None
         self._link = None  # a late link for it is ignored (it is no longer `_link`)
         self._cancel_reopen()
         sessions = self.sessions
+        if keep_recording:
+            self._set_small_aside()
         if sessions.pip_open() or sessions.pip_opening():
             sessions.close_pip()
+
+    # ---- 2.6: recordings in the background ----------------------------------------------------
+
+    def follow_roles(self) -> None:
+        """A player went to the background or came back: the frame shows the large and the
+        small player (a background one's surface hides) and the label follows."""
+        if self._frame is not None:
+            sessions = self.sessions
+            self._frame.set_roles(sessions.large().name, sessions.other().name)
+        self._refresh_label()
+        self.changed.emit()
+
+    def _set_small_aside(self) -> None:
+        """The open small picture records: it records on in the background (another player
+        is the small picture's)."""
+        small = self.sessions.small()
+        if small is not None and _records(small):
+            self.sessions.set_aside(small.name)
+
+    def _show_background(self, name: str, context: Optional[ZapContext]) -> None:
+        """The channel background player `name` records shows small: no stream opens."""
+        self._wanted = None
+        self._link = None
+        self._cancel_reopen()
+        self._set_small_aside()
+        if context is not None:
+            self.view(name).context = context
+        if self.sessions.show_small(name):
+            self.sessions.slot(name).live.bring_back()
+
+    def _on_set_aside(self, name: str, fresh: str) -> None:
+        """Slot `name` records on in the background: when `fresh` took the small role, the
+        frame and the label follow (the large role is the shell's to follow)."""
+        if fresh != self.sessions.other().name:
+            return
+        self.forget_view(fresh)  # it shows nothing yet; `name`'s view stays for its return
+        self.sessions.slot(name).live.set_aside()
+        self.follow_roles()
 
     def _request(self, target: Target) -> None:
         if self._link is not None:
@@ -544,6 +596,7 @@ class PipControls(QObject):
 
     def _open(self, target: Target, context: ZapContext, url: str) -> None:
         sessions = self.sessions
+        self._set_small_aside()  # 2.6: a small picture that records records on
         slot = sessions.other()
         self._views[slot.name] = SlotView(target, context, url)
         self._closed_view = None

@@ -591,6 +591,7 @@ class LiveSession(QObject):
         self._kept_only = False
         self._live_after_resume = False
         self._back: Optional[Where] = None  # where the user was in a kept buffer taken back
+        self._aside: Optional[Where] = None  # where the user was when its player was set aside
         self._from_kept = False
         self._disk_failures = 0  # of the kept buffer taken back, this tune: a second starts afresh
         # Where a session with kept history goes when it is let go otherwise than by `park`
@@ -1156,6 +1157,26 @@ class LiveSession(QObject):
         self._ready_seen = self._loading = self._held_said = False
         self._edges = []
         self._ready_timer.start(self._ready_timeout_ms)
+
+    def set_aside(self) -> None:
+        """2.6: its channel was left while it records: the player pauses (the helper records
+        on) and where the user was is kept for `bring_back`."""
+        self._aside = self._where()
+        if self._phase is _Phase.PIPELINE and not self._paused:
+            self.toggle_pause()
+
+    def bring_back(self) -> None:
+        """2.6: its channel is watched again: live, and where the user was is offered
+        (`backOffered`), as a kept buffer taken back does."""
+        aside, self._aside = self._aside, None
+        self.go_live()
+        if aside is not None and aside.position is not None and self._sid is not None:
+            snapshot = self._snapshot()
+            parts = live_parts.from_state(snapshot.get("parts"))
+            now = self._wall()
+            edge = self._live_edge(snapshot)
+            wall = live_parts.wall_at(parts, aside.position, live_edge=edge, now=now)
+            self.backOffered.emit(aside.position, wall)
 
     def go_back_to(self, t: float) -> None:
         """Play on from timeline second `t` (2.6: where the user was before leaving), also

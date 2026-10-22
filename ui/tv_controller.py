@@ -545,6 +545,8 @@ class TVController(QObject):
             self.sessions.pipStarted.connect(self._on_pip_started)
             self.sessions.pipStateChanged.connect(self._on_pip_state)
             self.sessions.slotState.connect(self._on_slot_state)
+            self.sessions.setAside.connect(self._on_set_aside)
+            self.sessions.broughtBack.connect(self._on_brought_back)
         column.closed.connect(zap.close_column)
         column.rowClicked.connect(self._on_column_row)
         drawer.playRequested.connect(self.play_item)
@@ -631,8 +633,11 @@ class TVController(QObject):
         """Stop what plays (window close, self-update): its slot goes back once released."""
         self._resume = self._current if self._has_media() else None
         self.leave_multiview(keep_pip=False)
-        self._close_pip()
+        if self._pip is not None:
+            self._pip.close(keep_recording=False)
         self._live_controls.stop_tune()
+        if self.sessions is not None:
+            self.sessions.stop_background()  # 2.6: recordings stop (their files are saved)
 
     def resume_stopped(self) -> None:
         """Play again what stop_live() stopped (a self-update that could not launch).
@@ -695,6 +700,7 @@ class TVController(QObject):
         except Exception as e:
             self._log_failure("save the watch state", e)
         self._close_pip()  # both pictures stop
+        self._set_recording_aside()  # 2.6: a recording records on in the background
         self._live_controls.stop_tune()
         self._current, self._cid = None, None
 
@@ -802,6 +808,7 @@ class TVController(QObject):
         target = Target({"name": title, "cmd": url}, "movies", title, local=True)
         self.leave_multiview(keep_pip=False)  # the multiview is for live TV
         self._close_pip()  # picture in picture is for live TV
+        self._set_recording_aside()  # 2.6: it records on in the background
         self._cancel_external()
         self._lanes.supersede()
         self._lanes.drop_tune()  # a channel or movie still on its way never opens over it
@@ -1113,6 +1120,8 @@ class TVController(QObject):
             context.source = picked  # a zap keeps the list its group was picked from
         playing = self._playing_live()
         stay = playing is not None and ZapContext.same(channel, playing.item)
+        if stay and archive is not None and self._large_records():
+            stay = False  # its archive opens beside the recording, which records on (2.6)
         if not stay and self._shown_elsewhere(channel, group_key, channels):
             return
         if not from_zap and not stay:
@@ -1473,6 +1482,7 @@ class TVController(QObject):
         launcher = self._external_launcher()
         # Direct plays book the slot under the item's own provider, as pipeline tunes do.
         provider_name = item_provider.provider_name(self.catalog, item)
+        self._set_recording_aside()  # 2.6: what records large records on in the background
         self._live_controls.new_target()  # the old channel's ticks and held notice
         previous = self._current  # what the large picture played: a retry keeps its sync
         if launcher is not None:
@@ -1740,7 +1750,103 @@ class TVController(QObject):
         """A tune onto a channel another picture shows: never a second stream of it."""
         if self.multiview_shown():
             return self._grid_takes(channel, group_key, channels)
-        return self._pip_takes(channel, group_key, channels)
+        return self._pip_takes(channel, group_key, channels) or self._background_takes(
+            channel, group_key, channels
+        )
+
+    # ---- 2.6: recordings in the background ----------------------------------------------------
+
+    def _large_records(self) -> bool:
+        live = self.live
+        return live is not None and bool(getattr(live, "recording", lambda: False)())
+
+    def _set_recording_aside(self) -> bool:
+        """The large picture's channel is left while it records: its player records on in
+        the background and another takes the large picture (SessionManager.set_aside). False:
+        it does not record, the grid shows (its tiles are named), or no player could be had
+        (then it is left as before)."""
+        sessions = self.sessions
+        if sessions is None or self._closed or self.multiview_shown() or not self._large_records():
+            return False
+        return sessions.set_aside(sessions.large().name) is not None
+
+    def _background_takes(self, channel: dict, group_key: str, channels: list[dict]) -> bool:
+        """A tune onto the channel a background player records: that player is large again
+        (live, where the user was offered), never a second stream of it."""
+        sessions, pip = self.sessions, self._pip
+        slot = sessions.background_showing(channel) if sessions is not None else None
+        if slot is None or pip is None:
+            return False
+        pip.view(slot.name).context = ZapContext(
+            group_key,
+            channels,
+            fallback=self._all_live(),
+            source=item_provider.pick_source(self.catalog, channel, group_key),
+        )
+        self.overlays.column.close()
+        self._cancel_external()
+        self._lanes.drop_tune()  # a choice on its way for the large picture is superseded
+        return sessions.bring_back(slot.name) is not None
+
+    def _on_set_aside(self, name: str, fresh: str) -> None:
+        """Slot `name` records on in the background; `fresh` took its role. The large role
+        is the shell's to follow (the small one's is PipControls')."""
+        sessions, pip = self.sessions, self._pip
+        if sessions is None or pip is None or self._closed or sessions.large().name != fresh:
+            return
+        slot = sessions.slot(name)
+        current = self._current
+        pip.take_large(name, fresh, current, self.zap.context, self._current_url, self._cid)
+        pip.forget_view(fresh)  # a stand-in shows nothing yet
+        slot.channel = current.item if current is not None and current.live else None
+        slot.group_key = current.group_key if current is not None and current.live else None
+        self._use_slot(sessions.slot(fresh))
+        self._current, self._cid, self._current_url = None, None, ""
+        self._state = self._states.get(fresh, "idle")
+        pip.follow_roles()
+        slot.live.set_aside()
+
+    def _on_brought_back(self, name: str, old_name: str) -> None:
+        """Background slot `name` is the large picture again: the channel it records plays
+        live, where the user was is offered, and the stand-in leaves what it showed."""
+        sessions, pip = self.sessions, self._pip
+        if sessions is None or pip is None or self._closed:
+            return
+        slot, old = sessions.slot(name), sessions.slot(old_name)
+        view = pip.take_large(
+            old_name, name, self._current, self.zap.context, self._current_url, self._cid
+        )
+        self._live_controls.new_target()  # the stand-in's ticks and held notice
+        self._tuner.stop()  # the stand-in leaves its channel (its buffer is kept)
+        old.channel = old.group_key = None
+        pip.forget_view(old_name)
+        self._use_slot(slot)
+        target = view.target
+        if target is None and slot.channel is not None:  # a multiview tile's: no view kept
+            title = str(slot.channel.get("name") or "")
+            target = Target(slot.channel, "live", title, group_key=slot.group_key or "")
+        self._current, self._cid, self._current_url = target, view.cid, view.url
+        self._state = self._states.get(name, "idle")
+        self._tuning.stop()
+        self._autoplay.drop()  # the Next card was the stand-in's
+        if self._digits:
+            self.zap.cancel_digits()
+        context = view.context
+        if context is not None and context is not self.zap.context:
+            self.zap.set_context(context)
+        pip.follow_roles()
+        slot.live.bring_back()
+        self._restore_channel()
+        self.overlays.transport.set_paused(False)
+        current = self._current
+        if current is not None and self._channel is not None:
+            self.zap.tuned(self._channel)
+            self._record_watched(current, view.url)
+            self._live_controls.show_live_transport(current)
+            self._show_banner(self._channel)
+        self._tracks.refresh()
+        self._picture.refresh()
+        self._update_guides()
 
     def _grid_takes(self, channel: dict, group_key: str, channels: list[dict]) -> bool:
         """Another tile shows the channel: the focus moves there, with the zap group."""
