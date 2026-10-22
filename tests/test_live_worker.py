@@ -1589,6 +1589,63 @@ class ParkResumeTests(unittest.TestCase):
         self.assertGreater(len(self.read(helper, "d", kept[0][0])), 0)
 
 
+class KeptSpaceTests(unittest.TestCase):
+    """2.6: disk buffers share the user's disk amount, a kept one giving way first; a day-old
+    segment goes."""
+
+    def source(self, payload):
+        upstream = LocalSource({SECRET_PATH: (200, {}, payload)})
+        self.addCleanup(upstream.close)
+        return upstream.url + SECRET_PATH
+
+    def disk(self, root, max_bytes):
+        directory = ".qitv-timeshift-" + secrets.token_hex(16)
+        return {"kind": "disk", "root": str(root), "dir": directory, "max_bytes": max_bytes}
+
+    def oldest(self, helper, sid):
+        return [m for m in helper.messages if m[:2] == ("state", sid)][-1][2]["oldest"]
+
+    def test_a_kept_buffer_gives_way_to_the_channel_watched(self):
+        helper = InProcessHelper(self)
+        root = Path(helper.helper.root)
+        helper.parent.send(
+            ("open", "a", self.source(make_stream(8)), {}, True, self.disk(root, 1 << 30), 6.0)
+        )
+        helper.wait_for(lambda m: m == ("ended", "a"))
+        helper.parent.send(("park", "a"))
+        helper.wait_for(lambda m: m == ("parked", "a"))
+        kept = self.oldest(helper, "a")
+        # The newest open's amount is the total: room for about one of the two.
+        ring_a = helper.helper._sessions["a"]._ring
+        amount = ring_a.charged + 64 * 1024
+        helper.parent.send(
+            ("open", "b", self.source(make_stream(8)), {}, True, self.disk(root, amount), 6.0)
+        )
+        helper.wait_for(lambda m: m == ("ended", "b"))
+
+        def gave_way(m):
+            return m[:2] == ("state", "a") and m[2]["oldest"] != kept
+
+        if not any(gave_way(m) for m in helper.messages):  # it may have come before "ended"
+            helper.wait_for(gave_way)
+        ring_b = helper.helper._sessions["b"]._ring
+        self.assertLessEqual(ring_a.charged + ring_b.charged, amount)
+        self.assertEqual(self.oldest(helper, "b"), 0)  # the channel watched kept its own
+
+    def test_a_day_old_segment_goes(self):
+        from services.live import ring as ring_module
+
+        helper = InProcessHelper(self)
+        helper.parent.send(("open", "o", self.source(make_stream(8)), {}, True, RAM, 6.0))
+        helper.wait_for(lambda m: m == ("ended", "o"))
+        later = time.time() + ring_module.STALE_S + 60
+        with patch.object(ring_module, "_wall_time", lambda: later):
+            helper.helper.expire()
+        state = helper.wait_for(lambda m: m[:2] == ("state", "o"))
+        self.assertIsNone(state[3])  # nothing is left of it: the spans go too
+        self.assertIsNone(state[2]["oldest"])
+
+
 class StartQualityTests(unittest.TestCase):
     """In process: the spans message carries how cleanly each segment starts."""
 
@@ -1732,6 +1789,11 @@ class RamFallbackSizeTests(unittest.TestCase):
             root=str(root),
             send=lambda message, session=None: None,
             server=SimpleNamespace(add_session=lambda sid, ring, ended: adopted.append(ring)),
+            # 2.6: the disk rings' shared amount
+            disk_budget=lambda max_bytes: SimpleNamespace(register=lambda ring: None),
+            forget_ring=lambda ring: None,
+            ring_parked=lambda ring, parked: None,
+            trim_disk=lambda session: None,
         )
         ring = {"kind": "disk", "dir": directory, "max_bytes": 1 << 30, "ram_bytes": 3 * 1024**2}
         return _Session(helper, "s1", "http://provider.test/1.ts", {}, True, ring, 6.0), adopted

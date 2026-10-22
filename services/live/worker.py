@@ -127,13 +127,15 @@ from services.live.ts import (
 
 if TYPE_CHECKING:
     from services.live.recorder import Recorder
-    from services.live.ring import Ring
+    from services.live.ring import DiskBudget, Ring
     from services.live.server import StreamServer
     from services.live.source import Source
 
 _LOG = logging.getLogger(__name__)
 _wall_time = time.time  # a part's time of day (2.6); tests replace the module's clocks
 _POLL = 0.1
+_EXPIRE_EVERY_S = 60.0  # 2.6: how often a day-old segment is looked for
+_NOTIFY_WAIT_S = 0.5  # a kept session's state after its ring lost segments: waited for that long
 _NOTIFY_INTERVAL = 0.25
 # A live edge this far past the one last reported is reported at once, throttle or not: a burst
 # lands in one read, and the throttle held it back until the next read (up to a pause later).
@@ -572,6 +574,8 @@ class _Session:
             else:
                 self._parked = True
         if not reading:
+            if self._ring is not None:
+                self._helper.ring_parked(self._ring, True)
             self._send(("parked", self.sid))
             return
         self._interrupt.set()
@@ -596,6 +600,9 @@ class _Session:
                 self._parked = self._parking = self._ended = False
                 self.released.clear()
                 self._interrupt.clear()
+                ring = self._ring
+        if accepted and ring is not None:
+            self._helper.ring_parked(ring, False)
         if not accepted:
             _LOG.warning("A live session that still reads was asked to resume; ignored.")
             return
@@ -623,6 +630,8 @@ class _Session:
                                 self._parking, self._parked = False, True
                             self.released.set()
                 if parked or self._resume_failed():
+                    if self._ring is not None:
+                        self._helper.ring_parked(self._ring, True)  # it gives way first
                     self._send(("parked", self.sid))
                 # Keep serving the buffer until the parent closes the session or resumes it.
                 if not self._await_resume():
@@ -789,6 +798,7 @@ class _Session:
         root = Path(spec.get("root") or self._helper.root)
         try:
             ring: Ring = DiskRing(root, spec["dir"], spec["max_bytes"], stop=self.stop)
+            self._helper.disk_budget(spec["max_bytes"]).register(ring)
         except (RingError, OSError) as error:
             self._check()
             # An OSError's text names the path; ring errors are fixed strings.
@@ -818,9 +828,11 @@ class _Session:
                 self._ring = ring
                 self._helper.server.add_session(self.sid, ring, self._is_ended)
         if cancelled:
+            self._helper.forget_ring(ring)
             _close_ring(ring)
             raise _Cancelled()
         if previous is not None:
+            self._helper.forget_ring(previous)
             _close_ring(previous)
 
     def _disk_failed(self, message: str) -> None:
@@ -863,6 +875,8 @@ class _Session:
                 if not self._skipping:
                     closing = event.seq
                     self._write(lambda ring: ring.complete(closing))
+                    if self._disk:
+                        self._helper.trim_disk(self)  # 2.6: every disk buffer's total
                 span = timeline.on_closed(
                     event.seq, event.next_first_pts, event.wall, event.start_quality
                 )
@@ -1250,7 +1264,24 @@ class _Session:
         with self.lock:
             ring, self._ring = self._ring, None
         if ring is not None:
+            self._helper.forget_ring(ring)
             _close_ring(ring)
+
+    def expire(self, before: float) -> None:
+        """2.6: segments completed before `before` go; the parent hears it."""
+        ring = self._ring
+        if ring is not None and ring.retire_before(before):
+            self.notify_soon()
+
+    def notify_soon(self) -> None:
+        """Another thread changed the ring (the disk amount, the day's limit): the state says
+        so once the pipeline is free, skipped when it stays busy (its own next state will)."""
+        if self.cancelled or not self._moving.acquire(timeout=_NOTIFY_WAIT_S):
+            return
+        try:
+            self._notify(force=True)
+        finally:
+            self._moving.release()
 
 
 class _Helper:
@@ -1272,6 +1303,51 @@ class _Helper:
         self._owner_gone = owner_gone or threading.Event()
         self._outbox = _Outbox(conn)
         self._sessions: dict[str, _Session] = {}
+        self._budget: DiskBudget | None = None  # 2.6: the disk rings' shared amount
+        self._expiry = threading.Event()  # set: the expiry ticker ends
+
+    # ---- 2.6: the disk amount and the day's limit ----------------------------------------
+    def disk_budget(self, max_bytes: int) -> DiskBudget:
+        """The disk rings' shared amount: the newest disk session's (the user's setting)."""
+        from services.live.ring import DiskBudget
+
+        if self._budget is None:
+            self._budget = DiskBudget(max_bytes)
+        else:
+            self._budget.max_bytes = max_bytes
+        return self._budget
+
+    def ring_parked(self, ring: Ring, parked: bool) -> None:
+        if self._budget is not None:
+            self._budget.set_parked(ring, parked)
+
+    def forget_ring(self, ring: Ring) -> None:
+        if self._budget is not None:
+            self._budget.unregister(ring)
+
+    def trim_disk(self, writer: _Session) -> None:
+        """Fit every disk ring into the amount; kept sessions that lost segments say so."""
+        if self._budget is None:
+            return
+        changed = self._budget.trim()
+        for session in list(self._sessions.values()):
+            if session is not writer and session._ring in changed:
+                session.notify_soon()
+
+    def expire(self) -> None:
+        """Segments over a day old go, from every session's ring (2.6)."""
+        from services.live import ring as ring_module
+
+        before = ring_module._wall_time() - ring_module.STALE_S
+        for session in list(self._sessions.values()):
+            session.expire(before)
+
+    def _expire_ticker(self) -> None:
+        while not self._expiry.wait(_EXPIRE_EVERY_S):
+            try:
+                self.expire()
+            except Exception as error:  # the next tick tries again
+                _LOG.warning("Old time-shift segments could not go (%s).", type(error).__name__)
 
     def send(self, message: tuple[Any, ...], session: _Session | None = None) -> None:
         """Queue a message for the parent (dropped once `session` is cancelled)."""
@@ -1280,6 +1356,7 @@ class _Helper:
     def run(self) -> None:
         """Serve commands until "shutdown", or until the owner closes the pipe or dies."""
         self.send(("hello", self.server.start()))
+        threading.Thread(target=self._expire_ticker, name="qitv-live-expiry", daemon=True).start()
         while not self._owner_gone.is_set():
             try:
                 if not self._conn.poll(_POLL):
@@ -1427,6 +1504,7 @@ class _Helper:
             session.cancel()
 
     def shutdown(self) -> None:
+        self._expiry.set()
         sessions = list(self._sessions.values())
         self._sessions.clear()
         for session in sessions:

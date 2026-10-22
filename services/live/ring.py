@@ -4,6 +4,11 @@ One writer thread appends keyframe-aligned MPEG-TS segments; several reader thre
 them progressively (including the still-open one) with `read_at`, which pins nothing, and
 wait on `changed` for more data. Eviction removes the oldest *completed* segments first;
 the open segment is never removed. Error texts are fixed strings.
+
+Kept buffers (2.6): each completed segment notes the time of day it completed (`wall`); one
+older than `STALE_S` goes (`retire_before`). Every disk ring of a helper shares the user's
+disk amount (`DiskBudget`): over it, the oldest segment of a kept (parked) ring goes first,
+then the oldest of any.
 """
 
 from __future__ import annotations
@@ -34,6 +39,8 @@ _LOG = logging.getLogger(__name__)
 _READ_FAILED = "The temporary buffer could not be read."
 _STOPPED = "Recording stopped."
 _WRITE_FAILED = "The temporary disk could not complete a buffer write."
+STALE_S = 24 * 3600  # 2.6: a segment older than this goes (a day-old timeline is no use)
+_wall_time = time.time  # a segment's time of day; tests replace it
 
 
 class RingError(Exception):
@@ -48,6 +55,7 @@ class Segment:
     complete: bool = False
     retired: bool = False
     charge: int = 0
+    wall: float = 0.0  # 2.6: Unix time it completed (0.0 while open)
     junction: bool = False  # 2.6: it begins a kept buffer's new run (its header is sent too)
 
 
@@ -239,6 +247,7 @@ class Ring(ABC):
     def _complete_locked(self, segment: Segment) -> None:
         self._guard(lambda: self._finish(segment))
         with self.changed:
+            segment.wall = _wall_time()
             segment.complete = True
             if self._open is segment:
                 self._open = None
@@ -253,6 +262,34 @@ class Ring(ABC):
         with self._state_lock:
             self._bytes -= segment.size
             self._charged -= segment.charge
+
+    def oldest_wall(self) -> float | None:
+        """When the oldest completed segment completed (Unix time); None without one."""
+        with self._state_lock:
+            return self._completed[0].wall if self._completed else None
+
+    def retire_oldest(self) -> bool:
+        """Let the oldest completed segment go (2.6, the disk amount); False without one."""
+        with self._disk_lock:
+            if self.closed or not self._completed:
+                return False
+            self._retire_oldest_locked()
+            with self.changed:
+                self.changed.notify_all()
+            return True
+
+    def retire_before(self, wall: float) -> int:
+        """Let every completed segment that completed before `wall` go (2.6: a day old);
+        the open one stays. Returns how many went."""
+        count = 0
+        with self._disk_lock:
+            while not self.closed and self._completed and self._completed[0].wall < wall:
+                self._retire_oldest_locked()
+                count += 1
+            if count:
+                with self.changed:
+                    self.changed.notify_all()
+        return count
 
     def _retire_oldest_locked(self) -> None:
         with self._state_lock:
@@ -616,3 +653,54 @@ def cleanup_session_dir(root: Path, name: str) -> bool:
         if manager.tryLock(0):
             manager.unlock()
     return True
+
+
+class DiskBudget:
+    """The user's disk amount, shared by every disk ring of a helper (2.6).
+
+    Each ring keeps under its own cap as it writes; `trim()`, called once a segment completed
+    and without any ring's lock held, lets the oldest segments go until all of them fit: a
+    kept (parked) ring's first, the oldest first, then the oldest of any. Lock order: the
+    budget's lock, then one ring's at a time.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self._lock = threading.Lock()
+        self._rings: dict[int, tuple[Ring, bool]] = {}  # id -> (ring, parked)
+
+    def register(self, ring: Ring, *, parked: bool = False) -> None:
+        with self._lock:
+            self._rings[id(ring)] = (ring, parked)
+
+    def set_parked(self, ring: Ring, parked: bool) -> None:
+        with self._lock:
+            if id(ring) in self._rings:
+                self._rings[id(ring)] = (ring, parked)
+
+    def unregister(self, ring: Ring) -> None:
+        with self._lock:
+            self._rings.pop(id(ring), None)
+
+    def trim(self) -> list[Ring]:
+        """Fit the rings into `max_bytes`; returns the parked rings that lost segments (their
+        sessions say so: nothing else would)."""
+        changed: list[Ring] = []
+        with self._lock:
+            rings = list(self._rings.values())
+            while sum(ring.charged for ring, _ in rings) > self.max_bytes:
+                victim = self._victim(rings)
+                if victim is None or not victim[0].retire_oldest():
+                    break
+                if victim[1] and victim[0] not in changed:
+                    changed.append(victim[0])
+        return changed
+
+    @staticmethod
+    def _victim(rings: list[tuple[Ring, bool]]) -> tuple[Ring, bool] | None:
+        """The ring whose oldest segment goes next: a parked one's oldest, else any one's."""
+        for parked in (True, False):
+            held = [(r, p) for r, p in rings if p is parked and r.oldest_wall() is not None]
+            if held:
+                return min(held, key=lambda item: item[0].oldest_wall() or 0.0)
+        return None

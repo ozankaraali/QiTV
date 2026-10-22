@@ -10,8 +10,11 @@ import time
 import unittest
 from unittest.mock import patch
 
+from services.live import ring as ring_module
 from services.live.ring import (
     _OWNER,
+    STALE_S,
+    DiskBudget,
     DiskRing,
     RamRing,
     RingError,
@@ -584,3 +587,96 @@ class DiskRingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiskBudgetTests(unittest.TestCase):
+    """2.6: every disk buffer shares the user's disk amount; kept (parked) ones give way first,
+    the oldest first, and nothing older than a day stays."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-budget-test-")
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
+        self.now = 1_000_000.0
+        clock = patch.object(ring_module, "_wall_time", lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def ring(self):
+        ring = DiskRing(self.directory, session_name(), 64 * 1024 * 1024)
+        self.addCleanup(ring.close)
+        return ring
+
+    def fill(self, ring, count, *, size=8192):
+        """`count` completed segments, a second apart on the wall clock."""
+        start = ring.newest_seq + 1 if ring.newest_seq is not None else 0
+        for seq in range(start, start + count):
+            ring.open_segment(seq, b"h" * 376)
+            ring.append(b"d" * size)
+            ring.complete(seq)
+            self.now += 1.0
+
+    def test_kept_rings_give_way_first(self):
+        kept, live = self.ring(), self.ring()
+        self.fill(kept, 3)
+        self.fill(live, 3)
+        budget = DiskBudget(kept.charged + live.charged)
+        budget.register(kept, parked=True)
+        budget.register(live)
+        self.fill(live, 1)
+        emptied = budget.trim()
+        self.assertEqual(kept.oldest_seq, 1)  # kept's oldest went ...
+        self.assertEqual(live.oldest_seq, 0)  # ... the channel watched kept all of its own
+        self.assertLessEqual(kept.charged + live.charged, budget.max_bytes)
+        self.assertEqual(emptied, [kept])  # it changed: its owner says so
+
+    def test_the_oldest_kept_goes_first(self):
+        older, newer, live = self.ring(), self.ring(), self.ring()
+        self.fill(older, 2)
+        self.fill(newer, 2)
+        self.fill(live, 1)
+        budget = DiskBudget(older.charged + newer.charged + live.charged)
+        for ring in (older, newer):
+            budget.register(ring, parked=True)
+        budget.register(live)
+        self.fill(live, 1)
+        budget.trim()
+        self.assertEqual((older.oldest_seq, newer.oldest_seq), (1, 0))
+
+    def test_without_kept_rings_the_oldest_of_any_goes(self):
+        first, second = self.ring(), self.ring()
+        self.fill(first, 2)
+        self.fill(second, 2)
+        budget = DiskBudget(first.charged + second.charged)
+        budget.register(first)
+        budget.register(second)
+        self.fill(second, 1)
+        budget.trim()
+        self.assertEqual((first.oldest_seq, second.oldest_seq), (1, 0))
+
+    def test_a_ring_that_unregisters_no_longer_counts(self):
+        kept, live = self.ring(), self.ring()
+        self.fill(kept, 2)
+        self.fill(live, 2)
+        budget = DiskBudget(live.charged)
+        budget.register(kept, parked=True)
+        budget.register(live)
+        budget.unregister(kept)
+        self.assertEqual(budget.trim(), [])
+        self.assertEqual(kept.oldest_seq, 0)
+
+    def test_a_day_old_segment_goes(self):
+        ring = self.ring()
+        self.fill(ring, 3)
+        self.now += STALE_S - 2.5  # the first is over a day old, the others not yet
+        self.assertEqual(ring.retire_before(self.now - STALE_S), 1)
+        self.assertEqual(ring.oldest_seq, 1)
+        self.assertEqual(STALE_S, 24 * 3600)
+
+    def test_the_open_segment_never_goes(self):
+        ring = self.ring()
+        self.fill(ring, 1)
+        ring.open_segment(1, b"h" * 376)
+        self.now += 2 * STALE_S
+        self.assertEqual(ring.retire_before(self.now - STALE_S), 1)
+        self.assertEqual(ring.oldest_seq, 1)
