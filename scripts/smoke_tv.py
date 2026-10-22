@@ -34,7 +34,8 @@ saved (MPEG-TS from its first byte), the controls showed REC meanwhile and the t
 then Down zaps to Channel 4 (a second such source) and Up back to Channel 3 as soon as
 Channel 4's upstream delivers: each source, and both together, never had more than one
 connection open at once (spec §11; the sources see a client's close at once); after the
-close no helper process and nothing in the timeshift directory remain. Lags and
+close no helper process remains and the timeshift directory holds only the kept buffers
+(2.6: labelled, readable, unlocked, for the next start). Lags and
 positions are the LiveSession timeline's (`timelineChanged`), not VLC's. A run killed for a
 hang has its live helper killed too.
 
@@ -240,7 +241,10 @@ SEEK_CHECK = f"{PIPELINE_PREFIX}seeking back 10 s moves the position back 8-12 s
 SPEED_CHECK = f"{PIPELINE_PREFIX}1.5x is applied while time-shifted"
 LIVE_AGAIN_CHECK = f"{PIPELINE_PREFIX}the speed returns to 1x once back at live"
 NO_HELPER_CHECK = f"{PIPELINE_PREFIX}no live helper process remains after the close"
-EMPTY_DIR_CHECK = f"{PIPELINE_PREFIX}the timeshift directory is empty after the close"
+EMPTY_DIR_CHECK = (
+    f"{PIPELINE_PREFIX}after the close the timeshift directory holds kept buffers only "
+    "(labelled, readable, unlocked)"
+)
 ZAP_CHECK = (
     f"{PIPELINE_PREFIX}zapping {LIVE_CHANNEL} → {ZAP_CHANNEL} → {LIVE_CHANNEL} never has more "
     "than one source connection open"
@@ -899,6 +903,25 @@ def _process_alive(pid: int) -> bool:
     return bool(stat) and not stat.startswith("Z")
 
 
+def _kept_buffer(folder: Path) -> bool:
+    """A kept buffer (2.6): a v2 folder with a readable, labelled index and a free lock."""
+    from PySide6.QtCore import QLockFile
+
+    from services.live.ring import read_index
+
+    if not folder.name.startswith(".qitv-buffer-"):
+        return False
+    index = read_index(folder)
+    if index is None or index.label is None or not index.segments:
+        return False
+    lock = QLockFile(str(folder / "session.lock"))
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(0):
+        return False
+    lock.unlock()
+    return True
+
+
 def _entries(directory: Optional[str]) -> list[str]:
     """What `directory` holds (none when it does not exist)."""
     if not directory or not os.path.isdir(directory):
@@ -1473,7 +1496,8 @@ class Driver:
         if not tuned:
             return  # the checks still missing fail the pipeline gate
         facts["helper_pid"] = self._helper_pid()
-        buffers = [n for n in _entries(facts["timeshift_dir"]) if n.startswith(".qitv-timeshift-")]
+        prefixes = (".qitv-timeshift-", ".qitv-buffer-")  # 2.6: v2 folders, kept past a quit
+        buffers = [n for n in _entries(facts["timeshift_dir"]) if n.startswith(prefixes)]
         report.check(ON_DISK_CHECK, bool(buffers), f"{facts['timeshift_dir']}: {buffers}")
         yield WARM_UP_MS
         facts["video"] = self._video_facts(PIPELINE_VIDEO)  # inspection only, no check
@@ -2292,10 +2316,16 @@ class Driver:
             report.check(NO_HELPER_CHECK, not alive, f"pid {pid} {'runs' if alive else 'is gone'}")
         directory = facts.get("timeshift_dir")
         left = _entries(directory)
+        # 2.6: the channels' buffers are kept for the next start; nothing else may stay.
+        strays = [name for name in left if not _kept_buffer(Path(directory) / name)]
         report.check(
             EMPTY_DIR_CHECK,
-            directory is not None and not left,
-            f"{directory}: {left}" if directory else "the pipeline never ran",
+            directory is not None and not strays,
+            (
+                f"{directory}: kept {len(left) - len(strays)}, others {strays}"
+                if directory
+                else "the pipeline never ran"
+            ),
         )
         facts["timeline_states"] = len(self.timeline)
 

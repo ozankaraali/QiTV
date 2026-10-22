@@ -1441,11 +1441,13 @@ class OutboxTests(unittest.TestCase):
 class InProcessHelper:
     """A `_Helper` command loop on a thread, with the parent's end of its pipe."""
 
-    def __init__(self, test):
-        temporary = tempfile.TemporaryDirectory(prefix="qitv-live-worker-test-")
-        test.addCleanup(temporary.cleanup)
+    def __init__(self, test, root=None):
+        if root is None:
+            temporary = tempfile.TemporaryDirectory(prefix="qitv-live-worker-test-")
+            test.addCleanup(temporary.cleanup)
+            root = temporary.name
         self.parent, child = multiprocessing.Pipe(duplex=True)
-        self.helper = worker._Helper(child, temporary.name)
+        self.helper = worker._Helper(child, str(root))
         self.loop = threading.Thread(target=self.helper.run, daemon=True)
         self.loop.start()
         self.messages = []
@@ -1764,6 +1766,84 @@ class KeptIndexTests(unittest.TestCase):
         while (root / directory).exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertFalse((root / directory).exists())
+
+
+class AdoptTests(unittest.TestCase):
+    """2.6: a later helper takes a kept folder back as a parked session."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-adopt-test-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def source(self, payload):
+        upstream = LocalSource({SECRET_PATH: (200, {}, payload)})
+        self.addCleanup(upstream.close)
+        return upstream.url + SECRET_PATH
+
+    def kept_folder(self):
+        """A first helper's labelled disk session, parked and left behind as it goes down."""
+        first = InProcessHelper(self, self.root)
+        directory = ".qitv-buffer-" + secrets.token_hex(16)
+        ring = {"kind": "disk", "root": str(self.root), "dir": directory, "max_bytes": 1 << 30}
+        first.parent.send(("open", "a", self.source(make_stream(8)), {}, True, ring, 6.0))
+        first.parent.send(("keep", "a", {"channel": "k1"}))
+        first.wait_for(lambda m: m == ("ended", "a"))
+        first.parent.send(("park", "a"))
+        first.wait_for(lambda m: m == ("parked", "a"))
+        first.helper._dispatch(("where", "a", {"position": 3.0, "paused": True}))
+        states = [m for m in first.messages if m[:2] == ("state", "a")]
+        before = rebuild(states)
+        with urlopen(f"{first.base_url}/a/stream/{before[0][0]}.ts", timeout=5) as response:
+            body = response.read()
+        first.helper.shutdown()
+        return directory, before, states[-1][2]["parts"], body
+
+    def adopted(self, directory):
+        second = InProcessHelper(self, self.root)
+        second.helper._dispatch(("adopt", "z", directory, 1 << 30))
+        second.wait_for(lambda m: m[:2] == ("kept", "z"))
+        return second
+
+    def test_a_kept_folder_is_taken_back(self):
+        directory, before, parts, body = self.kept_folder()
+        second = self.adopted(directory)
+        names = [m[0] for m in second.messages if len(m) > 1 and m[1] == "z"]
+        self.assertEqual(names[-2:], ["parked", "kept"])
+        self.assertEqual(
+            second.messages[-1], ("kept", "z", {"channel": "k1"}, {"position": 3.0, "paused": True})
+        )
+        states = [m for m in second.messages if m[:2] == ("state", "z")]
+        self.assertEqual(
+            [(s[0], round(s[1], 3), round(s[2], 3)) for s in rebuild(states)],
+            [(s[0], round(s[1], 3), round(s[2], 3)) for s in before],
+        )
+        self.assertEqual(
+            [[p[0], round(p[1], 3)] for p in states[-1][2]["parts"]],
+            [[p[0], round(p[1], 3)] for p in parts],
+        )
+        with urlopen(f"{second.base_url}/z/stream/{before[0][0]}.ts", timeout=5) as response:
+            self.assertEqual(response.read(), body)  # what it kept, byte for byte
+
+    def test_a_taken_back_buffer_resumes_where_it_was(self):
+        directory, before, _, _ = self.kept_folder()
+        second = self.adopted(directory)
+        ahead = self.source(make_stream(6, pts_start=AHEAD))
+        second.parent.send(("resume", "z", ahead, {}, True, 6.0))
+        second.wait_for(lambda m: m == ("resumed", "z"))
+        second.wait_for(lambda m: m == ("ended", "z"))
+        after = rebuild([m for m in second.messages if m[:2] == ("state", "z")])
+        seqs = [s[0] for s in after]
+        self.assertEqual(seqs, list(range(seqs[0], seqs[0] + len(seqs))))
+        self.assertGreater(seqs[-1], before[-1][0])
+        with urlopen(f"{second.base_url}/z/stream/{before[-1][0]}.ts", timeout=5) as response:
+            steps = video_steps(response.read())
+        self.assertTrue(all(0 < step <= 2 * (CLOCK // 25) for step in steps), sorted(set(steps)))
+
+    def test_a_folder_that_cannot_be_taken_back_says_so(self):
+        second = InProcessHelper(self, self.root)
+        second.helper._dispatch(("adopt", "y", ".qitv-buffer-" + "0" * 32, 1 << 30))
+        second.wait_for(lambda m: m == ("unkept", "y"))
 
 
 class StartQualityTests(unittest.TestCase):

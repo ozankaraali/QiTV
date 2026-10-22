@@ -44,6 +44,12 @@ Commands (parent to helper):
   channel's key) and where the user was in it, written to its folder's index (a v2 folder,
   `services.live.ring`); unanswered, ignored for a memory buffer. A helper going down
   ("shutdown", its owner gone) keeps v2 folders for the next helper; "close" removes them;
+- `("adopt", sid, dir_name, max_bytes)` (2.6): take a kept folder back (a v2 folder a helper
+  that went down kept, `services.live.ring.DiskRing.adopt`) as parked session `sid`: its ring,
+  timeline and parts as they were, its segmenter and clock joiner primed with its newest
+  segment so a resume goes on after it. Answered by a state holding every span, then
+  `("parked", sid)` and `("kept", sid, label, where)`; `("unkept", sid)` when it cannot be
+  taken back (gone, in use, unreadable);
 - `("record_start", sid, rid, path, seq, limits)` (2.2): recording `rid` (the parent's name for
   it) writes the session's ring to a new file at `path` (a unique name next to it when that
   exists) from segment `seq` on, following the live edge, until "record_stop", the session's
@@ -485,6 +491,7 @@ class _Session:
         self._label: dict | None = None  # 2.6: "keep" (written once a disk ring exists)
         self._where: dict | None = None  # 2.6: "where"
         self.keep_on_close = False  # 2.6: the helper goes down: a v2 folder stays
+        self.adopting: tuple[str, int] | None = None  # 2.6: (folder, size) to take back
         self._recorder: Recorder | None = None  # 2.2: writes the ring to a file (`record`)
         self._finishing: set[Recorder] = set()  # stopped, still writing up to the live edge
         self.thread = threading.Thread(target=self._run, name="qitv-live-session", daemon=True)
@@ -618,6 +625,8 @@ class _Session:
     # ---- session thread ---------------------------------------------------------------
     def _run(self) -> None:
         try:
+            if self.adopting is not None and not (self._take_back() and self._await_resume()):
+                return
             while True:
                 try:
                     self._ingest()
@@ -645,6 +654,66 @@ class _Session:
                     return
         finally:
             self._teardown()
+
+    def _take_back(self) -> bool:
+        """Take a kept folder back as a parked session (see "adopt"); False (it ends, having
+        said "unkept") when it cannot be."""
+        from services.live.parts import Part
+        from services.live.ring import DiskRing
+        from services.live.timeline import Span
+
+        assert self.adopting is not None
+        directory, max_bytes = self.adopting
+        root = Path(self._helper.root)
+        try:
+            ring, index = DiskRing.adopt(root, directory, max_bytes)
+        except Exception as error:  # RingError, OSError: gone, in use, unreadable
+            _LOG.info(
+                "A kept time-shift buffer could not be taken back (%s).", type(error).__name__
+            )
+            self._helper.unkept(self)
+            return False
+        records = index.segments
+        spans = [
+            Span(r["seg"], float(r["s"]), float(r["e"]), bool(r.get("d")), r.get("q") or "key")
+            for r in records
+        ]
+        self._timeline.restore(
+            spans, [Part(p["part"], float(p["s"]), float(p["w"])) for p in index.parts]
+        )
+        # The newest segment primes the segmenter (its program) and the clock joiner (the last
+        # picture's timestamps, the counters), so a resume re-bases onto it as after a park.
+        newest = records[-1]["seg"]
+        segmenter = self._segmenter
+        joiner = ClockJoiner(
+            program=lambda: (segmenter.video_pid, segmenter.video_type), clock=time.monotonic
+        )
+        try:
+            last = (root / directory / f"segment-{newest}.ts").read_bytes()
+            segmenter.feed(last)
+            segmenter.finish()
+            joiner.feed(last)
+            joiner.finish()
+        except Exception as error:  # a resume then starts its clock afresh
+            _LOG.info(
+                "A kept buffer's newest segment could not be read (%s).", type(error).__name__
+            )
+        segmenter.dropped.clear()
+        segmenter.seed(newest + 1)
+        self._clock_joiner, self._clock_hls = joiner, None
+        self._label, self._where = index.label, index.where
+        self._kept_history = self._disk = True
+        self._ring_spec = {"kind": "disk", "dir": directory, "max_bytes": max_bytes}
+        self._pending = [(s.seq, s.start, s.end, s.discontinuity, s.start_quality) for s in spans]
+        self._helper.disk_budget(max_bytes).register(ring, parked=True)
+        self._adopt(ring)
+        with self.lock:
+            self._parked = True
+            self.released.set()  # no upstream
+        self._notify(force=True)
+        self._send(("parked", self.sid))
+        self._send(("kept", self.sid, index.label or {}, index.where or {}))
+        return True
 
     def _resume_failed(self) -> bool:
         """A resumed run ended without its first segment: the session is parked again."""
@@ -733,7 +802,7 @@ class _Session:
         segmenter = self._segmenter
         # A resumed run of the same kind keeps the clock joiner: it re-bases the new run onto
         # the old run's last picture (2.6). Another kind starts afresh.
-        kept_clock = self._clock_joiner if self._clock_hls is source.hls else None
+        kept_clock = self._clock_joiner if self._clock_hls in (None, source.hls) else None
         self._clock_hls = source.hls
 
         def program() -> tuple[int | None, int | None]:
@@ -1445,6 +1514,14 @@ class _Helper:
                 if len(command) not in (6, 7) or not isinstance(command[1], str):
                     raise ValueError("a resume needs a session and its source")
                 self._resume(*command[1:])
+            elif name == "adopt":
+                if (
+                    len(command) != 4
+                    or not all(isinstance(command[k], str) for k in (1, 2))
+                    or type(command[3]) is not int
+                ):
+                    raise ValueError("an adopt needs a session, a folder and a size")
+                self._adopt(command[1], command[2], command[3])
             elif name in ("keep", "where"):
                 if len(command) != 3 or not isinstance(command[1], str):
                     raise ValueError("a note needs a session")
@@ -1487,6 +1564,22 @@ class _Helper:
         session = _Session(self, sid, url, headers, verify_ssl, ring, live_delay, start)
         self._sessions[sid] = session
         session.thread.start()
+
+    def _adopt(self, sid: str, directory: str, max_bytes: int) -> None:
+        if not _SESSION_ID.fullmatch(sid) or sid in self._sessions:
+            self.send(("unkept", sid))
+            return
+        spec = {"kind": "disk", "dir": directory, "max_bytes": max_bytes}
+        session = _Session(self, sid, "", {}, True, spec, 6.0)
+        session.adopting = (directory, max_bytes)
+        self._sessions[sid] = session
+        session.thread.start()
+
+    def unkept(self, session: _Session) -> None:
+        """A kept folder could not be taken back (its session thread): it is no session."""
+        if self._sessions.get(session.sid) is session:
+            del self._sessions[session.sid]
+        self.send(("unkept", session.sid))
 
     def _park(self, sid: str) -> None:
         session = self._sessions.get(sid)

@@ -445,8 +445,10 @@ class TVWindow(QMainWindow):
             self.live_session = LiveSession(self.engine, self.session, tuning=self.live_tuning)
             self.pip_live = LiveSession(self.engine, self.pip_session, tuning=self.live_tuning)
             self.engine.start()
-            # 2.6: the buffers of the channels left, for every player.
+            # 2.6: the buffers of the channels left, for every player (and those kept on disk
+            # before a restart, taken back by the helper).
             self.kept = KeptBuffers(self.engine)
+            self._take_kept_back()
             self.sessions = SessionManager(
                 self._slot("main", self.session, self.live_session),
                 self._slot("pip", self.pip_session, self.pip_live),
@@ -1436,6 +1438,8 @@ class TVWindow(QMainWindow):
         self.controller.settings_saved()
         if self.kept is not None and not self.config_manager.timeshift_enabled:
             self.kept.drop_disk()  # the disk buffer is off: what was kept on disk goes
+            if self.engine is not None:
+                self.engine.drop_kept()
         self.remote.apply_config()
 
     def set_provider(self, force_update: bool = False) -> None:
@@ -1613,11 +1617,22 @@ class TVWindow(QMainWindow):
             live.use_engine(self.engine)  # connected before it starts
         if self.kept is not None:
             self.kept.use_engine(self.engine)
+            self._take_kept_back()
         self.engine.start()
         old.deleteLater()
         call_before_update(self.stop_live, self.restart_live)  # each hook runs once
         logger.info("The update did not launch; time-shift is back on.")
         self.controller.resume_stopped()  # what played before plays again
+
+    def _take_kept_back(self) -> None:
+        """The disk buffers kept before (2.6): taken back with the disk buffer on, else gone."""
+        config = self.config_manager
+        if self.engine is None:
+            return
+        if config.timeshift_enabled:
+            self.engine.adopt_kept(int(config.timeshift_max_mib) * 1024 * 1024)
+        else:
+            self.engine.drop_kept()
 
     def _lives(self) -> list[LiveSession]:
         if self.sessions is None:

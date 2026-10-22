@@ -17,6 +17,7 @@ LIVE = Where(None, False)
 
 class FakeEngine(QObject):
     sessionUpdated = Signal(str, dict)
+    keptFound = Signal(str, dict, dict)  # 2.6: a later helper took a kept folder back
 
     def __init__(self):
         super().__init__()
@@ -81,6 +82,14 @@ class KeptBuffersTests(unittest.TestCase):
         self.engine.sessionUpdated.emit("a", {"oldest": None})
         self.assertEqual(self.engine.closed, ["a"])
         self.assertEqual([r.sid for r in self.kept.rings()], ["b"])
+
+    def test_what_a_new_helper_took_back_is_kept(self):
+        self.engine.keptFound.emit("z", {"channel": "k1"}, {"position": 12.0, "paused": True})
+        self.engine.keptFound.emit("y", {"channel": "k2"}, {})
+        self.engine.keptFound.emit("x", {}, {})  # no channel: let go
+        self.assertEqual(self.kept.take("k1"), KeptRing("z", "k1", True, Where(12.0, True)))
+        self.assertEqual(self.kept.take("k2"), KeptRing("y", "k2", True, Where(None, False)))
+        self.assertEqual(self.engine.closed, ["x"])
 
     def test_a_new_engine_forgets_the_old_ones_sessions(self):
         self.kept.put(KeptRing("a", "k1", True, LIVE))

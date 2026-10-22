@@ -726,6 +726,68 @@ class DiskRing(Ring):
             raise RingError("Some temporary buffer files could not be removed.")
 
     # ---- 2.6: the index of a v2 folder ----------------------------------------------------
+    @classmethod
+    def adopt(cls, root: Path, dir_name: str, max_bytes: int) -> tuple[DiskRing, Index]:
+        """Take a kept (v2) folder back (a later helper): its lock taken, its index read, the
+        files its index does not hold removed, the index written anew. RingError when it is
+        not one, holds nothing whole, or another process holds it."""
+        if not _KEPT_PATTERN.fullmatch(dir_name):
+            raise RingError("Not a kept buffer.")
+        directory = Path(root) / dir_name
+        if directory.is_symlink() or not directory.is_dir():
+            raise RingError("The kept buffer is gone.")
+        ring = cls.__new__(cls)
+        Ring.__init__(ring, max_bytes)
+        ring.dir_name = dir_name
+        ring._kept = True
+        ring._index_lock = threading.Lock()
+        ring._index = None
+        ring._index_segs, ring._index_parts, ring._index_dead = {}, [], 0
+        ring._index_label = ring._index_where = None
+        ring._root, ring._directory, ring._session_lock = Path(root), None, None
+        ring._unit, ring._file, ring._file_seq = 4096, None, None
+        lock = QLockFile(str(directory / "session.lock"))
+        lock.setStaleLockTime(0)
+        if not lock.tryLock(0):
+            raise RingError("The kept buffer is in use.")
+        ring._session_lock, ring._directory = lock, directory
+        try:
+            index = read_index(directory)
+            if index is None or not index.segments:
+                raise RingError("The kept buffer could not be read.")
+            held = {record["seg"] for record in index.segments}
+            for item in directory.iterdir():
+                media = _MEDIA_PATTERN.fullmatch(item.name)
+                if (media and int(item.name[8:-3]) not in held) or item.name == _INDEX_NEW:
+                    item.unlink(missing_ok=True)
+            ring._unit = _allocation_unit(directory)
+            for record in index.segments:
+                segment = Segment(
+                    record["seg"],
+                    header_len=record["h"],
+                    size=record["n"],
+                    complete=True,
+                    charge=ring._charge_for(record["n"]),
+                    wall=float(record["w"]),
+                    junction=bool(record.get("j")),
+                )
+                ring._segments[segment.seq] = segment
+                ring._completed.append(segment)
+                ring._bytes += segment.size
+                ring._charged += segment.charge
+                ring._index_segs[segment.seq] = record
+            ring._index_parts = list(index.parts)
+            ring._index_label, ring._index_where = index.label, index.where
+            ring._index = (directory / _INDEX).open("ab", buffering=0)
+            ring._compact()
+        except OSError:
+            ring._release_storage()
+            raise RingError("The kept buffer could not be read.") from None
+        except BaseException:
+            ring._release_storage()
+            raise
+        return ring, index
+
     def _append_index(self, record: dict) -> None:
         line = (json.dumps(record, separators=(",", ":")) + "\n").encode("ascii")
         with self._index_lock:

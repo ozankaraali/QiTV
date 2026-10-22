@@ -363,6 +363,12 @@ class Segmenter:
         self._scan(data, wall, events)
         return events
 
+    def seed(self, seq: int) -> None:
+        """The next segment opened takes number `seq` (2.6: a kept buffer taken back by a later
+        helper goes on after its newest); nothing may be open."""
+        self._open = False
+        self._seq = seq
+
     def abandon(self) -> None:
         """Forget the open segment without closing it (2.6: the ring could not take it): the
         next segment opened takes its number, and the input starts afresh."""

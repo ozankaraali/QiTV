@@ -43,7 +43,8 @@ class KeptBuffers:
     memory as long as it is kept, so one is kept at most: the channel left last. Disk buffers
     are all kept: their total is the user's disk amount, which the helper keeps them under.
     Letting one go closes its session at the engine; one the helper emptied (the disk amount,
-    the day's limit, its files gone) goes by itself once its state says so.
+    the day's limit, its files gone) goes by itself once its state says so. What a later
+    helper took back after a restart comes in by itself too (`LiveEngine.keptFound`).
     """
 
     def __init__(self, engine: Any) -> None:
@@ -55,6 +56,20 @@ class KeptBuffers:
         updated = getattr(engine, "sessionUpdated", None)
         if updated is not None:
             updated.connect(self._on_updated)
+        found = getattr(engine, "keptFound", None)
+        if found is not None:
+            found.connect(self._on_found)
+
+    def _on_found(self, sid: str, label: dict, where: dict) -> None:
+        """A later helper took a kept disk buffer back (it survived a restart)."""
+        channel = label.get("channel")
+        if not isinstance(channel, str) or not channel:
+            self._engine.close_session(sid)  # nobody can take it back
+            return
+        position = where.get("position")
+        if not isinstance(position, (int, float)) or isinstance(position, bool):
+            position = None
+        self.put(KeptRing(sid, channel, True, Where(position, where.get("paused") is True)))
 
     def _on_updated(self, sid: str, snapshot: dict) -> None:
         if snapshot.get("oldest") is None and any(r.sid == sid for r in self._rings.values()):

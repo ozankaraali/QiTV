@@ -143,6 +143,17 @@ class Timeline:
         self._open = None
         return span
 
+    def restore(self, spans: List[Span], parts: List[Part]) -> None:
+        """Start from a kept buffer's spans and parts (2.6: a later helper took it back)."""
+        self._spans = list(spans)
+        self._end = self._spans[-1].end if self._spans else 0.0
+        self._max_edge = self._end
+        self._open = None
+        self._parts = list(parts)
+        self._part_wall = None
+        if self._spans:
+            self.on_evicted(self._spans[0].seq - 1)  # parts before the oldest span go or move
+
     def drop_open(self) -> None:
         """Forget the open segment (2.6: the ring could not take it); a part it began goes."""
         opened, self._open = self._open, None

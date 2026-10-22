@@ -425,6 +425,110 @@ class KeptFolderTests(unittest.TestCase):
             self.assertEqual(supervisor._dirs, set())
 
 
+class AdoptKeptTests(unittest.TestCase):
+    """2.6: at the start the supervisor takes kept folders back, and sweeps what cannot be."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-kept-test-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def folder(self, *, label=True, age=0.0):
+        from services.live import ring as ring_module
+        from services.live.ring import DiskRing
+
+        name = engine_module._session_dir()
+        with patch.object(ring_module, "_wall_time", lambda: time.time() - age):
+            ring = DiskRing(self.root, name, MIB)
+            ring.open_segment(0, b"h" * 376)
+            ring.append(b"d" * 1000)
+            ring.complete(0)
+            ring.note_segment(0, 0.0, 2.0, False, "key")
+        if label:
+            ring.note_label({"channel": "k1"})
+        ring.close(keep=True)
+        return name
+
+    def supervisor(self):
+        import queue
+
+        supervisor = engine_module._Supervisor(self.root, queue.Queue())
+        relayed = []
+        supervisor._relay = relayed.append
+        return supervisor, relayed
+
+    def test_fresh_labelled_folders_are_taken_back_the_rest_swept(self):
+        from services.live.ring import STALE_S
+
+        kept = self.folder()
+        stale = self.folder(age=STALE_S + 60)
+        plain = self.folder(label=False)
+        supervisor, relayed = self.supervisor()
+        supervisor._adopt_kept(64 * MIB)
+        adopting = [m for m in relayed if m[0] == "adopting"]
+        self.assertEqual(len(adopting), 1)
+        record = supervisor._records[adopting[0][1]]
+        self.assertTrue(record.parked)
+        self.assertEqual(record.command[5]["dir"], kept)
+        self.assertTrue((self.root / kept).exists())
+        self.assertFalse((self.root / stale).exists())
+        self.assertFalse((self.root / plain).exists())
+        sent = []
+        supervisor._send_open(SimpleNamespace(send=sent.append), record)
+        self.assertEqual(sent, [("adopt", adopting[0][1], kept, 64 * MIB)])
+
+    def test_a_folder_another_qitv_holds_is_left_alone(self):
+        from test_ring import hold_session_lock
+
+        kept = self.folder()
+        context = multiprocessing.get_context("spawn")
+        ready, release = context.Event(), context.Event()
+        holder = context.Process(
+            target=hold_session_lock, args=(str(self.root / kept / "session.lock"), ready, release)
+        )
+        holder.start()
+        self.addCleanup(holder.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(ready.wait(20))
+        supervisor, relayed = self.supervisor()
+        supervisor._adopt_kept(64 * MIB)
+        self.assertEqual(relayed, [])
+        self.assertTrue((self.root / kept / "segment-0.ts").exists())
+
+    def test_disk_buffer_off_sweeps_every_kept_folder(self):
+        kept = self.folder()
+        supervisor, _ = self.supervisor()
+        supervisor._drop_kept()
+        self.assertFalse((self.root / kept).exists())
+
+    def test_a_parked_session_is_taken_back_after_a_helper_death(self):
+        supervisor, _ = self.supervisor()
+        ring = {"kind": "disk", "dir": engine_module._session_dir(), "max_bytes": 64 * MIB}
+        (self.root / ring["dir"]).mkdir()  # left for the next helper
+        command = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        record = supervisor._records["s1"] = engine_module._Record(command, sent=True)
+        supervisor._receive(("parked", "s1"))
+        self.assertTrue(record.parked)
+        record.sent = False  # the helper died
+        sent = []
+        supervisor._send_open(SimpleNamespace(send=sent.append), record)
+        self.assertEqual(sent, [("adopt", "s1", ring["dir"], 64 * MIB)])
+
+    def test_the_engine_tells_what_was_kept(self):
+        engine = LiveEngine.__new__(LiveEngine)
+        LiveEngine.__init__(engine, tempfile.gettempdir())
+        found = []
+        engine.keptFound.connect(lambda sid, label, where: found.append((sid, label, where)))
+        engine._on_message(("adopting", "z"))
+        engine._on_message(("state", "z", {"oldest": 0}, 0, [(0, 0.0, 2.0, False, "key")]))
+        engine._on_message(("parked", "z"))
+        engine._on_message(("kept", "z", {"channel": "k1"}, {"position": 1.0, "paused": True}))
+        self.assertEqual(found, [("z", {"channel": "k1"}, {"position": 1.0, "paused": True})])
+        self.assertEqual(len(engine.spans("z")), 1)
+        engine._on_message(("unkept", "z"))
+        self.assertEqual(engine.spans("z"), [])
+
+
 class FailureReasonTests(unittest.TestCase):
     """2.1: why a channel plays directly is logged, by kind and HTTP status only."""
 
@@ -571,6 +675,7 @@ class Signals:
         )
         engine.sessionEnded.connect(lambda sid: self._add("ended", sid), direct)
         engine.sessionClosed.connect(lambda sid: self._add("closed", sid), direct)
+        engine.sessionParked.connect(lambda sid: self._add("parked", sid), direct)  # 2.6
 
     def _add(self, *event):
         if threading.current_thread() is not threading.main_thread():
@@ -680,6 +785,33 @@ class LiveEngineTests(unittest.TestCase):
         return engine.open_session(
             url, headers=HEADERS, verify_ssl=True, disk=disk, max_bytes=256 * MIB
         )
+
+    def test_a_kept_buffer_survives_a_restart(self):
+        # 2.6, end to end through two real helpers: one keeps a labelled disk buffer as the
+        # engine shuts down, the next engine takes it back with its spans and where it was.
+        engine, signals = self.engine()
+        signals.wait_for(lambda event: event == ("available", True), timeout=60)
+        source = self.source({SECRET_PATH: (200, {}, make_stream(8))})
+        sid = self.open(engine, source.url + SECRET_PATH, disk=True)
+        engine.keep_session(sid, {"channel": "k1"})
+        signals.wait_for(lambda event: event == ("ended", sid))
+        spans = [(s.seq, s.start, s.end) for s in engine.spans(sid)]
+        engine.note_where(sid, {"position": 2.0, "paused": True})
+        engine.park_session(sid)
+        signals.wait_for(lambda event: event == ("parked", sid))
+        engine.shutdown()
+        self.assertEqual(len(session_dirs(self.root)), 1)  # kept for the next start
+
+        second, signals = self.engine()
+        found = []
+        second.keptFound.connect(lambda *args: found.append(args))
+        second.adopt_kept(256 * MIB)
+        self.assertTrue(wait_until(lambda: found, 30), "nothing was taken back")
+        [(kept, label, where)] = found
+        self.assertEqual((label, where), ({"channel": "k1"}, {"position": 2.0, "paused": True}))
+        self.assertEqual([(s.seq, s.start, s.end) for s in second.spans(kept)], spans)
+        second.close_session(kept)
+        self.assertTrue(wait_until(lambda: session_dirs(self.root) == [], 10))
 
     def test_a_session_is_served_with_spans_rebuilt_from_the_deltas(self):
         engine, signals = self.engine()

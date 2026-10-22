@@ -83,9 +83,9 @@ import threading
 import time
 from typing import Any
 
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QEvent, QLockFile, QObject, Qt, QThread, Signal, Slot
 
-from services.live.ring import cleanup_session_dir, read_index, remove_stale_sessions
+from services.live.ring import STALE_S, cleanup_session_dir, read_index, remove_stale_sessions
 from services.live.timeline import Span
 from services.live.worker import helper_main
 from services.thread_cleanup import ThreadCleanup
@@ -127,6 +127,9 @@ class _Record:
     failed: bool = False  # a final failure was reported for the current or last helper
     over: bool = False  # its input ended or its source failed for good: never reopened
     closing: bool = False  # "close" was sent; "closed" is due
+    # 2.6: parked (its upstream closed, its buffer kept): a new helper takes its folder back
+    # ("adopt") instead of opening it again; also a kept folder found at the start.
+    parked: bool = False
 
 
 @dataclass
@@ -215,6 +218,12 @@ class _Supervisor(QThread):
             return
         if command is None:
             return
+        if command[0] == "adopt_kept":  # 2.6
+            self._adopt_kept(int(command[1]))
+            return
+        if command[0] == "drop_kept":
+            self._drop_kept()
+            return
         name, sid = command[0], command[1]
         if name == "open":
             opened = self._records[sid] = _Record(command)
@@ -276,6 +285,17 @@ class _Supervisor(QThread):
     def _send_open(self, conn: Connection, record: _Record) -> None:
         command = record.command
         ring = command[5]
+        if record.parked:  # 2.6: its folder is taken back, no upstream opens
+            sid = command[1]
+            if ring.get("kind") != "disk" or not os.path.lexists(self._root / ring["dir"]):
+                del self._records[sid]  # a memory buffer went with the helper
+                self._relay(("unkept", sid))
+                return
+            self._dirs.add(ring["dir"])
+            conn.send(("adopt", sid, ring["dir"], int(ring["max_bytes"])))
+            record.sent = True
+            record.failed = False
+            return
         if ring["kind"] == "disk":
             if os.path.lexists(self._root / ring["dir"]):
                 # A dead helper's directory could not be removed: reopen in a fresh one.
@@ -294,7 +314,7 @@ class _Supervisor(QThread):
             self._up = True
             assert self._conn is not None
             for waiting in list(self._records.values()):
-                if not waiting.sent and not waiting.over:
+                if not waiting.sent and (not waiting.over or waiting.parked):
                     self._send_open(self._conn, waiting)
             self._relay(("hello", message[1]))
             return
@@ -332,13 +352,80 @@ class _Supervisor(QThread):
                     message[2],
                     f", HTTP {status}" if isinstance(status, int) else "",
                 )
-        elif name in ("ended", "parked"):
+        elif name == "ended":
             record.over = True
+        elif name == "parked":
+            record.over = record.parked = True
         elif name == "resumed":
-            record.over = False
+            record.over = record.parked = False
+        elif name == "unkept":  # 2.6: a kept folder could not be taken back
+            del self._records[sid]
+            ring = record.command[5]
+            if ring.get("dir"):
+                self._dirs.discard(ring["dir"])
+        elif name == "kept":
+            if len(message) != 4:
+                return
         elif name not in ("state", "ready"):
             return
         self._relay(message)
+
+    # ---- 2.6: kept folders ----------------------------------------------------------------
+    def _adopt_kept(self, max_bytes: int) -> None:
+        """Take back the kept folders no helper holds (at the start, and when a new engine
+        starts): a fresh labelled one becomes a parked session ("adopting" says its id first);
+        one over a day old, unlabelled or unreadable is removed; one another process holds is
+        left alone. Runs on this thread: never the GUI's."""
+        now = time.time()
+        for name in self._kept_names():
+            directory = self._root / name
+            if not self._lockable(directory):
+                continue  # another QiTV holds it
+            index = read_index(directory)
+            newest = max((r["w"] for r in index.segments), default=0.0) if index else 0.0
+            if index is None or index.label is None or newest < now - STALE_S:
+                self._remove(name)
+                continue
+            sid = secrets.token_hex(8)
+            ring = {"kind": "disk", "dir": name, "max_bytes": int(max_bytes)}
+            command = ("open", sid, "", {}, True, ring, 6.0)
+            record = self._records[sid] = _Record(command, over=True, parked=True)
+            self._relay(("adopting", sid))
+            if self._up and self._conn is not None:
+                self._send_open(self._conn, record)
+
+    def _drop_kept(self) -> None:
+        """The disk buffer is off: every kept folder no helper holds goes."""
+        for name in self._kept_names():
+            self._remove(name)
+
+    def _kept_names(self) -> list[str]:
+        if not self._root.is_dir():
+            return []
+        held = set(self._dirs)
+        try:
+            return sorted(
+                p.name
+                for p in self._root.iterdir()
+                if p.name.startswith(_SESSION_PREFIX) and p.name not in held
+            )
+        except OSError:
+            return []
+
+    @staticmethod
+    def _lockable(directory: Path) -> bool:
+        lock = QLockFile(str(directory / "session.lock"))
+        lock.setStaleLockTime(0)
+        if not lock.tryLock(0):
+            return False
+        lock.unlock()
+        return True
+
+    def _remove(self, name: str) -> None:
+        try:
+            cleanup_session_dir(self._root, name)
+        except OSError as error:
+            _LOG.warning("A kept buffer could not be removed (%s).", type(error).__name__)
 
     def _prune_dirs(self) -> None:
         """Forget the directories of closed sessions once their helper removed them."""
@@ -547,6 +634,8 @@ class LiveEngine(QObject):
     # (rid, reason, path, written): a recording ended (see the module docstring)
     recordingEnded = Signal(str, str, str, int)
     sessionParked = Signal(str)  # 2.6: its upstream is closed, its buffer kept and served
+    # 2.6: a kept folder taken back as a parked session: (sid, label, where)
+    keptFound = Signal(str, dict, dict)
     sessionResumed = Signal(str)  # 2.6: a resumed session's new run has its first segment
 
     def __init__(self, root_dir: str, parent: QObject | None = None) -> None:
@@ -661,6 +750,16 @@ class LiveEngine(QObject):
             command = (*command, {"target": float(target), "extra": float(extra)})
         self._commands.put(command)
 
+    def adopt_kept(self, max_bytes: int) -> None:
+        """Take back the kept buffers a helper left (2.6): each comes as `keptFound`."""
+        if not self._shut:
+            self._commands.put(("adopt_kept", int(max_bytes)))
+
+    def drop_kept(self) -> None:
+        """Remove the kept buffers no session holds (2.6: the disk buffer was turned off)."""
+        if not self._shut:
+            self._commands.put(("drop_kept",))
+
     def keep_session(self, sid: str, label: Mapping[str, Any]) -> None:
         """Label a disk session's buffer (2.6: the channel's key), so a later helper knows
         whose it is."""
@@ -764,6 +863,9 @@ class LiveEngine(QObject):
                 self.available.emit(False)
             return
         sid = message[1]
+        if name == "adopting":  # 2.6: a kept folder is taken back as this session
+            self._sessions[sid] = _View()
+            return
         if name == "recording":
             _, _, rid, path, written = message
             if rid in self._recordings:
@@ -803,6 +905,11 @@ class LiveEngine(QObject):
             self.sessionReady.emit(sid)
         elif name == "parked":
             self.sessionParked.emit(sid)
+        elif name == "kept":
+            label, where = message[2], message[3]
+            self.keptFound.emit(sid, dict(label or {}), dict(where or {}))
+        elif name == "unkept":
+            del self._sessions[sid]
         elif name == "resumed":
             self.sessionResumed.emit(sid)
         elif name == "error":
