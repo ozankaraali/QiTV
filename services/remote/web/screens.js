@@ -46,6 +46,10 @@ const words = {
   pick_here: "Pick a channel below to watch it here",
   now_on_tv: "Now playing on the TV",
   open_player: "Open in the phone's player",
+  film_format: "This film doesn't play on a phone. Tap TV to watch it there.",
+  film_sound: "This film's sound doesn't play on a phone. Tap TV to watch it there.",
+  film_relay: "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).",
+  film_provider: "The film didn't open. Tap TV to watch it there.",
 };
 const w = (key) => (t(key) === key ? words[key] || key : t(key));
 
@@ -821,9 +825,10 @@ function note(text) {
   }, NOTE_MS);
 }
 
-function caption(num, name) {
+function caption(num, name, why = false) {
   $("playerNum").textContent = num || "";
   $("playerName").textContent = name || "";
+  $("playerName").parentElement.classList.toggle("why", why); // a reason wraps
 }
 
 function stopVideo() {
@@ -884,10 +889,17 @@ function startHere() {
   send({ t: "watch" }); // what the TV plays, if anything
 }
 
+// Why a film doesn't play here (QiTV's films.py and remote_controller.py say).
+const FILM_WHY = { format: "film_format", sound: "film_sound", relay: "film_relay", provider: "film_provider" };
+
 function onPlay(message) {
   const url = typeof message.url === "string" ? message.url : "";
   if (!/^https?:\/\//i.test(url)) {
-    if (here && !hereLink) caption("", w("pick_here"));
+    const why = FILM_WHY[message.why];
+    if (here && why) {
+      stopVideo();
+      caption("", w(why), true);
+    } else if (here && !hereLink) caption("", w("pick_here"));
     return;
   }
   if (!here) useHere(true);

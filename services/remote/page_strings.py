@@ -51,6 +51,18 @@ PAGE_STRINGS: dict[str, str] = {
     "now_on_tv": N_("Now playing on the TV"),
     # i18n: the phone remote: a stream its page can't play opens in the phone's own player
     "open_player": N_("Open in the phone's player"),
+    # i18n: the phone remote, where a film would play on the phone; TV: the TV | Phone switch
+    "film_format": N_("This film doesn't play on a phone. Tap TV to watch it there."),
+    # i18n: the phone remote, where a film would play on the phone (its sound: DTS and the like)
+    "film_sound": N_("This film's sound doesn't play on a phone. Tap TV to watch it there."),
+    # i18n: the phone remote through the relay (QiTV's server on the internet): films of
+    # this kind come from QiTV itself, at home; a guest network or a VPN can't reach it
+    "film_relay": N_(
+        "The relay can't carry films. To watch this one on the phone, be at home on QiTV's "
+        "network (not a guest network or a VPN)."
+    ),
+    # i18n: the phone remote: the provider didn't hand QiTV the film for the phone
+    "film_provider": N_("The film didn't open. Tap TV to watch it there."),
     "remote": N_("Remote"),  # i18n: the phone remote: the tab with the buttons
     "channel_number": N_("Channel number"),  # i18n: the phone remote: the numpad's heading
     "previous": N_("Previous"),  # i18n: the phone remote's numpad: the previous channel

@@ -21,6 +21,7 @@ from services.i18n import N_, translate
 from services.provider_api import xtream_hls
 from services.provider_ids import ALL_PROVIDERS, provider_of
 from services.redact import safe_message
+from services.remote.films import is_matroska
 from services.remote.protocol import (
     BUTTON_META,
     STORE_VERSION,
@@ -40,6 +41,7 @@ from services.remote.protocol import (
     WatchHere,
 )
 from services.search import Hit
+from services.vlc_profile import DEFAULT_USER_AGENT
 from ui.find_session import FindSession
 from ui.keymap import Action
 from ui.library.search_session import SearchSession
@@ -124,6 +126,7 @@ class RemoteController(QObject):
         self._libraries: dict[str, PhoneLibrary] = {}  # and its own Library
         self._channel_lists: dict[str, PhoneGuide] = {}  # and the Remote tab's channel list
         self._devices: dict[str, str] = {}  # each phone's device id, by session
+        self._relayed: set[str] = set()  # phones through the relay (no film comes that way)
         # Each phone's catalog for its lists (its own provider choice), by device.
         self._phone_catalogs: dict[str, BrowsedCatalog] = {}
         self._channel_finder: Optional[FindSession] = None  # the phones' finds, shared
@@ -278,6 +281,7 @@ class RemoteController(QObject):
             self._schedule()
             self._phones.discard(event.sid)
             self._devices.pop(event.sid, None)
+            self._relayed.discard(event.sid)
             for browsing in (self._guides, self._libraries, self._channel_lists):
                 gone = browsing.pop(event.sid, None)
                 if gone is not None:
@@ -289,6 +293,8 @@ class RemoteController(QObject):
         elif isinstance(event, Opened):
             self._phones.add(event.sid)
             self._devices[event.sid] = event.device_id
+            if event.door == "relay":
+                self._relayed.add(event.sid)
             self._diff.start()
             self._send(event.sid, self._state())
         elif isinstance(event, Get):
@@ -554,8 +560,7 @@ class RemoteController(QObject):
                 return False, PHONE_GONE_TEXT
             first = self._device(sid) not in self._watching
             self._watching[self._device(sid)] = (target, group)
-            message = {"t": "play", "url": self._phone_link(target.item, url)}
-            message["name"] = target.title[:TITLE_CHARS]
+            message: dict = {"t": "play", "name": target.title[:TITLE_CHARS]}
             if target.live:
                 message["num"] = str(controller.channel_number(target.item) or "")
             else:  # a film or an episode goes on where it stopped (as on the TV)
@@ -564,7 +569,12 @@ class RemoteController(QObject):
                 start = None if target.start_over or not key else watch.resume_position(key)
                 if start:
                     message["start"] = start // 1000
-            self._send(sid, message)
+            if not target.live and is_matroska(target.item, url):
+                self._film_to(sid, target.item, url, message)
+            else:
+                if self.hub is not None:
+                    self.hub.forget_film(self._device(sid))  # a film opening comes no more
+                self._send(sid, {**message, "url": self._phone_link(target.item, url)})
             if first:  # a zap on the phone after that says nothing more
                 name = self._names.get(self._devices.get(sid, ""), "")
                 text = PLAYING_ON_TEXT if name else PLAYING_ON_PHONE_TEXT
@@ -578,6 +588,23 @@ class RemoteController(QObject):
             handed = False
         if not handed:
             self._send(sid, {"t": "play", "failed": True})
+
+    def _film_to(self, sid: str, item: dict, url: str, message: dict) -> None:
+        """An MKV film (Safari plays none) goes to the phone as HLS from QiTV's home door
+        (services/remote/films.py), which reads it from its provider as the phone plays it.
+        The relay carries no film: a phone through it is told to be on QiTV's home network
+        (one through the relay at home didn't reach the home door: a guest network, a VPN)."""
+        if sid in self._relayed or self.hub is None:
+            self._send(sid, {"t": "play", "failed": True, "why": "relay"})
+            return
+        catalog, config = self._window.catalog, self._window.config_manager
+        try:
+            entry = catalog.provider_entry(provider_of(item) or catalog.current_provider_name())
+        except KeyError:
+            entry = {}
+        verify = bool(entry.get("ssl_verify", config.ssl_verify))
+        headers = {"User-Agent": str(item.get("user_agent") or DEFAULT_USER_AGENT)}
+        self.hub.open_film(sid, self._device(sid), url, headers, verify, message)
 
     def _position(self, sid: str, position_ms: int, length_ms: int) -> None:
         """How far a phone got in the film or episode it plays: kept as the TV keeps its own,
@@ -594,6 +621,8 @@ class RemoteController(QObject):
         watched = self._watching.pop(self._device(sid), None)
         if watched is None:
             return
+        if self.hub is not None:
+            self.hub.forget_film(self._device(sid))  # nor reads (nor still opens) it for the phone
         target, group = watched
         window = self._window
         if target.live:
@@ -610,6 +639,8 @@ class RemoteController(QObject):
                 if self._device(sid) in self._watching:
                     self._send(sid, {"t": "stop"})
             self._watching.clear()
+            if self.hub is not None:
+                self.hub.drop_films()  # nor reads a film for them any more
 
     def _device(self, sid: str) -> str:
         return self._devices.get(sid) or sid

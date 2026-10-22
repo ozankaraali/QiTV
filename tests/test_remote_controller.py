@@ -17,6 +17,7 @@ from services.remote.protocol import (
     Code,
     Get,
     Held,
+    Opened,
     Paired,
     Position,
     Press,
@@ -468,6 +469,67 @@ class WatchHereTests(WindowCase):
         remote.bridge.post(WatchHere("s8", handle))
         self.assertTrue(wait_until(self.plays))
         self.assertEqual(self.plays()[-1], {"t": "play", "failed": True})
+
+    def test_an_mkv_film_goes_through_qitvs_home_door(self):
+        """Safari plays no MKV: QiTV's home door hands it to the phone as HLS, reading it from
+        its provider (services/remote/films.py); the phone gets its address from there."""
+        self.connect()
+        remote = self.window.remote
+        film = {"id": 7, "name": "Harbour Lights", "container_extension": "mkv"}
+        handle = remote._library("s8").handles.issue("title", (film, "movie", None))
+        with mock.patch.object(self.window.watch, "resume_position", return_value=61_000):
+            self.hand_off("http://p.test/movie/u/p/7.mkv", handle=handle)
+        self.assertEqual(self.plays(), [])
+        self.hub.open_film.assert_called_once()
+        sid, device, url, headers, verify, message = self.hub.open_film.call_args.args
+        self.assertEqual((sid, device, url), ("s8", "s8", "http://p.test/movie/u/p/7.mkv"))
+        self.assertTrue(headers["User-Agent"])
+        self.assertIs(verify, True)
+        self.assertEqual(message, {"t": "play", "name": "Harbour Lights", "start": 61})
+
+    def test_an_mkv_film_for_a_phone_through_the_relay(self):
+        """The relay carries no film: the phone is told to be on QiTV's home network."""
+        self.connect()
+        remote = self.window.remote
+        remote.bridge.post(Opened("s8", "d1", "relay"))
+        self.assertTrue(wait_until(lambda: "s8" in remote._relayed))
+        film = {"id": 7, "name": "Harbour Lights", "container_extension": "mkv"}
+        handle = remote._library("s8").handles.issue("title", (film, "movie", None))
+        self.hand_off("http://p.test/movie/u/p/7.mkv", handle=handle)
+        self.hub.open_film.assert_not_called()
+        self.assertEqual(self.plays()[-1], {"t": "play", "failed": True, "why": "relay"})
+
+    def test_a_phone_at_the_home_door_gets_its_films_there(self):
+        self.connect()
+        remote = self.window.remote
+        remote.bridge.post(Opened("s8", "d1", "home"))
+        self.assertTrue(wait_until(lambda: remote._devices.get("s8") == "d1"))
+        self.assertNotIn("s8", remote._relayed)
+
+    def test_handing_a_film_back_to_the_tv_lets_the_phones_film_go(self):
+        self.connect()
+        remote = self.window.remote
+        film = {"id": 7, "name": "Harbour Lights", "container_extension": "mkv"}
+        handle = remote._library("s8").handles.issue("title", (film, "movie", None))
+        self.hand_off("http://p.test/movie/u/p/7.mkv", handle=handle)
+        with mock.patch.object(self.window.controller, "play_vod") as play_vod:
+            remote.bridge.post(ToTv("s8"))
+            self.assertTrue(wait_until(lambda: play_vod.called))
+        self.hub.forget_film.assert_called_once_with("s8")
+
+    def test_something_else_on_the_phone_calls_off_its_film(self):
+        """A channel (or an MP4) after an MKV still opening: the film comes no more."""
+        self.connect()
+        self.hand_off("http://p.test/news.m3u8")
+        self.hub.forget_film.assert_called_once_with("s8")
+        self.assertEqual(self.plays()[-1]["url"], "http://p.test/news.m3u8")
+
+    def test_the_tv_playing_again_ends_the_phones_films(self):
+        self.connect()
+        self.hand_off("http://p.test/news.m3u8")
+        with mock.patch.object(self.window.controller, "showing_here", return_value=True):
+            self.window.remote._push_state()
+        self.hub.drop_films.assert_called_once_with()
 
     def test_an_xtream_channel_goes_as_hls(self):
         remote = self.window.remote
