@@ -183,7 +183,10 @@ class Session:
                 "relay": self._store.relay_url if relay else None,
                 "room": self._store.room if relay else None,
             }
-            events += [Paired(self.sid, device.id, name), Opened(self.sid, device.id, self._door)]
+            events += [
+                Paired(self.sid, device.id, name),
+                Opened(self.sid, device.id, self._door, self._same),
+            ]
             events.append(StoreSaved(self._store.to_config()))
         else:
             assert self._hs is not None
@@ -201,14 +204,14 @@ class Session:
                     return self._close(4401, "unknown")
                 self._device_id = self._ticket_device
                 answer = {"device": self._device_id, "key": key.id, "tv": self._tv_name}
-                events += [Opened(self.sid, self._device_id, self._door)]
+                events += [Opened(self.sid, self._device_id, self._door, self._same)]
                 events.append(StoreSaved(self._store.to_config()))
             else:
                 if self._store.find_key(self._key_id) is None:
                     return self._close(4401, "unknown")  # removed while it shook hands
                 answer = {}
                 assert self._device_id is not None
-                events.append(Opened(self.sid, self._device_id, self._door))
+                events.append(Opened(self.sid, self._device_id, self._door, self._same))
                 if self._touch(now):
                     events.append(StoreSaved(self._store.to_config()))
         assert self._hs is not None

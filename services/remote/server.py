@@ -1,7 +1,8 @@
 """The phone remote's home door: QiTV serving the remote page and its WebSocket on the LAN.
 
 Runs on the remote hub's event loop (services/remote/hub.py). Only addresses of a home network
-may connect; the page's files come from one folder, never from outside it.
+may connect; the page's files come from one folder, never from outside it. The films phones play
+(services/remote/films.py) are served here too.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Iterable
 
 from aiohttp import web
 
+from services.remote.films import add_routes as add_film_routes
 from services.remote.net import is_private
 
 if TYPE_CHECKING:
@@ -85,6 +87,7 @@ async def start_home_door(
     app = web.Application(middlewares=[private_only])
     app.router.add_get("/ws", core.handle_ws)
     app.router.add_get("/door.json", door)
+    add_film_routes(app, core.films)
     app.router.add_get("/", page)
     app.router.add_get("/{path:.+}", page)
     # A phone's open socket must not keep QiTV from quitting (aiohttp waits 60 s by default).

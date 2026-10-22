@@ -4,7 +4,8 @@ The loop runs the home door (services/remote/server.py) and, when the relay is o
 client; every phone connection is a Session. Events go to `emit` on the loop's thread as plain
 objects (services/remote/protocol.py); the GUI marshals them to its own thread. RemoteHub's
 methods are safe to call from the GUI thread: they only schedule work on the loop and never wait
-on the network.
+on the network. The home door also hands phones the MKV films they play as HLS
+(services/remote/films.py), read from their providers on this loop.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from services.redact import safe_exc
 from services.remote import net
+from services.remote.films import OPEN_S, PROVIDER, Film, FilmRefused, FilmShelf, HttpFetcher
 from services.remote.page_id import page_id
 from services.remote.page_strings import page_hello
 from services.remote.pairing import RemoteStore
@@ -46,6 +48,7 @@ logger = logging.getLogger(__name__)
 Emit = Callable[[object], None]
 _STOP_S = 2.0
 _GOODBYE_S = 0.3  # a goodbye to a phone that doesn't answer stops waiting after this
+SHELF_READS = 4  # films read from their providers at once (each film reads once at a time)
 # With the relay on, the pairing screen waits this long for it before showing the home door's
 # address: pairing through the relay keeps the phone's keys at the address it keeps (its icon).
 RELAY_WAIT_S = 8.0
@@ -107,6 +110,9 @@ class HubCore:
         self._relay_wait_until = 0.0  # monotonic; the pairing screen waits for the relay till then
         self.relay: Any = None  # a RelayClient while the relay is on
         self._early: list[tuple[Callable[..., Any], tuple[Any, ...]]] = []
+        self.films = FilmShelf()
+        self._http: Any = None  # the films' aiohttp session, made when first needed
+        self._openings: set[asyncio.Task] = set()  # films being opened (kept from the GC)
 
     # ---- lifecycle -------------------------------------------------------------------------
 
@@ -167,6 +173,59 @@ class HubCore:
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
+        self.films.clear()
+        if self._http is not None:
+            await _quietly(self._http.close())
+            self._http = None
+
+    # ---- films -----------------------------------------------------------------------------
+
+    def open_film(
+        self, sid: str, device: str, url: str, headers: dict, verify: bool, message: dict
+    ) -> None:
+        """Open the MKV film at `url` for phone `sid` and send it `message` with the film's HLS
+        address as its link, or, if a phone can't play it, a failed play saying why."""
+        task = asyncio.ensure_future(self._open_film(sid, device, url, headers, verify, message))
+        self._openings.add(task)
+        task.add_done_callback(self._openings.discard)
+
+    async def _open_film(
+        self, sid: str, device: str, url: str, headers: dict, verify: bool, message: dict
+    ) -> None:
+        home = self.home_url()
+        film = Film(HttpFetcher(self._film_http(), url, headers, verify))
+        try:
+            if not home:
+                raise FilmRefused(PROVIDER, "no home address")
+            await asyncio.wait_for(film.open(), OPEN_S)
+        except FilmRefused as refused:
+            logger.info("Phone remote: a film can't play on the phone: %s", refused)
+            self.send(sid, {"t": "play", "failed": True, "why": refused.reason})
+            return
+        except Exception as error:  # the provider's: unreachable, slow, refused
+            logger.info("Phone remote: a film couldn't open: %s", safe_exc(error))
+            self.send(sid, {"t": "play", "failed": True, "why": PROVIDER})
+            return
+        token = self.films.put(device, film)
+        self.send(sid, {**message, "url": f"{home}film/{token}/index.m3u8"})
+
+    def drop_films(self) -> None:
+        """The TV plays again: the films phones played go (one screen at a time)."""
+        self.films.clear()
+
+    def _film_http(self) -> Any:
+        if self._http is None:
+            import ssl
+
+            from aiohttp import ClientSession, ClientTimeout, TCPConnector
+            import certifi
+
+            context = ssl.create_default_context(cafile=certifi.where())
+            # No connection kept open to a provider between reads: it may count them.
+            connector = TCPConnector(force_close=True, limit=SHELF_READS, ssl=context)
+            timeout = ClientTimeout(sock_connect=10, sock_read=30)
+            self._http = ClientSession(connector=connector, timeout=timeout)
+        return self._http
 
     # ---- addresses and the pairing code ----------------------------------------------------
 
@@ -478,3 +537,11 @@ class RemoteHub:
 
     def broadcast(self, message: dict) -> None:
         self._call(self._core.broadcast, message)
+
+    def open_film(
+        self, sid: str, device: str, url: str, headers: dict, verify: bool, message: dict
+    ) -> None:
+        self._call(self._core.open_film, sid, device, url, dict(headers), verify, dict(message))
+
+    def drop_films(self) -> None:
+        self._call(self._core.drop_films)

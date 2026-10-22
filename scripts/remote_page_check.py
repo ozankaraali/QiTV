@@ -800,6 +800,12 @@ def scenario_watch_here(rig: Rig) -> None:
           v.currentTime = 4381; v.dispatchEvent(new Event('pause')); }""")
     where = rig.events.wait(Position, after=mark)
     assert (where.position_ms, where.length_ms) == (4381000, 5400000), where
+    # A film no phone plays (its sound, say): QiTV says why, where its name was, in full.
+    rig.hub.send(sid, {"t": "play", "failed": True, "why": "sound"})
+    rig.page.locator("#playerName", has_text="sound").wait_for(timeout=5000)
+    assert rig.page.locator(".player-cap.why").count() == 1
+    assert rig.page.evaluate("document.getElementById('video').getAttribute('src')") is None
+    rig.shot("watch-here-why")
     mark = rig.events.mark()
     rig.page.locator("#libraryRows .row", has_text="Harbour Watch").click()
     assert rig.events.wait(OpenItem, after=mark).handle == "s1"

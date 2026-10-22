@@ -265,6 +265,7 @@ class Opened:
     sid: str
     device_id: str
     door: str
+    same: Optional[bool] = None  # through the relay: the phone shares QiTV's network
 
 
 @dataclass(frozen=True)
