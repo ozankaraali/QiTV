@@ -13,6 +13,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from services.live import learned_target, worker
+from services.live.kept import KeptRing, Where
 from services.live.learned_target import ArrivalModel, Learned, LearnedTarget
 import services.live.live_session as live_session
 from services.live.live_session import LiveSession
@@ -34,6 +35,8 @@ DISK = "Disk time-shift isn't available; using memory"
 REWOUND = "Rewound past the buffer"
 LOADING = "Still loading…"
 RECONNECTING = "Reconnecting…"
+KEPT_ONLY = "This channel can't open right now. Playing what was kept."
+KEPT_END = "That's all that was kept. The channel can't open right now."
 DIRECT = (URL, PlayKind.LIVE, "normal")
 MiB = 1024 * 1024
 
@@ -56,9 +59,13 @@ class FakeEngine(QObject):
     sessionEnded = Signal(str)
     sessionClosed = Signal(str)
     recordingEnded = Signal(str, str, str, int)  # 2.3: (rid, reason, path, written)
+    sessionParked = Signal(str)  # 2.6
+    sessionResumed = Signal(str)
 
     def __init__(self):
         super().__init__()
+        self.parks = []  # 2.6: sids parked
+        self.resumes = []  # (sid, url, keyword arguments)
         self.up = True
         self.gave_up = False  # an engine that gave up before this LiveSession existed
         self.opened = []  # (sid, url, keyword arguments)
@@ -95,6 +102,14 @@ class FakeEngine(QObject):
 
     def resize_session(self, sid, max_bytes):
         self.resizes.append((sid, max_bytes))
+
+    def park_session(self, sid):
+        self.parks.append(sid)
+        self.events.append(("park", sid))
+
+    def resume_session(self, sid, url, **kwargs):
+        self.resumes.append((sid, url, kwargs))
+        self.events.append(("resume", sid))
 
     def start_recording(self, sid, path, seq, **kwargs):
         rid = f"r{len(self.recordings) + 1}"
@@ -143,6 +158,7 @@ class FakeEngine(QObject):
         finite=False,
         open_quality=None,
         video=None,
+        parts=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -174,6 +190,8 @@ class FakeEngine(QObject):
             self._snapshots[sid]["backlog_s"] = backlog
         if video is not None:
             self._snapshots[sid]["video"] = video
+        if parts is not None:  # 2.6: [first_seq, start, wall] of each part
+            self._snapshots[sid]["parts"] = [list(part) for part in parts]
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def receive(self, sid, count):
@@ -558,6 +576,7 @@ class LiveSessionCase(unittest.TestCase):
         burst=0.0,
         latency="normal",
         backlog_after_start=True,
+        channel=None,
     ):
         """Start, and get ready with `spans` buffered (and an open segment after them).
 
@@ -567,7 +586,7 @@ class LiveSessionCase(unittest.TestCase):
         comes with only that segment buffered, as far back as the target (since 2.1 a tune
         starts at the target), and the rest follows. Without it, or when the oldest segment
         cannot be that far back, all of it is buffered at ready and the start policy picks."""
-        sid = self.start(latency=latency)
+        sid = self.start(latency=latency, channel=channel)
         first = (spans[0].seq, spans[0].start) if spans else (open_seq, 0.0)
         limit = live_edge if live_edge is not None else (spans[-1].end if spans else 0.0)
         early = backlog_after_start and first[0] is not None
@@ -623,6 +642,147 @@ class LiveSessionCase(unittest.TestCase):
         self.assertEqual(self.notices[-1], notice)
         self.assertEqual(self.modes[-1], "direct")
         self.assertFalse(self.live.is_pipeline())
+
+
+class KeptTests(LiveSessionCase):
+    """2.6: leaving a channel parks its buffer; coming back resumes where it was."""
+
+    def setUp(self):
+        super().setUp()
+        self.live._wall = lambda: 20_000.0  # the time of day the parts are placed against
+
+    def resume(self, kept, **kwargs):
+        self.live.start(
+            URL,
+            headers={"User-Agent": "QiTV-Test"},
+            verify_ssl=True,
+            latency="normal",
+            user_agent="QiTV-Test",
+            disk=False,
+            max_bytes=128 * MiB,
+            channel="k1",
+            kept=kept,
+            **kwargs,
+        )
+
+    @staticmethod
+    def seq_of(play):
+        return int(play[0].rsplit("/", 1)[1].split(".")[0])
+
+    def test_park_remembers_a_paused_position(self):
+        sid = self.ready(segments(0, 30), channel="k1")
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.toggle_pause()
+        kept = self.live.park()
+        self.assertEqual(self.engine.parks, [sid])
+        self.assertNotIn(sid, self.engine.closed)
+        self.assertEqual((kept.sid, kept.channel, kept.disk), (sid, "k1", False))
+        self.assertTrue(kept.where.paused)
+        self.assertAlmostEqual(kept.where.position, 20.0, delta=2.0)
+        self.assertEqual(self.releases, [])
+        self.engine.sessionParked.emit(sid)
+        self.assertEqual(self.releases, [True])
+
+    def test_live_when_parked_is_live(self):
+        self.ready(segments(0, 30), channel="k1")
+        self.playback.set_state(PlaybackState.PLAYING)
+        kept = self.live.park()
+        self.assertEqual(kept.where, Where(None, False))
+
+    def test_without_a_channel_key_it_stops(self):
+        sid = self.ready(segments(0, 30))
+        self.assertIsNone(self.live.park())
+        self.assertIn(sid, self.engine.closed)
+        self.assertEqual(self.engine.parks, [])
+
+    def test_resume_paused_plays_from_the_ring_at_once(self):
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(20.0, True)))
+        self.assertEqual(self.engine.opened, [])
+        self.assertEqual([r[0] for r in self.engine.resumes], ["k"])
+        self.assertEqual(self.playback.plays[-1], self.stream("k", 10))
+        self.assertEqual(self.modes, ["pipeline"])
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertEqual(self.playback.paused[-1], True)
+
+    def test_resume_live_starts_on_the_newest_part(self):
+        self.engine.buffer("k", segments(0, 10), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(None, False)))
+        self.assertEqual(self.playback.plays, [])
+        # The new run: two segments after the gap, shorter than the target and a GOP.
+        parts = [[0, 0.0, 1_000.0], [10, 20.0, 9_000.0]]
+        self.engine.buffer("k", segments(0, 12), parts=parts)
+        self.engine.sessionResumed.emit("k")
+        self.step(2.0)
+        self.assertTrue(self.playback.plays)
+        self.assertGreaterEqual(self.seq_of(self.playback.plays[-1]), 10)
+
+    def test_go_live_takes_only_the_newest_part(self):
+        parts = [[0, 0.0, 1_000.0], [10, 20.0, 9_000.0]]
+        self.engine.buffer("k", segments(0, 12), parts=parts)
+        self.resume(KeptRing("k", "k1", False, Where(5.0, True)))
+        self.engine.sessionResumed.emit("k")
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.go_live()
+        self.assertGreaterEqual(self.seq_of(self.playback.plays[-1]), 10)
+
+    def test_a_seek_near_an_older_parts_end_is_no_go_live(self):
+        parts = [[0, 0.0, 1_000.0], [10, 20.0, 9_000.0]]
+        self.engine.buffer("k", segments(0, 12), parts=parts)
+        self.resume(KeptRing("k", "k1", False, Where(5.0, False)))
+        self.engine.sessionResumed.emit("k")
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(19.0)
+        self.assertEqual(self.playback.plays[-1], self.stream("k", 9))
+
+    def test_a_failed_resume_keeps_playing_the_ring(self):
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(20.0, False)))
+        self.playback.set_state(PlaybackState.PLAYING)
+        plays = len(self.playback.plays)
+        self.engine.sessionFailed.emit("k", "http", "The channel refused the stream.")
+        self.assertEqual(self.notices[-1], KEPT_ONLY)
+        self.assertEqual(len(self.playback.plays), plays)  # nothing reopened, nothing direct
+        self.assertNotIn("k", self.engine.closed)
+        self.assertEqual(self.modes, ["pipeline"])
+        self.live.go_live()
+        self.assertEqual(len(self.engine.resumes), 2)  # Go live tries the channel again
+
+    def test_a_failed_live_resume_plays_what_was_kept(self):
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(None, False)))
+        self.engine.sessionFailed.emit("k", "network", "The channel did not answer.")
+        self.assertEqual(self.notices[-1], KEPT_ONLY)
+        self.assertTrue(self.playback.plays)
+        self.assertEqual(self.playback.plays[-1][1], PlayKind.LIVE_PIPELINE)
+
+    def test_the_end_of_what_was_kept_says_so(self):
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(50.0, False)))
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionFailed.emit("k", "http", "The channel refused the stream.")
+        plays = len(self.playback.plays)
+        self.playback.ended.emit()
+        self.assertEqual(self.notices[-1], KEPT_END)
+        self.assertEqual(len(self.playback.plays), plays)
+
+    def test_a_kept_ring_that_is_gone_starts_afresh(self):
+        self.resume(KeptRing("gone", "k1", False, Where(20.0, True)))
+        self.assertIn("gone", self.engine.closed)
+        self.assertEqual(len(self.engine.opened), 1)
+        self.assertEqual(self.engine.resumes, [])
+
+    def test_the_timeline_says_how_far_behind_in_real_time(self):
+        parts = [[0, 0.0, 1_000.0], [10, 20.0, 19_000.0]]
+        self.engine.buffer("k", segments(0, 30), parts=parts)
+        self.resume(KeptRing("k", "k1", False, Where(10.0, True)))
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live._emit_timeline()
+        state = self.timelines[-1]
+        self.assertEqual(state["parts"], parts)
+        self.assertAlmostEqual(state["behind"], 20_000.0 - 1_010.0, delta=2.0)
 
 
 class ResizeTests(LiveSessionCase):

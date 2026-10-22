@@ -272,6 +272,108 @@ class ResizeTests(unittest.TestCase):
         self.assertEqual((sent, supervisor._records["s1"].command), ([], command))
 
 
+class ParkResumeTests(unittest.TestCase):
+    """2.6: a parked session keeps its view; the supervisor never reopens it by itself."""
+
+    def engine(self):
+        import queue
+
+        commands: queue.Queue = queue.Queue()
+        engine = LiveEngine.__new__(LiveEngine)
+        LiveEngine.__init__(engine, tempfile.gettempdir())
+        engine._commands = commands
+        return engine, commands
+
+    def test_park_and_resume_commands(self):
+        engine, commands = self.engine()
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=256 * MIB, target=2.5
+        )
+        commands.get_nowait()
+        engine.park_session(sid)
+        engine.park_session("unknown")
+        engine.resume_session(
+            sid, URL_FOR_RING, headers={"User-Agent": "a"}, verify_ssl=False, target=3.0
+        )
+        self.assertEqual(commands.get_nowait(), ("park", sid))
+        self.assertEqual(
+            commands.get_nowait(),
+            (
+                "resume",
+                sid,
+                URL_FOR_RING,
+                {"User-Agent": "a"},
+                False,
+                6.0,
+                {"target": 3.0, "extra": 0.0},
+            ),
+        )
+        self.assertTrue(commands.empty())
+
+    def test_parked_and_resumed_keep_the_view(self):
+        engine, _ = self.engine()
+        engine._sessions["s"] = engine_module._View()
+        engine._sessions["s"].spans.append(Span(0, 0.0, 2.0, False))
+        parked, resumed = [], []
+        engine.sessionParked.connect(parked.append)
+        engine.sessionResumed.connect(resumed.append)
+        engine._on_message(("parked", "s"))
+        engine._on_message(("resumed", "s"))
+        self.assertEqual((parked, resumed), (["s"], ["s"]))
+        self.assertEqual(len(engine.spans("s")), 1)
+
+    def test_a_parked_session_is_not_reopened_after_a_helper_death(self):
+        import queue
+
+        commands: queue.Queue = queue.Queue()
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), commands)
+        ring = {"kind": "ram", "max_bytes": 64 * MIB}
+        command = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        supervisor._records["s1"] = engine_module._Record(command=command, sent=True)
+        sent, relayed = [], []
+        supervisor._relay = relayed.append
+        commands.put(("park", "s1"))
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent, [("park", "s1")])
+        supervisor._receive(("parked", "s1"))
+        self.assertTrue(supervisor._records["s1"].over)
+        self.assertIn(("parked", "s1"), relayed)
+
+    def test_a_resume_reopens_with_its_own_source_after_a_helper_death(self):
+        import queue
+
+        commands: queue.Queue = queue.Queue()
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), commands)
+        ring = {"kind": "ram", "max_bytes": 64 * MIB}
+        command = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        record = supervisor._records["s1"] = engine_module._Record(command, sent=True, over=True)
+        sent, relayed = [], []
+        supervisor._relay = relayed.append
+        start = {"target": 3.0, "extra": 0.0}
+        commands.put(("resume", "s1", "http://other.test/1.ts", {"A": "b"}, False, 4.0, start))
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent[0][0], "resume")
+        self.assertFalse(record.over)
+        self.assertEqual(
+            record.command,
+            ("open", "s1", "http://other.test/1.ts", {"A": "b"}, False, ring, 4.0, start),
+        )
+
+    def test_a_resume_without_a_helper_fails(self):
+        import queue
+
+        commands: queue.Queue = queue.Queue()
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), commands)
+        ring = {"kind": "ram", "max_bytes": 64 * MIB}
+        command = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        supervisor._records["s1"] = engine_module._Record(command, sent=False, over=True)
+        relayed = []
+        supervisor._relay = relayed.append
+        commands.put(("resume", "s1", URL_FOR_RING, {}, True, 6.0))
+        supervisor._send_next(SimpleNamespace(send=relayed.append))
+        self.assertEqual(relayed[-1][:3], ("error", "s1", "crashed"))
+
+
 class FailureReasonTests(unittest.TestCase):
     """2.1: why a channel plays directly is logged, by kind and HTTP status only."""
 

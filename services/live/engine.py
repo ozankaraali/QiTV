@@ -232,6 +232,27 @@ class _Supervisor(QThread):
             if record.sent:
                 conn.send(command)
             return
+        if name == "park":  # 2.6: a parked session is never reopened after a helper death
+            if record is not None and record.sent and not record.closing:
+                record.over = True
+                conn.send(command)
+            elif record is not None and not record.closing:
+                record.over = True
+                self._relay(("parked", sid))  # no helper holds an upstream for it
+            return
+        if name == "resume":
+            if record is None or record.closing:
+                return
+            if not record.sent:  # its buffer went with a helper: nothing to resume
+                self._relay(("error", sid, "crashed", _INTERNAL))
+                return
+            # A helper's death after this reopens with the new source.
+            _, _, url, headers, verify_ssl, live_delay, *start = command
+            ring = record.command[5]
+            record.command = ("open", sid, url, headers, verify_ssl, ring, live_delay, *start)
+            record.over = record.failed = False
+            conn.send(command)
+            return
         if name in ("record_start", "record_stop"):
             if record is not None and record.sent and not record.closing:
                 conn.send(command)
@@ -307,8 +328,10 @@ class _Supervisor(QThread):
                     message[2],
                     f", HTTP {status}" if isinstance(status, int) else "",
                 )
-        elif name == "ended":
+        elif name in ("ended", "parked"):
             record.over = True
+        elif name == "resumed":
+            record.over = False
         elif name not in ("state", "ready"):
             return
         self._relay(message)
@@ -513,6 +536,8 @@ class LiveEngine(QObject):
     sessionClosed = Signal(str)
     # (rid, reason, path, written): a recording ended (see the module docstring)
     recordingEnded = Signal(str, str, str, int)
+    sessionParked = Signal(str)  # 2.6: its upstream is closed, its buffer kept and served
+    sessionResumed = Signal(str)  # 2.6: a resumed session's new run has its first segment
 
     def __init__(self, root_dir: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -595,6 +620,36 @@ class LiveEngine(QObject):
             return
         view.closing = True
         self._commands.put(("close", sid))
+
+    def park_session(self, sid: str) -> None:
+        """Close the session's upstream and keep its buffer (2.6); `sessionParked` follows.
+        Its spans and state stay until it is closed."""
+        view = self._sessions.get(sid)
+        if view is None or view.closing or self._shut:
+            return
+        self._commands.put(("park", sid))
+
+    def resume_session(
+        self,
+        sid: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        verify_ssl: bool,
+        live_delay: float = 6.0,
+        target: float | None = None,
+        extra: float = 0.0,
+    ) -> None:
+        """A new upstream for a parked session (2.6): `sessionResumed` once its first
+        segment came, else `sessionFailed` (it stays parked). The arguments as for
+        `open_session`."""
+        view = self._sessions.get(sid)
+        if view is None or view.closing or self._shut:
+            return
+        command: _Command = ("resume", sid, url, dict(headers), bool(verify_ssl), float(live_delay))
+        if target is not None:
+            command = (*command, {"target": float(target), "extra": float(extra)})
+        self._commands.put(command)
 
     def resize_session(self, sid: str, max_bytes: int) -> None:
         """A RAM session holds up to `max_bytes` from now on (the multiview: the focused
@@ -723,6 +778,10 @@ class LiveEngine(QObject):
             view.snapshot = {}
         elif name == "ready":
             self.sessionReady.emit(sid)
+        elif name == "parked":
+            self.sessionParked.emit(sid)
+        elif name == "resumed":
+            self.sessionResumed.emit(sid)
         elif name == "error":
             self.sessionFailed.emit(sid, message[2], message[3])
         elif name == "ended":
