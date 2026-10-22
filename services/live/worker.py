@@ -26,6 +26,20 @@ Commands (parent to helper):
   from now on, its open ring at once (a smaller size evicts the oldest segments) and a ring
   made later too; a disk session's size stays the user's. Unanswered; an unknown sid is
   ignored;
+- `("park", sid)` (2.6, kept buffers): the session's upstream closes and its buffer stays:
+  what the pipeline holds goes into the ring and the open segment completes; ring, timeline,
+  segmenter and clock joiner are kept, and the server serves the ring, readers ending at its
+  end as after an ended input. Answered by `("parked", sid)` once the upstream connection is
+  closed (an unknown sid at once). Parking a session whose input already ended answers at once;
+- `("resume", sid, url, headers, verify_ssl, live_delay[, start])` (2.6): a new upstream for a
+  parked session. Its first segment begins a new part of the timeline (`Timeline.begin_part`,
+  with the time of day) and is a junction: the clock joiner re-bases the new run onto the old
+  run's last picture, as for a restart inside one connection, so the timeline and VLC go
+  straight across the gap; the counters run on, the segment numbers too, and the ring marks
+  the segment so a reader following on into it reads its tables (`Ring.open_segment`).
+  Answered by `("resumed", sid)` at that segment. A resume that fails reports its error and
+  parks again (`("parked", sid)`): nothing of the buffer goes. A resume of a session that is
+  not parked is ignored;
 - `("record_start", sid, rid, path, seq, limits)` (2.2): recording `rid` (the parent's name for
   it) writes the session's ring to a new file at `path` (a unique name next to it when that
   exists) from segment `seq` on, following the live edge, until "record_stop", the session's
@@ -52,6 +66,7 @@ seconds while it grows (2.2), and `("recorded", sid, rid, reason, path, written)
 waits for its recording (the next channel opens on "closed"), and the session's teardown lets
 the recording reach the live edge meanwhile. A recording outlives its session's cancel, and
 these messages are never dropped for it;
+`("parked", sid)` and `("resumed", sid)` (2.6, see "park" and "resume");
 `("error", sid, kind, message[, status])`, an HTTP failure's status last (2.1: the parent
 logs why a channel played directly); `("ended", sid)`; `("closed", sid)`. Error messages are
 fixed strings. `kind`, one meaning each:
@@ -59,7 +74,8 @@ fixed strings. `kind`, one meaning each:
   also for input the segmenter or the RAM ring cannot take): the input ended for good;
 - "crashed": this session failed unexpectedly while the helper stays up (also the reply to
   a malformed or duplicate "open", and, with sid None, to a malformed command);
-- "disk": the disk ring failed and the session goes on in RAM, the only non-final error.
+- "disk": the disk ring failed and the session goes on in RAM, the only non-final error;
+  a session that was resumed (2.6) parks instead, its disk ring kept as it stands.
 The helper never sends "internal": that is the parent's report of the helper's death. When
 the command loop itself fails, the sessions are cancelled without a message and the helper
 exits. After a final error or the end of the input the buffer stays playable until "close".
@@ -116,6 +132,7 @@ if TYPE_CHECKING:
     from services.live.source import Source
 
 _LOG = logging.getLogger(__name__)
+_wall_time = time.time  # a part's time of day (2.6); tests replace the module's clocks
 _POLL = 0.1
 _NOTIFY_INTERVAL = 0.25
 # A live edge this far past the one last reported is reported at once, throttle or not: a burst
@@ -261,6 +278,10 @@ class BurstMeter:
             self._estimate = size
 
 
+class _Parking(Exception):
+    """The session parks at once (a resumed session's disk ring failed: 2.6)."""
+
+
 class _Cancelled(Exception):
     """The session was closed: unwind without sending anything or writing to a ring."""
 
@@ -390,6 +411,9 @@ class _Session:
     ) -> None:
         self.sid = sid
         self.stop = threading.Event()
+        # Ends the source's open and its reads: a cancel, or a park (2.6) that keeps the rest.
+        self._interrupt = threading.Event()
+        self._wake = threading.Event()  # a resume came, or the session ends
         # Set under `lock` by the command loop; read under the outbox lock as each message
         # is queued, so nothing from this session follows its "closed".
         self.cancelled = False
@@ -438,6 +462,17 @@ class _Session:
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
         self._last_notify = 0.0
         self._heard_edge = 0.0  # the live edge the latest state reported
+        # 2.6, kept buffers: a park asked (the run ends quietly), done (readers end at the
+        # ring's end), and the resume waiting for the session thread.
+        self._parking = False
+        self._parked = False
+        self._resume_args: tuple[str, dict[str, str], bool, float, dict[str, float]] | None = None
+        self._new_part = True  # the next segment opened begins a part of the timeline
+        self._junction_next = False  # the clock joiner's next piece begins a resumed run
+        self._open_junction = False  # the ring's next segment begins a resumed run
+        self._resuming = False  # "resumed" goes with the resumed run's first segment
+        self._kept_history = False  # resumed once: a disk failure parks, never drops it
+        self._clock_hls: bool | None = None  # the kind of source the clock joiner is for
         self._recorder: Recorder | None = None  # 2.2: writes the ring to a file (`record`)
         self._finishing: set[Recorder] = set()  # stopped, still writing up to the live edge
         self.thread = threading.Thread(target=self._run, name="qitv-live-session", daemon=True)
@@ -518,30 +553,129 @@ class _Session:
         with self.lock:
             self.cancelled = True
             source = self._source
-        self.stop.set()  # also interrupts an open in progress and a disk-lock wait
+        self.stop.set()  # also interrupts a disk-lock wait
+        self._interrupt.set()  # and an open in progress
+        self._wake.set()
         if source is not None:
             source.close()
+
+    def park(self) -> None:
+        """Called by the command loop ("park"); never blocks. The session thread answers
+        "parked" once its upstream is closed; a session that reads nothing answers now."""
+        with self.lock:
+            if self.cancelled:
+                return
+            source = self._source
+            reading = not self.released.is_set()
+            if reading:
+                self._parking = True
+            else:
+                self._parked = True
+        if not reading:
+            self._send(("parked", self.sid))
+            return
+        self._interrupt.set()
+        if source is not None:
+            source.close()
+
+    def resume(
+        self,
+        url: str,
+        headers: dict[str, str],
+        verify_ssl: bool,
+        live_delay: float,
+        start: dict[str, float] | None,
+    ) -> None:
+        """Called by the command loop ("resume"); never blocks: the session thread opens the
+        new upstream. Ignored unless the session reads nothing (parked, or its input ended)."""
+        with self.lock:
+            accepted = not self.cancelled and self.released.is_set()
+            accepted = accepted and self._resume_args is None
+            if accepted:
+                self._resume_args = (url, headers, verify_ssl, live_delay, start or {})
+                self._parked = self._parking = self._ended = False
+                self.released.clear()
+                self._interrupt.clear()
+        if not accepted:
+            _LOG.warning("A live session that still reads was asked to resume; ignored.")
+            return
+        self._wake.set()
 
     # ---- session thread ---------------------------------------------------------------
     def _run(self) -> None:
         try:
-            try:
-                self._ingest()
-            except _Cancelled:
-                pass
-            except BaseException as error:
-                _LOG.warning("A live session failed unexpectedly (%s).", type(error).__name__)
-                with contextlib.suppress(_Cancelled):
-                    self._fail("crashed", _INTERNAL)
-            finally:
+            while True:
                 try:
-                    self._close_source()
+                    self._ingest()
+                except _Cancelled:
+                    pass
+                except BaseException as error:
+                    _LOG.warning("A live session failed unexpectedly (%s).", type(error).__name__)
+                    with contextlib.suppress(_Cancelled):
+                        self._fail("crashed", _INTERNAL)
                 finally:
-                    self.released.set()
-            # Keep serving the buffer until the parent closes the session.
-            self.stop.wait()
+                    try:
+                        self._close_source()
+                    finally:
+                        with self.lock:
+                            parked = self._parking
+                            if parked:
+                                self._parking, self._parked = False, True
+                            self.released.set()
+                if parked or self._resume_failed():
+                    self._send(("parked", self.sid))
+                # Keep serving the buffer until the parent closes the session or resumes it.
+                if not self._await_resume():
+                    return
         finally:
             self._teardown()
+
+    def _resume_failed(self) -> bool:
+        """A resumed run ended without its first segment: the session is parked again."""
+        with self.lock:
+            failed = self._resuming
+            if failed:
+                self._resuming = False
+                self._parked = True
+        return failed
+
+    def _await_resume(self) -> bool:
+        """Wait for a resume (True, its run prepared) or the session's end (False)."""
+        while True:
+            self._wake.wait()
+            with self.lock:
+                if self.cancelled:
+                    return False
+                args, self._resume_args = self._resume_args, None
+                self._wake.clear()
+            if args is not None:
+                self._begin_run(*args)
+                return True
+
+    def _begin_run(
+        self,
+        url: str,
+        headers: dict[str, str],
+        verify_ssl: bool,
+        live_delay: float,
+        start: dict[str, float],
+    ) -> None:
+        """A resumed run's start: the ring, the timeline, the segmenter and the clock joiner
+        stay; what belongs to one connection starts afresh (see "resume")."""
+        self._url, self._headers, self._verify_ssl = url, headers, verify_ssl
+        self._live_delay, self._start = live_delay, start
+        with self.lock:
+            self._source = None
+        self._kept_history = self._resuming = True
+        self._new_part = self._open_junction = self._junction_next = True
+        self._received, self._answered, self._caught_up = 0, False, False
+        self._reconnecting = self._skipping = False
+        self._segment, self._measured = (0, 0.0), (0.0, 0.0)
+        self._bursts = BurstMeter()
+        self._rejoiner = self._trimmer = self._loop_trimmer = None
+        self._relabeler.reconnect()
+        with self._moving:
+            self._discontinuity()  # the segmenter frames the new input afresh
 
     def _ingest(self) -> None:
         from services.live.ring import RingError
@@ -553,14 +687,15 @@ class _Session:
                 self._url,
                 headers=self._headers,
                 verify_ssl=self._verify_ssl,
-                stop=self.stop,
+                stop=self._interrupt,
                 live_delay=self._live_delay,
                 target=float(target) if isinstance(target, (int, float)) else None,
                 extra=float(self._start.get("extra") or 0.0),
                 on_answer=self._on_answer,
             )
         except SourceError as error:
-            self._send(_error(self.sid, error.kind, str(error), error.status))
+            if not self._parking:  # a park interrupted the open: nothing to say
+                self._send(_error(self.sid, error.kind, str(error), error.status))
             return
         with self.lock:
             cancelled = self.cancelled
@@ -569,8 +704,13 @@ class _Session:
         if cancelled:
             source.close()
             raise _Cancelled()
-        self._adopt(self._make_ring())
+        if self._ring is None:  # a resumed run goes on in its ring
+            self._adopt(self._make_ring())
         segmenter = self._segmenter
+        # A resumed run of the same kind keeps the clock joiner: it re-bases the new run onto
+        # the old run's last picture (2.6). Another kind starts afresh.
+        kept_clock = self._clock_joiner if self._clock_hls is source.hls else None
+        self._clock_hls = source.hls
 
         def program() -> tuple[int | None, int | None]:
             return segmenter.video_pid, segmenter.video_type
@@ -579,7 +719,7 @@ class _Session:
         if not source.hls:  # HLS has its own discontinuities and no such restarts
             rejoiner = self._rejoiner = ReconnectTrimmer(program=program)
             # Its clock is the arrival a forward jump is measured against.
-            self._clock_joiner = ClockJoiner(program=program, clock=time.monotonic)
+            self._clock_joiner = kept_clock or ClockJoiner(program=program, clock=time.monotonic)
             # The clock joiner runs the counters on at every junction; without one, the trimmer
             # does where it drops.
             trimmer = self._trimmer = RepeatTrimmer(
@@ -589,7 +729,7 @@ class _Session:
         else:
             # A clock that leaps ahead inside a segment is re-based too: each segment's EXTINF
             # is its arrival (`_follow`).
-            self._clock_joiner = ClockJoiner(program=program)
+            self._clock_joiner = kept_clock or ClockJoiner(program=program)
         ticking = self._hold_ticker(trimmer) if trimmer is not None else None
         try:
             try:
@@ -607,7 +747,13 @@ class _Session:
                     self._pass_on(trimmer.finish())
                 self._clock_end(reconnect=False)
                 self._finish_segmenter()
+        except _Parking:
+            return  # its ring stays as it stands (`_write`)
         except SourceError as error:
+            if self._parking:  # the park closed the source
+                self._drain()
+                self._notify(force=True)
+                return
             self._fail(error.kind, str(error), error.status)
             return
         except Unsupported:
@@ -618,7 +764,10 @@ class _Session:
             # keyframe interval does not fit, so play the channel directly instead.
             self._fail("unsupported", str(error))
             return
-        if not self._ready:
+        if self._parking:
+            self._notify(force=True)  # what it held is in the ring: parked, not ended
+            return
+        if not self._ready or self._resuming:
             if self._received:
                 self._fail("unsupported", _NO_MEDIA)
             else:
@@ -689,11 +838,24 @@ class _Session:
                     self._write(lambda ring: ring.append(payload))
                 self._notify()
             elif isinstance(event, Opened):
+                if self._new_part:  # a run's first segment: the part's time of day (2.6)
+                    self._new_part = False
+                    timeline.begin_part(_wall_time())
                 timeline.on_opened(event.seq, event.first_pts, event.wall, event.discontinuity)
                 self._skipping = False
                 seq, header = event.seq, event.header
-                self._write(lambda ring: ring.open_segment(seq, header), new_segment=True)
-                if not self._ready:
+                junction, self._open_junction = self._open_junction, False
+                self._write(
+                    lambda ring: ring.open_segment(seq, header, junction=junction),
+                    new_segment=True,
+                )
+                if self._resuming:
+                    with self.lock:
+                        self._resuming = False
+                    self._ready = True
+                    self._notify(force=True)
+                    self._send(("resumed", self.sid))
+                elif not self._ready:
                     self._ready = True
                     self._notify(force=True)  # the parent starts playback at "oldest"
                     self._send(("ready", self.sid))
@@ -737,6 +899,14 @@ class _Session:
                 raise
             message = str(error)
         self._check()
+        if self._kept_history:
+            # 2.6: a kept history is never given up for a RAM ring, which would remove it:
+            # the session parks with the disk ring as it stands, still served.
+            self._send(("error", self.sid, "disk", message))
+            with self.lock:
+                self._parking = True
+            self._interrupt.set()
+            raise _Parking()
         self._disk_failed(message)
         fallback = RamRing(self._fallback_bytes())
         self._adopt(fallback)  # readers of the disk ring are cut off; it is removed
@@ -845,6 +1015,20 @@ class _Session:
 
     def _end_input(self, kind: str, message: str, status: int | None) -> None:
         if self._ring is not None:
+            self._drain()
+            if self._resuming:
+                self._parked = True  # a failed resume keeps what was kept (2.6)
+            else:
+                self._ended = True  # readers stop at the end of the buffer instead of waiting
+            self._notify(force=True)
+        self._send(_error(self.sid, kind, message, status))
+
+    def _drain(self) -> None:
+        """The input ends: what the pipeline holds goes into the ring, the open segment
+        completes."""
+        if self._ring is None:
+            return
+        with self._moving:
             self._check()  # a cancelled session never touches its ring again
             try:
                 if self._trimmer is not None:
@@ -855,11 +1039,10 @@ class _Session:
                 self._finish_segmenter()
             except _Cancelled:
                 raise
+            except _Parking:
+                pass  # the ring could not take it: it stays as it stands
             except Exception as error:
                 _LOG.info("The last live segment was dropped (%s).", type(error).__name__)
-            self._ended = True  # readers stop at the end of the buffer instead of waiting
-            self._notify(force=True)
-        self._send(_error(self.sid, kind, message, status))
 
     def _pass_on(self, pieces: list[bytes]) -> None:
         """The trimmer's output, through the loop trimmer and the clock joiner, to the
@@ -875,7 +1058,9 @@ class _Session:
         one piece at a time)."""
         clock = self._clock_joiner
         for k, piece in enumerate(pieces):
-            parts = [piece] if clock is None else clock.feed(piece, junction=k > 0)
+            junction = k > 0 or self._junction_next  # a resumed run's first piece too (2.6)
+            self._junction_next = False
+            parts = [piece] if clock is None else clock.feed(piece, junction=junction)
             for j, part in enumerate(parts):
                 if (j if clock is not None else k) > 0:
                     self._discontinuity()
@@ -1023,6 +1208,8 @@ class _Session:
             # Raw TS: the connection broke and a new one is being opened (a silent but open
             # connection is waited out first: a stall is not a reconnect).
             "reconnecting": self._reconnecting,
+            # 2.6: the buffer's parts, [first_seq, start, wall] each (`services.live.parts`).
+            "parts": [[p.first_seq, p.start, p.wall] for p in timeline.parts()],
         }
         self._heard_edge = edge
         additions, self._pending = self._pending, []
@@ -1036,7 +1223,8 @@ class _Session:
             raise _Cancelled()
 
     def _is_ended(self) -> bool:
-        return self._ended
+        """Readers end at the ring's end: the input ended, or the session is parked."""
+        return self._ended or self._parked
 
     def _send(self, message: tuple[Any, ...]) -> None:
         self._helper.send(message, self)
@@ -1124,6 +1312,14 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.resize(size)
+            elif name == "park":
+                if len(command) != 2 or not isinstance(command[1], str):
+                    raise ValueError("a park needs a session")
+                self._park(command[1])
+            elif name == "resume":
+                if len(command) not in (6, 7) or not isinstance(command[1], str):
+                    raise ValueError("a resume needs a session and its source")
+                self._resume(*command[1:])
             elif name == "record_start":
                 self._record(command)
             elif name == "record_stop":
@@ -1158,6 +1354,30 @@ class _Helper:
         session = _Session(self, sid, url, headers, verify_ssl, ring, live_delay, start)
         self._sessions[sid] = session
         session.thread.start()
+
+    def _park(self, sid: str) -> None:
+        session = self._sessions.get(sid)
+        if session is None:
+            self.send(("parked", sid))
+            return
+        session.park()
+
+    def _resume(
+        self,
+        sid: str,
+        url: str,
+        headers: dict[str, str],
+        verify_ssl: bool,
+        live_delay: float,
+        start: dict[str, float] | None = None,
+    ) -> None:
+        if start is not None and not isinstance(start, dict):
+            raise TypeError("start must be a mapping")
+        session = self._sessions.get(sid)
+        if session is None:
+            self.send(("error", sid, "crashed", _INTERNAL))
+            return
+        session.resume(url, headers, verify_ssl, live_delay, start)
 
     def _record(self, command: tuple[Any, ...]) -> None:
         """("record_start", sid, rid, path, seq, limits): the session records, else

@@ -259,7 +259,8 @@ class Recorder:
             if status == "open":
                 following_header = ring.read_at(number + 1, 0, 0)  # its header's length only
                 if following_header is not None:
-                    number, offset = number + 1, following_header[2]
+                    number = number + 1  # a new run's tables (2.6) are written with it
+                    offset = 0 if ring.junction(number) else following_header[2]
             elif status == "evicted":
                 number, offset = self._oldest(ring, number + 1), 0
             elif status == "timeout":

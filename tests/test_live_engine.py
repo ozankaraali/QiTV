@@ -63,6 +63,7 @@ STATE_KEYS = {
     "video",
     "answered",
     "reconnecting",
+    "parts",  # 2.6: a kept buffer's runs, each with its time of day
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024

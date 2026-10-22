@@ -308,7 +308,9 @@ class _Handler(BaseHTTPRequestHandler):
                 following = ring.read_at(number + 1, 0, 0)  # header length; reads no storage
                 if following is None:
                     return 0  # evicted since
-                number, offset = number + 1, following[2]
+                # A new run's tables (2.6) come with it; else the header is skipped.
+                number = number + 1
+                offset = 0 if ring.junction(number) else following[2]
             elif status != "timeout" or ended:
                 return 0  # the next segment was evicted, the ring closed, or the session ended
             else:

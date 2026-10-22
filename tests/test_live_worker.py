@@ -28,7 +28,7 @@ import warnings
 from http_fixtures import LocalSource, leaf, tls_server_context
 from process_fixtures import still_running, terminate
 from test_fmp4 import movie, trak, visual
-from ts_fixtures import CLOCK, PMT_PID, VIDEO_PID, make_stream
+from ts_fixtures import AUDIO_PID, CLOCK, PMT_PID, VIDEO_PID, make_stream
 from urllib3.exceptions import InsecureRequestWarning
 
 from services.live import interruptible_http, source as source_module, ts as ts_module, worker
@@ -60,6 +60,7 @@ STATE_KEYS = {
     "video",
     "answered",
     "reconnecting",
+    "parts",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -1467,6 +1468,125 @@ class InProcessHelper:
         self.loop.join(5)
         self.helper.shutdown()
         self.parent.close()
+
+
+AHEAD = 900_000 + 3600 * 90_000  # the provider's clock an hour later
+
+
+class ParkResumeTests(unittest.TestCase):
+    """2.6: a parked session closes its upstream and keeps its buffer; a resume appends a
+    new run after the gap, its timestamps following the old run's last picture."""
+
+    def source(self, routes):
+        upstream = LocalSource(routes)
+        self.addCleanup(upstream.close)
+        return upstream
+
+    @staticmethod
+    def states(helper, sid):
+        return [m for m in helper.messages if m[:2] == ("state", sid)]
+
+    def spans(self, helper, sid):
+        return rebuild(self.states(helper, sid))
+
+    def read(self, helper, sid, seq):
+        with urlopen(f"{helper.base_url}/{sid}/stream/{seq}.ts", timeout=5) as response:
+            return response.read()
+
+    def test_park_closes_the_upstream_and_keeps_serving(self):
+        stop, hung_up = threading.Event(), threading.Event()
+        self.addCleanup(stop.set)
+        upstream = self.source({SECRET_PATH: paced_route(make_stream(60), stop, hung_up)})
+        helper = InProcessHelper(self)
+        helper.parent.send(("open", "p", upstream.url + SECRET_PATH, {}, True, RAM, 6.0))
+        helper.wait_for(lambda m: m == ("ready", "p"))
+        helper.wait_for(lambda m: m[:2] == ("state", "p") and len(self.spans(helper, "p")) >= 2)
+        helper.parent.send(("park", "p"))
+        helper.wait_for(lambda m: m == ("parked", "p"))
+        self.assertTrue(hung_up.wait(2), "the parked session kept its upstream connection")
+        body = self.read(helper, "p", self.spans(helper, "p")[0][0])  # served, and it ends
+        self.assertGreater(len(body), 0)
+        self.assertEqual(len(body) % 188, 0)
+        self.assertFalse([m for m in helper.messages if m[:2] == ("error", "p")])
+
+    def test_an_unknown_session_is_parked_at_once(self):
+        helper = InProcessHelper(self)
+        helper.parent.send(("park", "nobody"))
+        helper.wait_for(lambda m: m == ("parked", "nobody"))
+
+    def test_resume_appends_after_a_junction(self):
+        first = self.source({SECRET_PATH: (200, {}, make_stream(8))})
+        second = self.source({SECRET_PATH: (200, {}, make_stream(8, pts_start=AHEAD))})
+        helper = InProcessHelper(self)
+        helper.parent.send(("open", "r", first.url + SECRET_PATH, {}, True, RAM, 6.0))
+        helper.wait_for(lambda m: m == ("ended", "r"))
+        before = self.spans(helper, "r")
+        helper.parent.send(("park", "r"))
+        helper.wait_for(lambda m: m == ("parked", "r"))
+        helper.parent.send(("resume", "r", second.url + SECRET_PATH, {}, True, 6.0))
+        helper.wait_for(lambda m: m == ("resumed", "r"))
+        helper.wait_for(lambda m: m == ("ended", "r"))
+        after = self.spans(helper, "r")
+        seqs = [span[0] for span in after]
+        self.assertGreater(len(after), len(before))
+        self.assertEqual(seqs, list(range(seqs[0], seqs[0] + len(seqs))))  # numbering goes on
+        self.assertEqual(after[: len(before)], before)
+        parts = self.states(helper, "r")[-1][2]["parts"]
+        self.assertEqual([part[0] for part in parts], [before[0][0], before[-1][0] + 1])
+        self.assertAlmostEqual(parts[1][1], after[len(before)][1])
+        self.assertGreaterEqual(parts[1][2], parts[0][2])
+        body = self.read(helper, "r", before[-1][0])  # the old run's last segment, then on
+        steps = video_steps(body)
+        self.assertGreater(len(steps), 25)
+        frame = CLOCK // 25
+        self.assertTrue(all(0 < step <= 2 * frame for step in steps), sorted(set(steps)))
+        media = [b for b in counter_breaks(body) if b[1] in (VIDEO_PID, AUDIO_PID)]
+        self.assertEqual(media, [])
+
+    def test_resume_that_fails_stays_parked_and_served(self):
+        first = self.source({SECRET_PATH: (200, {}, make_stream(6))})
+        refused = self.source({SECRET_PATH: (403, {}, b"")})
+        good = self.source({SECRET_PATH: (200, {}, make_stream(6, pts_start=AHEAD))})
+        helper = InProcessHelper(self)
+        helper.parent.send(("open", "f", first.url + SECRET_PATH, {}, True, RAM, 6.0))
+        helper.wait_for(lambda m: m == ("ended", "f"))
+        kept = self.spans(helper, "f")
+        helper.parent.send(("park", "f"))
+        helper.wait_for(lambda m: m == ("parked", "f"))
+        parked = len([m for m in helper.messages if m == ("parked", "f")])
+        helper.parent.send(("resume", "f", refused.url + SECRET_PATH, {}, True, 6.0))
+        helper.wait_for(lambda m: m[:2] == ("error", "f"))
+        helper.wait_for(lambda m: m == ("parked", "f"))  # parked again, nothing torn down
+        self.assertEqual(len([m for m in helper.messages if m == ("parked", "f")]), parked + 1)
+        self.assertGreater(len(self.read(helper, "f", kept[0][0])), 0)
+        helper.parent.send(("resume", "f", good.url + SECRET_PATH, {}, True, 6.0))
+        helper.wait_for(lambda m: m == ("resumed", "f"))
+        helper.wait_for(lambda m: m == ("ended", "f"))
+        self.assertGreater(len(self.spans(helper, "f")), len(kept))
+
+    def test_disk_failure_on_a_resumed_ring_keeps_it(self):
+        from services.live.ring import DiskRing, RingError
+
+        first = self.source({SECRET_PATH: (200, {}, make_stream(6))})
+        second = self.source({SECRET_PATH: (200, {}, make_stream(6, pts_start=AHEAD))})
+        helper = InProcessHelper(self)
+        root = Path(helper.helper.root)
+        directory = ".qitv-timeshift-" + secrets.token_hex(16)
+        ring = {"kind": "disk", "root": str(root), "dir": directory, "max_bytes": 1 << 30}
+        helper.parent.send(("open", "d", first.url + SECRET_PATH, {}, True, ring, 6.0))
+        helper.wait_for(lambda m: m == ("ended", "d"))
+        kept = self.spans(helper, "d")
+        helper.parent.send(("park", "d"))
+        helper.wait_for(lambda m: m == ("parked", "d"))
+        failing = patch.object(DiskRing, "append", side_effect=RingError("full"))
+        failing.start()
+        self.addCleanup(failing.stop)
+        helper.parent.send(("resume", "d", second.url + SECRET_PATH, {}, True, 6.0))
+        helper.wait_for(lambda m: m[:3] == ("error", "d", "disk"))
+        helper.wait_for(lambda m: m == ("parked", "d"))
+        failing.stop()
+        self.assertTrue((root / directory / f"segment-{kept[0][0]}.ts").exists())
+        self.assertGreater(len(self.read(helper, "d", kept[0][0])), 0)
 
 
 class StartQualityTests(unittest.TestCase):

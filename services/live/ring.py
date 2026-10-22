@@ -48,6 +48,7 @@ class Segment:
     complete: bool = False
     retired: bool = False
     charge: int = 0
+    junction: bool = False  # 2.6: it begins a kept buffer's new run (its header is sent too)
 
 
 class Ring(ABC):
@@ -150,13 +151,15 @@ class Ring(ABC):
                 self.changed.notify_all()
 
     # ---- writer side ------------------------------------------------------------------
-    def open_segment(self, seq: int, header: _Bytes) -> None:
+    def open_segment(self, seq: int, header: _Bytes, *, junction: bool = False) -> None:
+        """`junction` (2.6): the segment begins a kept buffer's new run, whose tables may
+        differ: a reader following on into it reads its header too (`junction()`)."""
         with self._disk_lock:
             self._check_writable()
             with self._state_lock:
                 if seq in self._segments:
                     raise RingError("The temporary buffer segment already exists.")
-            segment = Segment(seq, header_len=len(header))
+            segment = Segment(seq, header_len=len(header), junction=junction)
             previous = self._open
             if previous is not None:
                 self._guard(lambda: self._finish(previous))
@@ -281,6 +284,12 @@ class Ring(ABC):
                 return self._read(segment, offset, size), complete, header_len
             except OSError, KeyError:
                 raise RingError(_READ_FAILED) from None
+
+    def junction(self, seq: int) -> bool:
+        """Segment `seq` is held and begins a new run (see `open_segment`)."""
+        with self._state_lock:
+            segment = self._segments.get(seq)
+            return segment is not None and segment.junction and not segment.retired
 
     def wait_for_seq(self, seq: int, timeout: float) -> str:
         """Wait for segment `seq`: "open" (open or complete), "evicted", "closed", "timeout"."""
