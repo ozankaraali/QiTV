@@ -156,6 +156,111 @@ class FixtureFilmTests(unittest.TestCase):
         self.assertLess(sum(read), film.pieces[1].position - film.pieces[0].position + 8 * 1024)
 
 
+class GatedFetcher(MemoryFetcher):
+    """A provider that sends a piece's first chunk, then waits to be let go (`go`); each stream
+    it gave up on (closed early) is counted."""
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data, chunk=1024)
+        self.go = asyncio.Event()
+        self.closed = 0
+        self.gate = False
+
+    async def stream(self, start, end):
+        try:
+            first = True
+            async for chunk in super().stream(start, end):
+                yield chunk
+                if self.gate and first:
+                    first = False
+                    await self.go.wait()
+        except asyncio.CancelledError:
+            self.closed += 1
+            raise
+
+
+class ReadsTests(unittest.TestCase):
+    """What a phone moved on from stops reading the provider: a seek, the film closed."""
+
+    def run_film(self, steps):
+        data = (FILMS / "h264_aac.mkv").read_bytes()
+        fetcher = GatedFetcher(data)
+
+        async def go():
+            film = Film(fetcher)
+            await film.open()
+            fetcher.gate = True
+            return await steps(film, fetcher)
+
+        return asyncio.run(asyncio.wait_for(go(), 10))
+
+    def test_a_seek_stops_the_read_it_left(self):
+        async def steps(film, fetcher):
+            first = asyncio.ensure_future(film.piece(1))
+            await asyncio.sleep(0.05)  # piece 1 is being read, held at the gate
+            fetcher.gate = False
+            fetcher.go.set()
+            second = await film.piece(0)  # back to the start: piece 1 is no longer wanted
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            return second, fetcher.closed
+
+        piece, closed = self.run_film(steps)
+        self.assertEqual(piece[4:8], b"moof")
+        self.assertEqual(closed, 1)
+
+    def test_the_next_piece_waits_for_the_one_read_now(self):
+        async def steps(film, fetcher):
+            first = asyncio.ensure_future(film.piece(0))
+            await asyncio.sleep(0.05)
+            second = asyncio.ensure_future(film.piece(1))  # read ahead: piece 0 goes on
+            await asyncio.sleep(0.05)
+            fetcher.go.set()
+            return await first, await second, fetcher.closed
+
+        first, second, closed = self.run_film(steps)
+        self.assertEqual((first[4:8], second[4:8], closed), (b"moof", b"moof", 0))
+
+    def test_a_closed_film_stops_reading(self):
+        async def steps(film, fetcher):
+            read = asyncio.ensure_future(film.piece(1))
+            await asyncio.sleep(0.05)
+            film.close()
+            with self.assertRaises(asyncio.CancelledError):
+                await read
+            with self.assertRaises(FilmRefused):
+                await film.piece(0)
+            await asyncio.sleep(0)
+            return fetcher.closed
+
+        self.assertEqual(self.run_film(steps), 1)
+
+    def test_a_retry_logs_no_address(self):
+        """A provider's error text may hold its address and an account's password: the log
+        gets its kind alone (services/redact.py)."""
+        data = (FILMS / "h264_aac.mkv").read_bytes()
+        fetcher = MemoryFetcher(data)
+        film = Film(fetcher)
+        asyncio.run(film.open())
+        stream, failed = fetcher.stream, []
+
+        async def once_failing(start, end):
+            if not failed:
+                failed.append(True)
+                raise ConnectionError("http://p.test/movie/someone/secret/7.mkv refused")
+            async for chunk in stream(start, end):
+                yield chunk
+
+        with (
+            mock.patch.object(fetcher, "stream", once_failing),
+            self.assertLogs("services.remote.films", "INFO") as logs,
+        ):
+            piece = asyncio.run(film.piece(0))
+        self.assertEqual(piece[4:8], b"moof")
+        self.assertNotIn("secret", "\n".join(logs.output))
+        self.assertIn("ConnectionError", "\n".join(logs.output))
+
+
 AVC = bytes([1, 100, 0, 30, 0xFF, 0xE0, 0])  # avcC: High profile (no parameter sets needed)
 ASC = bytes([0x11, 0x90])  # AAC LC, 48 kHz, stereo
 
@@ -228,8 +333,9 @@ class Provider:
     """A provider on localhost serving the fixtures, with byte ranges or (`ranges` False)
     without: each answer whole."""
 
-    def __init__(self, ranges=True):
+    def __init__(self, ranges=True, first_wrong=False):
         self.ranges = ranges
+        self.first_wrong = first_wrong  # its first answer to a range past 0 is a 416
         self.loop = asyncio.new_event_loop()
         self.started = threading.Event()
         threading.Thread(target=self._run, daemon=True).start()
@@ -239,6 +345,9 @@ class Provider:
         asyncio.set_event_loop(self.loop)
 
         async def serve(request):
+            if self.first_wrong and request.http_range.start not in (0, None):
+                self.first_wrong = False
+                return web.Response(status=416)
             name = request.match_info["name"]
             path = FILMS.parent / name if name == "smoke.mp4" else FILMS / name
             if self.ranges:
@@ -278,6 +387,12 @@ class HttpTests(unittest.TestCase):
         self.addCleanup(provider.stop)
         film, piece = self.open(provider, "h264_aac.mkv")
         self.assertEqual(len(film.pieces), 2)
+        self.assertEqual(piece[4:8], b"moof")
+
+    def test_a_provider_answering_wrong_once_is_asked_again(self):
+        provider = Provider(first_wrong=True)
+        self.addCleanup(provider.stop)
+        film, piece = self.open(provider, "h264_aac.mkv")
         self.assertEqual(piece[4:8], b"moof")
 
     def test_a_provider_without_ranges_is_refused(self):
@@ -358,6 +473,53 @@ class HomeDoorFilmTests(unittest.TestCase):
     def test_a_film_a_phone_cant_play_says_why(self):
         _sid, message = self.open_film("smoke.mp4")
         self.assertEqual(message, {"t": "play", "failed": True, "why": FORMAT})
+
+    def opening_held(self):
+        """Films that open only once let go (`release`); the phone's sends are recorded."""
+        release = threading.Event()
+
+        class Held(Film):
+            async def open(self):
+                while not release.is_set():
+                    await asyncio.sleep(0.01)
+                await Film.open(self)
+
+        patch = mock.patch("services.remote.hub.Film", Held)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return release
+
+    def test_a_newer_choice_calls_off_a_film_still_opening(self):
+        release = self.opening_held()
+        self.hub.open_film("s8", "d1", self.provider.url("h264_aac.mkv"), {}, True, {"t": "play"})
+        time.sleep(0.1)
+        self.hub.forget_film("d1")  # the phone played something else, or handed it to the TV
+        release.set()
+        time.sleep(0.5)
+        self.assertEqual(self.sent, [])
+
+    def test_the_tv_calls_off_films_still_opening(self):
+        release = self.opening_held()
+        self.hub.open_film("s8", "d1", self.provider.url("h264_aac.mkv"), {}, True, {"t": "play"})
+        time.sleep(0.1)
+        self.hub.drop_films()
+        release.set()
+        time.sleep(0.5)
+        self.assertEqual(self.sent, [])
+
+    def test_a_second_film_opening_replaces_the_first(self):
+        release = self.opening_held()
+        first = {"t": "play", "name": "first"}
+        self.hub.open_film("s8", "d1", self.provider.url("h264_aac.mkv"), {}, True, first)
+        time.sleep(0.1)
+        second = {"t": "play", "name": "second"}
+        self.hub.open_film("s8", "d1", self.provider.url("hevc_ac3.mkv"), {}, True, second)
+        release.set()
+        end = time.monotonic() + 5
+        while not self.sent and time.monotonic() < end:
+            time.sleep(0.02)
+        time.sleep(0.3)
+        self.assertEqual([message["name"] for _sid, message in self.sent], ["second"])
 
     def test_a_phones_next_film_replaces_its_last(self):
         _sid, first = self.open_film("h264_aac.mkv")

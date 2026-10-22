@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from functools import partial
 import logging
 from pathlib import Path
 import secrets
@@ -112,7 +113,7 @@ class HubCore:
         self._early: list[tuple[Callable[..., Any], tuple[Any, ...]]] = []
         self.films = FilmShelf()
         self._http: Any = None  # the films' aiohttp session, made when first needed
-        self._openings: set[asyncio.Task] = set()  # films being opened (kept from the GC)
+        self._openings: dict[str, asyncio.Task] = {}  # the films being opened, by phone
 
     # ---- lifecycle -------------------------------------------------------------------------
 
@@ -173,7 +174,7 @@ class HubCore:
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
-        self.films.clear()
+        self.drop_films()
         if self._http is not None:
             await _quietly(self._http.close())
             self._http = None
@@ -184,10 +185,16 @@ class HubCore:
         self, sid: str, device: str, url: str, headers: dict, verify: bool, message: dict
     ) -> None:
         """Open the MKV film at `url` for phone `sid` and send it `message` with the film's HLS
-        address as its link, or, if a phone can't play it, a failed play saying why."""
+        address as its link, or, if a phone can't play it, a failed play saying why. The phone's
+        film still opening, if any, is called off: the newest choice wins."""
+        self.forget_film(device)
         task = asyncio.ensure_future(self._open_film(sid, device, url, headers, verify, message))
-        self._openings.add(task)
-        task.add_done_callback(self._openings.discard)
+        self._openings[device] = task
+        task.add_done_callback(partial(self._opened, device))
+
+    def _opened(self, device: str, task: asyncio.Task) -> None:
+        if self._openings.get(device) is task:
+            del self._openings[device]
 
     async def _open_film(
         self, sid: str, device: str, url: str, headers: dict, verify: bool, message: dict
@@ -209,8 +216,20 @@ class HubCore:
         token = self.films.put(device, film)
         self.send(sid, {**message, "url": f"{home}film/{token}/index.m3u8"})
 
+    def forget_film(self, device: str) -> None:
+        """Phone `device` plays something else (or hands its film to the TV): its film, playing
+        or still opening, goes, and stops reading its provider."""
+        opening = self._openings.pop(device, None)
+        if opening is not None:
+            opening.cancel()
+        self.films.drop(device)
+
     def drop_films(self) -> None:
-        """The TV plays again: the films phones played go (one screen at a time)."""
+        """The TV plays again: the films phones played or were opening go (one screen at a
+        time)."""
+        for opening in self._openings.values():
+            opening.cancel()
+        self._openings.clear()
         self.films.clear()
 
     def _film_http(self) -> Any:
@@ -542,6 +561,9 @@ class RemoteHub:
         self, sid: str, device: str, url: str, headers: dict, verify: bool, message: dict
     ) -> None:
         self._call(self._core.open_film, sid, device, url, dict(headers), verify, dict(message))
+
+    def forget_film(self, device: str) -> None:
+        self._call(self._core.forget_film, device)
 
     def drop_films(self) -> None:
         self._call(self._core.drop_films)

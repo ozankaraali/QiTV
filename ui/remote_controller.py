@@ -572,6 +572,8 @@ class RemoteController(QObject):
             if not target.live and is_matroska(target.item, url):
                 self._film_to(sid, target.item, url, message)
             else:
+                if self.hub is not None:
+                    self.hub.forget_film(self._device(sid))  # a film opening comes no more
                 self._send(sid, {**message, "url": self._phone_link(target.item, url)})
             if first:  # a zap on the phone after that says nothing more
                 name = self._names.get(self._devices.get(sid, ""), "")
@@ -619,6 +621,8 @@ class RemoteController(QObject):
         watched = self._watching.pop(self._device(sid), None)
         if watched is None:
             return
+        if self.hub is not None:
+            self.hub.forget_film(self._device(sid))  # nor reads (nor still opens) it for the phone
         target, group = watched
         window = self._window
         if target.live:

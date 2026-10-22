@@ -506,6 +506,24 @@ class WatchHereTests(WindowCase):
         self.assertTrue(wait_until(lambda: remote._devices.get("s8") == "d1"))
         self.assertNotIn("s8", remote._relayed)
 
+    def test_handing_a_film_back_to_the_tv_lets_the_phones_film_go(self):
+        self.connect()
+        remote = self.window.remote
+        film = {"id": 7, "name": "Harbour Lights", "container_extension": "mkv"}
+        handle = remote._library("s8").handles.issue("title", (film, "movie", None))
+        self.hand_off("http://p.test/movie/u/p/7.mkv", handle=handle)
+        with mock.patch.object(self.window.controller, "play_vod") as play_vod:
+            remote.bridge.post(ToTv("s8"))
+            self.assertTrue(wait_until(lambda: play_vod.called))
+        self.hub.forget_film.assert_called_once_with("s8")
+
+    def test_something_else_on_the_phone_calls_off_its_film(self):
+        """A channel (or an MP4) after an MKV still opening: the film comes no more."""
+        self.connect()
+        self.hand_off("http://p.test/news.m3u8")
+        self.hub.forget_film.assert_called_once_with("s8")
+        self.assertEqual(self.plays()[-1]["url"], "http://p.test/news.m3u8")
+
     def test_the_tv_playing_again_ends_the_phones_films(self):
         self.connect()
         self.hand_off("http://p.test/news.m3u8")

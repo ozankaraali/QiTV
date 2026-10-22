@@ -22,12 +22,14 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import partial
 import logging
 import secrets
 import time
 from typing import Any, AsyncIterator, Optional, Protocol, Sequence
 from urllib.parse import parse_qsl, urlsplit
 
+from services.redact import safe_exc
 from services.remote import fmp4_writer as mp4
 from services.remote.mkv import (
     CLUSTER,
@@ -59,6 +61,7 @@ FIRST_FRAME_BYTES = 8 * 1024 * 1024  # how far the sound's first frame is looked
 OPEN_S = 30.0
 SHELF = 4  # films kept at once (one per phone)
 _CACHED = 1  # pieces kept per film (a phone asks again for the one it got)
+_AHEAD = 2  # reads of the pieces this close before one asked for go on (the phone reads ahead)
 _VIDEO_SCALE = 90000
 
 FORMAT, SOUND, PROVIDER = "format", "sound", "provider"
@@ -437,17 +440,36 @@ class Film:
         self._audio: Optional[MkvTrack] = None
         self._sound: Optional[Sound] = None
         self._scale = 1_000_000
+        self._reads: dict[int, asyncio.Task] = {}  # the pieces being read, by index
+        self._closed = False
 
     @property
     def pieces(self) -> list[Piece]:
         return list(self._pieces)
 
     async def open(self) -> None:
-        """Read the film's layout and plan its pieces. Raises FilmRefused."""
+        """Read the film's layout and plan its pieces. Raises FilmRefused, or what the fetcher
+        raises."""
         try:
-            await self._open()
+            await self._open_twice()
         except MkvError as error:
             raise FilmRefused(FORMAT, str(error)) from error
+
+    async def _open_twice(self) -> None:
+        """`_open`, once more after the provider's error (a range answered wrong, cut off)."""
+        try:
+            await self._open()
+            return
+        except MkvError:
+            raise
+        except FilmRefused as refused:
+            if refused.reason != PROVIDER:
+                raise
+            why = str(refused)
+        except Exception as error:
+            why = safe_exc(error)
+        logger.info("Film: opening again after %s", why)
+        await self._open()
 
     async def _open(self) -> None:
         head = read_head(await self._fetcher.read(0, HEAD_BYTES))
@@ -523,22 +545,54 @@ class Film:
     def init(self) -> bytes:
         return self._init
 
+    def close(self) -> None:
+        """The phone is done with the film: what is read from its provider stops now (its
+        connection closes), and nothing more is."""
+        self._closed = True
+        for task in self._reads.values():
+            task.cancel()
+
     async def piece(self, index: int) -> bytes:
-        """Piece `index` as a media segment (IndexError: none such). Raises FilmRefused,
-        MkvError, or what the fetcher raises."""
+        """Piece `index` as a media segment (IndexError: none such).
+
+        Asks for one piece share its read. A piece asked for anew stops the reads the phone
+        moved on from (a seek: any but the `_AHEAD` pieces just before it, which it reads
+        ahead), so the provider isn't read for nothing, nor kept waiting behind. Raises
+        FilmRefused, MkvError, what the fetcher raises, or CancelledError: a later ask, or
+        `close`, stopped the read."""
+        if self._closed:
+            raise FilmRefused(PROVIDER, "the film was closed")
         if not 0 <= index < len(self._pieces):
             raise IndexError(index)
+        cached = self._cache.get(index)
+        if cached is not None:
+            self._cache.move_to_end(index)
+            return cached
+        task = self._reads.get(index)
+        if task is None:
+            for other, running in list(self._reads.items()):
+                if not index - _AHEAD <= other < index:
+                    running.cancel()
+            task = asyncio.ensure_future(self._read(index))
+            self._reads[index] = task
+            task.add_done_callback(partial(self._read_done, index))
+        return await asyncio.shield(task)
+
+    def _read_done(self, index: int, task: asyncio.Task) -> None:
+        if self._reads.get(index) is task:
+            del self._reads[index]
+
+    async def _read(self, index: int) -> bytes:
         async with self._lock:  # the provider is read once at a time
             cached = self._cache.get(index)
             if cached is not None:
-                self._cache.move_to_end(index)
                 return cached
             try:
                 data = await self._read_piece(index)
             except MkvError:
                 raise  # the file's: reading it again changes nothing
             except Exception as error:  # the provider's (refused, cut off, slow): once more
-                logger.info("Film piece %s: reading again after %s", index, error)
+                logger.info("Film piece %s: reading again after %s", index, safe_exc(error))
                 data = await self._read_piece(index)
             self._cache[index] = data
             while len(self._cache) > _CACHED:
@@ -582,7 +636,7 @@ class HttpFetcher:
 
     @staticmethod
     def _check(response: Any, start: int, end: Optional[int]) -> None:
-        if response.status != 206:
+        if response.status != 206 and not (response.status == 200 and start == 0):
             asked = f"{start}-{'' if end is None else end - 1}"
             raise FilmRefused(PROVIDER, f"HTTP {response.status} to the range {asked}")
 
@@ -615,13 +669,17 @@ class FilmShelf:
         self._films: OrderedDict[str, _Shelved] = OrderedDict()
 
     def put(self, device: str, film: Film) -> str:
-        for token in [t for t, kept in self._films.items() if kept.device == device]:
-            del self._films[token]
+        self.drop(device)
         token = secrets.token_urlsafe(16)
         self._films[token] = _Shelved(film, device, time.monotonic())
         while len(self._films) > SHELF:
-            self._films.popitem(last=False)
+            self._films.popitem(last=False)[1].film.close()
         return token
+
+    def drop(self, device: str) -> None:
+        """Phone `device`'s film goes (and stops reading)."""
+        for token in [t for t, kept in self._films.items() if kept.device == device]:
+            self._films.pop(token).film.close()
 
     def get(self, token: str) -> Optional[Film]:
         kept = self._films.get(token)
@@ -631,6 +689,8 @@ class FilmShelf:
         return kept.film
 
     def clear(self) -> None:
+        for kept in self._films.values():
+            kept.film.close()
         self._films.clear()
 
     def __len__(self) -> int:
@@ -665,8 +725,13 @@ def add_routes(app: Any, shelf: FilmShelf) -> None:
             data = await film.piece(int(request.match_info["n"]))
         except IndexError, ValueError:
             raise web.HTTPNotFound(text="404: Not Found")
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise  # this answer itself is called off
+            raise web.HTTPServiceUnavailable(text="503: Service Unavailable")  # asked anew
         except Exception as error:  # the provider's or the file's: this piece fails alone
-            logger.warning("Film piece %s failed: %s", request.match_info["n"], error)
+            logger.warning("Film piece %s failed: %s", request.match_info["n"], safe_exc(error))
             raise web.HTTPBadGateway(text="502: Bad Gateway")
         return web.Response(body=data, content_type="video/mp4", headers=headers)
 
