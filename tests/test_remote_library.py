@@ -241,6 +241,21 @@ class PhoneLibraryTests(unittest.TestCase):
         self.assertEqual((kind, item["name"], item_kind), ("title", "Movie 0", "movie"))
         self.assertEqual(len(genre_items), 120)
 
+    def test_rows_say_which_titles_play_a_series_not(self):
+        """Watching on the phone, a film or an episode plays there; a series opens its seasons
+        on the TV: its row says it doesn't play."""
+        drama = self.opened()["Drama"]
+        self.library.titles("movies", drama, 0, "")
+        self.assertTrue(self.last("library")["items"][0]["plays"])
+        series = {"id": "s1", "name": "Harbour Watch"}
+        self.catalog.item_map[("series", "9")] = [series]
+        self.library.genres("series", 0, "")
+        self.ready("series")
+        self.assertTrue(wait_until(lambda: not self.last("genres")["loading"]))
+        self.library.genres("series", 0, "harbour")
+        [found] = self.last("genres")["titles"]
+        self.assertNotIn("plays", found)
+
     def test_the_largest_pages_fit_a_frame_in_any_script(self):
         long = "字" * 300  # 3 bytes a letter; titles are cut to what a row shows
         titles = [movie(i, f"{long}{i}", year=long) for i in range(120)]

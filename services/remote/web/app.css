@@ -83,7 +83,7 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .remote.zapping > .seg, .remote.zapping > .pad, .remote.zapping > .trio { display: none; }
 /* Watching on this phone: a player above the channel list, whose taps play here. */
 .remote.on-phone > .nowbar, .remote.on-phone > .cluster { display: none; }
-.player { flex: none; margin: 0 -20px; display: flex; flex-direction: column; gap: 8px; }
+.player { flex: none; display: flex; flex-direction: column; gap: 8px; padding-bottom: 8px; }
 .player video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; }
 .player-cap { display: flex; align-items: baseline; gap: 8px; padding: 0 20px; font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; }
 .player-cap .name { overflow: hidden; text-overflow: ellipsis; }
@@ -178,7 +178,9 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 /* ---- lists: guide, search, library ---- */
 .list { gap: 12px; padding: 2px 16px 0; }
 .list > * { flex: none; }
-.list-head h1 { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; margin: 2px 0 0; }
+.list-head { position: relative; }
+.list-head h1 { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; margin: 2px 128px 0 0; }
+.list-head .where { position: absolute; right: 0; bottom: 2px; }
 .field { width: 100%; height: 40px; padding: 0 12px; border-radius: 12px; border: 0; background: var(--raised); color: var(--text); font: inherit; font-size: 16px; outline: none; -webkit-user-select: text; user-select: text; }
 .field::placeholder { color: var(--faint); }
 /* A find box's own name, unseen: AutoFill takes the text before a box for its label otherwise. */

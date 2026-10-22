@@ -120,6 +120,7 @@ class RemoteController(QObject):
         self._devices: dict[str, str] = {}  # each phone's device id, by session
         # Each phone's catalog for its lists (its own provider choice), by device.
         self._phone_catalogs: dict[str, BrowsedCatalog] = {}
+        self._every_catalog: Optional[BrowsedCatalog] = None  # every provider's, for finds
         # What a phone plays in its own player, and the group it was picked in (for the TV), by
         # device: a phone that slept comes back as another session.
         self._watching: dict[str, tuple[Target, Optional[tuple[str, list]]]] = {}
@@ -368,7 +369,8 @@ class RemoteController(QObject):
         guide = self._guides.get(sid)
         if guide is None:
             send = lambda message: self._send(sid, message)  # noqa: E731
-            guide = PhoneGuide(self._window, send, self, catalog=self._phone_catalog(sid))
+            catalog, every = self._phone_catalog(sid), self._every()
+            guide = PhoneGuide(self._window, send, self, catalog=catalog, every=every)
             self._guides[sid] = guide
         return guide
 
@@ -376,8 +378,8 @@ class RemoteController(QObject):
         listed = self._channel_lists.get(sid)
         if listed is None:
             send = lambda m: self._send(sid, m)  # noqa: E731
-            catalog = self._phone_catalog(sid)
-            listed = PhoneGuide(self._window, send, self, bare=True, catalog=catalog)
+            catalog, every = self._phone_catalog(sid), self._every()
+            listed = PhoneGuide(self._window, send, self, bare=True, catalog=catalog, every=every)
             self._channel_lists[sid] = listed
         return listed
 
@@ -397,6 +399,21 @@ class RemoteController(QObject):
             )
             self._phone_catalogs[device] = catalog
         return catalog
+
+    def _every(self) -> BrowsedCatalog:
+        """Every provider's lists (All providers), which the phones' finds reach: one for all."""
+        if self._every_catalog is None:
+            window = self._window
+            choice = _PhoneChoice(window.config_manager)
+            choice.phone_all_providers = True
+            self._every_catalog = BrowsedCatalog(
+                window.catalogs,
+                choice,
+                source_key="phone_provider_name",
+                all_key="phone_all_providers",
+                parent=self,
+            )
+        return self._every_catalog
 
     def _library(self, sid: str) -> PhoneLibrary:
         library = self._libraries.get(sid)
@@ -420,13 +437,19 @@ class RemoteController(QObject):
         chosen: Optional[Target] = None
         group: Optional[tuple[str, list]] = None
         if handle:
-            found = self._find_handle(sid, handle)
-            if found is None or found[0] != "channel":
+            found = self._find_handle(sid, handle) or ("", None)
+            kind, payload = found
+            if kind == "channel":
+                channel, group_key, channels = cast(tuple, payload)
+                name = str(channel.get("name") or "")
+                chosen = Target(channel, "live", name, group_key=group_key)
+                group = (group_key, channels) if group_key else None
+            elif kind == "title" and cast(tuple, payload)[1] in ("movie", "episode"):
+                item, item_kind, _genre_items = cast(tuple, payload)
+                chosen = controller.title_target(item, item_kind)
+            else:  # a series opens on the TV; anything else plays nowhere but there
                 self._send(sid, {"t": "play", "failed": True})
                 return
-            channel, group_key, channels = cast(tuple, found[1])
-            chosen = Target(channel, "live", str(channel.get("name") or ""), group_key=group_key)
-            group = (group_key, channels) if group_key else None
 
         def launch(target: Target, url: str) -> tuple[bool, str]:
             if sid not in self._phones:
