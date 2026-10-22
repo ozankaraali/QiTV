@@ -38,6 +38,7 @@ from services.remote.protocol import (  # noqa: E402
     Opened,
     OpenItem,
     Paired,
+    Position,
     Press,
     Query,
     Status,
@@ -777,6 +778,19 @@ def scenario_watch_here(rig: Rig) -> None:
     rig.page.locator("#libraryRows .row", has_text="Harbour Lights").click()
     assert rig.events.wait(WatchHere, after=mark).handle == "m1"
     assert rig.page.inner_text("#playerName") == "Harbour Lights"
+    # How far it got goes to QiTV (paused here): the film's place, for the TV to go on from.
+    film = f"http://localhost:{rig.hub.port}/icon-192.png?film=m1"
+    rig.hub.send(sid, {"t": "play", "url": film, "name": "Harbour Lights"})
+    rig.page.wait_for_function(
+        "(url) => document.getElementById('video').getAttribute('src') === url", arg=film
+    )
+    mark = rig.events.mark()
+    rig.page.evaluate("""() => { const v = document.getElementById('video');
+          Object.defineProperty(v, 'duration', { value: 5400, configurable: true });
+          Object.defineProperty(v, 'currentTime', { value: 61, configurable: true });
+          v.dispatchEvent(new Event('pause')); }""")
+    where = rig.events.wait(Position, after=mark)
+    assert (where.position_ms, where.length_ms) == (61000, 5400000), where
     mark = rig.events.mark()
     rig.page.locator("#libraryRows .row", has_text="Harbour Watch").click()
     assert rig.events.wait(OpenItem, after=mark).handle == "s1"
