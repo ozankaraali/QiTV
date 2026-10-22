@@ -67,6 +67,8 @@ class FakeEngine(QObject):
         super().__init__()
         self.parks = []  # 2.6: sids parked
         self.resumes = []  # (sid, url, keyword arguments)
+        self.labels = []  # (sid, label): a disk buffer's channel (2.6)
+        self.wheres = []  # (sid, where): where the user was in it
         self.up = True
         self.gave_up = False  # an engine that gave up before this LiveSession existed
         self.opened = []  # (sid, url, keyword arguments)
@@ -107,6 +109,12 @@ class FakeEngine(QObject):
     def park_session(self, sid):
         self.parks.append(sid)
         self.events.append(("park", sid))
+
+    def keep_session(self, sid, label):
+        self.labels.append((sid, label))
+
+    def note_where(self, sid, where):
+        self.wheres.append((sid, where))
 
     def resume_session(self, sid, url, **kwargs):
         self.resumes.append((sid, url, kwargs))
@@ -825,6 +833,26 @@ class KeptTests(LiveSessionCase):
         self.assertEqual([(r.sid, r.channel) for r in kept_aside], [("k", "k1")])
         self.engine.sessionParked.emit("k")
         self.assertEqual(self.playback.plays[-1], DIRECT)
+
+    def test_a_disk_buffer_is_labelled_and_where_the_user_was_noted(self):
+        sid = self.start(disk=True, channel="k1")
+        self.assertEqual(self.engine.labels, [(sid, {"channel": "k1"})])
+        self.engine.buffer(sid, segments(0, 30))
+        self.engine.sessionReady.emit(sid)
+        self.step(2.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.toggle_pause()
+        self.live.park()
+        [(noted, where)] = self.engine.wheres
+        self.assertEqual(noted, sid)
+        self.assertTrue(where["paused"])
+        self.assertAlmostEqual(where["position"], 20.0, delta=2.0)
+
+    def test_a_memory_buffer_is_not_labelled(self):
+        self.start(disk=False, channel="k1")
+        self.assertEqual(self.engine.labels, [])
 
     def test_the_timeline_says_how_far_behind_in_real_time(self):
         parts = [[0, 0.0, 1_000.0], [10, 20.0, 19_000.0]]

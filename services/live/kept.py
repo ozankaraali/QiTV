@@ -22,6 +22,11 @@ class Where:
     paused: bool
 
 
+def where_dict(where: Where) -> dict:
+    """`where` as a kept buffer's index notes it (`Where(**where_dict(w)) == w`)."""
+    return {"position": where.position, "paused": where.paused}
+
+
 @dataclass(frozen=True)
 class KeptRing:
     sid: str  # the parked session at the engine

@@ -1721,6 +1721,51 @@ class KeptSpaceTests(unittest.TestCase):
         self.assertIsNone(state[2]["oldest"])
 
 
+class KeptIndexTests(unittest.TestCase):
+    """2.6: a v2 disk session writes its index, label and parts; a helper going down keeps it."""
+
+    def test_the_index_follows_the_session_and_survives_the_helper(self):
+        from services.live.ring import read_index
+
+        upstream = LocalSource({SECRET_PATH: (200, {}, make_stream(8))})
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        root = Path(helper.helper.root)
+        directory = ".qitv-buffer-" + secrets.token_hex(16)
+        ring = {"kind": "disk", "root": str(root), "dir": directory, "max_bytes": 1 << 30}
+        helper.parent.send(("open", "i", upstream.url + SECRET_PATH, {}, True, ring, 6.0))
+        helper.parent.send(("keep", "i", {"channel": "k1"}))
+        helper.wait_for(lambda m: m == ("ended", "i"))
+        helper.helper._dispatch(("where", "i", {"position": 3.0, "paused": True}))
+        spans = rebuild([m for m in helper.messages if m[:2] == ("state", "i")])
+        helper.helper.shutdown()  # the helper goes down: the folder stays
+        index = read_index(root / directory)
+        self.assertIsNotNone(index)
+        self.assertEqual(index.label, {"channel": "k1"})
+        self.assertEqual(index.where, {"position": 3.0, "paused": True})
+        self.assertEqual(
+            [(s["seg"], round(s["s"], 3), round(s["e"], 3)) for s in index.segments],
+            [(s[0], round(s[1], 3), round(s[2], 3)) for s in spans],
+        )
+        self.assertEqual([p["part"] for p in index.parts], [spans[0][0]])
+
+    def test_an_explicit_close_removes_it(self):
+        upstream = LocalSource({SECRET_PATH: (200, {}, make_stream(4))})
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        root = Path(helper.helper.root)
+        directory = ".qitv-buffer-" + secrets.token_hex(16)
+        ring = {"kind": "disk", "root": str(root), "dir": directory, "max_bytes": 1 << 30}
+        helper.parent.send(("open", "x", upstream.url + SECRET_PATH, {}, True, ring, 6.0))
+        helper.wait_for(lambda m: m == ("ended", "x"))
+        helper.parent.send(("close", "x"))
+        helper.wait_for(lambda m: m == ("closed", "x"))
+        deadline = time.monotonic() + 5
+        while (root / directory).exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse((root / directory).exists())
+
+
 class StartQualityTests(unittest.TestCase):
     """In process: the spans message carries how cleanly each segment starts."""
 

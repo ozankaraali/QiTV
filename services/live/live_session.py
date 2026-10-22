@@ -243,7 +243,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from services.i18n import N_
 from services.live import parts as live_parts
-from services.live.kept import KeptRing, Where
+from services.live.kept import KeptRing, Where, where_dict
 from services.live.learned_target import LearnedTarget, learned_target
 from services.live.recorder import MAX_SECONDS, MIN_FREE_BYTES
 from services.live.refusals import REFUSALS, STREAM_LIMIT
@@ -781,6 +781,8 @@ class LiveSession(QObject):
             return None
         assert self._sid is not None
         kept = KeptRing(self._sid, self._channel, self._on_disk, self._where())
+        if kept.disk:  # 2.6: a later helper takes it back there too
+            self._engine.note_where(self._sid, where_dict(kept.where))
         self._halt(park=True)
         return kept
 
@@ -1126,6 +1128,8 @@ class LiveSession(QObject):
             target=start_target(self._latency) if learned is None else learned.target(0.0),
             extra=0.0,
         )
+        if self._open_args.get("disk") and self._channel:
+            self._engine.keep_session(self._sid, {"channel": self._channel})  # 2.6: whose
         self._phase = _Phase.WAITING
         self._ready_seen = self._loading = self._held_said = False
         self._edges = []

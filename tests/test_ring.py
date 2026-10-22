@@ -13,12 +13,14 @@ from unittest.mock import patch
 from services.live import ring as ring_module
 from services.live.ring import (
     _OWNER,
+    _SESSION_PATTERN,
     STALE_S,
     DiskBudget,
     DiskRing,
     RamRing,
     RingError,
     cleanup_session_dir,
+    read_index,
     remove_stale_sessions,
 )
 
@@ -697,3 +699,128 @@ class DiskBudgetTests(unittest.TestCase):
         self.assertTrue(kept.closed)
         self.assertEqual(live.oldest_seq, 0)
         self.assertLessEqual(live.charged, budget.max_bytes)
+
+
+def kept_name():
+    return ".qitv-buffer-" + secrets.token_hex(16)
+
+
+class IndexTests(unittest.TestCase):
+    """2.6: a kept buffer's folder (v2) carries an index, so a later helper can take it back."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-index-test-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def ring(self, name=None):
+        ring = DiskRing(self.root, name or kept_name(), 64 * 1024 * 1024)
+        self.addCleanup(ring.close)
+        return ring
+
+    @staticmethod
+    def fill(ring, count, start_seq=0):
+        for seq in range(start_seq, start_seq + count):
+            ring.open_segment(seq, b"h" * 376, junction=seq == 2)
+            ring.append(b"d" * 4000)
+            ring.complete(seq)
+            ring.note_segment(seq, 2.0 * seq, 2.0 * seq + 2.0, seq == 2, "key")
+
+    def folder(self, ring):
+        return self.root / ring.dir_name
+
+    def test_the_index_follows_the_ring(self):
+        ring = self.ring()
+        ring.note_part(0, 0.0, 1_000.0)
+        self.fill(ring, 2)
+        ring.note_part(2, 4.0, 9_000.0)
+        self.fill(ring, 1, start_seq=2)
+        ring.note_label({"channel": "k1"})
+        ring.note_where({"position": 3.0, "paused": True})
+        index = read_index(self.folder(ring))
+        self.assertEqual([s["seg"] for s in index.segments], [0, 1, 2])
+        third = index.segments[2]
+        self.assertEqual((third["h"], third["n"], third["s"], third["e"]), (376, 4376, 4.0, 6.0))
+        self.assertTrue(third["d"] and third["j"])
+        self.assertGreater(third["w"], 0)
+        self.assertEqual(
+            [(p["part"], p["s"], p["w"]) for p in index.parts],
+            [(0, 0.0, 1_000.0), (2, 4.0, 9_000.0)],
+        )
+        self.assertEqual(index.label, {"channel": "k1"})
+        self.assertEqual(index.where, {"position": 3.0, "paused": True})
+
+    def test_a_torn_last_line_is_ignored(self):
+        ring = self.ring()
+        self.fill(ring, 3)
+        with open(self.folder(ring) / "index.jsonl", "ab") as handle:
+            handle.write(b'{"seg": 3, "h')
+        self.assertEqual([s["seg"] for s in read_index(self.folder(ring)).segments], [0, 1, 2])
+
+    def test_a_missing_file_keeps_the_newest_run_after_it(self):
+        ring = self.ring()
+        self.fill(ring, 4)
+        (self.folder(ring) / "segment-1.ts").unlink()
+        self.assertEqual([s["seg"] for s in read_index(self.folder(ring)).segments], [2, 3])
+
+    def test_a_short_file_counts_as_missing(self):
+        ring = self.ring()
+        self.fill(ring, 3)
+        with open(self.folder(ring) / "segment-2.ts", "r+b") as handle:
+            handle.truncate(100)
+        self.assertEqual(read_index(self.folder(ring)).segments, [])
+
+    def test_retired_segments_leave_the_index_and_it_stays_small(self):
+        ring = self.ring()
+        self.fill(ring, 200)
+        for _ in range(190):
+            ring.retire_oldest()
+        index = read_index(self.folder(ring))
+        self.assertEqual([s["seg"] for s in index.segments], list(range(190, 200)))
+        lines = (self.folder(ring) / "index.jsonl").read_text().splitlines()
+        self.assertLess(len(lines), 200)  # compacted on the way
+
+    def test_close_keep_leaves_the_folder_unlocked(self):
+        from PySide6.QtCore import QLockFile
+
+        ring = self.ring()
+        self.fill(ring, 2)
+        folder = self.folder(ring)
+        ring.close(keep=True)
+        self.assertTrue((folder / "segment-1.ts").exists())
+        lock = QLockFile(str(folder / "session.lock"))
+        lock.setStaleLockTime(0)
+        self.assertTrue(lock.tryLock(0))  # a later helper can take it
+        lock.unlock()
+        self.assertEqual(len(read_index(folder).segments), 2)
+
+    def test_a_plain_close_removes_it(self):
+        ring = self.ring()
+        self.fill(ring, 2)
+        folder = self.folder(ring)
+        ring.close()
+        self.assertFalse(folder.exists())
+
+    def test_sweeps_for_old_buffers_leave_it_alone(self):
+        ring = self.ring()
+        self.fill(ring, 2)
+        folder = self.folder(ring)
+        ring.close(keep=True)  # its owner is gone, its lock free
+        remove_stale_sessions(self.root)
+        self.assertTrue(folder.exists())
+        self.assertIsNone(_SESSION_PATTERN.fullmatch(folder.name))  # older builds never match
+
+    def test_a_memory_ring_takes_notes_and_keeps_nothing(self):
+        ring = RamRing(1 << 20)
+        ring.note_part(0, 0.0, 1.0)
+        ring.note_label({"channel": "k1"})
+        ring.close(keep=True)
+
+    def test_dropping_the_open_segment_closes_its_file(self):
+        ring = self.ring()
+        ring.open_segment(0, b"h" * 376)
+        ring.append(b"d" * 100)
+        ring.drop_open()
+        self.assertIsNone(ring._file)
+        self.assertFalse((self.folder(ring) / "segment-0.ts").exists())
+        self.assertEqual((ring.charged, ring.bytes), (0, 0))

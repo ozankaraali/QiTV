@@ -9,6 +9,16 @@ Kept buffers (2.6): each completed segment notes the time of day it completed (`
 older than `STALE_S` goes (`retire_before`). Every disk ring of a helper shares the user's
 disk amount (`DiskBudget`): over it, the oldest segment of a kept (parked) ring goes first,
 then the oldest of any.
+
+A disk ring in a `.qitv-buffer-<32 hex>` folder (v2, its `owner` reading `_KEPT_OWNER`) keeps
+an index, `index.jsonl`, one JSON object per line, appended and never rewritten in place
+(compacted through `index.jsonl.new` once most of its segment lines name segments gone):
+`{"v": 2}` first, then `{"seg": seq, "h": header_len, "n": size, "s": start, "e": end, "d":
+discontinuity, "q": start_quality, "w": wall, "j": junction}` per completed segment (the
+session's `note_segment`), `{"part": first_seq, "s": start, "w": wall}` per part,
+`{"label": {...}}` and `{"where": {...}}` (the last counts). `close(keep=True)` leaves such a
+folder for a later helper (`read_index`); older builds' sweeps match only
+`.qitv-timeshift-<32 hex>` folders with the v1 marker, so they never touch it.
 """
 
 from __future__ import annotations
@@ -16,7 +26,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import json
 import logging
 import os
 from pathlib import Path
@@ -29,8 +40,13 @@ from typing import BinaryIO
 from PySide6.QtCore import QLockFile
 
 _SESSION_PATTERN = re.compile(r"\.qitv-timeshift-[0-9a-f]{32}")
+_KEPT_PATTERN = re.compile(r"\.qitv-buffer-[0-9a-f]{32}")  # 2.6: a buffer that may be kept
 _MEDIA_PATTERN = re.compile(r"segment-[0-9]+\.ts")
 _OWNER = "QiTV temporary time-shift v1\n"
+_KEPT_OWNER = "QiTV time-shift buffer v2\n"
+_INDEX = "index.jsonl"
+_INDEX_NEW = "index.jsonl.new"
+_INDEX_NAMES = {_INDEX, _INDEX_NEW}
 _RESERVE_BYTES = 64 * 1024 * 1024
 _IO_TIMEOUT = 2.0
 _MANAGER_LOCK = ".qitv-timeshift-manager.lock"
@@ -106,6 +122,28 @@ class Ring(ABC):
 
     @abstractmethod
     def _free_storage(self) -> None: ...
+
+    def _release_storage(self) -> None:
+        """Let go of the storage, keeping what can be kept (`close(keep=True)`)."""
+        self._free_storage()
+
+    def _forget(self, segment: Segment) -> None:
+        """A segment went (called with the disk lock held)."""
+
+    # ---- 2.6: a kept buffer's index (a v2 disk ring writes one; others keep none) -----
+    def note_segment(
+        self, seq: int, start: float, end: float, discontinuity: bool, start_quality: str
+    ) -> None:
+        """Segment `seq` completed and the timeline placed it."""
+
+    def note_part(self, first_seq: int, start: float, wall: float) -> None:
+        """A part of the timeline begins at segment `first_seq`."""
+
+    def note_label(self, label: dict) -> None:
+        """Whose buffer it is (the channel's key; never a URL or a name)."""
+
+    def note_where(self, where: dict) -> None:
+        """Where the user was in it."""
 
     # ---- properties -------------------------------------------------------------------
     @property
@@ -258,6 +296,7 @@ class Ring(ABC):
         # Metadata is removed before the storage is freed, so no reader looks it up again.
         with self._state_lock:
             self._segments.pop(segment.seq, None)
+        self._forget(segment)
         try:
             self._unlink(segment)
         finally:  # gone from the ring either way: the accounting follows (2.6)
@@ -371,7 +410,9 @@ class Ring(ABC):
             self.changed.wait_for(lambda: status() != "timeout", timeout)
             return status()
 
-    def close(self) -> None:
+    def close(self, *, keep: bool = False) -> None:
+        """Close the ring and free its storage; `keep` (2.6, a helper going down): a kept
+        buffer's folder stays for a later helper."""
         with self.changed:
             if self.closed:
                 return
@@ -383,7 +424,10 @@ class Ring(ABC):
                 self._completed.clear()
                 self._open = None
             try:
-                self._free_storage()
+                if keep:
+                    self._release_storage()
+                else:
+                    self._free_storage()
             finally:
                 with self._state_lock:
                     self._bytes = 0
@@ -447,12 +491,15 @@ def _allocation_unit(directory: Path) -> int:
 
 def _owned_files(directory: Path, *, require_marker: bool = True) -> list[Path] | None:
     """Do not follow symlinks or remove anything outside our tiny file format."""
+    known = {"owner", "session.lock"}
+    if _KEPT_PATTERN.fullmatch(directory.name):
+        known = known | _INDEX_NAMES  # a v2 folder's index
     try:
         files = list(directory.iterdir())
         if any(
             item.is_symlink()
             or not item.is_file()
-            or not (item.name in {"owner", "session.lock"} or _MEDIA_PATTERN.fullmatch(item.name))
+            or not (item.name in known or _MEDIA_PATTERN.fullmatch(item.name))
             for item in files
         ):
             return None
@@ -524,8 +571,18 @@ class DiskRing(Ring):
         stop: threading.Event | None = None,
     ) -> None:
         super().__init__(max_bytes)
-        if not _SESSION_PATTERN.fullmatch(session_dir_name):
+        kept = bool(_KEPT_PATTERN.fullmatch(session_dir_name))
+        if not kept and not _SESSION_PATTERN.fullmatch(session_dir_name):
             raise RingError("Cannot lock the temporary playback buffer.")
+        self.dir_name = session_dir_name
+        self._kept = kept  # 2.6: a v2 folder with an index
+        self._index_lock = threading.Lock()
+        self._index: BinaryIO | None = None
+        self._index_segs: dict[int, dict] = {}  # the held segments' lines
+        self._index_parts: list[dict] = []
+        self._index_label: dict | None = None
+        self._index_where: dict | None = None
+        self._index_dead = 0  # segment lines naming segments gone since the last compaction
         self._root = Path(root)
         self._directory: Path | None = None
         self._session_lock: QLockFile | None = None
@@ -558,7 +615,12 @@ class DiskRing(Ring):
             _remove_stale_sessions(self._root)
             directory.mkdir(mode=0o700)
             self._directory = directory
-            (directory / "owner").write_text(_OWNER, encoding="ascii")
+            (directory / "owner").write_text(
+                _KEPT_OWNER if self._kept else _OWNER, encoding="ascii"
+            )
+            if self._kept:
+                self._index = (directory / _INDEX).open("ab", buffering=0)
+                self._index.write(b'{"v":2}\n')
             lock = QLockFile(str(directory / "session.lock"))
             lock.setStaleLockTime(0)
             if not lock.tryLock(0):
@@ -596,6 +658,13 @@ class DiskRing(Ring):
             self._file_seq = None
 
     def _unlink(self, segment: Segment) -> None:
+        if self._file is not None and self._file_seq == segment.seq:  # 2.6: an open one dropped
+            try:
+                self._file.close()
+            except OSError:
+                pass
+            self._file = None
+            self._file_seq = None
         self._path(segment).unlink()
 
     def _read(self, segment: Segment, offset: int, size: int) -> bytes:
@@ -609,13 +678,30 @@ class DiskRing(Ring):
         if additional and shutil.disk_usage(self._directory).free < _RESERVE_BYTES + additional:
             raise RingError("Recording stopped to preserve free disk space.")
 
+    def _close_files(self) -> None:
+        for handle in (self._file, self._index):
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+        self._file = None
+        with self._index_lock:
+            self._index = None
+
+    def _release_storage(self) -> None:
+        """Keep a v2 folder as it is, its lock free for a later helper (2.6); a v1 one goes."""
+        if not self._kept:
+            self._free_storage()
+            return
+        self._close_files()
+        if self._session_lock is not None:
+            self._session_lock.unlock()
+            self._session_lock = None
+        self._directory = None
+
     def _free_storage(self) -> None:
-        if self._file is not None:
-            try:
-                self._file.close()
-            except OSError:
-                pass
-            self._file = None
+        self._close_files()
         directory = self._directory
         if directory is None:
             return
@@ -639,12 +725,194 @@ class DiskRing(Ring):
         if failed:
             raise RingError("Some temporary buffer files could not be removed.")
 
+    # ---- 2.6: the index of a v2 folder ----------------------------------------------------
+    def _append_index(self, record: dict) -> None:
+        line = (json.dumps(record, separators=(",", ":")) + "\n").encode("ascii")
+        with self._index_lock:
+            if self._index is None:
+                return
+            try:
+                self._index.write(line)
+            except OSError:
+                _LOG.warning("A kept buffer's index could not be written; it will not be kept.")
+                self._index = None
+
+    def note_segment(
+        self, seq: int, start: float, end: float, discontinuity: bool, start_quality: str
+    ) -> None:
+        if not self._kept:
+            return
+        with self._state_lock:
+            segment = self._segments.get(seq)
+            if segment is None or not segment.complete:
+                return
+            record = {
+                "seg": seq,
+                "h": segment.header_len,
+                "n": segment.size,
+                "s": start,
+                "e": end,
+                "d": bool(discontinuity),
+                "q": start_quality,
+                "w": segment.wall,
+                "j": segment.junction,
+            }
+            self._index_segs[seq] = record
+        self._append_index(record)
+
+    def note_part(self, first_seq: int, start: float, wall: float) -> None:
+        if self._kept:
+            record = {"part": first_seq, "s": start, "w": wall}
+            with self._state_lock:
+                self._index_parts.append(record)
+            self._append_index(record)
+
+    def note_label(self, label: dict) -> None:
+        if self._kept:
+            self._index_label = dict(label)
+            self._append_index({"label": self._index_label})
+
+    def note_where(self, where: dict) -> None:
+        if self._kept:
+            self._index_where = dict(where)
+            self._append_index({"where": self._index_where})
+
+    def _forget(self, segment: Segment) -> None:
+        if not self._kept:
+            return
+        with self._state_lock:
+            if self._index_segs.pop(segment.seq, None) is None:
+                return
+            self._index_dead += 1
+            due = self._index_dead > max(64, len(self._index_segs))
+        if due:
+            self._compact()
+
+    def _compact(self) -> None:
+        """Write the index anew with the held segments only (called with the disk lock)."""
+        directory = self._directory
+        if directory is None:
+            return
+        with self._state_lock:
+            held = [self._index_segs[seq] for seq in sorted(self._index_segs)]
+            oldest = held[0]["seg"] if held else None
+            parts = [
+                p
+                for i, p in enumerate(self._index_parts)
+                if oldest is None
+                or i + 1 == len(self._index_parts)
+                or self._index_parts[i + 1]["part"] > oldest
+            ]
+            self._index_parts = parts
+            self._index_dead = 0
+        records: list[dict] = [{"v": 2}]
+        if self._index_label is not None:
+            records.append({"label": self._index_label})
+        if self._index_where is not None:
+            records.append({"where": self._index_where})
+        records += parts + held
+        text = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in records)
+        with self._index_lock:
+            if self._index is None:
+                return
+            try:
+                (directory / _INDEX_NEW).write_text(text, encoding="ascii")
+                self._index.close()
+                os.replace(directory / _INDEX_NEW, directory / _INDEX)
+                self._index = (directory / _INDEX).open("ab", buffering=0)
+            except OSError:
+                _LOG.warning("A kept buffer's index could not be compacted; it will not be kept.")
+                self._index = None
+
+
+# ---- 2.6: the kept buffer's index --------------------------------------------------------
+
+
+@dataclass
+class Index:
+    """What a kept buffer's folder holds (`read_index`): its whole segments' lines in order
+    (the newest unbroken run of them), its parts, whose it is and where the user was."""
+
+    segments: list[dict] = field(default_factory=list)
+    parts: list[dict] = field(default_factory=list)
+    label: dict | None = None
+    where: dict | None = None
+
+
+def _number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _segment_line(record: dict) -> bool:
+    return (
+        type(record.get("seg")) is int
+        and type(record.get("h")) is int
+        and type(record.get("n")) is int
+        and _number(record.get("s"))
+        and _number(record.get("e"))
+        and _number(record.get("w"))
+    )
+
+
+def read_index(folder: Path) -> Index | None:
+    """A v2 folder's index (module docstring); None when it is not one or cannot be read.
+    A torn or odd line is skipped. Only the newest unbroken run of whole segments counts: a
+    segment whose file is missing or of another size ends it (a damaged buffer keeps what is
+    after the damage). Reads files only: call it off the GUI thread."""
+    try:
+        marker = (folder / "owner").read_text(encoding="ascii").replace("\r\n", "\n")
+        if marker != _KEPT_OWNER:
+            return None
+        raw = (folder / _INDEX).read_bytes()
+    except OSError, UnicodeError:
+        return None
+    segments: dict[int, dict] = {}
+    index = Index()
+    versioned = False
+    for line in raw.split(b"\n"):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("v") == 2:
+            versioned = True
+        elif _segment_line(record):
+            segments[record["seg"]] = record
+        elif (
+            type(record.get("part")) is int
+            and _number(record.get("s"))
+            and _number(record.get("w"))
+        ):
+            index.parts.append(record)
+        elif isinstance(record.get("label"), dict):
+            index.label = record["label"]
+        elif isinstance(record.get("where"), dict):
+            index.where = record["where"]
+    if not versioned:
+        return None
+    run: list[dict] = []
+    for seq in sorted(segments, reverse=True):
+        if run and run[-1]["seg"] != seq + 1:
+            break
+        try:
+            size = (folder / f"segment-{seq}.ts").stat().st_size
+        except OSError:
+            break
+        if size != segments[seq]["n"]:
+            break
+        run.append(segments[seq])
+    run.reverse()
+    index.segments = run
+    return index
+
 
 def cleanup_session_dir(root: Path, name: str) -> bool:
     """Remove a dead helper's session directory; True when removed or absent, False
     when a live owner still holds it (left untouched)."""
     directory = Path(root) / name
-    if not _SESSION_PATTERN.fullmatch(name):
+    if not (_SESSION_PATTERN.fullmatch(name) or _KEPT_PATTERN.fullmatch(name)):
         raise OSError("not a temporary session name")
     if directory.is_symlink():
         raise OSError("temporary session was replaced")

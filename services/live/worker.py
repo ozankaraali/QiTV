@@ -40,6 +40,10 @@ Commands (parent to helper):
   Answered by `("resumed", sid)` at that segment. A resume that fails reports its error and
   parks again (`("parked", sid)`): nothing of the buffer goes. A resume of a session that is
   not parked is ignored;
+- `("keep", sid, label)` and `("where", sid, where)` (2.6): a disk buffer's label (the
+  channel's key) and where the user was in it, written to its folder's index (a v2 folder,
+  `services.live.ring`); unanswered, ignored for a memory buffer. A helper going down
+  ("shutdown", its owner gone) keeps v2 folders for the next helper; "close" removes them;
 - `("record_start", sid, rid, path, seq, limits)` (2.2): recording `rid` (the parent's name for
   it) writes the session's ring to a new file at `path` (a unique name next to it when that
   exists) from segment `seq` on, following the live edge, until "record_stop", the session's
@@ -294,9 +298,12 @@ def _error(sid: str, kind: str, text: str, status: int | None) -> tuple[Any, ...
     return message if status is None else (*message, status)
 
 
-def _close_ring(ring: Ring) -> None:
+def _close_ring(ring: Ring, *, keep: bool = False) -> None:
     try:
-        ring.close()
+        if keep:
+            ring.close(keep=True)
+        else:
+            ring.close()
     except Exception as error:  # RingError: some disk buffer files could not be removed
         _LOG.warning("A live buffer was not removed completely (%s).", type(error).__name__)
 
@@ -475,6 +482,9 @@ class _Session:
         self._resuming = False  # "resumed" goes with the resumed run's first segment
         self._kept_history = False  # resumed once: a disk failure parks, never drops it
         self._clock_hls: bool | None = None  # the kind of source the clock joiner is for
+        self._label: dict | None = None  # 2.6: "keep" (written once a disk ring exists)
+        self._where: dict | None = None  # 2.6: "where"
+        self.keep_on_close = False  # 2.6: the helper goes down: a v2 folder stays
         self._recorder: Recorder | None = None  # 2.2: writes the ring to a file (`record`)
         self._finishing: set[Recorder] = set()  # stopped, still writing up to the live edge
         self.thread = threading.Thread(target=self._run, name="qitv-live-session", daemon=True)
@@ -804,6 +814,10 @@ class _Session:
         try:
             ring: Ring = DiskRing(root, spec["dir"], spec["max_bytes"], stop=self.stop)
             self._helper.disk_budget(spec["max_bytes"]).register(ring)
+            if self._label is not None:
+                ring.note_label(self._label)
+            if self._where is not None:
+                ring.note_where(self._where)
         except (RingError, OSError) as error:
             self._check()
             # An OSError's text names the path; ring errors are fixed strings.
@@ -855,10 +869,14 @@ class _Session:
                     self._write(lambda ring: ring.append(payload))
                 self._notify()
             elif isinstance(event, Opened):
-                if self._new_part:  # a run's first segment: the part's time of day (2.6)
+                began = self._new_part
+                if began:  # a run's first segment: the part's time of day (2.6)
                     self._new_part = False
                     timeline.begin_part(_wall_time())
                 timeline.on_opened(event.seq, event.first_pts, event.wall, event.discontinuity)
+                if began and timeline.parts() and self._ring is not None:
+                    part = timeline.parts()[-1]
+                    self._ring.note_part(part.first_seq, part.start, part.wall)
                 self._skipping = False
                 seq, header = event.seq, event.header
                 junction, self._open_junction = self._open_junction, False
@@ -885,6 +903,10 @@ class _Session:
                 span = timeline.on_closed(
                     event.seq, event.next_first_pts, event.wall, event.start_quality
                 )
+                if not self._skipping and self._ring is not None:
+                    self._ring.note_segment(  # 2.6: the index a later helper reads
+                        span.seq, span.start, span.end, span.discontinuity, span.start_quality
+                    )
                 self._pending.append(
                     (span.seq, span.start, span.end, span.discontinuity, span.start_quality)
                 )
@@ -1275,7 +1297,23 @@ class _Session:
             ring, self._ring = self._ring, None
         if ring is not None:
             self._helper.forget_ring(ring)
-            _close_ring(ring)
+            # 2.6: a helper going down keeps a labelled buffer (one a later helper can give
+            # back to its channel); any other goes as before.
+            _close_ring(ring, keep=self.keep_on_close and self._label is not None)
+
+    def note(self, kind: str, value: dict) -> None:
+        """Called by the command loop ("keep", "where"): kept, and written to the ring's index
+        (now when it exists, else once it is made)."""
+        if kind == "keep":
+            self._label = dict(value)
+        else:
+            self._where = dict(value)
+        ring = self._ring
+        if ring is not None:
+            try:
+                (ring.note_label if kind == "keep" else ring.note_where)(dict(value))
+            except Exception as error:  # an index is a convenience: never the session's end
+                _LOG.warning("A kept buffer's note was not written (%s).", type(error).__name__)
 
     def expire(self, before: float) -> None:
         """2.6: segments completed before `before` go; the parent hears it."""
@@ -1407,6 +1445,14 @@ class _Helper:
                 if len(command) not in (6, 7) or not isinstance(command[1], str):
                     raise ValueError("a resume needs a session and its source")
                 self._resume(*command[1:])
+            elif name in ("keep", "where"):
+                if len(command) != 3 or not isinstance(command[1], str):
+                    raise ValueError("a note needs a session")
+                if not isinstance(command[2], dict):
+                    raise TypeError("a note is a mapping")
+                session = self._sessions.get(command[1])
+                if session is not None:
+                    session.note(name, command[2])
             elif name == "record_start":
                 self._record(command)
             elif name == "record_stop":
@@ -1518,6 +1564,7 @@ class _Helper:
         sessions = list(self._sessions.values())
         self._sessions.clear()
         for session in sessions:
+            session.keep_on_close = True  # 2.6: kept buffers stay for the next helper
             session.cancel()
             self.server.remove_session(session.sid)
         self.server.stop()

@@ -85,7 +85,7 @@ from typing import Any
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, QThread, Signal, Slot
 
-from services.live.ring import cleanup_session_dir, remove_stale_sessions
+from services.live.ring import cleanup_session_dir, read_index, remove_stale_sessions
 from services.live.timeline import Span
 from services.live.worker import helper_main
 from services.thread_cleanup import ThreadCleanup
@@ -99,7 +99,7 @@ _RESTARTS = 1
 _HELLO_TIMEOUT = 30.0  # a helper that never says hello counts as dead
 _RAM_BYTES = 128 * 1024 * 1024  # a disk ring's memory fallback when it names none
 _SHUTDOWN_WAIT_MS = 1800  # the escalation takes at most 1.5 s
-_SESSION_PREFIX = ".qitv-timeshift-"
+_SESSION_PREFIX = ".qitv-buffer-"  # 2.6: a v2 folder, kept past the helper (services.live.ring)
 _INTERNAL = "The live buffer stopped unexpectedly."
 _UNAVAILABLE = "The live buffer is not available."
 _FAILED, _LOST = "failed", "lost"  # a recording that could not start, or whose helper died
@@ -252,6 +252,10 @@ class _Supervisor(QThread):
             record.command = ("open", sid, url, headers, verify_ssl, ring, live_delay, *start)
             record.over = record.failed = False
             conn.send(command)
+            return
+        if name in ("keep", "where"):  # 2.6: a disk buffer's label, where the user was
+            if record is not None and record.sent and not record.closing:
+                conn.send(command)
             return
         if name in ("record_start", "record_stop"):
             if record is not None and record.sent and not record.closing:
@@ -498,8 +502,14 @@ class _Supervisor(QThread):
         return exited
 
     def _clean_dirs(self) -> None:
-        """Only after the helper exited: a live owner's directory is left untouched."""
+        """Only after the helper exited: a live owner's directory is left untouched. A kept
+        buffer's (v2) stays for the next helper (2.6)."""
         for name in sorted(self._dirs):
+            if name.startswith(_SESSION_PREFIX):
+                index = read_index(self._root / name)
+                if index is not None and index.label is not None:
+                    self._dirs.discard(name)  # kept for the next helper
+                    continue
             try:
                 removed = cleanup_session_dir(self._root, name)
             except OSError as error:
@@ -650,6 +660,19 @@ class LiveEngine(QObject):
         if target is not None:
             command = (*command, {"target": float(target), "extra": float(extra)})
         self._commands.put(command)
+
+    def keep_session(self, sid: str, label: Mapping[str, Any]) -> None:
+        """Label a disk session's buffer (2.6: the channel's key), so a later helper knows
+        whose it is."""
+        view = self._sessions.get(sid)
+        if view is not None and not view.closing and not self._shut:
+            self._commands.put(("keep", sid, dict(label)))
+
+    def note_where(self, sid: str, where: Mapping[str, Any]) -> None:
+        """Note where the user was in a disk session's buffer (2.6), for a later helper."""
+        view = self._sessions.get(sid)
+        if view is not None and not view.closing and not self._shut:
+            self._commands.put(("where", sid, dict(where)))
 
     def resize_session(self, sid: str, max_bytes: int) -> None:
         """A RAM session holds up to `max_bytes` from now on (the multiview: the focused

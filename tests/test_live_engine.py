@@ -127,7 +127,8 @@ def kill(process):
 def session_dirs(root):
     if not root.is_dir():
         return []
-    return sorted(path.name for path in root.iterdir() if path.name.startswith(".qitv-timeshift-"))
+    prefixes = (".qitv-timeshift-", ".qitv-buffer-")  # 2.6: v2 folders
+    return sorted(path.name for path in root.iterdir() if path.name.startswith(prefixes))
 
 
 def paced_body(payload, stop, hung_up):
@@ -372,6 +373,56 @@ class ParkResumeTests(unittest.TestCase):
         commands.put(("resume", "s1", URL_FOR_RING, {}, True, 6.0))
         supervisor._send_next(SimpleNamespace(send=relayed.append))
         self.assertEqual(relayed[-1][:3], ("error", "s1", "crashed"))
+
+
+class KeptFolderTests(unittest.TestCase):
+    """2.6: disk buffers go in v2 folders, labelled; a helper's death leaves them for the next."""
+
+    def test_new_disk_buffers_are_v2_folders(self):
+        self.assertTrue(engine_module._session_dir().startswith(".qitv-buffer-"))
+
+    def test_keep_and_where_reach_the_helper(self):
+        import queue
+
+        commands: queue.Queue = queue.Queue()
+        engine = LiveEngine.__new__(LiveEngine)
+        LiveEngine.__init__(engine, tempfile.gettempdir())
+        engine._commands = commands
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=True, max_bytes=MIB
+        )
+        opened = commands.get_nowait()
+        engine.keep_session(sid, {"channel": "k1"})
+        engine.note_where(sid, {"position": 12.0, "paused": True})
+        engine.keep_session("unknown", {"channel": "k2"})
+        self.assertEqual(commands.get_nowait(), ("keep", sid, {"channel": "k1"}))
+        self.assertEqual(commands.get_nowait(), ("where", sid, {"position": 12.0, "paused": True}))
+        self.assertTrue(commands.empty())
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), commands)
+        supervisor._records[sid] = engine_module._Record(command=opened, sent=True)
+        sent = []
+        commands.put(("keep", sid, {"channel": "k1"}))
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent, [("keep", sid, {"channel": "k1"})])
+
+    def test_a_helpers_death_leaves_labelled_folders_only(self):
+        import queue
+
+        from services.live.ring import DiskRing
+
+        with tempfile.TemporaryDirectory() as root:
+            kept, plain = engine_module._session_dir(), engine_module._session_dir()
+            for name in (kept, plain):
+                ring = DiskRing(Path(root), name, MIB)
+                if name == kept:
+                    ring.note_label({"channel": "k1"})
+                ring.close(keep=True)  # as a helper that died left it
+            supervisor = engine_module._Supervisor(Path(root), queue.Queue())
+            supervisor._dirs = {kept, plain}
+            supervisor._clean_dirs()
+            self.assertTrue((Path(root) / kept).exists())
+            self.assertFalse((Path(root) / plain).exists())  # nobody could take it back
+            self.assertEqual(supervisor._dirs, set())
 
 
 class FailureReasonTests(unittest.TestCase):
