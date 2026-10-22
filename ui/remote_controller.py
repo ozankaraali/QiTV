@@ -14,10 +14,12 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 
+from services import favorites
 from services.browsed_catalog import BrowsedCatalog
+from services.find import Preferences, preferences_for
 from services.i18n import N_, translate
 from services.provider_api import xtream_hls
-from services.provider_ids import provider_of
+from services.provider_ids import ALL_PROVIDERS, provider_of
 from services.redact import safe_message
 from services.remote.protocol import (
     BUTTON_META,
@@ -29,6 +31,7 @@ from services.remote.protocol import (
     Opened,
     OpenItem,
     Paired,
+    Position,
     Press,
     Query,
     Status,
@@ -36,13 +39,16 @@ from services.remote.protocol import (
     ToTv,
     WatchHere,
 )
+from services.search import Hit
+from ui.find_session import FindSession
 from ui.keymap import Action
+from ui.library.search_session import SearchSession
 from ui.link_lanes import Target
 from ui.remote_buttons import BUTTONS
 from ui.remote_guide import PhoneGuide
 from ui.remote_library import PhoneLibrary
 from ui.remote_repeat import KeyRepeater
-from ui.remote_snapshots import TITLE_CHARS, Handles, results, state
+from ui.remote_snapshots import TITLE_CHARS, Handles, results, results_of, state
 
 if TYPE_CHECKING:
     from services.remote.hub import RemoteHub
@@ -120,7 +126,10 @@ class RemoteController(QObject):
         self._devices: dict[str, str] = {}  # each phone's device id, by session
         # Each phone's catalog for its lists (its own provider choice), by device.
         self._phone_catalogs: dict[str, BrowsedCatalog] = {}
-        self._every_catalog: Optional[BrowsedCatalog] = None  # every provider's, for finds
+        self._channel_finder: Optional[FindSession] = None  # the phones' finds, shared
+        self._title_searcher: Optional[SearchSession] = None  # and their Library's
+        self._quiet_query = ""  # what a phone searches for on its own (the TV's picture stays)
+        self._find_source = ""  # the provider the phone's list that found last shows
         # What a phone plays in its own player, and the group it was picked in (for the TV), by
         # device: a phone that slept comes back as another session.
         self._watching: dict[str, tuple[Target, Optional[tuple[str, list]]]] = {}
@@ -214,6 +223,12 @@ class RemoteController(QObject):
             if b.payload == "tv":
                 if screens.library_shown():
                     screens.back_to_tv()
+                # The TV's guide or channel list open: closed as Back closes them, the picture
+                # shows (at most both, one Esc each).
+                for _ in range(2):
+                    if window.controller.key_context() not in ("guide", "drawer"):
+                        break
+                    window.controller.handle(Action.ESCAPE)
             else:
                 screens.open_library(b.payload)
         elif b.action in _WINDOW_ACTIONS:
@@ -267,6 +282,7 @@ class RemoteController(QObject):
                 gone = browsing.pop(event.sid, None)
                 if gone is not None:
                     gone.deleteLater()
+            self._release_finds()
             self._phone_guides()
             if not self._phones:
                 self._diff.stop()
@@ -278,13 +294,15 @@ class RemoteController(QObject):
         elif isinstance(event, Get):
             self._answer(event)
         elif isinstance(event, Query):
-            self._search(event.text)
+            self._search(event.text, event.tv)
         elif isinstance(event, OpenItem):
             self._open(event.sid, event.handle)
         elif isinstance(event, WatchHere):
             self._watch_here(event.sid, event.handle)
         elif isinstance(event, ToTv):
             self._to_tv(event.sid)
+        elif isinstance(event, Position):
+            self._position(event.sid, event.position_ms, event.length_ms)
         elif isinstance(event, StoreSaved):
             self._persist(event.data)
         elif isinstance(event, Paired):
@@ -352,6 +370,7 @@ class RemoteController(QObject):
                 self._library(sid).titles(section, event.genre, event.page, event.find, event.n)
         except Exception as error:  # a phone's question must never take QiTV down
             logger.error("Phone remote: %s failed: %s", event.what, safe_message(error))
+        self._release_finds()
         if event.what in ("groups", "guide", "timetable"):
             self._phone_guides()
 
@@ -369,8 +388,15 @@ class RemoteController(QObject):
         guide = self._guides.get(sid)
         if guide is None:
             send = lambda message: self._send(sid, message)  # noqa: E731
-            catalog, every = self._phone_catalog(sid), self._every()
-            guide = PhoneGuide(self._window, send, self, catalog=catalog, every=every)
+            guide = PhoneGuide(
+                self._window,
+                send,
+                self,
+                catalog=self._phone_catalog(sid),
+                finder=self._finder(),
+                prefer=self._prefer,
+                guides_moved=self._phone_guides,
+            )
             self._guides[sid] = guide
         return guide
 
@@ -378,8 +404,15 @@ class RemoteController(QObject):
         listed = self._channel_lists.get(sid)
         if listed is None:
             send = lambda m: self._send(sid, m)  # noqa: E731
-            catalog, every = self._phone_catalog(sid), self._every()
-            listed = PhoneGuide(self._window, send, self, bare=True, catalog=catalog, every=every)
+            listed = PhoneGuide(
+                self._window,
+                send,
+                self,
+                bare=True,
+                catalog=self._phone_catalog(sid),
+                finder=self._finder(),
+                prefer=self._prefer,
+            )
             self._channel_lists[sid] = listed
         return listed
 
@@ -400,20 +433,78 @@ class RemoteController(QObject):
             self._phone_catalogs[device] = catalog
         return catalog
 
-    def _every(self) -> BrowsedCatalog:
-        """Every provider's lists (All providers), which the phones' finds reach: one for all."""
-        if self._every_catalog is None:
+    def _finder(self) -> FindSession:
+        """The desktop channel list's find, for every phone: genres and channels at every
+        provider from their saved lists (a worker reads them; nothing signs in), ranked as on
+        the desktop."""
+        if self._channel_finder is None:
             window = self._window
-            choice = _PhoneChoice(window.config_manager)
-            choice.phone_all_providers = True
-            self._every_catalog = BrowsedCatalog(
-                window.catalogs,
-                choice,
-                source_key="phone_provider_name",
-                all_key="phone_all_providers",
+            finder = FindSession(
+                window.provider_manager,
+                window.jobs,
+                loaded=window.catalog.loaded_contents,
+                signature=window._find_signature,
+                preferences=self._find_preferences,
                 parent=self,
             )
-        return self._every_catalog
+            window.catalogs.contentChanged.connect(finder.content_changed)
+            window.catalogs.providersChanged.connect(finder.content_changed)
+            self._channel_finder = finder
+        return self._channel_finder
+
+    def _searcher(self) -> SearchSession:
+        """The desktop Library's search, for every phone: every provider's films and series
+        from their saved lists (a worker reads them), as the Library's search finds them."""
+        if self._title_searcher is None:
+            window = self._window
+            searcher = SearchSession(
+                window.provider_manager,
+                window.jobs,
+                window.screens.library_model,
+                window.watch,
+                self,
+                loaded=getattr(window.library_catalog, "loaded_contents", None),
+            )
+            window.catalogs.contentChanged.connect(self._titles_changed)
+            window.catalogs.providersChanged.connect(self._titles_changed)
+            searcher.changed.connect(self._push_quiet_results)
+            self._title_searcher = searcher
+        return self._title_searcher
+
+    def _titles_changed(self, *_args: object) -> None:
+        """A provider's lists changed: the search reads them again, a find on show runs anew."""
+        searcher = self._title_searcher
+        if searcher is not None:
+            searcher.drop_snapshot()
+            if searcher.query.strip():
+                searcher.rerun()
+
+    def _release_finds(self) -> None:
+        """No phone finds anything: the shared find and search let their text go (and their
+        index after a while), as the desktop's find does once it ends, and a list change no
+        longer runs them again."""
+        lists = list(self._guides.values()) + list(self._channel_lists.values())
+        finder = self._channel_finder
+        if finder is not None and finder.query and not any(g.finding() for g in lists):
+            finder.clear()
+        searcher = self._title_searcher
+        searched = self._quiet_query.strip() or any(
+            library.finding() for library in self._libraries.values()
+        )
+        if searcher is not None and searcher.query and not searched:
+            searcher.clear()
+
+    def _prefer(self, source: str) -> None:
+        self._find_source = source
+
+    def _find_preferences(self) -> Preferences:
+        """What the phones' finds rank first: the provider the phone's list shows (as the TV's
+        own find ranks the TV's), the providers and channels watched lately, the stars."""
+        window, config = self._window, self._window.config_manager
+        names = window.catalog.provider_names()
+        shown = self._find_source if self._find_source != ALL_PROVIDERS else ""
+        browsed = shown or window.catalog.current_provider_name()
+        return preferences_for(names, browsed, config.watch_history, favorites.matcher(config))
 
     def _library(self, sid: str) -> PhoneLibrary:
         library = self._libraries.get(sid)
@@ -426,6 +517,7 @@ class RemoteController(QObject):
                 lambda message: self._send(sid, message),
                 self,
                 cache=window.screens.library_model.cache,  # the TV's: a sorted list serves both
+                searcher=self._searcher(),
             )
             self._libraries[sid] = library
         return library
@@ -447,6 +539,12 @@ class RemoteController(QObject):
             elif kind == "title" and cast(tuple, payload)[1] in ("movie", "episode"):
                 item, item_kind, _genre_items = cast(tuple, payload)
                 chosen = controller.title_target(item, item_kind)
+            elif kind == "hit" and cast(Hit, payload).section in ("live", "movies"):
+                hit = cast(Hit, payload)  # a search result: a channel, or a film
+                if hit.section == "live":
+                    chosen = Target(hit.item, "live", str(hit.item.get("name") or hit.title))
+                else:
+                    chosen = controller.title_target(hit.item, "movie")
             else:  # a series opens on the TV; anything else plays nowhere but there
                 self._send(sid, {"t": "play", "failed": True})
                 return
@@ -460,6 +558,12 @@ class RemoteController(QObject):
             message["name"] = target.title[:TITLE_CHARS]
             if target.live:
                 message["num"] = str(controller.channel_number(target.item) or "")
+            else:  # a film or an episode goes on where it stopped (as on the TV)
+                key = controller.resume_key(target)
+                watch = self._window.watch
+                start = None if target.start_over or not key else watch.resume_position(key)
+                if start:
+                    message["start"] = start // 1000
             self._send(sid, message)
             if first:  # a zap on the phone after that says nothing more
                 name = self._names.get(self._devices.get(sid, ""), "")
@@ -467,8 +571,23 @@ class RemoteController(QObject):
                 self._window.screens.notify(translate(text, name=name))
             return True, ""
 
-        if not controller.play_elsewhere(launch, chosen):
+        try:
+            handed = controller.play_elsewhere(launch, chosen)
+        except Exception as error:  # a phone's ask must never take QiTV down
+            logger.error("Phone remote: playing on the phone failed: %s", safe_message(error))
+            handed = False
+        if not handed:
             self._send(sid, {"t": "play", "failed": True})
+
+    def _position(self, sid: str, position_ms: int, length_ms: int) -> None:
+        """How far a phone got in the film or episode it plays: kept as the TV keeps its own,
+        so the TV (and the Library's Continue) goes on from there."""
+        watched = self._watching.get(self._device(sid))
+        if watched is None:
+            return
+        key = self._window.controller.resume_key(watched[0])
+        if key:
+            self._window.watch.update_position(key, position_ms, length_ms)
 
     def _to_tv(self, sid: str) -> None:
         """The phone hands back what it played: the TV plays it."""
@@ -507,7 +626,27 @@ class RemoteController(QObject):
             return url
         return xtream_hls(url, str(entry.get("username") or ""), str(entry.get("password") or ""))
 
-    def _search(self, text: str) -> None:
+    def _push_quiet_results(self) -> None:
+        """What a phone's own search found (the desktop's search, every provider's), for the
+        phones: they show what answers the text they hold."""
+        searcher = self._title_searcher
+        if self.hub is None or not self._phones or searcher is None:
+            return
+        query = self._quiet_query
+        if query.strip() and (searcher.query != query or searcher.searching):
+            return  # what is on its way answers it
+        hits = (searcher.hits or []) if query.strip() else []
+        self.hub.broadcast(results_of(hits, query, self.result_handles))
+
+    def _search(self, text: str, tv: bool = True) -> None:
+        if not tv:  # the phone's own search: the TV's picture stays
+            self._quiet_query = text
+            if text.strip():
+                self._searcher().set_query(text)
+            else:
+                self._push_quiet_results()
+                self._release_finds()
+            return
         screens = self._window.screens
         if screens.library_shown():
             self._window.library_controller.remote_search(text)

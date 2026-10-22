@@ -3,7 +3,10 @@ titles a page at a time. GUI thread only.
 
 Each phone browses with its own LibraryModel, so the phone leaves the TV's Library where it is,
 over the TV's cache: a genre the TV sorted is not sorted again (a large one takes a second).
-The find box searches the level shown, the whole of it. Genres travel as short keys and titles
+The find box searches the level shown, the whole of it, and goes on with the desktop Library's
+search (services.search through a SearchSession the phones share): every provider's films or
+series from their saved lists, read in a worker, the shown provider's first; after the genres
+it matches, or after the genre's own titles. Genres travel as short keys and titles
 as handles: nothing a phone receives names a stream, a link or a provider's own ids.
 """
 
@@ -14,7 +17,9 @@ from typing import Any, Callable, Optional
 from PySide6.QtCore import QObject, QTimer
 
 from services.library import Genre, LibraryCache, LibraryModel, title_of
-from services.search import search_index
+from services.navigation import item_key
+from services.provider_ids import ALL_PROVIDERS, provider_of
+from services.search import Hit, search_index
 from services.text_fold import fold
 from ui.remote_snapshots import Handles, stable_key
 
@@ -40,9 +45,16 @@ class PhoneLibrary(QObject):
         send: Callable[[dict], None],
         parent=None,
         cache: Optional[LibraryCache] = None,
+        searcher: Any = None,
     ) -> None:
         super().__init__(parent)
         self.model = LibraryModel(catalog, config, watch, self, cache=cache)
+        self._catalog = catalog
+        # The desktop Library's search, shared: what a find reaches past the level shown.
+        self._searcher = searcher
+        if searcher is not None:
+            searcher.changed.connect(self._changed)  # what it found arrived
+        self._claiming = False  # answering the phone's ask: its find may take the shared search
         self.handles = Handles()
         self._send = send
         self._ids: dict[str, str] = {}  # key → genre id, the genres seen so far
@@ -101,12 +113,20 @@ class PhoneLibrary(QObject):
     def _answer_page(self, view: tuple, page: int, n: int = -1) -> None:
         if view != self._view:
             self._view, self._anchor = view, page
-        message, signature = self._answer(page)
+        self._claiming = True
+        try:
+            message, signature = self._answer(page)
+        finally:
+            self._claiming = False
         if page == self._anchor:
             self._shown = signature
         if n >= 0:
             message["n"] = n  # the ask it answers; a later push carries none
         self._send(message)
+
+    def finding(self) -> bool:
+        """Whether what this Library shows is a find (the shared search stays while one is)."""
+        return self._view is not None and bool(str(self._view[-1]).strip())
 
     # ---- what the phone sees ---------------------------------------------------------------
 
@@ -133,7 +153,7 @@ class PhoneLibrary(QObject):
         titles it finds (the desktop search's rules) a page at a time after them."""
         model, find = self.model, self._find()
         genres = model.genres(find.strip())
-        hits = search_index(model.search_index(), find) if find.strip() else []
+        hits, searching = self._everywhere(find)
         if hits:
             shown = genres[:GENRES_PAGE] if page == 0 else []
             pages = _pages(len(hits), LIBRARY_PAGE)
@@ -152,6 +172,7 @@ class PhoneLibrary(QObject):
             "titles": [self._found_row(item) for item in found],
             "found": len(hits),
             "loading": loading,
+            "searching": searching,  # every provider's, still on its way
         }
         if self._failed and not genres:
             message["failed"] = True
@@ -161,6 +182,7 @@ class PhoneLibrary(QObject):
             tuple(title_of(i) for i in found),
             pages,
             loading,
+            searching,
             self._failed,
         )
         return message, signature
@@ -209,9 +231,21 @@ class PhoneLibrary(QObject):
         model, find = self.model, self._find()
         items = model.items()
         found = self._found(items, find) if items is not None else []
-        shown = found[page * LIBRARY_PAGE : (page + 1) * LIBRARY_PAGE]
+        own = len(found)  # the genre's own; the others the find finds follow them
+        searching = False
+        if items is not None and find.strip():
+            listed = {(provider_of(i), item_key(i)) for i in items}
+            hits, searching = self._everywhere(find)
+            found = found + [
+                h.item for h in hits if (provider_of(h.item), item_key(h.item)) not in listed
+            ]
+        start = page * LIBRARY_PAGE
+        shown = found[start : start + LIBRARY_PAGE]
         genre = model.genre_id
-        rows = [self._title_row(item, items) for item in shown]
+        rows = [
+            self._title_row(item, items) if at < own else self._found_row(item)
+            for at, item in enumerate(shown, start)
+        ]
         title = next((g.title for g in model.genres() if g.id == genre), "")
         message: dict = {
             "t": "library",
@@ -224,6 +258,7 @@ class PhoneLibrary(QObject):
             "pages": _pages(len(found), LIBRARY_PAGE),
             "items": rows,
             "loading": items is None and not self._failed,
+            "searching": searching,
         }
         if items is None and self._failed:
             message["failed"] = True
@@ -232,10 +267,41 @@ class PhoneLibrary(QObject):
             genre,
             message["pages"],
             message["loading"],
+            searching,
             self._failed,
             tuple(title_of(i) for i in shown),
         )
         return message, signature
+
+    # ---- past the level shown: the desktop Library's search --------------------------------
+
+    def _everywhere(self, find: str) -> tuple[list[Hit], bool]:
+        """The desktop search's films or series (the section shown) at every provider for
+        `find`, the shown provider's first, and whether they are still on their way: meanwhile
+        the shown provider's own, found here at once."""
+        if not find.strip():
+            return [], False
+        local = search_index(self.model.search_index(), find)  # the shown provider's, at once
+        searcher = self._searcher
+        if searcher is None:
+            return local, False
+        if searcher.query != find:
+            if not self._claiming:  # another search holds it (the phone's Search, say)
+                return local, False
+            searcher.set_query(find)
+        if searcher.searching or searcher.hits is None:
+            return local, True  # every provider's follow
+        words = fold(find).split()
+        section = self.model.section
+        hits = [
+            hit
+            for hit in searcher.hits or []
+            if hit.section == section and all(w in fold(hit.title) for w in words)
+        ]
+        shown = _shown(self._catalog)
+        if shown and shown != ALL_PROVIDERS:
+            hits.sort(key=lambda hit: hit.provider != shown)  # stable: each keeps its order
+        return hits, bool(searcher.searching)
 
     # ---- loads landing later ---------------------------------------------------------------
 
@@ -255,3 +321,9 @@ class PhoneLibrary(QObject):
         if signature != self._shown:
             self._shown = signature
             self._send(message)
+
+
+def _shown(catalog: Any) -> str:
+    """The provider `catalog` shows (ALL_PROVIDERS for all of them)."""
+    source = getattr(catalog, "source", None)
+    return str(source() if callable(source) else catalog.current_provider_name())

@@ -165,11 +165,31 @@ class PushTests(WindowCase):
             wait_until(lambda: {m["t"] for m in self.sent("s2")} >= {"guide", "library"})
         )
 
-    def test_search_query_mirrors_results(self):
+    def test_the_phones_own_search_leaves_the_tv_alone(self):
+        """Search on the phone, without Show on TV: the desktop's search for the phone alone
+        (every provider's channels, films and series), the TV's picture as it was."""
         self.show()
         remote = self.window.remote
         remote.bridge.post(Opened("s1", "d1", "home"))
         remote.bridge.post(Query("s1", "Channel"))
+
+        def results():
+            found = [
+                c.args[0] for c in self.hub.broadcast.call_args_list if c.args[0]["t"] == "results"
+            ]
+            return found[-1] if found and found[-1]["groups"] else None
+
+        self.assertTrue(wait_until(lambda: results() is not None, timeout_ms=10000))
+        self.assertFalse(self.window.screens.library_shown())  # the TV never searched
+        message = results()
+        self.assertEqual(message["q"], "Channel")
+        self.assertIn("Channel 1", [i["title"] for i in message["groups"][0]["items"]])
+
+    def test_search_query_mirrors_results(self):
+        self.show()
+        remote = self.window.remote
+        remote.bridge.post(Opened("s1", "d1", "home"))
+        remote.bridge.post(Query("s1", "Channel", tv=True))  # Show on TV
         self.assertTrue(wait_until(self.window.screens.library_shown))
 
         def results():

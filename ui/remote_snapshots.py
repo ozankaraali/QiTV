@@ -118,10 +118,15 @@ def _playing(session: Any) -> bool:
 
 
 def results(window: Any, handles: Handles) -> dict:
-    """The search's hits, grouped by section, 30 a group."""
+    """The TV's search's hits, grouped by section, 30 a group."""
     library = window.library_controller
+    return results_of(library.search_hits(), library.query, handles)
+
+
+def results_of(hits: list, query: str, handles: Handles) -> dict:
+    """Search hits (services.search's), grouped by section, 30 a group."""
     grouped: dict[str, list[dict]] = {section: [] for section in _SECTIONS}
-    for hit in library.search_hits():
+    for hit in hits:
         group = grouped.get(hit.section)
         if group is None or len(group) >= RESULTS_PER_GROUP:
             continue
@@ -129,6 +134,6 @@ def results(window: Any, handles: Handles) -> dict:
         group.append({"id": handles.issue("hit", hit), "title": title, "sub": ""})
     return {
         "t": "results",
-        "q": library.query,
+        "q": query,
         "groups": [{"kind": s, "items": grouped[s]} for s in _SECTIONS if grouped[s]],
     }

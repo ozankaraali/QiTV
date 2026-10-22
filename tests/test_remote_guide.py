@@ -10,13 +10,15 @@ import json
 import unittest
 from unittest import mock
 
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtTest import QTest
 from test_tv_window import WindowCase, wait_until
 
 from services.epg_view import Programme
+from services.find import FoundChannel, FoundGenre
 from services.navigation import NavNode
 from services.provider_ids import ALL_PROVIDERS
 from services.remote.protocol import MAX_MESSAGE, Get, OpenItem
-from services.text_fold import fold
 from tests.fixtures import local_provider
 from tests.fixtures.local_provider import PROVIDER_NAME
 from ui.remote_guide import GUIDE_PAGE, PhoneGuide
@@ -233,9 +235,47 @@ class PhoneGuideTests(WindowCase):
         guides.assert_called_with({PROVIDER_NAME})
 
 
+class FakeFinder(QObject):
+    """The remote's FindSession as the phone's lists use it."""
+
+    changed = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.query, self.genres, self.channels, self.searching = "", [], [], False
+        self.asked = []
+
+    def set_query(self, text):
+        self.query, self.searching = text, True
+        self.asked.append(text)
+        self.changed.emit()  # as FindSession narrows at once
+
+
+class SharedFindTests(WindowCase):
+    """Lists sharing the remote's find: only an ask takes it; a list pushing what changed never
+    takes it back (two lists would trade it for ever), showing its own without the other's."""
+
+    def test_a_push_never_takes_the_find_back(self):
+        self.open_first_channel()
+        finder, sent = FakeFinder(), []
+        lists = [
+            PhoneGuide(self.window, sent.append, bare=bare, finder=finder) for bare in (False, True)
+        ]
+        for made in lists:
+            self.addCleanup(made.deleteLater)
+        lists[0].groups(0, "cnn")
+        lists[1].groups(0, "bbc")
+        finder.changed.emit()
+        QTest.qWait(600)  # past both lists' pushes
+        self.assertEqual(finder.asked, ["cnn", "bbc"])
+        guide = [m for m in sent if m["t"] == "groups"][-1]
+        self.assertEqual((guide["find"], guide["channels"], guide["searching"]), ("cnn", [], False))
+
+
 class GuideFindTests(WindowCase):
-    """The find on the groups finds groups and channels alike, as the Library's finds genres and
-    titles: the channels with the desktop search's rules, after the groups it matches."""
+    """The phone's finds go on with the desktop channel list's find (services.find, the
+    remote's FindSession): channels and genres at every provider, ranked as there, after the
+    groups the find matches, or after the group's own channels."""
 
     def setUp(self):
         super().setUp()
@@ -243,8 +283,11 @@ class GuideFindTests(WindowCase):
         self.addCleanup(lambda: [g.deleteLater() for g in self.lists])
         self.lists = []
 
-    def make(self, bare=False):
-        made = PhoneGuide(self.window, self.sent.append, bare=bare)
+    def make(self, bare=False, catalog=None):
+        remote = self.window.remote
+        made = PhoneGuide(
+            self.window, self.sent.append, bare=bare, catalog=catalog, finder=remote._finder()
+        )
         self.lists.append(made)
         return made
 
@@ -255,9 +298,14 @@ class GuideFindTests(WindowCase):
     def found(self, kind, find):
         def ready():
             message = self.last(kind)
-            return message and message["find"] == find and not message["loading"]
+            return (
+                message
+                and message["find"] == find
+                and not message["loading"]
+                and not message.get("searching")
+            )
 
-        self.assertTrue(wait_until(ready))
+        self.assertTrue(wait_until(ready, timeout_ms=10000))
         return self.last(kind)
 
     def test_finds_channels_after_the_groups(self):
@@ -270,27 +318,33 @@ class GuideFindTests(WindowCase):
         self.assertIn("now", message["channels"][0])  # the Guide's rows: with what's on
 
     def test_the_largest_find_fits_a_frame_in_any_script(self):
-        """A page of 100 groups found, and the channels found below them with what's on."""
+        """100 rows of groups (the shown provider's and others' genres), and the channels found
+        below them with what's on, in a three-byte script."""
         self.open_first_channel()
         guide = self.make()
         long = "字" * 300  # 3 bytes a letter
         now = datetime.now(timezone.utc)
         on = programme(long, now - timedelta(minutes=5))
-        nodes = [NavNode("group", f"g{i}", f"{long}{i}", None, 9999) for i in range(150)]
-        names = [f"{long}{i}" for i in range(80)]
-        index = [("P", "live", fold(n), n, {"name": n, "id": i}) for i, n in enumerate(names)]
+        genres = [FoundGenre("Other", str(i), f"{long}{i}", 9999) for i in range(150)]
+        hits = [
+            FoundChannel("P", f"{long}{i}", {"name": f"{long}{i}", "id": i}, "") for i in range(80)
+        ]
         controller = self.window.controller
-        with (
-            mock.patch.object(guide, "_group_nodes", return_value=nodes),
-            mock.patch.object(guide, "_search_index", return_value=index),
-            mock.patch.object(controller, "now_next", return_value=(on, on)),
+        for nodes in (
+            [NavNode("group", f"g{i}", f"{long}{i}", None, 9999) for i in range(150)],
+            [],
         ):
-            guide.groups(0, "字字")
-        message = self.last("groups")
-        self.assertEqual(len(message["rows"]), 100)
-        self.assertTrue(message["channels"])
-        encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
-        self.assertLessEqual(len(encoded), MAX_MESSAGE)
+            with (
+                mock.patch.object(guide, "_group_nodes", return_value=nodes),
+                mock.patch.object(guide, "_everywhere", return_value=(genres, hits, False)),
+                mock.patch.object(controller, "now_next", return_value=(on, on)),
+            ):
+                guide.groups(0, "字字")
+            message = self.last("groups")
+            self.assertEqual(len(message["rows"]), 100)
+            self.assertTrue(message["channels"])
+            encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
+            self.assertLessEqual(len(encoded), MAX_MESSAGE)
 
     def test_the_guides_of_the_channels_found_load(self):
         self.open_first_channel()
@@ -299,41 +353,59 @@ class GuideFindTests(WindowCase):
         self.addCleanup(setattr, remote, "hub", None)
         with mock.patch.object(self.window.controller, "use_phone_guides") as guides:
             remote.bridge.post(Get("s7", "groups", "", 0, find="channel 2"))
-            self.assertTrue(wait_until(lambda: guides.called))
-        guides.assert_called_with({PROVIDER_NAME})
 
-    def test_finding_in_a_group_reaches_every_channel(self):
-        """ "Find a channel" inside a group: the group's own first, then any other channel."""
+            def loaded():
+                return any(c.args and c.args[0] == {PROVIDER_NAME} for c in guides.call_args_list)
+
+            self.assertTrue(wait_until(loaded, timeout_ms=10000))  # once the find's came
+
+    def test_finding_in_a_group_goes_on_past_it(self):
+        """ "Find a channel" inside a group: the group's own first, then what the find found
+        elsewhere, in its order (the desktop's ranking), each tuned on its own."""
         self.open_first_channel()
         guide = self.make(bare=True)
-        elsewhere = {"name": "Channel 9 Elsewhere", "id": 9, "cmd": "file:///9"}
-        index = guide._live_index() + [("P", "live", fold(elsewhere["name"]), "", elsewhere)]
-        with mock.patch.object(guide, "_search_index", return_value=index):
+        mine = {"name": "Channel 8 Mine", "id": 8, "cmd": "file:///8", "_provider": PROVIDER_NAME}
+        other = {"name": "Channel 9 Other", "id": 9, "cmd": "file:///9", "_provider": "Other"}
+        hits = [
+            FoundChannel(PROVIDER_NAME, mine["name"], mine, ""),
+            FoundChannel("Other", other["name"], other, ""),
+        ]
+        with mock.patch.object(guide, "_everywhere", return_value=([], hits, False)):
             guide.channels("", 0, "channel")
             message = self.found("channels", "channel")
         names = [r["name"] for r in message["rows"]]
-        self.assertEqual(names, ["Channel 1", "Channel 2", "Channel 9 Elsewhere"])
-        self.assertEqual(message["count"], 3)
-        kind, (channel, group, channels) = guide.handles.get(message["rows"][2]["id"])
-        self.assertEqual((channel["name"], group, channels), ("Channel 9 Elsewhere", "", []))
+        self.assertEqual(names, ["Channel 1", "Channel 2", "Channel 8 Mine", "Channel 9 Other"])
+        self.assertEqual(message["count"], 4)
+        kind, (channel, group, channels) = guide.handles.get(message["rows"][3]["id"])
+        self.assertEqual((channel["name"], group, channels), ("Channel 9 Other", "", []))
         kind, (channel, group, channels) = guide.handles.get(message["rows"][0]["id"])
         self.assertTrue(group and channels)  # the group's own: tuned within it
 
-    def test_a_find_reaches_other_providers_after_the_shown_ones(self):
-        """The find widens without going up: the group's own, the provider's others, then
-        every other provider's (the shown provider's first wherever the index has it)."""
+    def test_the_group_s_own_are_not_listed_twice(self):
         self.open_first_channel()
         guide = self.make(bare=True)
-        other = {"name": "Channel 9 Other", "id": 9, "cmd": "file:///9", "_provider": "Other"}
-        mine = {"name": "Channel 8 Mine", "id": 8, "cmd": "file:///8", "_provider": PROVIDER_NAME}
-        index = [
-            ("Other", "live", fold(other["name"]), other["name"], other),
-            (PROVIDER_NAME, "live", fold(mine["name"]), mine["name"], mine),
-        ] + guide._live_index()
-        with mock.patch.object(guide, "_search_index", return_value=index):
-            guide.channels("", 0, "channel")
-            names = [r["name"] for r in self.found("channels", "channel")["rows"]]
-        self.assertEqual(names, ["Channel 1", "Channel 2", "Channel 8 Mine", "Channel 9 Other"])
+        guide.channels("", 0, "channel")
+        names = [r["name"] for r in self.found("channels", "channel")["rows"]]
+        self.assertEqual(names, ["Channel 1", "Channel 2"])  # the find found them too
+
+    def test_genres_found_at_another_provider_open_in_all_providers(self):
+        self.open_first_channel()
+        catalog = self.window.remote._phone_catalog("s4")
+        guide = self.make(bare=True, catalog=catalog)
+        genres = [
+            FoundGenre("Other", "7", "Sports", 3),
+            FoundGenre(PROVIDER_NAME, "x", "Fixture", 2),
+        ]
+        with mock.patch.object(guide, "_everywhere", return_value=(genres, [], False)):
+            guide.groups(0, "s")
+        rows = self.last("chgroups")["rows"]
+        self.assertIn({"title": "Other", "header": True}, rows)
+        sports = next(r for r in rows if r.get("title") == "Sports")
+        self.assertEqual(sports["count"], 3)
+        self.assertEqual([r["title"] for r in rows if r.get("header")], ["Other"])  # not mine
+        with mock.patch.object(catalog, "select_provider") as select:
+            guide.channels(sports["id"], 0, "")
+        select.assert_called_once_with(ALL_PROVIDERS)
 
     def test_a_group_and_no_channel(self):
         self.open_first_channel()
@@ -348,9 +420,8 @@ class GuideFindTests(WindowCase):
         listed = self.make(bare=True)
         listed.groups(0, "chan")
         message = self.found("chgroups", "chan")
-        self.assertEqual([c["name"] for c in message["channels"]], ["Channel 1", "Channel 2"])
+        self.assertEqual(sorted(c["name"] for c in message["channels"]), ["Channel 1", "Channel 2"])
         self.assertFalse(any("now" in c for c in message["channels"]))
-        self.assertTrue(message["channels"][0]["playing"])
 
     def test_a_found_channel_tunes(self):
         self.open_first_channel()
@@ -363,6 +434,15 @@ class GuideFindTests(WindowCase):
         remote.bridge.post(OpenItem("s6", handle))
         controller = self.window.controller
         self.assertTrue(wait_until(lambda: (controller._channel or {}).get("name") == "Channel 2"))
+
+    def test_the_find_ranks_the_provider_the_phone_shows_first(self):
+        remote = self.window.remote
+        names = [PROVIDER_NAME, "Other"]
+        with mock.patch.object(self.window.catalog, "provider_names", return_value=names):
+            remote._prefer("Other")
+            self.assertEqual(remote._find_preferences().providers[0], "Other")
+            remote._prefer(PROVIDER_NAME)
+            self.assertEqual(remote._find_preferences().providers[0], PROVIDER_NAME)
 
 
 class ChannelListTests(WindowCase):
@@ -472,18 +552,6 @@ class ProviderLevelTests(WindowCase):
         self.assertTrue(self.catalog.all_providers())
         self.assertFalse(self.window.catalog.all_providers())  # the TV's list stays
         self.assertEqual((config.selected_provider_name, config.tv_all_providers), before)
-
-    def test_with_two_providers_the_find_searches_every_providers_list(self):
-        remote = self.window.remote
-        listed = PhoneGuide(
-            self.window, self.sent.append, bare=True, catalog=self.catalog, every=remote._every()
-        )
-        self.addCleanup(listed.deleteLater)
-        with self.two_providers(), mock.patch.object(remote._every(), "select_provider") as every:
-            listed._search_index()
-        every.assert_called_once_with(ALL_PROVIDERS)  # their lists, set up as All providers does
-        self.assertTrue(remote._every().all_providers())
-        self.assertFalse(self.window.catalog.all_providers())
 
     def test_a_phones_lists_share_its_choice_and_not_the_tvs(self):
         remote = self.window.remote

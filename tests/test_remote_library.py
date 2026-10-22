@@ -10,13 +10,15 @@ import json
 import unittest
 from unittest import mock
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, QObject, Signal
+from PySide6.QtTest import QTest
 from test_library_model import FakeCatalog, history, make_config, movie, resume
 from timer_fixtures import wait_until
 
 from services import library
 from services.library import LibraryCache, LibraryModel
 from services.remote.protocol import MAX_MESSAGE
+from services.search import Hit
 from services.watch_state import WatchState
 from ui.remote_library import GENRES_PAGE, LIBRARY_PAGE, PhoneLibrary
 
@@ -29,6 +31,24 @@ def catalog_with(count=120):
         {"movies": [("1", "Drama", count), ("2", "Comedy", 1)], "series": [("9", "Crime", 1)]},
         {("movies", "1"): titles, ("movies", "2"): [movie(500, "Comedy one")]},
     )
+
+
+class FakeSearcher(QObject):
+    """The desktop Library's SearchSession as the phone's Library uses it."""
+
+    changed = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.query, self.hits, self.searching, self.asked = "", None, False, []
+
+    def set_query(self, text):
+        self.query, self.searching = text, True
+        self.asked.append(text)
+
+    def land(self, hits):
+        self.hits, self.searching = hits, False
+        self.changed.emit()
 
 
 class PhoneLibraryTests(unittest.TestCase):
@@ -255,6 +275,86 @@ class PhoneLibraryTests(unittest.TestCase):
         self.library.genres("series", 0, "harbour")
         [found] = self.last("genres")["titles"]
         self.assertNotIn("plays", found)
+
+    def with_searcher(self):
+        searcher = FakeSearcher()
+        made = PhoneLibrary(
+            self.catalog,
+            self.config,
+            WatchState(self.config),
+            self.sent.append,
+            cache=self.cache,
+            searcher=searcher,
+        )
+        self.addCleanup(made.deleteLater)
+        return made, searcher
+
+    def test_a_find_goes_on_with_every_providers_films_the_shown_ones_first(self):
+        """The desktop Library's search: every provider's films (not their series), the
+        provider shown first; the shown provider's own meanwhile, found at once."""
+        made, searcher = self.with_searcher()
+        made.genres("movies", 0, "")
+        self.ready()
+        self.assertTrue(wait_until(lambda: not self.last("genres")["loading"]))
+        made.genres("movies", 0, "comedy")
+        meanwhile = self.last("genres")
+        self.assertEqual(searcher.asked, ["comedy"])
+        self.assertTrue(meanwhile["searching"])
+        self.assertEqual([t["title"] for t in meanwhile["titles"]], ["Comedy one"])
+        theirs = movie(9, "Comedy nights", _provider="Q")
+        mine = movie(500, "Comedy one", _provider="P")
+        show = {"id": "s9", "name": "Comedy hour", "_provider": "Q"}
+        searcher.land(
+            [
+                Hit("Q", "movies", "Comedy nights", theirs),
+                Hit("Q", "series", "Comedy hour", show),
+                Hit("P", "movies", "Comedy one", mine),
+            ]
+        )
+
+        def titles():
+            message = self.last("genres")
+            return None if message["searching"] else [t["title"] for t in message["titles"]]
+
+        self.assertTrue(wait_until(lambda: titles() == ["Comedy one", "Comedy nights"]))
+
+    def test_a_find_in_a_genre_goes_on_past_it(self):
+        made, searcher = self.with_searcher()
+        made.genres("movies", 0, "")
+        self.ready()
+        self.assertTrue(wait_until(lambda: not self.last("genres")["loading"]))
+        keys = {g["title"]: g["id"] for g in self.last("genres")["rows"] if "id" in g}
+        made.titles("movies", keys["Comedy"], 0, "comedy")
+        theirs = movie(9, "Comedy nights", _provider="Q")
+        own = self.catalog.item_map[("movies", "2")][0]
+        searcher.land(
+            [Hit("P", "movies", "Comedy one", own), Hit("Q", "movies", "Comedy nights", theirs)]
+        )
+
+        def found():
+            message = self.last("library")
+            return None if message["searching"] else [t["title"] for t in message["items"]]
+
+        self.assertTrue(wait_until(lambda: found() == ["Comedy one", "Comedy nights"]))
+        self.assertEqual(self.last("library")["count"], 2)
+        kind, (item, item_kind, _genre) = made.handles.get(self.last("library")["items"][1]["id"])
+        self.assertEqual((item["name"], item_kind), ("Comedy nights", "movie"))
+
+    def test_a_push_never_takes_the_search_back(self):
+        """The quiet search took the shared search: the Library's find, pushing what landed,
+        leaves it be and shows its own provider's meanwhile."""
+        made, searcher = self.with_searcher()
+        made.genres("movies", 0, "")
+        self.ready()
+        self.assertTrue(wait_until(lambda: not self.last("genres")["loading"]))
+        made.genres("movies", 0, "comedy")
+        searcher.set_query("dune")  # the phone's Search, meanwhile
+        searcher.land([])
+        QCoreApplication.processEvents()
+        self.assertTrue(wait_until(lambda: searcher.asked == ["comedy", "dune"]))
+        QTest.qWait(400)
+        self.assertEqual(searcher.asked, ["comedy", "dune"])
+        self.assertEqual([t["title"] for t in self.last("genres")["titles"]], ["Comedy one"])
 
     def test_the_largest_pages_fit_a_frame_in_any_script(self):
         long = "字" * 300  # 3 bytes a letter; titles are cut to what a row shows

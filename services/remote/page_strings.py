@@ -37,6 +37,8 @@ PAGE_STRINGS: dict[str, str] = {
     "go_live": N_("Go live"),  # i18n: the phone remote: a button
     "ch": N_("Ch"),  # i18n: the phone remote: the channel rocker's label (very short)
     "done": N_("Done"),  # i18n: the phone remote: closes the search or the numbers
+    # i18n: the phone remote's search: the TV's own search shows it too (else the phone's alone)
+    "show_on_tv": N_("Show on TV"),
     "library": N_("Library"),  # i18n: the phone remote: a tab
     # i18n: the phone remote: plays what the TV plays in the phone's own player instead
     "watch_here": N_("Watch on this phone"),

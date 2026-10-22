@@ -1214,6 +1214,14 @@ class TVController(QObject):
             start_over=bool(context["start_over"]),
         )
 
+    def resume_key(self, target: Target) -> Optional[str]:
+        """Where a movie's or an episode's position is kept, as while it plays here (None: a
+        live channel, or a file from the disk)."""
+        if target.live or target.local:
+            return None
+        provider_name = item_provider.provider_name(self.catalog, target.item)
+        return self.watch.content_id(provider_name, target.item, item_type=target.item_type)
+
     def play_vod(
         self,
         item: dict,

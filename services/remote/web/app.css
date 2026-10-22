@@ -178,6 +178,9 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 /* ---- lists: guide, search, library ---- */
 .list { gap: 12px; padding: 2px 16px 0; }
 .list > * { flex: none; }
+/* Show on TV, under the search: the TV's own search shows it too (else the phone's alone). */
+.tvtoggle { align-self: flex-start; height: 32px; padding: 0 14px; border-radius: 16px; font-size: 13px; font-weight: 600; color: var(--muted); background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
+.tvtoggle.on { color: var(--text); background: var(--accent-fill); box-shadow: none; }
 .list-head { position: relative; }
 .list-head h1 { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; margin: 2px 128px 0 0; }
 .list-head .where { position: absolute; right: 0; bottom: 2px; }

@@ -94,8 +94,15 @@ class MessageTests(unittest.TestCase):
             parse_phone_message({"t": "watch", "id": "h3"}), {"t": "watch", "id": "h3"}
         )
         self.assertEqual(parse_phone_message({"t": "totv"}), {"t": "totv"})
+        self.assertEqual(  # how far the phone got in a film it plays
+            parse_phone_message({"t": "pos", "ms": 61000, "len": 5400000}),
+            {"t": "pos", "ms": 61000, "len": 5400000},
+        )
         q = parse_phone_message({"t": "query", "s": "h" * 150})
         self.assertEqual(len(q["s"]), 100)
+        self.assertFalse(q["tv"])  # the phone's own search: the TV's picture stays
+        self.assertTrue(parse_phone_message({"t": "query", "s": "h", "tv": True})["tv"])
+        self.assertFalse(parse_phone_message({"t": "query", "s": "h", "tv": "yes"})["tv"])
         self.assertEqual(
             parse_phone_message(
                 {"t": "get", "what": "guide", "list": "g4", "page": 2, "find": "n" * 150}
@@ -216,6 +223,10 @@ class MessageTests(unittest.TestCase):
             {"t": "open", "id": "x" * 33},
             {"t": "watch", "id": "x" * 33},
             {"t": "watch", "id": 3},
+            {"t": "pos", "ms": -1, "len": 10},
+            {"t": "pos", "ms": 10, "len": 0},
+            {"t": "pos", "ms": "10", "len": 10},
+            {"t": "pos", "ms": 10, "len": 10**12},
             {"t": "query", "s": 5},
             ["t", "held"],
             "held",
