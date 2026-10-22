@@ -270,5 +270,49 @@ class SegmentedTimelineTests(unittest.TestCase):
                 )
 
 
+class PartTests(unittest.TestCase):
+    """A kept buffer's runs (2.6): each begins with the time its first segment opened."""
+
+    @staticmethod
+    def run_of(tl, first, count, pts, wall, *, discontinuity=False):
+        tl.on_opened(first, pts, wall, discontinuity)
+        for seq in range(first, first + count):
+            pts += 2 * HZ
+            wall += 2.0
+            tl.on_closed(seq, pts, wall)
+            if seq + 1 < first + count:
+                tl.on_opened(seq + 1, pts, wall, False)
+        return pts, wall
+
+    def test_no_part_until_one_begins(self):
+        tl = Timeline()
+        self.run_of(tl, 0, 2, 0, 0.0)
+        self.assertEqual(tl.parts(), [])
+
+    def test_begin_part_marks_the_next_opened_segment(self):
+        tl = Timeline()
+        tl.begin_part(1_000.0)
+        pts, wall = self.run_of(tl, 0, 1, 0, 0.0)
+        tl.begin_part(9_000.0)
+        self.run_of(tl, 1, 1, 5 * HZ, wall + 0.1, discontinuity=True)
+        parts = tl.parts()
+        self.assertEqual([(p.first_seq, p.wall) for p in parts], [(0, 1_000.0), (1, 9_000.0)])
+        self.assertEqual(parts[1].start, tl.spans()[1].start)
+        self.assertEqual(parts[0].start, 0.0)
+
+    def test_eviction_moves_and_drops_parts(self):
+        tl = Timeline()
+        tl.begin_part(1_000.0)
+        pts, wall = self.run_of(tl, 0, 3, 0, 0.0)
+        tl.begin_part(9_000.0)
+        self.run_of(tl, 3, 1, pts, wall, discontinuity=True)
+        tl.on_evicted(0)
+        first = tl.parts()[0]
+        self.assertEqual((first.first_seq, first.start), (1, tl.spans()[0].start))
+        self.assertAlmostEqual(first.wall, 1_000.0 + first.start)  # the same moment as before
+        tl.on_evicted(2)
+        self.assertEqual([(p.first_seq, p.wall) for p in tl.parts()], [(3, 9_000.0)])
+
+
 if __name__ == "__main__":
     unittest.main()
