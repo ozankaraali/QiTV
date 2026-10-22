@@ -282,7 +282,7 @@ class GuideFindTests(WindowCase):
         controller = self.window.controller
         with (
             mock.patch.object(guide, "_group_nodes", return_value=nodes),
-            mock.patch.object(guide, "_live_index", return_value=index),
+            mock.patch.object(guide, "_search_index", return_value=index),
             mock.patch.object(controller, "now_next", return_value=(on, on)),
         ):
             guide.groups(0, "字字")
@@ -308,7 +308,7 @@ class GuideFindTests(WindowCase):
         guide = self.make(bare=True)
         elsewhere = {"name": "Channel 9 Elsewhere", "id": 9, "cmd": "file:///9"}
         index = guide._live_index() + [("P", "live", fold(elsewhere["name"]), "", elsewhere)]
-        with mock.patch.object(guide, "_live_index", return_value=index):
+        with mock.patch.object(guide, "_search_index", return_value=index):
             guide.channels("", 0, "channel")
             message = self.found("channels", "channel")
         names = [r["name"] for r in message["rows"]]
@@ -318,6 +318,22 @@ class GuideFindTests(WindowCase):
         self.assertEqual((channel["name"], group, channels), ("Channel 9 Elsewhere", "", []))
         kind, (channel, group, channels) = guide.handles.get(message["rows"][0]["id"])
         self.assertTrue(group and channels)  # the group's own: tuned within it
+
+    def test_a_find_reaches_other_providers_after_the_shown_ones(self):
+        """The find widens without going up: the group's own, the provider's others, then
+        every other provider's (the shown provider's first wherever the index has it)."""
+        self.open_first_channel()
+        guide = self.make(bare=True)
+        other = {"name": "Channel 9 Other", "id": 9, "cmd": "file:///9", "_provider": "Other"}
+        mine = {"name": "Channel 8 Mine", "id": 8, "cmd": "file:///8", "_provider": PROVIDER_NAME}
+        index = [
+            ("Other", "live", fold(other["name"]), other["name"], other),
+            (PROVIDER_NAME, "live", fold(mine["name"]), mine["name"], mine),
+        ] + guide._live_index()
+        with mock.patch.object(guide, "_search_index", return_value=index):
+            guide.channels("", 0, "channel")
+            names = [r["name"] for r in self.found("channels", "channel")["rows"]]
+        self.assertEqual(names, ["Channel 1", "Channel 2", "Channel 8 Mine", "Channel 9 Other"])
 
     def test_a_group_and_no_channel(self):
         self.open_first_channel()
@@ -456,6 +472,18 @@ class ProviderLevelTests(WindowCase):
         self.assertTrue(self.catalog.all_providers())
         self.assertFalse(self.window.catalog.all_providers())  # the TV's list stays
         self.assertEqual((config.selected_provider_name, config.tv_all_providers), before)
+
+    def test_with_two_providers_the_find_searches_every_providers_list(self):
+        remote = self.window.remote
+        listed = PhoneGuide(
+            self.window, self.sent.append, bare=True, catalog=self.catalog, every=remote._every()
+        )
+        self.addCleanup(listed.deleteLater)
+        with self.two_providers(), mock.patch.object(remote._every(), "select_provider") as every:
+            listed._search_index()
+        every.assert_called_once_with(ALL_PROVIDERS)  # their lists, set up as All providers does
+        self.assertTrue(remote._every().all_providers())
+        self.assertFalse(self.window.catalog.all_providers())
 
     def test_a_phones_lists_share_its_choice_and_not_the_tvs(self):
         remote = self.window.remote

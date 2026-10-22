@@ -61,6 +61,7 @@ class PhoneGuide(QObject):
         parent=None,
         bare: bool = False,
         catalog: Any = None,
+        every: Any = None,
     ) -> None:
         super().__init__(parent)
         self._window = window
@@ -70,6 +71,9 @@ class PhoneGuide(QObject):
             ("chgroups", "channels", "chsources") if bare else ("groups", "guide", "sources")
         )
         self._catalog = catalog if catalog is not None else window.catalog
+        # Every provider's lists (All providers), which a find reaches with two providers or more.
+        self._every = every
+        self._every_nav: Optional[NavModel] = None
         self._sources: dict[str, str] = {}  # the phone's key → a provider (or ALL_PROVIDERS)
         self.nav = NavModel(self._catalog, window.config_manager, self)
         self.nav.reset_to("live")
@@ -274,7 +278,7 @@ class PhoneGuide(QObject):
         finds (the desktop search's rules) a page at a time after them."""
         find = self._view[1] if self._view is not None else ""
         nodes = _matching(self._group_nodes(), fold(find.strip()))
-        hits = search_index(self._live_index(), find) if find.strip() else []
+        hits = self._search_hits(find) if find.strip() else []
         if hits:
             shown = nodes[:GROUPS_PAGE] if page == 0 else []
             pages = _pages(len(hits), FOUND_PAGE)
@@ -316,25 +320,31 @@ class PhoneGuide(QObject):
     def _elsewhere(self, channels: list[dict], find: str) -> list[dict]:
         """The channels outside `channels` that the find finds among every channel."""
         listed = {(provider_of(c), item_key(c)) for c in channels}
-        hits = search_index(self._live_index(), find)
+        hits = self._search_hits(find)
         return [h.item for h in hits if (provider_of(h.item), item_key(h.item)) not in listed]
 
+    def _search_hits(self, find: str) -> list:
+        """What the find finds (the desktop search's rules), the shown provider's first."""
+        hits = search_index(self._search_index(), find)
+        shown = self._catalog.source()
+        if shown and shown != ALL_PROVIDERS:
+            hits.sort(key=lambda hit: hit.provider != shown)  # stable: each keeps its order
+        return hits
+
+    def _search_index(self) -> SearchIndex:
+        """What a find searches: the shown provider's channels; with two providers or more,
+        every provider's (their lists set up as All providers sets them up)."""
+        every = self._every
+        if every is None or len(self._catalog.provider_names()) < 2:
+            return self._live_index()
+        if self._every_nav is None:
+            every.select_provider(ALL_PROVIDERS)
+            self._every_nav = NavModel(every, self._window.config_manager, self)
+            self._every_nav.changed.connect(self._changed)  # a provider's list arrived
+        return _index_of(every, self._every_nav)
+
     def _live_index(self) -> SearchIndex:
-        catalog = self._catalog
-        version = catalog.content_version()
-        kept = PhoneGuide._indexes.get(id(catalog))
-        if kept is None or kept[0] != version:
-            items = self.nav.all_live_items()
-            names = [str(item.get("name") or "") for item in items]
-            index = [
-                (provider_of(item), "live", folded, name, item)
-                for item, name, folded in zip(items, names, fold_all(names))
-            ]
-            kept = (version, index)
-            if len(PhoneGuide._indexes) >= 4:  # catalogs gone (phones that left) give way
-                PhoneGuide._indexes.pop(next(iter(PhoneGuide._indexes)))
-            PhoneGuide._indexes[id(catalog)] = kept
-        return kept[1]
+        return _index_of(self._catalog, self.nav)
 
     def _entry(self, node: NavNode) -> dict:
         title = node.title[:TITLE_CHARS]
@@ -427,6 +437,25 @@ class PhoneGuide(QObject):
         if signature != self._shown:
             self._shown = signature
             self._send(message)
+
+
+def _index_of(catalog: Any, nav: NavModel) -> SearchIndex:
+    """`catalog`'s live channels as the desktop search indexes them (names folded), worked out
+    once per content version and kept for every list browsing through it."""
+    version = catalog.content_version()
+    kept = PhoneGuide._indexes.get(id(catalog))
+    if kept is None or kept[0] != version:
+        items = nav.all_live_items()
+        names = [str(item.get("name") or "") for item in items]
+        index = [
+            (provider_of(item), "live", folded, name, item)
+            for item, name, folded in zip(items, names, fold_all(names))
+        ]
+        kept = (version, index)
+        if len(PhoneGuide._indexes) >= 4:  # catalogs gone (phones that left) give way
+            PhoneGuide._indexes.pop(next(iter(PhoneGuide._indexes)))
+        PhoneGuide._indexes[id(catalog)] = kept
+    return kept[1]
 
 
 def _source_title(name: str) -> str:

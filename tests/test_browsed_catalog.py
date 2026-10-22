@@ -197,6 +197,22 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.assertFalse(getattr(self.config, "tv_all_providers", False))
         self.assertFalse(hasattr(self.config, "phone_provider_name"))  # nothing saved
 
+    def test_the_phones_finds_reach_every_providers_channels(self):
+        """The phone remote's finds search a catalog set to All providers (ui.remote_controller's
+        _every): both providers' channels, while the TV's page stays on its own."""
+        from ui.remote_controller import _PhoneChoice
+
+        tv = self.view("Demo TV")
+        choice = _PhoneChoice(self.config)
+        choice.phone_all_providers = True
+        every = BrowsedCatalog(
+            self.catalogs, choice, source_key="phone_provider_name", all_key="phone_all_providers"
+        )
+        every.select_provider(ALL_PROVIDERS)
+        channels = NavModel(every, self.config).all_live_items()
+        self.assertEqual({provider_of(c) for c in channels}, {"Demo TV", "Harbor IPTV"})
+        self.assertEqual(tv.source(), "Demo TV")
+
     def test_signals_of_other_providers_are_not_this_pages(self):
         view = self.view("Demo TV")
         ready = QSignalSpy(view.sectionReady)
