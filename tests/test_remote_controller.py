@@ -133,6 +133,16 @@ class RemoteDispatchTests(WindowCase):
         self.remote().fire("tv")
         self.assertTrue(wait_until(lambda: not self.window.screens.library_shown()))
 
+    def test_tv_leaves_the_guide_for_the_picture(self):
+        """The phone's TV from the TV's guide (or its channel list): back to the picture, as
+        Back does; it only left the Library before."""
+        self.open_first_channel()
+        controller = self.window.controller
+        self.remote().fire("guide")
+        self.assertTrue(wait_until(lambda: controller.key_context() == "guide"))
+        self.remote().fire("tv")
+        self.assertTrue(wait_until(lambda: controller.key_context() == "player"))
+
     def test_a_press_from_another_thread_reaches_the_gui(self):
         self.show()
         self.wait_for_drawer()

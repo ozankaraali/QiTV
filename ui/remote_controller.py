@@ -215,6 +215,12 @@ class RemoteController(QObject):
             if b.payload == "tv":
                 if screens.library_shown():
                     screens.back_to_tv()
+                # The TV's guide or channel list open: closed as Back closes them, the picture
+                # shows (at most both, one Esc each).
+                for _ in range(2):
+                    if window.controller.key_context() not in ("guide", "drawer"):
+                        break
+                    window.controller.handle(Action.ESCAPE)
             else:
                 screens.open_library(b.payload)
         elif b.action in _WINDOW_ACTIONS:
