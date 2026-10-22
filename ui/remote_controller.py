@@ -29,6 +29,7 @@ from services.remote.protocol import (
     Opened,
     OpenItem,
     Paired,
+    Position,
     Press,
     Query,
     Status,
@@ -285,6 +286,8 @@ class RemoteController(QObject):
             self._watch_here(event.sid, event.handle)
         elif isinstance(event, ToTv):
             self._to_tv(event.sid)
+        elif isinstance(event, Position):
+            self._position(event.sid, event.position_ms, event.length_ms)
         elif isinstance(event, StoreSaved):
             self._persist(event.data)
         elif isinstance(event, Paired):
@@ -469,6 +472,16 @@ class RemoteController(QObject):
 
         if not controller.play_elsewhere(launch, chosen):
             self._send(sid, {"t": "play", "failed": True})
+
+    def _position(self, sid: str, position_ms: int, length_ms: int) -> None:
+        """How far a phone got in the film or episode it plays: kept as the TV keeps its own,
+        so the TV (and the Library's Continue) goes on from there."""
+        watched = self._watching.get(self._device(sid))
+        if watched is None:
+            return
+        key = self._window.controller.resume_key(watched[0])
+        if key:
+            self._window.watch.update_position(key, position_ms, length_ms)
 
     def _to_tv(self, sid: str) -> None:
         """The phone hands back what it played: the TV plays it."""

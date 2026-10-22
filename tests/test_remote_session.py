@@ -13,6 +13,7 @@ from services.remote.protocol import (
     Opened,
     OpenItem,
     Paired,
+    Position,
     Press,
     Query,
     StoreSaved,
@@ -208,6 +209,7 @@ class KkTests(SessionCase):
             {"t": "totv"},
             {"t": "get", "what": "sources", "n": 2},
             {"t": "get", "what": "chgroups", "source": "g1a", "n": 3},
+            {"t": "pos", "ms": 61000, "len": 5400000},
         ):
             got += session.receive(phone.seal(message)).events
         self.assertEqual(
@@ -224,6 +226,7 @@ class KkTests(SessionCase):
                 ToTv(sid),
                 Get(sid, "sources", "", 0, n=2),
                 Get(sid, "chgroups", "", 0, n=3, source="g1a"),
+                Position(sid, 61000, 5400000),
             ],
         )
 

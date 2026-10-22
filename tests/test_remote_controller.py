@@ -17,6 +17,7 @@ from services.remote.protocol import (
     Code,
     Held,
     Paired,
+    Position,
     Press,
     Status,
     StoreSaved,
@@ -382,6 +383,26 @@ class WatchHereTests(WindowCase):
             self.assertTrue(wait_until(lambda: play_vod.called))
         item, kind = play_vod.call_args.args[:2]
         self.assertEqual((item["name"], kind), ("Harbour Lights", "movie"))
+
+    def test_how_far_the_phone_got_in_a_film_is_kept_as_the_tvs(self):
+        self.connect()
+        remote = self.window.remote
+        film = {"id": 7, "name": "Harbour Lights", "cmd": "http://p.test/movie/u/p/7.mp4"}
+        handle = remote._library("s8").handles.issue("title", (film, "movie", None))
+        self.hand_off("http://p.test/movie/u/p/7.mp4", handle=handle)
+        key = self.window.controller.resume_key(self.window.controller.title_target(film, "movie"))
+        with mock.patch.object(self.window.watch, "update_position") as update:
+            remote.bridge.post(Position("s8", 61000, 5400000))
+            self.assertTrue(wait_until(lambda: update.called))
+        update.assert_called_once_with(key, 61000, 5400000)
+
+    def test_a_channel_on_the_phone_keeps_no_position(self):
+        self.connect()
+        self.hand_off("http://p.test/news.m3u8")
+        with mock.patch.object(self.window.watch, "update_position") as update:
+            self.window.remote.bridge.post(Position("s8", 61000, 5400000))
+            QTest.qWait(200)
+        update.assert_not_called()
 
     def test_a_series_does_not_play_on_the_phone(self):
         self.connect()

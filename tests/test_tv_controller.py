@@ -1120,6 +1120,12 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.session.stops, 1)
         self.assertFalse(self.controller.playing())
 
+    def test_a_titles_resume_key_is_the_tvs_and_a_channel_has_none(self):
+        film = self.controller.title_target(VodTests.MOVIE, "movie")
+        key = self.controller.resume_key(film)
+        self.assertEqual(key, self.watch.content_id("Home", VodTests.MOVIE, item_type="movie"))
+        self.assertIsNone(self.controller.resume_key(Target(CHANNELS[0], "live", "One")))
+
     def test_play_elsewhere_with_nothing_current(self):
         self.assertFalse(self.controller.play_elsewhere(lambda target, url: (True, "")))
         self.assertEqual(self.catalog.links, [])

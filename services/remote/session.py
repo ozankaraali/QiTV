@@ -31,6 +31,7 @@ from services.remote.protocol import (
     Opened,
     OpenItem,
     Paired,
+    Position,
     Press,
     Query,
     StoreSaved,
@@ -277,6 +278,8 @@ class Session:
             return Reply(events=[WatchHere(sid, m.get("id", ""))])
         if t == "totv":
             return Reply(events=[ToTv(sid)])
+        if t == "pos":
+            return Reply(events=[Position(sid, m["ms"], m["len"])])
         # "forget": the phone leaves for good.
         device_id = self._device_id or ""
         self._store.remove_device(device_id)

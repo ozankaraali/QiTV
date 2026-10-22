@@ -155,6 +155,11 @@ def parse_phone_message(obj: object) -> Optional[dict]:
     t = obj.get("t")
     if t in ("held", "where", "forget", "totv"):
         return {"t": t}
+    if t == "pos":  # how far the phone got in a film or an episode it plays
+        ms, length = _int(obj.get("ms")), _int(obj.get("len"))
+        if ms is not None and length is not None and 0 <= ms <= MAX_POS and 0 < length <= MAX_POS:
+            return {"t": "pos", "ms": ms, "len": length}
+        return None
     if t == "watch":  # what the TV plays, or a channel of the phone's list by its handle
         if "id" not in obj:
             return {"t": "watch"}
@@ -184,6 +189,7 @@ def parse_phone_message(obj: object) -> Optional[dict]:
 
 
 MAX_ASK = 2**31 - 1  # an ask's number (see _numbered)
+MAX_POS = 2 * 24 * 3600 * 1000  # a title's place or length, in ms: two days at most
 
 
 def _page_and_find(obj: dict) -> Optional[tuple[int, str]]:
@@ -293,6 +299,15 @@ class WatchHere:
 
     sid: str
     handle: str = ""
+
+
+@dataclass(frozen=True)
+class Position:
+    """How far the phone got in the film or episode it plays, of how long (ms)."""
+
+    sid: str
+    position_ms: int
+    length_ms: int
 
 
 @dataclass(frozen=True)
