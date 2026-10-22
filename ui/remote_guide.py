@@ -78,6 +78,7 @@ class PhoneGuide(QObject):
         # Called when `providers` changed in a push (a find's channels arrived later): the
         # programme guides in use follow, as they do on an ask.
         self._guides_moved = guides_moved
+        self._claiming = False  # answering the phone's ask: its find may take the shared find
         self._sources: dict[str, str] = {}  # the phone's key → a provider (or ALL_PROVIDERS)
         self.nav = NavModel(self._catalog, window.config_manager, self)
         self.nav.reset_to("live")
@@ -191,7 +192,11 @@ class PhoneGuide(QObject):
             self._view, self._anchor = view, page
         if page == self._anchor:
             self._retry_failed()
-        message, signature = self._answer(page)
+        self._claiming = True
+        try:
+            message, signature = self._answer(page)
+        finally:
+            self._claiming = False
         if page == self._anchor:
             self._shown = signature
         if n >= 0:
@@ -340,10 +345,16 @@ class PhoneGuide(QObject):
         if finder is None or not find.strip():
             return [], [], False
         if finder.query != find:
+            if not self._claiming:  # another list's find holds it: this one's own meanwhile
+                return [], [], False
             if self._prefer is not None:
                 self._prefer(self._catalog.source())  # ranked first: what these lists show
             finder.set_query(find)
         return list(finder.genres), list(finder.channels), bool(finder.searching)
+
+    def finding(self) -> bool:
+        """Whether what this list shows is a find (the shared find stays while one is)."""
+        return self._view is not None and bool(str(self._view[-1]).strip())
 
     def _other_genres(self, genres: list) -> list[dict]:
         """The genres found at the providers these lists don't show, under their headings (a

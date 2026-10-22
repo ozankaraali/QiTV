@@ -859,10 +859,11 @@ function useHere(on) {
 // the TV keeps its own, so the TV, or the Library's Continue, goes on from there.
 const POSITION_MS = 15000;
 let positionAt = 0;
+let startAt = 0; // where a title goes on (s), until its length is known and it got there
 
 function reportPosition(now = false) {
   const video = $("video");
-  if (!hereLink || !Number.isFinite(video.duration) || video.duration <= 0) return;
+  if (!hereLink || startAt > 0 || !Number.isFinite(video.duration) || video.duration <= 0) return;
   if (!now && Date.now() - positionAt < POSITION_MS) return;
   positionAt = Date.now();
   send({ t: "pos", ms: Math.round(video.currentTime * 1000), len: Math.round(video.duration * 1000) });
@@ -897,6 +898,8 @@ function onPlay(message) {
   }
   hereLink = url;
   $("playerOut").hidden = true;
+  startAt = Number(message.start) > 0 ? Number(message.start) : 0; // where it stopped
+  positionAt = Date.now(); // the first report in a while, not at 0:00
   const video = $("video");
   video.src = url;
   video.play().catch(() => {}); // the first may wait for a tap on its ▶
@@ -930,6 +933,10 @@ function bindHere() {
     if (!here) startHere();
   });
   const video = $("video");
+  video.addEventListener("loadedmetadata", () => {
+    if (startAt > 0 && Number.isFinite(video.duration) && startAt < video.duration) video.currentTime = startAt;
+    startAt = 0;
+  });
   video.addEventListener("timeupdate", () => reportPosition());
   for (const type of ["pause", "ended"]) video.addEventListener(type, () => reportPosition(true));
   document.addEventListener("visibilitychange", () => {

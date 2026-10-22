@@ -282,6 +282,7 @@ class RemoteController(QObject):
                 gone = browsing.pop(event.sid, None)
                 if gone is not None:
                     gone.deleteLater()
+            self._release_finds()
             self._phone_guides()
             if not self._phones:
                 self._diff.stop()
@@ -369,6 +370,7 @@ class RemoteController(QObject):
                 self._library(sid).titles(section, event.genre, event.page, event.find, event.n)
         except Exception as error:  # a phone's question must never take QiTV down
             logger.error("Phone remote: %s failed: %s", event.what, safe_message(error))
+        self._release_finds()
         if event.what in ("groups", "guide", "timetable"):
             self._phone_guides()
 
@@ -477,6 +479,21 @@ class RemoteController(QObject):
             if searcher.query.strip():
                 searcher.rerun()
 
+    def _release_finds(self) -> None:
+        """No phone finds anything: the shared find and search let their text go (and their
+        index after a while), as the desktop's find does once it ends, and a list change no
+        longer runs them again."""
+        lists = list(self._guides.values()) + list(self._channel_lists.values())
+        finder = self._channel_finder
+        if finder is not None and finder.query and not any(g.finding() for g in lists):
+            finder.clear()
+        searcher = self._title_searcher
+        searched = self._quiet_query.strip() or any(
+            library.finding() for library in self._libraries.values()
+        )
+        if searcher is not None and searcher.query and not searched:
+            searcher.clear()
+
     def _prefer(self, source: str) -> None:
         self._find_source = source
 
@@ -541,6 +558,12 @@ class RemoteController(QObject):
             message["name"] = target.title[:TITLE_CHARS]
             if target.live:
                 message["num"] = str(controller.channel_number(target.item) or "")
+            else:  # a film or an episode goes on where it stopped (as on the TV)
+                key = controller.resume_key(target)
+                watch = self._window.watch
+                start = None if target.start_over or not key else watch.resume_position(key)
+                if start:
+                    message["start"] = start // 1000
             self._send(sid, message)
             if first:  # a zap on the phone after that says nothing more
                 name = self._names.get(self._devices.get(sid, ""), "")
@@ -548,7 +571,12 @@ class RemoteController(QObject):
                 self._window.screens.notify(translate(text, name=name))
             return True, ""
 
-        if not controller.play_elsewhere(launch, chosen):
+        try:
+            handed = controller.play_elsewhere(launch, chosen)
+        except Exception as error:  # a phone's ask must never take QiTV down
+            logger.error("Phone remote: playing on the phone failed: %s", safe_message(error))
+            handed = False
+        if not handed:
             self._send(sid, {"t": "play", "failed": True})
 
     def _position(self, sid: str, position_ms: int, length_ms: int) -> None:
@@ -617,6 +645,7 @@ class RemoteController(QObject):
                 self._searcher().set_query(text)
             else:
                 self._push_quiet_results()
+                self._release_finds()
             return
         screens = self._window.screens
         if screens.library_shown():

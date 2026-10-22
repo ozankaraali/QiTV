@@ -54,6 +54,7 @@ class PhoneLibrary(QObject):
         self._searcher = searcher
         if searcher is not None:
             searcher.changed.connect(self._changed)  # what it found arrived
+        self._claiming = False  # answering the phone's ask: its find may take the shared search
         self.handles = Handles()
         self._send = send
         self._ids: dict[str, str] = {}  # key → genre id, the genres seen so far
@@ -112,12 +113,20 @@ class PhoneLibrary(QObject):
     def _answer_page(self, view: tuple, page: int, n: int = -1) -> None:
         if view != self._view:
             self._view, self._anchor = view, page
-        message, signature = self._answer(page)
+        self._claiming = True
+        try:
+            message, signature = self._answer(page)
+        finally:
+            self._claiming = False
         if page == self._anchor:
             self._shown = signature
         if n >= 0:
             message["n"] = n  # the ask it answers; a later push carries none
         self._send(message)
+
+    def finding(self) -> bool:
+        """Whether what this Library shows is a find (the shared search stays while one is)."""
+        return self._view is not None and bool(str(self._view[-1]).strip())
 
     # ---- what the phone sees ---------------------------------------------------------------
 
@@ -277,6 +286,8 @@ class PhoneLibrary(QObject):
         if searcher is None:
             return local, False
         if searcher.query != find:
+            if not self._claiming:  # another search holds it (the phone's Search, say)
+                return local, False
             searcher.set_query(find)
         if searcher.searching or searcher.hits is None:
             return local, True  # every provider's follow

@@ -15,6 +15,7 @@ from test_tv_window import WindowCase, wait_until
 from services.remote.protocol import (
     Closed,
     Code,
+    Get,
     Held,
     Paired,
     Position,
@@ -395,6 +396,34 @@ class WatchHereTests(WindowCase):
             self.assertTrue(wait_until(lambda: play_vod.called))
         item, kind = play_vod.call_args.args[:2]
         self.assertEqual((item["name"], kind), ("Harbour Lights", "movie"))
+
+    def test_a_film_starts_on_the_phone_where_it_stopped(self):
+        """A film half watched goes on from there on the phone (its saved place travels with
+        the link), not from the start, where the phone's first report would lose it."""
+        self.connect()
+        remote = self.window.remote
+        film = {"id": 7, "name": "Harbour Lights", "cmd": "http://p.test/movie/u/p/7.mp4"}
+        handle = remote._library("s8").handles.issue("title", (film, "movie", None))
+        with mock.patch.object(self.window.watch, "resume_position", return_value=4_320_000):
+            self.hand_off("http://p.test/movie/u/p/7.mp4", handle=handle)
+        self.assertEqual(self.plays()[-1]["start"], 4320)
+
+    def test_a_failed_hand_off_tells_the_phone(self):
+        self.connect()
+        with mock.patch.object(self.window.controller, "play_elsewhere", side_effect=RuntimeError):
+            self.window.remote.bridge.post(WatchHere("s8"))
+            self.assertTrue(wait_until(self.plays))
+        self.assertEqual(self.plays()[-1], {"t": "play", "failed": True})
+
+    def test_the_finds_let_go_when_nobody_finds(self):
+        """As the desktop's find does once it ends: no phone's list finds anything, the shared
+        find lets its text (and its index, in a while) go."""
+        self.connect()
+        remote = self.window.remote
+        remote.bridge.post(Get("s8", "chgroups", "", 0, find="channel"))
+        self.assertTrue(wait_until(lambda: remote._finder().query == "channel"))
+        remote.bridge.post(Get("s8", "chgroups", "", 0, find=""))
+        self.assertTrue(wait_until(lambda: remote._finder().query == ""))
 
     def test_how_far_the_phone_got_in_a_film_is_kept_as_the_tvs(self):
         self.connect()

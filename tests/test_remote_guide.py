@@ -10,6 +10,8 @@ import json
 import unittest
 from unittest import mock
 
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtTest import QTest
 from test_tv_window import WindowCase, wait_until
 
 from services.epg_view import Programme
@@ -231,6 +233,43 @@ class PhoneGuideTests(WindowCase):
             )
         self.assertIn("s2", remote._guides)
         guides.assert_called_with({PROVIDER_NAME})
+
+
+class FakeFinder(QObject):
+    """The remote's FindSession as the phone's lists use it."""
+
+    changed = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.query, self.genres, self.channels, self.searching = "", [], [], False
+        self.asked = []
+
+    def set_query(self, text):
+        self.query, self.searching = text, True
+        self.asked.append(text)
+        self.changed.emit()  # as FindSession narrows at once
+
+
+class SharedFindTests(WindowCase):
+    """Lists sharing the remote's find: only an ask takes it; a list pushing what changed never
+    takes it back (two lists would trade it for ever), showing its own without the other's."""
+
+    def test_a_push_never_takes_the_find_back(self):
+        self.open_first_channel()
+        finder, sent = FakeFinder(), []
+        lists = [
+            PhoneGuide(self.window, sent.append, bare=bare, finder=finder) for bare in (False, True)
+        ]
+        for made in lists:
+            self.addCleanup(made.deleteLater)
+        lists[0].groups(0, "cnn")
+        lists[1].groups(0, "bbc")
+        finder.changed.emit()
+        QTest.qWait(600)  # past both lists' pushes
+        self.assertEqual(finder.asked, ["cnn", "bbc"])
+        guide = [m for m in sent if m["t"] == "groups"][-1]
+        self.assertEqual((guide["find"], guide["channels"], guide["searching"]), ("cnn", [], False))
 
 
 class GuideFindTests(WindowCase):

@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 from PySide6.QtCore import QCoreApplication, QObject, Signal
+from PySide6.QtTest import QTest
 from test_library_model import FakeCatalog, history, make_config, movie, resume
 from timer_fixtures import wait_until
 
@@ -338,6 +339,22 @@ class PhoneLibraryTests(unittest.TestCase):
         self.assertEqual(self.last("library")["count"], 2)
         kind, (item, item_kind, _genre) = made.handles.get(self.last("library")["items"][1]["id"])
         self.assertEqual((item["name"], item_kind), ("Comedy nights", "movie"))
+
+    def test_a_push_never_takes_the_search_back(self):
+        """The quiet search took the shared search: the Library's find, pushing what landed,
+        leaves it be and shows its own provider's meanwhile."""
+        made, searcher = self.with_searcher()
+        made.genres("movies", 0, "")
+        self.ready()
+        self.assertTrue(wait_until(lambda: not self.last("genres")["loading"]))
+        made.genres("movies", 0, "comedy")
+        searcher.set_query("dune")  # the phone's Search, meanwhile
+        searcher.land([])
+        QCoreApplication.processEvents()
+        self.assertTrue(wait_until(lambda: searcher.asked == ["comedy", "dune"]))
+        QTest.qWait(400)
+        self.assertEqual(searcher.asked, ["comedy", "dune"])
+        self.assertEqual([t["title"] for t in self.last("genres")["titles"]], ["Comedy one"])
 
     def test_the_largest_pages_fit_a_frame_in_any_script(self):
         long = "字" * 300  # 3 bytes a letter; titles are cut to what a row shows
