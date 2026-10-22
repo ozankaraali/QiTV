@@ -85,7 +85,13 @@ from typing import Any
 
 from PySide6.QtCore import QCoreApplication, QEvent, QLockFile, QObject, Qt, QThread, Signal, Slot
 
-from services.live.ring import STALE_S, cleanup_session_dir, read_index, remove_stale_sessions
+from services.live.ring import (
+    STALE_S,
+    Index,
+    cleanup_session_dir,
+    read_index,
+    remove_stale_sessions,
+)
 from services.live.timeline import Span
 from services.live.worker import helper_main
 from services.thread_cleanup import ThreadCleanup
@@ -130,6 +136,9 @@ class _Record:
     # 2.6: parked (its upstream closed, its buffer kept): a new helper takes its folder back
     # ("adopt") instead of opening it again; also a kept folder found at the start.
     parked: bool = False
+    label: dict | None = None  # 2.6: "keep", also sent after a (re)open or a take-back
+    where: dict | None = None  # 2.6: "where", likewise
+    resume: _Command | None = None  # 2.6: a resume that came before its take-back was sent
 
 
 @dataclass
@@ -252,18 +261,22 @@ class _Supervisor(QThread):
         if name == "resume":
             if record is None or record.closing:
                 return
+            if not record.sent and record.parked:  # its take-back waits for the helper
+                record.resume = command
+                return
             if not record.sent:  # its buffer went with a helper: nothing to resume
                 self._relay(("error", sid, "crashed", _INTERNAL))
                 return
-            # A helper's death after this reopens with the new source.
-            _, _, url, headers, verify_ssl, live_delay, *start = command
-            ring = record.command[5]
-            record.command = ("open", sid, url, headers, verify_ssl, ring, live_delay, *start)
-            record.over = record.failed = False
-            conn.send(command)
+            self._forward_resume(conn, record, command)
             return
         if name in ("keep", "where"):  # 2.6: a disk buffer's label, where the user was
-            if record is not None and record.sent and not record.closing:
+            if record is None or record.closing:
+                return
+            if name == "keep":
+                record.label = dict(command[2])
+            else:
+                record.where = dict(command[2])
+            if record.sent:  # else after its open (`_send_notes`)
                 conn.send(command)
             return
         if name in ("record_start", "record_stop"):
@@ -295,6 +308,10 @@ class _Supervisor(QThread):
             conn.send(("adopt", sid, ring["dir"], int(ring["max_bytes"])))
             record.sent = True
             record.failed = False
+            self._send_notes(conn, record)
+            resume, record.resume = record.resume, None
+            if resume is not None:  # the tune that took it back came first
+                self._forward_resume(conn, record, resume)
             return
         if ring["kind"] == "disk":
             if os.path.lexists(self._root / ring["dir"]):
@@ -305,6 +322,23 @@ class _Supervisor(QThread):
         conn.send(command)
         record.sent = True
         record.failed = False
+        self._send_notes(conn, record)
+
+    def _send_notes(self, conn: Connection, record: _Record) -> None:
+        """2.6: a disk session's label and where the user was, after its (re)open."""
+        sid = record.command[1]
+        if record.label is not None:
+            conn.send(("keep", sid, record.label))
+        if record.where is not None:
+            conn.send(("where", sid, record.where))
+
+    def _forward_resume(self, conn: Connection, record: _Record, command: _Command) -> None:
+        """Send a resume; a helper's death after it reopens with the new source."""
+        _, sid, url, headers, verify_ssl, live_delay, *start = command
+        ring = record.command[5]
+        record.command = ("open", sid, url, headers, verify_ssl, ring, live_delay, *start)
+        record.over = record.failed = record.parked = False
+        conn.send(command)
 
     def _receive(self, message: Any) -> None:
         if not isinstance(message, tuple) or len(message) < 2:
@@ -377,20 +411,32 @@ class _Supervisor(QThread):
         one over a day old, unlabelled or unreadable is removed; one another process holds is
         left alone. Runs on this thread: never the GUI's."""
         now = time.time()
+        found: dict[str, tuple[float, str, Index]] = {}  # channel -> its newest folder
         for name in self._kept_names():
             directory = self._root / name
             if not self._lockable(directory):
                 continue  # another QiTV holds it
             index = read_index(directory)
             newest = max((r["w"] for r in index.segments), default=0.0) if index else 0.0
-            if index is None or index.label is None or newest < now - STALE_S:
+            channel = index.label.get("channel") if index and index.label else None
+            if index is None or not isinstance(channel, str) or newest < now - STALE_S:
                 self._remove(name)
                 continue
+            other = found.get(channel)
+            if other is not None:  # one channel, two folders (a helper's death): the newer
+                older = name if other[0] >= newest else other[1]
+                self._remove(older)
+                if older == other[1]:
+                    found[channel] = (newest, name, index)
+                continue
+            found[channel] = (newest, name, index)
+        for _newest, name, index in found.values():
             sid = secrets.token_hex(8)
             ring = {"kind": "disk", "dir": name, "max_bytes": int(max_bytes)}
-            command = ("open", sid, "", {}, True, ring, 6.0)
+            command: _Command = ("open", sid, "", {}, True, ring, 6.0)
             record = self._records[sid] = _Record(command, over=True, parked=True)
-            self._relay(("adopting", sid))
+            # Told at once, with whose and where (a startup tune of it finds it).
+            self._relay(("adopting", sid, index.label or {}, index.where or {}))
             if self._up and self._conn is not None:
                 self._send_open(self._conn, record)
 
@@ -494,7 +540,7 @@ class _Supervisor(QThread):
             _LOG.warning("The dead live helper is still running; time-shift is off for this run.")
             self._give_up()
             return
-        self._clean_dirs()
+        self._clean_dirs(died=True)
         if self._count_death():
             self._start_helper()
 
@@ -555,6 +601,7 @@ class _Supervisor(QThread):
         exited = True
         if process is not None and conn is not None:
             try:
+                self._flush_notes(conn)  # 2.6: where the user was, parks, closes: first
                 conn.send(("shutdown",))
             except OSError, ValueError:
                 pass
@@ -570,6 +617,23 @@ class _Supervisor(QThread):
             exited = self._reap(process, conn, 0)
         if exited:
             self._clean_dirs()
+
+    def _flush_notes(self, conn: Connection) -> None:
+        """At a stop, the queued notes, parks and closes go to the helper before "shutdown"
+        (2.6: the app notes where the user was and parks as it quits, in the same turn); an
+        open, a resume or anything else that would reach a provider is dropped."""
+        while True:
+            try:
+                command = self._commands.get_nowait()
+            except queue.Empty:
+                return
+            if command is None or command[0] not in ("keep", "where", "park", "close"):
+                continue
+            record = self._records.get(command[1])
+            if record is not None and record.sent and not record.closing:
+                if command[0] == "close":
+                    record.closing = True
+                conn.send(command)
 
     def _reap(self, process: BaseProcess, conn: Connection, grace: float) -> bool:
         """Join, then terminate, then kill (ported escalation); True once it exited."""
@@ -588,11 +652,14 @@ class _Supervisor(QThread):
             _LOG.warning("The live helper could not be stopped.")
         return exited
 
-    def _clean_dirs(self) -> None:
+    def _clean_dirs(self, *, died: bool = False) -> None:
         """Only after the helper exited: a live owner's directory is left untouched. A kept
-        buffer's (v2) stays for the next helper (2.6)."""
+        buffer's (v2) stays for the next helper (2.6): every labelled one at a stop; after a
+        death only a parked session's, which the next helper takes back (a live one opens
+        again in a fresh folder, as before 2.6)."""
+        parked = {r.command[5].get("dir") for r in self._records.values() if r.parked}
         for name in sorted(self._dirs):
-            if name.startswith(_SESSION_PREFIX):
+            if name.startswith(_SESSION_PREFIX) and (not died or name in parked):
                 index = read_index(self._root / name)
                 if index is not None and index.label is not None:
                     self._dirs.discard(name)  # kept for the next helper
@@ -750,6 +817,10 @@ class LiveEngine(QObject):
             command = (*command, {"target": float(target), "extra": float(extra)})
         self._commands.put(command)
 
+    def holds(self, sid: str) -> bool:
+        """The engine knows session `sid` (2.6: a kept one still being taken back too)."""
+        return sid in self._sessions
+
     def adopt_kept(self, max_bytes: int) -> None:
         """Take back the kept buffers a helper left (2.6): each comes as `keptFound`."""
         if not self._shut:
@@ -865,6 +936,8 @@ class LiveEngine(QObject):
         sid = message[1]
         if name == "adopting":  # 2.6: a kept folder is taken back as this session
             self._sessions[sid] = _View()
+            if len(message) == 4:  # told at once: a startup tune of it finds it
+                self.keptFound.emit(sid, dict(message[2] or {}), dict(message[3] or {}))
             return
         if name == "recording":
             _, _, rid, path, written = message
@@ -906,10 +979,10 @@ class LiveEngine(QObject):
         elif name == "parked":
             self.sessionParked.emit(sid)
         elif name == "kept":
-            label, where = message[2], message[3]
-            self.keptFound.emit(sid, dict(label or {}), dict(where or {}))
+            pass  # taken back (it was told at "adopting")
         elif name == "unkept":
             del self._sessions[sid]
+            self.sessionFailed.emit(sid, "crashed", _INTERNAL)  # a tune of it starts afresh
         elif name == "resumed":
             self.sessionResumed.emit(sid)
         elif name == "error":

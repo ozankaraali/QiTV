@@ -68,6 +68,7 @@ class FakeEngine(QObject):
         self.parks = []  # 2.6: sids parked
         self.resumes = []  # (sid, url, keyword arguments)
         self.labels = []  # (sid, label): a disk buffer's channel (2.6)
+        self.adopting = set()  # kept folders being taken back: held, spans to come
         self.wheres = []  # (sid, where): where the user was in it
         self.up = True
         self.gave_up = False  # an engine that gave up before this LiveSession existed
@@ -109,6 +110,9 @@ class FakeEngine(QObject):
     def park_session(self, sid):
         self.parks.append(sid)
         self.events.append(("park", sid))
+
+    def holds(self, sid):
+        return sid in self._spans or sid in self.adopting
 
     def keep_session(self, sid, label):
         self.labels.append((sid, label))
@@ -806,6 +810,13 @@ class KeptTests(LiveSessionCase):
         self.playback.ended.emit()
         self.assertEqual(self.notices[-1], KEPT_END)
         self.assertEqual(len(self.playback.plays), plays)
+
+    def test_a_kept_ring_still_being_taken_back_is_resumed(self):
+        # Review B I2: its spans are on their way.
+        self.engine.adopting.add("k")
+        self.resume(KeptRing("k", "k1", True, Where(20.0, True)), disk=True)
+        self.assertEqual([r[0] for r in self.engine.resumes], ["k"])
+        self.assertEqual(self.engine.opened, [])
 
     def test_a_kept_ring_that_is_gone_starts_afresh(self):
         self.resume(KeptRing("gone", "k1", False, Where(20.0, True)))

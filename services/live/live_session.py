@@ -1115,7 +1115,9 @@ class LiveSession(QObject):
         kept buffer with something left is taken back instead (2.6)."""
         kept, self._kept = self._kept, None
         if kept is not None:
-            if not self._dead and not self._memory.direct and self._engine.spans(kept.sid):
+            holds = getattr(self._engine, "holds", None)  # spans on their way (a take-back)
+            known = self._engine.spans(kept.sid) or (holds is not None and holds(kept.sid))
+            if not self._dead and not self._memory.direct and known:
                 self._resume_kept(kept)
                 return
             self._engine.close_session(kept.sid)  # nothing of it is left to play
@@ -1238,6 +1240,9 @@ class LiveSession(QObject):
         newest point when nothing plays yet, and Go live tries the channel again. Nothing
         newer comes meanwhile: no reopen at live, no stay-live (`_ended`)."""
         self._resuming = self._live_after_resume = False
+        if self._sid is not None and not self._engine.spans(self._sid):
+            self._start_afresh()  # nothing of it is left to play (it was not taken back)
+            return
         self._kept_only = self._ended = True
         self.notice.emit(notice)
         if self._phase is _Phase.WAITING:

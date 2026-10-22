@@ -577,7 +577,9 @@ class DiskRing(Ring):
         self.dir_name = session_dir_name
         self._kept = kept  # 2.6: a v2 folder with an index
         self._index_lock = threading.Lock()
-        self._index: BinaryIO | None = None
+        # 2.6: the index's path while it is written (opened for each line: a kept buffer holds
+        # no file open but its lock); None: no index, or it failed.
+        self._index: Path | None = None
         self._index_segs: dict[int, dict] = {}  # the held segments' lines
         self._index_parts: list[dict] = []
         self._index_label: dict | None = None
@@ -619,8 +621,8 @@ class DiskRing(Ring):
                 _KEPT_OWNER if self._kept else _OWNER, encoding="ascii"
             )
             if self._kept:
-                self._index = (directory / _INDEX).open("ab", buffering=0)
-                self._index.write(b'{"v":2}\n')
+                (directory / _INDEX).write_bytes(b'{"v":2}\n')
+                self._index = directory / _INDEX
             lock = QLockFile(str(directory / "session.lock"))
             lock.setStaleLockTime(0)
             if not lock.tryLock(0):
@@ -679,12 +681,11 @@ class DiskRing(Ring):
             raise RingError("Recording stopped to preserve free disk space.")
 
     def _close_files(self) -> None:
-        for handle in (self._file, self._index):
-            if handle is not None:
-                try:
-                    handle.close()
-                except OSError:
-                    pass
+        if self._file is not None:
+            try:
+                self._file.close()
+            except OSError:
+                pass
         self._file = None
         with self._index_lock:
             self._index = None
@@ -778,7 +779,7 @@ class DiskRing(Ring):
                 ring._index_segs[segment.seq] = record
             ring._index_parts = list(index.parts)
             ring._index_label, ring._index_where = index.label, index.where
-            ring._index = (directory / _INDEX).open("ab", buffering=0)
+            ring._index = directory / _INDEX
             ring._compact()
         except OSError:
             ring._release_storage()
@@ -794,7 +795,8 @@ class DiskRing(Ring):
             if self._index is None:
                 return
             try:
-                self._index.write(line)
+                with self._index.open("ab") as handle:
+                    handle.write(line)
             except OSError:
                 _LOG.warning("A kept buffer's index could not be written; it will not be kept.")
                 self._index = None
@@ -879,9 +881,7 @@ class DiskRing(Ring):
                 return
             try:
                 (directory / _INDEX_NEW).write_text(text, encoding="ascii")
-                self._index.close()
                 os.replace(directory / _INDEX_NEW, directory / _INDEX)
-                self._index = (directory / _INDEX).open("ab", buffering=0)
             except OSError:
                 _LOG.warning("A kept buffer's index could not be compacted; it will not be kept.")
                 self._index = None

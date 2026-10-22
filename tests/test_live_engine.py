@@ -35,6 +35,7 @@ from ts_fixtures import make_stream
 
 from services.live import engine as engine_module
 from services.live.engine import LiveEngine
+from services.live.ring import read_index
 from services.live.timeline import START_KEY, START_NONE, START_OPEN, Span
 from services.thread_cleanup import has_pending_threads
 
@@ -514,19 +515,82 @@ class AdoptKeptTests(unittest.TestCase):
         supervisor._send_open(SimpleNamespace(send=sent.append), record)
         self.assertEqual(sent, [("adopt", "s1", ring["dir"], 64 * MIB)])
 
-    def test_the_engine_tells_what_was_kept(self):
+    def test_the_engine_tells_what_was_kept_at_once(self):
+        # Review B I2: from the scan, before the helper took it back, so a startup tune of
+        # that channel finds it.
         engine = LiveEngine.__new__(LiveEngine)
         LiveEngine.__init__(engine, tempfile.gettempdir())
         found = []
         engine.keptFound.connect(lambda sid, label, where: found.append((sid, label, where)))
-        engine._on_message(("adopting", "z"))
+        label, where = {"channel": "k1"}, {"position": 1.0, "paused": True}
+        engine._on_message(("adopting", "z", label, where))
+        self.assertEqual(found, [("z", label, where)])
+        self.assertTrue(engine.holds("z"))
         engine._on_message(("state", "z", {"oldest": 0}, 0, [(0, 0.0, 2.0, False, "key")]))
         engine._on_message(("parked", "z"))
-        engine._on_message(("kept", "z", {"channel": "k1"}, {"position": 1.0, "paused": True}))
-        self.assertEqual(found, [("z", {"channel": "k1"}, {"position": 1.0, "paused": True})])
+        engine._on_message(("kept", "z", label, where))
+        self.assertEqual(len(found), 1)  # told once
         self.assertEqual(len(engine.spans("z")), 1)
         engine._on_message(("unkept", "z"))
         self.assertEqual(engine.spans("z"), [])
+        self.assertFalse(engine.holds("z"))
+
+    def test_keep_and_where_before_the_helper_is_up_follow_its_open(self):
+        # Review B I1: a startup tune opens before the helper's hello.
+        supervisor, _ = self.supervisor()
+        ring = {"kind": "disk", "dir": engine_module._session_dir(), "max_bytes": MIB}
+        opened = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        conn = SimpleNamespace(send=lambda command: None)
+        for command in (
+            opened,
+            ("keep", "s1", {"channel": "k1"}),
+            ("where", "s1", {"position": 1.0, "paused": False}),
+        ):
+            supervisor._commands.put(command)
+            supervisor._send_next(conn)
+        sent = []
+        supervisor._up = True
+        supervisor._send_open(SimpleNamespace(send=sent.append), supervisor._records["s1"])
+        self.assertEqual([c[0] for c in sent], ["open", "keep", "where"])
+
+    def test_a_resume_before_the_take_back_follows_it(self):
+        # Review B I2: the startup tune takes the kept buffer back before the helper is up.
+        kept = self.folder()
+        supervisor, relayed = self.supervisor()
+        supervisor._adopt_kept(64 * MIB)
+        [(_, sid, label, where)] = [m for m in relayed if m[0] == "adopting"]
+        self.assertEqual(label, {"channel": "k1"})
+        supervisor._commands.put(("resume", sid, URL_FOR_RING, {}, True, 6.0))
+        supervisor._send_next(SimpleNamespace(send=lambda command: None))
+        self.assertNotIn(("error", sid, "crashed", engine_module._INTERNAL), relayed)
+        sent = []
+        supervisor._up = True
+        supervisor._send_open(SimpleNamespace(send=sent.append), supervisor._records[sid])
+        self.assertEqual([c[0] for c in sent], ["adopt", "resume"])
+        self.assertEqual(sent[0][2], kept)
+
+    def test_of_two_folders_of_one_channel_the_newest_is_taken_back(self):
+        # Review B I3
+        older = self.folder(age=600.0)
+        newer = self.folder()
+        supervisor, relayed = self.supervisor()
+        supervisor._adopt_kept(64 * MIB)
+        [(_, sid, _, _)] = [m for m in relayed if m[0] == "adopting"]
+        self.assertEqual(supervisor._records[sid].command[5]["dir"], newer)
+        self.assertFalse((self.root / older).exists())
+
+    def test_a_helpers_death_keeps_parked_folders_only(self):
+        # Review B I3: a live session reopens in a fresh folder; its old one would be an orphan.
+        live, parked = self.folder(), self.folder()
+        supervisor, _ = self.supervisor()
+        for sid, name, is_parked in (("a", live, False), ("b", parked, True)):
+            ring = {"kind": "disk", "dir": name, "max_bytes": MIB}
+            command = ("open", sid, URL_FOR_RING, {}, True, ring, 6.0)
+            supervisor._records[sid] = engine_module._Record(command, parked=is_parked)
+            supervisor._dirs.add(name)
+        supervisor._clean_dirs(died=True)
+        self.assertFalse((self.root / live).exists())
+        self.assertTrue((self.root / parked).exists())
 
 
 class FailureReasonTests(unittest.TestCase):
@@ -786,6 +850,37 @@ class LiveEngineTests(unittest.TestCase):
             url, headers=HEADERS, verify_ssl=True, disk=disk, max_bytes=256 * MIB
         )
 
+    def test_where_and_park_reach_the_helper_before_it_goes(self):
+        # Review B C1: the app notes where the user was and parks at quit, then shuts the
+        # engine down in the same turn: those must reach the helper first.
+        engine, signals = self.engine()
+        signals.wait_for(lambda event: event == ("available", True), timeout=60)
+        source = self.source()
+        sid = self.open(engine, source.url + SECRET_PATH, disk=True)
+        engine.keep_session(sid, {"channel": "k1"})
+        signals.wait_for(lambda e: e[0] == "updated" and e[1] == sid and len(e[3]) >= 2)
+        engine.note_where(sid, {"position": 2.0, "paused": True})
+        engine.park_session(sid)
+        engine.shutdown()
+        [name] = session_dirs(self.root)
+        index = read_index(self.root / name)
+        self.assertEqual(index.where, {"position": 2.0, "paused": True})
+        self.assertEqual(index.label, {"channel": "k1"})
+
+    def test_a_session_opened_before_the_helper_is_up_is_labelled(self):
+        # Review B I1, end to end: the startup tune opens before the helper's hello.
+        engine, signals = self.engine()
+        source = self.source()
+        sid = self.open(engine, source.url + SECRET_PATH, disk=True)
+        engine.keep_session(sid, {"channel": "k1"})
+        self.assertFalse(engine.is_available())  # still starting
+        signals.wait_for(lambda event: event == ("ready", sid), timeout=60)
+        [name] = session_dirs(self.root)
+        self.assertTrue(wait_until(lambda: (read_index(self.root / name) or None) is not None, 5))
+        self.assertTrue(
+            wait_until(lambda: read_index(self.root / name).label == {"channel": "k1"}, 5)
+        )
+
     def test_a_kept_buffer_survives_a_restart(self):
         # 2.6, end to end through two real helpers: one keeps a labelled disk buffer as the
         # engine shuts down, the next engine takes it back with its spans and where it was.
@@ -809,6 +904,8 @@ class LiveEngineTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: found, 30), "nothing was taken back")
         [(kept, label, where)] = found
         self.assertEqual((label, where), ({"channel": "k1"}, {"position": 2.0, "paused": True}))
+        # Told at once, from the scan; its spans follow once the helper took it back.
+        self.assertTrue(wait_until(lambda: second.spans(kept), 30), "its spans never came")
         self.assertEqual([(s.seq, s.start, s.end) for s in second.spans(kept)], spans)
         second.close_session(kept)
         self.assertTrue(wait_until(lambda: session_dirs(self.root) == [], 10))

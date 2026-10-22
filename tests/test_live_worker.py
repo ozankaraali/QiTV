@@ -1840,6 +1840,35 @@ class AdoptTests(unittest.TestCase):
             steps = video_steps(response.read())
         self.assertTrue(all(0 < step <= 2 * (CLOCK // 25) for step in steps), sorted(set(steps)))
 
+    def test_a_resume_right_after_the_adopt_follows_it(self):
+        # Review B I2: the take-back is still reading when the resume comes.
+        directory, before, _, _ = self.kept_folder()
+        second = InProcessHelper(self, self.root)
+        ahead = self.source(make_stream(6, pts_start=AHEAD))
+        second.helper._dispatch(("adopt", "z", directory, 1 << 30))
+        second.helper._dispatch(("resume", "z", ahead, {}, True, 6.0))
+        second.wait_for(lambda m: m == ("resumed", "z"))
+
+    def test_quitting_while_taking_back_keeps_the_folder(self):
+        # Review B I4
+        directory, _, _, _ = self.kept_folder()
+        helper = SimpleNamespace(
+            root=str(self.root),
+            send=lambda message, session=None: None,
+            server=SimpleNamespace(add_session=lambda *a: None),
+            disk_budget=lambda max_bytes: SimpleNamespace(register=lambda ring, parked=False: None),
+            forget_ring=lambda ring: None,
+            unkept=lambda session: None,
+        )
+        session = worker._Session(
+            helper, "z", "", {}, True, {"kind": "disk", "dir": directory, "max_bytes": 1 << 30}, 6.0
+        )
+        session.adopting = (directory, 1 << 30)
+        session.keep_on_close = True
+        session.cancelled = True  # the helper's shutdown came meanwhile
+        self.assertFalse(session._take_back())
+        self.assertTrue((self.root / directory / "index.jsonl").exists())
+
     def test_a_folder_that_cannot_be_taken_back_says_so(self):
         second = InProcessHelper(self, self.root)
         second.helper._dispatch(("adopt", "y", ".qitv-buffer-" + "0" * 32, 1 << 30))
@@ -2256,3 +2285,21 @@ class HeardEdgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpenFilesTests(unittest.TestCase):
+    """Review B I5: kept buffers hold files open; the helper asks for room for many."""
+
+    @unittest.skipIf(sys.platform == "win32", "no soft limit on open files there")
+    def test_the_helper_raises_its_soft_limit(self):
+        import resource
+
+        calls = []
+        with (
+            patch.object(resource, "getrlimit", return_value=(256, 10240)),
+            patch.object(
+                resource, "setrlimit", side_effect=lambda which, limits: calls.append(limits)
+            ),
+        ):
+            worker._raise_open_files()
+        self.assertEqual(calls, [(4096, 10240)])

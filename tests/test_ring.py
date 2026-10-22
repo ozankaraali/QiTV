@@ -816,6 +816,16 @@ class IndexTests(unittest.TestCase):
         ring.note_label({"channel": "k1"})
         ring.close(keep=True)
 
+    @unittest.skipUnless(os.path.isdir("/dev/fd"), "counts open files through /dev/fd")
+    def test_a_kept_buffer_holds_one_file_open(self):
+        # Review B I5: its lock only; the index is opened for each line.
+        before = len(os.listdir("/dev/fd"))
+        rings = [self.ring() for _ in range(5)]
+        for ring in rings:
+            self.fill(ring, 2)
+            ring.note_label({"channel": "k"})
+        self.assertEqual(len(os.listdir("/dev/fd")) - before, 5)
+
     def test_dropping_the_open_segment_closes_its_file(self):
         ring = self.ring()
         ring.open_segment(0, b"h" * 376)

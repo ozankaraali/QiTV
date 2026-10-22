@@ -613,7 +613,8 @@ class _Session:
         with self.lock:
             # Parked, its input ended, or a park still on its way (another player took the
             # buffer back before "parked" came): the resume follows the park.
-            ready = self.released.is_set() or self._parking
+            taking_back = self.adopting is not None and not self.released.is_set()
+            ready = self.released.is_set() or self._parking or taking_back
             accepted = not self.cancelled and ready and self._resume_args is None
             if accepted:
                 self._resume_args = (url, headers, verify_ssl, live_delay, start or {})
@@ -706,7 +707,10 @@ class _Session:
         self._ring_spec = {"kind": "disk", "dir": directory, "max_bytes": max_bytes}
         self._pending = [(s.seq, s.start, s.end, s.discontinuity, s.start_quality) for s in spans]
         self._helper.disk_budget(max_bytes).register(ring, parked=True)
-        self._adopt(ring)
+        try:
+            self._adopt(ring)
+        except _Cancelled:  # the helper goes down meanwhile: the folder stays
+            return False
         with self.lock:
             self._parked = True
             self.released.set()  # no upstream
@@ -917,7 +921,8 @@ class _Session:
                 self._helper.server.add_session(self.sid, ring, self._is_ended)
         if cancelled:
             self._helper.forget_ring(ring)
-            _close_ring(ring)
+            # 2.6: a helper going down keeps a labelled buffer (one being taken back too).
+            _close_ring(ring, keep=self.keep_on_close and self._label is not None)
             raise _Cancelled()
         if previous is not None:
             self._helper.forget_ring(previous)
@@ -1681,6 +1686,22 @@ def _exit_with_owner(owner_gone: threading.Event) -> None:
         os._exit(0)
 
 
+def _raise_open_files() -> None:
+    """Room for many open files (2.6: each kept buffer holds its folder's lock): the soft limit
+    up to 4096, within the hard one (a Mac app started from the Finder gets 256)."""
+    try:
+        import resource
+    except ImportError:  # Windows has no such limit
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        wanted = 4096 if hard == resource.RLIM_INFINITY else min(4096, hard)
+        if soft != resource.RLIM_INFINITY and soft < wanted:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
+    except (OSError, ValueError) as error:
+        _LOG.info("The open files limit stays as it is (%s).", type(error).__name__)
+
+
 def helper_main(conn: Connection, root: str) -> None:
     """Spawn entry point: arguments travel through multiprocessing IPC, not argv.
 
@@ -1697,6 +1718,7 @@ def helper_main(conn: Connection, root: str) -> None:
         threading.Thread(
             target=_exit_with_owner, args=(owner_gone,), name="qitv-live-owner", daemon=True
         ).start()
+        _raise_open_files()
         helper = _Helper(conn, root, owner_gone)
         helper.run()
     except BaseException:
