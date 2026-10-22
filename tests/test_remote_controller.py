@@ -487,23 +487,24 @@ class WatchHereTests(WindowCase):
         self.assertIs(verify, True)
         self.assertEqual(message, {"t": "play", "name": "Harbour Lights", "start": 61})
 
-    def test_an_mkv_film_for_a_phone_away_from_home(self):
+    def test_an_mkv_film_for_a_phone_through_the_relay(self):
+        """The relay carries no film: the phone is told to be on QiTV's home network."""
         self.connect()
         remote = self.window.remote
-        remote.bridge.post(Opened("s8", "d1", "relay", False))
-        self.assertTrue(wait_until(lambda: "s8" in remote._away))
+        remote.bridge.post(Opened("s8", "d1", "relay"))
+        self.assertTrue(wait_until(lambda: "s8" in remote._relayed))
         film = {"id": 7, "name": "Harbour Lights", "container_extension": "mkv"}
         handle = remote._library("s8").handles.issue("title", (film, "movie", None))
         self.hand_off("http://p.test/movie/u/p/7.mkv", handle=handle)
         self.hub.open_film.assert_not_called()
-        self.assertEqual(self.plays()[-1], {"t": "play", "failed": True, "why": "away"})
+        self.assertEqual(self.plays()[-1], {"t": "play", "failed": True, "why": "relay"})
 
-    def test_a_phone_through_the_relay_at_home_reaches_the_home_door(self):
+    def test_a_phone_at_the_home_door_gets_its_films_there(self):
         self.connect()
         remote = self.window.remote
-        remote.bridge.post(Opened("s8", "d1", "relay", True))
+        remote.bridge.post(Opened("s8", "d1", "home"))
         self.assertTrue(wait_until(lambda: remote._devices.get("s8") == "d1"))
-        self.assertNotIn("s8", remote._away)
+        self.assertNotIn("s8", remote._relayed)
 
     def test_the_tv_playing_again_ends_the_phones_films(self):
         self.connect()

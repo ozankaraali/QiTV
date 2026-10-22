@@ -126,7 +126,7 @@ class RemoteController(QObject):
         self._libraries: dict[str, PhoneLibrary] = {}  # and its own Library
         self._channel_lists: dict[str, PhoneGuide] = {}  # and the Remote tab's channel list
         self._devices: dict[str, str] = {}  # each phone's device id, by session
-        self._away: set[str] = set()  # phones through the relay, not on QiTV's network
+        self._relayed: set[str] = set()  # phones through the relay (no film comes that way)
         # Each phone's catalog for its lists (its own provider choice), by device.
         self._phone_catalogs: dict[str, BrowsedCatalog] = {}
         self._channel_finder: Optional[FindSession] = None  # the phones' finds, shared
@@ -281,7 +281,7 @@ class RemoteController(QObject):
             self._schedule()
             self._phones.discard(event.sid)
             self._devices.pop(event.sid, None)
-            self._away.discard(event.sid)
+            self._relayed.discard(event.sid)
             for browsing in (self._guides, self._libraries, self._channel_lists):
                 gone = browsing.pop(event.sid, None)
                 if gone is not None:
@@ -293,8 +293,8 @@ class RemoteController(QObject):
         elif isinstance(event, Opened):
             self._phones.add(event.sid)
             self._devices[event.sid] = event.device_id
-            if event.door == "relay" and not event.same:
-                self._away.add(event.sid)
+            if event.door == "relay":
+                self._relayed.add(event.sid)
             self._diff.start()
             self._send(event.sid, self._state())
         elif isinstance(event, Get):
@@ -589,10 +589,11 @@ class RemoteController(QObject):
 
     def _film_to(self, sid: str, item: dict, url: str, message: dict) -> None:
         """An MKV film (Safari plays none) goes to the phone as HLS from QiTV's home door
-        (services/remote/films.py), which reads it from its provider as the phone plays it: a
-        phone away from home can't reach it."""
-        if sid in self._away or self.hub is None:
-            self._send(sid, {"t": "play", "failed": True, "why": "away"})
+        (services/remote/films.py), which reads it from its provider as the phone plays it.
+        The relay carries no film: a phone through it is told to be on QiTV's home network
+        (one through the relay at home didn't reach the home door: a guest network, a VPN)."""
+        if sid in self._relayed or self.hub is None:
+            self._send(sid, {"t": "play", "failed": True, "why": "relay"})
             return
         catalog, config = self._window.catalog, self._window.config_manager
         try:

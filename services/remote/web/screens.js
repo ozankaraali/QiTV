@@ -48,7 +48,7 @@ const words = {
   open_player: "Open in the phone's player",
   film_format: "This film doesn't play on a phone. Tap TV to watch it there.",
   film_sound: "This film's sound doesn't play on a phone. Tap TV to watch it there.",
-  film_away: "This film plays on the phone at home only, on QiTV's network.",
+  film_relay: "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).",
   film_provider: "The film didn't open. Tap TV to watch it there.",
 };
 const w = (key) => (t(key) === key ? words[key] || key : t(key));
@@ -890,7 +890,7 @@ function startHere() {
 }
 
 // Why a film doesn't play here (QiTV's films.py and remote_controller.py say).
-const FILM_WHY = { format: "film_format", sound: "film_sound", away: "film_away", provider: "film_provider" };
+const FILM_WHY = { format: "film_format", sound: "film_sound", relay: "film_relay", provider: "film_provider" };
 
 function onPlay(message) {
   const url = typeof message.url === "string" ? message.url : "";

@@ -55,8 +55,12 @@ PAGE_STRINGS: dict[str, str] = {
     "film_format": N_("This film doesn't play on a phone. Tap TV to watch it there."),
     # i18n: the phone remote, where a film would play on the phone (its sound: DTS and the like)
     "film_sound": N_("This film's sound doesn't play on a phone. Tap TV to watch it there."),
-    # i18n: the phone remote, away from home: films of this kind come through QiTV itself
-    "film_away": N_("This film plays on the phone at home only, on QiTV's network."),
+    # i18n: the phone remote through the relay (QiTV's server on the internet): films of
+    # this kind come from QiTV itself, at home; a guest network or a VPN can't reach it
+    "film_relay": N_(
+        "The relay can't carry films. To watch this one on the phone, be at home on QiTV's "
+        "network (not a guest network or a VPN)."
+    ),
     # i18n: the phone remote: the provider didn't hand QiTV the film for the phone
     "film_provider": N_("The film didn't open. Tap TV to watch it there."),
     "remote": N_("Remote"),  # i18n: the phone remote: the tab with the buttons
