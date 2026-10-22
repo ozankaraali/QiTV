@@ -48,7 +48,7 @@ player (their play and open counts stay) and moves the sound to A; after a 4 s p
 and two more swaps A is still at least 3 s behind live; the two players keep a volume and a
 mute of their own, read back from libVLC; after a move and resize the geometry holds; P
 closes the small picture (B): one session plays on, its budget ticket is back and the live
-helper reports a single session. With the PiP up, each source never has more than one
+helper streams a single session (2.6: B's buffer is kept, parked: no upstream, no updates). With the PiP up, each source never has more than one
 connection open and both together two. libVLC's audio output modules are recorded, and on
 Windows it must be DirectSound (per-player volume; services/playback.default_args).
 
@@ -309,7 +309,9 @@ LEVELS_CHECK = f"{PIP_PREFIX}each player keeps a volume and a mute of its own"
 PIP_WINDOW_CHANGE = f"{PIP_PREFIX}the window moves and resizes"
 ONE_SESSION_CHECK = f"{PIP_PREFIX}P closes the small picture and one session plays on"
 TICKET_CHECK = f"{PIP_PREFIX}the small picture's budget ticket is released"
-HELPER_SESSION_CHECK = f"{PIP_PREFIX}the live helper reports a single session"
+HELPER_SESSION_CHECK = (
+    f"{PIP_PREFIX}the live helper streams a single session; the closed picture's buffer is kept"
+)
 PEAK_CHECK = (
     f"{PIP_PREFIX}with picture-in-picture each source has one connection open at most, and "
     "both together two"
@@ -1998,7 +2000,12 @@ class Driver:
             f"{tuner.releasing()}",
         )
         known = getattr(engine, "_sessions", {})  # the helper confirms each close
-        single = yield from self._wait(lambda: len(known) == 1, RELEASE_WAIT_MS)
+
+        def kept() -> set[str]:  # 2.6: parked sessions stay at the engine, streaming nothing
+            registry = getattr(w, "kept", None)
+            return {ring.sid for ring in registry.rings()} if registry is not None else set()
+
+        single = yield from self._wait(lambda: len(set(known) - kept()) == 1, RELEASE_WAIT_MS)
         since = time.monotonic()
         yield HELPER_WATCH_MS
         updated = {sid for at, sid in self.helper_updates if at >= since}
@@ -2006,7 +2013,8 @@ class Driver:
         report.check(
             HELPER_SESSION_CHECK,
             single and large_sid is not None and updated == {large_sid},
-            f"sessions the engine holds: {len(known)}; sessions the helper updated in "
+            f"sessions the engine holds: {len(known)}, kept: {len(kept())}; sessions the "
+            "helper updated in "
             f"{HELPER_WATCH_MS} ms: {len(updated)}, {LIVE_CHANNEL}'s among them: "
             f"{large_sid in updated}",
         )
