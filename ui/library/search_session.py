@@ -93,6 +93,11 @@ class SearchSession(QObject):
     def hits(self) -> Optional[list[Hit]]:
         return self._hits
 
+    @property
+    def searching(self) -> bool:
+        """A search for the query is on its way: waiting out the pause, or running."""
+        return self._timer.isActive() or self._running or self._queued
+
     def sections(self) -> list[tuple[str, list[dict]]]:
         """The grid sections: "{provider} · {Live TV|Movies|Series} ({n})" and their items."""
         return list(self._sections)

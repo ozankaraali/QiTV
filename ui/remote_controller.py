@@ -41,6 +41,7 @@ from services.remote.protocol import (
 )
 from ui.find_session import FindSession
 from ui.keymap import Action
+from ui.library.search_session import SearchSession
 from ui.link_lanes import Target
 from ui.remote_buttons import BUTTONS
 from ui.remote_guide import PhoneGuide
@@ -125,6 +126,7 @@ class RemoteController(QObject):
         # Each phone's catalog for its lists (its own provider choice), by device.
         self._phone_catalogs: dict[str, BrowsedCatalog] = {}
         self._channel_finder: Optional[FindSession] = None  # the phones' finds, shared
+        self._title_searcher: Optional[SearchSession] = None  # and their Library's
         self._find_source = ""  # the provider the phone's list that found last shows
         # What a phone plays in its own player, and the group it was picked in (for the TV), by
         # device: a phone that slept comes back as another session.
@@ -446,6 +448,32 @@ class RemoteController(QObject):
             self._channel_finder = finder
         return self._channel_finder
 
+    def _searcher(self) -> SearchSession:
+        """The desktop Library's search, for every phone: every provider's films and series
+        from their saved lists (a worker reads them), as the Library's search finds them."""
+        if self._title_searcher is None:
+            window = self._window
+            searcher = SearchSession(
+                window.provider_manager,
+                window.jobs,
+                window.screens.library_model,
+                window.watch,
+                self,
+                loaded=getattr(window.library_catalog, "loaded_contents", None),
+            )
+            window.catalogs.contentChanged.connect(self._titles_changed)
+            window.catalogs.providersChanged.connect(self._titles_changed)
+            self._title_searcher = searcher
+        return self._title_searcher
+
+    def _titles_changed(self, *_args: object) -> None:
+        """A provider's lists changed: the search reads them again, a find on show runs anew."""
+        searcher = self._title_searcher
+        if searcher is not None:
+            searcher.drop_snapshot()
+            if searcher.query.strip():
+                searcher.rerun()
+
     def _prefer(self, source: str) -> None:
         self._find_source = source
 
@@ -469,6 +497,7 @@ class RemoteController(QObject):
                 lambda message: self._send(sid, message),
                 self,
                 cache=window.screens.library_model.cache,  # the TV's: a sorted list serves both
+                searcher=self._searcher(),
             )
             self._libraries[sid] = library
         return library

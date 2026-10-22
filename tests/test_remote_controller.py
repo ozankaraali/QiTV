@@ -25,6 +25,7 @@ from services.remote.protocol import (
     WatchHere,
 )
 from ui.keymap import Action
+from ui.library.search_session import SearchSession
 from ui.link_lanes import Target
 from ui.remote_controller import PHONE_GONE_TEXT
 
@@ -413,6 +414,13 @@ class WatchHereTests(WindowCase):
             self.window.remote.bridge.post(Position("s8", 61000, 5400000))
             QTest.qWait(200)
         update.assert_not_called()
+
+    def test_the_phones_library_searches_with_the_desktops_search(self):
+        remote = self.window.remote
+        library = remote._library("s3")
+        self.addCleanup(remote._libraries.pop, "s3", None)
+        self.assertIs(library._searcher, remote._searcher())
+        self.assertIsInstance(remote._searcher(), SearchSession)
 
     def test_a_series_does_not_play_on_the_phone(self):
         self.connect()
