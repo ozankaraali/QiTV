@@ -264,7 +264,7 @@ class Session:
         if t == "held":
             return Reply(events=[Held(sid)])
         if t == "query":
-            return Reply(events=[Query(sid, m["s"])])
+            return Reply(events=[Query(sid, m["s"], m.get("tv", False))])
         if t == "open":
             return Reply(events=[OpenItem(sid, m["id"])])
         if t == "get":

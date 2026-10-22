@@ -39,6 +39,7 @@ from services.remote.protocol import (
     ToTv,
     WatchHere,
 )
+from services.search import Hit
 from ui.find_session import FindSession
 from ui.keymap import Action
 from ui.library.search_session import SearchSession
@@ -47,7 +48,7 @@ from ui.remote_buttons import BUTTONS
 from ui.remote_guide import PhoneGuide
 from ui.remote_library import PhoneLibrary
 from ui.remote_repeat import KeyRepeater
-from ui.remote_snapshots import TITLE_CHARS, Handles, results, state
+from ui.remote_snapshots import TITLE_CHARS, Handles, results, results_of, state
 
 if TYPE_CHECKING:
     from services.remote.hub import RemoteHub
@@ -127,6 +128,7 @@ class RemoteController(QObject):
         self._phone_catalogs: dict[str, BrowsedCatalog] = {}
         self._channel_finder: Optional[FindSession] = None  # the phones' finds, shared
         self._title_searcher: Optional[SearchSession] = None  # and their Library's
+        self._quiet_query = ""  # what a phone searches for on its own (the TV's picture stays)
         self._find_source = ""  # the provider the phone's list that found last shows
         # What a phone plays in its own player, and the group it was picked in (for the TV), by
         # device: a phone that slept comes back as another session.
@@ -291,7 +293,7 @@ class RemoteController(QObject):
         elif isinstance(event, Get):
             self._answer(event)
         elif isinstance(event, Query):
-            self._search(event.text)
+            self._search(event.text, event.tv)
         elif isinstance(event, OpenItem):
             self._open(event.sid, event.handle)
         elif isinstance(event, WatchHere):
@@ -463,6 +465,7 @@ class RemoteController(QObject):
             )
             window.catalogs.contentChanged.connect(self._titles_changed)
             window.catalogs.providersChanged.connect(self._titles_changed)
+            searcher.changed.connect(self._push_quiet_results)
             self._title_searcher = searcher
         return self._title_searcher
 
@@ -519,6 +522,12 @@ class RemoteController(QObject):
             elif kind == "title" and cast(tuple, payload)[1] in ("movie", "episode"):
                 item, item_kind, _genre_items = cast(tuple, payload)
                 chosen = controller.title_target(item, item_kind)
+            elif kind == "hit" and cast(Hit, payload).section in ("live", "movies"):
+                hit = cast(Hit, payload)  # a search result: a channel, or a film
+                if hit.section == "live":
+                    chosen = Target(hit.item, "live", str(hit.item.get("name") or hit.title))
+                else:
+                    chosen = controller.title_target(hit.item, "movie")
             else:  # a series opens on the TV; anything else plays nowhere but there
                 self._send(sid, {"t": "play", "failed": True})
                 return
@@ -589,7 +598,26 @@ class RemoteController(QObject):
             return url
         return xtream_hls(url, str(entry.get("username") or ""), str(entry.get("password") or ""))
 
-    def _search(self, text: str) -> None:
+    def _push_quiet_results(self) -> None:
+        """What a phone's own search found (the desktop's search, every provider's), for the
+        phones: they show what answers the text they hold."""
+        searcher = self._title_searcher
+        if self.hub is None or not self._phones or searcher is None:
+            return
+        query = self._quiet_query
+        if query.strip() and (searcher.query != query or searcher.searching):
+            return  # what is on its way answers it
+        hits = (searcher.hits or []) if query.strip() else []
+        self.hub.broadcast(results_of(hits, query, self.result_handles))
+
+    def _search(self, text: str, tv: bool = True) -> None:
+        if not tv:  # the phone's own search: the TV's picture stays
+            self._quiet_query = text
+            if text.strip():
+                self._searcher().set_query(text)
+            else:
+                self._push_quiet_results()
+            return
         screens = self._window.screens
         if screens.library_shown():
             self._window.library_controller.remote_search(text)

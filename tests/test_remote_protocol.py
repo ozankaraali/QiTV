@@ -100,6 +100,9 @@ class MessageTests(unittest.TestCase):
         )
         q = parse_phone_message({"t": "query", "s": "h" * 150})
         self.assertEqual(len(q["s"]), 100)
+        self.assertFalse(q["tv"])  # the phone's own search: the TV's picture stays
+        self.assertTrue(parse_phone_message({"t": "query", "s": "h", "tv": True})["tv"])
+        self.assertFalse(parse_phone_message({"t": "query", "s": "h", "tv": "yes"})["tv"])
         self.assertEqual(
             parse_phone_message(
                 {"t": "get", "what": "guide", "list": "g4", "page": 2, "find": "n" * 150}

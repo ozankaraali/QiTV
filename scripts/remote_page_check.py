@@ -918,23 +918,39 @@ def scenario_timetable(rig: Rig) -> None:
 
 
 def scenario_search_mirror(rig: Rig) -> None:
+    """Search is the phone's own: the TV's search isn't opened, the text goes to QiTV (not to
+    the TV's search), the results show, a tap opens one, Enter only puts the keyboard away.
+    Show on TV: the TV's search opens and shows what is typed, Enter presses its OK."""
     sid = paired_sid(rig)
     mark = rig.events.mark()
     rig.page.click("#searchButton")
-    rig.events.wait(Press, where=lambda e: e.button == "search" and not e.down, after=mark)
     rig.page.wait_for_selector("[data-screen=search]:not([hidden])")
     assert rig.page.evaluate("document.activeElement.id") == "searchInput"
-    mark = rig.events.mark()
     rig.page.keyboard.type("harb", delay=30)
-    rig.events.wait(Query, where=lambda e: e.text == "harb", after=mark)
+    query = rig.events.wait(Query, where=lambda e: e.text == "harb", after=mark)
+    assert not query.tv, query
+    assert not rig.events.of(Press, after=mark), "the TV's search was opened"
     rig.hub.send(sid, RESULTS)
     rig.page.wait_for_selector("#searchRows .row >> nth=1")
     groups = rig.page.locator("#searchRows .group").all_inner_texts()
     assert len(groups) == 2, groups
     rig.shot("search")
+    rig.hub.send(sid, {**RESULTS, "q": "har", "groups": []})  # an older text's: not shown
+    rig.page.wait_for_timeout(300)
+    assert rig.page.locator("#searchRows .row").count() == 2
     mark = rig.events.mark()
     rig.page.locator("#searchRows .row", has_text="Harbour Lights").click()
     assert rig.events.wait(OpenItem, after=mark).handle == "r2"
+    mark = rig.events.mark()
+    rig.page.focus("#searchInput")
+    rig.page.keyboard.press("Enter")
+    rig.page.wait_for_timeout(400)
+    assert not rig.events.of(Press, after=mark), "Enter pressed the TV's OK"
+    mark = rig.events.mark()  # Show on TV
+    rig.page.click("#searchTv")
+    rig.events.wait(Press, where=lambda e: e.button == "search" and not e.down, after=mark)
+    query = rig.events.wait(Query, where=lambda e: e.text == "harb" and e.tv, after=mark)
+    assert rig.page.locator("#searchTv.on").count() == 1
     mark = rig.events.mark()
     rig.page.focus("#searchInput")
     rig.page.keyboard.press("Enter")

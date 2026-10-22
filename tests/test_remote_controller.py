@@ -24,6 +24,7 @@ from services.remote.protocol import (
     ToTv,
     WatchHere,
 )
+from services.search import Hit
 from ui.keymap import Action
 from ui.library.search_session import SearchSession
 from ui.link_lanes import Target
@@ -421,6 +422,14 @@ class WatchHereTests(WindowCase):
         self.addCleanup(remote._libraries.pop, "s3", None)
         self.assertIs(library._searcher, remote._searcher())
         self.assertIsInstance(remote._searcher(), SearchSession)
+
+    def test_a_search_result_plays_on_the_phone(self):
+        self.connect()
+        remote = self.window.remote
+        film = {"id": 7, "name": "Harbour Lights", "_provider": "P"}
+        handle = remote.result_handles.issue("hit", Hit("P", "movies", "Harbour Lights", film))
+        self.hand_off("http://p.test/movie/7.mp4", handle=handle)
+        self.assertEqual(self.plays()[-1]["name"], "Harbour Lights")
 
     def test_a_series_does_not_play_on_the_phone(self):
         self.connect()

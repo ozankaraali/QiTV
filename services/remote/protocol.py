@@ -173,8 +173,8 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         if n is not None and 1 <= n <= MAX_STEPS:
             return {"t": "up", "b": obj["b"], "n": n}
         return None
-    if t == "query" and isinstance(obj.get("s"), str):
-        return {"t": "query", "s": obj["s"][:MAX_QUERY]}
+    if t == "query" and isinstance(obj.get("s"), str):  # "tv": the TV's search shows it too
+        return {"t": "query", "s": obj["s"][:MAX_QUERY], "tv": obj.get("tv") is True}
     if t == "open" and _short_id(obj.get("id")):
         return {"t": "open", "id": obj["id"]}
     if t == "get":
@@ -290,6 +290,7 @@ class Held:
 class Query:
     sid: str
     text: str
+    tv: bool = False  # Show on TV: the TV's own search shows it; else the phone's alone
 
 
 @dataclass(frozen=True)

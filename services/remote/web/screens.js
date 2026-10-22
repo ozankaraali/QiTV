@@ -41,6 +41,7 @@ const words = {
   use_buttons: "Use buttons",
   watch_here: "Watch on this phone",
   opening_here: "Opening on this phone…",
+  show_on_tv: "Show on TV",
   phone: "Phone",
   pick_here: "Pick a channel below to watch it here",
   now_on_tv: "Now playing on the TV",
@@ -549,15 +550,33 @@ function pageOnScroll(box, list, more) {
 
 let queryTimer = null;
 
+// The search is the phone's own (the desktop's search, the TV's picture as it is) unless Show
+// on TV is on: then the TV's search shows it too, as typing on its keyboard would.
+let searchOnTv = store.setting("search_tv", "") === "on";
+
 function openSearch() {
   show("search");
   const input = $("searchInput");
   input.value = "";
   $("searchRows").replaceChildren();
   input.focus();
+  if (searchOnTv) tap("search"); // the TV's search opens
+}
+
+function sendQuery() {
+  send({ t: "query", s: $("searchInput").value, tv: searchOnTv });
+}
+
+function useSearchOnTv(on) {
+  searchOnTv = on;
+  const toggle = $("searchTv");
+  toggle.classList.toggle("on", on);
+  toggle.setAttribute("aria-pressed", String(on));
+  store.setSetting("search_tv", on ? "on" : "");
 }
 
 function onResults(message) {
+  if (typeof message.q === "string" && message.q !== $("searchInput").value) return; // older text
   const box = $("searchRows");
   const titles = { live: w("channels"), movies: w("movies"), series: w("series") };
   const nodes = [];
@@ -573,7 +592,7 @@ function onResults(message) {
       main.append(top);
       if (item.sub) main.append(el("div", "row-next", item.sub));
       row.append(main);
-      tapRow(row, item.id);
+      tapRow(row, item.id, { plays: group.kind !== "series", name: item.title });
       nodes.push(row);
     }
   }
@@ -586,16 +605,25 @@ function bindSearch() {
   const input = $("searchInput");
   input.addEventListener("input", () => {
     clearTimeout(queryTimer);
-    queryTimer = setTimeout(() => send({ t: "query", s: input.value }), QUERY_DEBOUNCE_MS);
+    queryTimer = setTimeout(sendQuery, QUERY_DEBOUNCE_MS);
   });
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
       clearTimeout(queryTimer);
-      send({ t: "query", s: input.value });
-      tap("ok");
+      sendQuery();
+      if (searchOnTv) tap("ok"); // the TV's highlighted result
+      else input.blur(); // the phone's: its results, the keyboard out of the way
     }
   });
+  const toggle = $("searchTv");
+  pressable(toggle);
+  toggle.addEventListener("click", () => {
+    useSearchOnTv(!searchOnTv);
+    if (searchOnTv) tap("search"); // shown on the TV from now on: its search opens
+    if (input.value) sendQuery();
+  });
+  useSearchOnTv(searchOnTv);
   $("searchDone").addEventListener("click", () => {
     input.blur();
     show("remote");

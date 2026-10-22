@@ -199,6 +199,7 @@ class KkTests(SessionCase):
         got = []
         for message in (
             {"t": "query", "s": "harb"},
+            {"t": "query", "s": "harb", "tv": True},
             {"t": "open", "id": "h1"},
             {"t": "get", "what": "guide", "list": "g2", "page": 1, "find": "news"},
             {"t": "get", "what": "timetable", "id": "h7"},
@@ -216,6 +217,7 @@ class KkTests(SessionCase):
             got,
             [
                 Query(sid, "harb"),
+                Query(sid, "harb", tv=True),
                 OpenItem(sid, "h1"),
                 Get(sid, "guide", "g2", 1, find="news"),
                 Get(sid, "timetable", "", 0, handle="h7"),
