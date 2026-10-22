@@ -14,10 +14,12 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 
+from services import favorites
 from services.browsed_catalog import BrowsedCatalog
+from services.find import Preferences, preferences_for
 from services.i18n import N_, translate
 from services.provider_api import xtream_hls
-from services.provider_ids import provider_of
+from services.provider_ids import ALL_PROVIDERS, provider_of
 from services.redact import safe_message
 from services.remote.protocol import (
     BUTTON_META,
@@ -37,6 +39,7 @@ from services.remote.protocol import (
     ToTv,
     WatchHere,
 )
+from ui.find_session import FindSession
 from ui.keymap import Action
 from ui.link_lanes import Target
 from ui.remote_buttons import BUTTONS
@@ -121,7 +124,8 @@ class RemoteController(QObject):
         self._devices: dict[str, str] = {}  # each phone's device id, by session
         # Each phone's catalog for its lists (its own provider choice), by device.
         self._phone_catalogs: dict[str, BrowsedCatalog] = {}
-        self._every_catalog: Optional[BrowsedCatalog] = None  # every provider's, for finds
+        self._channel_finder: Optional[FindSession] = None  # the phones' finds, shared
+        self._find_source = ""  # the provider the phone's list that found last shows
         # What a phone plays in its own player, and the group it was picked in (for the TV), by
         # device: a phone that slept comes back as another session.
         self._watching: dict[str, tuple[Target, Optional[tuple[str, list]]]] = {}
@@ -378,8 +382,15 @@ class RemoteController(QObject):
         guide = self._guides.get(sid)
         if guide is None:
             send = lambda message: self._send(sid, message)  # noqa: E731
-            catalog, every = self._phone_catalog(sid), self._every()
-            guide = PhoneGuide(self._window, send, self, catalog=catalog, every=every)
+            guide = PhoneGuide(
+                self._window,
+                send,
+                self,
+                catalog=self._phone_catalog(sid),
+                finder=self._finder(),
+                prefer=self._prefer,
+                guides_moved=self._phone_guides,
+            )
             self._guides[sid] = guide
         return guide
 
@@ -387,8 +398,15 @@ class RemoteController(QObject):
         listed = self._channel_lists.get(sid)
         if listed is None:
             send = lambda m: self._send(sid, m)  # noqa: E731
-            catalog, every = self._phone_catalog(sid), self._every()
-            listed = PhoneGuide(self._window, send, self, bare=True, catalog=catalog, every=every)
+            listed = PhoneGuide(
+                self._window,
+                send,
+                self,
+                bare=True,
+                catalog=self._phone_catalog(sid),
+                finder=self._finder(),
+                prefer=self._prefer,
+            )
             self._channel_lists[sid] = listed
         return listed
 
@@ -409,20 +427,36 @@ class RemoteController(QObject):
             self._phone_catalogs[device] = catalog
         return catalog
 
-    def _every(self) -> BrowsedCatalog:
-        """Every provider's lists (All providers), which the phones' finds reach: one for all."""
-        if self._every_catalog is None:
+    def _finder(self) -> FindSession:
+        """The desktop channel list's find, for every phone: genres and channels at every
+        provider from their saved lists (a worker reads them; nothing signs in), ranked as on
+        the desktop."""
+        if self._channel_finder is None:
             window = self._window
-            choice = _PhoneChoice(window.config_manager)
-            choice.phone_all_providers = True
-            self._every_catalog = BrowsedCatalog(
-                window.catalogs,
-                choice,
-                source_key="phone_provider_name",
-                all_key="phone_all_providers",
+            finder = FindSession(
+                window.provider_manager,
+                window.jobs,
+                loaded=window.catalog.loaded_contents,
+                signature=window._find_signature,
+                preferences=self._find_preferences,
                 parent=self,
             )
-        return self._every_catalog
+            window.catalogs.contentChanged.connect(finder.content_changed)
+            window.catalogs.providersChanged.connect(finder.content_changed)
+            self._channel_finder = finder
+        return self._channel_finder
+
+    def _prefer(self, source: str) -> None:
+        self._find_source = source
+
+    def _find_preferences(self) -> Preferences:
+        """What the phones' finds rank first: the provider the phone's list shows (as the TV's
+        own find ranks the TV's), the providers and channels watched lately, the stars."""
+        window, config = self._window, self._window.config_manager
+        names = window.catalog.provider_names()
+        shown = self._find_source if self._find_source != ALL_PROVIDERS else ""
+        browsed = shown or window.catalog.current_provider_name()
+        return preferences_for(names, browsed, config.watch_history, favorites.matcher(config))
 
     def _library(self, sid: str) -> PhoneLibrary:
         library = self._libraries.get(sid)
