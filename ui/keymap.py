@@ -60,6 +60,9 @@ class Action(str, Enum):
     FORGET = "forget"  # Delete in the channel list: the highlighted channel leaves ⟲ Recent
     PICTURE = "picture"  # A: the Picture panel; again while it shows, the next aspect (2.3)
     STATS = "stats"  # Shift+I: the statistics over the picture, shown or hidden (2.3)
+    # 2.6: back to where a channel come back to was left (the Resume pill's; the phone's
+    # button). No key of its own: Enter does it while the pill shows.
+    BACK_TO = "back_to"
 
 
 # "subtitles": the OpenSubtitles search over the player (2.2): it types like the drawer.

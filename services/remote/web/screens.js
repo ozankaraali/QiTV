@@ -50,6 +50,7 @@ const words = {
   film_sound: "This film's sound doesn't play on a phone. Tap TV to watch it there.",
   film_relay: "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).",
   film_provider: "The film didn't open. Tap TV to watch it there.",
+  back_to: "Resume · {time}",
 };
 const w = (key) => (t(key) === key ? words[key] || key : t(key));
 
@@ -135,6 +136,11 @@ function onState(message) {
   if (pip) {
     pip.classList.toggle("on", !!message.pip); // a small picture shows: the button closes it
     pip.querySelector("span").textContent = w(message.pip ? "close_pip" : "pip");
+  }
+  const back = $("backTo"); // 2.6: the TV offers where the channel come back to was left
+  if (back) {
+    back.hidden = !message.back;
+    if (message.back) $("backToText").textContent = w("back_to").replace("{time}", message.back);
   }
   followTv(now && now.kind === "live" ? liveKey(now.num, now.name) : "");
 }

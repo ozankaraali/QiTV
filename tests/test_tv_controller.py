@@ -719,6 +719,10 @@ class FakeLiveSession(QObject):
     released = Signal()
     recordingChanged = Signal(bool)  # 2.3
     recordingEnded = Signal(str, str, int)  # (reason, path, written)
+    backOffered = Signal(float, float)  # 2.6: (where it was left, that moment's Unix time)
+
+    def go_back_to(self, t):
+        self.calls.append(("go_back_to", t))
 
     def __init__(self, playback):
         super().__init__()
@@ -2768,6 +2772,60 @@ class PipelineCase(ControllerTestCase):
     def start_pipeline(self, index=0):
         self.start_channel(index)
         self.live.play_pipeline()
+
+
+class BackNoticeTests(PipelineCase):
+    """2.6: coming back to a channel plays it live and offers where it was left, a minute."""
+
+    def setUp(self):
+        super().setUp()
+        from ui.overlays.back_notice import BackNotice
+
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.host.show()
+        self.addCleanup(self.host.close)
+        self.notice = BackNotice(self.host)
+        self.controller.overlays.back_notice = self.notice
+        self.start_pipeline()
+        self.left_at = datetime(2026, 10, 15, 20, 10).astimezone().timestamp()
+
+    def test_it_offers_where_it_was_and_enter_goes_back(self):
+        self.live.backOffered.emit(30.0, self.left_at)
+        self.assertTrue(self.notice.isVisible())
+        self.assertEqual(self.notice.text(), "Left off at 20:10")
+        self.assertEqual(self.controller.back_label(), "20:10")
+        self.controller.handle(Action.OK)
+        self.assertEqual(self.live.calls[-1], ("go_back_to", 30.0))
+        self.assertFalse(self.notice.isVisible())
+        self.assertIsNone(self.controller.back_label())
+
+    def test_a_click_goes_back_too(self):
+        self.live.backOffered.emit(30.0, self.left_at)
+        self.notice.keepWatching.emit()
+        self.assertEqual(self.live.calls[-1], ("go_back_to", 30.0))
+
+    def test_the_phone_goes_back_too(self):
+        self.live.backOffered.emit(30.0, self.left_at)
+        self.controller.handle(Action.BACK_TO)
+        self.assertEqual(self.live.calls[-1], ("go_back_to", 30.0))
+        self.controller.handle(Action.BACK_TO)  # gone now: nothing more
+        self.assertEqual(
+            [c for c in self.live.calls if c[0] == "go_back_to"], [("go_back_to", 30.0)]
+        )
+
+    def test_it_goes_after_a_minute_and_with_the_channel(self):
+        import ui.live_controls as live_controls
+
+        self.assertEqual(live_controls.BACK_NOTICE_MS, 60_000)
+        with mock.patch.object(live_controls, "BACK_NOTICE_MS", 30):
+            self.live.backOffered.emit(30.0, self.left_at)
+            elapse(60)
+        self.assertFalse(self.notice.isVisible())
+        self.assertIsNone(self.controller.back_label())
+        self.live.backOffered.emit(30.0, self.left_at)
+        self.start_channel(1)  # another channel
+        self.assertFalse(self.notice.isVisible())
 
 
 class PipelineTuneTests(PipelineCase):

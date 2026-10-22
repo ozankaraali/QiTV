@@ -562,6 +562,21 @@ def scenario_now_playing(rig: Rig) -> None:
     rig.events.wait(Press, where=lambda e: e.button == "info" and not e.down, after=mark)
 
 
+def scenario_back_to(rig: Rig) -> None:
+    """2.6: while the TV offers where a channel come back to was left, the phone shows Resume
+    with when; a tap asks the TV to go back; it goes once the TV no longer offers it."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, {**STATE, "back": "20:10"})
+    rig.page.locator("#backTo", has_text="20:10").wait_for()
+    assert "Resume" in rig.page.inner_text("#backTo"), rig.page.inner_text("#backTo")
+    rig.shot("back-to")
+    mark = rig.events.mark()
+    rig.page.click("#backTo")
+    rig.events.wait(Press, where=lambda e: e.button == "back_to" and not e.down, after=mark)
+    rig.hub.send(sid, STATE)
+    rig.page.locator("#backTo").wait_for(state="hidden")
+
+
 def scenario_guide_tune(rig: Rig) -> None:
     sid = paired_sid(rig)
     mark = rig.events.mark()
@@ -1207,6 +1222,7 @@ SCENARIOS.update(
         "forget-clean": scenario_forget_clean,
         "hello-keeps-now": scenario_hello_keeps_now,
         "now-playing": scenario_now_playing,
+        "back-to": scenario_back_to,
         "guide-tune": scenario_guide_tune,
         "channel-list": scenario_channel_list,
         "find-both": scenario_find_both,

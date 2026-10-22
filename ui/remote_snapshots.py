@@ -97,6 +97,8 @@ def state(window: Any) -> dict:
         "volume": controller.main_level(),
         "muted": controller.main_muted(),
         "recording": bool(live is not None and live.recording()),
+        # 2.6: when the channel come back to was left ("20:10") while Resume is offered
+        "back": controller.back_label(),
         "pip": controller.pip_shown(),
         "multiview": controller.multiview_shown(),
     }

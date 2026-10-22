@@ -173,6 +173,7 @@ class Overlays:
     layout_row: Any = None  # the multiview's layouts above its layout chip
     library_toast: Any = None  # the Library page's toast: the menus' messages while it shows
     pairing: Any = None  # the phone remote's pairing screen (2.5)
+    back_notice: Any = None  # 2.6: Resume, where a channel come back to was left
 
 
 class TVController(QObject):
@@ -281,6 +282,7 @@ class TVController(QObject):
             may_reopen=self._may_reopen,
             memory=catchup_memory,
             prepare=lambda session, target: self._prepare(session, target, None),
+            back_notice=lambda: self.overlays.back_notice,
             archive_allowed=self._archive_allowed,
             parent=self,
         )
@@ -925,8 +927,12 @@ class TVController(QObject):
                 self._autoplay.play_now()
             elif self.overlays.column.isVisible():
                 self._on_column_row(self.overlays.column.current_index())  # tune it now
+            elif self._live_controls.go_back():
+                pass  # 2.6: the Resume pill shows: back to where the channel was left
             else:
                 self._open_drawer()
+        elif action is Action.BACK_TO:
+            self._live_controls.go_back()  # the phone's Resume (nothing when it is gone)
         elif action is Action.OPEN_DRAWER:
             from_column = self.overlays.column.isVisible()
             self.overlays.column.close()
@@ -2191,6 +2197,10 @@ class TVController(QObject):
         timeline = self._tuner.timeline
         lag = timeline.get("lag") if timeline is not None else None
         return float(lag) if isinstance(lag, (int, float)) else None
+
+    def back_label(self) -> Optional[str]:
+        """When the channel come back to was left ("20:10"), while Resume is offered (2.6)."""
+        return self._live_controls.back_label()
 
     def behind_live(self) -> float:
         """How far the large picture plays behind live once the viewer left live (paused, went

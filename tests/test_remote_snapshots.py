@@ -48,6 +48,12 @@ class SnapshotTests(WindowCase):
         with mock.patch.object(controller, "behind_live", return_value=0.0):
             self.assertEqual(state(self.window)["now"]["behind_s"], 0)
 
+    def test_where_it_was_left_reaches_the_phone(self):
+        controller = self.window.controller
+        self.assertIsNone(state(self.window).get("back"))
+        with mock.patch.object(controller, "back_label", return_value="20:10"):
+            self.assertEqual(state(self.window)["back"], "20:10")
+
     def test_state_before_anything_plays(self):
         snapshot = state(self.window)
         self.assertIsNone(snapshot["now"])

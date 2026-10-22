@@ -263,3 +263,15 @@ class ReviewFixProtocolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BackToButtonTests(unittest.TestCase):
+    """2.6: the phone's Resume, shown while the TV offers where a channel was left."""
+
+    def test_it_is_a_player_button_for_the_tv_s_back_to(self):
+        from services.remote.protocol import BUTTON_META
+        from ui.keymap import Action
+        from ui.remote_buttons import BUTTONS
+
+        self.assertEqual(BUTTON_META["back_to"].route, "player")
+        self.assertEqual(BUTTONS["back_to"].action, Action.BACK_TO)

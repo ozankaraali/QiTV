@@ -706,15 +706,45 @@ class KeptTests(LiveSessionCase):
         self.assertIn(sid, self.engine.closed)
         self.assertEqual(self.engine.parks, [])
 
-    def test_resume_paused_plays_from_the_ring_at_once(self):
+    def back_offers(self):
+        offers = []
+        self.live.backOffered.connect(lambda t, wall: offers.append((t, wall)))
+        return offers
+
+    def come_back(self, kept, parts=((0, 0.0, 1_000.0), (30, 60.0, 19_000.0))):
+        """Take `kept` back: the new run (30 s after 60 s kept) comes, and it plays live."""
+        self.engine.buffer("k", segments(0, 30), parts=[list(parts[0])])
+        self.resume(kept)
+        self.engine.buffer("k", segments(0, 45), parts=[list(p) for p in parts])
+        self.engine.sessionResumed.emit("k")
+        self.step(2.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+
+    def test_coming_back_plays_live_and_offers_where_it_was(self):
+        # The owner's choice (2.6): live first, and where it was a click away.
+        offers = self.back_offers()
         self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
         self.resume(KeptRing("k", "k1", False, Where(20.0, True)))
         self.assertEqual(self.engine.opened, [])
         self.assertEqual([r[0] for r in self.engine.resumes], ["k"])
+        self.assertEqual(self.playback.plays, [])  # it waits for the new run: live
+        self.engine.buffer("k", segments(0, 45), parts=[[0, 0.0, 1_000.0], [30, 60.0, 19_000.0]])
+        self.engine.sessionResumed.emit("k")
+        self.step(2.0)
+        self.assertGreaterEqual(self.seq_of(self.playback.plays[-1]), 30)
+        self.assertEqual(offers, [(20.0, 1_020.0)])  # 20 s into the part kept from 1,000
+
+    def test_going_back_plays_from_where_it_was(self):
+        self.come_back(KeptRing("k", "k1", False, Where(20.0, True)))
+        self.live.go_back_to(20.0)
         self.assertEqual(self.playback.plays[-1], self.stream("k", 10))
-        self.assertEqual(self.modes, ["pipeline"])
         self.playback.set_state(PlaybackState.PLAYING)
-        self.assertEqual(self.playback.paused[-1], True)
+        self.assertNotEqual(self.playback.paused[-1:], [True])  # it plays on from there
+
+    def test_nothing_is_offered_when_it_was_live(self):
+        offers = self.back_offers()
+        self.come_back(KeptRing("k", "k1", False, Where(None, False)))
+        self.assertEqual(offers, [])
 
     def test_resume_live_starts_on_the_newest_part(self):
         self.engine.buffer("k", segments(0, 10), parts=[[0, 0.0, 1_000.0]])
@@ -746,14 +776,14 @@ class KeptTests(LiveSessionCase):
         self.live.seek_to(19.0)
         self.assertEqual(self.playback.plays[-1], self.stream("k", 9))
 
-    def test_a_failed_resume_keeps_playing_the_ring(self):
+    def test_a_failed_resume_plays_what_was_kept_from_where_it_was(self):
         self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
-        self.resume(KeptRing("k", "k1", False, Where(20.0, False)))
-        self.playback.set_state(PlaybackState.PLAYING)
-        plays = len(self.playback.plays)
+        self.resume(KeptRing("k", "k1", False, Where(20.0, True)))
         self.engine.sessionFailed.emit("k", "http", "The channel refused the stream.")
         self.assertEqual(self.notices[-1], KEPT_ONLY)
-        self.assertEqual(len(self.playback.plays), plays)  # nothing reopened, nothing direct
+        self.assertEqual(self.playback.plays[-1], self.stream("k", 10))  # no live: where it was
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertEqual(self.playback.paused[-1], True)  # as it was left
         self.assertNotIn("k", self.engine.closed)
         self.assertEqual(self.modes, ["pipeline"])
         self.live.go_live()
@@ -770,8 +800,8 @@ class KeptTests(LiveSessionCase):
     def test_the_end_of_what_was_kept_says_so(self):
         self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
         self.resume(KeptRing("k", "k1", False, Where(50.0, False)))
-        self.playback.set_state(PlaybackState.PLAYING)
         self.engine.sessionFailed.emit("k", "http", "The channel refused the stream.")
+        self.playback.set_state(PlaybackState.PLAYING)
         plays = len(self.playback.plays)
         self.playback.ended.emit()
         self.assertEqual(self.notices[-1], KEPT_END)
@@ -858,6 +888,9 @@ class KeptTests(LiveSessionCase):
         parts = [[0, 0.0, 1_000.0], [10, 20.0, 19_000.0]]
         self.engine.buffer("k", segments(0, 30), parts=parts)
         self.resume(KeptRing("k", "k1", False, Where(10.0, True)))
+        self.engine.sessionResumed.emit("k")
+        self.step(2.0)
+        self.live.go_back_to(10.0)
         self.playback.set_state(PlaybackState.PLAYING)
         self.live._emit_timeline()
         state = self.timelines[-1]

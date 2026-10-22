@@ -76,6 +76,10 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .now { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 18px; text-align: left; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
 .now.pressed { background: var(--raised-2); }
 /* Channels: the remote's middle (sections, arrows, Back/Search/More) becomes the channel list. */
+.resume { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 11px 14px; border-radius: 16px; font-size: 15px; font-weight: 600; color: var(--text); background: var(--accent-fill); box-shadow: inset 0 0 0 1px var(--accent); }
+.resume[hidden] { display: none; }
+.resume svg { width: 18px; height: 18px; }
+.remote.on-phone > .resume { display: none; }
 .lister { flex: none; width: 70px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border-radius: 18px; font-size: 11px; font-weight: 600; color: var(--muted); background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
 .lister.on { color: var(--accent); background: var(--accent-fill); box-shadow: none; }
 .lister.pressed { background: var(--raised-2); }

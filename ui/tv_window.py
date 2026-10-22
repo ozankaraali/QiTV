@@ -111,6 +111,7 @@ from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
 from ui.overlay_host import OverlayHost
+from ui.overlays.back_notice import BackNotice
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.corner_controls import CornerControls
 from ui.overlays.drawer import Drawer
@@ -496,6 +497,7 @@ class TVWindow(QMainWindow):
         self.picture_panel = TrackPanel(host)
         self.stats_overlay = StatsOverlay(host)
         self.sleep_notice = SleepNotice(host)
+        self.back_notice = BackNotice(host)  # 2.6: Resume, where a channel was left
         self.pair_overlay = PairOverlay(host)  # the phone remote's pairing QR
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
@@ -519,6 +521,7 @@ class TVWindow(QMainWindow):
             picture_panel=self.picture_panel,
             stats=self.stats_overlay,
             sleep_notice=self.sleep_notice,
+            back_notice=self.back_notice,
             pairing=self.pair_overlay,
             library_toast=self.library_toast,
             layout_row=self.layout_row,
@@ -533,7 +536,7 @@ class TVWindow(QMainWindow):
         # layouts over it (above their buttons). The statistics sit over the transport, under
         # its title row (they take no click). The drawer and the guide cover them all; the
         # OpenSubtitles search covers the player with its backdrop, under the corner player's
-        # controls, the sleep timer's last minute and the toast.
+        # controls, the sleep timer's last minute, Resume (2.6) and the toast.
         for overlay in (
             self.grid_tiles,
             self.overlays.banner,
@@ -554,6 +557,7 @@ class TVWindow(QMainWindow):
             self.subtitle_search,
             self.corner_controls,
             self.sleep_notice,
+            self.back_notice,
             self.pair_overlay,
             self.overlays.toast,
         ):

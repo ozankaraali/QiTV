@@ -97,6 +97,7 @@ def _meta() -> dict[str, ButtonMeta]:
     }
     for name in ("pp", "live", "info", "guide", "record", "pip", "swap", "multiview", "picture"):
         table[name] = ButtonMeta("player")
+    table["back_to"] = ButtonMeta("player")  # 2.6: Resume, where a channel come back to was left
     for digit in range(10):
         table[f"d{digit}"] = ButtonMeta("keys")
     return table

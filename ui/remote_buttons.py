@@ -59,6 +59,7 @@ def _buttons() -> dict[str, Button]:
         "swap": _action(Action.SWAP),
         "multiview": _action(Action.MULTIVIEW),
         "picture": _action(Action.PICTURE),
+        "back_to": _action(Action.BACK_TO),  # 2.6: Resume, while the TV offers it
         "tv": Button("screen", payload="tv"),
         "movies": Button("screen", payload="movies"),
         "series": Button("screen", payload="series"),
