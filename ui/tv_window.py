@@ -76,6 +76,7 @@ from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
 from services.live.engine import LiveEngine
+from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
 from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
 from services.navigation import NavModel
@@ -424,6 +425,7 @@ class TVWindow(QMainWindow):
         self.pip_live: Optional[LiveSession] = None
         self.live_tuning: Optional[LiveTuning] = None
         self.sessions: Optional[SessionManager] = None
+        self.kept: Optional[KeptBuffers] = None
         self.budget = ConnectionBudget(self)
         if self._instance is None:
             logger.warning("libVLC is unavailable: channels cannot play")
@@ -443,6 +445,8 @@ class TVWindow(QMainWindow):
             self.live_session = LiveSession(self.engine, self.session, tuning=self.live_tuning)
             self.pip_live = LiveSession(self.engine, self.pip_session, tuning=self.live_tuning)
             self.engine.start()
+            # 2.6: the buffers of the channels left, for every player.
+            self.kept = KeptBuffers(self.engine)
             self.sessions = SessionManager(
                 self._slot("main", self.session, self.live_session),
                 self._slot("pip", self.pip_session, self.pip_live),
@@ -710,6 +714,8 @@ class TVWindow(QMainWindow):
         live_tuners = [t for t in tuners if isinstance(t, LiveTuner)]
         one_disk_ring(*live_tuners)
         wait_for_each_other(*live_tuners)
+        for tuner in live_tuners:
+            tuner.set_kept(self.kept)  # every player keeps the buffer of the channel it leaves
 
     def _wire_source(self, source) -> None:
         """A surface (or the host over them): its clicks, moves, wheel and side buttons."""
@@ -1428,6 +1434,8 @@ class TVWindow(QMainWindow):
             logger.warning("Couldn't save the settings: %s", safe_message(e))
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
         self.controller.settings_saved()
+        if self.kept is not None and not self.config_manager.timeshift_enabled:
+            self.kept.drop_disk()  # the disk buffer is off: what was kept on disk goes
         self.remote.apply_config()
 
     def set_provider(self, force_update: bool = False) -> None:
@@ -1603,6 +1611,8 @@ class TVWindow(QMainWindow):
         old, self.engine = self.engine, LiveEngine(str(self.engine.root_dir), self)
         for live in self._lives():
             live.use_engine(self.engine)  # connected before it starts
+        if self.kept is not None:
+            self.kept.use_engine(self.engine)
         self.engine.start()
         old.deleteLater()
         call_before_update(self.stop_live, self.restart_live)  # each hook runs once

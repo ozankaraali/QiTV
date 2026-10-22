@@ -13,6 +13,10 @@ own one):
 
 `released` from a stop this object did not make (or after its cap) is ignored.
 
+Kept buffers (2.6): with a registry (`kept`, shared by every player's slot), a stop parks the
+channel (`LiveSession.park`) and puts what it kept there; a start of a channel whose buffer is
+kept takes it back (`LiveSession.start(kept=...)`).
+
 A `HeldSlot` is the slot of a stream that plays outside a `LiveSession`: the main player's
 direct channel, movie or episode. It is taken at once, whatever the limit (the player's own
 release gate already orders its streams), so that other consumers (the PiP) see the
@@ -28,6 +32,7 @@ from typing import Any, Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from services.connection_budget import DENIED, ConnectionBudget
+from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
 
 logger = logging.getLogger(__name__)
@@ -56,6 +61,7 @@ class BudgetedStream(QObject):
         self.purpose = purpose
         self.ticket: Optional[int] = None  # the pending or running stream's
         self.disk = False  # the running stream keeps its time-shift on disk
+        self.kept: Optional[KeptBuffers] = None  # 2.6: where its stops park their channel
         self._granted = False
         self._running = False  # live.start() was called and not stopped since
         self._releasing: list[int] = []  # given back once the stopped upstream is closed
@@ -103,6 +109,11 @@ class BudgetedStream(QObject):
         """Start the live session on the held ticket; if it raises, the ticket goes back."""
         self._running = True
         self.disk = bool(kwargs.get("disk"))
+        channel = kwargs.get("channel")
+        if self.kept is not None and channel and "kept" not in kwargs:
+            ring = self.kept.take(str(channel))
+            if ring is not None:
+                kwargs["kept"] = ring  # taken back where the user was
         try:
             self.live.start(*args, **kwargs)
         except Exception:
@@ -126,7 +137,12 @@ class BudgetedStream(QObject):
                 self._releasing.append(ticket)
             self._waiting = True
             self._cap.start()
-            self.live.stop()  # released() follows, perhaps at once
+            if self.kept is None:
+                self.live.stop()  # released() follows, perhaps at once
+            else:
+                ring = self.live.park()  # likewise; the channel's buffer is kept
+                if ring is not None:
+                    self.kept.put(ring)
         elif ticket is not None:
             self.budget.release(ticket)  # never started: nothing upstream to wait for
 

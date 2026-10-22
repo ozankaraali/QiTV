@@ -252,6 +252,19 @@ class SlotRoleTests(unittest.TestCase):
         QTest.qWait(10)
         self.assertEqual(self.live.starts, [URL])
 
+    def test_a_tune_back_takes_the_channels_kept_buffer(self):
+        # 2.6: every player shares the window's registry through its stream.
+        from services.live.kept import KeptBuffers, KeptRing, Where
+
+        kept = KeptBuffers(SimpleNamespace(close_session=lambda sid: None))
+        self.tuner.set_kept(kept)
+        self.assertIs(self.tuner.stream.kept, kept)
+        ring = KeptRing("s1", "k1", True, Where(12.0, True))
+        kept.put(ring)
+        self.tuner.tune(LiveStart(URL, "QiTV", True, channel="k1"), PROVIDER, 2)
+        QTest.qWait(10)
+        self.assertEqual(self.live.kwargs[-1]["kept"], ring)
+
     def test_its_purpose_names_its_slots_and_follows_a_new_role(self):
         self.start_pipeline()
         self.assertEqual(self.holders(), ["pip"])

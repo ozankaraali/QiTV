@@ -43,6 +43,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from services.budgeted_stream import BudgetedStream, HeldSlot
 from services.config_manager import ConfigManager
 from services.connection_budget import ConnectionBudget
+from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
 from services.playback import Session
 
@@ -179,6 +180,11 @@ class LiveTuner(QObject):
         self._held.set_purpose(purpose)
         if self._stream is not None:
             self._stream.set_purpose(purpose)
+
+    def set_kept(self, kept: Optional[KeptBuffers]) -> None:
+        """2.6: where its stops keep the channel's buffer, and its tunes find their own."""
+        if self._stream is not None:
+            self._stream.kept = kept
 
     def set_disk_allowed(self, allowed: Callable[[], bool]) -> None:
         """Whether a tune may keep its time-shift on disk now (False: another picture
