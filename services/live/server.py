@@ -54,7 +54,7 @@ class ThreadingLoopbackHTTPServer(ThreadingMixIn, LoopbackHTTPServer):
 
 @dataclass
 class _Session:
-    ring: Ring
+    ring: Any  # a Ring, or what reads like one (recorder.RecordedReads)
     is_ended: Callable[[], bool]
     removed: bool = False
     clients: set[socket.socket] = field(default_factory=set)
@@ -123,7 +123,8 @@ class StreamServer:
             self._thread.start()
         return self._base_url
 
-    def add_session(self, session_id: str, ring: Ring, is_ended: Callable[[], bool]) -> None:
+    def add_session(self, session_id: str, ring: Any, is_ended: Callable[[], bool]) -> None:
+        """`ring`: a `Ring`, or what reads like one (2.6: `recorder.RecordedReads`)."""
         if not re.fullmatch(_SESSION_ID, session_id):
             raise ValueError("A stream session id must be 1-64 URL-safe characters.")
         with self._lock:

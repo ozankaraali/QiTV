@@ -918,7 +918,11 @@ class _Session:
                 # Under the lock: `close` removes the session from the server after
                 # setting `cancelled`, so a cancelled session is never added back.
                 self._ring = ring
-                self._helper.server.add_session(self.sid, ring, self._is_ended)
+                # 2.6: a recording's file serves what the ring let go of while it records.
+                from services.live.recorder import RecordedReads
+
+                reads = RecordedReads(ring, lambda: self._recorder)
+                self._helper.server.add_session(self.sid, reads, self._is_ended)
         if cancelled:
             self._helper.forget_ring(ring)
             # 2.6: a helper going down keeps a labelled buffer (one being taken back too).
@@ -1278,6 +1282,12 @@ class _Session:
         ring, timeline, source = self._ring, self._timeline, self._source
         # No ring yet while the source opens: only its answer can be news then.
         oldest = ring.oldest_seq if ring is not None else None
+        recorder = self._recorder
+        if recorder is not None and oldest is not None:
+            # 2.6: while it records, what it wrote stays on the timeline (its file serves it).
+            written = recorder.first_written()
+            if written is not None and written < oldest:
+                oldest = written
         if ring is not None:
             # Spans of evicted segments leave the timeline (all of them while it is empty).
             evicted = oldest - 1 if oldest is not None else timeline.newest_seq

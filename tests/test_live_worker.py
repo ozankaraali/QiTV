@@ -1875,6 +1875,42 @@ class AdoptTests(unittest.TestCase):
         second.wait_for(lambda m: m == ("unkept", "y"))
 
 
+class RecordedReadTests(unittest.TestCase):
+    """2.6: while a recording runs, what the buffer let go of plays back from its file."""
+
+    def test_recorded_segments_serve_from_the_file_after_eviction(self):
+        stop, hung_up = threading.Event(), threading.Event()
+        self.addCleanup(stop.set)
+        upstream = LocalSource({SECRET_PATH: paced_route(make_stream(60), stop, hung_up)})
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        folder = Path(helper.helper.root) / "Recordings"
+        small = {"kind": "ram", "max_bytes": 300 * 1024}  # about four segments
+        helper.parent.send(("open", "r", upstream.url + SECRET_PATH, {}, True, small, 6.0))
+        helper.wait_for(lambda m: m == ("ready", "r"))
+        helper.parent.send(("record_start", "r", "rec", str(folder / "r.ts"), 0, {}))
+        session = helper.helper._sessions["r"]
+        deadline = time.monotonic() + 30
+        while session._ring is None or (session._ring.oldest_seq or 0) < 3:  # the ring let go
+            self.assertLess(time.monotonic(), deadline, "the buffer never let a segment go")
+            time.sleep(0.05)
+        helper.wait_for(lambda m: m[:2] == ("state", "r") and m[2]["oldest"] is not None)
+        recorder = session._recorder
+        self.assertEqual(recorder.first_written(), 0)
+        last = [m for m in helper.messages if m[:2] == ("state", "r")][-1]
+        self.assertEqual(last[2]["oldest"], 0)  # still there to play back
+        with urlopen(f"{helper.base_url}/r/stream/0.ts", timeout=5) as response:
+            head = response.read(4000)
+        self.assertEqual(head, Path(recorder.path).read_bytes()[:4000])
+        os.replace(recorder.path, recorder.path + ".moved")  # the user moved it
+        with self.assertRaises(HTTPError):
+            urlopen(f"{helper.base_url}/r/stream/0.ts", timeout=5)
+        os.replace(recorder.path + ".moved", recorder.path)
+        helper.parent.send(("record_stop", "r"))
+        helper.wait_for(lambda m: m[:3] == ("recorded", "r", "rec"))
+        helper.wait_for(lambda m: m[:2] == ("state", "r") and (m[2]["oldest"] or 0) > 0)
+
+
 class StartQualityTests(unittest.TestCase):
     """In process: the spans message carries how cleanly each segment starts."""
 
@@ -2048,8 +2084,9 @@ class RamFallbackSizeTests(unittest.TestCase):
 
             session._write(write, new_segment=True)
         self.assertEqual(len(adopted), 1)
-        self.assertIsInstance(adopted[0], RamRing)
-        self.assertEqual(adopted[0]._max_bytes, 3 * 1024**2)
+        served = adopted[0].ring  # 2.6: served through a recording's reads
+        self.assertIsInstance(served, RamRing)
+        self.assertEqual(served._max_bytes, 3 * 1024**2)
 
 
 class HeardEdgeTests(unittest.TestCase):
