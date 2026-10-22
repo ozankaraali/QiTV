@@ -137,6 +137,19 @@ class RewindTests(CatchupCase):
         self.assertIn((ARCHIVE_TEXT, "info"), self.toast.messages())
         self.assertEqual(self.runner.jobs, [])  # a 1-stream account is never probed
 
+    def test_a_kept_buffers_archive_starts_before_its_oldest_part(self):
+        # 2.6: the buffer was kept from 18:30, the channel left and come back to at 20:25: the
+        # archive's part of the bar goes back from 18:30, not from the live edge.
+        start = NOW.timestamp()
+        parts = [[0, 3000.0, start - 7200.0], [50, 3300.0, start - 300.0]]
+        self.start_archived()
+        self.live.timelineChanged.emit(dict(STATE, parts=parts, behind=7195.0))
+        self.controller.handle(Action.SEEK_BACK)  # 10 s back from 5 s after the buffer's start
+        self.live.released.emit()
+        [(url, kwargs)] = self.archive_plays()
+        self.assertEqual(url, "http://panel.test/timeshift/viewer/secret/121/2026-10-15:18-29/1.ts")
+        self.assertEqual(kwargs["start_ms"], 55_000)
+
     def test_the_archive_plays_on_its_own_bar_and_go_live_tunes_the_channel_again(self):
         self.start_archived()
         self.controller.mouse_moved()

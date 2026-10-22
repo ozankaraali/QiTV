@@ -2,12 +2,15 @@ import unittest
 
 from services.live.parts import (
     Part,
+    behind_in,
     from_state,
     index_of,
     junctions,
     newest_first_seq,
     t_at,
+    t_in,
     wall_at,
+    wall_in,
 )
 
 P = [Part(0, 0.0, 1_000.0), Part(30, 60.0, 10_000.0)]  # 60 s kept, then hours away
@@ -40,8 +43,9 @@ class InverseTests(unittest.TestCase):
     def test_in_the_gap_is_none(self):
         self.assertIsNone(t_at(P, 5_000.0, live_edge=EDGE, now=NOW))
 
-    def test_before_the_oldest_is_none(self):
-        self.assertIsNone(t_at(P, 900.0, live_edge=EDGE, now=NOW))
+    def test_before_the_oldest_goes_on_backwards(self):
+        # The catch-up archive's part of the bar, before the buffer's oldest point.
+        self.assertEqual(t_at(P, 900.0, live_edge=EDGE, now=NOW), -100.0)
 
     def test_round_trip_in_each_part(self):
         for t in (10.0, 100.0):
@@ -73,6 +77,23 @@ class ShapeTests(unittest.TestCase):
             from_state([[0, 0.0, 1.0], [5, 10.0, 2.0], [3, 4.0, 3.0]]),
             [Part(0, 0.0, 1.0), Part(5, 10.0, 2.0)],
         )
+
+
+class StateTests(unittest.TestCase):
+    """The timeline state's view: its parts, its live edge."""
+
+    STATE = {"live_edge": EDGE, "lag": 4.0, "parts": [[0, 0.0, 1_000.0], [30, 60.0, 10_000.0]]}
+
+    def test_wall_and_t_in_a_state(self):
+        self.assertEqual(wall_in(self.STATE, 30.0, NOW), 1_030.0)
+        self.assertIsNone(t_in(self.STATE, 5_000.0, NOW))  # a programme in the gap
+        self.assertEqual(t_in({"live_edge": 10.0}, 45.0, 50.0), 5.0)
+
+    def test_behind_counts_the_time_away_once_there_is_a_gap(self):
+        self.assertEqual(behind_in(dict(self.STATE, behind=900.0)), 900.0)
+        one = {"live_edge": EDGE, "lag": 4.0, "parts": [[0, 0.0, 1_000.0]], "behind": 900.0}
+        self.assertEqual(behind_in(one), 4.0)  # one part: the lag, as before
+        self.assertIsNone(behind_in({"parts": []}))
 
 
 if __name__ == "__main__":

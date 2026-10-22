@@ -79,6 +79,7 @@ from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
 from services.failure_reasons import LIMIT, Reason, own_streams_text, shown_message
 from services.i18n import N_, tr, translate
+from services.live import parts as live_parts
 from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
 from services.navigation import (
@@ -2195,11 +2196,12 @@ class TVController(QObject):
         """How far the large picture plays behind live once the viewer left live (paused, went
         back, or another speed): 0 while it stays live, its buffer aside, as the player shows
         Go live only then."""
-        lag = self._live_lag()
         timeline = self._tuner.timeline
-        if lag is None or not isinstance(timeline, dict) or timeline.get("mode", "live") == "live":
+        if self._live_lag() is None or not isinstance(timeline, dict):
             return 0.0
-        return lag
+        if timeline.get("mode", "live") == "live":
+            return 0.0
+        return live_parts.behind_in(timeline) or 0.0  # 2.6: the time away included
 
     def _live_info(self) -> dict:
         """The statistics' source and lag for the large picture."""
@@ -2213,7 +2215,10 @@ class TVController(QObject):
         target = self._playing_live()
         if target is None or self._live_controls.catchup.active():
             return None
+        timeline = self._tuner.timeline
         lag = self._live_lag() or 0.0
+        if lag and isinstance(timeline, dict):
+            lag = live_parts.behind_in(timeline) or lag  # 2.6: the time away included
         watched = self._now() - timedelta(seconds=lag)
         for programme in self._programmes(target.item, watched, 1):
             if programme.is_on(watched):

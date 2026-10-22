@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -85,15 +85,41 @@ def wall_at(parts: Sequence[Part], t: float, *, live_edge: float, now: float) ->
 
 
 def t_at(parts: Sequence[Part], wall: float, *, live_edge: float, now: float) -> Optional[float]:
-    """The timeline second of time of day `wall`; None in a gap or before the oldest part."""
+    """The timeline second of time of day `wall`; None in a gap. Before the oldest part it
+    goes on backwards from it (the catch-up archive's part of the bar)."""
     if not parts:
         return live_edge - (now - wall)
     starts = _starts(parts, live_edge, now)
     if wall >= starts[-1]:
         return live_edge - (now - wall)
+    if wall < starts[0]:
+        return parts[0].start - (starts[0] - wall)
     for i in range(len(parts) - 1):
         length = parts[i + 1].start - parts[i].start
         end = min(starts[i] + length, starts[i + 1])
         if starts[i] <= wall <= end:
             return parts[i].start + (wall - starts[i])
     return None
+
+
+# A `LiveSession.timelineChanged` state: its parts and live edge place its seconds in the day.
+
+
+def wall_in(state: Mapping[str, Any], t: float, now: float) -> float:
+    """`wall_at` for a timeline state."""
+    edge = float(state.get("live_edge", 0.0))
+    return wall_at(from_state(state.get("parts")), t, live_edge=edge, now=now)
+
+
+def t_in(state: Mapping[str, Any], wall: float, now: float) -> Optional[float]:
+    """`t_at` for a timeline state."""
+    edge = float(state.get("live_edge", 0.0))
+    return t_at(from_state(state.get("parts")), wall, live_edge=edge, now=now)
+
+
+def behind_in(state: Mapping[str, Any]) -> Optional[float]:
+    """How far behind now a state plays: once its buffer has a gap, the time of day's
+    (`behind`, the time away included), else the lag as before; None when it says neither."""
+    key = "behind" if len(from_state(state.get("parts"))) > 1 else "lag"
+    value = state.get(key)
+    return float(value) if isinstance(value, (int, float)) else None

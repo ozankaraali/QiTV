@@ -43,6 +43,7 @@ from services import favorites, recording
 from services.catchup_memory import CatchupMemory
 from services.epg_view import Programme
 from services.i18n import N_, tr, tr_n, translate
+from services.live import parts as live_parts
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
@@ -454,14 +455,18 @@ class LiveControls(QObject):
         transport.update_timeline(state, self._ticks)
 
     def _programme_ticks(self, channel: dict, state: dict) -> list[tuple[float, str]]:
-        """Programme starts in timeline seconds: the live edge is now (as the transport)."""
-        now = self._now()
-        edge = float(state["live_edge"])
-        since = now - timedelta(seconds=max(0.0, edge - float(state["start"])))
-        return [
-            (edge - (now - p.start).total_seconds(), p.title)
-            for p in self._programmes(channel, since, TICK_PROGRAMMES)
-        ]
+        """Programme starts in timeline seconds: the live edge is now (as the transport), and
+        a kept buffer's older parts are placed by their own time (2.6; a programme that began
+        where nothing was kept has no tick)."""
+        stamp = self._now().timestamp()
+        oldest = live_parts.wall_in(state, float(state["start"]), stamp)
+        since = datetime.fromtimestamp(min(oldest, stamp), timezone.utc)
+        ticks = []
+        for p in self._programmes(channel, since, TICK_PROGRAMMES):
+            t = live_parts.t_in(state, p.start.timestamp(), stamp)
+            if t is not None:
+                ticks.append((t, p.title))
+        return ticks
 
     def _on_live_notice(self, text: str) -> None:
         if self._closed():
@@ -596,13 +601,17 @@ class LiveControls(QObject):
         return t < float(state["start"]) - _PAST_BUFFER_S and self._open_archive_at(state, t)
 
     def _open_archive_at(self, state: dict, t: float) -> bool:
-        """The channel's archive at the time-shift timeline's `t` (its live edge is now)."""
+        """The channel's archive at the time-shift timeline's `t` (its live edge is now; 2.6:
+        a kept buffer's older parts by their own time)."""
+        return self._open_archive_moment(live_parts.wall_in(state, t, self._now().timestamp()))
+
+    def _open_archive_moment(self, moment: float) -> bool:
+        """The channel's archive from `moment` (Unix seconds)."""
         current = self._current()
         if current is None or self.catchup.offered(current) is None:
             if self.catchup.known_failed(current):
                 self._toast(translate(NOT_AVAILABLE_TEXT))
             return False
-        moment = self._now().timestamp() - (float(state["live_edge"]) - t)
         return self.catchup.open(current, moment)
 
     def _set_speed(self, rate: float) -> None:
@@ -633,15 +642,20 @@ class LiveControls(QObject):
             return
         if not self.pipeline_live() or self.live is None or current is None or state is None:
             return
-        now = self._now()
-        edge, oldest = float(state["live_edge"]), float(state["start"])
-        watching = now - timedelta(seconds=max(0.0, edge - float(state["position"])))
+        stamp = self._now().timestamp()
+        oldest = float(state["start"])
+        moment = min(live_parts.wall_in(state, float(state["position"]), stamp), stamp)
+        watching = datetime.fromtimestamp(moment, timezone.utc)
         target = oldest
         for programme in self._programmes(current.item, watching, 1):
-            start = edge - (now - programme.start).total_seconds()
-            if programme.is_on(watching) and start >= oldest:
+            if not programme.is_on(watching):
+                continue
+            # Where it began on the timeline (2.6: by its part; None: where nothing was kept).
+            begin = programme.start.timestamp()
+            start = live_parts.t_in(state, begin, stamp)
+            if start is not None and start >= oldest:
                 target = start
-            elif programme.is_on(watching) and self._open_archive_at(state, start):
+            elif self._open_archive_moment(begin):
                 self._show_transport()
                 return
         self.catchup.cancel()
