@@ -35,6 +35,9 @@ class ButtonTests(unittest.TestCase):
                     self.assertEqual(button.kind, "screen")
                     self.assertIn(button.payload, ("tv", "movies", "series"))
 
+    def test_stop_is_a_players_button(self):  # 2.6: nothing plays, nothing streams
+        self.assertEqual(BUTTONS["stop"].action, Action.STOP)
+
     def test_reverse_pairs_are_symmetric(self):
         for name, meta in BUTTON_META.items():
             if meta.reverse is not None:
@@ -83,6 +86,31 @@ class OpeningTests(unittest.TestCase):
 
 
 class MessageTests(unittest.TestCase):
+    def test_a_question_is_answered(self):  # 2.6: stop a recording for the phone's Watch?
+        self.assertEqual(
+            parse_phone_message({"t": "answer", "id": 3, "yes": True}),
+            {"t": "answer", "id": 3, "yes": True},
+        )
+        for bad in (
+            {"t": "answer", "id": "3", "yes": True},
+            {"t": "answer", "id": 3, "yes": 1},
+            {"t": "answer", "id": -1, "yes": False},
+            {"t": "answer", "yes": False},
+        ):
+            self.assertIsNone(parse_phone_message(bad), bad)
+
+    def test_a_recording_is_gone_back_to_or_stopped(self):
+        for act in ("back", "stop"):
+            self.assertEqual(
+                parse_phone_message({"t": "rec", "id": "main", "do": act}),
+                {"t": "rec", "id": "main", "do": act},
+            )
+        for bad in (
+            {"t": "rec", "id": "main", "do": "start"},
+            {"t": "rec", "id": "", "do": "stop"},
+        ):
+            self.assertIsNone(parse_phone_message(bad), bad)
+
     def test_messages_validated(self):
         self.assertEqual(parse_phone_message({"t": "down", "b": "up"}), {"t": "down", "b": "up"})
         self.assertEqual(
@@ -263,3 +291,15 @@ class ReviewFixProtocolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BackToButtonTests(unittest.TestCase):
+    """2.6: the phone's Resume, shown while the TV offers where a channel was left."""
+
+    def test_it_is_a_player_button_for_the_tv_s_back_to(self):
+        from services.remote.protocol import BUTTON_META
+        from ui.keymap import Action
+        from ui.remote_buttons import BUTTONS
+
+        self.assertEqual(BUTTON_META["back_to"].route, "player")
+        self.assertEqual(BUTTONS["back_to"].action, Action.BACK_TO)

@@ -35,6 +35,7 @@ from ts_fixtures import make_stream
 
 from services.live import engine as engine_module
 from services.live.engine import LiveEngine
+from services.live.ring import read_index
 from services.live.timeline import START_KEY, START_NONE, START_OPEN, Span
 from services.thread_cleanup import has_pending_threads
 
@@ -63,6 +64,7 @@ STATE_KEYS = {
     "video",
     "answered",
     "reconnecting",
+    "parts",  # 2.6: a kept buffer's runs, each with its time of day
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024
@@ -126,7 +128,8 @@ def kill(process):
 def session_dirs(root):
     if not root.is_dir():
         return []
-    return sorted(path.name for path in root.iterdir() if path.name.startswith(".qitv-timeshift-"))
+    prefixes = (".qitv-timeshift-", ".qitv-buffer-")  # 2.6: v2 folders
+    return sorted(path.name for path in root.iterdir() if path.name.startswith(prefixes))
 
 
 def paced_body(payload, stop, hung_up):
@@ -269,6 +272,325 @@ class ResizeTests(unittest.TestCase):
         commands.put(("resize", "s1", 64 * MIB))
         supervisor._send_next(SimpleNamespace(send=sent.append))
         self.assertEqual((sent, supervisor._records["s1"].command), ([], command))
+
+
+class ParkResumeTests(unittest.TestCase):
+    """2.6: a parked session keeps its view; the supervisor never reopens it by itself."""
+
+    def engine(self):
+        import queue
+
+        commands: queue.Queue = queue.Queue()
+        engine = LiveEngine.__new__(LiveEngine)
+        LiveEngine.__init__(engine, tempfile.gettempdir())
+        engine._commands = commands
+        return engine, commands
+
+    def test_park_and_resume_commands(self):
+        engine, commands = self.engine()
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=256 * MIB, target=2.5
+        )
+        commands.get_nowait()
+        engine.park_session(sid)
+        engine.park_session("unknown")
+        engine.resume_session(
+            sid, URL_FOR_RING, headers={"User-Agent": "a"}, verify_ssl=False, target=3.0
+        )
+        self.assertEqual(commands.get_nowait(), ("park", sid))
+        self.assertEqual(
+            commands.get_nowait(),
+            (
+                "resume",
+                sid,
+                URL_FOR_RING,
+                {"User-Agent": "a"},
+                False,
+                6.0,
+                {"target": 3.0, "extra": 0.0},
+            ),
+        )
+        self.assertTrue(commands.empty())
+
+    def test_parked_and_resumed_keep_the_view(self):
+        engine, _ = self.engine()
+        engine._sessions["s"] = engine_module._View()
+        engine._sessions["s"].spans.append(Span(0, 0.0, 2.0, False))
+        parked, resumed = [], []
+        engine.sessionParked.connect(parked.append)
+        engine.sessionResumed.connect(resumed.append)
+        engine._on_message(("parked", "s"))
+        engine._on_message(("resumed", "s"))
+        self.assertEqual((parked, resumed), (["s"], ["s"]))
+        self.assertEqual(len(engine.spans("s")), 1)
+
+    def test_a_parked_session_is_not_reopened_after_a_helper_death(self):
+        import queue
+
+        commands: queue.Queue = queue.Queue()
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), commands)
+        ring = {"kind": "ram", "max_bytes": 64 * MIB}
+        command = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        supervisor._records["s1"] = engine_module._Record(command=command, sent=True)
+        sent, relayed = [], []
+        supervisor._relay = relayed.append
+        commands.put(("park", "s1"))
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent, [("park", "s1")])
+        supervisor._receive(("parked", "s1"))
+        self.assertTrue(supervisor._records["s1"].over)
+        self.assertIn(("parked", "s1"), relayed)
+
+    def test_a_resume_reopens_with_its_own_source_after_a_helper_death(self):
+        import queue
+
+        commands: queue.Queue = queue.Queue()
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), commands)
+        ring = {"kind": "ram", "max_bytes": 64 * MIB}
+        command = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        record = supervisor._records["s1"] = engine_module._Record(command, sent=True, over=True)
+        sent, relayed = [], []
+        supervisor._relay = relayed.append
+        start = {"target": 3.0, "extra": 0.0}
+        commands.put(("resume", "s1", "http://other.test/1.ts", {"A": "b"}, False, 4.0, start))
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent[0][0], "resume")
+        self.assertFalse(record.over)
+        self.assertEqual(
+            record.command,
+            ("open", "s1", "http://other.test/1.ts", {"A": "b"}, False, ring, 4.0, start),
+        )
+
+    def test_a_resume_without_a_helper_fails(self):
+        import queue
+
+        commands: queue.Queue = queue.Queue()
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), commands)
+        ring = {"kind": "ram", "max_bytes": 64 * MIB}
+        command = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        supervisor._records["s1"] = engine_module._Record(command, sent=False, over=True)
+        relayed = []
+        supervisor._relay = relayed.append
+        commands.put(("resume", "s1", URL_FOR_RING, {}, True, 6.0))
+        supervisor._send_next(SimpleNamespace(send=relayed.append))
+        self.assertEqual(relayed[-1][:3], ("error", "s1", "crashed"))
+
+
+class KeptFolderTests(unittest.TestCase):
+    """2.6: disk buffers go in v2 folders, labelled; a helper's death leaves them for the next."""
+
+    def test_new_disk_buffers_are_v2_folders(self):
+        self.assertTrue(engine_module._session_dir().startswith(".qitv-buffer-"))
+
+    def test_keep_and_where_reach_the_helper(self):
+        import queue
+
+        commands: queue.Queue = queue.Queue()
+        engine = LiveEngine.__new__(LiveEngine)
+        LiveEngine.__init__(engine, tempfile.gettempdir())
+        engine._commands = commands
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=True, max_bytes=MIB
+        )
+        opened = commands.get_nowait()
+        engine.keep_session(sid, {"channel": "k1"})
+        engine.note_where(sid, {"position": 12.0, "paused": True})
+        engine.keep_session("unknown", {"channel": "k2"})
+        self.assertEqual(commands.get_nowait(), ("keep", sid, {"channel": "k1"}))
+        self.assertEqual(commands.get_nowait(), ("where", sid, {"position": 12.0, "paused": True}))
+        self.assertTrue(commands.empty())
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), commands)
+        supervisor._records[sid] = engine_module._Record(command=opened, sent=True)
+        sent = []
+        commands.put(("keep", sid, {"channel": "k1"}))
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent, [("keep", sid, {"channel": "k1"})])
+
+    def test_a_helpers_death_leaves_labelled_folders_only(self):
+        import queue
+
+        from services.live.ring import DiskRing
+
+        with tempfile.TemporaryDirectory() as root:
+            kept, plain = engine_module._session_dir(), engine_module._session_dir()
+            for name in (kept, plain):
+                ring = DiskRing(Path(root), name, MIB)
+                if name == kept:
+                    ring.note_label({"channel": "k1"})
+                ring.close(keep=True)  # as a helper that died left it
+            supervisor = engine_module._Supervisor(Path(root), queue.Queue())
+            supervisor._dirs = {kept, plain}
+            supervisor._clean_dirs()
+            self.assertTrue((Path(root) / kept).exists())
+            self.assertFalse((Path(root) / plain).exists())  # nobody could take it back
+            self.assertEqual(supervisor._dirs, set())
+
+
+class AdoptKeptTests(unittest.TestCase):
+    """2.6: at the start the supervisor takes kept folders back, and sweeps what cannot be."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-kept-test-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def folder(self, *, label=True, age=0.0):
+        from services.live import ring as ring_module
+        from services.live.ring import DiskRing
+
+        name = engine_module._session_dir()
+        with patch.object(ring_module, "_wall_time", lambda: time.time() - age):
+            ring = DiskRing(self.root, name, MIB)
+            ring.open_segment(0, b"h" * 376)
+            ring.append(b"d" * 1000)
+            ring.complete(0)
+            ring.note_segment(0, 0.0, 2.0, False, "key")
+        if label:
+            ring.note_label({"channel": "k1"})
+        ring.close(keep=True)
+        return name
+
+    def supervisor(self):
+        import queue
+
+        supervisor = engine_module._Supervisor(self.root, queue.Queue())
+        relayed = []
+        supervisor._relay = relayed.append
+        return supervisor, relayed
+
+    def test_fresh_labelled_folders_are_taken_back_the_rest_swept(self):
+        from services.live.ring import STALE_S
+
+        kept = self.folder()
+        stale = self.folder(age=STALE_S + 60)
+        plain = self.folder(label=False)
+        supervisor, relayed = self.supervisor()
+        supervisor._adopt_kept(64 * MIB)
+        adopting = [m for m in relayed if m[0] == "adopting"]
+        self.assertEqual(len(adopting), 1)
+        record = supervisor._records[adopting[0][1]]
+        self.assertTrue(record.parked)
+        self.assertEqual(record.command[5]["dir"], kept)
+        self.assertTrue((self.root / kept).exists())
+        self.assertFalse((self.root / stale).exists())
+        self.assertFalse((self.root / plain).exists())
+        sent = []
+        supervisor._send_open(SimpleNamespace(send=sent.append), record)
+        self.assertEqual(sent, [("adopt", adopting[0][1], kept, 64 * MIB)])
+
+    def test_a_folder_another_qitv_holds_is_left_alone(self):
+        from test_ring import hold_session_lock
+
+        kept = self.folder()
+        context = multiprocessing.get_context("spawn")
+        ready, release = context.Event(), context.Event()
+        holder = context.Process(
+            target=hold_session_lock, args=(str(self.root / kept / "session.lock"), ready, release)
+        )
+        holder.start()
+        self.addCleanup(holder.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(ready.wait(20))
+        supervisor, relayed = self.supervisor()
+        supervisor._adopt_kept(64 * MIB)
+        self.assertEqual(relayed, [])
+        self.assertTrue((self.root / kept / "segment-0.ts").exists())
+
+    def test_disk_buffer_off_sweeps_every_kept_folder(self):
+        kept = self.folder()
+        supervisor, _ = self.supervisor()
+        supervisor._drop_kept()
+        self.assertFalse((self.root / kept).exists())
+
+    def test_a_parked_session_is_taken_back_after_a_helper_death(self):
+        supervisor, _ = self.supervisor()
+        ring = {"kind": "disk", "dir": engine_module._session_dir(), "max_bytes": 64 * MIB}
+        (self.root / ring["dir"]).mkdir()  # left for the next helper
+        command = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        record = supervisor._records["s1"] = engine_module._Record(command, sent=True)
+        supervisor._receive(("parked", "s1"))
+        self.assertTrue(record.parked)
+        record.sent = False  # the helper died
+        sent = []
+        supervisor._send_open(SimpleNamespace(send=sent.append), record)
+        self.assertEqual(sent, [("adopt", "s1", ring["dir"], 64 * MIB)])
+
+    def test_the_engine_tells_what_was_kept_at_once(self):
+        # Review B I2: from the scan, before the helper took it back, so a startup tune of
+        # that channel finds it.
+        engine = LiveEngine.__new__(LiveEngine)
+        LiveEngine.__init__(engine, tempfile.gettempdir())
+        found = []
+        engine.keptFound.connect(lambda sid, label, where: found.append((sid, label, where)))
+        label, where = {"channel": "k1"}, {"position": 1.0, "paused": True}
+        engine._on_message(("adopting", "z", label, where))
+        self.assertEqual(found, [("z", label, where)])
+        self.assertTrue(engine.holds("z"))
+        engine._on_message(("state", "z", {"oldest": 0}, 0, [(0, 0.0, 2.0, False, "key")]))
+        engine._on_message(("parked", "z"))
+        engine._on_message(("kept", "z", label, where))
+        self.assertEqual(len(found), 1)  # told once
+        self.assertEqual(len(engine.spans("z")), 1)
+        engine._on_message(("unkept", "z"))
+        self.assertEqual(engine.spans("z"), [])
+        self.assertFalse(engine.holds("z"))
+
+    def test_keep_and_where_before_the_helper_is_up_follow_its_open(self):
+        # Review B I1: a startup tune opens before the helper's hello.
+        supervisor, _ = self.supervisor()
+        ring = {"kind": "disk", "dir": engine_module._session_dir(), "max_bytes": MIB}
+        opened = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        conn = SimpleNamespace(send=lambda command: None)
+        for command in (
+            opened,
+            ("keep", "s1", {"channel": "k1"}),
+            ("where", "s1", {"position": 1.0, "paused": False}),
+        ):
+            supervisor._commands.put(command)
+            supervisor._send_next(conn)
+        sent = []
+        supervisor._up = True
+        supervisor._send_open(SimpleNamespace(send=sent.append), supervisor._records["s1"])
+        self.assertEqual([c[0] for c in sent], ["open", "keep", "where"])
+
+    def test_a_resume_before_the_take_back_follows_it(self):
+        # Review B I2: the startup tune takes the kept buffer back before the helper is up.
+        kept = self.folder()
+        supervisor, relayed = self.supervisor()
+        supervisor._adopt_kept(64 * MIB)
+        [(_, sid, label, where)] = [m for m in relayed if m[0] == "adopting"]
+        self.assertEqual(label, {"channel": "k1"})
+        supervisor._commands.put(("resume", sid, URL_FOR_RING, {}, True, 6.0))
+        supervisor._send_next(SimpleNamespace(send=lambda command: None))
+        self.assertNotIn(("error", sid, "crashed", engine_module._INTERNAL), relayed)
+        sent = []
+        supervisor._up = True
+        supervisor._send_open(SimpleNamespace(send=sent.append), supervisor._records[sid])
+        self.assertEqual([c[0] for c in sent], ["adopt", "resume"])
+        self.assertEqual(sent[0][2], kept)
+
+    def test_of_two_folders_of_one_channel_the_newest_is_taken_back(self):
+        # Review B I3
+        older = self.folder(age=600.0)
+        newer = self.folder()
+        supervisor, relayed = self.supervisor()
+        supervisor._adopt_kept(64 * MIB)
+        [(_, sid, _, _)] = [m for m in relayed if m[0] == "adopting"]
+        self.assertEqual(supervisor._records[sid].command[5]["dir"], newer)
+        self.assertFalse((self.root / older).exists())
+
+    def test_a_helpers_death_keeps_parked_folders_only(self):
+        # Review B I3: a live session reopens in a fresh folder; its old one would be an orphan.
+        live, parked = self.folder(), self.folder()
+        supervisor, _ = self.supervisor()
+        for sid, name, is_parked in (("a", live, False), ("b", parked, True)):
+            ring = {"kind": "disk", "dir": name, "max_bytes": MIB}
+            command = ("open", sid, URL_FOR_RING, {}, True, ring, 6.0)
+            supervisor._records[sid] = engine_module._Record(command, parked=is_parked)
+            supervisor._dirs.add(name)
+        supervisor._clean_dirs(died=True)
+        self.assertFalse((self.root / live).exists())
+        self.assertTrue((self.root / parked).exists())
 
 
 class FailureReasonTests(unittest.TestCase):
@@ -417,6 +739,7 @@ class Signals:
         )
         engine.sessionEnded.connect(lambda sid: self._add("ended", sid), direct)
         engine.sessionClosed.connect(lambda sid: self._add("closed", sid), direct)
+        engine.sessionParked.connect(lambda sid: self._add("parked", sid), direct)  # 2.6
 
     def _add(self, *event):
         if threading.current_thread() is not threading.main_thread():
@@ -526,6 +849,66 @@ class LiveEngineTests(unittest.TestCase):
         return engine.open_session(
             url, headers=HEADERS, verify_ssl=True, disk=disk, max_bytes=256 * MIB
         )
+
+    def test_where_and_park_reach_the_helper_before_it_goes(self):
+        # Review B C1: the app notes where the user was and parks at quit, then shuts the
+        # engine down in the same turn: those must reach the helper first.
+        engine, signals = self.engine()
+        signals.wait_for(lambda event: event == ("available", True), timeout=60)
+        source = self.source()
+        sid = self.open(engine, source.url + SECRET_PATH, disk=True)
+        engine.keep_session(sid, {"channel": "k1"})
+        signals.wait_for(lambda e: e[0] == "updated" and e[1] == sid and len(e[3]) >= 2)
+        engine.note_where(sid, {"position": 2.0, "paused": True})
+        engine.park_session(sid)
+        engine.shutdown()
+        [name] = session_dirs(self.root)
+        index = read_index(self.root / name)
+        self.assertEqual(index.where, {"position": 2.0, "paused": True})
+        self.assertEqual(index.label, {"channel": "k1"})
+
+    def test_a_session_opened_before_the_helper_is_up_is_labelled(self):
+        # Review B I1, end to end: the startup tune opens before the helper's hello.
+        engine, signals = self.engine()
+        source = self.source()
+        sid = self.open(engine, source.url + SECRET_PATH, disk=True)
+        engine.keep_session(sid, {"channel": "k1"})
+        self.assertFalse(engine.is_available())  # still starting
+        signals.wait_for(lambda event: event == ("ready", sid), timeout=60)
+        [name] = session_dirs(self.root)
+        self.assertTrue(wait_until(lambda: (read_index(self.root / name) or None) is not None, 5))
+        self.assertTrue(
+            wait_until(lambda: read_index(self.root / name).label == {"channel": "k1"}, 5)
+        )
+
+    def test_a_kept_buffer_survives_a_restart(self):
+        # 2.6, end to end through two real helpers: one keeps a labelled disk buffer as the
+        # engine shuts down, the next engine takes it back with its spans and where it was.
+        engine, signals = self.engine()
+        signals.wait_for(lambda event: event == ("available", True), timeout=60)
+        source = self.source({SECRET_PATH: (200, {}, make_stream(8))})
+        sid = self.open(engine, source.url + SECRET_PATH, disk=True)
+        engine.keep_session(sid, {"channel": "k1"})
+        signals.wait_for(lambda event: event == ("ended", sid))
+        spans = [(s.seq, s.start, s.end) for s in engine.spans(sid)]
+        engine.note_where(sid, {"position": 2.0, "paused": True})
+        engine.park_session(sid)
+        signals.wait_for(lambda event: event == ("parked", sid))
+        engine.shutdown()
+        self.assertEqual(len(session_dirs(self.root)), 1)  # kept for the next start
+
+        second, signals = self.engine()
+        found = []
+        second.keptFound.connect(lambda *args: found.append(args))
+        second.adopt_kept(256 * MIB)
+        self.assertTrue(wait_until(lambda: found, 30), "nothing was taken back")
+        [(kept, label, where)] = found
+        self.assertEqual((label, where), ({"channel": "k1"}, {"position": 2.0, "paused": True}))
+        # Told at once, from the scan; its spans follow once the helper took it back.
+        self.assertTrue(wait_until(lambda: second.spans(kept), 30), "its spans never came")
+        self.assertEqual([(s.seq, s.start, s.end) for s in second.spans(kept)], spans)
+        second.close_session(kept)
+        self.assertTrue(wait_until(lambda: session_dirs(self.root) == [], 10))
 
     def test_a_session_is_served_with_spans_rebuilt_from_the_deltas(self):
         engine, signals = self.engine()

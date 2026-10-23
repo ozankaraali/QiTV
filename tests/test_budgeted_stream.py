@@ -11,6 +11,7 @@ from timer_fixtures import elapse
 
 from services.budgeted_stream import RELEASE_CAP_MS, BudgetedStream, HeldSlot
 from services.connection_budget import DENIED, ConnectionBudget
+from services.live.kept import KeptBuffers, KeptRing, Where
 
 app = QApplication.instance() or QApplication([])
 
@@ -37,6 +38,13 @@ class FakeLive(QObject):
         self.calls.append(("stop",))
         if self.auto_release:
             self.released.emit()
+
+    def park(self):
+        """2.6: what `keep` says is kept (None: it stops instead)."""
+        self.calls.append(("park",))
+        if self.auto_release:
+            self.released.emit()
+        return getattr(self, "keep", None)
 
 
 class _Fixture(unittest.TestCase):
@@ -200,3 +208,55 @@ class ReleaseCapTests(_Fixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeptStreamTests(_Fixture):
+    """2.6: with a registry, a stop parks the channel and a start takes its kept buffer."""
+
+    def setUp(self):
+        super().setUp()
+        self.closed = []
+        engine = type("Engine", (), {"close_session": lambda _, sid: self.closed.append(sid)})()
+        self.kept = KeptBuffers(engine)
+        self.stream.kept = self.kept
+
+    def test_a_stop_parks_into_the_registry(self):
+        self.running_stream()
+        ring = KeptRing("s1", "k1", True, Where(30.0, True))
+        self.live.keep = ring
+        self.stream.stop()
+        self.assertEqual(self.live.calls[-1], ("park",))
+        self.assertEqual(self.kept.take("k1"), ring)
+        self.assertEqual(self.releases, [True])
+        self.assertEqual(self.budget.holders(P), [])  # its slot went back on release
+
+    def test_a_start_takes_the_channels_kept_buffer(self):
+        ring = KeptRing("s1", "k1", True, Where(30.0, True))
+        self.kept.put(ring)
+        self.stream.request(P, 2)
+        self.pump()
+        self.stream.start("http://provider.test/1.ts", channel="k1")
+        self.assertEqual(self.live.calls[-1][2]["kept"], ring)
+        self.assertEqual(self.kept.rings(), [])
+
+    def test_another_channel_starts_afresh(self):
+        self.kept.put(KeptRing("s1", "k1", True, Where(None, False)))
+        self.stream.request(P, 2)
+        self.pump()
+        self.stream.start("http://provider.test/2.ts", channel="k2")
+        self.assertNotIn("kept", self.live.calls[-1][2])
+        self.assertEqual(len(self.kept.rings()), 1)
+
+    def test_without_a_registry_a_stop_stops(self):
+        self.stream.kept = None
+        self.running_stream()
+        self.stream.stop()
+        self.assertEqual(self.live.calls[-1], ("stop",))
+
+    def test_a_taken_back_memory_buffer_is_not_disk(self):
+        # Review I3: whether it is on disk follows the buffer taken back.
+        self.kept.put(KeptRing("s1", "k1", False, Where(None, False)))
+        self.stream.request(P, 2)
+        self.pump()
+        self.stream.start("http://provider.test/1.ts", channel="k1", disk=True)
+        self.assertFalse(self.stream.disk)

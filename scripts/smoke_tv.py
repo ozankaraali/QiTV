@@ -34,7 +34,8 @@ saved (MPEG-TS from its first byte), the controls showed REC meanwhile and the t
 then Down zaps to Channel 4 (a second such source) and Up back to Channel 3 as soon as
 Channel 4's upstream delivers: each source, and both together, never had more than one
 connection open at once (spec §11; the sources see a client's close at once); after the
-close no helper process and nothing in the timeshift directory remain. Lags and
+close no helper process remains and the timeshift directory holds only the kept buffers
+(2.6: labelled, readable, unlocked, for the next start). Lags and
 positions are the LiveSession timeline's (`timelineChanged`), not VLC's. A run killed for a
 hang has its live helper killed too.
 
@@ -48,7 +49,7 @@ player (their play and open counts stay) and moves the sound to A; after a 4 s p
 and two more swaps A is still at least 3 s behind live; the two players keep a volume and a
 mute of their own, read back from libVLC; after a move and resize the geometry holds; P
 closes the small picture (B): one session plays on, its budget ticket is back and the live
-helper reports a single session. With the PiP up, each source never has more than one
+helper streams a single session (2.6: B's buffer is kept, parked: no upstream, no updates). With the PiP up, each source never has more than one
 connection open and both together two. libVLC's audio output modules are recorded, and on
 Windows it must be DirectSound (per-player volume; services/playback.default_args).
 
@@ -240,7 +241,10 @@ SEEK_CHECK = f"{PIPELINE_PREFIX}seeking back 10 s moves the position back 8-12 s
 SPEED_CHECK = f"{PIPELINE_PREFIX}1.5x is applied while time-shifted"
 LIVE_AGAIN_CHECK = f"{PIPELINE_PREFIX}the speed returns to 1x once back at live"
 NO_HELPER_CHECK = f"{PIPELINE_PREFIX}no live helper process remains after the close"
-EMPTY_DIR_CHECK = f"{PIPELINE_PREFIX}the timeshift directory is empty after the close"
+EMPTY_DIR_CHECK = (
+    f"{PIPELINE_PREFIX}after the close the timeshift directory holds kept buffers only "
+    "(labelled, readable, unlocked)"
+)
 ZAP_CHECK = (
     f"{PIPELINE_PREFIX}zapping {LIVE_CHANNEL} → {ZAP_CHANNEL} → {LIVE_CHANNEL} never has more "
     "than one source connection open"
@@ -309,7 +313,9 @@ LEVELS_CHECK = f"{PIP_PREFIX}each player keeps a volume and a mute of its own"
 PIP_WINDOW_CHANGE = f"{PIP_PREFIX}the window moves and resizes"
 ONE_SESSION_CHECK = f"{PIP_PREFIX}P closes the small picture and one session plays on"
 TICKET_CHECK = f"{PIP_PREFIX}the small picture's budget ticket is released"
-HELPER_SESSION_CHECK = f"{PIP_PREFIX}the live helper reports a single session"
+HELPER_SESSION_CHECK = (
+    f"{PIP_PREFIX}the live helper streams a single session; the closed picture's buffer is kept"
+)
 PEAK_CHECK = (
     f"{PIP_PREFIX}with picture-in-picture each source has one connection open at most, and "
     "both together two"
@@ -897,6 +903,25 @@ def _process_alive(pid: int) -> bool:
     return bool(stat) and not stat.startswith("Z")
 
 
+def _kept_buffer(folder: Path) -> bool:
+    """A kept buffer (2.6): a v2 folder with a readable, labelled index and a free lock."""
+    from PySide6.QtCore import QLockFile
+
+    from services.live.ring import read_index
+
+    if not folder.name.startswith(".qitv-buffer-"):
+        return False
+    index = read_index(folder)
+    if index is None or index.label is None or not index.segments:
+        return False
+    lock = QLockFile(str(folder / "session.lock"))
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(0):
+        return False
+    lock.unlock()
+    return True
+
+
 def _entries(directory: Optional[str]) -> list[str]:
     """What `directory` holds (none when it does not exist)."""
     if not directory or not os.path.isdir(directory):
@@ -1471,7 +1496,8 @@ class Driver:
         if not tuned:
             return  # the checks still missing fail the pipeline gate
         facts["helper_pid"] = self._helper_pid()
-        buffers = [n for n in _entries(facts["timeshift_dir"]) if n.startswith(".qitv-timeshift-")]
+        prefixes = (".qitv-timeshift-", ".qitv-buffer-")  # 2.6: v2 folders, kept past a quit
+        buffers = [n for n in _entries(facts["timeshift_dir"]) if n.startswith(prefixes)]
         report.check(ON_DISK_CHECK, bool(buffers), f"{facts['timeshift_dir']}: {buffers}")
         yield WARM_UP_MS
         facts["video"] = self._video_facts(PIPELINE_VIDEO)  # inspection only, no check
@@ -1998,7 +2024,12 @@ class Driver:
             f"{tuner.releasing()}",
         )
         known = getattr(engine, "_sessions", {})  # the helper confirms each close
-        single = yield from self._wait(lambda: len(known) == 1, RELEASE_WAIT_MS)
+
+        def kept() -> set[str]:  # 2.6: parked sessions stay at the engine, streaming nothing
+            registry = getattr(w, "kept", None)
+            return {ring.sid for ring in registry.rings()} if registry is not None else set()
+
+        single = yield from self._wait(lambda: len(set(known) - kept()) == 1, RELEASE_WAIT_MS)
         since = time.monotonic()
         yield HELPER_WATCH_MS
         updated = {sid for at, sid in self.helper_updates if at >= since}
@@ -2006,7 +2037,8 @@ class Driver:
         report.check(
             HELPER_SESSION_CHECK,
             single and large_sid is not None and updated == {large_sid},
-            f"sessions the engine holds: {len(known)}; sessions the helper updated in "
+            f"sessions the engine holds: {len(known)}, kept: {len(kept())}; sessions the "
+            "helper updated in "
             f"{HELPER_WATCH_MS} ms: {len(updated)}, {LIVE_CHANNEL}'s among them: "
             f"{large_sid in updated}",
         )
@@ -2284,10 +2316,16 @@ class Driver:
             report.check(NO_HELPER_CHECK, not alive, f"pid {pid} {'runs' if alive else 'is gone'}")
         directory = facts.get("timeshift_dir")
         left = _entries(directory)
+        # 2.6: the channels' buffers are kept for the next start; nothing else may stay.
+        strays = [name for name in left if not _kept_buffer(Path(directory) / name)]
         report.check(
             EMPTY_DIR_CHECK,
-            directory is not None and not left,
-            f"{directory}: {left}" if directory else "the pipeline never ran",
+            directory is not None and not strays,
+            (
+                f"{directory}: kept {len(left) - len(strays)}, others {strays}"
+                if directory
+                else "the pipeline never ran"
+            ),
         )
         facts["timeline_states"] = len(self.timeline)
 

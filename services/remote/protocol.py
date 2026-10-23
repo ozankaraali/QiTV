@@ -95,8 +95,20 @@ def _meta() -> dict[str, ButtonMeta]:
         "movies": ButtonMeta("screen"),
         "series": ButtonMeta("screen"),
     }
-    for name in ("pp", "live", "info", "guide", "record", "pip", "swap", "multiview", "picture"):
+    for name in (
+        "pp",
+        "stop",
+        "live",
+        "info",
+        "guide",
+        "record",
+        "pip",
+        "swap",
+        "multiview",
+        "picture",
+    ):
         table[name] = ButtonMeta("player")
+    table["back_to"] = ButtonMeta("player")  # 2.6: Resume, where a channel come back to was left
     for digit in range(10):
         table[f"d{digit}"] = ButtonMeta("keys")
     return table
@@ -159,6 +171,15 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         ms, length = _int(obj.get("ms")), _int(obj.get("len"))
         if ms is not None and length is not None and 0 <= ms <= MAX_POS and 0 < length <= MAX_POS:
             return {"t": "pos", "ms": ms, "len": length}
+        return None
+    if t == "answer":  # 2.6: the phone's answer to QiTV's question (its number, yes or no)
+        n, yes = _int(obj.get("id")), obj.get("yes")
+        if n is not None and 0 <= n <= MAX_ASK and isinstance(yes, bool):
+            return {"t": "answer", "id": n, "yes": yes}
+        return None
+    if t == "rec":  # 2.6: the REC line: go back to a recording player's channel, or stop it
+        if _short_id(obj.get("id")) and obj.get("do") in ("back", "stop"):
+            return {"t": "rec", "id": obj["id"], "do": obj["do"]}
         return None
     if t == "watch":  # what the TV plays, or a channel of the phone's list by its handle
         if "id" not in obj:
@@ -316,6 +337,25 @@ class ToTv:
     """The phone hands what it plays back to the TV."""
 
     sid: str
+
+
+@dataclass(frozen=True)
+class Answered:
+    """The phone's answer to QiTV's question `n` (2.6: stop a recording for its Watch?)."""
+
+    sid: str
+    n: int
+    yes: bool
+
+
+@dataclass(frozen=True)
+class RecAct:
+    """The phone's REC line (2.6): go back to (`act` "back") or stop ("stop") what the player
+    `slot` records in the background."""
+
+    sid: str
+    slot: str
+    act: str
 
 
 @dataclass(frozen=True)

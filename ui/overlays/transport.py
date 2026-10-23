@@ -48,6 +48,11 @@ records it is lit and a "● REC 01:23" chip after it counts the time; a channel
 shows it dimmed, and hovering it says why it cannot record (a press asks anyway: the shell
 says why too). It sits up there because the bottom row has no room to spare for it in longer
 languages (the Stay live indicator's).
+Kept buffers (2.6): a channel the user left and came back to has parts (`parts` in the state):
+each runs as long as its seconds on the bar, and between two of them, where nothing was kept,
+the line breaks for `GAP_PX`; a click there goes to the next part. Its times are the real
+ones: "Buffer from" the oldest part's, the bubble the moment watched, and "behind live" counts
+the time away (`behind`).
 """
 
 from dataclasses import dataclass
@@ -87,6 +92,7 @@ from PySide6.QtWidgets import QWidget
 
 from services import i18n
 from services.i18n import N_, tr, translate
+from services.live.parts import Part, from_state as parts_from_state, junctions, wall_at
 from services.live.stay_live import TARGETS, Mode, SettledLag
 from services.recording import elapsed_text
 from ui.keymap import key_hint
@@ -109,6 +115,7 @@ SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)  # − and + step through these
 TOP_FRACTION = 0.22
 BOTTOM_FRACTION = 0.42
 TICK_LABEL_MAX_U = 25.0
+GAP_PX = 14.0  # 2.6: the break in the bar where nothing was kept between two parts
 _ICON_GAP_U = 1.8  # between the icon buttons
 _TIGHT_GAP_U = 1.0  # in a crowded row
 MINUS = "−"
@@ -138,6 +145,8 @@ RESTORE_LABEL = N_("Last grid")  # i18n: chip on the player bar (multiview); sho
 # shown), and that key.
 KEY_HINTS = {
     "play": (N_("Play / pause"), "Space"),  # i18n: tooltip of the play button
+    # i18n: tooltip of the stop button (2.6): every picture stops, nothing streams
+    "stop": (N_("Stop"), "X"),
     "back10": (N_("Back 10 seconds"), "Left"),
     "fwd10": (N_("Forward 10 seconds"), "Right"),
     "golive": (N_("Go live"), "L"),  # i18n: button: jump to the channel's live point
@@ -218,6 +227,42 @@ def _optional(value: object) -> Optional[float]:
     return float(value) if isinstance(value, (int, float)) else None
 
 
+class _BarMap:
+    """Timeline seconds to fractions of the bar and back (2.6): each part in proportion to its
+    seconds, each junction between two parts a gap of `gap` (a fraction of the bar; the gaps
+    take half the bar at most). A fraction in a gap is the next part's start."""
+
+    def __init__(self, start: float, end: float, cuts: list[float], gap: float) -> None:
+        self.start, self.end = start, end
+        self.cuts = [cut for cut in cuts if start < cut < end]
+        n = len(self.cuts)
+        self.gap = min(gap, 0.5 / n) if n else 0.0
+        span = end - start
+        self.scale = (1.0 - self.gap * n) / span if span > 0 else 0.0
+
+    def frac(self, t: float) -> float:
+        if self.scale <= 0:
+            return 1.0
+        t = min(max(t, self.start), self.end)
+        crossed = sum(1 for cut in self.cuts if cut <= t)
+        return min(1.0, (t - self.start) * self.scale + crossed * self.gap)
+
+    def t(self, frac: float) -> float:
+        if self.scale <= 0:
+            return self.end
+        used, previous = 0.0, self.start
+        for cut in self.cuts:
+            width = (cut - previous) * self.scale
+            if frac < used + width:
+                return previous + (frac - used) / self.scale
+            used += width
+            if frac < used + self.gap:
+                return cut  # in the gap: where the next part begins
+            used += self.gap
+            previous = cut
+        return min(self.end, previous + max(0.0, frac - used) / self.scale)
+
+
 @dataclass(frozen=True)
 class _TitleRow:
     """The top row: the channel's (or title's) name, on live TV a star after it, the clock."""
@@ -253,6 +298,8 @@ class _Timeline:
     adjusted: bool  # the channel's Auto target moved from where Auto starts
     archive: bool = False  # the provider's archive plays (catch-up)
     buffer_start: Optional[float] = None  # the bar reaches into an archive: the buffer's start
+    parts: tuple[Part, ...] = ()  # 2.6: a kept buffer's runs, each with its time of day
+    behind: Optional[float] = None  # 2.6: seconds behind now in the day, the time away included
 
     @classmethod
     def from_state(cls, state: dict) -> "_Timeline":
@@ -274,6 +321,8 @@ class _Timeline:
             adjusted=bool(state.get("adjusted", False)),
             archive=bool(state.get("archive", False)),
             buffer_start=_optional(state.get("buffer_start")),
+            parts=tuple(parts_from_state(state.get("parts"))),
+            behind=_optional(state.get("behind")),
         )
 
 
@@ -281,6 +330,7 @@ class Transport(Overlay):
     pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
 
     playPauseRequested = Signal()
+    stopRequested = Signal()  # 2.6: ■, every picture stops and nothing streams
     seekRequested = Signal(int)
     seekRelativeRequested = Signal(int)
     speedRequested = Signal(float)
@@ -747,7 +797,7 @@ class Transport(Overlay):
             tl = self._timeline
             assert tl is not None
             if tl.archive:
-                archive_from = fmt_clock(self._wall(tl.live_edge - tl.start))
+                archive_from = fmt_clock(self._wall_of(tl.start))
                 left = tr(
                     "Archive from {time}",  # i18n: under the bar while the provider's archive plays
                     time=archive_from,
@@ -756,7 +806,7 @@ class Transport(Overlay):
                 # i18n: under the time-shift bar, right: how far behind live it plays ("−00:38")
                 return (left, tr("{behind} behind live", behind=behind))
             buffered = tl.start if tl.buffer_start is None else tl.buffer_start
-            buffer_from = fmt_clock(self._wall(tl.live_edge - buffered))
+            buffer_from = fmt_clock(self._wall_of(buffered))
             return (
                 # i18n: under the time-shift bar, left: the oldest buffered time ("18:44")
                 tr("Buffer from {time}", time=buffer_from),
@@ -812,19 +862,47 @@ class Transport(Overlay):
         assert tl is not None
         if self._drag is None:
             return tl.position
-        return tl.start + self._drag * (tl.end - tl.start)
+        return self._bar().t(self._drag)
 
     def _shown_lag(self) -> float:
+        """How far behind now the shown position is: the time away too once there are parts
+        (2.6), else the lag."""
         tl = self._timeline
         assert tl is not None
+        if len(tl.parts) > 1:
+            if self._drag is None and tl.behind is not None:
+                return _seconds(tl.behind)
+            return _seconds((self._wall(0.0) - self._wall_of(self._shown_t())).total_seconds())
         return tl.lag if self._drag is None else _seconds(tl.live_edge - self._shown_t())
+
+    def _bar(self) -> _BarMap:
+        """The bar's seconds and fractions now (its gaps are `GAP_PX` at its width)."""
+        tl = self._timeline
+        assert tl is not None
+        width = self.seek_rect().width() if len(tl.parts) > 1 else 0.0
+        gap = GAP_PX / width if width > 0 else 0.0
+        return _BarMap(tl.start, tl.end, junctions(tl.parts), gap)
+
+    def fraction_of(self, t: float) -> float:
+        """Where timeline second `t` is on the time-shift bar, 0 to 1 from its left."""
+        if self._timeline is None:
+            return 0.0
+        return self._bar().frac(t)
+
+    def _wall_of(self, t: float) -> datetime:
+        """The local time of day of timeline second `t` (2.6: by its part's time once there
+        are parts; else the live edge is now)."""
+        tl = self._timeline
+        assert tl is not None
+        if len(tl.parts) < 2:
+            return self._wall(tl.live_edge - t)
+        now = self._wall(0.0)
+        moment = wall_at(tl.parts, t, live_edge=tl.live_edge, now=now.timestamp())
+        return datetime.fromtimestamp(moment, timezone.utc).astimezone()
 
     def _shown_frac(self) -> float:
         if self._timeshift:
-            tl = self._timeline
-            assert tl is not None
-            span = tl.end - tl.start
-            frac = (self._shown_t() - tl.start) / span if span > 0 else 1.0
+            frac = self._bar().frac(self._shown_t())
         else:
             frac = self._shown_ms() / self._length if self._length else 0.0
         return min(1.0, max(0.0, frac))
@@ -1040,11 +1118,12 @@ class Transport(Overlay):
 
         skip = icon + un.px(1.6)
         if not bar:
+            put("play", big, un.px(0.6))
             if self._timeshift:  # at the live edge: ← goes back into the buffer
-                put("play", big, un.px(0.6))
+                put("stop", skip, un.px(0.6))
                 put("back10", skip, un.px(1.5))
             else:
-                put("play", big, un.px(1.5))
+                put("stop", skip, un.px(1.5))
             left_end = x  # the left buttons and their gap
             # As wide as its word in a longer language ("EN VIVO"), never narrower than LIVE's.
             badge = QFontMetricsF(self._live_font(un)).horizontalAdvance(_live_label())
@@ -1075,6 +1154,7 @@ class Transport(Overlay):
                 put("fwd10", skip, un.px(0.6) if self._next_available else un.px(1.0))
                 if self._next_available:
                     put("next", skip, un.px(1.0))
+            put("stop", skip, un.px(1.0))
             speed_x = x  # the chip goes in once the right side has taken its room
             side = self._side_chip(un)
             room = speed_x + (side[1] if side is not None else 0.0) + un.px(0.8)
@@ -1226,6 +1306,7 @@ class Transport(Overlay):
         span = tl.end - tl.start if tl is not None else 0.0
         if tl is None or span <= 0:
             return []
+        bar = self._bar()
         fm = QFontMetricsF(self._tick_font(un))
         label_h = max(float(un.px(1.5)), fm.height())
         top = seek.center().y() - un.px(1.5) / 2 - un.px(0.3) - label_h
@@ -1235,7 +1316,7 @@ class Transport(Overlay):
         for t, label in sorted(self._ticks):
             if not tl.start <= t <= tl.end:
                 continue
-            x = seek.x() + seek.width() * (t - tl.start) / span
+            x = seek.x() + seek.width() * bar.frac(t)
             text = fm.elidedText(label, Qt.ElideRight, un.px(TICK_LABEL_MAX_U))
             w = fm.horizontalAdvance(text)
             lx = min(max(x - w / 2, seek.x()), seek.right() - w)
@@ -1421,6 +1502,7 @@ class Transport(Overlay):
             ("fwd10", "fwd10", un.px(3.0)),
             ("fwd60", "next", un.px(2.4)),
             ("next", "next", un.px(2.4)),
+            ("stop", "stop", un.px(2.0)),
         ):
             if name not in rects:
                 continue
@@ -1474,6 +1556,7 @@ class Transport(Overlay):
         cy = seek.center().y()
         kc = self._paint_track(p, un, seek, 0.3)
         self._paint_archive(p, un, seek)
+        self._paint_gaps(p, un, seek)
         p.setFont(self._tick_font(un))
         p.setPen(qcolor(PALETTE.text, 0.75))
         tick_h = un.px(1.5)
@@ -1520,7 +1603,7 @@ class Transport(Overlay):
             return 1.0
         if tl.buffer_start is None:
             return 0.0
-        return min(1.0, max(0.0, (tl.buffer_start - tl.start) / (tl.end - tl.start)))
+        return self._bar().frac(tl.buffer_start)
 
     def _paint_archive(self, p: QPainter, un: Units, seek: QRectF) -> None:
         """The archive's part of the line, dashed (QiTV's own buffer is a solid line)."""
@@ -1537,6 +1620,23 @@ class Transport(Overlay):
             p.fillRect(QRectF(x, part.top(), gap, part.height()), qcolor(PALETTE.canvas, 0.9))
             x += step
         p.restore()
+
+    def _paint_gaps(self, p: QPainter, un: Units, seek: QRectF) -> None:
+        """Where nothing was kept between two parts (2.6): the line breaks, a short upright
+        stroke closing each side."""
+        tl = self._timeline
+        if tl is None or len(tl.parts) < 2:
+            return
+        bar = self._bar()
+        h = un.px(0.55)
+        cy = seek.center().y()
+        cap = un.px(1.1)
+        for cut in bar.cuts:
+            right = seek.x() + seek.width() * bar.frac(cut)
+            left = right - seek.width() * bar.gap
+            p.fillRect(QRectF(left, cy - h / 2 - 1, right - left, h + 2), qcolor(PALETTE.canvas))
+            for x in (left, right - 1):
+                p.fillRect(QRectF(x, cy - cap / 2, 1.0, cap), qcolor("#ffffff", 0.55))
 
     def bubble_text(self) -> str:
         """The moment the knob shows ("14:32:05"; another day's with the day: "Sat 14:32:05")."""
@@ -1728,6 +1828,8 @@ class Transport(Overlay):
                 continue
             if name == "play":
                 self.playPauseRequested.emit()
+            elif name == "stop":
+                self.stopRequested.emit()
             elif name == "back10":
                 self.seekRelativeRequested.emit(-10_000)
             elif name == "fwd10":

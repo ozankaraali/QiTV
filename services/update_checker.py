@@ -59,6 +59,8 @@ class UpdateUI(Protocol):
 
     def confirm_quit_and_open(self) -> bool: ...  # macOS: quit and open the disk image now?
 
+    def confirm_stop_recordings(self, question: str) -> bool: ...  # 2.6: quit while recording?
+
 
 # Keep references to background threads/workers to avoid premature GC
 _update_jobs: List[Tuple[QThread, "UpdateWorker"]] = []
@@ -67,6 +69,7 @@ _update_jobs: List[Tuple[QThread, "UpdateWorker"]] = []
 _Hook: TypeAlias = "weakref.WeakMethod[Callable[[], None]]"
 _before_update: List[Tuple[_Hook, Optional[_Hook]]] = []
 _undo_update: List[_Hook] = []
+_quit_note: Optional[Callable[[], Optional[Callable[[], str]]]] = None  # set_quit_note's
 
 
 def call_before_update(
@@ -444,14 +447,36 @@ def start_download(
     return downloader.cancel
 
 
+def set_quit_note(note: Optional[Callable[[], str]]) -> None:
+    """2.6: what quitting now would stop, as a question ("" while nothing would): asked
+    before an update quits QiTV (the window's recordings). Held weakly when a method."""
+    global _quit_note
+    if note is None:
+        _quit_note = None
+    elif hasattr(note, "__self__"):
+        _quit_note = weakref.WeakMethod(note)
+    else:
+        _quit_note = lambda: note  # noqa: E731
+
+
+def _keeps_recording(ui: UpdateUI) -> bool:
+    """Channels record and the user keeps them: the update does not quit."""
+    ref = _quit_note
+    note = ref() if ref is not None else None
+    question = note() if note is not None else ""
+    return bool(question) and not ui.confirm_stop_recordings(question)
+
+
 def perform_update(downloaded_path: str, release_url: str, ui: UpdateUI):
     """Execute platform-specific update process."""
     system = platform.system()
 
     if system == "Windows":
-        _perform_windows_update(downloaded_path, release_url, ui)
+        if not _keeps_recording(ui):
+            _perform_windows_update(downloaded_path, release_url, ui)
     elif system == "Darwin" and is_disk_image(downloaded_path):
-        if ui.confirm_quit_and_open():  # or not now: the image waits in Downloads
+        # Or not now: the image waits in Downloads.
+        if ui.confirm_quit_and_open() and not _keeps_recording(ui):
             _perform_macos_update(downloaded_path, release_url, ui)
     else:
         ui.downloaded(downloaded_path)  # a zip, or Linux: the user replaces the app

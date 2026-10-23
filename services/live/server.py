@@ -54,7 +54,7 @@ class ThreadingLoopbackHTTPServer(ThreadingMixIn, LoopbackHTTPServer):
 
 @dataclass
 class _Session:
-    ring: Ring
+    ring: Any  # a Ring, or what reads like one (recorder.RecordedReads)
     is_ended: Callable[[], bool]
     removed: bool = False
     clients: set[socket.socket] = field(default_factory=set)
@@ -123,7 +123,8 @@ class StreamServer:
             self._thread.start()
         return self._base_url
 
-    def add_session(self, session_id: str, ring: Ring, is_ended: Callable[[], bool]) -> None:
+    def add_session(self, session_id: str, ring: Any, is_ended: Callable[[], bool]) -> None:
+        """`ring`: a `Ring`, or what reads like one (2.6: `recorder.RecordedReads`)."""
         if not re.fullmatch(_SESSION_ID, session_id):
             raise ValueError("A stream session id must be 1-64 URL-safe characters.")
         with self._lock:
@@ -308,7 +309,9 @@ class _Handler(BaseHTTPRequestHandler):
                 following = ring.read_at(number + 1, 0, 0)  # header length; reads no storage
                 if following is None:
                     return 0  # evicted since
-                number, offset = number + 1, following[2]
+                # A new run's tables (2.6) come with it; else the header is skipped.
+                number = number + 1
+                offset = 0 if ring.junction(number) else following[2]
             elif status != "timeout" or ended:
                 return 0  # the next segment was evicted, the ring closed, or the session ended
             else:

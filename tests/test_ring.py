@@ -10,12 +10,17 @@ import time
 import unittest
 from unittest.mock import patch
 
+from services.live import ring as ring_module
 from services.live.ring import (
     _OWNER,
+    _SESSION_PATTERN,
+    STALE_S,
+    DiskBudget,
     DiskRing,
     RamRing,
     RingError,
     cleanup_session_dir,
+    read_index,
     remove_stale_sessions,
 )
 
@@ -584,3 +589,248 @@ class DiskRingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiskBudgetTests(unittest.TestCase):
+    """2.6: every disk buffer shares the user's disk amount; kept (parked) ones give way first,
+    the oldest first, and nothing older than a day stays."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-budget-test-")
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
+        self.now = 1_000_000.0
+        clock = patch.object(ring_module, "_wall_time", lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def ring(self):
+        ring = DiskRing(self.directory, session_name(), 64 * 1024 * 1024)
+        self.addCleanup(ring.close)
+        return ring
+
+    def fill(self, ring, count, *, size=8192):
+        """`count` completed segments, a second apart on the wall clock."""
+        start = ring.newest_seq + 1 if ring.newest_seq is not None else 0
+        for seq in range(start, start + count):
+            ring.open_segment(seq, b"h" * 376)
+            ring.append(b"d" * size)
+            ring.complete(seq)
+            self.now += 1.0
+
+    def test_kept_rings_give_way_first(self):
+        kept, live = self.ring(), self.ring()
+        self.fill(kept, 3)
+        self.fill(live, 3)
+        budget = DiskBudget(kept.charged + live.charged)
+        budget.register(kept, parked=True)
+        budget.register(live)
+        self.fill(live, 1)
+        emptied = budget.trim()
+        self.assertEqual(kept.oldest_seq, 1)  # kept's oldest went ...
+        self.assertEqual(live.oldest_seq, 0)  # ... the channel watched kept all of its own
+        self.assertLessEqual(kept.charged + live.charged, budget.max_bytes)
+        self.assertEqual(emptied, [kept])  # it changed: its owner says so
+
+    def test_the_oldest_kept_goes_first(self):
+        older, newer, live = self.ring(), self.ring(), self.ring()
+        self.fill(older, 2)
+        self.fill(newer, 2)
+        self.fill(live, 1)
+        budget = DiskBudget(older.charged + newer.charged + live.charged)
+        for ring in (older, newer):
+            budget.register(ring, parked=True)
+        budget.register(live)
+        self.fill(live, 1)
+        budget.trim()
+        self.assertEqual((older.oldest_seq, newer.oldest_seq), (1, 0))
+
+    def test_without_kept_rings_the_oldest_of_any_goes(self):
+        first, second = self.ring(), self.ring()
+        self.fill(first, 2)
+        self.fill(second, 2)
+        budget = DiskBudget(first.charged + second.charged)
+        budget.register(first)
+        budget.register(second)
+        self.fill(second, 1)
+        budget.trim()
+        self.assertEqual((first.oldest_seq, second.oldest_seq), (1, 0))
+
+    def test_a_ring_that_unregisters_no_longer_counts(self):
+        kept, live = self.ring(), self.ring()
+        self.fill(kept, 2)
+        self.fill(live, 2)
+        budget = DiskBudget(live.charged)
+        budget.register(kept, parked=True)
+        budget.register(live)
+        budget.unregister(kept)
+        self.assertEqual(budget.trim(), [])
+        self.assertEqual(kept.oldest_seq, 0)
+
+    def test_a_day_old_segment_goes(self):
+        ring = self.ring()
+        self.fill(ring, 3)
+        self.now += STALE_S - 2.5  # the first is over a day old, the others not yet
+        self.assertEqual(ring.retire_before(self.now - STALE_S), 1)
+        self.assertEqual(ring.oldest_seq, 1)
+        self.assertEqual(STALE_S, 24 * 3600)
+
+    def test_the_open_segment_never_goes(self):
+        ring = self.ring()
+        self.fill(ring, 1)
+        ring.open_segment(1, b"h" * 376)
+        self.now += 2 * STALE_S
+        self.assertEqual(ring.retire_before(self.now - STALE_S), 1)
+        self.assertEqual(ring.oldest_seq, 1)
+
+    def test_a_kept_ring_whose_files_went_is_let_go(self):
+        # Review I4: a segment that cannot be deleted never stops the trim; that ring is
+        # closed (its owner says so), and the accounting stays right.
+        kept, live = self.ring(), self.ring()
+        self.fill(kept, 2)
+        self.fill(live, 2)
+        budget = DiskBudget(kept.charged + live.charged)
+        budget.register(kept, parked=True)
+        budget.register(live)
+        with patch.object(DiskRing, "_unlink", side_effect=OSError("gone")):
+            self.fill(live, 1)
+            changed = budget.trim()
+        self.assertEqual(changed, [kept])
+        self.assertTrue(kept.closed)
+        self.assertEqual(live.oldest_seq, 0)
+        self.assertLessEqual(live.charged, budget.max_bytes)
+
+
+def kept_name():
+    return ".qitv-buffer-" + secrets.token_hex(16)
+
+
+class IndexTests(unittest.TestCase):
+    """2.6: a kept buffer's folder (v2) carries an index, so a later helper can take it back."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-index-test-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def ring(self, name=None):
+        ring = DiskRing(self.root, name or kept_name(), 64 * 1024 * 1024)
+        self.addCleanup(ring.close)
+        return ring
+
+    @staticmethod
+    def fill(ring, count, start_seq=0):
+        for seq in range(start_seq, start_seq + count):
+            ring.open_segment(seq, b"h" * 376, junction=seq == 2)
+            ring.append(b"d" * 4000)
+            ring.complete(seq)
+            ring.note_segment(seq, 2.0 * seq, 2.0 * seq + 2.0, seq == 2, "key")
+
+    def folder(self, ring):
+        return self.root / ring.dir_name
+
+    def test_the_index_follows_the_ring(self):
+        ring = self.ring()
+        ring.note_part(0, 0.0, 1_000.0)
+        self.fill(ring, 2)
+        ring.note_part(2, 4.0, 9_000.0)
+        self.fill(ring, 1, start_seq=2)
+        ring.note_label({"channel": "k1"})
+        ring.note_where({"position": 3.0, "paused": True})
+        index = read_index(self.folder(ring))
+        self.assertEqual([s["seg"] for s in index.segments], [0, 1, 2])
+        third = index.segments[2]
+        self.assertEqual((third["h"], third["n"], third["s"], third["e"]), (376, 4376, 4.0, 6.0))
+        self.assertTrue(third["d"] and third["j"])
+        self.assertGreater(third["w"], 0)
+        self.assertEqual(
+            [(p["part"], p["s"], p["w"]) for p in index.parts],
+            [(0, 0.0, 1_000.0), (2, 4.0, 9_000.0)],
+        )
+        self.assertEqual(index.label, {"channel": "k1"})
+        self.assertEqual(index.where, {"position": 3.0, "paused": True})
+
+    def test_a_torn_last_line_is_ignored(self):
+        ring = self.ring()
+        self.fill(ring, 3)
+        with open(self.folder(ring) / "index.jsonl", "ab") as handle:
+            handle.write(b'{"seg": 3, "h')
+        self.assertEqual([s["seg"] for s in read_index(self.folder(ring)).segments], [0, 1, 2])
+
+    def test_a_missing_file_keeps_the_newest_run_after_it(self):
+        ring = self.ring()
+        self.fill(ring, 4)
+        (self.folder(ring) / "segment-1.ts").unlink()
+        self.assertEqual([s["seg"] for s in read_index(self.folder(ring)).segments], [2, 3])
+
+    def test_a_short_file_counts_as_missing(self):
+        ring = self.ring()
+        self.fill(ring, 3)
+        with open(self.folder(ring) / "segment-2.ts", "r+b") as handle:
+            handle.truncate(100)
+        self.assertEqual(read_index(self.folder(ring)).segments, [])
+
+    def test_retired_segments_leave_the_index_and_it_stays_small(self):
+        ring = self.ring()
+        self.fill(ring, 200)
+        for _ in range(190):
+            ring.retire_oldest()
+        index = read_index(self.folder(ring))
+        self.assertEqual([s["seg"] for s in index.segments], list(range(190, 200)))
+        lines = (self.folder(ring) / "index.jsonl").read_text().splitlines()
+        self.assertLess(len(lines), 200)  # compacted on the way
+
+    def test_close_keep_leaves_the_folder_unlocked(self):
+        from PySide6.QtCore import QLockFile
+
+        ring = self.ring()
+        self.fill(ring, 2)
+        folder = self.folder(ring)
+        ring.close(keep=True)
+        self.assertTrue((folder / "segment-1.ts").exists())
+        lock = QLockFile(str(folder / "session.lock"))
+        lock.setStaleLockTime(0)
+        self.assertTrue(lock.tryLock(0))  # a later helper can take it
+        lock.unlock()
+        self.assertEqual(len(read_index(folder).segments), 2)
+
+    def test_a_plain_close_removes_it(self):
+        ring = self.ring()
+        self.fill(ring, 2)
+        folder = self.folder(ring)
+        ring.close()
+        self.assertFalse(folder.exists())
+
+    def test_sweeps_for_old_buffers_leave_it_alone(self):
+        ring = self.ring()
+        self.fill(ring, 2)
+        folder = self.folder(ring)
+        ring.close(keep=True)  # its owner is gone, its lock free
+        remove_stale_sessions(self.root)
+        self.assertTrue(folder.exists())
+        self.assertIsNone(_SESSION_PATTERN.fullmatch(folder.name))  # older builds never match
+
+    def test_a_memory_ring_takes_notes_and_keeps_nothing(self):
+        ring = RamRing(1 << 20)
+        ring.note_part(0, 0.0, 1.0)
+        ring.note_label({"channel": "k1"})
+        ring.close(keep=True)
+
+    @unittest.skipUnless(os.path.isdir("/dev/fd"), "counts open files through /dev/fd")
+    def test_a_kept_buffer_holds_one_file_open(self):
+        # Review B I5: its lock only; the index is opened for each line.
+        before = len(os.listdir("/dev/fd"))
+        rings = [self.ring() for _ in range(5)]
+        for ring in rings:
+            self.fill(ring, 2)
+            ring.note_label({"channel": "k"})
+        self.assertEqual(len(os.listdir("/dev/fd")) - before, 5)
+
+    def test_dropping_the_open_segment_closes_its_file(self):
+        ring = self.ring()
+        ring.open_segment(0, b"h" * 376)
+        ring.append(b"d" * 100)
+        ring.drop_open()
+        self.assertIsNone(ring._file)
+        self.assertFalse((self.folder(ring) / "segment-0.ts").exists())
+        self.assertEqual((ring.charged, ring.bytes), (0, 0))

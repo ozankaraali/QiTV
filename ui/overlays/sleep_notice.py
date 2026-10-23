@@ -51,10 +51,14 @@ class SleepNotice(Overlay):
     def text(self) -> str:
         return self._text
 
+    def button_text(self) -> str:
+        """Its button's words (in the active language)."""
+        return translate(KEEP_WATCHING)
+
     def button_rect(self) -> QRectF:
         """Keep watching (the whole pill keeps watching too)."""
         un = self._units()
-        label = QFontMetricsF(self._fonts(un)[1]).horizontalAdvance(translate(KEEP_WATCHING))
+        label = QFontMetricsF(self._fonts(un)[1]).horizontalAdvance(self.button_text())
         h = self.height() - 2 * un.px(0.6)
         width = label + 2 * un.px(1.2)
         return QRectF(self.width() - un.px(0.6) - width, un.px(0.6), width, h)
@@ -74,7 +78,7 @@ class SleepNotice(Overlay):
         un = Units(parent.width())
         text_font, button_font = self._fonts(un)
         text_w = QFontMetricsF(text_font).horizontalAdvance(self._text)
-        button_w = QFontMetricsF(button_font).horizontalAdvance(translate(KEEP_WATCHING))
+        button_w = QFontMetricsF(button_font).horizontalAdvance(self.button_text())
         height = round(QFontMetricsF(text_font).height() + un.px(2.0))
         width = round(un.px(1.6) + text_w + un.px(1.6) + button_w + 2 * un.px(1.2) + un.px(0.6))
         width = min(width, parent.width() - 2 * un.px(_EDGE_U))
@@ -89,7 +93,7 @@ class SleepNotice(Overlay):
         return False
 
     def tooltip_at(self, pos: QPointF) -> str:
-        return key_hint(translate(KEEP_WATCHING), "Return")
+        return key_hint(self.button_text(), "Return")
 
     def paintEvent(self, event: QPaintEvent) -> None:
         un = self._units()
@@ -117,7 +121,7 @@ class SleepNotice(Overlay):
         fill_round(p, button, qcolor(PALETTE.accent), button.height() / 2)
         p.setFont(button_font)
         p.setPen(qcolor(PALETTE.canvas))
-        p.drawText(button, Qt.AlignmentFlag.AlignCenter, translate(KEEP_WATCHING))
+        p.drawText(button, Qt.AlignmentFlag.AlignCenter, self.button_text())
         p.end()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:

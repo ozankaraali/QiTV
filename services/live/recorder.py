@@ -49,6 +49,9 @@ _CHUNK = 256 * 1024
 _WAIT = 0.5  # a wait for more data is cut this short to look at the caps again
 _BATCH_S = 0.2  # at the live edge, what arrives within this is written at once
 _SPACE_EVERY = 16 * 1024 * 1024  # the free space is looked at again after this many bytes
+# Windows cannot move or delete a file open here, and its stat by name and by handle need not
+# agree on the volume's serial: there only a missing path says the file went (`_gone`).
+_SAME_FILE_BY_ID = os.name != "nt"
 _UNIQUE_TRIES = 99
 _FULL = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
 
@@ -58,7 +61,7 @@ REASONS = (STOPPED, ENDED, LIMIT, SPACE, FOLDER, WRITE, FAILED)
 PROGRESS_S = 5.0  # how often a growing recording tells its size (`on_progress`)
 _RETRY_S = 0.1  # before a failed read of the ring is tried again
 # A recording stops after this long and once the disk holding it has less than this free.
-MAX_SECONDS = 4 * 60 * 60.0
+MAX_SECONDS = 24 * 60 * 60.0  # 2.6: a day (was 4 hours): a forgotten one stops by the next day
 MIN_FREE_BYTES = 2 * 1024**3
 
 
@@ -118,7 +121,15 @@ class Recorder:
         self.reason = ""  # why it ended, once it has (one of REASONS)
         self.name = ""  # what its owner calls it (the parent's recording id)
         self._checked_at = 0  # `written` when the free space was last looked at
+        self._found_at = 0  # `written` when the file was last found where it was made
         self._ring: Ring | None = None  # the ring being followed (stop() wakes its waiters)
+        # 2.6: where each segment it wrote sits in the file, so a reader plays back what the
+        # ring let go of: seq -> [header offset, header length, payload offset, payload length]
+        # (the header is the newest one written at or before it), and whether it began a run.
+        self._index_lock = threading.Lock()
+        self._places: dict[int, list[int]] = {}
+        self._junctions: set[int] = set()
+        self._header: tuple[int, int] | None = None
         self.thread = threading.Thread(target=self._run, name="qitv-live-record", daemon=True)
 
     def start(self) -> None:
@@ -242,13 +253,16 @@ class Recorder:
                     ring, number, offset = following, self._oldest(following, at_least), 0
                     self._ring = ring
                 continue
-            data, complete, _header = result
+            data, complete, header_len = result
             if data:
+                self._place(number, offset, header_len, len(data), ring)
                 self._write(data)
                 offset += len(data)
                 self._progress()
                 if self._short_of_space():
                     return SPACE
+                if self._gone():
+                    return WRITE  # moved or deleted: it would be written nowhere
                 continue
             if not complete:
                 if ended or stopping:
@@ -259,7 +273,8 @@ class Recorder:
             if status == "open":
                 following_header = ring.read_at(number + 1, 0, 0)  # its header's length only
                 if following_header is not None:
-                    number, offset = number + 1, following_header[2]
+                    number = number + 1  # a new run's tables (2.6) are written with it
+                    offset = 0 if ring.junction(number) else following_header[2]
             elif status == "evicted":
                 number, offset = self._oldest(ring, number + 1), 0
             elif status == "timeout":
@@ -272,6 +287,66 @@ class Recorder:
                     return STOPPED
                 ring, number, offset = following, self._oldest(following, number + 1), 0
                 self._ring = ring
+
+    # ---- 2.6: reading back what it wrote ---------------------------------------------------
+    def _place(self, seq: int, offset: int, header_len: int, size: int, ring: Ring) -> None:
+        """Note where segment `seq`'s bytes [offset, offset + size) go in the file."""
+        at = self.written
+        with self._index_lock:
+            place = self._places.get(seq)
+            if place is None:
+                if offset == 0 and header_len:
+                    self._header = (at, header_len)  # its own tables, written first
+                header = self._header or (at, 0)
+                payload = at + max(0, header_len - offset)
+                place = self._places[seq] = [header[0], header[1], payload, 0]
+                if ring.junction(seq):
+                    self._junctions.add(seq)
+            end = at + size
+            place[3] = max(place[3], end - place[2])
+
+    def first_written(self) -> int | None:
+        """The oldest segment it wrote (None before any)."""
+        with self._index_lock:
+            return min(self._places) if self._places else None
+
+    def junction(self, seq: int) -> bool:
+        with self._index_lock:
+            return seq in self._junctions
+
+    def read(self, seq: int, offset: int, size: int) -> tuple[bytes, bool, int] | None:
+        """Segment `seq` as the ring served it (its header, then its payload) from `offset`, as
+        `Ring.read_at` answers; None when it never wrote it or its file cannot be read (moved,
+        deleted)."""
+        with self._index_lock:
+            place = self._places.get(seq)
+            if place is None or not self.path:
+                return None
+            header_at, header_len, payload_at, payload_len = place
+        if offset < header_len:
+            at, length = header_at + offset, min(size, header_len - offset)
+        else:
+            skip = offset - header_len
+            at, length = payload_at + skip, min(size, payload_len - skip)
+        if length <= 0:
+            return b"", True, header_len
+        try:
+            with open(self.path, "rb") as handle:
+                handle.seek(at)
+                return handle.read(length), True, header_len
+        except OSError:
+            self._forget()  # moved or deleted: what it held plays back no more
+            return None
+
+    def _forget(self) -> None:
+        """Its file can no longer be read back: the timeline's oldest point is the buffer's
+        again (`first_written` is None)."""
+        with self._index_lock:
+            if self._places:
+                _LOG.info("A recording's file cannot be read back any more.")
+            self._places.clear()
+            self._junctions.clear()
+            self._header = None
 
     def _oldest(self, ring: Ring, at_least: int) -> int:
         """Where to go on after a gap: the oldest segment `ring` holds, never before
@@ -324,6 +399,29 @@ class Recorder:
         except OSError:
             return False  # not known: the writes say when it is full
 
+    def _gone(self) -> bool:
+        """The file is no longer where it was made (moved, deleted), looked at every
+        `_SPACE_EVERY` bytes as the free space is: what it writes would reach no one."""
+        handle = self._file
+        if handle is None or not self.path or self.written - self._found_at < _SPACE_EVERY:
+            return False
+        self._found_at = self.written
+        try:
+            mine = os.fstat(handle.fileno())
+        except OSError:
+            return False
+        try:
+            there = os.stat(self.path)
+        except FileNotFoundError:
+            there = None
+        except OSError:
+            return False  # not known: the writes say when they fail
+        if there is not None and (not _SAME_FILE_BY_ID or os.path.samestat(there, mine)):
+            return False
+        _LOG.warning("A recording's file was moved or deleted while it recorded.")
+        self._forget()
+        return True
+
     def _close(self) -> None:
         handle, self._file = self._file, None
         if handle is None:
@@ -346,3 +444,40 @@ _Snapshot = tuple[int, int | None, int | None]
 def _snapshot(ring: Ring) -> _Snapshot:
     """Differs after every append, eviction, completion or new segment (as the server's)."""
     return ring.bytes, ring.oldest_seq, ring.open_seq
+
+
+class RecordedReads:
+    """What a session's readers read (2.6): its ring, and, while a recording runs, what the
+    recording wrote that the ring no longer holds, from its file: a recording plays back to
+    its start while it records, whatever the ring's size. Anything else is the ring's."""
+
+    def __init__(self, ring: Ring, recorder_of: Callable[[], Recorder | None]) -> None:
+        self._ring = ring
+        self._recorder_of = recorder_of
+
+    @property
+    def ring(self) -> Ring:
+        return self._ring
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._ring, name)
+
+    def read_at(self, seq: int, offset: int, size: int) -> tuple[bytes, bool, int] | None:
+        result = self._ring.read_at(seq, offset, size)
+        if result is not None:
+            return result
+        recorder = self._recorder_of()
+        return recorder.read(seq, offset, size) if recorder is not None else None
+
+    def wait_for_seq(self, seq: int, timeout: float) -> str:
+        status = self._ring.wait_for_seq(seq, timeout)
+        recorder = self._recorder_of()
+        if status == "evicted" and recorder is not None and recorder.read(seq, 0, 0) is not None:
+            return "open"  # gone from the ring, in the recording
+        return status
+
+    def junction(self, seq: int) -> bool:
+        if self._ring.junction(seq):
+            return True
+        recorder = self._recorder_of()
+        return recorder is not None and recorder.junction(seq)

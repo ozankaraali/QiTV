@@ -59,6 +59,15 @@ they are the main sound, which follows the focus. `follow_focus()` goes back: th
 muted. `end_mix()`, as the grid is left (before its tiles stop), and `leave_grid` end it:
 the big picture is heard, unless the mix had every tile muted, and the PiP kept from the
 grid keeps its mute, as a PiP made audible does; the normal rule holds again.
+
+Recording as a PVR (2.6): a slot that records is never stopped for a channel change: it is set
+aside (`set_aside`) and records on in the background, muted, its surface hidden (neither large
+nor small), while a spare slot takes its role: an idle one ("main", "pip", one made before),
+else one the window makes (`set_slot_factory`: "b1", "b2" …). Its stream keeps its budget slot,
+so every other stream counts it. `bring_back` gives it the large role again (its stand-in is
+the caller's to let go), `show_small` shows it as the picture in picture without a stream of
+its own, and once its recording ends it leaves its channel as any slot does. Not while the
+multiview's grid shows: the grid lays its tiles out by their names.
 """
 
 from __future__ import annotations
@@ -89,6 +98,11 @@ PIP_LEVEL = 30  # the PiP stream's level until the mixer sets one (config pip_vo
 PIP_FAILED = N_("Couldn't open this channel in picture-in-picture")  # i18n: error toast
 # A refusal when the limit is not known.
 LIMITED = N_("Your provider limits concurrent streams")  # i18n: error toast
+
+
+def records(slot: Slot) -> bool:
+    """Slot `slot`'s channel records (2.2's Record; 2.6: as a PVR, `set_aside`)."""
+    return bool(getattr(slot.live, "recording", lambda: False)())
 
 
 def limit_message(limit: Optional[int]) -> str:
@@ -182,6 +196,13 @@ class SessionManager(QObject):
     # The grid's sound: True once the user mixed it (each tile keeps its sound), False when
     # it follows the focus again (`follow_focus`, `end_mix`, leaving the grid).
     mixChanged = Signal(bool)
+    # 2.6: a recording slot left its role (its name) for the background, and the slot that
+    # took the role; a background slot is large again, and the slot that was; a background
+    # slot shows as the picture in picture.
+    setAside = Signal(str, str)
+    broughtBack = Signal(str, str)
+    shownSmall = Signal(str)
+    backgroundChanged = Signal()  # which slots are in the background changed
 
     def __init__(
         self,
@@ -216,6 +237,8 @@ class SessionManager(QObject):
         self._sizes: Optional[tuple[int, int]] = None  # (focused, other) tile buffers
         self._direct: set[str] = set()  # the tiles open_slot opened directly, until they stop
         self._tile_opens: dict[str, _Open] = {}  # tiles waiting for a release or a slot
+        self._aside: list[str] = []  # 2.6: recording slots in the background, oldest first
+        self._make_slot: Optional[Callable[[str], Optional[Slot]]] = None
         self._add(main, PIP_LEVEL, muted=False)
         self._add(pip, PIP_LEVEL, muted=True)
         # A wanted level makes PlaybackSession apply it on every media it opens; without one
@@ -246,6 +269,9 @@ class SessionManager(QObject):
         stream.granted.connect(self._on_granted)
         slot.live.failed.connect(partial(self._on_failed, slot.name))
         slot.live.timelineChanged.connect(partial(self._on_timeline, slot.name))
+        recording = getattr(slot.live, "recordingChanged", None)
+        if recording is not None:  # 2.6: a background slot's recording ended
+            recording.connect(partial(self._on_recording_changed, slot.name))
         denied = getattr(tuner, "denied", None)  # LiveTuner's: a tile's direct open
         if denied is not None:
             denied.connect(partial(self._on_slot_denied, slot.name))
@@ -363,6 +389,156 @@ class SessionManager(QObject):
         self.pipStateChanged.emit(True)
         return True
 
+    # ---- 2.6: recordings in the background ---------------------------------------------------
+
+    def set_slot_factory(self, make_slot: Callable[[str], Optional[Slot]]) -> None:
+        """How another slot is made (a name in, the slot added, or None): the window's."""
+        self._make_slot = make_slot
+
+    def background(self) -> list[Slot]:
+        """The recording slots in the background, oldest first."""
+        return [self._slots[name] for name in self._aside]
+
+    def background_showing(self, channel: dict) -> Optional[Slot]:
+        for slot in self.background():
+            if ZapContext.same(slot.channel, channel):
+                return slot
+        return None
+
+    def set_aside(self, name: str) -> Optional[str]:
+        """Slot `name` (it records) leaves its role, large or small, and records on in the
+        background; a spare slot takes the role (module docstring). The spare's name, or None
+        (nothing changes) while the grid shows or no slot can be had."""
+        slot = self._slot(name)
+        if self._grid or name in self._aside or slot not in (self._large, self._small):
+            return None
+        fresh = self._spare()
+        if fresh is None:
+            return None
+        self._aside.append(name)
+        self._set_background(slot, True)
+        if slot is self._large:
+            users_mute = self._muted[name]
+            self._large = fresh
+            self._set_mute(fresh, users_mute)
+            self._apply_level(fresh)
+        else:
+            self._small = fresh
+        self._set_mute(slot, True)
+        self.setAside.emit(name, fresh.name)
+        self.backgroundChanged.emit()
+        return fresh.name
+
+    def bring_back(self, name: str) -> Optional[str]:
+        """Background slot `name` is large again; the slot that was large is returned: one
+        that records goes to the background in turn, else its caller lets its channel go.
+        None when `name` is not in the background."""
+        if self._grid or name not in self._aside:
+            return None
+        slot, old = self._slot(name), self._large
+        self._aside.remove(name)
+        self._set_background(slot, False)
+        users_mute = self._muted[old.name]
+        self._large = slot
+        if records(old):  # two recordings: the one left records on
+            self._aside.append(old.name)
+            self._set_background(old, True)
+        self._set_mute(old, True)
+        self._set_mute(slot, users_mute)
+        self._apply_level(slot)
+        self._apply_level(old)
+        self.broughtBack.emit(name, old.name)
+        self.backgroundChanged.emit()
+        return old.name
+
+    def show_small(self, name: str) -> bool:
+        """Background slot `name` shows as the picture in picture, its own stream: the small
+        slot's channel stops first. False when `name` is not in the background."""
+        if self._grid or name not in self._aside:
+            return False
+        self._pending = None
+        old = self._small
+        self._stop(old)
+        slot = self._slot(name)
+        self._aside.remove(name)
+        self._set_background(slot, False)
+        self._small = slot
+        self._set_mute(slot, True)
+        self._apply_level(slot)
+        self.shownSmall.emit(name)
+        if not self._open:
+            self._open = True
+            self.pipStateChanged.emit(True)
+        self.backgroundChanged.emit()
+        return True
+
+    def keep_recording(self, name: str) -> bool:
+        """A multiview tile that records, as the grid goes, records on in the background (it
+        has no role: the grid's leave gives the roles). False: it does not play."""
+        slot = self._slot(name)
+        if name in self._aside or slot is self._large or slot.channel is None:
+            return False
+        if slot is self._small:
+            if not self._grid:
+                return False
+            # In the grid the small role is bookkeeping only: another slot takes it.
+            fresh = self._spare()
+            if fresh is None:
+                return False
+            self._small = fresh
+        self._direct.discard(name)
+        self._tile_opens.pop(name, None)
+        self._aside.append(name)
+        self._set_background(slot, True)
+        self._set_mute(slot, True)
+        self.backgroundChanged.emit()
+        return True
+
+    def stop_background(self) -> None:
+        """Every background slot stops (the quit: their recordings end and are saved)."""
+        for name in list(self._aside):
+            self._aside.remove(name)
+            slot = self._slot(name)
+            self._set_background(slot, False)
+            self._stop(slot)
+            slot.channel = slot.group_key = None
+            self.backgroundChanged.emit()
+
+    def _on_recording_changed(self, name: str, recording: bool) -> None:
+        if recording or name not in self._aside:
+            return
+        self._aside.remove(name)  # its recording ended: it leaves its channel (kept)
+        slot = self._slot(name)
+        self._set_background(slot, False)
+        self._tuners[name].stop()
+        slot.channel = slot.group_key = None
+        self.backgroundChanged.emit()
+
+    def _spare(self) -> Optional[Slot]:
+        """An idle slot for a role (not a tile's), else one made for it."""
+        busy = {self._large.name, self._small.name, *self._aside}
+        for slot in self._slots.values():
+            if slot.name in busy or slot.name.startswith("t"):
+                continue
+            tuner = self._tuners[slot.name]
+            idle = getattr(tuner, "idle", None)
+            stream = tuner.stream
+            playing = stream is not None and (stream.running() or stream.ticket is not None)
+            if tuner.releasing() or playing or (idle is not None and not idle()):
+                continue
+            return slot
+        if self._make_slot is None:
+            return None
+        number = 1
+        while f"b{number}" in self._slots:
+            number += 1
+        return self._make_slot(f"b{number}")
+
+    def _set_background(self, slot: Slot, background: bool) -> None:
+        tuner = self._tuners[slot.name]
+        if hasattr(tuner, "background"):
+            tuner.background = background  # its disk ring counts no more (one_disk_ring)
+
     # ---- the multiview's tiles ----------------------------------------------------------------
 
     def grid(self) -> bool:
@@ -384,7 +560,7 @@ class SessionManager(QObject):
         self._open = False
         self._sizes = (full_bytes, tile_bytes) if full_bytes > 0 and tile_bytes > 0 else None
         for slot in self._slots.values():
-            if slot is not self._large:
+            if slot is not self._large and slot.name not in self._aside:  # (2.6: not a tile)
                 if slot is self._small:  # the PiP's level goes with it into the grid
                     self._levels[slot.name] = self._pip_level
                 self._as_tile(slot, focused=False)

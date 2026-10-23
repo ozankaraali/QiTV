@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QCheckBox, QGridLayout, QMessageBox, QProgressDial
 
 from services import i18n, update_checker
 from services.config_manager import ConfigManager, get_app_version
-from services.i18n import tr
+from services.i18n import tr, translate
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,22 @@ class _Dialogs:
         _polish_msgbox(msg)
         msg.exec_()
         return msg.clickedButton() == update_btn
+
+    def confirm_stop_recordings(self, question: str) -> bool:
+        """2.6: channels record: the update quits and stops them (their files are saved), or
+        not now (Keep recording, the default)."""
+        from ui.stream_question import KEEP_RECORDING, QUIT
+
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle(tr("Update Downloaded"))
+        msg.setText(question)
+        quit_btn = msg.addButton(translate(QUIT), QMessageBox.AcceptRole)
+        keep_btn = msg.addButton(translate(KEEP_RECORDING), QMessageBox.RejectRole)
+        msg.setDefaultButton(keep_btn)
+        _polish_msgbox(msg)
+        msg.exec_()
+        return msg.clickedButton() == quit_btn
 
     def downloaded(self, downloaded_path: str) -> None:
         """A zip on macOS, or Linux: say where the update is, then open the Downloads folder."""

@@ -13,6 +13,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from services.live import learned_target, worker
+from services.live.kept import KeptRing, Where
 from services.live.learned_target import ArrivalModel, Learned, LearnedTarget
 import services.live.live_session as live_session
 from services.live.live_session import LiveSession
@@ -34,6 +35,9 @@ DISK = "Disk time-shift isn't available; using memory"
 REWOUND = "Rewound past the buffer"
 LOADING = "Still loading…"
 RECONNECTING = "Reconnecting…"
+KEPT_ONLY = "This channel can't open right now. Playing what was kept."
+KEPT_END = "That's all that was kept. The channel can't open right now."
+KEPT_DISK = "The disk buffer failed. Playing what was kept; Go live plays the channel again."
 DIRECT = (URL, PlayKind.LIVE, "normal")
 MiB = 1024 * 1024
 
@@ -56,9 +60,16 @@ class FakeEngine(QObject):
     sessionEnded = Signal(str)
     sessionClosed = Signal(str)
     recordingEnded = Signal(str, str, str, int)  # 2.3: (rid, reason, path, written)
+    sessionParked = Signal(str)  # 2.6
+    sessionResumed = Signal(str)
 
     def __init__(self):
         super().__init__()
+        self.parks = []  # 2.6: sids parked
+        self.resumes = []  # (sid, url, keyword arguments)
+        self.labels = []  # (sid, label): a disk buffer's channel (2.6)
+        self.adopting = set()  # kept folders being taken back: held, spans to come
+        self.wheres = []  # (sid, where): where the user was in it
         self.up = True
         self.gave_up = False  # an engine that gave up before this LiveSession existed
         self.opened = []  # (sid, url, keyword arguments)
@@ -95,6 +106,23 @@ class FakeEngine(QObject):
 
     def resize_session(self, sid, max_bytes):
         self.resizes.append((sid, max_bytes))
+
+    def park_session(self, sid):
+        self.parks.append(sid)
+        self.events.append(("park", sid))
+
+    def holds(self, sid):
+        return sid in self._spans or sid in self.adopting
+
+    def keep_session(self, sid, label):
+        self.labels.append((sid, label))
+
+    def note_where(self, sid, where):
+        self.wheres.append((sid, where))
+
+    def resume_session(self, sid, url, **kwargs):
+        self.resumes.append((sid, url, kwargs))
+        self.events.append(("resume", sid))
 
     def start_recording(self, sid, path, seq, **kwargs):
         rid = f"r{len(self.recordings) + 1}"
@@ -143,6 +171,7 @@ class FakeEngine(QObject):
         finite=False,
         open_quality=None,
         video=None,
+        parts=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -174,6 +203,8 @@ class FakeEngine(QObject):
             self._snapshots[sid]["backlog_s"] = backlog
         if video is not None:
             self._snapshots[sid]["video"] = video
+        if parts is not None:  # 2.6: [first_seq, start, wall] of each part
+            self._snapshots[sid]["parts"] = [list(part) for part in parts]
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def receive(self, sid, count):
@@ -558,6 +589,7 @@ class LiveSessionCase(unittest.TestCase):
         burst=0.0,
         latency="normal",
         backlog_after_start=True,
+        channel=None,
     ):
         """Start, and get ready with `spans` buffered (and an open segment after them).
 
@@ -567,7 +599,7 @@ class LiveSessionCase(unittest.TestCase):
         comes with only that segment buffered, as far back as the target (since 2.1 a tune
         starts at the target), and the rest follows. Without it, or when the oldest segment
         cannot be that far back, all of it is buffered at ready and the start policy picks."""
-        sid = self.start(latency=latency)
+        sid = self.start(latency=latency, channel=channel)
         first = (spans[0].seq, spans[0].start) if spans else (open_seq, 0.0)
         limit = live_edge if live_edge is not None else (spans[-1].end if spans else 0.0)
         early = backlog_after_start and first[0] is not None
@@ -623,6 +655,353 @@ class LiveSessionCase(unittest.TestCase):
         self.assertEqual(self.notices[-1], notice)
         self.assertEqual(self.modes[-1], "direct")
         self.assertFalse(self.live.is_pipeline())
+
+
+class KeptTests(LiveSessionCase):
+    """2.6: leaving a channel parks its buffer; coming back resumes where it was."""
+
+    def setUp(self):
+        super().setUp()
+        self.live._wall = lambda: 20_000.0  # the time of day the parts are placed against
+
+    def resume(self, kept, disk=False, **kwargs):
+        self.live.start(
+            URL,
+            headers={"User-Agent": "QiTV-Test"},
+            verify_ssl=True,
+            latency="normal",
+            user_agent="QiTV-Test",
+            disk=disk,
+            max_bytes=128 * MiB,
+            channel="k1",
+            kept=kept,
+            **kwargs,
+        )
+
+    @staticmethod
+    def seq_of(play):
+        return int(play[0].rsplit("/", 1)[1].split(".")[0])
+
+    def test_park_remembers_a_paused_position(self):
+        sid = self.ready(segments(0, 30), channel="k1")
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.toggle_pause()
+        kept = self.live.park()
+        self.assertEqual(self.engine.parks, [sid])
+        self.assertNotIn(sid, self.engine.closed)
+        self.assertEqual((kept.sid, kept.channel, kept.disk), (sid, "k1", False))
+        self.assertTrue(kept.where.paused)
+        self.assertAlmostEqual(kept.where.position, 20.0, delta=2.0)
+        self.assertEqual(self.releases, [])
+        self.engine.sessionParked.emit(sid)
+        self.assertEqual(self.releases, [True])
+
+    def test_live_when_parked_is_live(self):
+        self.ready(segments(0, 30), channel="k1")
+        self.playback.set_state(PlaybackState.PLAYING)
+        kept = self.live.park()
+        self.assertEqual(kept.where, Where(None, False))
+
+    def test_without_a_channel_key_it_stops(self):
+        sid = self.ready(segments(0, 30))
+        self.assertIsNone(self.live.park())
+        self.assertIn(sid, self.engine.closed)
+        self.assertEqual(self.engine.parks, [])
+
+    def back_offers(self):
+        offers = []
+        self.live.backOffered.connect(lambda t, wall: offers.append((t, wall)))
+        return offers
+
+    def come_back(self, kept, parts=((0, 0.0, 1_000.0), (30, 60.0, 19_000.0))):
+        """Take `kept` back: the new run (30 s after 60 s kept) comes, and it plays live."""
+        self.engine.buffer("k", segments(0, 30), parts=[list(parts[0])])
+        self.resume(kept)
+        self.engine.buffer("k", segments(0, 45), parts=[list(p) for p in parts])
+        self.engine.sessionResumed.emit("k")
+        self.step(2.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+
+    def test_coming_back_plays_live_and_offers_where_it_was(self):
+        # The owner's choice (2.6): live first, and where it was a click away.
+        offers = self.back_offers()
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(20.0, True)))
+        self.assertEqual(self.engine.opened, [])
+        self.assertEqual([r[0] for r in self.engine.resumes], ["k"])
+        self.assertEqual(self.playback.plays, [])  # it waits for the new run: live
+        self.engine.buffer("k", segments(0, 45), parts=[[0, 0.0, 1_000.0], [30, 60.0, 19_000.0]])
+        self.engine.sessionResumed.emit("k")
+        self.step(2.0)
+        self.assertGreaterEqual(self.seq_of(self.playback.plays[-1]), 30)
+        self.assertEqual(offers, [(20.0, 1_020.0)])  # 20 s into the part kept from 1,000
+
+    def test_going_back_plays_from_where_it_was(self):
+        self.come_back(KeptRing("k", "k1", False, Where(20.0, True)))
+        self.live.go_back_to(20.0)
+        self.assertEqual(self.playback.plays[-1], self.stream("k", 10))
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertNotEqual(self.playback.paused[-1:], [True])  # it plays on from there
+
+    def test_nothing_is_offered_when_it_was_live(self):
+        offers = self.back_offers()
+        self.come_back(KeptRing("k", "k1", False, Where(None, False)))
+        self.assertEqual(offers, [])
+
+    def test_resume_live_starts_on_the_newest_part(self):
+        self.engine.buffer("k", segments(0, 10), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(None, False)))
+        self.assertEqual(self.playback.plays, [])
+        # The new run: two segments after the gap, shorter than the target and a GOP.
+        parts = [[0, 0.0, 1_000.0], [10, 20.0, 9_000.0]]
+        self.engine.buffer("k", segments(0, 12), parts=parts)
+        self.engine.sessionResumed.emit("k")
+        self.step(2.0)
+        self.assertTrue(self.playback.plays)
+        self.assertGreaterEqual(self.seq_of(self.playback.plays[-1]), 10)
+
+    def test_go_live_takes_only_the_newest_part(self):
+        parts = [[0, 0.0, 1_000.0], [10, 20.0, 9_000.0]]
+        self.engine.buffer("k", segments(0, 12), parts=parts)
+        self.resume(KeptRing("k", "k1", False, Where(5.0, True)))
+        self.engine.sessionResumed.emit("k")
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.go_live()
+        self.assertGreaterEqual(self.seq_of(self.playback.plays[-1]), 10)
+
+    def test_a_seek_near_an_older_parts_end_is_no_go_live(self):
+        parts = [[0, 0.0, 1_000.0], [10, 20.0, 9_000.0]]
+        self.engine.buffer("k", segments(0, 12), parts=parts)
+        self.resume(KeptRing("k", "k1", False, Where(5.0, False)))
+        self.engine.sessionResumed.emit("k")
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(19.0)
+        self.assertEqual(self.playback.plays[-1], self.stream("k", 9))
+
+    def test_a_failed_resume_plays_what_was_kept_from_where_it_was(self):
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(20.0, True)))
+        self.engine.sessionFailed.emit("k", "http", "The channel refused the stream.")
+        self.assertEqual(self.notices[-1], KEPT_ONLY)
+        self.assertEqual(self.playback.plays[-1], self.stream("k", 10))  # no live: where it was
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertEqual(self.playback.paused[-1], True)  # as it was left
+        self.assertNotIn("k", self.engine.closed)
+        self.assertEqual(self.modes, ["pipeline"])
+        self.live.go_live()
+        self.assertEqual(len(self.engine.resumes), 2)  # Go live tries the channel again
+
+    def test_a_failed_live_resume_plays_what_was_kept(self):
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(None, False)))
+        self.engine.sessionFailed.emit("k", "network", "The channel did not answer.")
+        self.assertEqual(self.notices[-1], KEPT_ONLY)
+        self.assertTrue(self.playback.plays)
+        self.assertEqual(self.playback.plays[-1][1], PlayKind.LIVE_PIPELINE)
+
+    def slow(self):
+        """A LiveSession whose ready wait ends at once, and is extended while bytes flow."""
+        self.live = self.make(ready_timeout_ms=50, ready_max_ms=60_000)
+        self.live._wall = lambda: 20_000.0
+
+    def new_run(self):
+        self.engine.buffer("k", segments(0, 45), parts=[[0, 0.0, 1_000.0], [30, 60.0, 19_000.0]])
+        self.engine.sessionResumed.emit("k")
+        self.step(2.0)
+
+    def test_a_channel_slow_to_come_back_waits_as_a_tune_does(self):
+        # Final review I1: bytes flow but no segment yet: "Still loading…" as at a tune's
+        # start, then live, not "can't open" and what was kept.
+        self.slow()
+        offers = self.back_offers()
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(20.0, True)))
+        self.engine.receive("k", 188 * 20)
+        self.wait_until(lambda: self.notices)
+        self.assertEqual(self.notices, [LOADING])
+        self.assertEqual(self.playback.plays, [])
+        self.new_run()
+        self.assertGreaterEqual(self.seq_of(self.playback.plays[-1]), 30)
+        self.assertEqual(offers, [(20.0, 1_020.0)])
+        self.assertEqual(self.notices, [LOADING])
+
+    def test_a_channel_back_after_the_wait_plays_live(self):
+        # Final review I1: the new run that comes after "can't open" plays live, where the
+        # user was a click away, as it would have in time.
+        self.slow()
+        offers = self.back_offers()
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(20.0, True)))
+        self.wait_until(lambda: self.notices)
+        self.assertEqual(self.notices, [KEPT_ONLY])
+        self.assertEqual(self.playback.plays[-1], self.stream("k", 10))  # where it was
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertEqual(self.playback.paused, [True])
+        self.new_run()
+        self.assertGreaterEqual(self.seq_of(self.playback.plays[-1]), 30)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertEqual(self.playback.paused, [True])  # not paused again
+        self.step(0.25)
+        self.assertFalse(self.timelines[-1]["paused"])
+        self.assertEqual(offers, [(20.0, 1_020.0)])
+
+    def test_a_late_channel_leaves_a_user_who_moved_where_they_are(self):
+        self.slow()
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(20.0, True)))
+        self.wait_until(lambda: self.notices)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.toggle_pause()  # plays on from where it was
+        plays = len(self.playback.plays)
+        self.new_run()
+        self.assertEqual(len(self.playback.plays), plays)
+
+    def test_the_end_of_what_was_kept_says_so(self):
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(50.0, False)))
+        self.engine.sessionFailed.emit("k", "http", "The channel refused the stream.")
+        self.playback.set_state(PlaybackState.PLAYING)
+        plays = len(self.playback.plays)
+        self.playback.ended.emit()
+        self.assertEqual(self.notices[-1], KEPT_END)
+        self.assertEqual(len(self.playback.plays), plays)
+
+    def test_a_kept_ring_still_being_taken_back_is_resumed(self):
+        # Review B I2: its spans are on their way.
+        self.engine.adopting.add("k")
+        self.resume(KeptRing("k", "k1", True, Where(20.0, True)), disk=True)
+        self.assertEqual([r[0] for r in self.engine.resumes], ["k"])
+        self.assertEqual(self.engine.opened, [])
+
+    def test_a_kept_ring_that_is_gone_starts_afresh(self):
+        self.resume(KeptRing("gone", "k1", False, Where(20.0, True)))
+        self.assertIn("gone", self.engine.closed)
+        self.assertEqual(len(self.engine.opened), 1)
+        self.assertEqual(self.engine.resumes, [])
+
+    def test_leaving_while_taking_back_from_live_keeps_it(self):
+        # Review I1: a double scroll leaves before the new run's first segment came.
+        self.engine.buffer("k", segments(0, 10), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(None, False)))
+        kept = self.live.park()
+        self.assertEqual(kept, KeptRing("k", "k1", False, Where(None, False)))
+        self.assertEqual(self.engine.parks, ["k"])
+        self.assertNotIn("k", self.engine.closed)
+
+    def test_a_taken_back_buffer_keeps_its_own_kind(self):
+        # Review I3: a memory buffer taken back by a disk tune parks as memory.
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(20.0, True)), disk=True)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertFalse(self.live.park().disk)
+
+    def test_a_disk_failure_after_taking_back_then_go_live(self):
+        # Review C1: what was kept plays on and says why; Go live tries the channel again,
+        # and after a second disk failure starts it afresh (the helper's own memory fallback).
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", True, Where(20.0, False)), disk=True)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionResumed.emit("k")
+        self.engine.sessionFailed.emit("k", "disk", "The disk buffer failed.")
+        self.assertEqual(self.notices[-1], KEPT_DISK)
+        self.live.go_live()
+        self.assertEqual(len(self.engine.resumes), 2)
+        self.engine.sessionFailed.emit("k", "disk", "The disk buffer failed.")
+        self.live.go_live()
+        self.assertIn("k", self.engine.closed)
+        self.engine.answer()
+        self.assertEqual(len(self.engine.opened), 1)  # a fresh session for the channel
+
+    def test_a_provider_drop_after_taking_back_keeps_the_history(self):
+        # Review I6: a final failure at the live edge plays the channel directly, as before,
+        # but hours of kept history are not thrown away with the session.
+        kept_aside = []
+        self.live.set_keeper(kept_aside.append)
+        parts = [[0, 0.0, 1_000.0], [10, 20.0, 9_000.0]]
+        self.engine.buffer("k", segments(0, 30), parts=parts)
+        self.resume(KeptRing("k", "k1", False, Where(None, False)))
+        self.engine.sessionResumed.emit("k")
+        self.step(2.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionFailed.emit("k", "network", "The channel stopped answering.")
+        self.assertEqual(self.engine.parks, ["k"])
+        self.assertNotIn("k", self.engine.closed)
+        self.assertEqual([(r.sid, r.channel) for r in kept_aside], [("k", "k1")])
+        self.engine.sessionParked.emit("k")
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+
+    def stopping_when_the_recording_ends(self):
+        """As SessionManager does for a recording in the background (Stage C review I2)."""
+        self.live.recordingChanged.connect(lambda recording: recording or self.live.stop())
+
+    def test_a_stop_at_the_recordings_end_in_a_fall_back_plays_nothing(self):
+        sid = self.ready([], open_seq=4, live_edge=3.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertTrue(self.live.start_recording("/Movies/QiTV/One.ts"))
+        self.stopping_when_the_recording_ends()
+        plays = len(self.playback.plays)
+        self.engine.sessionFailed.emit(sid, "network", "x")  # a final failure at the edge
+        self.engine.answer()
+        self.assertNotIn(DIRECT, self.playback.plays[plays:])
+        self.assertNotIn("direct", self.modes)
+
+    def test_a_stop_at_the_recordings_end_in_a_refusal_reports_nothing(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertTrue(self.live.start_recording("/Movies/QiTV/One.ts"))
+        self.stopping_when_the_recording_ends()
+        self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
+        self.engine.answer()
+        self.assertEqual(self.failures, [])  # it was stopped, not refused
+        self.assertFalse(self.live.is_pipeline())
+
+    def test_a_recording_set_aside_pauses_and_comes_back_live_offering_where_it_was(self):
+        offers = self.back_offers()
+        self.ready(segments(0, 30), channel="k1")
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.set_aside()  # its channel was left while it records: it waits, paused
+        self.assertEqual(self.playback.paused[-1], True)
+        self.live.bring_back()
+        self.assertGreaterEqual(self.seq_of(self.playback.plays[-1]), 25)  # live
+        self.assertEqual(len(offers), 1)
+        self.assertAlmostEqual(offers[0][0], 20.0, delta=2.0)
+
+    def test_a_disk_buffer_is_labelled_and_where_the_user_was_noted(self):
+        sid = self.start(disk=True, channel="k1")
+        self.assertEqual(self.engine.labels, [(sid, {"channel": "k1"})])
+        self.engine.buffer(sid, segments(0, 30))
+        self.engine.sessionReady.emit(sid)
+        self.step(2.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.toggle_pause()
+        self.live.park()
+        [(noted, where)] = self.engine.wheres
+        self.assertEqual(noted, sid)
+        self.assertTrue(where["paused"])
+        self.assertAlmostEqual(where["position"], 20.0, delta=2.0)
+
+    def test_a_memory_buffer_is_not_labelled(self):
+        self.start(disk=False, channel="k1")
+        self.assertEqual(self.engine.labels, [])
+
+    def test_the_timeline_says_how_far_behind_in_real_time(self):
+        parts = [[0, 0.0, 1_000.0], [10, 20.0, 19_000.0]]
+        self.engine.buffer("k", segments(0, 30), parts=parts)
+        self.resume(KeptRing("k", "k1", False, Where(10.0, True)))
+        self.engine.sessionResumed.emit("k")
+        self.step(2.0)
+        self.live.go_back_to(10.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live._emit_timeline()
+        state = self.timelines[-1]
+        self.assertEqual(state["parts"], parts)
+        self.assertAlmostEqual(state["behind"], 20_000.0 - 1_010.0, delta=2.0)
 
 
 class ResizeTests(LiveSessionCase):

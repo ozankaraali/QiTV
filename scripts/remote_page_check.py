@@ -33,6 +33,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 from services.remote import net  # noqa: E402
 from services.remote.hub import RemoteHub, web_dir  # noqa: E402
 from services.remote.protocol import (  # noqa: E402
+    Answered,
     Code,
     Get,
     Opened,
@@ -41,6 +42,7 @@ from services.remote.protocol import (  # noqa: E402
     Position,
     Press,
     Query,
+    RecAct,
     Status,
     ToTv,
     WatchHere,
@@ -562,6 +564,70 @@ def scenario_now_playing(rig: Rig) -> None:
     rig.events.wait(Press, where=lambda e: e.button == "info" and not e.down, after=mark)
 
 
+def scenario_back_to(rig: Rig) -> None:
+    """2.6: while the TV offers where a channel come back to was left, the phone shows Resume
+    with when; a tap asks the TV to go back; it goes once the TV no longer offers it."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, {**STATE, "back": "20:10"})
+    rig.page.locator("#backTo", has_text="20:10").wait_for()
+    assert "Resume" in rig.page.inner_text("#backTo"), rig.page.inner_text("#backTo")
+    rig.shot("back-to")
+    mark = rig.events.mark()
+    rig.page.click("#backTo")
+    rig.events.wait(Press, where=lambda e: e.button == "back_to" and not e.down, after=mark)
+    rig.hub.send(sid, STATE)
+    rig.page.locator("#backTo").wait_for(state="hidden")
+
+
+def scenario_ask(rig: Rig) -> None:
+    """2.6: QiTV's question on the phone that asked (stop a recording for its Watch?): a
+    sheet over everything with the safe answer first; each answer carries the question's
+    number back; Keep recording says nothing opened; a question gone on the TV closes."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    rig.page.locator("#nowName", has_text="Harbourline News").wait_for()
+    question = "No stream is free: Harbourline News is recording. Stop the recording?"
+    ask = {"t": "ask", "id": 7, "text": question, "yes": "Stop recording", "no": "Keep recording"}
+    rig.hub.send(sid, ask)
+    rig.page.locator("#askSheet").wait_for()
+    assert rig.page.inner_text("#askText") == question, rig.page.inner_text("#askText")
+    rig.shot("ask")
+    mark = rig.events.mark()
+    rig.page.click("#askYes")
+    rig.events.wait(Answered, where=lambda e: e.n == 7 and e.yes, after=mark)
+    rig.page.locator("#askSheet").wait_for(state="hidden")
+    rig.hub.send(sid, {**ask, "id": 8})
+    rig.page.locator("#askSheet").wait_for()
+    mark = rig.events.mark()
+    rig.page.click("#veil", position={"x": 20, "y": 20})  # tapped away: keep recording
+    rig.events.wait(Answered, where=lambda e: e.n == 8 and not e.yes, after=mark)
+    rig.hub.send(sid, {**ask, "id": 9})
+    rig.page.locator("#askSheet").wait_for()
+    rig.hub.send(sid, {"t": "unask", "id": 9})  # settled on the TV
+    rig.page.locator("#askSheet").wait_for(state="hidden")
+
+
+def scenario_rec_line(rig: Rig) -> None:
+    """2.6: what records in the background shows under the now-playing card with its time;
+    its menu goes back to the channel or stops the recording."""
+    sid = paired_sid(rig)
+    since = int(time.time()) - 3723
+    rig.hub.send(sid, {**STATE, "rec": [{"id": "b1", "name": "Quayside Sport", "since": since}]})
+    rig.page.locator("#recLine", has_text="Quayside Sport").wait_for()
+    shown = rig.page.inner_text("#recTime")
+    assert shown.startswith("1:02:"), shown
+    rig.shot("rec-line")
+    mark = rig.events.mark()
+    rig.page.click("#recLine")
+    rig.page.locator("#menuList button", has_text="Quayside Sport").click()
+    rig.events.wait(RecAct, where=lambda e: e.slot == "b1" and e.act == "back", after=mark)
+    rig.page.click("#recLine")
+    rig.page.locator("#menuList button.danger").click()
+    rig.events.wait(RecAct, where=lambda e: e.slot == "b1" and e.act == "stop", after=mark)
+    rig.hub.send(sid, STATE)
+    rig.page.locator("#recLine").wait_for(state="hidden")
+
+
 def scenario_guide_tune(rig: Rig) -> None:
     sid = paired_sid(rig)
     mark = rig.events.mark()
@@ -1076,6 +1142,19 @@ def scenario_more_numpad(rig: Rig) -> None:
     rig.page.wait_for_selector("#moreSheet", state="hidden")
 
 
+def scenario_stop(rig: Rig) -> None:
+    """2.6: More's Stop: nothing plays on the TV, nothing streams (as X and ■ there)."""
+    paired_sid(rig)
+    rig.page.click("#moreButton")
+    rig.page.wait_for_selector("#moreSheet:not([hidden])")
+    stop = rig.page.locator("#moreSheet [data-key=stop]")
+    assert stop.inner_text().strip() == "Stop", stop.inner_text()
+    rig.shot("more-stop")
+    mark = rig.events.mark()
+    stop.click()
+    rig.events.wait(Press, where=lambda e: e.button == "stop" and not e.down, after=mark)
+
+
 def scenario_pip_close(rig: Rig) -> None:
     """While the TV shows a small picture, More's button says it closes it."""
     sid = paired_sid(rig)
@@ -1207,6 +1286,10 @@ SCENARIOS.update(
         "forget-clean": scenario_forget_clean,
         "hello-keeps-now": scenario_hello_keeps_now,
         "now-playing": scenario_now_playing,
+        "back-to": scenario_back_to,
+        "ask": scenario_ask,
+        "stop": scenario_stop,
+        "rec-line": scenario_rec_line,
         "guide-tune": scenario_guide_tune,
         "channel-list": scenario_channel_list,
         "find-both": scenario_find_both,

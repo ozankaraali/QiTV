@@ -258,6 +258,8 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
         elif name == "pause":
             fill(_rrect(0.22, 0.15, 0.2, 0.7, 0.05))
             fill(_rrect(0.58, 0.15, 0.2, 0.7, 0.05))
+        elif name == "stop":  # ■: nothing plays (2.6)
+            fill(_rrect(0.2, 0.2, 0.6, 0.6, 0.08))
         elif name == "prev":
             fill(_rrect(0.2, 0.18, 0.1, 0.64, 0.03))
             fill(_poly([(0.8, 0.18), (0.8, 0.82), (0.35, 0.5)]))

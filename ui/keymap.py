@@ -60,6 +60,10 @@ class Action(str, Enum):
     FORGET = "forget"  # Delete in the channel list: the highlighted channel leaves ⟲ Recent
     PICTURE = "picture"  # A: the Picture panel; again while it shows, the next aspect (2.3)
     STATS = "stats"  # Shift+I: the statistics over the picture, shown or hidden (2.3)
+    # 2.6: back to where a channel come back to was left (the Resume pill's; the phone's
+    # button). No key of its own: Enter does it while the pill shows.
+    BACK_TO = "back_to"
+    STOP = "stop"  # X, ■: every picture stops and nothing streams; Space plays it again (2.6)
 
 
 # "subtitles": the OpenSubtitles search over the player (2.2): it types like the drawer.
@@ -116,6 +120,7 @@ _PLAYER_CHARS = {
     _K.Key_K.value: Action.SOUND_LATER,
     _K.Key_R.value: Action.RECORD,
     _K.Key_A.value: Action.PICTURE,  # VLC's aspect key: the panel opens on the aspect ratio
+    _K.Key_X.value: Action.STOP,
 }
 # With Shift, the sound's sync keys move the subtitles, and I (the channel's info) shows the
 # picture's statistics (the player only).
@@ -136,6 +141,7 @@ _MEDIA_KEYS = {
     _K.Key_MediaPause.value: Action.PLAY_PAUSE,
     _K.Key_MediaNext.value: Action.MEDIA_NEXT,
     _K.Key_MediaPrevious.value: Action.MEDIA_PREV,
+    _K.Key_MediaStop.value: Action.STOP,
     _K.Key_VolumeUp.value: Action.VOL_UP,
     _K.Key_VolumeDown.value: Action.VOL_DOWN,
     _K.Key_VolumeMute.value: Action.MUTE,
@@ -154,6 +160,7 @@ _GUIDE_CHARS = {
     key: _PLAYER_CHARS[key]
     for key in (
         _K.Key_Space.value,
+        _K.Key_X.value,
         _K.Key_G.value,
         _K.Key_F.value,
         _K.Key_M.value,
@@ -286,6 +293,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Return", N_("Channel list")),
         ("Left, Right", N_("Back / forward 10 seconds")),
         ("Space", N_("Play / pause")),
+        ("X", N_("Stop: nothing plays or streams (Space plays it again)")),
         ("L", N_("Go live")),
         ("R", N_("Record the channel, or stop recording")),
         ("G", N_("Guide")),

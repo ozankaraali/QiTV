@@ -281,6 +281,28 @@ class StreamServerTests(unittest.TestCase):
         self.assertEqual(self.client(server.stream_url("s", 1)).read_to_eof(2.0), writer.stream(1))
         self.assertLess(time.monotonic() - started, 0.5)
 
+    def test_a_junction_segment_is_sent_with_its_own_header(self):
+        # 2.6: a kept buffer's new run may bring other tables (a new PMT after hours away):
+        # following on into a segment that begins a run sends its header too.
+        server = self.start_server()
+        ring = RamRing()
+        writer = Writer(ring)
+        writer.open(0)
+        writer.append(1000)
+        ring.open_segment(1, header(1), junction=True)
+        writer.seq, writer.written[1] = 1, bytearray()
+        writer.append(1500)
+        writer.open()
+        writer.append(700)
+        ring.complete(2)
+        server.add_session("s", ring, lambda: True)
+        expected = header(0) + bytes(writer.written[0]) + header(1)
+        expected += bytes(writer.written[1]) + bytes(writer.written[2])
+        self.assertEqual(self.client(server.stream_url("s", 0)).read_to_eof(2.0), expected)
+        self.assertTrue(ring.junction(1))
+        self.assertFalse(ring.junction(2))
+        self.assertFalse(ring.junction(9))
+
     def test_ended_session_with_an_unfinished_last_segment_still_closes(self):
         server = self.start_server()
         ended = threading.Event()

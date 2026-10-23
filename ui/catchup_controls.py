@@ -92,6 +92,7 @@ from services.connection_budget import DENIED
 from services.epg_view import Recording
 from services.i18n import N_, translate
 from services.jobs import JobRunner
+from services.live import parts as live_parts
 from services.live.tuning import channel_key
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from services.workers import ArchiveProbeWorker
@@ -327,13 +328,13 @@ class CatchUp(QObject):
         archive = self.offered(target)
         if archive is None:
             return state
-        start, edge = float(state["start"]), float(state["live_edge"])
+        start = float(state["start"])
         now = self._now().timestamp()
-        ring_wall = now - (edge - start)
+        ring_wall = live_parts.wall_in(state, start, now)  # 2.6: a kept buffer's own time
         bar_wall = max(ring_wall - EXTEND_S, now - archive.seconds + EDGE_S)
         if bar_wall >= ring_wall - 1.0:
             return state
-        return dict(state, start=edge - (now - bar_wall), buffer_start=start)
+        return dict(state, start=start - (ring_wall - bar_wall), buffer_start=start)
 
     # ---- opening --------------------------------------------------------------------------
 

@@ -82,7 +82,7 @@ class NamingTests(unittest.TestCase):
         self.assertEqual(recording.ended_text(ENDED, path, 10), saved)
         self.assertEqual(
             recording.ended_text(LIMIT, path, 10),
-            ("Recording stopped after 4 hours. Saved: One 2026-10-19 21.30.ts", "info"),
+            ("Recording stopped after 24 hours. Saved: One 2026-10-19 21.30.ts", "info"),
         )
         self.assertEqual(
             recording.ended_text(SPACE, path, 10)[0],

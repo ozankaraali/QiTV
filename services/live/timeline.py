@@ -9,6 +9,10 @@ segmenter's stall-free clock (`Segmenter.wall`), so a stalled source adds no tim
 
 Each span also says how cleanly playback can start at it (`Span.start_quality`, from the
 segmenter's `Closed.start_quality`), so a jump can prefer real keyframes.
+
+A kept buffer (2.6) is made of parts (`services.live.parts`): `begin_part(wall)` before a
+run's first segment opens starts one there, with the time of day it began. Eviction moves a
+part's start up with its oldest segment (its time with it) and drops a part left empty.
 """
 
 from __future__ import annotations
@@ -16,6 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from typing import Final, List, Literal, Optional
+
+from services.live.parts import Part
 
 PTS_TICKS_PER_SECOND = 90_000
 _PTS_MODULUS = 1 << 33
@@ -79,8 +85,14 @@ class Timeline:
         self._end = 0.0
         self._open: Optional[_Open] = None
         self._max_edge = 0.0
+        self._parts: List[Part] = []
+        self._part_wall: Optional[float] = None  # a part begins at the next opened segment
 
     # -- segment lifecycle -------------------------------------------------
+    def begin_part(self, wall: float) -> None:
+        """The next segment opened begins a part that started at `wall` (Unix seconds)."""
+        self._part_wall = wall
+
     def on_opened(
         self, seq: int, first_pts: Optional[int], wall: float, discontinuity: bool
     ) -> None:
@@ -88,6 +100,9 @@ class Timeline:
             log.warning("segment %r opened while %r was still open", seq, self._open.seq)
             # Its start quality came with its Closed, which never came: no jump lands there.
             self._close(self._open, None, wall, START_NONE, force_discontinuity=True)
+        if self._part_wall is not None:
+            self._parts.append(Part(seq, self._end, self._part_wall))
+            self._part_wall = None
         self._open = _Open(seq, first_pts, wall, discontinuity)
 
     def on_closed(
@@ -128,12 +143,52 @@ class Timeline:
         self._open = None
         return span
 
+    def restore(self, spans: List[Span], parts: List[Part]) -> None:
+        """Start from a kept buffer's spans and parts (2.6: a later helper took it back)."""
+        self._spans = list(spans)
+        self._end = self._spans[-1].end if self._spans else 0.0
+        self._max_edge = self._end
+        self._open = None
+        self._parts = list(parts)
+        self._part_wall = None
+        if self._spans:
+            self.on_evicted(self._spans[0].seq - 1)  # parts before the oldest span go or move
+
+    def drop_open(self) -> None:
+        """Forget the open segment (2.6: the ring could not take it); a part it began goes."""
+        opened, self._open = self._open, None
+        if opened is not None and self._parts and self._parts[-1].first_seq == opened.seq:
+            self._parts.pop()
+            self._part_wall = None
+
     def on_evicted(self, seq: int) -> None:
         self._spans = [span for span in self._spans if span.seq > seq]
+        parts: List[Part] = []
+        for i, part in enumerate(self._parts):
+            if part.first_seq > seq:
+                parts.append(part)
+                continue
+            limit = self._parts[i + 1].first_seq if i + 1 < len(self._parts) else None
+            held = [
+                s
+                for s in self._spans
+                if s.seq >= part.first_seq and (limit is None or s.seq < limit)
+            ]
+            if held:
+                first, start = held[0].seq, held[0].start
+            elif self._open is not None and limit is None:
+                first, start = self._open.seq, self._end  # only its open segment is left
+            else:
+                continue  # every segment of it is gone
+            parts.append(Part(first, start, part.wall + (start - part.start)))
+        self._parts = parts
 
     # -- queries -----------------------------------------------------------
     def spans(self) -> List[Span]:
         return list(self._spans)
+
+    def parts(self) -> List[Part]:
+        return list(self._parts)
 
     @property
     def start(self) -> float:

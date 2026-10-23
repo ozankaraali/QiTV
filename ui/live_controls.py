@@ -11,6 +11,11 @@ opens again in the same player, so in the same budget slot, twice per tune at mo
 RECONNECT_MS: "Reconnecting…", and only then "The stream ended"; once it has played for
 HEALTHY_S since it last opened, it may open again twice more.
 
+Kept buffers (2.6): coming back to a channel whose buffer was kept, it plays live and the
+session offers where the user was (`LiveSession.backOffered`): the Resume pill
+(ui/overlays/back_notice.py) says when for `BACK_NOTICE_MS`, until the channel changes; a click,
+Enter or the phone's Resume plays on from there (`go_back`).
+
 Recording (2.2): R and the record button record the time-shifted channel being watched from
 where it plays (rewound or not) into the Recordings folder (`services.recording`), or stop
 it; the record button is lit and the REC chip counts while the large picture's channel
@@ -43,6 +48,7 @@ from services import favorites, recording
 from services.catchup_memory import CatchupMemory
 from services.epg_view import Programme
 from services.i18n import N_, tr, tr_n, translate
+from services.live import parts as live_parts
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
@@ -51,11 +57,14 @@ from ui import item_provider
 from ui.catchup_controls import NO_RECORDING_TEXT, NOT_AVAILABLE_TEXT, CatchUp
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, LiveTuner
+from ui.overlays.back_notice import LEFT_OFF
+from ui.overlays.painting import fmt_clock
 from ui.overlays.transport import NO_RECORDING, Transport
 
 logger = logging.getLogger(__name__)
 
 LIVE_SEEK_S = 10.0  # ←/→ while time-shifting (spec §6.7)
+BACK_NOTICE_MS = 60_000  # 2.6: the Resume pill shows this long (the owner: "a minute or so")
 _PAST_BUFFER_S = 1.0  # a point this far before the buffer's start is the archive's
 _AT_START_S = 5.0  # ⏮ this near a programme's start goes to the one before (the archive)
 TICK_PROGRAMMES = 6  # programme starts marked on the time-shift bar
@@ -137,6 +146,7 @@ class LiveControls(QObject):
         prepare: Callable[[Any, Target], None] = lambda session, target: None,
         archive_allowed: Callable[[], bool] = lambda: True,
         runner: Any = None,
+        back_notice: Callable[[], Any] = lambda: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`explain(item, title)` asks why the failure just toasted happened at the item's
@@ -147,6 +157,12 @@ class LiveControls(QObject):
         its archive opens, `archive_allowed()` says whether archives may play now, `runner`
         runs the archive probes (a JobRunner by default)."""
         super().__init__(parent)
+        self._back_notice = back_notice  # 2.6: the Resume pill (None: none)
+        self._back: Optional[float] = None  # where the user was, while it is offered
+        self._back_label: Optional[str] = None
+        self._back_timer = QTimer(self, singleShot=True)
+        self._back_timer.timeout.connect(self.forget_back)
+        self._wired_notices: set[int] = set()
         self._may_reopen = may_reopen
         self._tuner = tuner
         self.live = live
@@ -216,14 +232,54 @@ class LiveControls(QObject):
                 (live.failed, self._on_live_failed),
                 (live.recordingChanged, self._on_recording_changed),
             ]
+            offered = getattr(live, "backOffered", None)
+            if offered is not None:
+                pairs.append((offered, self._on_back_offered))
         for signal, slot in pairs:
             if connect:
                 signal.connect(slot)
             else:
                 signal.disconnect(slot)
 
+    # ---- 2.6: where a channel come back to was left ---------------------------------------
+    def _on_back_offered(self, t: float, wall: float) -> None:
+        if self._closed():
+            return
+        self._back = t
+        self._back_label = fmt_clock(datetime.fromtimestamp(wall, timezone.utc).astimezone())
+        notice = self._back_notice()
+        if notice is not None:
+            if id(notice) not in self._wired_notices:
+                self._wired_notices.add(id(notice))
+                notice.keepWatching.connect(self.go_back)
+            notice.show_notice(translate(LEFT_OFF, time=self._back_label))
+        self._back_timer.start(BACK_NOTICE_MS)
+
+    def go_back(self) -> bool:
+        """Resume (the pill, Enter, the phone): play on from where the user was; False when
+        nothing is offered."""
+        back = self._back
+        if back is None or self.live is None:
+            return False
+        self.forget_back()
+        self.live.go_back_to(back)
+        self._show_transport()
+        return True
+
+    def back_label(self) -> Optional[str]:
+        """When the channel was left ("20:10") while Resume is offered; else None."""
+        return self._back_label if self._back is not None else None
+
+    def forget_back(self) -> None:
+        self._back = self._back_label = None
+        self._back_timer.stop()
+        notice = self._back_notice()
+        if notice is not None:
+            notice.hide()
+
     def use_slot(self, tuner: LiveTuner, live: Optional[LiveSession], session) -> None:
         """The large picture is another player's now (a PiP swap): act on its stream."""
+        self.forget_back()
         if self._wired:
             self._connect(False)
         self._tuner, self.live, self.session = tuner, live, session
@@ -236,7 +292,9 @@ class LiveControls(QObject):
     # ---- tuning -------------------------------------------------------------------------------
 
     def new_target(self) -> None:
-        """A new target plays: the old channel's ticks, reopen and archive are gone."""
+        """A new target plays: the old channel's ticks, reopen and archive are gone, and so is
+        the Resume pill (2.6)."""
+        self.forget_back()
         self._forget_channel()
         self.catchup.reset()
 
@@ -454,14 +512,18 @@ class LiveControls(QObject):
         transport.update_timeline(state, self._ticks)
 
     def _programme_ticks(self, channel: dict, state: dict) -> list[tuple[float, str]]:
-        """Programme starts in timeline seconds: the live edge is now (as the transport)."""
-        now = self._now()
-        edge = float(state["live_edge"])
-        since = now - timedelta(seconds=max(0.0, edge - float(state["start"])))
-        return [
-            (edge - (now - p.start).total_seconds(), p.title)
-            for p in self._programmes(channel, since, TICK_PROGRAMMES)
-        ]
+        """Programme starts in timeline seconds: the live edge is now (as the transport), and
+        a kept buffer's older parts are placed by their own time (2.6; a programme that began
+        where nothing was kept has no tick)."""
+        stamp = self._now().timestamp()
+        oldest = live_parts.wall_in(state, float(state["start"]), stamp)
+        since = datetime.fromtimestamp(min(oldest, stamp), timezone.utc)
+        ticks = []
+        for p in self._programmes(channel, since, TICK_PROGRAMMES):
+            t = live_parts.t_in(state, p.start.timestamp(), stamp)
+            if t is not None:
+                ticks.append((t, p.title))
+        return ticks
 
     def _on_live_notice(self, text: str) -> None:
         if self._closed():
@@ -596,13 +658,17 @@ class LiveControls(QObject):
         return t < float(state["start"]) - _PAST_BUFFER_S and self._open_archive_at(state, t)
 
     def _open_archive_at(self, state: dict, t: float) -> bool:
-        """The channel's archive at the time-shift timeline's `t` (its live edge is now)."""
+        """The channel's archive at the time-shift timeline's `t` (its live edge is now; 2.6:
+        a kept buffer's older parts by their own time)."""
+        return self._open_archive_moment(live_parts.wall_in(state, t, self._now().timestamp()))
+
+    def _open_archive_moment(self, moment: float) -> bool:
+        """The channel's archive from `moment` (Unix seconds)."""
         current = self._current()
         if current is None or self.catchup.offered(current) is None:
             if self.catchup.known_failed(current):
                 self._toast(translate(NOT_AVAILABLE_TEXT))
             return False
-        moment = self._now().timestamp() - (float(state["live_edge"]) - t)
         return self.catchup.open(current, moment)
 
     def _set_speed(self, rate: float) -> None:
@@ -633,15 +699,20 @@ class LiveControls(QObject):
             return
         if not self.pipeline_live() or self.live is None or current is None or state is None:
             return
-        now = self._now()
-        edge, oldest = float(state["live_edge"]), float(state["start"])
-        watching = now - timedelta(seconds=max(0.0, edge - float(state["position"])))
+        stamp = self._now().timestamp()
+        oldest = float(state["start"])
+        moment = min(live_parts.wall_in(state, float(state["position"]), stamp), stamp)
+        watching = datetime.fromtimestamp(moment, timezone.utc)
         target = oldest
         for programme in self._programmes(current.item, watching, 1):
-            start = edge - (now - programme.start).total_seconds()
-            if programme.is_on(watching) and start >= oldest:
+            if not programme.is_on(watching):
+                continue
+            # Where it began on the timeline (2.6: by its part; None: where nothing was kept).
+            begin = programme.start.timestamp()
+            start = live_parts.t_in(state, begin, stamp)
+            if start is not None and start >= oldest:
                 target = start
-            elif programme.is_on(watching) and self._open_archive_at(state, start):
+            elif self._open_archive_moment(begin):
                 self._show_transport()
                 return
         self.catchup.cancel()

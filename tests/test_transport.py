@@ -119,6 +119,7 @@ class TransportCase(unittest.TestCase):
         t.update_position(0, 100_000)
         cases = {
             "play": t.playPauseRequested,
+            "stop": t.stopRequested,  # 2.6
             "fullscreen": t.fullscreenRequested,
             "audio": t.audioRequested,
             "subtitles": t.subtitleRequested,
@@ -131,6 +132,15 @@ class TransportCase(unittest.TestCase):
         self.click(t, t.button_rect("back10").center().toPoint())
         self.click(t, t.button_rect("fwd10").center().toPoint())
         self.assertEqual([spy.at(0)[0], spy.at(1)[0]], [-10_000, 10_000])
+
+    def test_stop_sits_beside_play_on_live_tv_too(self):  # 2.6
+        t = self.make()
+        t.show_live("One", "")
+        play, stop = t.button_rect("play"), t.button_rect("stop")
+        self.assertGreater(stop.left(), play.right())
+        spy = QSignalSpy(t.stopRequested)
+        self.click(t, stop.center().toPoint())
+        self.assertEqual(spy.count(), 1)
 
     def test_mini_player_and_second_channel_buttons_sit_left_of_fullscreen(self):
         # Clickable controls for both pictures-in-picture.

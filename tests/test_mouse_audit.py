@@ -75,6 +75,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     # Movies and a channel behind live: ◀10 10▶; at a time-shifted channel's live edge: ◀10.
     ("player", "Left, Right"): (("transport", "back10"), ("transport", "fwd10")),
     ("player", "Space"): (("transport", "play"),),
+    ("player", "X"): (("transport", "stop"),),  # 2.6: ■ beside ▶
     ("player", "L"): (("transport", "golive"),),
     # The record button after the channel's star (2.2): lit while it records, dimmed on a
     # channel played directly (a press says why).

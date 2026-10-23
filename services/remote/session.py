@@ -24,6 +24,7 @@ from services.remote.protocol import (
     MAX_MESSAGE,
     MAX_RATE,
     PROTO,
+    Answered,
     Closed,
     Forgot,
     Get,
@@ -34,6 +35,7 @@ from services.remote.protocol import (
     Position,
     Press,
     Query,
+    RecAct,
     StoreSaved,
     ToTv,
     WatchHere,
@@ -280,6 +282,10 @@ class Session:
             return Reply(events=[ToTv(sid)])
         if t == "pos":
             return Reply(events=[Position(sid, m["ms"], m["len"])])
+        if t == "answer":
+            return Reply(events=[Answered(sid, m["id"], m["yes"])])
+        if t == "rec":
+            return Reply(events=[RecAct(sid, m["id"], m["do"])])
         # "forget": the phone leaves for good.
         device_id = self._device_id or ""
         self._store.remove_device(device_id)

@@ -1,7 +1,7 @@
 // The second screen: what QiTV says is on, the guide, the search's results and the Library,
 // drawn from QiTV's snapshots (ui/remote_snapshots.py). Taps send back the opaque handles QiTV
 // gave; nothing here knows a stream's address. Also the d-pad's touchpad mode.
-import app, { banner, nameField, press, release, send, show, t, tap } from "./app.js";
+import app, { banner, closeSheets, menuItem, nameField, openSheet, press, release, send, show, t, tap } from "./app.js";
 import * as store from "./store.js";
 
 const $ = (id) => document.getElementById(id);
@@ -50,6 +50,11 @@ const words = {
   film_sound: "This film's sound doesn't play on a phone. Tap TV to watch it there.",
   film_relay: "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).",
   film_provider: "The film didn't open. Tap TV to watch it there.",
+  back_to: "Resume · {time}",
+  rec: "REC",
+  go_back: "Go back to {channel}",
+  stop_recording: "Stop recording",
+  recording_kept: "The recording goes on: nothing opened on this phone",
 };
 const w = (key) => (t(key) === key ? words[key] || key : t(key));
 
@@ -136,7 +141,79 @@ function onState(message) {
     pip.classList.toggle("on", !!message.pip); // a small picture shows: the button closes it
     pip.querySelector("span").textContent = w(message.pip ? "close_pip" : "pip");
   }
+  const back = $("backTo"); // 2.6: the TV offers where the channel come back to was left
+  if (back) {
+    back.hidden = !message.back;
+    if (message.back) $("backToText").textContent = w("back_to").replace("{time}", message.back);
+  }
+  recordings = Array.isArray(message.rec) ? message.rec : [];
+  drawRec();
   followTv(now && now.kind === "live" ? liveKey(now.num, now.name) : "");
+}
+
+// ---- 2.6: what records in the background, and QiTV's question --------------------------
+
+let recordings = []; // [{id, name, since}] from the TV's state
+let askId = null; // the number of the question shown, which the answer carries back
+
+function recClock(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+  const rest = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${m}:${rest}` : `${m}:${rest}`;
+}
+
+function drawRec() {
+  const line = $("recLine");
+  if (!line) return;
+  line.hidden = recordings.length === 0;
+  if (!recordings.length) return;
+  $("recName").textContent = recordings.map((r) => r.name).join(", ");
+  const one = recordings.length === 1 && Number(recordings[0].since) > 0;
+  $("recTime").textContent = one ? recClock(Date.now() / 1000 - Number(recordings[0].since)) : "";
+}
+
+function openRecMenu() {
+  const list = $("menuList");
+  list.replaceChildren();
+  $("menuTitle").textContent = w("rec");
+  for (const r of recordings) {
+    list.append(menuItem(w("go_back").replace("{channel}", r.name), () => send({ t: "rec", id: r.id, do: "back" })));
+    list.append(menuItem(w("stop_recording"), () => send({ t: "rec", id: r.id, do: "stop" }), "danger"));
+  }
+  openSheet("menuSheet");
+}
+
+function onAsk(message) {
+  if (typeof message.id !== "number") return;
+  closeSheets();
+  askId = message.id;
+  $("askText").textContent = message.text || "";
+  $("askYes").textContent = message.yes || "";
+  $("askNo").textContent = message.no || "";
+  openSheet("askSheet");
+  if (navigator.vibrate) navigator.vibrate(12);
+}
+
+function answer(yes) {
+  if (askId === null) return;
+  send({ t: "answer", id: askId, yes });
+  askId = null;
+  closeSheets();
+}
+
+function onUnask(message) {
+  if (message.id !== askId) return;
+  askId = null;
+  closeSheets();
+}
+
+function bindRec() {
+  $("recLine").addEventListener("click", openRecMenu);
+  $("askYes").addEventListener("click", () => answer(true));
+  $("askNo").addEventListener("click", () => answer(false));
+  $("veil").addEventListener("click", () => answer(false)); // tapped away: nothing stops
 }
 
 function drawNow() {
@@ -890,7 +967,7 @@ function startHere() {
 }
 
 // Why a film doesn't play here (QiTV's films.py and remote_controller.py say).
-const FILM_WHY = { format: "film_format", sound: "film_sound", relay: "film_relay", provider: "film_provider" };
+const FILM_WHY = { format: "film_format", sound: "film_sound", relay: "film_relay", provider: "film_provider", recording: "recording_kept" };
 
 function onPlay(message) {
   const url = typeof message.url === "string" ? message.url : "";
@@ -991,6 +1068,8 @@ app.handlers.genres = onGenres;
 app.handlers.library = onLibrary;
 app.handlers.play = onPlay;
 app.handlers.stop = onStop;
+app.handlers.ask = onAsk;
+app.handlers.unask = onUnask;
 app.handlers["tab:guide"] = openGuide;
 app.handlers["tab:library"] = openLibrary;
 app.menuExtras.push(() => {
@@ -1013,7 +1092,9 @@ export function install() {
   useTouchpad(store.setting("dpad", "buttons") === "touchpad");
   bindChannelList();
   bindHere();
+  bindRec();
   setInterval(() => {
     if (current && !document.hidden) drawNow();
+    if (recordings.length && !document.hidden) drawRec();
   }, 1000);
 }

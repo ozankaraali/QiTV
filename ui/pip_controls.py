@@ -52,7 +52,7 @@ from services.live.live_session import LOADING, RECONNECTING, UNAVAILABLE
 from services.live.refusals import STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
-from services.sessions import SessionManager, Slot, limit_message
+from services.sessions import SessionManager, Slot, limit_message, records
 from services.vlc_profile import PlayKind
 from services.zapping import ZapContext
 from ui import item_provider, live_controls
@@ -131,6 +131,7 @@ class PipControls(QObject):
         toggle_mute: Callable[[], None],
         sound: Optional[Callable[[Any, dict], None]] = None,
         explain: Callable[[dict, str], None] = lambda item, title: None,
+        needs_stream: Callable[[dict, str, Callable[[], None]], bool] = lambda *_: False,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
@@ -142,6 +143,8 @@ class PipControls(QObject):
         play in an external player (it holds the provider's stream); `swap()` the shell's swap
         (False when it has to wait); `toggle_mute()` mutes or unmutes the small picture;
         `sound(player, channel)` gives a channel opening small its sound sync (2.2).
+        `needs_stream(channel, purpose, then)` asks before a recording is stopped for the
+        stream a channel opening over `purpose`'s needs (2.6): True, asked (`then` follows).
         """
         super().__init__(parent)
         self.sessions = sessions
@@ -166,6 +169,7 @@ class PipControls(QObject):
         self._toggle_mute = toggle_mute
         self._sound = sound
         self._explain = explain  # why a failure happened, at the item's provider
+        self._needs_stream = needs_stream
         self._views: dict[str, SlotView] = {}
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
@@ -189,6 +193,8 @@ class PipControls(QObject):
         sessions.denied.connect(self._on_denied)
         sessions.pipFailed.connect(self._on_failed)
         sessions.slotTimeline.connect(self._on_timeline)
+        sessions.setAside.connect(self._on_set_aside)
+        sessions.shownSmall.connect(lambda _name: self.follow_roles())
         for slot in sessions.slots():
             self.watch_slot(slot)
         self._lanes.sideFailed.connect(self._on_link_failed)
@@ -356,6 +362,13 @@ class PipControls(QObject):
             return
         if self.small_showing(channel) is not None:
             return  # already small
+        background = self.sessions.background_showing(channel)
+        if background is not None:
+            self._show_background(background.name, context)
+            return
+        purpose = str(getattr(self.sessions.other().tuner, "purpose", ""))
+        if self._needs_stream(channel, purpose, lambda: self.open_channel(channel, context)):
+            return  # no stream is free while a recording holds one: asked
         if self._limit_reached(channel):
             return
         title = str(channel.get("name") or "")
@@ -495,16 +508,57 @@ class PipControls(QObject):
         self._toast(limit_message(limit), "error", ERROR_MS)
         return True
 
-    def close(self) -> None:
-        """Close the small picture, or forget the one waiting to open."""
+    def close(self, *, keep_recording: bool = True) -> None:
+        """Close the small picture, or forget the one waiting to open. 2.6: a small picture
+        that records records on in the background, unless not `keep_recording` (the quit)."""
         if self._room is not None and self._room.close_small:
             self._room = None  # closed already: nothing to close, or say, for the title
         self._wanted = None
         self._link = None  # a late link for it is ignored (it is no longer `_link`)
         self._cancel_reopen()
         sessions = self.sessions
+        if keep_recording:
+            self._set_small_aside()
         if sessions.pip_open() or sessions.pip_opening():
             sessions.close_pip()
+
+    # ---- 2.6: recordings in the background ----------------------------------------------------
+
+    def follow_roles(self) -> None:
+        """A player went to the background or came back: the frame shows the large and the
+        small player (a background one's surface hides) and the label follows."""
+        if self._frame is not None:
+            sessions = self.sessions
+            self._frame.set_roles(sessions.large().name, sessions.other().name)
+        self._refresh_label()
+        self.changed.emit()
+
+    def _set_small_aside(self) -> None:
+        """The open small picture records: it records on in the background (another player
+        is the small picture's)."""
+        small = self.sessions.small()
+        if small is not None and records(small):
+            self.sessions.set_aside(small.name)
+
+    def _show_background(self, name: str, context: Optional[ZapContext]) -> None:
+        """The channel background player `name` records shows small: no stream opens."""
+        self._wanted = None
+        self._link = None
+        self._cancel_reopen()
+        self._set_small_aside()
+        if context is not None:
+            self.view(name).context = context
+        if self.sessions.show_small(name):
+            self.sessions.slot(name).live.bring_back()
+
+    def _on_set_aside(self, name: str, fresh: str) -> None:
+        """Slot `name` records on in the background: when `fresh` took the small role, the
+        frame and the label follow (the large role is the shell's to follow)."""
+        if fresh != self.sessions.other().name:
+            return
+        self.forget_view(fresh)  # it shows nothing yet; `name`'s view stays for its return
+        self.sessions.slot(name).live.set_aside()
+        self.follow_roles()
 
     def _request(self, target: Target) -> None:
         if self._link is not None:
@@ -544,6 +598,7 @@ class PipControls(QObject):
 
     def _open(self, target: Target, context: ZapContext, url: str) -> None:
         sessions = self.sessions
+        self._set_small_aside()  # 2.6: a small picture that records records on
         slot = sessions.other()
         self._views[slot.name] = SlotView(target, context, url)
         self._closed_view = None

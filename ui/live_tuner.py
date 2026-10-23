@@ -43,6 +43,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from services.budgeted_stream import BudgetedStream, HeldSlot
 from services.config_manager import ConfigManager
 from services.connection_budget import ConnectionBudget
+from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
 from services.playback import Session
 
@@ -103,7 +104,11 @@ def one_disk_ring(*tuners: "LiveTuner") -> None:
     every tuner when one is added (a multiview tile's)."""
 
     def allowed(others: list[LiveTuner]) -> Callable[[], bool]:
-        return lambda: not any(other.on_disk() for other in others)
+        # 2.6: a recording in the background or a kept disk buffer taken back does not
+        # count: the disk amount is the total of every disk buffer (the helper's DiskBudget).
+        return lambda: not any(
+            other.on_disk() and not other.background and not other.kept_disk() for other in others
+        )
 
     for tuner in tuners:
         tuner.set_disk_allowed(allowed([other for other in tuners if other is not tuner]))
@@ -142,6 +147,7 @@ class LiveTuner(QObject):
         self.budget = budget if budget is not None else ConnectionBudget(self)
         self.purpose = purpose
         self.timeline: Optional[dict] = None  # the running tune's last timelineChanged state
+        self.background = False  # 2.6: its slot records in the background (SessionManager)
         self._pending: Optional[LiveStart] = None  # a tune waiting for its slot or the release
         self._disk_allowed: Callable[[], bool] = lambda: True
         # The pipeline tune's budget slot, its start and the wait for its release.
@@ -180,6 +186,11 @@ class LiveTuner(QObject):
         if self._stream is not None:
             self._stream.set_purpose(purpose)
 
+    def set_kept(self, kept: Optional[KeptBuffers]) -> None:
+        """2.6: where its stops keep the channel's buffer, and its tunes find their own."""
+        if self._stream is not None:
+            self._stream.kept = kept
+
     def set_disk_allowed(self, allowed: Callable[[], bool]) -> None:
         """Whether a tune may keep its time-shift on disk now (False: another picture
         does: the user's disk cap is the total, so this one stays in memory)."""
@@ -197,6 +208,11 @@ class LiveTuner(QObject):
         """The running stream keeps its time-shift on disk."""
         stream = self._stream
         return stream is not None and stream.running() and stream.disk
+
+    def kept_disk(self) -> bool:
+        """2.6: the running stream's disk is a kept buffer it took back, not its tune's ask."""
+        stream = self._stream
+        return stream is not None and stream.running() and stream.disk and not stream.asked_disk
 
     def releasing(self) -> bool:
         """A stopped stream of this player may still hold the provider (`released` follows)."""

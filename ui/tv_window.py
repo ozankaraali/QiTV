@@ -76,6 +76,7 @@ from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
 from services.live.engine import LiveEngine
+from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
 from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
 from services.navigation import NavModel
@@ -94,7 +95,7 @@ from services.sessions import SessionManager, Slot
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
 from services.thread_cleanup import has_pending_threads
-from services.update_checker import call_before_update
+from services.update_checker import call_before_update, set_quit_note
 from services.watch_state import WatchState
 from services.zapping import ZapController
 from ui import macos_window, provider_drop
@@ -110,6 +111,7 @@ from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
 from ui.overlay_host import OverlayHost
+from ui.overlays.back_notice import BackNotice
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.corner_controls import CornerControls
 from ui.overlays.drawer import Drawer
@@ -119,9 +121,12 @@ from ui.overlays.layout_row import LayoutRow
 from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
 from ui.overlays.pip_label import PipLabel
+from ui.overlays.question_card import QuestionCard
+from ui.overlays.rec_sign import RecSign
 from ui.overlays.remote_pair import PairOverlay
 from ui.overlays.sleep_notice import SleepNotice
 from ui.overlays.stats import StatsOverlay
+from ui.overlays.stopped_notice import StoppedNotice
 from ui.overlays.subtitle_search import SubtitleSearchPage
 from ui.overlays.toast import Toast
 from ui.overlays.track_panel import TrackPanel
@@ -380,6 +385,8 @@ class TVWindow(QMainWindow):
         self.posters = PosterCache(image_manager, config_manager, self)
         self.library_page = LibraryScreen(self.posters, self.logos)
         self.library_toast = Toast(self.library_page)  # the overlay host hides with the player
+        self.library_question = QuestionCard(self.library_page)  # 2.6: stop a recording?
+        self.library_rec_sign = RecSign(self.library_page, bottom=True)  # 2.6: recordings on
         # Both pages are always the stack's children: the player page is the whole picture, the
         # Library, or a small one in a corner over the Library while it plays on.
         self.pages = PageStack(self.player_page, self.library_page, config_manager, self)
@@ -424,6 +431,7 @@ class TVWindow(QMainWindow):
         self.pip_live: Optional[LiveSession] = None
         self.live_tuning: Optional[LiveTuning] = None
         self.sessions: Optional[SessionManager] = None
+        self.kept: Optional[KeptBuffers] = None
         self.budget = ConnectionBudget(self)
         if self._instance is None:
             logger.warning("libVLC is unavailable: channels cannot play")
@@ -443,12 +451,17 @@ class TVWindow(QMainWindow):
             self.live_session = LiveSession(self.engine, self.session, tuning=self.live_tuning)
             self.pip_live = LiveSession(self.engine, self.pip_session, tuning=self.live_tuning)
             self.engine.start()
+            # 2.6: the buffers of the channels left, for every player (and those kept on disk
+            # before a restart, taken back by the helper).
+            self.kept = KeptBuffers(self.engine)
+            self._take_kept_back()
             self.sessions = SessionManager(
                 self._slot("main", self.session, self.live_session),
                 self._slot("pip", self.pip_session, self.pip_live),
                 self.budget,
                 parent=self,
             )
+            self.sessions.set_slot_factory(self._make_slot)  # 2.6: recordings' stand-ins
             self._join_tuners()
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
         # Each channel's sound sync (J/K, the Sound panel), written off the GUI thread.
@@ -490,6 +503,10 @@ class TVWindow(QMainWindow):
         self.picture_panel = TrackPanel(host)
         self.stats_overlay = StatsOverlay(host)
         self.sleep_notice = SleepNotice(host)
+        self.back_notice = BackNotice(host)  # 2.6: Resume, where a channel was left
+        self.question_card = QuestionCard(host)  # 2.6: stop a recording for a stream?
+        self.rec_sign = RecSign(host)  # 2.6: recordings in the background
+        self.stopped_notice = StoppedNotice(host)  # 2.6: after Stop, Play again
         self.pair_overlay = PairOverlay(host)  # the phone remote's pairing QR
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
@@ -513,6 +530,12 @@ class TVWindow(QMainWindow):
             picture_panel=self.picture_panel,
             stats=self.stats_overlay,
             sleep_notice=self.sleep_notice,
+            back_notice=self.back_notice,
+            question=self.question_card,
+            library_question=self.library_question,
+            rec_sign=self.rec_sign,
+            library_rec_sign=self.library_rec_sign,
+            stopped_notice=self.stopped_notice,
             pairing=self.pair_overlay,
             library_toast=self.library_toast,
             layout_row=self.layout_row,
@@ -527,7 +550,7 @@ class TVWindow(QMainWindow):
         # layouts over it (above their buttons). The statistics sit over the transport, under
         # its title row (they take no click). The drawer and the guide cover them all; the
         # OpenSubtitles search covers the player with its backdrop, under the corner player's
-        # controls, the sleep timer's last minute and the toast.
+        # controls, the sleep timer's last minute, Resume and the question (2.6) and the toast.
         for overlay in (
             self.grid_tiles,
             self.overlays.banner,
@@ -548,6 +571,10 @@ class TVWindow(QMainWindow):
             self.subtitle_search,
             self.corner_controls,
             self.sleep_notice,
+            self.back_notice,
+            self.stopped_notice,
+            self.rec_sign,
+            self.question_card,
             self.pair_overlay,
             self.overlays.toast,
         ):
@@ -649,6 +676,7 @@ class TVWindow(QMainWindow):
         # The corner player (the Library with what plays in a corner of it): ⤢ and a click on
         # it bring the player back, × stops it, the speaker mutes.
         self.pages.modeChanged.connect(self._on_page_mode)
+        self.pages.modeChanged.connect(self.controller.page_changed)  # 2.6: a question goes along
         # The Library (its corner player) lays the player out: a floating picture comes back.
         self.pages.modeChanged.connect(lambda *_: self.desktop_pip.dock())
         self.pages.cornerClicked.connect(self.screens.back_to_player)
@@ -678,6 +706,7 @@ class TVWindow(QMainWindow):
         # A self-update (Windows, a macOS disk image) waits for background threads: the
         # engine's must stop first, and start again if the update cannot launch.
         call_before_update(self.stop_live, self.restart_live)
+        set_quit_note(self.controller.quit_note)  # 2.6: an update asks before it stops recordings
         sources = (*self.surfaces.values(), self.host)
         # The pointer over the video goes with the player controls (and comes back on a move).
         self.pointer = PointerHider(
@@ -710,6 +739,8 @@ class TVWindow(QMainWindow):
         live_tuners = [t for t in tuners if isinstance(t, LiveTuner)]
         one_disk_ring(*live_tuners)
         wait_for_each_other(*live_tuners)
+        for tuner in live_tuners:
+            tuner.set_kept(self.kept)  # every player keeps the buffer of the channel it leaves
 
     def _wire_source(self, source) -> None:
         """A surface (or the host over them): its clicks, moves, wheel and side buttons."""
@@ -890,6 +921,8 @@ class TVWindow(QMainWindow):
     def _act(self, action: Action, payload: str, key: int) -> None:
         if action is Action.ESCAPE and self.exports.cancel():
             return  # Esc while exporting cancels the export
+        if self.controller.answer_key(action):
+            return  # 2.6: QiTV asks (stop a recording?): its answers' keys, on every page
         if self.screens.library_shown():
             handled = self.library_controller.handle(action, payload)
             if not handled and action is Action.FULLSCREEN:
@@ -1428,6 +1461,11 @@ class TVWindow(QMainWindow):
             logger.warning("Couldn't save the settings: %s", safe_message(e))
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
         self.controller.settings_saved()
+        if self.kept is not None:
+            # The disk buffer off: what was kept on disk goes, and what is left later too.
+            self.kept.set_disk(self.config_manager.timeshift_enabled)
+            if self.engine is not None and not self.config_manager.timeshift_enabled:
+                self.engine.drop_kept()
         self.remote.apply_config()
 
     def set_provider(self, force_update: bool = False) -> None:
@@ -1504,6 +1542,18 @@ class TVWindow(QMainWindow):
                 self._bound[name] = handle
                 player.set_window(handle)
 
+    def _come_forward(self) -> None:
+        """The window in front, not minimized, its picture back from the desktop's."""
+        try:
+            self.desktop_pip.dock()
+        except Exception as e:  # never in the way of the question
+            logger.warning("Could not put the floating picture back: %s", safe_message(e))
+        if self.isMinimized():
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """Close in steps, each after the event loop ran again (`close_retry`).
 
@@ -1523,6 +1573,10 @@ class TVWindow(QMainWindow):
             return
         if self._closing and not self._stepping:
             event.ignore()
+            return
+        if not self._closing and self.controller.asks_before_quit(self.close):
+            event.ignore()  # 2.6: channels record: Quit stops them and closes again
+            self._come_forward()  # the question shows where it can be answered
             return
         if not self._closing:
             self._closing = True
@@ -1603,11 +1657,24 @@ class TVWindow(QMainWindow):
         old, self.engine = self.engine, LiveEngine(str(self.engine.root_dir), self)
         for live in self._lives():
             live.use_engine(self.engine)  # connected before it starts
+        if self.kept is not None:
+            self.kept.use_engine(self.engine)
+            self._take_kept_back()
         self.engine.start()
         old.deleteLater()
         call_before_update(self.stop_live, self.restart_live)  # each hook runs once
         logger.info("The update did not launch; time-shift is back on.")
         self.controller.resume_stopped()  # what played before plays again
+
+    def _take_kept_back(self) -> None:
+        """The disk buffers kept before (2.6): taken back with the disk buffer on, else gone."""
+        config = self.config_manager
+        if self.engine is None:
+            return
+        if config.timeshift_enabled:
+            self.engine.adopt_kept(int(config.timeshift_max_mib) * 1024 * 1024)
+        else:
+            self.engine.drop_kept()
 
     def _lives(self) -> list[LiveSession]:
         if self.sessions is None:

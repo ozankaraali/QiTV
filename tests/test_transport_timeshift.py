@@ -9,7 +9,7 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
-from ui.overlays.transport import Transport, fmt_behind
+from ui.overlays.transport import GAP_PX, Transport, fmt_behind
 from ui.theme import PALETTE
 
 # 19:42 local time, as an aware datetime: the buffer below starts 58 minutes earlier (18:44).
@@ -467,3 +467,68 @@ class TimeShiftCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# 2.6: a kept buffer of two parts: 30 s kept at 16:42, then 90 s since 19:40 (now 19:42).
+W0 = NOW.timestamp() - 3 * 3600
+W1 = NOW.timestamp() - 90
+PARTED = timeline(
+    start=0.0,
+    end=120.0,
+    live_edge=120.0,
+    position=10.0,
+    lag=110.0,
+    parts=[[0, 0.0, W0], [15, 30.0, W1]],
+    behind=NOW.timestamp() - (W0 + 10.0),
+)
+
+
+class GapTests(TimeShiftCase):
+    """2.6: the bar shows where nothing was kept, and the real times on either side."""
+
+    def parted(self):
+        t = self.make()
+        t.show_timeshift("104", "Nature")
+        t.update_timeline(PARTED, [])
+        return t
+
+    def test_buffer_from_is_the_oldest_parts_time(self):
+        self.assertEqual(self.parted().texts()[0], "Buffer from 16:42")
+
+    def test_behind_live_counts_the_time_away(self):
+        self.assertEqual(self.parted().texts()[1], "−2:59:50 behind live")
+
+    def test_the_bubble_shows_the_moment_watched(self):
+        self.assertEqual(self.parted().bubble_text(), "16:42:10")
+
+    def test_the_gap_has_its_room_on_the_bar(self):
+        t = self.parted()
+        width = t.seek_rect().width()
+        jump = t.fraction_of(30.0) - t.fraction_of(29.999)
+        self.assertAlmostEqual(jump * width, GAP_PX, delta=0.5)
+        self.assertAlmostEqual(t.fraction_of(0.0), 0.0)
+        self.assertAlmostEqual(t.fraction_of(120.0), 1.0)
+
+    def test_a_click_in_the_gap_seeks_to_the_next_part(self):
+        t = self.parted()
+        to = QSignalSpy(t.seekToRequested)
+        r = t.seek_rect()
+        x = r.x() + r.width() * t.fraction_of(30.0) - GAP_PX / 2
+        self.click(t, QPoint(round(x), round(r.center().y())))
+        self.assertEqual(to.count(), 1)
+        self.assertEqual(to.at(0)[0], 30.0)
+
+    def test_a_click_either_side_maps_within_its_part(self):
+        t = self.parted()
+        to = QSignalSpy(t.seekToRequested)
+        r = t.seek_rect()
+        x = r.x() + r.width() * t.fraction_of(75.0)
+        self.click(t, QPoint(round(x), round(r.center().y())))
+        self.assertAlmostEqual(to.at(0)[0], 75.0, delta=0.5)
+
+    def test_one_part_is_the_bar_as_before(self):
+        t = self.make()
+        t.show_timeshift("104", "Nature")
+        t.update_timeline(timeline(parts=[[0, 0.0, W0]], behind=12345.0), [])
+        self.assertEqual(t.texts(), ("Buffer from 18:44", "−00:38 behind live"))
+        self.assertAlmostEqual(t.fraction_of(1740.0), 0.5)

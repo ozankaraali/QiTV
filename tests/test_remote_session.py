@@ -6,6 +6,7 @@ from services.remote.noise import Keypair
 from services.remote.pairing import RemoteStore
 from services.remote.protocol import (
     MAX_MESSAGE,
+    Answered,
     Closed,
     Forgot,
     Get,
@@ -16,6 +17,7 @@ from services.remote.protocol import (
     Position,
     Press,
     Query,
+    RecAct,
     StoreSaved,
     ToTv,
     WatchHere,
@@ -211,6 +213,8 @@ class KkTests(SessionCase):
             {"t": "get", "what": "sources", "n": 2},
             {"t": "get", "what": "chgroups", "source": "g1a", "n": 3},
             {"t": "pos", "ms": 61000, "len": 5400000},
+            {"t": "answer", "id": 2, "yes": False},
+            {"t": "rec", "id": "b1", "do": "back"},
         ):
             got += session.receive(phone.seal(message)).events
         self.assertEqual(
@@ -229,6 +233,8 @@ class KkTests(SessionCase):
                 Get(sid, "sources", "", 0, n=2),
                 Get(sid, "chgroups", "", 0, n=3, source="g1a"),
                 Position(sid, 61000, 5400000),
+                Answered(sid, 2, False),
+                RecAct(sid, "b1", "back"),
             ],
         )
 

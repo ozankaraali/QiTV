@@ -331,6 +331,16 @@ class TVWindowTests(WindowCase):
         catalog.assert_called_once_with()
         library.assert_called_once_with()
 
+    def test_quitting_while_recording_asks_in_front(self):  # Stage C review M6
+        window = self.window
+        self.show()
+        window.showMinimized()
+        with mock.patch.object(window.controller, "asks_before_quit", return_value=True) as asks:
+            window.close()
+        asks.assert_called_once()
+        self.assertFalse(window.isMinimized())  # the question shows where it can be answered
+        self.assertFalse(window._closing)
+
     def test_close_saves_the_window_geometry(self):
         self.show()
         self.window.setGeometry(150, 120, 960, 540)
@@ -507,6 +517,7 @@ class TVWindowTests(WindowCase):
             shortcuts(menus["Playback"]),
             [
                 ("Play/Pause", "Space"),
+                ("Stop", "X"),  # 2.6
                 ("Mute", "M"),
                 ("Previous Channel", "Backspace"),
                 ("Go Live", "L"),

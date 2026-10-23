@@ -24,6 +24,7 @@ from services.live.recorder import (
     FAILED,
     FOLDER,
     LIMIT,
+    MAX_SECONDS,
     SPACE,
     STOPPED,
     WRITE,
@@ -368,6 +369,107 @@ class RecorderTests(RecorderCase):
         recorder = self.record(0, ring_of=lambda: None)
         self.assertEqual(self.finish(recorder), (FAILED, "", 0))
         self.assertFalse(self.folder.exists())
+
+
+class RecordedReadTests(RecorderCase):
+    """2.6: a recording knows where each segment sits in its file, so what the buffer let go of
+    still plays back from it while it records; a recording stops after a day."""
+
+    def test_a_day_is_the_limit(self):
+        self.assertEqual(MAX_SECONDS, 24 * 60 * 60.0)
+
+    def test_each_segment_reads_back_as_the_ring_served_it(self):
+        self.segments(3)  # 0, 1 and 2 closed, 3 open
+        served = {seq: self.whole(seq) for seq in range(3)}
+        recorder = self.record(0)
+        self.writer.append(2000)
+        self.writer.open()  # 4
+        self.wait_written(recorder, len(self.writer.stream(0)))
+        self.assertEqual(recorder.first_written(), 0)
+        for seq, whole in served.items():
+            back = self.read_back(recorder, seq)
+            # Its payload as the ring served it, after the recording's tables (the newest
+            # header it wrote: the stream's own PAT/PMT, alike from segment to segment).
+            self.assertEqual(back[len(header(0)) :], whole[len(header(seq)) :], seq)
+            self.assertEqual(back[: len(header(0))], header(0), seq)
+        self.assertIsNone(recorder.read(99, 0, 100))
+
+    def test_a_junction_segment_reads_back_with_its_own_header(self):
+        self.segments(1)  # 0 closed, 1 open
+        self.writer.append(500)
+        self.ring.open_segment(2, header(2), junction=True)
+        self.writer.seq, self.writer.written[2] = 2, bytearray()
+        self.writer.append(700)
+        self.writer.open()  # 3
+        recorder = self.record(0)
+        self.wait_written(recorder, len(self.writer.stream(0)) + len(header(2)))
+        self.assertEqual(self.read_back(recorder, 2), header(2) + bytes(self.writer.written[2]))
+        self.assertTrue(recorder.junction(2))
+
+    def test_a_moved_file_reads_as_gone(self):
+        self.segments(2)
+        recorder = self.record(0)
+        self.wait_written(recorder, len(self.writer.stream(0)))
+        os.replace(recorder.path, recorder.path + ".moved")
+        self.assertIsNone(recorder.read(0, 0, 100))
+        # Stage C review I4: what it held is forgotten (the buffer's oldest point again).
+        self.assertIsNone(recorder.first_written())
+
+    def test_a_moved_file_ends_the_recording_as_a_write_failure(self):  # Stage C review I4
+        with mock.patch.object(recorder_module, "_SPACE_EVERY", 1):
+            self.segments(2)
+            recorder = self.record(0)
+            self.wait_written(recorder, len(self.writer.stream(0)))
+            os.replace(recorder.path, recorder.path + ".moved")
+            self.writer.append(2000)  # more to write: the next look finds it gone
+            self.finish(recorder)
+        self.assertEqual(recorder.reason, WRITE)
+        self.assertIsNone(recorder.first_written())
+
+    def test_a_deleted_file_ends_the_recording_as_a_write_failure(self):
+        with mock.patch.object(recorder_module, "_SPACE_EVERY", 1):
+            self.segments(2)
+            recorder = self.record(0)
+            self.wait_written(recorder, len(self.writer.stream(0)))
+            os.remove(recorder.path)
+            self.writer.append(2000)
+            self.finish(recorder)
+        self.assertEqual(recorder.reason, WRITE)
+
+    def test_on_windows_only_a_missing_file_is_gone(self):
+        # Final review M6: Windows cannot move or delete a file open here, and its stat by
+        # name and by handle need not agree on the volume: there the path alone says.
+        with (
+            mock.patch.object(recorder_module, "_SPACE_EVERY", 1),
+            mock.patch.object(recorder_module, "_SAME_FILE_BY_ID", False),
+        ):
+            self.segments(2)
+            recorder = self.record(0)
+            self.wait_written(recorder, len(self.writer.stream(0)))
+            os.replace(recorder.path, recorder.path + ".moved")
+            Path(recorder.path).write_bytes(b"")  # another file where it was
+            self.writer.append(2000)
+            self.wait_written(recorder, len(self.writer.stream(0)))
+            recorder.stop()
+            reason, _path, _written = self.finish(recorder)
+        self.assertEqual(reason, STOPPED)
+
+    def whole(self, seq):
+        data = b""
+        while True:
+            chunk = self.ring.read_at(seq, len(data), 1 << 20)
+            if not chunk or not chunk[0]:
+                return data
+            data += chunk[0]
+
+    @staticmethod
+    def read_back(recorder, seq):
+        data = b""
+        while True:
+            chunk = recorder.read(seq, len(data), 1000)
+            if chunk is None or not chunk[0]:
+                return data
+            data += chunk[0]
 
 
 class HelperRecordingTests(unittest.TestCase):
