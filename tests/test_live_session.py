@@ -801,6 +801,63 @@ class KeptTests(LiveSessionCase):
         self.assertTrue(self.playback.plays)
         self.assertEqual(self.playback.plays[-1][1], PlayKind.LIVE_PIPELINE)
 
+    def slow(self):
+        """A LiveSession whose ready wait ends at once, and is extended while bytes flow."""
+        self.live = self.make(ready_timeout_ms=50, ready_max_ms=60_000)
+        self.live._wall = lambda: 20_000.0
+
+    def new_run(self):
+        self.engine.buffer("k", segments(0, 45), parts=[[0, 0.0, 1_000.0], [30, 60.0, 19_000.0]])
+        self.engine.sessionResumed.emit("k")
+        self.step(2.0)
+
+    def test_a_channel_slow_to_come_back_waits_as_a_tune_does(self):
+        # Final review I1: bytes flow but no segment yet: "Still loading…" as at a tune's
+        # start, then live, not "can't open" and what was kept.
+        self.slow()
+        offers = self.back_offers()
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(20.0, True)))
+        self.engine.receive("k", 188 * 20)
+        self.wait_until(lambda: self.notices)
+        self.assertEqual(self.notices, [LOADING])
+        self.assertEqual(self.playback.plays, [])
+        self.new_run()
+        self.assertGreaterEqual(self.seq_of(self.playback.plays[-1]), 30)
+        self.assertEqual(offers, [(20.0, 1_020.0)])
+        self.assertEqual(self.notices, [LOADING])
+
+    def test_a_channel_back_after_the_wait_plays_live(self):
+        # Final review I1: the new run that comes after "can't open" plays live, where the
+        # user was a click away, as it would have in time.
+        self.slow()
+        offers = self.back_offers()
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(20.0, True)))
+        self.wait_until(lambda: self.notices)
+        self.assertEqual(self.notices, [KEPT_ONLY])
+        self.assertEqual(self.playback.plays[-1], self.stream("k", 10))  # where it was
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertEqual(self.playback.paused, [True])
+        self.new_run()
+        self.assertGreaterEqual(self.seq_of(self.playback.plays[-1]), 30)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertEqual(self.playback.paused, [True])  # not paused again
+        self.step(0.25)
+        self.assertFalse(self.timelines[-1]["paused"])
+        self.assertEqual(offers, [(20.0, 1_020.0)])
+
+    def test_a_late_channel_leaves_a_user_who_moved_where_they_are(self):
+        self.slow()
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(20.0, True)))
+        self.wait_until(lambda: self.notices)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.toggle_pause()  # plays on from where it was
+        plays = len(self.playback.plays)
+        self.new_run()
+        self.assertEqual(len(self.playback.plays), plays)
+
     def test_the_end_of_what_was_kept_says_so(self):
         self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
         self.resume(KeptRing("k", "k1", False, Where(50.0, False)))

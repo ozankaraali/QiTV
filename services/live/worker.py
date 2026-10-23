@@ -773,6 +773,7 @@ class _Session:
         self._relabeler.reconnect()
         with self._moving:
             self._discontinuity()  # the segmenter frames the new input afresh
+        self._notify(force=True)  # the old run's bytes are not the new run's (`_receiving`)
 
     def _ingest(self) -> None:
         from services.live.ring import RingError

@@ -265,6 +265,23 @@ class SlotRoleTests(unittest.TestCase):
         QTest.qWait(10)
         self.assertEqual(self.live.kwargs[-1]["kept"], ring)
 
+    def test_a_kept_disk_buffer_taken_back_leaves_the_disk_to_the_others(self):
+        # Final review M3: the small picture takes the channel left before back, on disk: the
+        # large picture's tunes still keep theirs on disk (the disk total bounds both).
+        from services.live.kept import KeptBuffers, KeptRing, Where
+
+        kept = KeptBuffers(SimpleNamespace(close_session=lambda sid: None))
+        self.tuner.set_kept(kept)
+        kept.put(KeptRing("s1", "k1", True, Where(None, False)))
+        main = LiveTuner(FakeSession(), self.config, FakeLive(), self.budget, purpose="main")
+        one_disk_ring(main, self.tuner)
+        self.tuner.set_disk_allowed(lambda: False)  # its own tunes keep theirs in memory
+        self.tuner.tune(LiveStart(URL, "QiTV", True, channel="k1"), PROVIDER, 2)
+        QTest.qWait(10)
+        self.assertFalse(self.live.kwargs[-1]["disk"])
+        self.assertTrue(self.tuner.on_disk())  # the kept buffer stays the kind it is
+        self.assertTrue(main._disk_allowed())
+
     def test_its_purpose_names_its_slots_and_follows_a_new_role(self):
         self.start_pipeline()
         self.assertEqual(self.holders(), ["pip"])

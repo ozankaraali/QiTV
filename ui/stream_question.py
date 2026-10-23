@@ -46,7 +46,7 @@ RELEASE_WAIT_MS = 8000  # a stopped recording's stream not back by then: go on a
 @dataclass
 class _Question:
     provider: str
-    then: Callable[[], None]
+    then: Callable[[], object]
     stop: list[Slot]
     replaced: str  # the purpose whose stream the open takes over (none to wait for)
     ask_on: Optional[str] = None
@@ -95,7 +95,7 @@ class StreamQuestion(QObject):
         provider: str,
         limit: Optional[int],
         purpose: str,
-        then: Callable[[], None],
+        then: Callable[[], object],
         *,
         gives_way: bool = False,
         ask_on: Optional[str] = None,
@@ -131,7 +131,7 @@ class StreamQuestion(QObject):
         return self._ask(_Question(provider, then, stop, purpose, ask_on), text)
 
     def confirm(
-        self, slot: Slot, then: Callable[[], None], *, ask_on: Optional[str] = None
+        self, slot: Slot, then: Callable[[], object], *, ask_on: Optional[str] = None
     ) -> bool:
         """`slot` records and would stop (a multiview tile): True, asked; False when it does
         not record (the caller goes on)."""
@@ -140,7 +140,7 @@ class StreamQuestion(QObject):
         question = _Question("", then, [slot], _purpose(slot), ask_on)
         return self._ask(question, translate(TILE_QUESTION, channel=_name(slot)))
 
-    def quit(self, then: Callable[[], None]) -> bool:
+    def quit(self, then: Callable[[], object]) -> bool:
         """QiTV is to close while players record: True, asked; Quit stops them all (their
         files are saved) and runs `then`. False: nothing records (the caller closes)."""
         recording = self._recordings()

@@ -1566,6 +1566,24 @@ class ParkResumeTests(unittest.TestCase):
         helper.wait_for(lambda m: m == ("ended", "f"))
         self.assertGreater(len(self.spans(helper, "f")), len(kept))
 
+    def test_a_resume_says_its_new_run_received_nothing_yet(self):
+        # Final review I1: the parent waits longer for a channel slow to come back only while
+        # bytes flow; the old run's count must not read as the new run's.
+        first = self.source({SECRET_PATH: (200, {}, make_stream(6))})
+        silent = StalledUpstream(b"")
+        self.addCleanup(silent.close)
+        helper = InProcessHelper(self)
+        helper.parent.send(("open", "q", first.url + SECRET_PATH, {}, True, RAM, 6.0))
+        helper.wait_for(lambda m: m == ("ended", "q"))
+        helper.parent.send(("park", "q"))
+        helper.wait_for(lambda m: m == ("parked", "q"))
+        self.assertGreater(self.states(helper, "q")[-1][2]["received"], 0)
+        helper.parent.send(("resume", "q", silent.url, {}, True, 6.0))
+        self.assertTrue(silent.requested.wait(5))
+        helper.wait_for(
+            lambda m: m[:2] == ("state", "q") and m[2]["received"] == 0 and not m[2]["answered"]
+        )
+
     def test_a_disk_failure_clears_with_the_next_resume(self):
         # Review C1: a write that failed through the ring's guard must not refuse every later
         # resume, and the segment it could not write leaves no span behind.

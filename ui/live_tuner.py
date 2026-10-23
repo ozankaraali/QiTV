@@ -104,9 +104,11 @@ def one_disk_ring(*tuners: "LiveTuner") -> None:
     every tuner when one is added (a multiview tile's)."""
 
     def allowed(others: list[LiveTuner]) -> Callable[[], bool]:
-        # 2.6: a recording in the background does not count: the disk amount is the total
-        # of every disk buffer (the helper's DiskBudget).
-        return lambda: not any(other.on_disk() and not other.background for other in others)
+        # 2.6: a recording in the background or a kept disk buffer taken back does not
+        # count: the disk amount is the total of every disk buffer (the helper's DiskBudget).
+        return lambda: not any(
+            other.on_disk() and not other.background and not other.kept_disk() for other in others
+        )
 
     for tuner in tuners:
         tuner.set_disk_allowed(allowed([other for other in tuners if other is not tuner]))
@@ -206,6 +208,11 @@ class LiveTuner(QObject):
         """The running stream keeps its time-shift on disk."""
         stream = self._stream
         return stream is not None and stream.running() and stream.disk
+
+    def kept_disk(self) -> bool:
+        """2.6: the running stream's disk is a kept buffer it took back, not its tune's ask."""
+        stream = self._stream
+        return stream is not None and stream.running() and stream.disk and not stream.asked_disk
 
     def releasing(self) -> bool:
         """A stopped stream of this player may still hold the provider (`released` follows)."""

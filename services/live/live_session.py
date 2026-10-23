@@ -591,6 +591,9 @@ class LiveSession(QObject):
         self._kept_only = False
         self._live_after_resume = False
         self._back: Optional[Where] = None  # where the user was in a kept buffer taken back
+        # A resume that did not come in time (what was kept plays): should its run come
+        # after all, it plays live and where the user was is offered, unless they moved.
+        self._late: Optional[Where] = None
         self._aside: Optional[Where] = None  # where the user was when its player was set aside
         self._from_kept = False
         self._disk_failures = 0  # of the kept buffer taken back, this tune: a second starts afresh
@@ -693,7 +696,7 @@ class LiveSession(QObject):
         self.stop()
         self._kept = kept
         self._resuming = self._kept_only = self._live_after_resume = self._from_kept = False
-        self._back = None
+        self._back = self._late = None
         self._disk_failures = 0
         self._on_disk = disk
         self._url, self._user_agent, self._referrer = url, user_agent, referrer
@@ -815,6 +818,7 @@ class LiveSession(QObject):
         self._mode = ""
         sid, self._sid = self._sid, None
         self._resuming = self._kept_only = self._live_after_resume = False
+        self._late = None
         self._playback.stop()
         if sid is not None:
             if park:
@@ -831,6 +835,7 @@ class LiveSession(QObject):
             self._all_closed()
 
     def toggle_pause(self) -> None:
+        self._late = None  # the user picked where to be
         if self._phase is _Phase.DIRECT:
             self._playback.toggle_pause()
             return
@@ -862,6 +867,7 @@ class LiveSession(QObject):
 
     def _seek(self, t: float, *, lo: float = -math.inf, hi: float = math.inf) -> None:
         """Seek to `t`, opening a segment that starts in [`lo`, `hi`) (a step's direction)."""
+        self._late = None
         if self._phase is not _Phase.PIPELINE or self._sid is None:
             return
         snapshot = self._snapshot()
@@ -901,6 +907,7 @@ class LiveSession(QObject):
                 return
             self._kept_only = False
             self._resuming = self._live_after_resume = True
+            self._late = None
             self._send_resume(self._sid)
             return
         self._go_live(unpause=True, merge=True)
@@ -1171,19 +1178,14 @@ class LiveSession(QObject):
         aside, self._aside = self._aside, None
         self.go_live()
         if aside is not None and aside.position is not None and self._sid is not None:
-            snapshot = self._snapshot()
-            parts = live_parts.from_state(snapshot.get("parts"))
-            now = self._wall()
-            edge = self._live_edge(snapshot)
-            wall = live_parts.wall_at(parts, aside.position, live_edge=edge, now=now)
-            self.backOffered.emit(aside.position, wall)
+            self._offer_back(aside.position)
 
     def go_back_to(self, t: float) -> None:
         """Play on from timeline second `t` (2.6: where the user was before leaving), also
         before live started."""
         if self._sid is None:
             return
-        self._back = None
+        self._back = self._late = None
         self._paused = False
         if self._phase is _Phase.WAITING and self._from_kept:
             span = self._seek_start(t)
@@ -1212,19 +1214,28 @@ class LiveSession(QObject):
             return
         self._resuming = self._kept_only = False
         self._ended = False
+        late, self._late = self._late, None
         if self._phase is _Phase.WAITING:
             self._on_ready(sid)  # a tune's start, on the new run
             back, self._back = self._back, None
             if back is not None and back.position is not None:
-                snapshot = self._snapshot()
-                parts = live_parts.from_state(snapshot.get("parts"))
-                now = self._wall()
-                edge = self._live_edge(snapshot)
-                wall = live_parts.wall_at(parts, back.position, live_edge=edge, now=now)
-                self.backOffered.emit(back.position, wall)
+                self._offer_back(back.position)
         elif self._phase is _Phase.PIPELINE and self._live_after_resume:
             self._live_after_resume = False
             self._go_live(unpause=True, merge=False)
+        elif self._phase is _Phase.PIPELINE and late is not None:
+            # It came after "can't open", the user still where that put them: as in time.
+            self._go_live(unpause=True, merge=False)
+            if late.position is not None:
+                self._offer_back(late.position)
+
+    def _offer_back(self, position: float) -> None:
+        """Offer timeline second `position`, where the user was, with its time of day."""
+        snapshot = self._snapshot()
+        parts = live_parts.from_state(snapshot.get("parts"))
+        edge = self._live_edge(snapshot)
+        wall = live_parts.wall_at(parts, position, live_edge=edge, now=self._wall())
+        self.backOffered.emit(position, wall)
 
     def _start_afresh(self) -> None:
         """Let the kept buffer go and open the channel anew, once it closed (2.6)."""
@@ -1233,6 +1244,7 @@ class LiveSession(QObject):
         self._playback.stop()
         self._phase = _Phase.STARTING
         self._kept_only = self._resuming = self._live_after_resume = self._from_kept = False
+        self._late = None
         self._ended = self._paused = False
         self._disk_failures = 0
         self._stay.user_go_live()
@@ -1256,10 +1268,11 @@ class LiveSession(QObject):
         self._await_close(sid)
         self._keeper(KeptRing(sid, self._channel, self._on_disk, Where(None, False)))
 
-    def _kept_fallback(self, notice: str = KEPT_ONLY) -> None:
+    def _kept_fallback(self, notice: str = KEPT_ONLY, *, late: bool = False) -> None:
         """The channel's stream could not open again (2.6): what was kept plays on, from its
         newest point when nothing plays yet, and Go live tries the channel again. Nothing
-        newer comes meanwhile: no reopen at live, no stay-live (`_ended`)."""
+        newer comes meanwhile: no reopen at live, no stay-live (`_ended`). `late`: it did not
+        come in time, and may still (`_late`)."""
         self._resuming = self._live_after_resume = False
         if self._sid is not None and not self._engine.spans(self._sid):
             self._start_afresh()  # nothing of it is left to play (it was not taken back)
@@ -1268,6 +1281,8 @@ class LiveSession(QObject):
         self.notice.emit(notice)
         if self._phase is _Phase.WAITING:
             back, self._back = self._back, None
+            if late:
+                self._late = back if back is not None else Where(None, False)
             span = None
             if back is not None and back.position is not None:  # where it was: no live to play
                 self._paused = back.paused
@@ -1438,17 +1453,17 @@ class LiveSession(QObject):
     def _on_ready_timeout(self) -> None:
         if self._phase is not _Phase.WAITING:
             return
-        if self._resuming and not self._ready_seen:
-            self._kept_fallback()  # 2.6: the channel did not come back in time
-            return
         if self._ready_seen and self._oldest_seq() is not None:
             self._play_first(waited=True)  # held for a start that did not come in time
         elif not self._ready_seen and not self._loading and self._receiving():
             # Bytes flow but nothing is playable yet (an on-demand restream starting up,
-            # say): wait up to `ready_max_ms` in all before playing directly.
+            # say): wait up to `ready_max_ms` in all before playing directly (2.6: or what
+            # was kept, for a channel coming back).
             self._loading = True
             self._ready_timer.start(self._ready_more_ms)
             self.notice.emit(LOADING)
+        elif self._resuming and not self._ready_seen:
+            self._kept_fallback(late=True)  # 2.6: the channel did not come back in time
         else:
             _LOG.info("Playing the channel directly: %s.", self._unready_reason())
             self._fall_back(UNAVAILABLE)

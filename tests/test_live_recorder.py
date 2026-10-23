@@ -436,6 +436,24 @@ class RecordedReadTests(RecorderCase):
             self.finish(recorder)
         self.assertEqual(recorder.reason, WRITE)
 
+    def test_on_windows_only_a_missing_file_is_gone(self):
+        # Final review M6: Windows cannot move or delete a file open here, and its stat by
+        # name and by handle need not agree on the volume: there the path alone says.
+        with (
+            mock.patch.object(recorder_module, "_SPACE_EVERY", 1),
+            mock.patch.object(recorder_module, "_SAME_FILE_BY_ID", False),
+        ):
+            self.segments(2)
+            recorder = self.record(0)
+            self.wait_written(recorder, len(self.writer.stream(0)))
+            os.replace(recorder.path, recorder.path + ".moved")
+            Path(recorder.path).write_bytes(b"")  # another file where it was
+            self.writer.append(2000)
+            self.wait_written(recorder, len(self.writer.stream(0)))
+            recorder.stop()
+            reason, _path, _written = self.finish(recorder)
+        self.assertEqual(reason, STOPPED)
+
     def whole(self, seq):
         data = b""
         while True:

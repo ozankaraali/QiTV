@@ -1885,7 +1885,7 @@ class TVController(QObject):
                     recordings.append((slot.name, name, since))
         return recordings
 
-    def asks_before_quit(self, then: Callable[[], None]) -> bool:
+    def asks_before_quit(self, then: Callable[[], object]) -> bool:
         """QiTV is to close while channels record: True, asked (Quit stops them, saved, then
         `then` closes); False: nothing records."""
         return self._question.quit(then)

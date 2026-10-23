@@ -49,6 +49,9 @@ _CHUNK = 256 * 1024
 _WAIT = 0.5  # a wait for more data is cut this short to look at the caps again
 _BATCH_S = 0.2  # at the live edge, what arrives within this is written at once
 _SPACE_EVERY = 16 * 1024 * 1024  # the free space is looked at again after this many bytes
+# Windows cannot move or delete a file open here, and its stat by name and by handle need not
+# agree on the volume's serial: there only a missing path says the file went (`_gone`).
+_SAME_FILE_BY_ID = os.name != "nt"
 _UNIQUE_TRIES = 99
 _FULL = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
 
@@ -413,7 +416,7 @@ class Recorder:
             there = None
         except OSError:
             return False  # not known: the writes say when they fail
-        if there is not None and (there.st_dev, there.st_ino) == (mine.st_dev, mine.st_ino):
+        if there is not None and (not _SAME_FILE_BY_ID or os.path.samestat(there, mine)):
             return False
         _LOG.warning("A recording's file was moved or deleted while it recorded.")
         self._forget()
