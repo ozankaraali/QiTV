@@ -795,6 +795,7 @@
   "The provider took too long to answer": "Sağlayıcının yanıt vermesi çok uzun sürdü",
   "The provider's archive didn't answer": "Sağlayıcının arşivi yanıt vermedi",
   "The provider's server has a problem ({status})": "Sağlayıcının sunucusunda bir sorun var ({status})",
+  "The recording goes on: nothing opened on this phone": "Kayıt sürüyor: bu telefonda hiçbir şey açılmadı",
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Aktarıcı film iletemez. Bu filmi telefonda izlemek için evde, QiTV'nin ağında olun (misafir ağı ya da VPN değil).",
   "The server has nothing at this address (404)": "Sunucuda bu adreste bir şey yok (404)",
   "The server refused QiTV (403)": "Sunucu QiTV'yi reddetti (403)",

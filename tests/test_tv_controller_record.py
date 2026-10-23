@@ -211,6 +211,28 @@ class StreamQuestionTests(_RecordCase):
         recording.released.emit()  # the background player let its stream go
         self.assertTrue(wait_until(lambda: launched == ["http://stream/2"]))
 
+    def test_the_phones_watch_asks_on_the_phone(self):
+        self.one_stream()
+        recording = self.record_large(0)
+        self.leave_for_backup()
+        asked, settled, launched = [], [], []
+        self.controller.phoneAsked.connect(lambda *a: asked.append(a))
+        self.controller.phoneSettled.connect(settled.append)
+
+        def launch(target, url):
+            launched.append(url)
+            return True, ""
+
+        self.controller.play_elsewhere(launch, self.target(1), ask_on="s8")
+        self.ready("http://stream/2")
+        self.assertEqual(asked, [("s8", QUESTION, "Stop recording", "Keep recording")])
+        self.assertTrue(self.question.isHidden())  # the phone asked: the TV shows nothing
+        self.controller.answer_phone(True)
+        self.assertEqual(settled, ["s8"])
+        self.assertFalse(recording.recording())
+        recording.released.emit()
+        self.assertTrue(wait_until(lambda: launched == ["http://stream/2"]))
+
     def test_from_the_library_the_librarys_card_asks(self):
         self.one_stream()
         self.record_large(0)

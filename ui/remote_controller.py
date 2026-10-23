@@ -24,7 +24,9 @@ from services.redact import safe_message
 from services.remote.films import is_matroska
 from services.remote.protocol import (
     BUTTON_META,
+    MAX_ASK,
     STORE_VERSION,
+    Answered,
     Closed,
     Code,
     Get,
@@ -35,6 +37,7 @@ from services.remote.protocol import (
     Position,
     Press,
     Query,
+    RecAct,
     Status,
     StoreSaved,
     ToTv,
@@ -148,6 +151,12 @@ class RemoteController(QObject):
         self._soon.setSingleShot(True)
         self._soon.timeout.connect(self._push_state)
         window.library_controller.searchChanged.connect(self._push_results)
+        # 2.6: QiTV's question for a phone that asked (its Watch with no stream free): the
+        # number of the one each phone was asked, which its answer carries back.
+        self._asks: dict[str, int] = {}
+        self._ask_number = 0
+        window.controller.phoneAsked.connect(self._on_phone_asked)
+        window.controller.phoneSettled.connect(self._on_phone_settled)
 
     # ---- lifecycle -------------------------------------------------------------------------
 
@@ -277,6 +286,8 @@ class RemoteController(QObject):
         elif isinstance(event, Held):
             self._repeater.held(event.sid, self._now())
         elif isinstance(event, Closed):
+            if self._asks.pop(event.sid, None) is not None:
+                self._window.controller.answer_phone(False)  # gone: the recording stays
             self._repeater.drop(event.sid)
             self._schedule()
             self._phones.discard(event.sid)
@@ -309,6 +320,14 @@ class RemoteController(QObject):
             self._to_tv(event.sid)
         elif isinstance(event, Position):
             self._position(event.sid, event.position_ms, event.length_ms)
+        elif isinstance(event, Answered):
+            self._on_answered(event.sid, event.n, event.yes)
+        elif isinstance(event, RecAct):
+            controller = self._window.controller
+            if event.act == "back":
+                controller.go_back_to_recording(event.slot)
+            else:
+                controller.stop_background_recording(event.slot)
         elif isinstance(event, StoreSaved):
             self._persist(event.data)
         elif isinstance(event, Paired):
@@ -582,12 +601,35 @@ class RemoteController(QObject):
             return True, ""
 
         try:
-            handed = controller.play_elsewhere(launch, chosen)
+            handed = controller.play_elsewhere(launch, chosen, ask_on=sid)
         except Exception as error:  # a phone's ask must never take QiTV down
             logger.error("Phone remote: playing on the phone failed: %s", safe_message(error))
             handed = False
         if not handed:
             self._send(sid, {"t": "play", "failed": True})
+
+    def _on_phone_asked(self, sid: str, text: str, yes: str, no: str) -> None:
+        """QiTV asks phone `sid` (2.6: stop a recording for its Watch?)."""
+        if sid not in self._phones:
+            self._window.controller.answer_phone(False)  # gone meanwhile: nothing stops
+            return
+        self._ask_number = (self._ask_number + 1) % MAX_ASK
+        self._asks[sid] = self._ask_number
+        self._send(sid, {"t": "ask", "id": self._ask_number, "text": text, "yes": yes, "no": no})
+
+    def _on_phone_settled(self, sid: str) -> None:
+        """Phone `sid`'s question went otherwise (a newer one): its sheet closes."""
+        number = self._asks.pop(sid, None)
+        if number is not None:
+            self._send(sid, {"t": "unask", "id": number})
+
+    def _on_answered(self, sid: str, number: int, yes: bool) -> None:
+        if self._asks.get(sid) != number:
+            return  # a question no longer asked
+        del self._asks[sid]
+        self._window.controller.answer_phone(yes)
+        if not yes:  # Keep recording: nothing opens on the phone
+            self._send(sid, {"t": "play", "failed": True, "why": "recording"})
 
     def _film_to(self, sid: str, item: dict, url: str, message: dict) -> None:
         """An MKV film (Safari plays none) goes to the phone as HLS from QiTV's home door

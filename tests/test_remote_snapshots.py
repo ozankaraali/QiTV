@@ -7,6 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import json
+import time
 import unittest
 from unittest import mock
 
@@ -53,6 +54,16 @@ class SnapshotTests(WindowCase):
         self.assertIsNone(state(self.window).get("back"))
         with mock.patch.object(controller, "back_label", return_value="20:10"):
             self.assertEqual(state(self.window)["back"], "20:10")
+
+    def test_what_records_in_the_background_reaches_the_phone(self):
+        controller = self.window.controller
+        self.assertEqual(state(self.window)["rec"], [])
+        since = time.monotonic() - 90.0  # recording for a minute and a half
+        with mock.patch.object(controller, "rec_list", return_value=[("b1", "News", since)]):
+            [entry] = state(self.window)["rec"]
+        self.assertEqual((entry["id"], entry["name"]), ("b1", "News"))
+        self.assertAlmostEqual(entry["since"], time.time() - 90.0, delta=2.0)
+        self.assertIsInstance(entry["since"], int)  # whole seconds: a snapshot stays the same
 
     def test_state_before_anything_plays(self):
         snapshot = state(self.window)

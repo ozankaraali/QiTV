@@ -805,6 +805,7 @@
   "The provider took too long to answer": "Der Anbieter hat zu lange nicht geantwortet",
   "The provider's archive didn't answer": "Das Archiv des Anbieters hat nicht geantwortet",
   "The provider's server has a problem ({status})": "Der Server des Anbieters hat ein Problem ({status})",
+  "The recording goes on: nothing opened on this phone": "Die Aufnahme läuft weiter: Auf diesem Telefon wurde nichts geöffnet",
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Das Relay kann keine Filme weiterleiten. Um diesen auf dem Handy zu sehen, sei zu Hause im Netzwerk von QiTV (nicht in einem Gastnetz oder über VPN).",
   "The server has nothing at this address (404)": "Unter dieser Adresse gibt es auf dem Server nichts (404)",
   "The server refused QiTV (403)": "Der Server hat QiTV abgewiesen (403)",

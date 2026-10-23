@@ -12,6 +12,7 @@ from collections import OrderedDict
 from datetime import datetime
 import hashlib
 import secrets
+import time
 from typing import Any, Optional
 
 from services.epg_view import Programme
@@ -101,7 +102,18 @@ def state(window: Any) -> dict:
         "back": controller.back_label(),
         "pip": controller.pip_shown(),
         "multiview": controller.multiview_shown(),
+        # 2.6: what records in the background (the big picture's own is `recording`): since
+        # when, in Unix seconds, so the phone counts the time itself
+        "rec": _rec(controller),
     }
+
+
+def _rec(controller: Any) -> list[dict]:
+    started = time.time() - time.monotonic()  # LiveSession's clock is the monotonic one
+    return [
+        {"id": slot, "name": name[:TITLE_CHARS], "since": round(started + since)}
+        for slot, name, since in controller.rec_list()
+    ]
 
 
 def _int(session: Any, name: str) -> Optional[int]:

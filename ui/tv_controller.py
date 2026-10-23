@@ -67,7 +67,7 @@ from pathlib import Path
 import time
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QAbstractScrollArea
 
@@ -183,6 +183,10 @@ class Overlays:
 
 
 class TVController(QObject):
+    # 2.6: QiTV's question for phone `sid` (its text, the answers' words), and that it is gone.
+    phoneAsked = Signal(str, str, str, str)
+    phoneSettled = Signal(str)
+
     def __init__(
         self,
         *,
@@ -435,6 +439,8 @@ class TVController(QObject):
             closed=lambda: self._closed,
             parent=self,
         )
+        self._question.asked.connect(self.phoneAsked)
+        self._question.settled.connect(self.phoneSettled)
         # 2.6: a provider that keeps only the newest stream: the recording wins.
         self._guard: Optional[RecordGuard] = None
         if sessions is not None:
@@ -582,8 +588,8 @@ class TVController(QObject):
             self.sessions.backgroundChanged.connect(self._refresh_rec_sign)
         for sign in (self.overlays.rec_sign, self.overlays.library_rec_sign):
             if sign is not None:
-                sign.goBack.connect(self._go_back_to_recording)
-                sign.stop.connect(self._stop_background_recording)
+                sign.goBack.connect(self.go_back_to_recording)
+                sign.stop.connect(self.stop_background_recording)
         column.closed.connect(zap.close_column)
         column.rowClicked.connect(self._on_column_row)
         drawer.playRequested.connect(self.play_item)
@@ -1803,6 +1809,24 @@ class TVController(QObject):
 
     # ---- 2.6: recordings in the background ----------------------------------------------------
 
+    def answer_phone(self, yes: bool) -> None:
+        """A phone's answer to the question QiTV asked it (`phoneAsked`)."""
+        if not self._closed:
+            self._question.answer(yes)
+
+    def rec_list(self) -> list[tuple[str, str, float]]:
+        """What records in the background: (player, channel name, recording since, on
+        LiveSession's clock), the oldest first."""
+        sessions = self.sessions
+        recordings: list[tuple[str, str, float]] = []
+        if sessions is not None and not self._closed:
+            for slot in sessions.background():
+                since = slot.live.recording_since() if records(slot) else None
+                if since is not None:
+                    name = str((slot.channel or {}).get("name") or "")
+                    recordings.append((slot.name, name, since))
+        return recordings
+
     def asks_before_quit(self, then: Callable[[], None]) -> bool:
         """QiTV is to close while channels record: True, asked (Quit stops them, saved, then
         `then` closes); False: nothing records."""
@@ -1816,20 +1840,14 @@ class TVController(QObject):
     def _refresh_rec_sign(self) -> None:
         """The REC sign lists the recordings in the background (the big picture's own shows
         on its controls, the small picture's on its label)."""
-        sessions = self.sessions
-        recordings: list[tuple[str, str, float]] = []
-        if sessions is not None and not self._closed:
-            for slot in sessions.background():
-                since = slot.live.recording_since() if records(slot) else None
-                if since is not None:
-                    name = str((slot.channel or {}).get("name") or "")
-                    recordings.append((slot.name, name, since))
+        recordings = self.rec_list()
         for sign in (self.overlays.rec_sign, self.overlays.library_rec_sign):
             if sign is not None:
                 sign.set_recordings(recordings)
 
-    def _go_back_to_recording(self, name: str) -> None:
-        """The REC sign's Go back: the channel it records plays large again, from its group."""
+    def go_back_to_recording(self, name: str) -> None:
+        """The REC sign's Go back (the phone's too): the channel player `name` records in the
+        background plays large again, from its group."""
         sessions = self.sessions
         if sessions is None or self._closed:
             return
@@ -1841,11 +1859,15 @@ class TVController(QObject):
         channels = list(self.catalog.items("live", key) or []) or self._all_live()
         self.tune_live(slot.channel, key, channels)
 
-    def _stop_background_recording(self, name: str) -> None:
-        """The REC sign's Stop recording: saved, and its player leaves the channel."""
+    def stop_background_recording(self, name: str) -> None:
+        """The REC sign's Stop recording (the phone's too): saved, and its player leaves the
+        channel. Nothing for a player not in the background."""
         sessions = self.sessions
-        if sessions is not None and not self._closed:
-            sessions.slot(name).live.stop_recording()
+        if sessions is None or self._closed:
+            return
+        for slot in sessions.background():
+            if slot.name == name:
+                slot.live.stop_recording()
 
     def _recordings(self) -> list[Slot]:
         """Every player that records, the oldest recording first."""
@@ -1867,13 +1889,22 @@ class TVController(QObject):
         return not self._closed and self._question.handle(action)
 
     def _ask_for_stream(
-        self, item: dict, purpose: str, then: Callable[[], None], *, gives_way: bool = False
+        self,
+        item: dict,
+        purpose: str,
+        then: Callable[[], None],
+        *,
+        gives_way: bool = False,
+        ask_on: Optional[str] = None,
     ) -> bool:
         """Opening `item` over `purpose`'s stream needs one that a recording holds: True,
-        asked (StreamQuestion.needs); `then` runs once the recording let it go."""
+        asked (StreamQuestion.needs; on phone `ask_on` when it asked); `then` runs once the
+        recording let it go."""
         provider = item_provider.provider_name(self.catalog, item)
         limit = self._live_controls.limit(item)
-        return self._question.needs(provider, limit, purpose, then, gives_way=gives_way)
+        return self._question.needs(
+            provider, limit, purpose, then, gives_way=gives_way, ask_on=ask_on
+        )
 
     def _asks_first(
         self,
@@ -3237,31 +3268,39 @@ class TVController(QObject):
             self._context.show_players(target, anchor, self.overlays.transport)
 
     def play_elsewhere(
-        self, launch: Callable[[Target, str], tuple[bool, str]], target: Optional[Target] = None
+        self,
+        launch: Callable[[Target, str], tuple[bool, str]],
+        target: Optional[Target] = None,
+        *,
+        ask_on: Optional[str] = None,
     ) -> bool:
         """What plays now, or `target`, handed to `launch` with its link (a phone's player) as
         Play in VLC hands it: the in-app stream is released first, so the provider counts one.
-        False when nothing from a provider is current (a file opened from the disk stays here)."""
+        False when nothing from a provider is current (a file opened from the disk stays here).
+        2.6: with no stream free while a recording holds one, phone `ask_on` is asked."""
         target = target or self._current
         if self._closed or target is None or target.local:
             return False
-        self._lanes.request_side(
-            target,
-            lambda url: self._play_external(target, url, lambda link: launch(target, link)),
-            play=True,
-        )
+        chosen = target
+
+        def play(url: str) -> None:
+            self._play_external(chosen, url, lambda link: launch(chosen, link), ask_on=ask_on)
+
+        self._lanes.request_side(target, play, play=True)
         return True
 
-    def _play_external(self, target: Target, url: str, launcher: Launcher) -> None:
+    def _play_external(
+        self, target: Target, url: str, launcher: Launcher, *, ask_on: Optional[str] = None
+    ) -> None:
         """The context menu's external play: the newest choice, once the in-app stream is gone."""
         if self._closed:
             return
 
         def again() -> None:
-            self._play_external(target, url, launcher)
+            self._play_external(target, url, launcher, ask_on=ask_on)
 
         if not target.local and self._ask_for_stream(
-            target.item, self._tuner.purpose, again, gives_way=True
+            target.item, self._tuner.purpose, again, gives_way=True, ask_on=ask_on
         ):
             return  # 2.6: no stream is free while a recording holds one: asked
         self._cancel_external()

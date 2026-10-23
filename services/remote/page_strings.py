@@ -38,6 +38,13 @@ PAGE_STRINGS: dict[str, str] = {
     # i18n: the phone remote: a button while the TV offers where a channel was left; {time}
     # is when ("Resume · 20:10")
     "back_to": N_("Resume · {time}"),
+    # i18n: the phone remote: what records in the background, before the channel's name
+    "rec": N_("REC"),
+    # i18n: the phone remote's REC line menu: play the channel that records again
+    "go_back": N_("Go back to {channel}"),
+    "stop_recording": N_("Stop recording"),  # i18n: the phone remote's REC line menu
+    # i18n: the phone remote: the phone's Watch was answered Keep recording
+    "recording_kept": N_("The recording goes on: nothing opened on this phone"),
     "ch": N_("Ch"),  # i18n: the phone remote: the channel rocker's label (very short)
     "done": N_("Done"),  # i18n: the phone remote: closes the search or the numbers
     # i18n: the phone remote's search: the TV's own search shows it too (else the phone's alone)

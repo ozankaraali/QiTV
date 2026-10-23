@@ -13,6 +13,7 @@ from PySide6.QtTest import QTest
 from test_tv_window import WindowCase, wait_until
 
 from services.remote.protocol import (
+    Answered,
     Closed,
     Code,
     Get,
@@ -21,6 +22,7 @@ from services.remote.protocol import (
     Paired,
     Position,
     Press,
+    RecAct,
     Status,
     StoreSaved,
     ToTv,
@@ -269,6 +271,94 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class PhoneQuestionTests(WindowCase):
+    """2.6: the phone's Watch with no stream free asks on that phone (QiTV's words); its
+    answer reaches the TV, a stale or a gone phone's answers keep the recording."""
+
+    def connect(self):
+        remote = self.window.remote
+        self.hub = mock.Mock()
+        remote.hub = self.hub
+        self.addCleanup(setattr, remote, "hub", None)
+        remote._phones.add("s8")
+        self.addCleanup(remote._phones.discard, "s8")
+
+    def sent(self, kind):
+        calls = self.hub.send.call_args_list
+        return [c.args[1] for c in calls if c.args[0] == "s8" and c.args[1]["t"] == kind]
+
+    def ask(self):
+        self.connect()
+        self.window.controller.phoneAsked.emit("s8", "Q?", "Stop recording", "Keep recording")
+        [ask] = self.sent("ask")
+        return ask
+
+    def test_a_question_goes_to_the_phone_that_asked(self):
+        ask = self.ask()
+        self.assertEqual(
+            (ask["text"], ask["yes"], ask["no"]), ("Q?", "Stop recording", "Keep recording")
+        )
+        self.assertIsInstance(ask["id"], int)
+
+    def test_its_answer_reaches_the_tv_once(self):
+        ask = self.ask()
+        controller = self.window.controller
+        with mock.patch.object(controller, "answer_phone") as answer:
+            self.window.remote.bridge.post(Answered("s8", ask["id"] + 1, True))  # stale
+            self.window.remote.bridge.post(Answered("s8", ask["id"], True))
+            self.window.remote.bridge.post(Answered("s8", ask["id"], False))  # once
+            self.assertTrue(wait_until(lambda: answer.called))
+            QTest.qWait(50)
+        answer.assert_called_once_with(True)
+
+    def test_keep_recording_tells_the_phone_nothing_opened(self):
+        ask = self.ask()
+        with mock.patch.object(self.window.controller, "answer_phone"):
+            self.window.remote.bridge.post(Answered("s8", ask["id"], False))
+            self.assertTrue(wait_until(lambda: self.sent("play")))
+        self.assertEqual(self.sent("play"), [{"t": "play", "failed": True, "why": "recording"}])
+
+    def test_a_phone_that_leaves_keeps_the_recording(self):
+        self.ask()
+        with mock.patch.object(self.window.controller, "answer_phone") as answer:
+            self.window.remote.bridge.post(Closed("s8", None))
+            self.assertTrue(wait_until(lambda: answer.called))
+        answer.assert_called_once_with(False)
+
+    def test_a_question_settled_on_the_tv_closes_on_the_phone(self):
+        ask = self.ask()
+        self.window.controller.phoneSettled.emit("s8")
+        self.assertEqual(self.sent("unask"), [{"t": "unask", "id": ask["id"]}])
+
+    def test_the_rec_line_goes_back_or_stops(self):
+        self.connect()
+        controller = self.window.controller
+        with (
+            mock.patch.object(controller, "go_back_to_recording") as back,
+            mock.patch.object(controller, "stop_background_recording") as stop,
+        ):
+            self.window.remote.bridge.post(RecAct("s8", "b1", "back"))
+            self.window.remote.bridge.post(RecAct("s8", "b2", "stop"))
+            self.assertTrue(wait_until(lambda: stop.called))
+        back.assert_called_once_with("b1")
+        stop.assert_called_once_with("b2")
+
+    def test_watch_asks_on_that_phone(self):
+        self.connect()
+        asked_on = []
+
+        def play_elsewhere(launch, chosen=None, *, ask_on=None):
+            asked_on.append(ask_on)
+            return True
+
+        with mock.patch.object(
+            self.window.controller, "play_elsewhere", side_effect=play_elsewhere
+        ):
+            self.window.remote.bridge.post(WatchHere("s8"))
+            self.assertTrue(wait_until(lambda: asked_on))
+        self.assertEqual(asked_on, ["s8"])
+
+
 class WatchHereTests(WindowCase):
     """The phone's Watch on this phone: QiTV hands it the link of what the TV plays, or of a
     channel of its own list, as Play in VLC hands one; the TV's stream closed first, so the
@@ -294,7 +384,7 @@ class WatchHereTests(WindowCase):
         target = Target({"name": "News", "cmd": url}, "live", "News")
         results = []
 
-        def play_elsewhere(launch, chosen=None):
+        def play_elsewhere(launch, chosen=None, **_kwargs):
             if gone:
                 self.window.remote._phones.discard("s8")
             results.append(launch(chosen or target, url))
