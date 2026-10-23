@@ -480,6 +480,7 @@ class FakeTransport(FakeOverlay):
     logo = None  # the logo the last show_live/show_timeshift was given
 
     playPauseRequested = Signal()
+    stopRequested = Signal()  # 2.6
     seekRequested = Signal(int)
     seekRelativeRequested = Signal(int)
     speedRequested = Signal(float)

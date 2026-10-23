@@ -174,6 +174,11 @@ class ClosedKeymapTests(unittest.TestCase):
             self.assertEqual(closed(key), (Action.PLAY_PAUSE, ""))
         self.assertEqual(closed(K.Key_MediaNext), (Action.MEDIA_NEXT, ""))
         self.assertEqual(closed(K.Key_MediaPrevious), (Action.MEDIA_PREV, ""))
+        self.assertEqual(closed(K.Key_MediaStop), (Action.STOP, ""))
+
+    def test_x_stops(self):  # 2.6: nothing plays, nothing streams
+        self.assertEqual(closed(K.Key_X, "x"), (Action.STOP, ""))
+        self.assertEqual(guide(K.Key_X, "x"), (Action.STOP, ""))
 
 
 class AsIntTests(unittest.TestCase):

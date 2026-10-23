@@ -107,6 +107,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Enter</kbd> | Channel list |
 | <kbd>←</kbd> / <kbd>→</kbd> | Back / forward 10 seconds |
 | <kbd>Space</kbd> | Play / pause |
+| <kbd>X</kbd> | Stop: nothing plays or streams (Space plays it again) |
 | <kbd>L</kbd> | Go live |
 | <kbd>R</kbd> | Record the channel, or stop recording |
 | <kbd>G</kbd> | Guide |

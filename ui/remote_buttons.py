@@ -51,6 +51,7 @@ def _buttons() -> dict[str, Button]:
         "rew": _action(Action.SEEK_BACK),
         "fwd": _action(Action.SEEK_FWD),
         "pp": _action(Action.PLAY_PAUSE),
+        "stop": _action(Action.STOP),  # 2.6: nothing plays, nothing streams
         "live": _action(Action.GO_LIVE),
         "info": _action(Action.INFO),
         "guide": _action(Action.GUIDE),

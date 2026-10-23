@@ -67,7 +67,7 @@ from pathlib import Path
 import time
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QAbstractScrollArea
 
@@ -114,6 +114,7 @@ from ui.overlays.drawer import Drawer
 from ui.overlays.guide import Guide
 from ui.overlays.next_card import NextCard
 from ui.overlays.painting import fmt_duration
+from ui.overlays.stopped_notice import STOPPED
 from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
@@ -179,6 +180,7 @@ class Overlays:
     question: Any = None  # 2.6: the QuestionCard: stop a recording for a stream?
     library_question: Any = None  # its twin on the Library page
     rec_sign: Any = None  # 2.6: the REC sign of recordings in the background
+    stopped_notice: Any = None  # 2.6: "Stopped", with Play again, after Stop
     library_rec_sign: Any = None  # its twin on the Library page
 
 
@@ -259,6 +261,7 @@ class TVController(QObject):
         self.budget = self._tuner.budget
         self._states: dict[str, str] = {}  # each player's last state (a swap shows another)
         self._resume: Optional[Target] = None  # what stop_live() stopped, for resume_stopped()
+        self._stopped: Optional[Target] = None  # 2.6: what Stop stopped, for play_again()
         self._external_pending: Optional[tuple[Target, str]] = None
         self._external_settle = QTimer(self, singleShot=True)
         self._external_settle.timeout.connect(self._launch_settled)
@@ -600,6 +603,9 @@ class TVController(QObject):
         self.overlays.guide.fullscreenRequested.connect(self.window_actions.toggle_fullscreen)
         transport.nextRequested.connect(self._on_next_requested)
         transport.playPauseRequested.connect(self._toggle_pause)
+        transport.stopRequested.connect(self.stop)
+        if self.overlays.stopped_notice is not None:
+            self.overlays.stopped_notice.keepWatching.connect(self.play_again)
         transport.seekRequested.connect(self._seek_ms)
         transport.fullscreenRequested.connect(self.window_actions.toggle_fullscreen)
         transport.miniPlayerRequested.connect(self.window_actions.toggle_mini_player)
@@ -849,6 +855,7 @@ class TVController(QObject):
         url = Path(path).absolute().as_uri()
         title = Path(path).name
         target = Target({"name": title, "cmd": url}, "movies", title, local=True)
+        self._forget_stopped()  # 2.6: a newer choice than what Stop stopped
         self.leave_multiview(keep_pip=False)  # the multiview is for live TV
         self._close_pip()  # picture in picture is for live TV
         self._set_recording_aside()  # 2.6: it records on in the background
@@ -1009,6 +1016,7 @@ class TVController(QObject):
         drawer, tracks = self.overlays.drawer, self._tracks
         calls: dict[Action, Callable[[], None]] = {
             Action.PLAY_PAUSE: self._play_pause,
+            Action.STOP: self.stop,
             Action.INFO: self._info,
             Action.GO_LIVE: lambda: self._live_controls.go_live(),
             Action.RECORD: lambda: self._live_controls.toggle_recording(),
@@ -1041,8 +1049,56 @@ class TVController(QObject):
         return calls.get(action)
 
     def _play_pause(self) -> None:
+        if self._stopped is not None and self._current is None:
+            self.play_again()  # 2.6: after Stop, Play plays it again
+            return
         self._tuner.toggle_pause()
         self._show_transport()
+
+    def stop(self) -> None:
+        """Stop (■, X, the phone's; 2.6): every picture stops, nothing streams or reconnects,
+        and "Stopped" shows with Play again. A recording goes on in the background (its own
+        Stop ends it); a channel's buffer is kept, as when it is left. Nothing when nothing
+        plays."""
+        if self._closed:
+            return
+        sessions = self.sessions
+        small = sessions is not None and (sessions.pip_open() or sessions.pip_opening())
+        busy = self._lanes.busy() or self._tuner.opening() or self.multiview_shown()
+        target = self._current
+        if target is None and not small and not busy:
+            return
+        self.leave_multiview(keep_pip=False)
+        self._live_controls.forget_back()  # nothing to resume into: it stopped
+        self._stop_all()
+        self._stopped = target
+        logger.info("Stopped: nothing plays")
+        notice = self.overlays.stopped_notice
+        if notice is not None:
+            notice.show_notice(translate(STOPPED))
+
+    def play_again(self) -> None:
+        """Play what Stop stopped: a channel live (from its group), a movie or an episode
+        where it stopped, a file from the start."""
+        target = self._stopped
+        self._forget_stopped()
+        if target is None or self._closed:
+            return
+        if target.local:
+            self.play_file(QUrl(str(target.item.get("cmd") or "")).toLocalFile())
+        elif target.live:
+            key = target.group_key or ALL_GROUP_ID
+            channels = list(self.catalog.items("live", key) or []) or self._all_live()
+            self.tune(target.item, group_key=key, channels=channels)
+        else:
+            self.play_vod(target.item, target.item_type, target.context)
+
+    def _forget_stopped(self) -> None:
+        """Something else plays (or is on its way): the Stop's pill goes."""
+        self._stopped = None
+        notice = self.overlays.stopped_notice
+        if notice is not None and not notice.isHidden():
+            notice.hide()
 
     def video_clicked(self) -> None:
         if self.overlays.drawer.isVisible():
@@ -1367,6 +1423,7 @@ class TVController(QObject):
         return list(self.catalog.items("live", ALL_GROUP_ID) or [])
 
     def _request(self, target: Target) -> None:
+        self._forget_stopped()  # 2.6: a newer choice than what Stop stopped
         self._give_back_later = False  # the large picture has a newer choice
         self._cancel_external()
         self._flow.drop_autotune()  # a choice made before the live section loaded comes first
@@ -3303,6 +3360,7 @@ class TVController(QObject):
             target.item, self._tuner.purpose, again, gives_way=True, ask_on=ask_on
         ):
             return  # 2.6: no stream is free while a recording holds one: asked
+        self._forget_stopped()
         self._cancel_external()
         self.leave_multiview(keep_pip=False)  # an external player is outside the budget
         self._close_pip()  # an external player is outside the budget: the PiP gives way

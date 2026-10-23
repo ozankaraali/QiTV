@@ -1142,6 +1142,19 @@ def scenario_more_numpad(rig: Rig) -> None:
     rig.page.wait_for_selector("#moreSheet", state="hidden")
 
 
+def scenario_stop(rig: Rig) -> None:
+    """2.6: More's Stop: nothing plays on the TV, nothing streams (as X and ■ there)."""
+    paired_sid(rig)
+    rig.page.click("#moreButton")
+    rig.page.wait_for_selector("#moreSheet:not([hidden])")
+    stop = rig.page.locator("#moreSheet [data-key=stop]")
+    assert stop.inner_text().strip() == "Stop", stop.inner_text()
+    rig.shot("more-stop")
+    mark = rig.events.mark()
+    stop.click()
+    rig.events.wait(Press, where=lambda e: e.button == "stop" and not e.down, after=mark)
+
+
 def scenario_pip_close(rig: Rig) -> None:
     """While the TV shows a small picture, More's button says it closes it."""
     sid = paired_sid(rig)
@@ -1275,6 +1288,7 @@ SCENARIOS.update(
         "now-playing": scenario_now_playing,
         "back-to": scenario_back_to,
         "ask": scenario_ask,
+        "stop": scenario_stop,
         "rec-line": scenario_rec_line,
         "guide-tune": scenario_guide_tune,
         "channel-list": scenario_channel_list,

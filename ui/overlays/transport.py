@@ -145,6 +145,8 @@ RESTORE_LABEL = N_("Last grid")  # i18n: chip on the player bar (multiview); sho
 # shown), and that key.
 KEY_HINTS = {
     "play": (N_("Play / pause"), "Space"),  # i18n: tooltip of the play button
+    # i18n: tooltip of the stop button (2.6): every picture stops, nothing streams
+    "stop": (N_("Stop"), "X"),
     "back10": (N_("Back 10 seconds"), "Left"),
     "fwd10": (N_("Forward 10 seconds"), "Right"),
     "golive": (N_("Go live"), "L"),  # i18n: button: jump to the channel's live point
@@ -328,6 +330,7 @@ class Transport(Overlay):
     pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
 
     playPauseRequested = Signal()
+    stopRequested = Signal()  # 2.6: ■, every picture stops and nothing streams
     seekRequested = Signal(int)
     seekRelativeRequested = Signal(int)
     speedRequested = Signal(float)
@@ -1115,11 +1118,12 @@ class Transport(Overlay):
 
         skip = icon + un.px(1.6)
         if not bar:
+            put("play", big, un.px(0.6))
             if self._timeshift:  # at the live edge: ← goes back into the buffer
-                put("play", big, un.px(0.6))
+                put("stop", skip, un.px(0.6))
                 put("back10", skip, un.px(1.5))
             else:
-                put("play", big, un.px(1.5))
+                put("stop", skip, un.px(1.5))
             left_end = x  # the left buttons and their gap
             # As wide as its word in a longer language ("EN VIVO"), never narrower than LIVE's.
             badge = QFontMetricsF(self._live_font(un)).horizontalAdvance(_live_label())
@@ -1150,6 +1154,7 @@ class Transport(Overlay):
                 put("fwd10", skip, un.px(0.6) if self._next_available else un.px(1.0))
                 if self._next_available:
                     put("next", skip, un.px(1.0))
+            put("stop", skip, un.px(1.0))
             speed_x = x  # the chip goes in once the right side has taken its room
             side = self._side_chip(un)
             room = speed_x + (side[1] if side is not None else 0.0) + un.px(0.8)
@@ -1497,6 +1502,7 @@ class Transport(Overlay):
             ("fwd10", "fwd10", un.px(3.0)),
             ("fwd60", "next", un.px(2.4)),
             ("next", "next", un.px(2.4)),
+            ("stop", "stop", un.px(2.0)),
         ):
             if name not in rects:
                 continue
@@ -1822,6 +1828,8 @@ class Transport(Overlay):
                 continue
             if name == "play":
                 self.playPauseRequested.emit()
+            elif name == "stop":
+                self.stopRequested.emit()
             elif name == "back10":
                 self.seekRelativeRequested.emit(-10_000)
             elif name == "fwd10":

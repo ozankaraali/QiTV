@@ -35,6 +35,9 @@ class ButtonTests(unittest.TestCase):
                     self.assertEqual(button.kind, "screen")
                     self.assertIn(button.payload, ("tv", "movies", "series"))
 
+    def test_stop_is_a_players_button(self):  # 2.6: nothing plays, nothing streams
+        self.assertEqual(BUTTONS["stop"].action, Action.STOP)
+
     def test_reverse_pairs_are_symmetric(self):
         for name, meta in BUTTON_META.items():
             if meta.reverse is not None:

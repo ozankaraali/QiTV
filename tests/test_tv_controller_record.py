@@ -22,6 +22,7 @@ from ui.keymap import Action
 from ui.live_tuner import LiveTuner
 from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import RecSign
+from ui.overlays.stopped_notice import StoppedNotice
 
 QUESTION = "No stream is free: One is recording. Stop the recording?"
 
@@ -361,6 +362,68 @@ class RecordGuardWiringTests(_RecordCase):
             self.toast.messages(),
         )
         self.assertTrue(recording.recording())
+
+
+class StopTests(_RecordCase):
+    """2.6: Stop (■, X, the phone's): every picture stops and nothing streams; a recording goes
+    on in the background; Play plays what was stopped again."""
+
+    def overlays(self, column):
+        overlays = super().overlays(column)
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.notice = StoppedNotice(self.host)
+        overlays.stopped_notice = self.notice
+        return overlays
+
+    def test_stop_stops_both_pictures_and_says_so(self):
+        self.start_large(0)
+        small = self.open_small(CHANNELS[1])
+        self.controller.handle(Action.STOP)
+        self.assertEqual(self.live.calls[-1], ("stop",))
+        self.assertEqual(small.live.calls[-1], ("stop",))
+        self.assertFalse(self.sessions.pip_open())
+        self.assertTrue(self.notice.isVisibleTo(self.host))
+        self.assertEqual(self.notice.text(), "Stopped")
+
+    def test_play_plays_the_channel_again(self):
+        self.start_large(0)
+        self.controller.handle(Action.STOP)
+        self.live.released.emit()
+        links = len(self.catalog.links)
+        self.controller.handle(Action.PLAY_PAUSE)
+        self.assertEqual(len(self.catalog.links), links + 1)
+        self.assertEqual(self.requested()[-1], "One")
+        self.assertTrue(self.notice.isHidden())
+
+    def test_the_pills_button_plays_again(self):
+        self.start_large(0)
+        self.controller.handle(Action.STOP)
+        self.notice.keepWatching.emit()
+        self.assertEqual(self.requested()[-1], "One")
+
+    def test_a_film_plays_again_too(self):
+        self.controller.play_vod(MOVIE, "movie", play_context())
+        self.ready("http://vod/heat.mkv")
+        self.controller.handle(Action.STOP)
+        self.controller.handle(Action.PLAY_PAUSE)
+        self.assertEqual(self.requested()[-1], "Heat")
+
+    def test_a_recording_goes_on_in_the_background(self):
+        recording = self.record_large(0)
+        self.controller.handle(Action.STOP)
+        self.assertNotIn(("stop",), self.since_recording(recording))
+        self.assertEqual([s.name for s in self.sessions.background()], ["main"])
+
+    def test_with_nothing_playing_stop_does_nothing(self):
+        self.controller.handle(Action.STOP)
+        self.assertTrue(self.notice.isHidden())
+
+    def test_another_choice_takes_the_pill_away(self):
+        self.start_large(0)
+        self.controller.handle(Action.STOP)
+        self.tune(1)
+        self.assertTrue(self.notice.isHidden())
 
 
 class RecordingTileTests(MultiviewCase):

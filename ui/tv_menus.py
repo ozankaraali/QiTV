@@ -169,6 +169,8 @@ class TVMenus(QObject):
         player.append(add(view, tr("Mini Player"), "Alt+P", self._handler(Action.MINI_PLAYER)))
         playback = bar.addMenu(tr("Playback"))  # i18n: the menu bar's Playback menu
         player.append(add(playback, tr("Play/Pause"), "Space", self._handler(Action.PLAY_PAUSE)))
+        # i18n: a menu entry (2.6): every picture stops, nothing streams (verb)
+        player.append(add(playback, tr("Stop"), "X", self._handler(Action.STOP)))
         # i18n: a menu entry (verb)
         player.append(add(playback, tr("Mute"), "M", self._handler(Action.MUTE)))
         player.append(

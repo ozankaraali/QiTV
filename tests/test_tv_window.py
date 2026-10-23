@@ -507,6 +507,7 @@ class TVWindowTests(WindowCase):
             shortcuts(menus["Playback"]),
             [
                 ("Play/Pause", "Space"),
+                ("Stop", "X"),  # 2.6
                 ("Mute", "M"),
                 ("Previous Channel", "Backspace"),
                 ("Go Live", "L"),

@@ -126,6 +126,7 @@ from ui.overlays.rec_sign import RecSign
 from ui.overlays.remote_pair import PairOverlay
 from ui.overlays.sleep_notice import SleepNotice
 from ui.overlays.stats import StatsOverlay
+from ui.overlays.stopped_notice import StoppedNotice
 from ui.overlays.subtitle_search import SubtitleSearchPage
 from ui.overlays.toast import Toast
 from ui.overlays.track_panel import TrackPanel
@@ -505,6 +506,7 @@ class TVWindow(QMainWindow):
         self.back_notice = BackNotice(host)  # 2.6: Resume, where a channel was left
         self.question_card = QuestionCard(host)  # 2.6: stop a recording for a stream?
         self.rec_sign = RecSign(host)  # 2.6: recordings in the background
+        self.stopped_notice = StoppedNotice(host)  # 2.6: after Stop, Play again
         self.pair_overlay = PairOverlay(host)  # the phone remote's pairing QR
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
@@ -533,6 +535,7 @@ class TVWindow(QMainWindow):
             library_question=self.library_question,
             rec_sign=self.rec_sign,
             library_rec_sign=self.library_rec_sign,
+            stopped_notice=self.stopped_notice,
             pairing=self.pair_overlay,
             library_toast=self.library_toast,
             layout_row=self.layout_row,
@@ -569,6 +572,7 @@ class TVWindow(QMainWindow):
             self.corner_controls,
             self.sleep_notice,
             self.back_notice,
+            self.stopped_notice,
             self.rec_sign,
             self.question_card,
             self.pair_overlay,

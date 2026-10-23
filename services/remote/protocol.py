@@ -95,7 +95,18 @@ def _meta() -> dict[str, ButtonMeta]:
         "movies": ButtonMeta("screen"),
         "series": ButtonMeta("screen"),
     }
-    for name in ("pp", "live", "info", "guide", "record", "pip", "swap", "multiview", "picture"):
+    for name in (
+        "pp",
+        "stop",
+        "live",
+        "info",
+        "guide",
+        "record",
+        "pip",
+        "swap",
+        "multiview",
+        "picture",
+    ):
         table[name] = ButtonMeta("player")
     table["back_to"] = ButtonMeta("player")  # 2.6: Resume, where a channel come back to was left
     for digit in range(10):
