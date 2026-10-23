@@ -31,7 +31,12 @@ jobs:
           python-version: '3.14'
           enable-cache: true
       - name: Install VLC
-        run: sudo apt-get update && sudo apt-get install -y vlc libxcb-cursor0
+        # A stalled mirror fails the step in minutes (it usually takes under a minute), and
+        # the job's failure cancels the run: rerun it with `gh run rerun <id> --failed`.
+        timeout-minutes: 6
+        run: |
+          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
+          sudo apt-get $apt update && sudo apt-get $apt install -y vlc libxcb-cursor0
       - name: Sync dependencies
         run: uv sync --frozen --dev
       - name: Run tests
@@ -60,7 +65,11 @@ jobs:
           python-version: '3.14'
           enable-cache: true
       - name: Install VLC and xcb dependencies
-        run: sudo apt-get update && sudo apt-get install -y vlc libxcb-cursor0 xvfb openbox xcompmgr x11-utils
+        timeout-minutes: 6  # a stalled mirror (see the tests job)
+        run: |
+          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
+          sudo apt-get $apt update
+          sudo apt-get $apt install -y vlc libxcb-cursor0 xvfb openbox xcompmgr x11-utils
       - name: Silence ALSA
         run: |
           printf 'pcm.!default { type null }\n' > ~/.asoundrc
