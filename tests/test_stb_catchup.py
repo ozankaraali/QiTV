@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
-from mixed_fixtures import mixed_config
+from mixed_fixtures import mixed_config, shut_hub
 import orjson
 from timer_fixtures import wait_until
 
@@ -370,7 +370,7 @@ class CatalogLinkTests(PortalCase):
         self.config, self.registry = mixed_config(self.dir, [provider], {})
         self.addCleanup(self.registry._cache_writer.shutdown, wait=True)
         self.catalogs = Catalogs(self.config, self.registry, runner=ImmediateRunner())
-        self.addCleanup(self.catalogs.shutdown)
+        self.addCleanup(shut_hub, self.catalogs)
         self.ready, self.failed = [], []
         self.catalogs.linkReady.connect(lambda rid, url: self.ready.append((rid, url)))
         self.catalogs.linkFailed.connect(lambda rid, message: self.failed.append((rid, message)))

@@ -95,3 +95,12 @@ class HeldSetups(ImmediateRunner):
         self.waiting = [job for job in self.waiting if job[3].data[0] != name]
         for worker, on_finished, on_error, context in jobs:
             super().run_worker(worker, on_finished, on_error, context)
+
+
+def shut_hub(hub) -> None:
+    """Stop the catalog hub (`Catalogs`) and wait for each provider's cache writer:
+    `Catalogs.shutdown` does not wait (the app quits at once), and a test's temporary
+    directory goes next (macOS CI: a writer still saving left "Directory not empty")."""
+    hub.shutdown()
+    for catalog in hub._by_name.values():
+        catalog.provider_manager._cache_writer.shutdown(wait=True)

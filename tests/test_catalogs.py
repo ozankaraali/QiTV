@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
-from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config
+from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config, shut_hub
 import orjson
 from test_catalog_lifecycle import RealSetupFactory
 from test_catalog_service import FakeWorker
@@ -78,7 +78,7 @@ class CatalogsTests(unittest.TestCase):
         self.links, self.failures = [], []
         self.catalogs.linkReady.connect(lambda rid, url: self.links.append((rid, url)))
         self.catalogs.linkFailed.connect(lambda rid, msg: self.failures.append((rid, msg)))
-        self.addCleanup(self.catalogs.shutdown)
+        self.addCleanup(shut_hub, self.catalogs)
 
     def make_epg(self, manager):
         epg = FakeEpg(manager._pinned_provider)
@@ -156,7 +156,7 @@ class CatalogsTests(unittest.TestCase):
             make_epg=self.make_epg,
             in_use=lambda: {"Harbor IPTV"},
         )
-        self.addCleanup(catalogs.shutdown)
+        self.addCleanup(shut_hub, catalogs)
         catalogs.ensure("Harbor IPTV")
         old = catalogs.catalog("Harbor IPTV")
         runner.held.add("Harbor IPTV")  # the next sign-in takes a while
@@ -201,7 +201,7 @@ class CatalogsTests(unittest.TestCase):
             make_epg=self.make_epg,
             in_use=lambda: {"Harbor IPTV"},
         )
-        self.addCleanup(catalogs.shutdown)
+        self.addCleanup(shut_hub, catalogs)
         catalogs.ensure("Harbor IPTV")
         original = dict(self.registry.providers[1])
         runner.held.add("Harbor IPTV")
@@ -275,7 +275,7 @@ class CatalogsTests(unittest.TestCase):
             factory=self.factory,
             make_epg=self.make_epg,
         )
-        self.addCleanup(catalogs.shutdown)
+        self.addCleanup(shut_hub, catalogs)
         catalogs.use_guides({"Demo TV"})
         catalog = catalogs.catalog("Demo TV")
         self.assertTrue(catalog.epg_loading())
@@ -297,7 +297,7 @@ class CatalogsTests(unittest.TestCase):
             factory=self.factory,
             make_epg=self.make_epg,
         )
-        self.addCleanup(catalogs.shutdown)
+        self.addCleanup(shut_hub, catalogs)
         catalogs.use_guides({"Demo TV"})
         catalogs.use_guides(set())
         runner.finish_guides()
@@ -393,7 +393,7 @@ class LinksDuringSetupTests(unittest.TestCase):
             factory=self.factory,
             make_epg=self.make_epg,
         )
-        self.addCleanup(self.hub.shutdown)
+        self.addCleanup(shut_hub, self.hub)
         self.hub_links, self.hub_failures = [], []
         self.hub.linkReady.connect(lambda rid, url: self.hub_links.append((rid, url)))
         self.hub.linkFailed.connect(lambda rid, msg: self.hub_failures.append((rid, msg)))

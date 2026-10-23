@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from job_fixtures import ImmediateRunner
-from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config
+from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config, shut_hub
 from test_browsed_catalog import FakeEpg, ScriptedFactory
 from test_catalog_service import FakeWorker
 from timer_fixtures import elapse, wait_until
@@ -83,7 +83,7 @@ class MixedNavigationTests(unittest.TestCase):
             factory=self.factory,
             make_epg=lambda manager: FakeEpg(manager._pinned_provider),
         )
-        self.addCleanup(catalogs.shutdown)
+        self.addCleanup(shut_hub, catalogs)
         config.selected_provider_name = providers[0]["name"]
         view = BrowsedCatalog(
             catalogs, config, source_key="selected_provider_name", all_key="tv_all_providers"

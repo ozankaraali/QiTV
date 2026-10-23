@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
-from mixed_fixtures import DEMO, HARBOR, live_content, mixed_config
+from mixed_fixtures import DEMO, HARBOR, live_content, mixed_config, shut_hub
 import orjson
 from test_catalog_service import FakeWorker
 from test_catalogs import RecordingFactory
@@ -108,7 +108,7 @@ class BrowsedCatalogTests(unittest.TestCase):
             factory=self.factory,
             make_epg=lambda manager: FakeEpg(manager._pinned_provider),
         )
-        self.addCleanup(self.catalogs.shutdown)
+        self.addCleanup(shut_hub, self.catalogs)
 
     def view(self, source="Demo TV"):
         """A TV page showing `source` (ALL_PROVIDERS: every provider, set up from the caches)."""
@@ -553,7 +553,7 @@ class EditedProviderTests(unittest.TestCase):
             make_epg=lambda manager: FakeEpg(manager._pinned_provider),
             in_use=self.in_use,
         )
-        self.addCleanup(self.catalogs.shutdown)
+        self.addCleanup(shut_hub, self.catalogs)
         self.config.selected_provider_name = "Demo TV"
 
     def in_use(self):
