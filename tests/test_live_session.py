@@ -3151,7 +3151,7 @@ class RateHealthTests(LiveSessionCase):
         self.assertEqual(self.playback.rates, rates)  # never changed again
         self.assertEqual(len(self.playback.plays), 1)  # and no jump to live
         self.assertEqual(self.timelines[-1]["rate"], 1.0)
-        self.assertEqual(len(logs.records), 1)  # said once
+        self.assertEqual(len(logs.records), 1, logs.output)  # said once (shown when not)
         self.assertNotIn("provider.example", logs.output[0])
         self.assertNotIn("://", logs.output[0])
 
