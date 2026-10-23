@@ -18,10 +18,11 @@ permissions:
   actions: write  # a failed job cancels the run
 
 jobs:
-  # The unit tests run once, on Linux, beside the builds; each build still smoke-tests its
-  # packaged app (real playback with the bundled libVLC) on its own platform.
+  # The unit tests run once, on macOS, beside the builds (2.6.1: Ubuntu's package mirror kept
+  # stalling the VLC install; VLC.app comes from the build jobs' cache); each build still
+  # smoke-tests its packaged app (real playback with the bundled libVLC) on its own platform.
   tests:
-    runs-on: ubuntu-24.04
+    runs-on: macos-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,13 +31,20 @@ jobs:
         with:
           python-version: '3.14'
           enable-cache: true
-      - name: Install VLC
-        # A stalled mirror fails the step in minutes (it usually takes under a minute), and
-        # the job's failure cancels the run: rerun it with `gh run rerun <id> --failed`.
-        timeout-minutes: 6
+      - name: Get latest VLC version
+        id: vlc-version
         run: |
-          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
-          sudo apt-get $apt update && sudo apt-get $apt install -y vlc libxcb-cursor0
+          VLC_VERSION=$(brew info --json=v2 --cask vlc | python3 -c "import sys,json; print(json.load(sys.stdin)['casks'][0]['version'])")
+          echo "version=$VLC_VERSION" >> $GITHUB_OUTPUT
+      - name: Cache VLC.app
+        id: vlc-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /Applications/VLC.app
+          key: vlc-macos-arm64-${{ steps.vlc-version.outputs.version }}
+      - name: Install VLC
+        if: steps.vlc-cache.outputs.cache-hit != 'true'
+        run: brew install --cask vlc
       - name: Sync dependencies
         run: uv sync --frozen --dev
       - name: Run tests
