@@ -1314,7 +1314,10 @@ class LiveSession(QObject):
         if self._limited:
             self._refuse()
             return
+        phase = self._phase
         self._end_recording()  # a direct play has no buffer to record from
+        if phase is not _Phase.IDLE and self._phase is _Phase.IDLE:
+            return  # its end's handler stopped the session meanwhile (one in the background)
         self._stop_timers()
         keep = self._keeps_history()
         sid, self._sid = self._sid, None
@@ -1332,7 +1335,10 @@ class LiveSession(QObject):
 
     def _refuse(self) -> None:
         """The provider refused for its connection limit: close it all, play nothing."""
+        phase = self._phase
         self._end_recording()
+        if phase is not _Phase.IDLE and self._phase is _Phase.IDLE:
+            return  # its end's handler stopped the session meanwhile (one in the background)
         self._stop_timers()
         keep = self._keeps_history()
         sid, self._sid = self._sid, None

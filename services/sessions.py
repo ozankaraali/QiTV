@@ -430,8 +430,9 @@ class SessionManager(QObject):
         return fresh.name
 
     def bring_back(self, name: str) -> Optional[str]:
-        """Background slot `name` is large again; the slot that was large is returned (its
-        caller lets its channel go). None when `name` is not in the background."""
+        """Background slot `name` is large again; the slot that was large is returned: one
+        that records goes to the background in turn, else its caller lets its channel go.
+        None when `name` is not in the background."""
         if self._grid or name not in self._aside:
             return None
         slot, old = self._slot(name), self._large
@@ -439,6 +440,9 @@ class SessionManager(QObject):
         self._set_background(slot, False)
         users_mute = self._muted[old.name]
         self._large = slot
+        if records(old):  # two recordings: the one left records on
+            self._aside.append(old.name)
+            self._set_background(old, True)
         self._set_mute(old, True)
         self._set_mute(slot, users_mute)
         self._apply_level(slot)
@@ -472,8 +476,16 @@ class SessionManager(QObject):
         """A multiview tile that records, as the grid goes, records on in the background (it
         has no role: the grid's leave gives the roles). False: it does not play."""
         slot = self._slot(name)
-        if name in self._aside or slot in (self._large, self._small) or slot.channel is None:
+        if name in self._aside or slot is self._large or slot.channel is None:
             return False
+        if slot is self._small:
+            if not self._grid:
+                return False
+            # In the grid the small role is bookkeeping only: another slot takes it.
+            fresh = self._spare()
+            if fresh is None:
+                return False
+            self._small = fresh
         self._direct.discard(name)
         self._tile_opens.pop(name, None)
         self._aside.append(name)

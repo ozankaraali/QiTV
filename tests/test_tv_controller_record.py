@@ -83,6 +83,34 @@ class RecordingAsideTests(_RecordCase):
         self.assertIn(("stop",), stand_in.calls)  # the channel it showed is left
         self.assertEqual(self.controller._channel, CHANNELS[0])
 
+    def test_going_back_keeps_the_other_recording(self):  # Stage C review C1
+        self.record_large(0)
+        stand_in = self.leave_for(1)
+        self.assertTrue(stand_in.start_recording("/tmp/y.ts"))
+        self.controller.tune(CHANNELS[0], group_key="10", channels=CHANNELS)
+        self.assertEqual(self.sessions.large().name, "main")
+        self.assertTrue(stand_in.recording())
+        self.assertNotIn(
+            ("stop",), stand_in.calls[stand_in.calls.index(("start_recording", "/tmp/y.ts")) :]
+        )
+        self.assertEqual([s.name for s in self.sessions.background()], ["b1"])
+        self.assertEqual(stand_in.calls[-1], ("set_aside",))
+        self.controller.tune(CHANNELS[1], group_key="10", channels=CHANNELS)  # and back again
+        self.assertEqual(self.sessions.large().name, "b1")
+        self.assertEqual([s.name for s in self.sessions.background()], ["main"])
+
+    def test_the_signs_go_back_keeps_the_other_recording(self):  # Stage C review C1
+        self.record_large(0)
+        stand_in = self.leave_for(1)
+        self.assertTrue(stand_in.start_recording("/tmp/y.ts"))
+        self.controller.go_back_to_recording("main")
+        self.assertTrue(stand_in.recording())
+        self.assertEqual([s.name for s in self.sessions.background()], ["b1"])
+
+    def test_an_unknown_player_is_ignored(self):  # Stage C review M5: a stale phone's
+        self.controller.go_back_to_recording("b9")
+        self.controller.stop_background_recording("b9")
+
     def test_a_film_while_recording_keeps_it(self):
         recording = self.record_large(0)
         self.controller.play_vod(MOVIE, "movie", play_context())
@@ -233,6 +261,25 @@ class StreamQuestionTests(_RecordCase):
         self.assertFalse(recording.recording())
         recording.released.emit()
         self.assertTrue(wait_until(lambda: launched == ["http://stream/2"]))
+
+    def test_a_page_change_takes_the_question_along(self):  # Stage C review I3
+        self.one_stream()
+        self.record_large(0)
+        page = QWidget()
+        page.resize(1280, 720)
+        library_card = QuestionCard(page)
+        self.controller.overlays.library_question = library_card
+        self.tune(1)
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.controller.page_changed("library")
+        self.assertTrue(self.question.isHidden())
+        self.assertTrue(library_card.isVisibleTo(page))
+        self.assertEqual(library_card.question(), QUESTION)
+        self.controller.page_changed("corner")  # the Library, with the player in a corner
+        self.assertTrue(library_card.isVisibleTo(page))
+        self.controller.page_changed("player")
+        self.assertTrue(library_card.isHidden())
+        self.assertEqual(self.question.question(), QUESTION)
 
     def test_from_the_library_the_librarys_card_asks(self):
         self.one_stream()
@@ -452,6 +499,22 @@ class RecordingTileTests(MultiviewCase):
         self.host.resize(1280, 720)
         self.question = QuestionCard(self.host)
         self.controller.overlays.question = self.question
+
+    def test_the_small_role_tiles_recording_survives_leaving(self):  # Stage C review I1
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.pick_in("pip", CHANNELS[3], "http://stream/4")
+        self.grid_frame.focusRequested.emit("main")
+        small = self.sessions.other()
+        self.assertTrue(small.live.start_recording("/tmp/x.ts"))
+        self.controller.stop_for_library()  # leave_multiview(keep_pip=False)
+        tail = small.live.calls[small.live.calls.index(("start_recording", "/tmp/x.ts")) :]
+        self.assertNotIn(("stop",), tail)
+        self.assertIn(small, self.sessions.background())
+        self.assertNotIn(self.sessions.other(), self.sessions.background())
+        self.assertIsNot(self.sessions.other(), self.sessions.large())
 
     def test_a_recording_tiles_channel_change_asks_first(self):
         self.with_question()

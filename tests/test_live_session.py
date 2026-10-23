@@ -875,6 +875,31 @@ class KeptTests(LiveSessionCase):
         self.engine.sessionParked.emit("k")
         self.assertEqual(self.playback.plays[-1], DIRECT)
 
+    def stopping_when_the_recording_ends(self):
+        """As SessionManager does for a recording in the background (Stage C review I2)."""
+        self.live.recordingChanged.connect(lambda recording: recording or self.live.stop())
+
+    def test_a_stop_at_the_recordings_end_in_a_fall_back_plays_nothing(self):
+        sid = self.ready([], open_seq=4, live_edge=3.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertTrue(self.live.start_recording("/Movies/QiTV/One.ts"))
+        self.stopping_when_the_recording_ends()
+        plays = len(self.playback.plays)
+        self.engine.sessionFailed.emit(sid, "network", "x")  # a final failure at the edge
+        self.engine.answer()
+        self.assertNotIn(DIRECT, self.playback.plays[plays:])
+        self.assertNotIn("direct", self.modes)
+
+    def test_a_stop_at_the_recordings_end_in_a_refusal_reports_nothing(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertTrue(self.live.start_recording("/Movies/QiTV/One.ts"))
+        self.stopping_when_the_recording_ends()
+        self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
+        self.engine.answer()
+        self.assertEqual(self.failures, [])  # it was stopped, not refused
+        self.assertFalse(self.live.is_pipeline())
+
     def test_a_recording_set_aside_pauses_and_comes_back_live_offering_where_it_was(self):
         offers = self.back_offers()
         self.ready(segments(0, 30), channel="k1")

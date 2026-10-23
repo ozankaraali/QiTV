@@ -118,6 +118,7 @@ class Recorder:
         self.reason = ""  # why it ended, once it has (one of REASONS)
         self.name = ""  # what its owner calls it (the parent's recording id)
         self._checked_at = 0  # `written` when the free space was last looked at
+        self._found_at = 0  # `written` when the file was last found where it was made
         self._ring: Ring | None = None  # the ring being followed (stop() wakes its waiters)
         # 2.6: where each segment it wrote sits in the file, so a reader plays back what the
         # ring let go of: seq -> [header offset, header length, payload offset, payload length]
@@ -257,6 +258,8 @@ class Recorder:
                 self._progress()
                 if self._short_of_space():
                     return SPACE
+                if self._gone():
+                    return WRITE  # moved or deleted: it would be written nowhere
                 continue
             if not complete:
                 if ended or stopping:
@@ -329,7 +332,18 @@ class Recorder:
                 handle.seek(at)
                 return handle.read(length), True, header_len
         except OSError:
+            self._forget()  # moved or deleted: what it held plays back no more
             return None
+
+    def _forget(self) -> None:
+        """Its file can no longer be read back: the timeline's oldest point is the buffer's
+        again (`first_written` is None)."""
+        with self._index_lock:
+            if self._places:
+                _LOG.info("A recording's file cannot be read back any more.")
+            self._places.clear()
+            self._junctions.clear()
+            self._header = None
 
     def _oldest(self, ring: Ring, at_least: int) -> int:
         """Where to go on after a gap: the oldest segment `ring` holds, never before
@@ -381,6 +395,29 @@ class Recorder:
             return self._free_bytes(self._asked.parent) < self._min_free
         except OSError:
             return False  # not known: the writes say when it is full
+
+    def _gone(self) -> bool:
+        """The file is no longer where it was made (moved, deleted), looked at every
+        `_SPACE_EVERY` bytes as the free space is: what it writes would reach no one."""
+        handle = self._file
+        if handle is None or not self.path or self.written - self._found_at < _SPACE_EVERY:
+            return False
+        self._found_at = self.written
+        try:
+            mine = os.fstat(handle.fileno())
+        except OSError:
+            return False
+        try:
+            there = os.stat(self.path)
+        except FileNotFoundError:
+            there = None
+        except OSError:
+            return False  # not known: the writes say when they fail
+        if there is not None and (there.st_dev, there.st_ino) == (mine.st_dev, mine.st_ino):
+            return False
+        _LOG.warning("A recording's file was moved or deleted while it recorded.")
+        self._forget()
+        return True
 
     def _close(self) -> None:
         handle, self._file = self._file, None

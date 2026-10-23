@@ -262,6 +262,7 @@ class TVController(QObject):
         self._states: dict[str, str] = {}  # each player's last state (a swap shows another)
         self._resume: Optional[Target] = None  # what stop_live() stopped, for resume_stopped()
         self._stopped: Optional[Target] = None  # 2.6: what Stop stopped, for play_again()
+        self._page: Optional[str] = None  # the window's page ("player", "library", "corner")
         self._external_pending: Optional[tuple[Target, str]] = None
         self._external_settle = QTimer(self, singleShot=True)
         self._external_settle.timeout.connect(self._launch_settled)
@@ -1908,9 +1909,9 @@ class TVController(QObject):
         sessions = self.sessions
         if sessions is None or self._closed:
             return
-        slot = sessions.slot(name)
-        if slot.channel is None or not any(s is slot for s in sessions.background()):
-            return
+        slot = next((s for s in sessions.background() if s.name == name), None)
+        if slot is None or slot.channel is None:
+            return  # gone meanwhile (a phone's stale REC line)
         self.leave_multiview()  # the grid's tiles never show a background player
         key = slot.group_key or ALL_GROUP_ID
         channels = list(self.catalog.items("live", key) or []) or self._all_live()
@@ -1935,11 +1936,18 @@ class TVController(QObject):
         return sorted(recording, key=lambda slot: slot.live.recording_since() or 0.0)
 
     def _question_card(self) -> Any:
-        """The question's card on the page that shows (the Library's while it shows)."""
+        """The question's card on the page that shows (the Library's while it shows, the
+        player in its corner or not)."""
+        library = self._flow.in_library() if self._page is None else self._page != "player"
         card = self.overlays.library_question
-        if card is None or not self._flow.in_library():
+        if card is None or not library:
             card = self.overlays.question
         return card
+
+    def page_changed(self, mode: str) -> None:
+        """The window shows another page (PageStack's mode): a question goes along."""
+        self._page = mode
+        self._question.follow_page()
 
     def answer_key(self, action: Action) -> bool:
         """A key while QiTV asks (any page): True when it is the question's."""
@@ -2075,13 +2083,17 @@ class TVController(QObject):
         if sessions is None or pip is None or self._closed:
             return
         slot, old = sessions.slot(name), sessions.slot(old_name)
+        current = self._current
         view = pip.take_large(
-            old_name, name, self._current, self.zap.context, self._current_url, self._cid
+            old_name, name, current, self.zap.context, self._current_url, self._cid
         )
         self._live_controls.new_target()  # the stand-in's ticks and held notice
-        self._tuner.stop()  # the stand-in leaves its channel (its buffer is kept)
-        old.channel = old.group_key = None
-        pip.forget_view(old_name)
+        if any(s is old for s in sessions.background()):
+            old.live.set_aside()  # it records too: on in the background (Stage C review C1)
+        else:
+            self._tuner.stop()  # the stand-in leaves its channel (its buffer is kept)
+            old.channel = old.group_key = None
+            pip.forget_view(old_name)
         self._use_slot(slot)
         target = view.target
         if target is None and slot.channel is not None:  # a multiview tile's: no view kept

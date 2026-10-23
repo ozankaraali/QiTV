@@ -412,6 +412,29 @@ class RecordedReadTests(RecorderCase):
         self.wait_written(recorder, len(self.writer.stream(0)))
         os.replace(recorder.path, recorder.path + ".moved")
         self.assertIsNone(recorder.read(0, 0, 100))
+        # Stage C review I4: what it held is forgotten (the buffer's oldest point again).
+        self.assertIsNone(recorder.first_written())
+
+    def test_a_moved_file_ends_the_recording_as_a_write_failure(self):  # Stage C review I4
+        with mock.patch.object(recorder_module, "_SPACE_EVERY", 1):
+            self.segments(2)
+            recorder = self.record(0)
+            self.wait_written(recorder, len(self.writer.stream(0)))
+            os.replace(recorder.path, recorder.path + ".moved")
+            self.writer.append(2000)  # more to write: the next look finds it gone
+            self.finish(recorder)
+        self.assertEqual(recorder.reason, WRITE)
+        self.assertIsNone(recorder.first_written())
+
+    def test_a_deleted_file_ends_the_recording_as_a_write_failure(self):
+        with mock.patch.object(recorder_module, "_SPACE_EVERY", 1):
+            self.segments(2)
+            recorder = self.record(0)
+            self.wait_written(recorder, len(self.writer.stream(0)))
+            os.remove(recorder.path)
+            self.writer.append(2000)
+            self.finish(recorder)
+        self.assertEqual(recorder.reason, WRITE)
 
     def whole(self, seq):
         data = b""

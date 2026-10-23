@@ -676,6 +676,7 @@ class TVWindow(QMainWindow):
         # The corner player (the Library with what plays in a corner of it): ⤢ and a click on
         # it bring the player back, × stops it, the speaker mutes.
         self.pages.modeChanged.connect(self._on_page_mode)
+        self.pages.modeChanged.connect(self.controller.page_changed)  # 2.6: a question goes along
         # The Library (its corner player) lays the player out: a floating picture comes back.
         self.pages.modeChanged.connect(lambda *_: self.desktop_pip.dock())
         self.pages.cornerClicked.connect(self.screens.back_to_player)
@@ -1540,6 +1541,18 @@ class TVWindow(QMainWindow):
                 self._bound[name] = handle
                 player.set_window(handle)
 
+    def _come_forward(self) -> None:
+        """The window in front, not minimized, its picture back from the desktop's."""
+        try:
+            self.desktop_pip.dock()
+        except Exception as e:  # never in the way of the question
+            logger.warning("Could not put the floating picture back: %s", safe_message(e))
+        if self.isMinimized():
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """Close in steps, each after the event loop ran again (`close_retry`).
 
@@ -1562,6 +1575,7 @@ class TVWindow(QMainWindow):
             return
         if not self._closing and self.controller.asks_before_quit(self.close):
             event.ignore()  # 2.6: channels record: Quit stops them and closes again
+            self._come_forward()  # the question shows where it can be answered
             return
         if not self._closing:
             self._closing = True

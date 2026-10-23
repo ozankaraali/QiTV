@@ -71,6 +71,20 @@ class QuestionCardTests(unittest.TestCase):
             self.assertFalse(self.card.handle(action), action)
         self.assertEqual(self.answers, [])
 
+    def test_a_card_whose_page_hid_takes_no_keys(self):  # Stage C review I3
+        top = QWidget()
+        page = QWidget(top)
+        page.resize(1280, 720)
+        card = QuestionCard(page)
+        answers = []
+        card.answered.connect(answers.append)
+        card.ask(QUESTION, "Stop recording", "Keep recording")
+        page.hide()
+        self.assertFalse(card.handle(Action.SEEK_FWD))
+        self.assertFalse(card.handle(Action.OK))
+        self.assertEqual((answers, card.focused()), ([], "no"))
+        top.deleteLater()
+
     def test_a_hidden_card_takes_no_keys(self):
         self.card.escape()
         self.assertFalse(self.card.handle(Action.OK))

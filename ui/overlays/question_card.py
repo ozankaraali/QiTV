@@ -101,8 +101,8 @@ class QuestionCard(Overlay):
     def handle(self, action: Action) -> bool:
         """A key while it shows: True when it is the card's (every key but the sound's and
         the window's waits for the answer)."""
-        if self.isHidden() or action in _THROUGH:
-            return False
+        if not self.isVisibleTo(self.window()) or action in _THROUGH:
+            return False  # also when its page hid (the shell moves the question along)
         if action in (Action.OK, Action.NAV_ACTIVATE):
             self.activate()
         elif action in (Action.ESCAPE, Action.PREVIOUS, Action.NAV_BACKSPACE):

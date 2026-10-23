@@ -84,6 +84,7 @@ class StreamQuestion(QObject):
         self._waited: Optional[_Question] = None
         self._shown: Any = None  # the card that asks now
         self._cards: list[Any] = []  # the cards whose answers are followed
+        self._words = ("", "", "")  # the question shown and its answers' words
         self._going = False  # what was asked runs: it asks nothing again
         self._wait = QTimer(self, singleShot=True)
         self._wait.timeout.connect(self._go_on)
@@ -171,6 +172,18 @@ class StreamQuestion(QObject):
         self._wait.start(RELEASE_WAIT_MS)
         self._on_released(question.provider)
 
+    def follow_page(self) -> None:
+        """The page that shows changed: a question on the other page's card moves to this
+        page's (Stage C review: else it waited unseen, taking the keys)."""
+        card, question = self._shown, self._question
+        if card is None or question is None:
+            return
+        new = self._card()
+        if new is None or new is card:
+            return
+        card.hide()
+        self._show_on(new, *self._words)
+
     def handle(self, action: Action) -> bool:
         """A key while the card asks: True when it is the card's."""
         card = self._shown
@@ -193,15 +206,19 @@ class StreamQuestion(QObject):
         card = self._card()
         if card is None:
             return False
+        self._question = question
+        self._show_on(card, text, yes, no)
+        return True
+
+    def _show_on(self, card: Any, text: str, yes: str, no: str) -> None:
         if not any(known is card for known in self._cards):
             self._cards.append(card)
             card.answered.connect(partial(self._on_card, card))
         if self._shown is not None and self._shown is not card:
             self._shown.hide()  # the other page's card: no answer
-        self._question = question
         self._shown = card
+        self._words = (text, yes, no)
         card.ask(text, yes, no)
-        return True
 
     def _on_card(self, card: Any, yes: bool) -> None:
         if card is self._shown:
