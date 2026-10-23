@@ -462,6 +462,17 @@ class StopTests(_RecordCase):
         self.assertNotIn(("stop",), self.since_recording(recording))
         self.assertEqual([s.name for s in self.sessions.background()], ["main"])
 
+    def test_with_only_the_small_picture_play_plays_its_channel_again(self):
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.STOP)
+        self.assertFalse(self.sessions.pip_open())
+        self.assertTrue(self.notice.isVisibleTo(self.host))
+        links = len(self.catalog.links)
+        self.controller.handle(Action.PLAY_PAUSE)
+        self.assertEqual(len(self.catalog.links), links + 1)
+        self.assertEqual(self.requested()[-1], "Two")
+        self.assertTrue(self.notice.isHidden())
+
     def test_with_nothing_playing_stop_does_nothing(self):
         self.controller.handle(Action.STOP)
         self.assertTrue(self.notice.isHidden())
@@ -471,6 +482,19 @@ class StopTests(_RecordCase):
         self.controller.handle(Action.STOP)
         self.tune(1)
         self.assertTrue(self.notice.isHidden())
+
+
+class StopTileTests(MultiviewCase):
+    def test_stop_on_an_empty_grid_offers_nothing_to_play_again(self):
+        host = QWidget()
+        host.resize(1280, 720)
+        notice = StoppedNotice(host)
+        self.controller.overlays.stopped_notice = notice
+        self.v()
+        self.assertTrue(self.controller.multiview_shown())
+        self.controller.handle(Action.STOP)
+        self.assertFalse(self.controller.multiview_shown())
+        self.assertTrue(notice.isHidden())
 
 
 class RecordingTileTests(MultiviewCase):

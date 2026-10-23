@@ -1058,7 +1058,8 @@ class TVController(QObject):
 
     def stop(self) -> None:
         """Stop (■, X, the phone's; 2.6): every picture stops, nothing streams or reconnects,
-        and "Stopped" shows with Play again. A recording goes on in the background (its own
+        and "Stopped" shows with Play again (only "Stopped" when nothing could play again,
+        e.g. an empty grid). A recording goes on in the background (its own
         Stop ends it); a channel's buffer is kept, as when it is left. Nothing when nothing
         plays."""
         if self._closed:
@@ -1066,7 +1067,7 @@ class TVController(QObject):
         sessions = self.sessions
         small = sessions is not None and (sessions.pip_open() or sessions.pip_opening())
         busy = self._lanes.busy() or self._tuner.opening() or self.multiview_shown()
-        target = self._current
+        target = self._current or self._lanes.pending() or self._beside_target()
         if target is None and not small and not busy:
             return
         self.leave_multiview(keep_pip=False)
@@ -1075,8 +1076,18 @@ class TVController(QObject):
         self._stopped = target
         logger.info("Stopped: nothing plays")
         notice = self.overlays.stopped_notice
-        if notice is not None:
+        if target is None:
+            self._toast(translate(STOPPED))  # an empty grid: nothing to play again
+        elif notice is not None:
             notice.show_notice(translate(STOPPED))
+
+    def _beside_target(self) -> Optional[Target]:
+        """What the small picture shows (2.6: after a Stop with nothing large, Play plays it
+        again)."""
+        sessions, pip = self.sessions, self._pip
+        if sessions is None or pip is None or not (sessions.pip_open() or sessions.pip_opening()):
+            return None
+        return pip.view(sessions.other().name).target
 
     def play_again(self) -> None:
         """Play what Stop stopped: a channel live (from its group), a movie or an episode

@@ -39,6 +39,12 @@ class StoppedNoticeTests(unittest.TestCase):
         )
         self.assertEqual(spy.count(), 1)
 
+    def test_its_tooltip_names_the_key_that_plays_again(self):
+        # Space plays again; Return opens the channel list while stopped.
+        self.notice.show_notice("Stopped")
+        tip = self.notice.tooltip_at(self.notice.button_rect().center())
+        self.assertEqual(tip, "Play again (Space)")
+
 
 if __name__ == "__main__":
     unittest.main()
