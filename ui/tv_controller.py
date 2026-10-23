@@ -123,6 +123,7 @@ from ui.pip_controls import PipControls
 from ui.player_keys import PlayerKeys
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
+from ui.record_guard import RecordGuard
 from ui.stream_question import StreamQuestion, quit_text
 from ui.subtitle_search import OnlineSetup, OnlineSubtitles
 from ui.track_controls import TrackControls
@@ -434,6 +435,17 @@ class TVController(QObject):
             closed=lambda: self._closed,
             parent=self,
         )
+        # 2.6: a provider that keeps only the newest stream: the recording wins.
+        self._guard: Optional[RecordGuard] = None
+        if sessions is not None:
+            self._guard = RecordGuard(
+                self.budget,
+                sessions.slots,
+                limit_of=lambda slot: self._live_controls.limit(slot.channel or {}),
+                stop=self._stop_for_guard,
+                toast=lambda text: self._toast(text, "error", ERROR_MS),
+                parent=self,
+            )
         self._pip: Optional[PipControls] = None
         if sessions is not None:
             self._pip = PipControls(
@@ -556,6 +568,9 @@ class TVController(QObject):
             self._watch_player(name, player)
         for live in self._lives():
             self._watch_recordings(live)
+        if self.sessions is not None and self._guard is not None:
+            for slot in self.sessions.slots():
+                self._guard.watch_slot(slot)
         if self.sessions is not None:
             self.sessions.largeChanged.connect(self._on_large_changed)
             self.sessions.largeChanged.connect(lambda *_: self._update_guides())
@@ -1898,6 +1913,23 @@ class TVController(QObject):
         elif self.multiview_shown() and self._grid is not None and slot is not sessions.large():
             self._grid.close_tile(slot.name)
 
+    def _stop_for_guard(self, slot: Slot) -> None:
+        """RecordGuard: a stream its provider closed a recording's for stops, by its role."""
+        sessions = self.sessions
+        if sessions is None or self._closed:
+            return
+        if slot is sessions.large():
+            self._lanes.drop_tune()
+            self._live_controls.stop_tune()
+            self._current, self._cid = None, None
+            self._restore_channel()
+        elif sessions.small() is slot and self._pip is not None:
+            self._pip.close(keep_recording=False)
+        elif self.multiview_shown() and self._grid is not None:
+            self._grid.close_tile(slot.name)
+        else:
+            self._tuner_of(slot).stop()
+
     def _large_records(self) -> bool:
         live = self.live
         return live is not None and bool(getattr(live, "recording", lambda: False)())
@@ -2390,6 +2422,8 @@ class TVController(QObject):
             return
         self._watch_player(slot.name, slot.playback)
         self._watch_recordings(slot.live)
+        if self._guard is not None:
+            self._guard.watch_slot(slot)
         if self._pip is not None:
             self._pip.watch_slot(slot)
         if self._grid is not None:

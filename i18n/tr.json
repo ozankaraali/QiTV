@@ -929,6 +929,7 @@
     "other": "Hesabınız {n} yayına izin veriyor; {active} yayın kullanımda"
   },
   "Your mix stays": "Ses ayarınız korunuyor",
+  "Your provider allows no other stream while {channel} records": "{channel} kaydedilirken sağlayıcınız başka yayına izin vermiyor",
   "Your provider allows {n} stream at a time": {
     "other": "Sağlayıcınız aynı anda {n} yayına izin veriyor"
   },

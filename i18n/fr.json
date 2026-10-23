@@ -944,6 +944,7 @@
     "other": "Votre compte autorise {n} flux ; {active} sont utilisés"
   },
   "Your mix stays": "Votre mixage reste",
+  "Your provider allows no other stream while {channel} records": "Votre fournisseur n’autorise aucun autre flux pendant l’enregistrement de {channel}",
   "Your provider allows {n} stream at a time": {
     "one": "Votre fournisseur autorise {n} flux à la fois",
     "other": "Votre fournisseur autorise {n} flux à la fois"

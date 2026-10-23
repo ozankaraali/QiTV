@@ -108,6 +108,10 @@ class ConnectionBudget(QObject):
     def holders(self, provider_name: str) -> list[str]:
         return [p for prov, p in self._active.values() if prov == provider_name]
 
+    def entry(self, ticket: Optional[int]) -> Optional[tuple[str, str]]:
+        """A held ticket's (provider, purpose); None when it is not held."""
+        return self._active.get(ticket) if ticket is not None else None
+
     def provider_of(self, ticket: Optional[int]) -> Optional[str]:
         """The provider a held ticket counts against (None: not held, or no ticket)."""
         entry = self._active.get(ticket) if ticket is not None else None

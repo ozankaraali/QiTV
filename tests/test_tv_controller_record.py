@@ -323,6 +323,24 @@ class RecSignAndQuitTests(_RecordCase):
         self.assertEqual(self.controller.quit_note(), "")
 
 
+class RecordGuardWiringTests(_RecordCase):
+    """Task 14: a provider with no known limit that closes the recording's stream as
+    another opens: the other stops, and the provider allows one for the run."""
+
+    def test_the_stand_in_stops_when_the_recording_breaks(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "M3U"}
+        recording = self.record_large(0)
+        stand_in = self.leave_for(1)
+        recording.timelineChanged.emit({"reconnecting": True})
+        self.assertEqual(stand_in.calls[-1], ("stop",))
+        self.assertEqual(self.budget.cap("Home", None), 1)
+        self.assertIn(
+            ("Your provider allows no other stream while One records", "error"),
+            self.toast.messages(),
+        )
+        self.assertTrue(recording.recording())
+
+
 class RecordingTileTests(MultiviewCase):
     def setUp(self):
         super().setUp()

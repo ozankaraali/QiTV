@@ -944,6 +944,7 @@
     "other": "Ihr Konto erlaubt {n} Streams; {active} sind belegt"
   },
   "Your mix stays": "Ihre Mischung bleibt",
+  "Your provider allows no other stream while {channel} records": "Ihr Anbieter erlaubt keinen weiteren Stream, solange {channel} aufgenommen wird",
   "Your provider allows {n} stream at a time": {
     "one": "Ihr Anbieter erlaubt {n} Stream gleichzeitig",
     "other": "Ihr Anbieter erlaubt {n} Streams gleichzeitig"

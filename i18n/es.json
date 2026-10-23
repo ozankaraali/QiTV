@@ -944,6 +944,7 @@
     "other": "Tu cuenta permite {n} emisiones; {active} están en uso"
   },
   "Your mix stays": "Tu mezcla se mantiene",
+  "Your provider allows no other stream while {channel} records": "Tu proveedor no permite otra emisión mientras se graba {channel}",
   "Your provider allows {n} stream at a time": {
     "one": "Tu proveedor permite {n} emisión a la vez",
     "other": "Tu proveedor permite {n} emisiones a la vez"
