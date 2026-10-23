@@ -234,3 +234,12 @@ class LearnedLimitTests(unittest.TestCase):
         self.assertFalse(self.b.free("P", 2, purpose="main"))
         self.assertTrue(self.b.free("P", 2, purpose="pip"))  # its own does not count
         self.assertTrue(self.b.free("P", None, purpose="main"))
+
+    def test_a_release_is_told(self):
+        released = []
+        self.b.released.connect(released.append)
+        ticket = self.b.request("P", 2, purpose="rec")
+        self.b.cancel(self.b.request("Q", 2, purpose="main"))
+        self.b.release(ticket)
+        self.b.release(ticket)  # once
+        self.assertEqual(released, ["Q", "P"])

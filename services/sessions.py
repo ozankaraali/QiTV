@@ -100,6 +100,11 @@ PIP_FAILED = N_("Couldn't open this channel in picture-in-picture")  # i18n: err
 LIMITED = N_("Your provider limits concurrent streams")  # i18n: error toast
 
 
+def records(slot: Slot) -> bool:
+    """Slot `slot`'s channel records (2.2's Record; 2.6: as a PVR, `set_aside`)."""
+    return bool(getattr(slot.live, "recording", lambda: False)())
+
+
 def limit_message(limit: Optional[int]) -> str:
     """The toast for a provider limit that leaves no stream for the PiP."""
     if not limit:

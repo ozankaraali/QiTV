@@ -95,7 +95,7 @@ from services.next_episode import play_context
 from services.picture import SOURCE_DIRECT, ChannelPictures
 from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of, split_group_id
 from services.redact import safe_traceback, scrub
-from services.sessions import SessionManager, Slot
+from services.sessions import SessionManager, Slot, records
 from services.sound_sync import SoundSync
 from services.vlc_profile import classify
 from services.zapping import ZapContext
@@ -123,6 +123,7 @@ from ui.pip_controls import PipControls
 from ui.player_keys import PlayerKeys
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
+from ui.stream_question import StreamQuestion
 from ui.subtitle_search import OnlineSetup, OnlineSubtitles
 from ui.track_controls import TrackControls
 
@@ -174,6 +175,8 @@ class Overlays:
     library_toast: Any = None  # the Library page's toast: the menus' messages while it shows
     pairing: Any = None  # the phone remote's pairing screen (2.5)
     back_notice: Any = None  # 2.6: Resume, where a channel come back to was left
+    question: Any = None  # 2.6: the QuestionCard: stop a recording for a stream?
+    library_question: Any = None  # its twin on the Library page
 
 
 class TVController(QObject):
@@ -419,6 +422,16 @@ class TVController(QObject):
             show_transport=self._show_transport,
             parent=self,
         )
+        # 2.6: before a recording is stopped for a stream, the question.
+        self._question = StreamQuestion(
+            budget=self.budget,
+            recordings=self._recordings,
+            large=lambda: self.sessions.large() if self.sessions is not None else None,
+            card=self._question_card,
+            stop=self._stop_for_stream,
+            closed=lambda: self._closed,
+            parent=self,
+        )
         self._pip: Optional[PipControls] = None
         if sessions is not None:
             self._pip = PipControls(
@@ -444,6 +457,7 @@ class TVController(QObject):
                 toggle_mute=self._mixer.toggle_small_mute,
                 sound=self._prepare_small,
                 explain=self._explain_item,
+                needs_stream=self._ask_for_stream,
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
@@ -479,6 +493,7 @@ class TVController(QObject):
                 layouts=overlays.layout_row,
                 tile_action=self._on_tile_control,
                 show_controls=self._show_transport,
+                confirm=self._confirm_tile,
                 parent=self,
             )
             self._grid.changed.connect(self._mixer.refresh)
@@ -893,6 +908,8 @@ class TVController(QObject):
             pairing.dismiss()  # any key closes the pairing screen; Esc does only that
             if action is Action.ESCAPE:
                 return
+        if self._question.handle(action):
+            return  # 2.6: QiTV asks (stop a recording?): Enter, Esc, the arrows are its own
         if self._online is not None and self._online.handle(action, payload):
             return  # the OpenSubtitles search shows: typing, the lists, Enter and Esc
         if self._guide.is_open() and self._guide.handle(action, payload):
@@ -1124,6 +1141,8 @@ class TVController(QObject):
             stay = False  # its archive opens beside the recording, which records on (2.6)
         if not stay and self._shown_elsewhere(channel, group_key, channels):
             return
+        if not stay and self._asks_first(channel, group_key, channels, archive):
+            return  # 2.6: no stream is free while a recording holds one: asked
         if not from_zap and not stay:
             self.zap.note_request(channel)  # ↑/↓ move on from it while its link is pending
         self.overlays.column.close()
@@ -1259,6 +1278,12 @@ class TVController(QObject):
             return
         if from_library is None:
             from_library = self._flow.in_library()
+
+        def again() -> None:
+            self.play_vod(item, kind, context, from_library=from_library)
+
+        if self._ask_for_stream(item, self._tuner.purpose, again):
+            return  # 2.6: no stream is free while a recording holds one: asked
         self.leave_multiview()  # live only: the focused tile is the big picture again
         self._flow.leave_library()
         target = self.title_target(item, kind, context)
@@ -1755,6 +1780,72 @@ class TVController(QObject):
         )
 
     # ---- 2.6: recordings in the background ----------------------------------------------------
+
+    def _recordings(self) -> list[Slot]:
+        """Every player that records, the oldest recording first."""
+        sessions = self.sessions
+        if sessions is None:
+            return []
+        recording = [slot for slot in sessions.slots() if records(slot)]
+        return sorted(recording, key=lambda slot: slot.live.recording_since() or 0.0)
+
+    def _question_card(self) -> Any:
+        """The question's card on the page that shows (the Library's while it shows)."""
+        card = self.overlays.library_question
+        if card is None or not self._flow.in_library():
+            card = self.overlays.question
+        return card
+
+    def answer_key(self, action: Action) -> bool:
+        """A key while QiTV asks (any page): True when it is the question's."""
+        return not self._closed and self._question.handle(action)
+
+    def _ask_for_stream(
+        self, item: dict, purpose: str, then: Callable[[], None], *, gives_way: bool = False
+    ) -> bool:
+        """Opening `item` over `purpose`'s stream needs one that a recording holds: True,
+        asked (StreamQuestion.needs); `then` runs once the recording let it go."""
+        provider = item_provider.provider_name(self.catalog, item)
+        limit = self._live_controls.limit(item)
+        return self._question.needs(provider, limit, purpose, then, gives_way=gives_way)
+
+    def _asks_first(
+        self,
+        channel: dict,
+        group_key: str,
+        channels: list[dict],
+        archive: Optional[tuple[float, float]],
+    ) -> bool:
+        """A tune that would stop a recording, or needs the stream one holds: asked."""
+
+        def again() -> None:
+            self._tune(channel, group_key, channels, from_zap=False, archive=archive)
+
+        sessions = self.sessions
+        if self.multiview_shown() and sessions is not None:
+            if self._question.confirm(sessions.large(), again):
+                return True  # a tile has no background to record on in
+        gives_way = self._external_launcher() is not None
+        return self._ask_for_stream(channel, self._tuner.purpose, again, gives_way=gives_way)
+
+    def _confirm_tile(self, name: str, then: Callable[[], None]) -> bool:
+        """A multiview tile that records would close: asked first."""
+        sessions = self.sessions
+        return sessions is not None and self._question.confirm(sessions.slot(name), then)
+
+    def _stop_for_stream(self, slot: Slot, replaced: bool) -> None:
+        """Stop recording: the user said so for a stream. Unless the open that asked takes
+        its stream over (`replaced`), its player lets the stream go: a background one by
+        itself, a small picture closes, a tile closes."""
+        sessions = self.sessions
+        background = sessions is not None and slot in sessions.background()
+        slot.live.stop_recording()
+        if replaced or background or sessions is None:
+            return
+        if sessions.small() is slot and self._pip is not None:
+            self._pip.close(keep_recording=False)
+        elif self.multiview_shown() and self._grid is not None and slot is not sessions.large():
+            self._grid.close_tile(slot.name)
 
     def _large_records(self) -> bool:
         live = self.live
@@ -3080,9 +3171,18 @@ class TVController(QObject):
         """The context menu's external play: the newest choice, once the in-app stream is gone."""
         if self._closed:
             return
+
+        def again() -> None:
+            self._play_external(target, url, launcher)
+
+        if not target.local and self._ask_for_stream(
+            target.item, self._tuner.purpose, again, gives_way=True
+        ):
+            return  # 2.6: no stream is free while a recording holds one: asked
         self._cancel_external()
         self.leave_multiview(keep_pip=False)  # an external player is outside the budget
         self._close_pip()  # an external player is outside the budget: the PiP gives way
+        self._set_recording_aside()  # 2.6: a recording records on in the background
         self._autoplay.drop()
         self._lanes.drop_tune()  # e.g. an STB retry still on its way would open in-app
 

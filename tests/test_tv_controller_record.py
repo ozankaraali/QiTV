@@ -5,16 +5,27 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtWidgets import QWidget
 from test_multiview import MultiviewCase
-from test_tv_controller import CHANNELS, FakeLiveSession, FakeSession, play_context
+from test_tv_controller import (
+    BACKUP_TWO,
+    CHANNELS,
+    FakeLiveSession,
+    FakeSession,
+    play_context,
+)
 from test_tv_pip import MOVIE, PipCase
 from timer_fixtures import wait_until
 
 from services.sessions import Slot
+from ui.keymap import Action
 from ui.live_tuner import LiveTuner
+from ui.overlays.question_card import QuestionCard
+
+QUESTION = "No stream is free: One is recording. Stop the recording?"
 
 
-class RecordingAsideTests(PipCase):
+class _RecordCase(PipCase):
     def setUp(self):
         super().setUp()
 
@@ -47,6 +58,8 @@ class RecordingAsideTests(PipCase):
     def since_recording(self, live):
         return live.calls[live.calls.index(("start_recording", "/tmp/x.ts")) :]
 
+
+class RecordingAsideTests(_RecordCase):
     def test_a_zap_away_from_a_recording_keeps_it(self):
         recording = self.record_large(0)
         self.leave_for(1)
@@ -114,6 +127,134 @@ class RecordingAsideTests(PipCase):
         self.assertEqual(self.sessions.background(), [])
 
 
+class StreamQuestionTests(_RecordCase):
+    """Task 12: with no stream free at a recording's provider, QiTV asks before it stops it."""
+
+    def overlays(self, column):
+        overlays = super().overlays(column)
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.question = QuestionCard(self.host)
+        overlays.question = self.question
+        return overlays
+
+    def one_stream(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+
+    def test_no_free_stream_asks_and_tunes_nothing(self):
+        self.one_stream()
+        recording = self.record_large(0)
+        links = len(self.catalog.links)
+        self.tune(1)
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.assertEqual(self.question.question(), QUESTION)
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertNotIn(("stop",), self.since_recording(recording))
+        self.assertEqual(self.sessions.large().name, "main")
+
+    def test_stop_recording_stops_it_and_tunes(self):
+        self.one_stream()
+        recording = self.record_large(0)
+        self.tune(1)
+        self.controller.handle(Action.SEEK_FWD)  # to Stop recording
+        self.controller.handle(Action.OK)
+        self.assertIn(("stop_recording",), recording.calls)
+        self.assertEqual(self.requested()[-1], "Two")
+        self.ready("http://stream/2")
+        self.assertEqual(recording.calls[-1], ("stop",))  # a zap, as before 2.6
+        recording.released.emit()
+        self.assertTrue(wait_until(lambda: recording.named("start")[-1][0] == "http://stream/2"))
+        self.assertEqual(self.sessions.background(), [])
+
+    def test_keep_recording_leaves_everything(self):
+        self.one_stream()
+        recording = self.record_large(0)
+        links = len(self.catalog.links)
+        self.tune(1)
+        self.controller.handle(Action.OK)  # Keep recording, focused first
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertTrue(recording.recording())
+        self.assertEqual(self.controller._channel, CHANNELS[0])
+
+    def test_another_providers_channel_asks_nothing(self):
+        self.one_stream()
+        self.record_large(0)
+        self.controller.tune(BACKUP_TWO, group_key="10", channels=[BACKUP_TWO])
+        self.assertTrue(self.question.isHidden())
+        self.assertEqual(self.requested()[-1], "Two")
+
+    def test_a_film_asks_too(self):
+        self.one_stream()
+        self.record_large(0)
+        links = len(self.catalog.links)
+        self.controller.play_vod(MOVIE, "movie", play_context())
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.assertEqual(len(self.catalog.links), links)
+
+    def test_an_outside_player_asks_too(self):
+        self.one_stream()
+        recording = self.record_large(0)
+        self.leave_for_backup()
+        launched = []
+        self.assertTrue(
+            self.controller.play_elsewhere(
+                lambda target, url: launched.append(url) or (True, ""), self.target(1)
+            )
+        )
+        self.ready("http://stream/2")
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.assertEqual(launched, [])
+        self.controller.handle(Action.SEEK_FWD)
+        self.controller.handle(Action.OK)
+        self.assertIn(("stop_recording",), recording.calls)
+        recording.released.emit()  # the background player let its stream go
+        self.assertTrue(wait_until(lambda: launched == ["http://stream/2"]))
+
+    def test_from_the_library_the_librarys_card_asks(self):
+        self.one_stream()
+        self.record_large(0)
+        page = QWidget()
+        page.resize(1280, 720)
+        library_card = QuestionCard(page)
+        self.controller.overlays.library_question = library_card
+        self.controller._flow.enter_library()
+        self.controller.play_vod(MOVIE, "movie", play_context())
+        self.assertTrue(library_card.isVisibleTo(page))
+        self.assertTrue(self.question.isHidden())
+        self.assertTrue(self.controller.answer_key(Action.NAV_RIGHT))
+        self.assertEqual(library_card.focused(), "yes")
+        self.assertFalse(self.controller.answer_key(Action.MUTE))
+
+    def leave_for_backup(self):
+        """The recording goes on in the background; another provider's channel plays large."""
+        self.controller.tune(BACKUP_TWO, group_key="10", channels=[BACKUP_TWO])
+        self.ready("http://backup/2")
+        stand_in = self.controller.live
+        self.assertTrue(wait_until(lambda: len(stand_in.named("start")) == 1))
+        stand_in.play_pipeline()
+
+    def target(self, index):
+        from ui.link_lanes import Target
+
+        channel = CHANNELS[index]
+        return Target(channel, "live", channel["name"], group_key="10")
+
+    def test_a_pip_asks_too(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 2}
+        self.start_large(0)
+        small = self.open_small(CHANNELS[1])
+        self.assertTrue(small.live.start_recording("/tmp/x.ts"))
+        links = len(self.catalog.links)
+        self.controller.open_pip(CHANNELS[2], group_key="10", channels=CHANNELS)
+        self.assertEqual(len(self.catalog.links), links)  # both streams held, one records
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.assertEqual(self.question.question(), QUESTION.replace("One", "Two"))
+        self.controller.handle(Action.SEEK_FWD)
+        self.controller.handle(Action.OK)
+        self.assertFalse(small.live.recording())
+        self.assertEqual(self.requested()[-1], "Three")  # it opens over Two's stream
+
+
 class RecordingTileTests(MultiviewCase):
     def setUp(self):
         super().setUp()
@@ -134,6 +275,47 @@ class RecordingTileTests(MultiviewCase):
         )
         self.assertEqual([s.name for s in self.sessions.background()], ["t2"])
         self.assertTrue(self.sessions.muted("t2"))
+
+    def with_question(self):
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.question = QuestionCard(self.host)
+        self.controller.overlays.question = self.question
+
+    def test_a_recording_tiles_channel_change_asks_first(self):
+        self.with_question()
+        self.start_large(0)
+        recording = self.controller.live
+        self.assertTrue(recording.start_recording("/tmp/x.ts"))
+        self.v()
+        links = len(self.catalog.links)
+        self.tune(1)
+        self.assertEqual(
+            self.question.question(), "One is recording in this tile. Stop the recording?"
+        )
+        self.assertEqual(len(self.catalog.links), links)
+        self.controller.handle(Action.SEEK_FWD)
+        self.controller.handle(Action.OK)
+        self.assertFalse(recording.recording())
+        self.assertEqual(self.requested()[-1], "Two")
+
+    def test_a_recording_tiles_close_asks_first(self):
+        self.with_question()
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.assertTrue(t2.live.start_recording("/tmp/x.ts"))
+        self.grid_frame.focusRequested.emit("main")
+        self.grid.close_tile("t2")
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.assertTrue(t2.live.running)
+        self.controller.handle(Action.ESCAPE)  # keep recording
+        self.assertTrue(t2.live.recording())
+        self.grid.close_tile("t2")
+        self.controller.handle(Action.SEEK_FWD)
+        self.controller.handle(Action.OK)
+        self.assertEqual(t2.live.calls[-1], ("stop",))
 
     def test_a_background_player_is_no_tile(self):
         self.start_large(0)

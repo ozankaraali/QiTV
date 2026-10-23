@@ -66,7 +66,7 @@ from services.live.refusals import REFUSALS
 from services.live.stay_live import TARGETS
 from services.provider_ids import with_provider
 from services.redact import safe_message
-from services.sessions import SessionManager, Slot
+from services.sessions import SessionManager, Slot, records
 from services.zapping import ZapContext
 from ui import item_provider
 from ui.grid_frame import GridFrame
@@ -91,10 +91,6 @@ NEEDS_HARDWARE = N_(
 # picture in picture already has; a tile's player is made when it first takes the focus or a
 # channel, one at a time: a "+" tile has none).
 TILE_NAMES = ("main", "pip", "t2", "t3", "t4", "t5", "t6", "t7", "t8")
-
-
-def _records(slot: Slot) -> bool:
-    return bool(getattr(slot.live, "recording", lambda: False)())
 
 
 # The texts are kept in English and shown translated (no_stream_text for NO_STREAM).
@@ -166,6 +162,7 @@ class GridControls(QObject):
         layouts=None,
         tile_action: Optional[Callable[[str, str], None]] = None,
         show_controls: Optional[Callable[[], None]] = None,
+        confirm: Optional[Callable[[str, Callable[[], None]], bool]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` lays the surfaces out and `tiles` (the GridTiles overlay; None in tests)
@@ -187,7 +184,8 @@ class GridControls(QObject):
         (pause or play it), "live" (go live), "speaker" (mute or unmute it), "close" (the
         focused tile: its stream stops) and "closed" (a tile without the focus was closed:
         what it showed is forgotten); `show_controls()` shows the player controls (the
-        layouts' hint is drawn above them)."""
+        layouts' hint is drawn above them); `confirm(name, then)` asks before tile `name`'s
+        recording would stop (2.6): True, asked (`then` follows)."""
         super().__init__(parent)
         self.sessions = sessions
         self.frame = frame
@@ -216,6 +214,7 @@ class GridControls(QObject):
         self._layouts = layouts
         self._tile_action = tile_action
         self._show_controls = show_controls
+        self._confirm = confirm
         self._restored = False  # the last grid came back since the grid showed
         self._shown = False
         self._cells = DEFAULT_CELLS
@@ -414,7 +413,7 @@ class GridControls(QObject):
         for slot in sessions.slots():  # a tile left by a smaller layout too
             if slot.name in (large, keep) or slot.name in aside:
                 continue
-            if _records(slot) and sessions.keep_recording(slot.name):
+            if records(slot) and sessions.keep_recording(slot.name):
                 continue  # 2.6: it records on in the background
             self._stop(slot.name)
         if self._forget is not None:
@@ -577,6 +576,8 @@ class GridControls(QObject):
         focus (its stream is the shell's to stop)."""
         if not self._shown or name not in self._names:
             return
+        if self._confirm is not None and self._confirm(name, lambda: self.close_tile(name)):
+            return  # 2.6: it records: asked first
         focused = name == self.sessions.large().name
         if not focused:
             self._stop(name)

@@ -121,6 +121,7 @@ from ui.overlays.layout_row import LayoutRow
 from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
 from ui.overlays.pip_label import PipLabel
+from ui.overlays.question_card import QuestionCard
 from ui.overlays.remote_pair import PairOverlay
 from ui.overlays.sleep_notice import SleepNotice
 from ui.overlays.stats import StatsOverlay
@@ -382,6 +383,7 @@ class TVWindow(QMainWindow):
         self.posters = PosterCache(image_manager, config_manager, self)
         self.library_page = LibraryScreen(self.posters, self.logos)
         self.library_toast = Toast(self.library_page)  # the overlay host hides with the player
+        self.library_question = QuestionCard(self.library_page)  # 2.6: stop a recording?
         # Both pages are always the stack's children: the player page is the whole picture, the
         # Library, or a small one in a corner over the Library while it plays on.
         self.pages = PageStack(self.player_page, self.library_page, config_manager, self)
@@ -499,6 +501,7 @@ class TVWindow(QMainWindow):
         self.stats_overlay = StatsOverlay(host)
         self.sleep_notice = SleepNotice(host)
         self.back_notice = BackNotice(host)  # 2.6: Resume, where a channel was left
+        self.question_card = QuestionCard(host)  # 2.6: stop a recording for a stream?
         self.pair_overlay = PairOverlay(host)  # the phone remote's pairing QR
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
@@ -523,6 +526,8 @@ class TVWindow(QMainWindow):
             stats=self.stats_overlay,
             sleep_notice=self.sleep_notice,
             back_notice=self.back_notice,
+            question=self.question_card,
+            library_question=self.library_question,
             pairing=self.pair_overlay,
             library_toast=self.library_toast,
             layout_row=self.layout_row,
@@ -537,7 +542,7 @@ class TVWindow(QMainWindow):
         # layouts over it (above their buttons). The statistics sit over the transport, under
         # its title row (they take no click). The drawer and the guide cover them all; the
         # OpenSubtitles search covers the player with its backdrop, under the corner player's
-        # controls, the sleep timer's last minute, Resume (2.6) and the toast.
+        # controls, the sleep timer's last minute, Resume and the question (2.6) and the toast.
         for overlay in (
             self.grid_tiles,
             self.overlays.banner,
@@ -559,6 +564,7 @@ class TVWindow(QMainWindow):
             self.corner_controls,
             self.sleep_notice,
             self.back_notice,
+            self.question_card,
             self.pair_overlay,
             self.overlays.toast,
         ):
@@ -903,6 +909,8 @@ class TVWindow(QMainWindow):
     def _act(self, action: Action, payload: str, key: int) -> None:
         if action is Action.ESCAPE and self.exports.cancel():
             return  # Esc while exporting cancels the export
+        if self.controller.answer_key(action):
+            return  # 2.6: QiTV asks (stop a recording?): its answers' keys, on every page
         if self.screens.library_shown():
             handled = self.library_controller.handle(action, payload)
             if not handled and action is Action.FULLSCREEN:

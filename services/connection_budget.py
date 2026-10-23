@@ -25,7 +25,7 @@ Design notes:
 * A limit can be learned for the run (2.6: a provider that keeps only the newest stream
   while a recording holds one): ``learn`` lowers it, never raises it; ``limit_for`` and
   ``request`` apply it (``cap``), so every caller sees it. ``free`` says whether a purpose
-  could take a stream beside the others now.
+  could take a stream beside the others now, and ``released`` tells each held slot given back.
 """
 
 from __future__ import annotations
@@ -49,6 +49,7 @@ class _Waiter:
 
 class ConnectionBudget(QObject):
     granted = Signal(int)  # ticket
+    released = Signal(str)  # 2.6: a provider's held slot went back (its name)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -145,6 +146,7 @@ class ConnectionBudget(QObject):
             return
         self._pending_emit.discard(ticket)
         self._promote(entry[0])
+        self.released.emit(entry[0])
 
     def relabel(self, ticket: int, purpose: str) -> None:
         """Give a held or queued ticket another purpose (a PiP swap exchanges the roles).

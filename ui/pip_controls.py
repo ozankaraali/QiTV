@@ -52,7 +52,7 @@ from services.live.live_session import LOADING, RECONNECTING, UNAVAILABLE
 from services.live.refusals import STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
-from services.sessions import SessionManager, Slot, limit_message
+from services.sessions import SessionManager, Slot, limit_message, records
 from services.vlc_profile import PlayKind
 from services.zapping import ZapContext
 from ui import item_provider, live_controls
@@ -83,11 +83,6 @@ NOTICE_MS = 3000  # a small picture's stream notice, after its channel's name
 # Not said for the small picture: its label says "Connecting…" while it loads, and the large
 # picture keeps "no time-shift" for a rewind too.
 _QUIET_NOTICES = (LOADING, UNAVAILABLE)
-
-
-def _records(slot: Slot) -> bool:
-    """Slot `slot`'s channel records (2.2's Record)."""
-    return bool(getattr(slot.live, "recording", lambda: False)())
 
 
 @dataclass
@@ -136,6 +131,7 @@ class PipControls(QObject):
         toggle_mute: Callable[[], None],
         sound: Optional[Callable[[Any, dict], None]] = None,
         explain: Callable[[dict, str], None] = lambda item, title: None,
+        needs_stream: Callable[[dict, str, Callable[[], None]], bool] = lambda *_: False,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
@@ -147,6 +143,8 @@ class PipControls(QObject):
         play in an external player (it holds the provider's stream); `swap()` the shell's swap
         (False when it has to wait); `toggle_mute()` mutes or unmutes the small picture;
         `sound(player, channel)` gives a channel opening small its sound sync (2.2).
+        `needs_stream(channel, purpose, then)` asks before a recording is stopped for the
+        stream a channel opening over `purpose`'s needs (2.6): True, asked (`then` follows).
         """
         super().__init__(parent)
         self.sessions = sessions
@@ -171,6 +169,7 @@ class PipControls(QObject):
         self._toggle_mute = toggle_mute
         self._sound = sound
         self._explain = explain  # why a failure happened, at the item's provider
+        self._needs_stream = needs_stream
         self._views: dict[str, SlotView] = {}
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
@@ -367,6 +366,9 @@ class PipControls(QObject):
         if background is not None:
             self._show_background(background.name, context)
             return
+        purpose = str(getattr(self.sessions.other().tuner, "purpose", ""))
+        if self._needs_stream(channel, purpose, lambda: self.open_channel(channel, context)):
+            return  # no stream is free while a recording holds one: asked
         if self._limit_reached(channel):
             return
         title = str(channel.get("name") or "")
@@ -535,7 +537,7 @@ class PipControls(QObject):
         """The open small picture records: it records on in the background (another player
         is the small picture's)."""
         small = self.sessions.small()
-        if small is not None and _records(small):
+        if small is not None and records(small):
             self.sessions.set_aside(small.name)
 
     def _show_background(self, name: str, context: Optional[ZapContext]) -> None:
