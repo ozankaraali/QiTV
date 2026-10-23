@@ -27,8 +27,9 @@ class TimeshiftSettingsTests(base.WindowCase):
         self.assertIn("Time-shift", self.tab_titles(dialog))
         self.assertEqual(
             dialog.timeshift_checkbox.text(),
-            "Use disk for a longer time-shift buffer.\nQiTV deletes the oldest data "
-            "automatically and cleans up when you stop, change channel or quit.",
+            "Use disk for a longer time-shift buffer.\nA channel you leave keeps its buffer "
+            "for up to 24 hours, after a restart too; when the cache fills, the oldest goes "
+            "first.",
         )
         self.assertEqual(dialog.timeshift_size_slider.minimum(), 256)
         self.assertEqual(dialog.timeshift_size_slider.maximum(), 16384)
@@ -39,6 +40,10 @@ class TimeshiftSettingsTests(base.WindowCase):
             label.text() for label in tab.findChildren(type(dialog.timeshift_size_label))
         )
         self.assertIn("Without disk, each picture keeps its memory per stream", texts)
+        # 2.6: kept buffers share the cache, last a day, and the disk's off removes them
+        self.assertIn("The cache size is the total for every channel's buffer", texts)
+        self.assertIn("turning the disk off removes what it kept", texts)
+        self.assertNotIn("the only history limit", texts)
         self.assertNotIn("MPV", texts)
         self.assertNotIn("MPV", dialog.timeshift_checkbox.text())
 

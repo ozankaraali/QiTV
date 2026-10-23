@@ -577,8 +577,8 @@ class OptionsDialog(QDialog):
         self.timeshift_checkbox = QCheckBox(
             tr(
                 "Use disk for a longer time-shift buffer.\n"
-                "QiTV deletes the oldest data automatically and cleans up when you stop, "
-                "change channel or quit."
+                "A channel you leave keeps its buffer for up to 24 hours, after a restart too; "
+                "when the cache fills, the oldest goes first."
             ),
             tab,
         )
@@ -656,11 +656,14 @@ class OptionsDialog(QDialog):
         explanation = QLabel(
             tr(
                 "Without disk, each picture keeps its memory per stream (picture-in-picture's "
-                "small picture always does).\n\n"
+                "small picture always does), and only the channel left last keeps its buffer."
+                "\n\n"
                 "This is temporary playback history, not a permanent recording. The cache size "
-                "is the only history limit: when it fills, the oldest content is replaced. "
-                "Recording continues while paused or rewound.\n\n"
-                "After Save, enabling and size changes apply on the next channel you open."
+                "is the total for every channel's buffer: when it fills, the oldest content goes "
+                "first; anything older than 24 hours goes too. The buffer keeps filling while "
+                "paused or rewound, and stops when you leave the channel.\n\n"
+                "After Save, enabling and size changes apply on the next channel you open; "
+                "turning the disk off removes what it kept."
             ),
             tab,
         )
