@@ -21,6 +21,7 @@ from services.sessions import Slot
 from ui.keymap import Action
 from ui.live_tuner import LiveTuner
 from ui.overlays.question_card import QuestionCard
+from ui.overlays.rec_sign import RecSign
 
 QUESTION = "No stream is free: One is recording. Stop the recording?"
 
@@ -253,6 +254,73 @@ class StreamQuestionTests(_RecordCase):
         self.controller.handle(Action.OK)
         self.assertFalse(small.live.recording())
         self.assertEqual(self.requested()[-1], "Three")  # it opens over Two's stream
+
+
+class RecSignAndQuitTests(_RecordCase):
+    """Task 13: the REC sign of background recordings, and quitting asks first."""
+
+    def overlays(self, column):
+        overlays = super().overlays(column)
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.question = QuestionCard(self.host)
+        self.sign = RecSign(self.host)
+        overlays.question, overlays.rec_sign = self.question, self.sign
+        return overlays
+
+    def test_the_sign_shows_a_background_recording(self):
+        self.record_large(0)
+        self.assertTrue(self.sign.isHidden())  # the large picture's own chip says it
+        self.leave_for(1)
+        self.assertTrue(self.sign.isVisibleTo(self.host))
+        self.assertTrue(self.sign.text().startswith("REC One"))
+
+    def test_go_back_from_the_sign(self):
+        recording = self.record_large(0)
+        self.leave_for(1)
+        self.sign.goBack.emit("main")
+        self.assertIs(self.controller.live, recording)
+        self.assertEqual(recording.calls[-1], ("bring_back",))
+        self.assertTrue(self.sign.isHidden())
+
+    def test_stop_from_the_sign(self):
+        recording = self.record_large(0)
+        self.leave_for(1)
+        self.sign.stop.emit("main")
+        self.assertIn(("stop_recording",), recording.calls)
+        self.assertEqual(recording.calls[-1], ("stop",))  # its channel is left
+        self.assertEqual(self.sessions.background(), [])
+        self.assertTrue(self.sign.isHidden())
+
+    def test_quitting_asks_while_recording(self):
+        recording = self.record_large(0)
+        self.leave_for(1)
+        quits = []
+        self.assertTrue(self.controller.asks_before_quit(lambda: quits.append(True)))
+        self.assertEqual(self.question.question(), "One is recording. Quit and stop the recording?")
+        self.controller.handle(Action.OK)  # Keep recording
+        self.assertEqual(quits, [])
+        self.assertTrue(recording.recording())
+        self.controller.asks_before_quit(lambda: quits.append(True))
+        self.controller.handle(Action.SEEK_FWD)
+        self.controller.handle(Action.OK)
+        self.assertFalse(recording.recording())
+        self.assertEqual(quits, [True])
+
+    def test_quitting_counts_several(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 3}
+        self.record_large(0)
+        stand_in = self.leave_for(1)
+        self.assertTrue(stand_in.start_recording("/tmp/y.ts"))
+        self.controller.asks_before_quit(lambda: None)
+        self.assertEqual(
+            self.question.question(), "2 channels are recording. Quit and stop the recordings?"
+        )
+
+    def test_quitting_without_a_recording_asks_nothing(self):
+        self.start_large(0)
+        self.assertFalse(self.controller.asks_before_quit(lambda: None))
+        self.assertEqual(self.controller.quit_note(), "")
 
 
 class RecordingTileTests(MultiviewCase):

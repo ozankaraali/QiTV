@@ -250,6 +250,25 @@ class MacUpdateTests(unittest.TestCase):
         self.assertEqual(self.calls, [])  # no hook ran, nothing closed
         self.ui.downloaded.assert_not_called()
 
+    def test_a_recording_is_asked_about_before_the_update_quits(self):
+        note = "One is recording. Quit and stop the recording?"
+        update_checker.set_quit_note(lambda: note)
+        self.addCleanup(update_checker.set_quit_note, None)
+        self.ui.confirm_stop_recordings.side_effect = lambda text: self.calls.append(text) or False
+        process = self.update(until=None)
+        self.assertEqual(self.calls, ["asked", note])  # Keep recording: nothing else
+        process.Popen.assert_not_called()
+        self.calls.clear()
+        self.ui.confirm_stop_recordings.side_effect = lambda text: self.calls.append(text) or True
+        self.update()
+        self.assertEqual(self.calls, ["asked", note, "stop_live", "open", "close"])
+
+    def test_without_a_recording_the_update_asks_nothing_more(self):
+        update_checker.set_quit_note(lambda: "")
+        self.addCleanup(update_checker.set_quit_note, None)
+        self.update()
+        self.ui.confirm_stop_recordings.assert_not_called()
+
     def test_a_zip_and_linux_are_replaced_by_hand_as_before(self):
         for path, system in (
             ("/Users/someone/Downloads/qitv-macos-universal.zip", "Darwin"),

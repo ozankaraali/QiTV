@@ -129,12 +129,15 @@ def ended_text(reason: str, path: str, written: int) -> tuple[str, str]:
     return translate(STOPPED_TEXT, name=name), "error"  # "failed": it could not go on
 
 
-def elapsed_text(seconds: float) -> str:
-    """How long a recording has run, as its indicator shows it: "01:23", from an hour
-    "1:02:03"."""
+def clock_text(seconds: float) -> str:
+    """How long a recording has run: "01:23", from an hour "1:02:03"."""
     total = max(0, int(seconds))
     hours, rest = divmod(total, 3600)
     minutes, secs = divmod(rest, 60)
-    clock = f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
+
+
+def elapsed_text(seconds: float) -> str:
+    """How long a recording has run, as its indicator shows it: "REC 01:23"."""
     # i18n: the recording indicator on the player controls, in capitals; short ("REC 01:23")
-    return tr("REC {time}", time=clock)
+    return tr("REC {time}", time=clock_text(seconds))

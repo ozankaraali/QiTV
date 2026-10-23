@@ -10,7 +10,8 @@ nothing. A recording only counts when stopping it gives its stream back: the lar
 only when the open replaces it (the picture in picture never takes the big picture's stream).
 
 `confirm` asks the same of one recording that would stop anyway (a multiview tile's channel
-change or ✕: a tile has no background to go to).
+change or ✕: a tile has no background to go to), and `quit` before QiTV closes while any
+records ("{channel} is recording. Quit and stop the recording?"; Quit or Keep recording).
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services.i18n import N_, translate
+from services.i18n import N_, tr_n, translate
 from services.sessions import Slot, records
 from ui.keymap import Action
 
@@ -36,6 +37,9 @@ STREAM_QUESTION = N_("No stream is free: {channel} is recording. Stop the record
 TILE_QUESTION = N_("{channel} is recording in this tile. Stop the recording?")
 STOP_RECORDING = N_("Stop recording")  # i18n: the question's button: stop it and go on
 KEEP_RECORDING = N_("Keep recording")  # i18n: the question's button: nothing changes
+# i18n: a question when QiTV is quit while a channel records; {channel} is its name
+QUIT_ONE = N_("{channel} is recording. Quit and stop the recording?")
+QUIT = N_("Quit")  # i18n: the quit question's button: QiTV closes, the recordings saved
 RELEASE_WAIT_MS = 8000  # a stopped recording's stream not back by then: go on anyway
 
 
@@ -135,6 +139,16 @@ class StreamQuestion(QObject):
         question = _Question("", then, [slot], _purpose(slot), ask_on)
         return self._ask(question, translate(TILE_QUESTION, channel=_name(slot)))
 
+    def quit(self, then: Callable[[], None]) -> bool:
+        """QiTV is to close while players record: True, asked; Quit stops them all (their
+        files are saved) and runs `then`. False: nothing records (the caller closes)."""
+        recording = self._recordings()
+        if self._closed() or not recording:
+            return False
+        question = _Question("", then, recording, "")
+        question.replaced = "*"  # no stream to wait for: QiTV closes
+        return self._ask(question, quit_text(recording), yes=translate(QUIT))
+
     def answer(self, yes: bool) -> None:
         """The answer, from the card or the phone."""
         question, self._question = self._question, None
@@ -149,7 +163,7 @@ class StreamQuestion(QObject):
             logger.info("A recording kept its stream: nothing else opened")
             return
         for slot in question.stop:
-            replaced = _purpose(slot) == question.replaced
+            replaced = question.replaced == "*" or _purpose(slot) == question.replaced
             if not replaced and question.provider:
                 question.waiting.add(_purpose(slot))
             self._stop(slot, replaced)
@@ -167,11 +181,11 @@ class StreamQuestion(QObject):
 
     # ---- internals ----------------------------------------------------------------------
 
-    def _ask(self, question: _Question, text: str) -> bool:
+    def _ask(self, question: _Question, text: str, *, yes: str = "") -> bool:
         old = self._question
         if old is not None and old.ask_on is not None:
             self.settled.emit(old.ask_on)  # a newer question stands for it
-        yes, no = translate(STOP_RECORDING), translate(KEEP_RECORDING)
+        yes, no = yes or translate(STOP_RECORDING), translate(KEEP_RECORDING)
         if question.ask_on is not None:
             self._question = question
             self.asked.emit(question.ask_on, text, yes, no)
@@ -212,6 +226,18 @@ class StreamQuestion(QObject):
             question.then()
         finally:
             self._going = False
+
+
+def quit_text(recording: list[Slot]) -> str:
+    """The quit question for the players that record."""
+    if len(recording) == 1:
+        return translate(QUIT_ONE, channel=_name(recording[0]))
+    return tr_n(
+        # i18n: a question when QiTV is quit while several channels record ({n} of them)
+        "{n} channel is recording. Quit and stop the recordings?",
+        "{n} channels are recording. Quit and stop the recordings?",
+        len(recording),
+    )
 
 
 def _purpose(slot: Slot) -> str:

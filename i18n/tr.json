@@ -305,6 +305,7 @@
   "Get a free key": "Ücretsiz anahtar al",
   "Ghana": "Gana",
   "Go Live": "Canlıya dön",
+  "Go back to {channel}": "{channel} kanalına dön",
   "Go live": "Canlıya dön",
   "Greece": "Yunanistan",
   "Groups": "Gruplar",
@@ -948,6 +949,7 @@
   "{action} ({key})": "{action} ({key})",
   "{behind} behind live": "canlının {behind} gerisinde",
   "{channel} is recording in this tile. Stop the recording?": "{channel} bu ekranda kaydediliyor. Kayıt durdurulsun mu?",
+  "{channel} is recording. Quit and stop the recording?": "{channel} kaydediliyor. Çıkılsın ve kayıt durdurulsun mu?",
   "{country} (your region)": "{country} (bölgeniz)",
   "{decoded} decoded · {shown} shown · {late} too late": "{decoded} çözüldü · {shown} gösterildi · {late} geç kaldı",
   "{found} for other titles: check the title under each one": "Başka yapımlar için {found}: her birinin altındaki adı kontrol edin",
@@ -966,6 +968,10 @@
   "{name}: {message}": "{name}: {message}",
   "{n} channel": {
     "other": "{n} kanal"
+  },
+  "{n} channel is recording. Quit and stop the recordings?": {
+    "one": "{n} kanal kaydediliyor. Çıkılsın ve kayıtlar durdurulsun mu?",
+    "other": "{n} kanal kaydediliyor. Çıkılsın ve kayıtlar durdurulsun mu?"
   },
   "{n} download": {
     "other": "{n} indirme"

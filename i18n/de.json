@@ -309,6 +309,7 @@
   "Get a free key": "Kostenlosen Schlüssel holen",
   "Ghana": "Ghana",
   "Go Live": "Zu Live",
+  "Go back to {channel}": "Zurück zu {channel}",
   "Go live": "Zu Live",
   "Greece": "Griechenland",
   "Groups": "Gruppen",
@@ -964,6 +965,7 @@
   "{action} ({key})": "{action} ({key})",
   "{behind} behind live": "{behind} hinter Live",
   "{channel} is recording in this tile. Stop the recording?": "{channel} wird in dieser Kachel aufgenommen. Aufnahme beenden?",
+  "{channel} is recording. Quit and stop the recording?": "{channel} wird aufgenommen. Beenden und die Aufnahme stoppen?",
   "{country} (your region)": "{country} (Ihre Region)",
   "{decoded} decoded · {shown} shown · {late} too late": "{decoded} dekodiert · {shown} gezeigt · {late} zu spät",
   "{found} for other titles: check the title under each one": "{found} für andere Titel: Prüfen Sie den Titel unter jedem Eintrag",
@@ -983,6 +985,10 @@
   "{n} channel": {
     "one": "{n} Sender",
     "other": "{n} Sender"
+  },
+  "{n} channel is recording. Quit and stop the recordings?": {
+    "one": "{n} Sender wird aufgenommen. Beenden und die Aufnahmen stoppen?",
+    "other": "{n} Sender werden aufgenommen. Beenden und die Aufnahmen stoppen?"
   },
   "{n} download": {
     "one": "{n} Download",

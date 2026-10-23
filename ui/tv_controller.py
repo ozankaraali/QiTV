@@ -123,7 +123,7 @@ from ui.pip_controls import PipControls
 from ui.player_keys import PlayerKeys
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
-from ui.stream_question import StreamQuestion
+from ui.stream_question import StreamQuestion, quit_text
 from ui.subtitle_search import OnlineSetup, OnlineSubtitles
 from ui.track_controls import TrackControls
 
@@ -177,6 +177,8 @@ class Overlays:
     back_notice: Any = None  # 2.6: Resume, where a channel come back to was left
     question: Any = None  # 2.6: the QuestionCard: stop a recording for a stream?
     library_question: Any = None  # its twin on the Library page
+    rec_sign: Any = None  # 2.6: the REC sign of recordings in the background
+    library_rec_sign: Any = None  # its twin on the Library page
 
 
 class TVController(QObject):
@@ -562,6 +564,11 @@ class TVController(QObject):
             self.sessions.slotState.connect(self._on_slot_state)
             self.sessions.setAside.connect(self._on_set_aside)
             self.sessions.broughtBack.connect(self._on_brought_back)
+            self.sessions.backgroundChanged.connect(self._refresh_rec_sign)
+        for sign in (self.overlays.rec_sign, self.overlays.library_rec_sign):
+            if sign is not None:
+                sign.goBack.connect(self._go_back_to_recording)
+                sign.stop.connect(self._stop_background_recording)
         column.closed.connect(zap.close_column)
         column.rowClicked.connect(self._on_column_row)
         drawer.playRequested.connect(self.play_item)
@@ -1780,6 +1787,50 @@ class TVController(QObject):
         )
 
     # ---- 2.6: recordings in the background ----------------------------------------------------
+
+    def asks_before_quit(self, then: Callable[[], None]) -> bool:
+        """QiTV is to close while channels record: True, asked (Quit stops them, saved, then
+        `then` closes); False: nothing records."""
+        return self._question.quit(then)
+
+    def quit_note(self) -> str:
+        """The quit question while channels record ("" while none does): the self-update's."""
+        recording = self._recordings()
+        return quit_text(recording) if recording else ""
+
+    def _refresh_rec_sign(self) -> None:
+        """The REC sign lists the recordings in the background (the big picture's own shows
+        on its controls, the small picture's on its label)."""
+        sessions = self.sessions
+        recordings: list[tuple[str, str, float]] = []
+        if sessions is not None and not self._closed:
+            for slot in sessions.background():
+                since = slot.live.recording_since() if records(slot) else None
+                if since is not None:
+                    name = str((slot.channel or {}).get("name") or "")
+                    recordings.append((slot.name, name, since))
+        for sign in (self.overlays.rec_sign, self.overlays.library_rec_sign):
+            if sign is not None:
+                sign.set_recordings(recordings)
+
+    def _go_back_to_recording(self, name: str) -> None:
+        """The REC sign's Go back: the channel it records plays large again, from its group."""
+        sessions = self.sessions
+        if sessions is None or self._closed:
+            return
+        slot = sessions.slot(name)
+        if slot.channel is None or not any(s is slot for s in sessions.background()):
+            return
+        self.leave_multiview()  # the grid's tiles never show a background player
+        key = slot.group_key or ALL_GROUP_ID
+        channels = list(self.catalog.items("live", key) or []) or self._all_live()
+        self.tune_live(slot.channel, key, channels)
+
+    def _stop_background_recording(self, name: str) -> None:
+        """The REC sign's Stop recording: saved, and its player leaves the channel."""
+        sessions = self.sessions
+        if sessions is not None and not self._closed:
+            sessions.slot(name).live.stop_recording()
 
     def _recordings(self) -> list[Slot]:
         """Every player that records, the oldest recording first."""

@@ -309,6 +309,7 @@
   "Get a free key": "Obtener clave gratis",
   "Ghana": "Ghana",
   "Go Live": "Ir al directo",
+  "Go back to {channel}": "Volver a {channel}",
   "Go live": "Ir al directo",
   "Greece": "Grecia",
   "Groups": "Grupos",
@@ -964,6 +965,7 @@
   "{action} ({key})": "{action} ({key})",
   "{behind} behind live": "{behind} tras el directo",
   "{channel} is recording in this tile. Stop the recording?": "Se está grabando {channel} en este recuadro. ¿Detener la grabación?",
+  "{channel} is recording. Quit and stop the recording?": "Se está grabando {channel}. ¿Salir y detener la grabación?",
   "{country} (your region)": "{country} (tu región)",
   "{decoded} decoded · {shown} shown · {late} too late": "{decoded} decodificados · {shown} mostrados · {late} tarde",
   "{found} for other titles: check the title under each one": "{found} para otros títulos: comprueba el título que aparece bajo cada uno",
@@ -983,6 +985,10 @@
   "{n} channel": {
     "one": "{n} canal",
     "other": "{n} canales"
+  },
+  "{n} channel is recording. Quit and stop the recordings?": {
+    "one": "Se está grabando {n} canal. ¿Salir y detener las grabaciones?",
+    "other": "Se están grabando {n} canales. ¿Salir y detener las grabaciones?"
   },
   "{n} download": {
     "one": "{n} descarga",

@@ -95,7 +95,7 @@ from services.sessions import SessionManager, Slot
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
 from services.thread_cleanup import has_pending_threads
-from services.update_checker import call_before_update
+from services.update_checker import call_before_update, set_quit_note
 from services.watch_state import WatchState
 from services.zapping import ZapController
 from ui import macos_window, provider_drop
@@ -122,6 +122,7 @@ from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
 from ui.overlays.pip_label import PipLabel
 from ui.overlays.question_card import QuestionCard
+from ui.overlays.rec_sign import RecSign
 from ui.overlays.remote_pair import PairOverlay
 from ui.overlays.sleep_notice import SleepNotice
 from ui.overlays.stats import StatsOverlay
@@ -384,6 +385,7 @@ class TVWindow(QMainWindow):
         self.library_page = LibraryScreen(self.posters, self.logos)
         self.library_toast = Toast(self.library_page)  # the overlay host hides with the player
         self.library_question = QuestionCard(self.library_page)  # 2.6: stop a recording?
+        self.library_rec_sign = RecSign(self.library_page, bottom=True)  # 2.6: recordings on
         # Both pages are always the stack's children: the player page is the whole picture, the
         # Library, or a small one in a corner over the Library while it plays on.
         self.pages = PageStack(self.player_page, self.library_page, config_manager, self)
@@ -502,6 +504,7 @@ class TVWindow(QMainWindow):
         self.sleep_notice = SleepNotice(host)
         self.back_notice = BackNotice(host)  # 2.6: Resume, where a channel was left
         self.question_card = QuestionCard(host)  # 2.6: stop a recording for a stream?
+        self.rec_sign = RecSign(host)  # 2.6: recordings in the background
         self.pair_overlay = PairOverlay(host)  # the phone remote's pairing QR
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
@@ -528,6 +531,8 @@ class TVWindow(QMainWindow):
             back_notice=self.back_notice,
             question=self.question_card,
             library_question=self.library_question,
+            rec_sign=self.rec_sign,
+            library_rec_sign=self.library_rec_sign,
             pairing=self.pair_overlay,
             library_toast=self.library_toast,
             layout_row=self.layout_row,
@@ -564,6 +569,7 @@ class TVWindow(QMainWindow):
             self.corner_controls,
             self.sleep_notice,
             self.back_notice,
+            self.rec_sign,
             self.question_card,
             self.pair_overlay,
             self.overlays.toast,
@@ -695,6 +701,7 @@ class TVWindow(QMainWindow):
         # A self-update (Windows, a macOS disk image) waits for background threads: the
         # engine's must stop first, and start again if the update cannot launch.
         call_before_update(self.stop_live, self.restart_live)
+        set_quit_note(self.controller.quit_note)  # 2.6: an update asks before it stops recordings
         sources = (*self.surfaces.values(), self.host)
         # The pointer over the video goes with the player controls (and comes back on a move).
         self.pointer = PointerHider(
@@ -1548,6 +1555,9 @@ class TVWindow(QMainWindow):
             return
         if self._closing and not self._stepping:
             event.ignore()
+            return
+        if not self._closing and self.controller.asks_before_quit(self.close):
+            event.ignore()  # 2.6: channels record: Quit stops them and closes again
             return
         if not self._closing:
             self._closing = True

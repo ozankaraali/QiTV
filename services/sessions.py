@@ -202,6 +202,7 @@ class SessionManager(QObject):
     setAside = Signal(str, str)
     broughtBack = Signal(str, str)
     shownSmall = Signal(str)
+    backgroundChanged = Signal()  # which slots are in the background changed
 
     def __init__(
         self,
@@ -425,6 +426,7 @@ class SessionManager(QObject):
             self._small = fresh
         self._set_mute(slot, True)
         self.setAside.emit(name, fresh.name)
+        self.backgroundChanged.emit()
         return fresh.name
 
     def bring_back(self, name: str) -> Optional[str]:
@@ -442,6 +444,7 @@ class SessionManager(QObject):
         self._apply_level(slot)
         self._apply_level(old)
         self.broughtBack.emit(name, old.name)
+        self.backgroundChanged.emit()
         return old.name
 
     def show_small(self, name: str) -> bool:
@@ -462,6 +465,7 @@ class SessionManager(QObject):
         if not self._open:
             self._open = True
             self.pipStateChanged.emit(True)
+        self.backgroundChanged.emit()
         return True
 
     def keep_recording(self, name: str) -> bool:
@@ -475,6 +479,7 @@ class SessionManager(QObject):
         self._aside.append(name)
         self._set_background(slot, True)
         self._set_mute(slot, True)
+        self.backgroundChanged.emit()
         return True
 
     def stop_background(self) -> None:
@@ -485,6 +490,7 @@ class SessionManager(QObject):
             self._set_background(slot, False)
             self._stop(slot)
             slot.channel = slot.group_key = None
+            self.backgroundChanged.emit()
 
     def _on_recording_changed(self, name: str, recording: bool) -> None:
         if recording or name not in self._aside:
@@ -494,6 +500,7 @@ class SessionManager(QObject):
         self._set_background(slot, False)
         self._tuners[name].stop()
         slot.channel = slot.group_key = None
+        self.backgroundChanged.emit()
 
     def _spare(self) -> Optional[Slot]:
         """An idle slot for a role (not a tile's), else one made for it."""
