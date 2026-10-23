@@ -50,6 +50,7 @@ class KeptBuffers:
     def __init__(self, engine: Any) -> None:
         self._engine = engine
         self._rings: dict[str, KeptRing] = {}  # by channel key, the oldest put first
+        self._disk = True  # disk buffers are kept (`set_disk`)
         self._listen(engine)
 
     def _listen(self, engine: Any) -> None:
@@ -79,6 +80,9 @@ class KeptBuffers:
         old = self._rings.pop(ring.channel, None)
         if old is not None and old.sid != ring.sid:
             self._engine.close_session(old.sid)
+        if ring.disk and not self._disk:
+            self._engine.close_session(ring.sid)  # the disk buffer is off now
+            return
         if not ring.disk:
             for other in [r for r in self._rings.values() if not r.disk]:
                 self.drop(other.sid)
@@ -95,10 +99,13 @@ class KeptBuffers:
                 del self._rings[channel]
                 self._engine.close_session(sid)
 
-    def drop_disk(self) -> None:
-        """The disk buffer was turned off: every disk buffer kept goes."""
-        for ring in [r for r in self._rings.values() if r.disk]:
-            self.drop(ring.sid)
+    def set_disk(self, on: bool) -> None:
+        """The disk buffer was turned on or off: off, every disk buffer kept goes, and so does
+        one left later (a channel that played on disk when it was turned off)."""
+        self._disk = on
+        if not on:
+            for ring in [r for r in self._rings.values() if r.disk]:
+                self.drop(ring.sid)
 
     def use_engine(self, engine: Any) -> None:
         """A new engine (a restart after a self-update): the old one's sessions went with it."""

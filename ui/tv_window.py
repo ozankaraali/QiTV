@@ -1461,9 +1461,10 @@ class TVWindow(QMainWindow):
             logger.warning("Couldn't save the settings: %s", safe_message(e))
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
         self.controller.settings_saved()
-        if self.kept is not None and not self.config_manager.timeshift_enabled:
-            self.kept.drop_disk()  # the disk buffer is off: what was kept on disk goes
-            if self.engine is not None:
+        if self.kept is not None:
+            # The disk buffer off: what was kept on disk goes, and what is left later too.
+            self.kept.set_disk(self.config_manager.timeshift_enabled)
+            if self.engine is not None and not self.config_manager.timeshift_enabled:
                 self.engine.drop_kept()
         self.remote.apply_config()
 

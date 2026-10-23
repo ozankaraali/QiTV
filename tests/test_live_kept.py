@@ -60,12 +60,27 @@ class KeptBuffersTests(unittest.TestCase):
         self.assertEqual(self.engine.closed, ["a"])
         self.assertEqual(self.kept.take("k1").sid, "b")
 
-    def test_drop_disk_closes_the_disk_rings(self):
+    def test_turning_the_disk_off_closes_the_disk_rings(self):
         self.kept.put(KeptRing("a", "k1", True, LIVE))
         self.kept.put(KeptRing("m", "k2", False, LIVE))
-        self.kept.drop_disk()
+        self.kept.set_disk(False)
         self.assertEqual(self.engine.closed, ["a"])
         self.assertEqual([r.sid for r in self.kept.rings()], ["m"])
+
+    def test_with_the_disk_off_a_disk_ring_left_later_goes(self):
+        # The channel playing on disk when the disk was turned off, left afterwards.
+        self.kept.set_disk(False)
+        self.kept.put(KeptRing("a", "k1", True, LIVE))
+        self.kept.put(KeptRing("m", "k2", False, LIVE))
+        self.assertEqual(self.engine.closed, ["a"])
+        self.assertEqual([r.sid for r in self.kept.rings()], ["m"])
+
+    def test_with_the_disk_on_again_disk_rings_are_kept(self):
+        self.kept.set_disk(False)
+        self.kept.set_disk(True)
+        self.kept.put(KeptRing("a", "k1", True, LIVE))
+        self.assertEqual(self.engine.closed, [])
+        self.assertEqual(self.kept.take("k1").sid, "a")
 
     def test_drop_one(self):
         self.kept.put(KeptRing("a", "k1", True, LIVE))
