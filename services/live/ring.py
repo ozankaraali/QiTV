@@ -1046,18 +1046,22 @@ class DiskBudget:
 
     Each ring keeps under its own cap as it writes; `trim()`, called once a segment completed
     and without any ring's lock held, lets the oldest segments go until all of them fit: a
-    kept (parked) ring's first, the oldest first, then the oldest of any. Lock order: the
-    budget's lock, then one ring's at a time.
+    server part's played ones first (2.6.2: never the live buffer it runs into), then a kept
+    (parked) ring's, the oldest first, then the oldest of any. Lock order: the budget's lock,
+    then one ring's at a time.
     """
 
     def __init__(self, max_bytes: int) -> None:
         self.max_bytes = max_bytes
         self._lock = threading.Lock()
         self._rings: dict[int, tuple[Ring, bool]] = {}  # id -> (ring, parked)
+        self._parts: set[int] = set()  # 2.6.2: server parts' rings
 
-    def register(self, ring: Ring, *, parked: bool = False) -> None:
+    def register(self, ring: Ring, *, parked: bool = False, part: bool = False) -> None:
         with self._lock:
             self._rings[id(ring)] = (ring, parked)
+            if part:
+                self._parts.add(id(ring))
 
     def set_parked(self, ring: Ring, parked: bool) -> None:
         with self._lock:
@@ -1067,6 +1071,7 @@ class DiskBudget:
     def unregister(self, ring: Ring) -> None:
         with self._lock:
             self._rings.pop(id(ring), None)
+            self._parts.discard(id(ring))
 
     def trim(self) -> list[Ring]:
         """Fit the rings into `max_bytes`; returns the parked rings that lost segments (their
@@ -1075,7 +1080,11 @@ class DiskBudget:
         with self._lock:
             rings = list(self._rings.values())
             while sum(ring.charged for ring, _ in rings) > self.max_bytes:
-                victim = self._victim(rings)
+                parts = [(r, p) for r, p in rings if id(r) in self._parts and r.retirable()]
+                victim = (
+                    min(parts, key=lambda item: item[0].oldest_wall() or 0.0) if parts else None
+                )
+                victim = victim or self._victim(rings)
                 if victim is None:
                     break
                 ring, parked = victim

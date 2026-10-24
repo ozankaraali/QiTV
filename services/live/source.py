@@ -1071,9 +1071,12 @@ class HlsSource:
         sequence (the live buffer's first), placed in time by `part_wall`."""
         self.user_agent = http.user_agent
         back = window.get("back_s") if window is not None else None
+        before = window.get("before_s") if window is not None else None
         until = window.get("until_seq") if window is not None else None
         self._back = float(back) if isinstance(back, (int, float)) else None
+        self._before = float(before) if isinstance(before, (int, float)) else None
         self._until = until if type(until) is int else None
+        self._stop_dropped = False  # another encoding persisted: its stop is not this one's
         self._part_wall: float | None = None
         self._part_media: float | None = None  # the media before its stop, as first listed
         self._hold = hold  # 2.6.2: fetch no further segment while it says so (pacing)
@@ -1149,7 +1152,13 @@ class HlsSource:
 
     @until_seq.setter
     def until_seq(self, seq: int | None) -> None:
-        self._until = seq  # the live buffer's start moved (any thread: one attribute)
+        if not self._stop_dropped:  # (its numbers are another encoding's then)
+            self._until = seq  # the live buffer's start moved (any thread: one attribute)
+
+    @property
+    def until_dropped(self) -> bool:
+        """A server part's stop went: another encoding persisted (2.6.2, `_other_copy`)."""
+        return self._stop_dropped
 
     @property
     def part_media_s(self) -> float | None:
@@ -1229,7 +1238,15 @@ class HlsSource:
         """The first segment to fetch: `_depth` seconds from a live playlist's end; a server
         part's `back_s` from it (2.6.2)."""
         if self._back is not None:
-            return _back_from_end(playlist.segments, self._back)
+            segments, first = playlist.segments, playlist.media_sequence or 0
+            until = self._until
+            if (
+                self._before is not None
+                and until is not None
+                and first < until <= first + len(segments)
+            ):  # counted back from its stop: at least the segment before it
+                return _back_from_end(segments[: until - first], self._before)
+            return _back_from_end(segments, self._back)
         if playlist.is_endlist:
             return 0
         return _back_from_end(playlist.segments, self._depth(playlist))
@@ -1323,7 +1340,8 @@ class HlsSource:
                     playlist, url, _separate = _media_playlist(http, content, final)
                     continue
                 log.info("The other HLS encoding persisted; following it.")
-                self._until = None  # a server part's stop is ours: it plays on without one
+                if self._until is not None:  # a server part's stop is ours: it plays on
+                    self._until, self._stop_dropped = None, True
                 if next_sequence is not None:
                     self._mark()
                     next_sequence = first + self._start(playlist)  # its numbers are not ours
@@ -1361,14 +1379,18 @@ class HlsSource:
             # Frozen time runs between reloads only, never while segments download.
             if not fresh and loaded - progress >= _FROZEN_TIMEOUT:
                 raise SourceError("timeout", _FROZEN)
-            done = False  # 2.6.2: a server part reached the live buffer's first segment
+            done = again = False  # 2.6.2: a server part reached its stop / reloads first
             for index, segment in enumerate(playlist.segments):
                 sequence = first + index
                 if sequence < next_sequence:
                     continue
+                held = time.monotonic()
                 while self._hold is not None and self._hold():  # its stop may move meanwhile
                     if http.wait(_HOLD_POLL_S):
                         raise _Closed()
+                if time.monotonic() - held > max(1.0, float(playlist.target_duration or 0)):
+                    again = True  # held long: the window may have moved on, its URLs expired
+                    break
                 if self._until is not None and sequence >= self._until:
                     done = True
                     break
@@ -1385,7 +1407,7 @@ class HlsSource:
                 self._sequence = sequence
                 yield from self._segment(segment, sequence, url)
             self._fetching = 0.0
-            if fresh:
+            if fresh and not again:
                 progress = time.monotonic()
                 yield CaughtUp()  # what follows comes as the provider publishes it
             if done or playlist.is_endlist:

@@ -918,7 +918,8 @@ class _Session:
         root = Path(spec.get("root") or self._helper.root)
         try:
             ring: Ring = DiskRing(root, spec["dir"], spec["max_bytes"], stop=self.stop)
-            self._helper.disk_budget(spec["max_bytes"]).register(ring)
+            part = isinstance(self._start.get("window"), dict)  # 2.6.2: a server part's
+            self._helper.disk_budget(spec["max_bytes"]).register(ring, part=part)
             if self._label is not None:
                 ring.note_label(self._label)
             if self._where is not None:
@@ -1424,6 +1425,8 @@ class _Session:
             part_media = getattr(source, "part_media_s", None)
             if part_media is not None:
                 snapshot["part_media_s"] = float(part_media)
+            if getattr(source, "until_dropped", False) is True:
+                snapshot["until_dropped"] = True  # another encoding persisted: no stop
         self._heard_edge = edge
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the

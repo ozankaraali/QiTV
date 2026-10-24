@@ -2024,6 +2024,83 @@ video.m3u8
         finally:
             source.close()
 
+    def test_a_server_part_counts_back_from_its_stop(self):
+        # Review I8: from the stop, not the playlist's end (a segment published meanwhile, or
+        # a wall clock off, would otherwise start at or past the stop: an empty part).
+        names = [f"s{n}.ts" for n in range(100, 110)]
+        for before, fetched in ((2.0, ["s106.ts", "s107.ts"]), (0.5, ["s107.ts"])):
+            with self.subTest(before=before):
+                routes = {f"/{name}": (200, {}, self.video) for name in names}
+                routes["/live.m3u8"] = (200, {}, hls(100, names))
+                server = self.server(routes)
+                window = {"back_s": 1.0, "before_s": before, "until_seq": 108}
+                media(server.url + "/live.m3u8", live_delay=1.0, window=window)
+                self.assertEqual(requested_segments(server), fetched)
+
+    def test_a_server_part_whose_other_encoding_persists_drops_its_stop(self):
+        # Review I5: its stop was ours; the buffer's later stops are too: none applies.
+        def playlist(_request, count):
+            return 200, {}, hls(500, ["x.ts", "y.ts", "z.ts"], ended=count >= 4)
+
+        routes = {f"/{name}.ts": (200, {}, self.video) for name in "xyz"}
+        routes["/live.m3u8"] = playlist
+        server = self.server(routes)
+        with (
+            patch.object(source_module, "_OTHER_COPY_S", 0.0),
+            patch.object(source_module, "_STALE_TARGETS", 1),
+        ):
+            source = open_source(
+                server.url + "/live.m3u8",
+                headers={},
+                verify_ssl=True,
+                stop=threading.Event(),
+                window={"back_s": 3.0, "until_seq": 108},
+            )
+            try:
+                parts = list(source.chunks())
+            finally:
+                source.close()
+        self.assertTrue(source.until_dropped)
+        source.until_seq = 110  # the buffer's start moved: not this part's numbers
+        self.assertIsNone(source.until_seq)
+        self.assertTrue(any(isinstance(part, bytes) and part for part in parts))
+
+    def test_a_held_part_reloads_before_going_on(self):
+        # Review I4: a part held past a target duration reloads first: the window may have
+        # slid past its next segment, and its URLs may have expired.
+        held = threading.Event()
+
+        def first(request):
+            held.set()  # the player is behind: hold before the next one
+            request.wfile.write(self.video)
+
+        def playlist(_request, count):
+            if count == 1:
+                return 200, {}, hls(100, ["s100.ts", "s101.ts", "s102.ts"])
+            return 200, {}, hls(105, ["s105.ts", "s106.ts", "s107.ts"], ended=True)
+
+        routes = {f"/s{n}.ts": (200, {}, self.video) for n in range(101, 108)}
+        routes["/s100.ts"] = (200, {"Content-Length": str(len(self.video))}, first)
+        routes["/live.m3u8"] = playlist
+        server = self.server(routes)
+        source = open_source(
+            server.url + "/live.m3u8",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            window={"back_s": 3.0},
+            hold=held.is_set,
+        )
+        got = []
+        reader = threading.Thread(target=lambda: got.extend(source.chunks()), daemon=True)
+        reader.start()
+        time.sleep(1.5)  # held longer than a target duration (1 s)
+        held.clear()
+        reader.join(5)
+        source.close()
+        self.assertEqual(requested_segments(server), ["s100.ts", "s105.ts", "s106.ts", "s107.ts"])
+        self.assertIn(Discontinuity(), got)
+
     def test_a_held_hls_source_fetches_nothing_until_let_go(self):
         # 2.6.2: `hold` pauses the fetching between segments (a server part's pacing).
         names = ["a.ts", "b.ts", "c.ts"]

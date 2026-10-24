@@ -700,6 +700,21 @@ class DiskBudgetTests(unittest.TestCase):
         self.assertEqual(kept.oldest_seq, 0)
         self.assertEqual(live.oldest_seq, 1)
 
+    def test_a_server_parts_played_segments_go_before_the_live_buffer(self):
+        # Review I2: the part's oldest (played, behind the player) go first, never the live
+        # buffer the part runs into.
+        live, part = self.ring(), self.ring()
+        self.fill(live, 3)
+        self.fill(part, 3)
+        budget = DiskBudget(live.charged + part.charged)
+        budget.register(live)
+        budget.register(part, part=True)
+        part.protect_from(1)
+        self.fill(live, 1)
+        budget.trim()
+        self.assertEqual(live.oldest_seq, 0)
+        self.assertEqual(part.oldest_seq, 1)
+
     def test_a_ring_that_unregisters_no_longer_counts(self):
         kept, live = self.ring(), self.ring()
         self.fill(kept, 2)
