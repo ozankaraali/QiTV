@@ -5,10 +5,11 @@ buffered, the session opens a second helper session of the channel, the server p
 (`LiveEngine.open_session(window=...)`): the same playlist from that far back, its input ending
 before the media sequence the live buffer begins with (it never fetches what the buffer
 holds), paced to a minute ahead of the player. Its segments are placed on the live session's
-own timeline by time of day, before the buffer's start: its own second 0 sits where its first
-segment's time of day (`part_wall`) falls on the live timeline (`services.live.parts.t_at`,
-which goes on backwards before the oldest part). Position, the bar and seeks so keep one
-coordinate system. Pure functions and data; no Qt.
+own timeline, before the buffer's start: flush against the buffer's segment that begins its
+stop (the helper says how much media lies before it, `part_media_s`), else by its first
+segment's time of day (`part_wall` on the live timeline, `services.live.parts.t_at`, which
+goes on backwards before the oldest part; a few seconds early, measured). Position, the bar
+and seeks so keep one coordinate system. Pure functions and data; no Qt.
 """
 
 from __future__ import annotations
@@ -29,13 +30,27 @@ class ServerPart:
     ended: bool = False  # its input ended (at its stop, or the window's end)
 
     def place(
-        self, part_wall: float, parts: Sequence[Part], *, live_edge: float, now: float
+        self,
+        part_wall: float,
+        parts: Sequence[Part],
+        *,
+        live_edge: float,
+        now: float,
+        media_before: Optional[float] = None,
+        live: Sequence[Span] = (),
     ) -> None:
-        """Place it once its first segment's time of day is known (the helper's state);
-        a later state leaves it where it is."""
-        if self.offset is None:
-            t = t_at(parts, part_wall, live_edge=live_edge, now=now)
-            self.offset = self.asked if t is None else t  # None: a gap of the buffer's
+        """Place it once the helper's state says where: flush against the buffer's segment
+        that begins its stop, `media_before` (its media up to the stop) before it; without
+        that segment, by its first segment's time of day (which runs a few seconds early:
+        a live segment arrives after its time in the playlist). A later state leaves it."""
+        if self.offset is not None:
+            return
+        stop = next((s.start for s in live if s.media_seq == self.until), None)
+        if media_before is not None and stop is not None and self.until is not None:
+            self.offset = stop - media_before
+            return
+        t = t_at(parts, part_wall, live_edge=live_edge, now=now)
+        self.offset = self.asked if t is None else t  # None: a gap of the buffer's
 
     def spans(self, own: Sequence[Span]) -> list[Span]:
         """Its spans on the live timeline; [] until it is placed."""

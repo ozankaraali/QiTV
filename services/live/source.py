@@ -1075,6 +1075,7 @@ class HlsSource:
         self._back = float(back) if isinstance(back, (int, float)) else None
         self._until = until if type(until) is int else None
         self._part_wall: float | None = None
+        self._part_media: float | None = None  # the media before its stop, as first listed
         self._hold = hold  # 2.6.2: fetch no further segment while it says so (pacing)
         self._http = http
         self._capture = capture
@@ -1149,6 +1150,12 @@ class HlsSource:
     @until_seq.setter
     def until_seq(self, seq: int | None) -> None:
         self._until = seq  # the live buffer's start moved (any thread: one attribute)
+
+    @property
+    def part_media_s(self) -> float | None:
+        """A server part's media from its first segment to its stop (2.6.2: the session
+        places it flush against the buffer's segment that begins the stop)."""
+        return self._part_media
 
     @property
     def part_wall(self) -> float | None:
@@ -1328,6 +1335,9 @@ class HlsSource:
                 if self._back is not None:  # 2.6.2: where the server part sits in time
                     after = sum(float(s.duration or 0) for s in playlist.segments[start:])
                     self._part_wall = _wall_time() - after
+                    if self._until is not None and first <= self._until <= newest + 1:
+                        stop = playlist.segments[start : self._until - first]
+                        self._part_media = sum(float(s.duration or 0) for s in stop)
             elif first > next_sequence:
                 # Fell behind the window: rejoin at the live start, not the oldest segment; a
                 # server part goes on from the oldest (2.6.2: it plays the past).

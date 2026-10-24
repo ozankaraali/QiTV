@@ -178,6 +178,7 @@ class FakeEngine(QObject):
         parts=None,
         window=None,
         part_wall=None,
+        part_media=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -215,6 +216,8 @@ class FakeEngine(QObject):
             self._snapshots[sid]["window_s"] = window
         if part_wall is not None:  # 2.6.2: a server part's first segment's time of day
             self._snapshots[sid]["part_wall"] = part_wall
+        if part_media is not None:  # and the media before its stop
+            self._snapshots[sid]["part_media_s"] = part_media
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def receive(self, sid, count):
@@ -6119,3 +6122,17 @@ class ServerWindowTests(LiveSessionCase):
         self.engine.sessionParked.emit(sid)
         self.assertEqual(len(self.engine.opened), 2)
         self.assertEqual(self.engine.opened[-1][2]["window"]["back_s"], 1000.0)  # the newest
+
+    def test_a_part_ending_at_the_buffer_is_placed_flush_against_it(self):
+        # Its stop is the buffer's first HLS segment (media sequence 100, at 0.0): the media
+        # before the stop places it, whatever its time of day says (measured: 6 s off).
+        sid = self.playing(86400.0)
+        self.live.seek_to(-12.0)
+        part = self.engine.opened[-1][0]
+        own = [Span(0, 0.0, 6.0, False, media_seq=98), Span(1, 6.0, 12.0, False, media_seq=99)]
+        self.engine.buffer(part, own, hls=True, part_wall=10_000.0 - 100.0, part_media=12.0)
+        self.engine.sessionReady.emit(part)
+        self.assertAlmostEqual(self.live.position(), -12.0)
+        self.engine.sessionEnded.emit(part)
+        self.playback.ended.emit()
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 0))

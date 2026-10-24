@@ -2628,10 +2628,18 @@ class LiveSession(QObject):
 
     def _on_part_updated(self, part: ServerPart, snapshot: Mapping[str, Any]) -> None:
         wall = snapshot.get("part_wall")
-        if part.offset is None and isinstance(wall, (int, float)):
+        if part.offset is None and isinstance(wall, (int, float)) and self._sid is not None:
             live = self._snapshot()
             parts = live_parts.from_state(live.get("parts"))
-            part.place(float(wall), parts, live_edge=self._live_edge(live), now=self._wall())
+            media = snapshot.get("part_media_s")
+            part.place(
+                float(wall),
+                parts,
+                live_edge=self._live_edge(live),
+                now=self._wall(),
+                media_before=float(media) if isinstance(media, (int, float)) else None,
+                live=self._engine.spans(self._sid),
+            )
         if self._part_ready and not self._in_part:
             self._play_part()
 

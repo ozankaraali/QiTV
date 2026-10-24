@@ -2005,6 +2005,25 @@ video.m3u8
         self.assertEqual(parts, joined(self.video, self.next_video))
         self.assertEqual(requested_segments(server), ["s106.ts", "s107.ts"])
 
+    def test_a_server_part_reports_the_media_before_its_stop(self):
+        # 2.6.2: the session places the part flush against the buffer's first HLS segment.
+        names = [f"s{n}.ts" for n in range(100, 110)]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        routes["/live.m3u8"] = (200, {}, hls(100, names))
+        server = self.server(routes)
+        source = open_source(
+            server.url + "/live.m3u8",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            window={"back_s": 4.0, "until_seq": 108},
+        )
+        try:
+            next(iter(source.chunks()))
+            self.assertEqual(source.part_media_s, 2.0)  # s106 and s107, 1 s each
+        finally:
+            source.close()
+
     def test_a_held_hls_source_fetches_nothing_until_let_go(self):
         # 2.6.2: `hold` pauses the fetching between segments (a server part's pacing).
         names = ["a.ts", "b.ts", "c.ts"]

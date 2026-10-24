@@ -1421,6 +1421,9 @@ class _Session:
             part_wall = getattr(source, "part_wall", None)
             if part_wall is not None:
                 snapshot["part_wall"] = float(part_wall)
+            part_media = getattr(source, "part_media_s", None)
+            if part_media is not None:
+                snapshot["part_media_s"] = float(part_media)
         self._heard_edge = edge
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the
