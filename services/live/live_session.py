@@ -608,6 +608,11 @@ class LiveSession(QObject):
         self._part: Optional[ServerPart] = None
         self._part_ready = False
         self._in_part = False
+        # On a provider with one stream, the live upstream parks for the part (`one_stream`):
+        # parked for it, and the point a part waits to open at until the park is confirmed.
+        self._one_stream = False
+        self._live_parked = False
+        self._part_pending: Optional[float] = None
         self._from_kept = False
         self._disk_failures = 0  # of the kept buffer taken back, this tune: a second starts afresh
         # Where a session with kept history goes when it is let go otherwise than by `park`
@@ -699,15 +704,18 @@ class LiveSession(QObject):
         channel: str = "",
         referrer: Optional[str] = None,
         kept: Optional[KeptRing] = None,
+        one_stream: bool = False,
     ) -> None:
         """`ram_bytes`: the memory a disk buffer that fails goes on in (the helper's default
         when None). `channel`: the channel's key in the tuning store ("": nothing kept).
         `referrer`: the channel's M3U http-referrer, for a direct play (`headers` carry it to
         the helper as Referer). `kept` (2.6): the channel's parked session, taken back where
         the user was (`_resume_kept`) instead of a new one; one with nothing left starts
-        afresh."""
+        afresh. `one_stream` (2.6.2): the provider leaves no second stream, so the live
+        upstream parks while a server part plays and resumes after it."""
         self.stop()
         self._kept = kept
+        self._one_stream = one_stream
         self._resuming = self._kept_only = self._live_after_resume = self._from_kept = False
         self._back = self._late = None
         self._disk_failures = 0
@@ -818,7 +826,8 @@ class LiveSession(QObject):
     def _halt(self, *, park: bool) -> None:
         """Stop playback; the session closes, or parks (2.6); a server part closes."""
         self._end_recording()
-        self._close_part()
+        self._close_part(resume=False)
+        self._live_parked = False
         pending, self._kept = self._kept, None
         if pending is not None:
             self._engine.close_session(pending.sid)  # never taken back: it goes
@@ -1748,6 +1757,10 @@ class LiveSession(QObject):
             self._ended = True
 
     def _on_closed(self, sid: str) -> None:
+        if sid == self._sid and self._part_pending is not None and self._live_parked:
+            t, self._part_pending = self._part_pending, None
+            self._open_part_now(t)  # 2.6.2: its upstream closed: the part's may open
+            return
         if sid not in self._unclosed:
             return
         self._unclosed.discard(sid)
@@ -2588,9 +2601,23 @@ class LiveSession(QObject):
 
     def _open_part(self, t: float) -> None:
         """A server part from live timeline second `t`, stopping before the media sequence
-        the buffer begins with; it plays once its helper says ready and its state placed it."""
+        the buffer begins with; it plays once its helper says ready and its state placed it.
+        On a provider with one stream the live upstream parks first."""
         assert self._sid is not None
-        self._close_part()
+        parking = self._part_pending is not None
+        self._close_part(resume=False)
+        if self._one_stream and not self._live_parked:
+            self._live_parked = True
+            self._part_pending = t
+            self._engine.park_session(self._sid)
+            return
+        if parking:
+            self._part_pending = t  # still parking: the newest point asked opens then
+            return
+        self._open_part_now(t)
+
+    def _open_part_now(self, t: float) -> None:
+        assert self._sid is not None
         snapshot = self._snapshot()
         parts = live_parts.from_state(snapshot.get("parts"))
         back = back_for(t, parts, live_edge=self._live_edge(snapshot), now=self._wall())
@@ -2662,11 +2689,17 @@ class LiveSession(QObject):
             if seq is None or not self._open_at(seq):
                 self._go_live(unpause=False)
 
-    def _close_part(self) -> None:
+    def _close_part(self, *, resume: bool = True) -> None:
+        """The server part goes (never labelled, parked or kept); with `resume`, a live
+        upstream parked for it opens again (`one_stream`)."""
         part, self._part = self._part, None
         self._part_ready = self._in_part = False
+        self._part_pending = None
         if part is not None:
-            self._close(part.sid)  # never labelled, parked or kept
+            self._close(part.sid)
+        if resume and self._live_parked and self._sid is not None:
+            self._live_parked = False
+            self._send_resume(self._sid)  # a new run after the gap, as a kept buffer's
 
     def _behind(self, snapshot: Mapping[str, Any], position: float, edge: float) -> float:
         parts = live_parts.from_state(snapshot.get("parts"))

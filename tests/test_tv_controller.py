@@ -2853,6 +2853,7 @@ class PipelineTuneTests(PipelineCase):
                 "disk": False,
                 "max_bytes": 256 * MIB,  # without consent, the memory per stream: 256 MiB
                 "channel": channel_key("Home", CHANNELS[0]),  # what it taught is kept (2.0.2)
+                "one_stream": True,  # 2.6.2: a provider with a limit: no second download
             },
         )
         self.assertEqual(self.session.plays, [])  # the live session plays it, not the controller
