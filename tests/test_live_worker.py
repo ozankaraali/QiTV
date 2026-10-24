@@ -1951,7 +1951,7 @@ class RecordedReadTests(unittest.TestCase):
 class StartQualityTests(unittest.TestCase):
     """In process: the spans message carries how cleanly each segment starts."""
 
-    def test_each_addition_ends_with_its_segments_start_quality(self):
+    def test_each_addition_carries_its_segments_start_quality(self):
         # One IDR every 15 s: IDR starts at 0 and 15 s, a forced cut without one at 10 s.
         upstream = LocalSource({SECRET_PATH: (200, {}, make_stream(24, gop_s=15.0))})
         self.addCleanup(upstream.close)
@@ -1959,11 +1959,13 @@ class StartQualityTests(unittest.TestCase):
         helper.parent.send(("open", "q", upstream.url + SECRET_PATH, {}, True, RAM, 6.0))
         helper.wait_for(lambda message: message == ("ended", "q"))
         buffered = rebuild(m for m in helper.messages if m[:2] == ("state", "q"))
-        # (seq, start, end, discontinuity) as before, then the start quality.
+        # (seq, start, end, discontinuity) as before, then the start quality (then, 2.6.2,
+        # the HLS media sequence: None for raw TS).
         self.assertEqual([item[0] for item in buffered], [0, 1, 2])
         self.assertEqual([round(item[1], 3) for item in buffered], [0.0, 10.0, 15.0])
+        self.assertEqual([item[5] for item in buffered], [None, None, None])
         self.assertEqual(
-            [item[3:] for item in buffered],
+            [item[3:5] for item in buffered],
             [
                 (False, "key"),
                 (False, "none"),
