@@ -16,7 +16,13 @@ from services.live import learned_target, worker
 from services.live.kept import KeptRing, Where
 from services.live.learned_target import ArrivalModel, Learned, LearnedTarget
 import services.live.live_session as live_session
-from services.live.live_session import WINDOW_AHEAD_S, WINDOW_BAR_S, LiveSession
+from services.live.live_session import (
+    PART_FAILED,
+    PART_RECORDING,
+    WINDOW_AHEAD_S,
+    WINDOW_BAR_S,
+    LiveSession,
+)
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.stay_live import AUTO, TARGETS, Decision, StayLive
 from services.live.timeline import Span
@@ -179,6 +185,7 @@ class FakeEngine(QObject):
         window=None,
         part_wall=None,
         part_media=None,
+        until_dropped=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -218,6 +225,8 @@ class FakeEngine(QObject):
             self._snapshots[sid]["part_wall"] = part_wall
         if part_media is not None:  # and the media before its stop
             self._snapshots[sid]["part_media_s"] = part_media
+        if until_dropped is not None:  # its stop dropped (another encoding persisted)
+            self._snapshots[sid]["until_dropped"] = until_dropped
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def receive(self, sid, count):
@@ -6026,7 +6035,10 @@ class ServerWindowTests(LiveSessionCase):
         sid, part = self.in_part(-300.0)
         self.assertNotEqual(part, sid)
         window = self.engine.opened[-1][2]["window"]
-        self.assertEqual(window, {"back_s": 900.0, "until_seq": 100, "ahead_s": WINDOW_AHEAD_S})
+        self.assertEqual(
+            window,
+            {"back_s": 900.0, "until_seq": 100, "ahead_s": WINDOW_AHEAD_S, "before_s": 300.0},
+        )
         self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 0))
         self.assertTrue(self.live.in_server_part())
         self.assertAlmostEqual(self.live.position(), -300.0)
@@ -6136,3 +6148,115 @@ class ServerWindowTests(LiveSessionCase):
         self.engine.sessionEnded.emit(part)
         self.playback.ended.emit()
         self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 0))
+
+    # ---- the Stage 1-2 review's findings ------------------------------------------------
+    def test_pause_and_play_in_a_part_stays_in_it(self):  # C1
+        _sid, part = self.in_part(-300.0)
+        plays = len(self.playback.plays)
+        self.live.toggle_pause()
+        self.live.toggle_pause()
+        self.assertTrue(self.live.in_server_part())
+        self.assertEqual(len(self.playback.plays), plays)  # VLC just played on
+        self.assertNotIn(REWOUND, self.notices)
+        self.assertNotIn(part, self.engine.closed)
+
+    def test_a_second_step_back_past_the_part_waits_for_the_new_one(self):  # I1
+        _sid, part = self.in_part(-300.0)
+        self.live.seek_to(-600.0)  # beyond what the part holds: a new part
+        new = self.engine.opened[-1][0]
+        self.assertNotEqual(new, part)
+        plays = len(self.playback.plays)
+        self.playback.ended.emit()  # the old part's stream ended under VLC
+        self.assertEqual(len(self.playback.plays), plays)  # no flash of the live buffer
+        self.assertNotIn(REWOUND, self.notices)
+        own = [Span(0, 0.0, 6.0, False, media_seq=10)]
+        self.engine.buffer(new, own, hls=True, part_wall=10_000.0 - 600.0)
+        self.engine.sessionReady.emit(new)
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(new, 0))
+
+    def test_setting_the_channel_aside_closes_the_part(self):  # I6
+        _sid, part = self.in_part(-300.0)
+        self.live.set_aside()
+        self.assertIn(part, self.engine.closed)
+
+    def test_a_fallback_closes_the_part(self):  # I6
+        _sid, part = self.in_part(-300.0)
+        self.engine.lose()  # time-shift is off for the run: the channel plays directly
+        self.assertIn(part, self.engine.closed)
+
+    def test_a_refusal_closes_the_part(self):  # I6
+        _sid, part = self.in_part(-300.0)
+        self.live._limited = STREAM_LIMIT
+        self.live._refuse()
+        self.assertIn(part, self.engine.closed)
+
+    def test_go_live_on_one_stream_waits_for_the_resumed_run(self):  # I7a
+        sid, part = self.in_part(-300.0, one_stream=True)
+        plays = len(self.playback.plays)
+        self.live.go_live()
+        self.assertIn(part, self.engine.closed)
+        self.assertEqual([resume[0] for resume in self.engine.resumes], [sid])
+        self.playback.ended.emit()  # the part's stream ended under VLC
+        self.assertEqual(len(self.playback.plays), plays)  # not the stale edge
+        self.engine.sessionResumed.emit(sid)
+        self.assertGreater(len(self.playback.plays), plays)  # live on the new run
+        self.assertTrue(self.playback.plays[-1][0].startswith(f"http://127.0.0.1:9/token/{sid}/"))
+
+    def test_a_recording_on_one_stream_keeps_its_stream(self):  # I7b
+        sid = self.playing(86400.0, one_stream=True)
+        self.assertTrue(self.live.start_recording("/tmp/qitv-test.ts"))
+        self.live.seek_to(-300.0)
+        self.assertEqual(self.engine.parks, [])  # the recording session is never parked
+        self.assertEqual(len(self.engine.opened), 1)
+        self.assertIn(PART_RECORDING, self.notices)
+        self.assertEqual(self.engine.recordings[-1][1], sid)
+
+    def test_a_refused_part_is_tried_again_once(self):  # I7c
+        self.live._part_retry_ms = 0
+        sid = self.playing(86400.0)
+        self.live.seek_to(-300.0)
+        first = self.engine.opened[-1][0]
+        self.engine.sessionFailed.emit(first, "http", STREAM_LIMIT)
+        QTest.qWait(20)
+        second = self.engine.opened[-1][0]
+        self.assertNotEqual(second, first)  # a closed stream may still count: once more
+        self.assertNotIn(PART_FAILED, self.notices)
+        self.engine.sessionFailed.emit(second, "http", STREAM_LIMIT)
+        QTest.qWait(20)
+        self.assertEqual(self.engine.opened[-1][0], second)
+        self.assertIn(PART_FAILED, self.notices)
+        self.assertEqual(self.failures, [])
+        self.assertEqual(self.engine.opened[0][0], sid)
+
+    def test_a_refused_live_resume_after_a_part_plays_what_was_kept(self):  # I7c
+        sid, _part = self.in_part(-300.0, one_stream=True)
+        self.live.seek_to(30.0)  # back into the buffer: the live upstream resumes
+        self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
+        self.assertIn(KEPT_ONLY, self.notices)  # Go live tries again
+        self.assertEqual(self.failures, [])
+
+    def test_a_dropped_stop_is_not_armed_again_and_hops_by_time(self):  # I5
+        # The other origin group persisted at the part's open: its numbering is another
+        # encoding's, so no stop is armed again, and it hops once it plays into the buffer.
+        sid, part = self.in_part(-12.0)
+        own = self.engine.spans(part)
+        self.engine.buffer(part, own, hls=True, part_wall=10_000.0 - 12.0, until_dropped=True)
+        self.engine.buffer(
+            sid, self.SPANS[5:], hls=True, window=86400.0, parts=[[5, 30.0, 10_030.0]]
+        )
+        self.assertEqual(self.engine.untils, [])
+        self.playback.set_state(PlaybackState.PLAYING)
+        for _ in range(4 * 45):  # 45 s: from -12 past the buffer's start, now 30
+            self.clock.now += 0.25
+            self.playback.ms += 250
+            self.live._tick()
+            if not self.live.in_server_part():
+                break
+        self.assertFalse(self.live.in_server_part())
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 5))
+
+    def test_a_part_starts_back_from_its_stop(self):  # I8
+        self.playing(86400.0)
+        self.live.seek_to(-300.0)
+        window = self.engine.opened[-1][2]["window"]
+        self.assertEqual(window["before_s"], 300.0)  # from the buffer's first HLS segment
