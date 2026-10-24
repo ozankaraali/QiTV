@@ -23,7 +23,9 @@ Commands (parent to helper):
   adds `"window": {"back_s", "until_seq", "ahead_s"}`, a server part of an HLS playlist: it
   starts `back_s` from the playlist's end, its input ends before `until_seq`, and it fetches
   no further while what it holds runs `ahead_s` past the segment the player reads (which,
-  and what follows, its ring never evicts);
+  and what follows, its ring never evicts); a provider archive's, `{"until_s", "ahead_s"}`,
+  raw TS or HLS from its start, ends its input once its media reaches `until_s` (where the
+  live buffer begins, by time of day);
 - `("close", sid)`, always answered by `("closed", sid)`, once the session's upstream
   connection is closed but at most 0.5 s later;
 - `("resize", sid, max_bytes)` (2.2, the multiview): a RAM session holds up to `max_bytes`
@@ -865,6 +867,9 @@ class _Session:
                 for item in source.chunks():
                     with self._moving:
                         self._take(item, source, trimmer, rejoiner)
+                    if self._past_until():
+                        source.close()  # 2.6.2: an archive reached where the buffer begins
+                        break
             finally:
                 if ticking is not None:
                     ticking.set()
@@ -1268,6 +1273,13 @@ class _Session:
         source = self._source
         if source is not None and hasattr(source, "until_seq"):
             source.until_seq = seq
+
+    def _past_until(self) -> bool:
+        """A provider archive's server part (2.6.2) has its `until_s` seconds of media: where
+        the live buffer begins, by time of day (an archive shares no media sequence)."""
+        window = self._start.get("window")
+        until = window.get("until_s") if isinstance(window, dict) else None
+        return isinstance(until, (int, float)) and self._timeline.end >= float(until)
 
     def _hold(self) -> bool:
         """A server part (2.6.2) fetches no further while what it holds runs its `ahead_s`

@@ -2126,6 +2126,62 @@ video.m3u8
         source.close()
         self.assertEqual(requested_segments(server), names)
 
+    def test_a_ts_archive_plays_through_the_buffer(self):
+        # 2.6.2: a provider archive's raw TS opens as a server part (an archive's window,
+        # `until_s`): paced by `hold`, and a broken connection ends it (a reconnect would play
+        # the address from its start again).
+        body = self.video * 4
+        half = len(body) // 2 // 188 * 188
+
+        def broken(request):
+            request.wfile.write(body[:half])
+
+        server = self.server({"/archive.ts": (200, {"Content-Length": str(len(body))}, broken)})
+        held = threading.Event()
+        held.set()
+        source = open_source(
+            server.url + "/archive.ts",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            window={"until_s": 600.0, "ahead_s": 60.0},
+            hold=held.is_set,
+        )
+        got = []
+        reader = threading.Thread(target=lambda: got.extend(source.chunks()), daemon=True)
+        reader.start()
+        time.sleep(0.6)
+        while_held = sum(len(item) for item in list(got) if isinstance(item, bytes))
+        held.clear()
+        reader.join(5)
+        source.close()
+        self.assertLess(while_held, half)  # the bytes the open read, no more
+        self.assertEqual(b"".join(item for item in got if isinstance(item, bytes)), body[:half])
+        self.assertNotIn(Reconnecting(), got)
+        self.assertEqual(server.counts["/archive.ts"], 1)
+
+    def test_an_hls_archive_starts_at_its_first_segment(self):
+        # 2.6.2: an archive's playlist begins at the moment asked, also one still listed live.
+        names = [f"s{n}.ts" for n in range(30)]  # a live start would be ~6 s from its end
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        routes["/archive.m3u8"] = (200, {}, hls(0, names, ended=False))
+        server = self.server(routes)
+        window = {"until_s": 600.0, "ahead_s": 60.0}
+        source = open_source(
+            server.url + "/archive.m3u8",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            window=window,
+        )
+        try:
+            for item in source.chunks():
+                if isinstance(item, bytes):
+                    break
+        finally:
+            source.close()
+        self.assertEqual(requested_segments(server)[0], "s0.ts")
+
     def test_a_server_parts_first_wall_is_its_time_of_day(self):
         # Its first segment's time of day: the opened copy's segments after it, counted back
         # from now (the bar places the part by it).

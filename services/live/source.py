@@ -626,7 +626,9 @@ class TsSource:
     """Raw MPEG-TS from one HTTP(S) response; reconnects after the connection breaks.
 
     Only a body with a Content-Length ends the input when complete; every other end
-    reconnects while the backoff schedule allows.
+    reconnects while the backoff schedule allows. A provider archive's (2.6.2, `archive`)
+    never reconnects: a new request would play its address from the start again, so any end
+    ends the input; and it reads no further while `hold` says so (its pacing).
     """
 
     hls = False
@@ -639,6 +641,8 @@ class TsSource:
         prefix: bytes,
         *,
         capture: _Capture | None = None,
+        archive: bool = False,
+        hold: Callable[[], bool] | None = None,
     ) -> None:
         self.user_agent = http.user_agent
         http.stall_after(_TS_STALL_TIMEOUT)
@@ -648,6 +652,8 @@ class TsSource:
         self._prefix = prefix
         self._prefix_at = time.monotonic()  # the open has just read it
         self._capture = capture
+        self._archive = archive
+        self._hold = hold
 
     @property
     def burst_s(self) -> float:
@@ -679,7 +685,7 @@ class TsSource:
             yield prefix
         while True:
             try:
-                while block := http.read(response):
+                while block := self._read(response):
                     if capture is not None:
                         capture.write(block)
                     if reconnected:
@@ -692,12 +698,15 @@ class TsSource:
                     ):
                         backoff.reset()
                     yield block
-                if _sized(response):
-                    return  # a finite body reached its declared end
+                if _sized(response) or self._archive:
+                    return  # a finite body reached its declared end (an archive: any end)
                 # Any other end of a live body is a disconnect, also a clean one: a FIN, or
                 # a chunked body's last chunk (nginx when the channel's upstream restarts).
                 log.info("The channel closed its stream; reconnecting.")
             except _ReadError as error:
+                if self._archive:
+                    log.info("The archive's connection broke off (%s).", error.kind)
+                    return
                 log.info("The channel connection broke off (%s); reconnecting.", error.kind)
             finally:
                 http.release(response)
@@ -706,6 +715,13 @@ class TsSource:
             if capture is not None:
                 capture.mark("reconnect")
             connected, received, reconnected = time.monotonic(), 0, True
+
+    def _read(self, response: Any) -> bytes:
+        """The next block, once `hold` lets it be read (2.6.2: an archive's pacing)."""
+        while self._hold is not None and self._hold():
+            if self._http.wait(_HOLD_POLL_S):
+                raise _Closed()
+        return self._http.read(response)
 
 
 class LocalTsSource(TsSource):
@@ -1068,9 +1084,13 @@ class HlsSource:
     ) -> None:
         """`window` (2.6.2): a server part, `{"back_s": seconds, "until_seq": sequence}`: it
         starts that far back from the playlist's end and its input ends before that media
-        sequence (the live buffer's first), placed in time by `part_wall`."""
+        sequence (the live buffer's first), placed in time by `part_wall`; a provider
+        archive's, `{"until_s": seconds}`, starts at its first segment (the helper ends it
+        at that much media)."""
         self.user_agent = http.user_agent
         back = window.get("back_s") if window is not None else None
+        if window is not None and back is None and _archive_window(window):
+            back = math.inf  # 2.6.2: a provider archive's playlist begins at the moment asked
         before = window.get("before_s") if window is not None else None
         until = window.get("until_seq") if window is not None else None
         self._back = float(back) if isinstance(back, (int, float)) else None
@@ -1904,6 +1924,12 @@ def _first_answer(
             raise _Closed()
 
 
+def _archive_window(window: Mapping[str, Any]) -> bool:
+    """A provider archive's server part (2.6.2): its input ends at `until_s` seconds of its
+    media, an HLS one's from its first segment."""
+    return isinstance(window.get("until_s"), (int, float))
+
+
 def _open_http(
     http: _Http,
     url: str,
@@ -1917,10 +1943,12 @@ def _open_http(
 ) -> Source:
     response, prefix, content = _first_answer(http, url, on_answer)
     if content is None:
-        if window is not None:  # 2.6.2: a server part is an HLS playlist's
+        archive = window is not None and _archive_window(window)
+        if window is not None and not archive:  # 2.6.2: a server part is an HLS playlist's
             http.release(response)
             raise SourceError("unsupported")
-        return TsSource(http, url, response, prefix, capture=capture)  # it now owns the response
+        # It now owns the response.
+        return TsSource(http, url, response, prefix, capture=capture, archive=archive, hold=hold)
     try:
         final = str(response.url)
     finally:
@@ -1955,8 +1983,9 @@ def open_source(
     hold: Callable[[], bool] | None = None,
 ) -> Source:
     """Open ``url``, sniff it, and return a TS or HLS source (``window``: a server part of
-    the HLS playlist, 2.6.2, `HlsSource`; raw TS then is unsupported; ``hold``: an HLS
-    source fetches no further segment while it says so).
+    the HLS playlist, 2.6.2, `HlsSource`; raw TS then is unsupported, but for a provider
+    archive's (`until_s`: a `TsSource` that never reconnects); ``hold``: the source fetches
+    no further while it says so).
 
     One request, unless the first answer fails in passing: a 5xx or 408, a broken or refused
     connection, or a body that ends before its first byte is asked for again after each of the

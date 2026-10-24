@@ -1606,6 +1606,24 @@ class ServerPartStopTests(unittest.TestCase):
         self.assertEqual(fetched, [f"s{n}.ts" for n in range(5)])
 
 
+class ArchivePartTests(unittest.TestCase):
+    def test_an_archive_part_ends_at_the_buffers_time_of_day(self):
+        # 2.6.2: a provider archive (raw TS: no media sequence to share) ends its input once
+        # its media reaches `until_s`, where the live buffer begins: never what that holds.
+        body = make_stream(60)
+        upstream = LocalSource({SECRET_PATH: (200, {"Content-Length": str(len(body))}, body)})
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        helper.helper.server.reading = lambda sid: 10_000  # the player far on: no hold
+        window = {"until_s": 10.0, "ahead_s": 60.0}
+        url = upstream.url + SECRET_PATH
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"window": window}))
+        helper.wait_for(lambda m: m == ("ended", "p"))
+        states = [m for m in helper.messages if m[:2] == ("state", "p")]
+        self.assertGreaterEqual(states[-1][2]["end"], 10.0)
+        self.assertLess(states[-1][2]["end"], 15.0)  # not the whole minute
+
+
 AHEAD = 900_000 + 3600 * 90_000  # the provider's clock an hour later
 
 

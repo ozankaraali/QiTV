@@ -247,7 +247,13 @@ from services.live.kept import KeptRing, Where, where_dict
 from services.live.learned_target import LearnedTarget, learned_target
 from services.live.recorder import MAX_SECONDS, MIN_FREE_BYTES
 from services.live.refusals import REFUSALS, STREAM_LIMIT
-from services.live.server_part import ServerPart, back_for, buffer_first_media, hop_seq
+from services.live.server_part import (
+    ArchiveRoute,
+    ServerPart,
+    back_for,
+    buffer_first_media,
+    hop_seq,
+)
 from services.live.stay_live import (
     AUTO,
     LATENCIES,
@@ -317,6 +323,8 @@ _EDGE_S = 1.0  # VLC this close to the live edge is at it (a starvation, and its
 WINDOW_MIN_S = 300.0
 WINDOW_BAR_S = 30 * 60.0
 WINDOW_AHEAD_S = 60.0  # a server part fetches this far ahead of the player
+_ARCHIVE_JOIN_S = 2.0  # an archive part ending this near the buffer's start hops into it
+_ARCHIVE_STEP_S = 30.0  # one that brought less than this past its point has nothing more
 # VLC's clock, which moved since the open, standing still this long while VLC plays with media
 # ahead and the source sending is lost (`_clock_lost`): it opens again.
 _CLOCK_LOST_S = 10.0
@@ -620,6 +628,7 @@ class LiveSession(QObject):
         self._part_tries = 0  # opens of the server part the user asked for (a retry counts)
         self._part_again: Optional[float] = None  # a refused part's point, opened again soon
         self._part_resuming = False  # the live upstream parked for a part is opening again
+        self._archive: Optional[ArchiveRoute] = None  # the parts are a provider archive's
         self._from_kept = False
         self._disk_failures = 0  # of the kept buffer taken back, this tune: a second starts afresh
         # Where a session with kept history goes when it is let go otherwise than by `park`
@@ -1104,6 +1113,36 @@ class LiveSession(QObject):
     def in_server_part(self) -> bool:
         """VLC plays the server part, before the buffer (2.6.2)."""
         return self._in_part
+
+    def play_archive(
+        self,
+        moment: float,
+        build: Callable[[float], Optional[tuple[str, float]]],
+        fallback: Callable[[str], bool],
+    ) -> bool:
+        """The provider's archive past the buffer plays through it (2.6.2), from Unix second
+        `moment`: server parts of the addresses `build` makes for a moment ((its URL, the
+        Unix second it starts at); `ArchiveRoute`), each placed on the timeline by its
+        start, its input ending where the buffer begins, by time of day; the last hops into
+        the buffer by time of day, one ending before it goes on with the next address. On a
+        provider with one stream the live upstream parks first. A first part that does not
+        play has `fallback(kind)` play the address directly (catch-up, as before). False,
+        doing nothing, when the buffer does not play, the moment is not before it, or its
+        one stream records."""
+        if self._phase is not _Phase.PIPELINE or self._sid is None:
+            return False
+        if self._one_stream and self._recording is not None:
+            return False
+        snapshot = self._snapshot()
+        parts = live_parts.from_state(snapshot.get("parts"))
+        t = live_parts.t_at(parts, moment, live_edge=self._live_edge(snapshot), now=self._wall())
+        if t is None or t >= self._buffer_start(snapshot):
+            return False
+        self._late = None
+        self._stay.user_seeked_back()
+        self._archive = ArchiveRoute(build, fallback)
+        self._open_part(t)
+        return True
 
     def position(self) -> float:
         if self._phase is _Phase.PIPELINE:
@@ -1729,6 +1768,8 @@ class LiveSession(QObject):
         if part is not None and sid == part.sid:
             if message in REFUSALS and self._part_tries < 2:
                 self._retry_part(part)  # a stream just closed may still count: once more
+            elif self._archive is not None and not self._archive.played:
+                self._archive_failed(kind)
             else:
                 self._part_failed()
             return
@@ -1914,7 +1955,8 @@ class LiveSession(QObject):
             if part is None or not self._part_playing:
                 return  # a server part on its way plays once ready
             if part.ended:
-                self._hop()  # 2.6.2: the server part ran into the buffer
+                if not self._archive_goes_on(part):
+                    self._hop()  # 2.6.2: the server part ran into the buffer
             else:
                 self._seek(self._advance())
             return
@@ -2628,6 +2670,8 @@ class LiveSession(QObject):
             state["buffer_start"] = start
             state["window_start"] = start - beyond if beyond > 0.0 else min(reach, position)
             state["start"] = max(reach, state["window_start"])
+            if self._archive is not None:
+                state["archive_part"] = True  # a provider archive's, not the channel's window
         self.timelineChanged.emit(state)
 
     # ---- 2.6.2: the server part ------------------------------------------------------------
@@ -2653,7 +2697,7 @@ class LiveSession(QObject):
         assert self._sid is not None
         parking = self._part_pending is not None
         playing = self._in_part
-        self._close_part(resume=False)
+        self._close_part(resume=False, replacing=True)
         self._in_part = playing  # VLC's end of the old part waits for this one (`_resume`)
         self._part_tries = 0
         if self._one_stream and not self._live_parked:
@@ -2668,6 +2712,9 @@ class LiveSession(QObject):
 
     def _open_part_now(self, t: float) -> None:
         assert self._sid is not None
+        if self._archive is not None:
+            self._open_archive_now(t, self._archive)
+            return
         snapshot = self._snapshot()
         parts = live_parts.from_state(snapshot.get("parts"))
         back = back_for(t, parts, live_edge=self._live_edge(snapshot), now=self._wall())
@@ -2680,6 +2727,45 @@ class LiveSession(QObject):
         sid = self._engine.open_session(self._url, **self._open_args, window=window)
         self._part = ServerPart(sid, t, until)
         self._part_tries += 1
+
+    def _open_archive_now(self, t: float, route: ArchiveRoute) -> None:
+        """A provider archive's part from live timeline second `t`: its address for that
+        moment, placed by the address's start, its input ending where the buffer begins."""
+        snapshot = self._snapshot()
+        parts = live_parts.from_state(snapshot.get("parts"))
+        edge, now = self._live_edge(snapshot), self._wall()
+        built = route.build(live_parts.wall_at(parts, t, live_edge=edge, now=now))
+        stop = live_parts.wall_at(parts, self._buffer_start(snapshot), live_edge=edge, now=now)
+        if built is None or built[1] >= stop:
+            self._part_failed()  # no address there (past the archive's depth)
+            return
+        url, begins = built
+        window = {"until_s": stop - begins, "ahead_s": WINDOW_AHEAD_S}
+        sid = self._engine.open_session(url, **self._open_args, window=window)
+        self._part = ServerPart(sid, t, None)
+        self._part.place(begins, parts, live_edge=edge, now=now)
+        self._part_tries += 1
+
+    def _archive_goes_on(self, part: ServerPart) -> bool:
+        """An archive's part ended before the buffer (its address covers a stretch, or its
+        connection broke): the next address opens where it ended (True)."""
+        if self._archive is None or part.offset is None:
+            return False
+        end = part.offset + _number(self._engine.snapshot(part.sid).get("end"))
+        if end >= self._buffer_start() - _ARCHIVE_JOIN_S or end < part.asked + _ARCHIVE_STEP_S:
+            return False
+        self._open_part(end)
+        return True
+
+    def _archive_failed(self, kind: str) -> None:
+        """An archive's first part did not play: catch-up plays the address directly (VLC
+        may read what the helper does not), else the buffer plays on, saying so."""
+        route = self._archive
+        assert route is not None
+        self._close_part(resume=False)  # a parked upstream stays parked: the archive opens
+        if not route.fallback(kind):
+            self.notice.emit(PART_FAILED)
+            self._close_part()  # nothing more to close: a parked upstream opens again
 
     def _on_part_updated(self, part: ServerPart, snapshot: Mapping[str, Any]) -> None:
         if snapshot.get("until_dropped") is True:
@@ -2717,6 +2803,8 @@ class LiveSession(QObject):
             seq = placed[0].seq if placed else oldest
         if not self._open_at(seq, part):
             self._part_failed()
+        elif self._archive is not None:
+            self._archive.played = True
 
     def _part_start_of(self, part: ServerPart, seq: int) -> float:
         """Where segment `seq` of the server part starts on the live timeline."""
@@ -2752,7 +2840,7 @@ class LiveSession(QObject):
         """The provider refused the part (a stream just closed may still count for it): it
         opens once more after `_part_retry_ms`, unless the user moved meanwhile."""
         playing, asked = self._in_part, part.asked
-        self._close_part(resume=False)
+        self._close_part(resume=False, replacing=True)
         self._in_part = playing
         self._part_again = asked
 
@@ -2773,10 +2861,13 @@ class LiveSession(QObject):
             if seq is None or not self._open_at(seq):
                 self._go_live(unpause=False)
 
-    def _close_part(self, *, resume: bool = True) -> None:
+    def _close_part(self, *, resume: bool = True, replacing: bool = False) -> None:
         """The server part goes (never labelled, parked or kept); with `resume`, a live
-        upstream parked for it opens again (`one_stream`)."""
+        upstream parked for it opens again (`one_stream`); unless `replacing` (another part
+        opens), a provider archive's route goes with it."""
         part, self._part = self._part, None
+        if not replacing:
+            self._archive = None
         self._part_ready = self._in_part = self._part_playing = False
         self._part_pending = self._part_again = None
         if part is not None:

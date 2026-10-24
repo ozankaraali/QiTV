@@ -9,13 +9,19 @@ own timeline, before the buffer's start: flush against the buffer's segment that
 stop (the helper says how much media lies before it, `part_media_s`), else by its first
 segment's time of day (`part_wall` on the live timeline, `services.live.parts.t_at`, which
 goes on backwards before the oldest part; a few seconds early, measured). Position, the bar
-and seeks so keep one coordinate system. Pure functions and data; no Qt.
+and seeks so keep one coordinate system.
+
+A provider archive (catch-up) past the buffer plays the same way (`ArchiveRoute`): a part of
+the archive's address for the moment, placed by the time of day the address starts at, its
+input ending where the buffer begins by time of day (`until_s`: an archive shares no media
+sequence with the live stream); a part that ends before the buffer goes on with the next
+address. Pure functions and data; no Qt.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from services.live.parts import Part, t_at, wall_at
 from services.live.timeline import Span
@@ -63,6 +69,18 @@ class ServerPart:
         """It has live timeline second `t` buffered."""
         placed = self.spans(own)
         return bool(placed) and placed[0].start <= t < placed[-1].end
+
+
+@dataclass
+class ArchiveRoute:
+    """A provider archive's server parts (`LiveSession.play_archive`): `build(moment)` is
+    its address for a moment (Unix seconds) and the Unix second that address starts at
+    (None: none can be made); `fallback(kind)` plays it directly when its first part does
+    not play (False: it does not either)."""
+
+    build: Callable[[float], Optional[tuple[str, float]]]
+    fallback: Callable[[str], bool]
+    played: bool = False  # one of its parts played
 
 
 def back_for(t: float, parts: Sequence[Part], *, live_edge: float, now: float) -> float:

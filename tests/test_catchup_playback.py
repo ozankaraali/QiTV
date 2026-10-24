@@ -559,3 +559,59 @@ class ServerWindowRoutingTests(CatchupCase):
         self.windowed(PLAIN)
         self.assertGreater(self.controller.archive_reach(PLAIN), timedelta(hours=23))
         self.assertEqual(self.controller.archive_reach(ARCHIVED), timedelta(days=3))  # its own
+
+
+class ArchiveThroughBufferTests(CatchupCase):
+    """2.6.2: past the buffer, the provider's archive plays through the live session (a
+    server part of its address) while the buffer plays; directly, as before, otherwise."""
+
+    def setUp(self):
+        super().setUp()
+        self.archives = []
+
+        def play_archive(moment, build, fallback):
+            self.archives.append((moment, build, fallback))
+            return True
+
+        self.live.play_archive = play_archive
+
+    def test_a_ts_archive_plays_through_the_buffer(self):
+        self.start_archived()
+        self.controller.handle(Action.SEEK_BACK)  # 10 s back from 5 s after the buffer's start
+        [(moment, build, _fallback)] = self.archives
+        self.assertEqual(moment, NOW.timestamp() - 605.0)  # 9:55 + 10 s before 20:30: 20:19:55
+        self.assertNotIn(("stop",), self.live.calls)  # live plays on: no direct open
+        self.assertEqual(self.archive_plays(), [])
+        url, begins = build(moment)
+        self.assertEqual(url, "http://panel.test/timeshift/viewer/secret/11/2026-10-15:20-19/1.ts")
+        self.assertEqual(begins, moment - 55.0)
+        self.assertIn((ARCHIVE_TEXT, "info"), self.toast.messages())
+        self.assertFalse(self.catchup.active())  # the session draws the bar
+
+    def test_an_unreadable_archive_plays_directly_as_before(self):
+        self.start_archived()
+        self.controller.handle(Action.SEEK_BACK)
+        [(_moment, _build, fallback)] = self.archives
+        fallback("unsupported")  # the helper reads no TS or HLS there
+        self.assertEqual(self.live.calls[-1], ("stop",))  # live closes first ...
+        self.live.released.emit()
+        [(url, kwargs)] = self.archive_plays()
+        self.assertIn("/2026-10-15:20-19/1.ts", url)
+        self.assertEqual(kwargs["start_ms"], 55_000)
+        self.assertTrue(self.catchup.active())
+        # It is remembered: the channel's next rewind opens it directly.
+        self.controller.handle(Action.GO_LIVE)
+        self.catalog.linkReady.emit(self.catalog.links[-1][0], ARCHIVED["cmd"])
+        self.session.stateChanged.emit("idle")
+        self.assertTrue(wait_until(lambda: self.live.running))
+        self.live.play_pipeline()
+        self.live.timelineChanged.emit(dict(STATE))
+        self.controller.handle(Action.SEEK_BACK)
+        self.assertEqual(len(self.archives), 1)
+
+    def test_an_archive_part_is_not_the_channels_own_window(self):
+        # The session draws the archive part's bar as it draws a server window's.
+        self.start_archived()
+        part = dict(STATE, start=1200.0, buffer_start=3000.0, window_start=1200.0)
+        self.live.timelineChanged.emit(dict(part, archive_part=True))
+        self.assertEqual(self.controller._live_controls.window_reach(ARCHIVED), 0.0)

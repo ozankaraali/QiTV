@@ -6260,3 +6260,107 @@ class ServerWindowTests(LiveSessionCase):
         self.live.seek_to(-300.0)
         window = self.engine.opened[-1][2]["window"]
         self.assertEqual(window["before_s"], 300.0)  # from the buffer's first HLS segment
+
+
+class ArchivePartTests(LiveSessionCase):
+    """2.6.2: a provider archive past the buffer plays through it: a server part of the
+    archive's address, placed by its time of day, hopping into the buffer by time of day."""
+
+    playing = ServerWindowTests.playing
+    SPANS = ServerWindowTests.SPANS
+
+    def archive(self, moment, *, one_stream=None):
+        """A raw TS buffer of 600 s from 10,000 (Unix seconds; now 10,600) and its provider's
+        archive from `moment`, whose addresses begin at the whole minute."""
+        sid = self.playing(None, hls=False, one_stream=one_stream)
+        self.built, self.fallbacks = [], []
+
+        def build(wall):
+            self.built.append(wall)
+            begins = wall - wall % 60
+            return f"http://archive.test/{int(begins)}.ts", begins
+
+        self.assertTrue(self.live.play_archive(moment, build, self.fallbacks.append))
+        return sid
+
+    def test_an_archive_part_ends_at_the_buffers_time_of_day(self):
+        sid = self.archive(9_100.0)
+        part, url, kwargs = self.engine.opened[-1]
+        self.assertNotEqual(part, sid)
+        self.assertEqual(url, "http://archive.test/9060.ts")
+        self.assertEqual(kwargs["window"], {"until_s": 940.0, "ahead_s": WINDOW_AHEAD_S})
+        self.assertEqual(self.built, [9_100.0])
+        own = [Span(n, 30.0 * n, 30.0 * n + 30.0, False) for n in range(3)]
+        self.engine.buffer(part, own)
+        self.engine.sessionReady.emit(part)
+        # Placed by its start, 9,060: its second 0 is the live timeline's -940.
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 1))
+        self.assertAlmostEqual(self.live.position(), -910.0)
+        self.assertTrue(self.live.in_server_part())
+        self.live._emit_timeline()
+        self.assertTrue(self.timelines[-1]["archive_part"])
+
+    def test_the_archive_hops_into_the_buffer_by_time_of_day(self):
+        sid = self.archive(9_990.0)
+        part = self.engine.opened[-1][0]
+        self.engine.buffer(part, [Span(0, 0.0, 30.0, False), Span(1, 30.0, 45.0, False)])
+        self.engine.sessionReady.emit(part)
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 1))  # at -10
+        self.playback.set_state(PlaybackState.PLAYING)
+        for _ in range(4 * 15):
+            self.clock.now += 0.25
+            self.playback.ms += 250
+            self.live._tick()
+            if not self.live.in_server_part():
+                break
+        self.assertFalse(self.live.in_server_part())
+        self.assertIn(part, self.engine.closed)
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 0))
+
+    def test_an_archive_part_that_does_not_open_falls_back(self):
+        # Not TS or HLS (or refused, or no data): catch-up plays the address as before.
+        self.archive(9_100.0)
+        part = self.engine.opened[-1][0]
+        self.engine.sessionFailed.emit(part, "unsupported", "Not a stream.")
+        self.assertEqual(self.fallbacks, ["unsupported"])
+        self.assertIn(part, self.engine.closed)
+        self.assertFalse(self.live.in_server_part())
+
+    def test_an_archive_part_ending_early_goes_on_with_the_next_address(self):
+        # Its address covered two minutes (or its connection broke): the next one opens at
+        # its end, not a jump to the buffer.
+        self.archive(9_000.0)
+        part = self.engine.opened[-1][0]
+        self.engine.buffer(part, [Span(0, 0.0, 60.0, False), Span(1, 60.0, 120.0, False)])
+        self.engine.sessionReady.emit(part)
+        self.engine.sessionEnded.emit(part)
+        self.playback.ended.emit()  # VLC read it to its end
+        self.assertEqual(self.built, [9_000.0, 9_120.0])
+        self.assertIn(part, self.engine.closed)
+        nxt, url, kwargs = self.engine.opened[-1]
+        self.assertEqual(url, "http://archive.test/9120.ts")
+        self.assertEqual(kwargs["window"]["until_s"], 880.0)
+        self.assertTrue(self.live.in_server_part())
+
+    def test_a_seek_past_an_archive_part_builds_its_address(self):
+        self.archive(9_100.0)
+        part = self.engine.opened[-1][0]
+        self.engine.buffer(part, [Span(n, 30.0 * n, 30.0 * n + 30.0, False) for n in range(3)])
+        self.engine.sessionReady.emit(part)
+        self.live.seek_to(-1_500.0)  # 8,500: before what the part holds
+        self.assertEqual(self.built[-1], 8_500.0)
+        self.assertIn(part, self.engine.closed)
+        self.assertEqual(self.engine.opened[-1][1], "http://archive.test/8460.ts")
+        self.assertEqual(self.engine.opened[-1][2]["window"]["until_s"], 1_540.0)
+
+    def test_a_moment_within_the_buffer_is_not_an_archives(self):
+        self.playing(None, hls=False)
+        self.assertFalse(self.live.play_archive(10_100.0, lambda wall: None, lambda kind: None))
+        self.assertEqual(len(self.engine.opened), 1)
+
+    def test_a_one_stream_provider_parks_live_for_the_archive(self):
+        sid = self.archive(9_100.0, one_stream=True)
+        self.assertEqual(self.engine.parks, [sid])
+        self.assertEqual(len(self.engine.opened), 1)  # the archive waits for the park
+        self.engine.sessionParked.emit(sid)
+        self.assertEqual(self.engine.opened[-1][1], "http://archive.test/9060.ts")

@@ -544,7 +544,8 @@ class LiveControls(QObject):
         current = self._current()
         if self._closed() or not self._tuner.running() or current is None or not current.live:
             return
-        if "window_start" in state:  # 2.6.2: the channel's own server keeps more
+        # 2.6.2: the channel's own server keeps more (a provider archive's part is not that)
+        if "window_start" in state and not state.get("archive_part"):
             now = self._now().timestamp()
             wall = live_parts.wall_in(state, float(state["window_start"]), now)
             self._windows[self.catchup.key(current)] = max(0.0, now - wall)
