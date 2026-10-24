@@ -23,7 +23,7 @@ be saved for replay: `services.live.capture`.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import logging
 import math
@@ -104,6 +104,7 @@ _FROZEN_TIMEOUT = 60.0
 # An older playlist copy that overlaps recent segments is waited out this many targets.
 _STALE_TARGETS = 3
 _RECENT_SEGMENTS = 10
+_wall_time = time.time  # 2.6.2: a server part's time of day; tests replace it
 # 2.6.1: copies of another origin group (its own numbering and names) are set aside, the
 # playlist reloaded each _OTHER_RELOAD_S, until they persist as long as a stale copy is waited
 # out (measured: such a group answered every request for up to 14 s), at least this.
@@ -1003,6 +1004,16 @@ def _checked_ts(blocks: Iterator[bytes]) -> Iterator[bytes]:
         yield head
 
 
+def _back_from_end(segments: Sequence[Any], seconds: float) -> int:
+    """The index where the segments' EXTINF, summed from the end, reaches `seconds`."""
+    total = 0.0
+    for index in range(len(segments) - 1, -1, -1):
+        total += float(segments[index].duration or 0)
+        if total >= seconds:
+            return index
+    return 0
+
+
 class HlsSource:
     """HLS of MPEG-TS segments: live reloads, AES-128 and discontinuity markers.
 
@@ -1051,8 +1062,17 @@ class HlsSource:
         *,
         separate_audio: str | None = None,
         capture: _Capture | None = None,
+        window: Mapping[str, Any] | None = None,
     ) -> None:
+        """`window` (2.6.2): a server part, `{"back_s": seconds, "until_seq": sequence}`: it
+        starts that far back from the playlist's end and its input ends before that media
+        sequence (the live buffer's first), placed in time by `part_wall`."""
         self.user_agent = http.user_agent
+        back = window.get("back_s") if window is not None else None
+        until = window.get("until_seq") if window is not None else None
+        self._back = float(back) if isinstance(back, (int, float)) else None
+        self._until = until if type(until) is int else None
+        self._part_wall: float | None = None
         self._http = http
         self._capture = capture
         self._playlist = playlist
@@ -1099,7 +1119,8 @@ class HlsSource:
         self._fetching = 0.0  # the EXTINF of the segment being fetched (0.0: none)
         self._rest = 0.0  # the EXTINF of the listed segments after it
         self._last_whole: tuple[int, float] | None = None  # (serial, EXTINF) of the last whole
-        self._finite = bool(playlist.is_endlist)  # the playlist is finished (ENDLIST)
+        # The playlist is finished (ENDLIST), or a server part's input ends (2.6.2).
+        self._finite = bool(playlist.is_endlist) or self._back is not None
 
     @property
     def burst_s(self) -> float:
@@ -1116,6 +1137,11 @@ class HlsSource:
         """How long the live playlist's window lasts, its segments' EXTINF summed (2.6.2: a
         server that keeps hours offers them past the buffer); 0.0 once it is finished."""
         return self._window
+
+    @property
+    def part_wall(self) -> float | None:
+        """A server part's first segment's time of day (2.6.2); None before it, or else."""
+        return self._part_wall
 
     @property
     def edge_sequence(self) -> int | None:
@@ -1181,16 +1207,13 @@ class HlsSource:
         self._pending = self._pending or self._started
 
     def _start(self, playlist: Any) -> int:
-        """The first segment to fetch: `_depth` seconds from a live playlist's end."""
+        """The first segment to fetch: `_depth` seconds from a live playlist's end; a server
+        part's `back_s` from it (2.6.2)."""
+        if self._back is not None:
+            return _back_from_end(playlist.segments, self._back)
         if playlist.is_endlist:
             return 0
-        depth = self._depth(playlist)
-        total = 0.0
-        for index in range(len(playlist.segments) - 1, -1, -1):
-            total += float(playlist.segments[index].duration or 0)
-            if total >= depth:
-                return index
-        return 0
+        return _back_from_end(playlist.segments, self._depth(playlist))
 
     def _depth(self, playlist: Any) -> float:
         """How far back from a live playlist's end the start goes (2.1).
@@ -1263,9 +1286,11 @@ class HlsSource:
             first = playlist.media_sequence or 0
             newest = first + len(playlist.segments) - 1
             stale = False
-            if next_sequence is not None and self._other_copy(
-                playlist, url, next_sequence, loaded - ours
-            ):
+            if next_sequence is not None:
+                doubtful = self._other_copy(playlist, url, next_sequence, loaded - ours)
+            else:  # 2.6.2: a server part's stop must be in the copy it starts from
+                doubtful = self._until is not None and not first <= self._until <= newest + 1
+            if doubtful:
                 if other is None:
                     other = loaded
                     log.info("An HLS playlist copy numbers another encoding; waiting for ours.")
@@ -1279,17 +1304,24 @@ class HlsSource:
                     playlist, url, _separate = _media_playlist(http, content, final)
                     continue
                 log.info("The other HLS encoding persisted; following it.")
-                self._mark()
-                next_sequence = first + self._start(playlist)  # its numbers are not ours
+                self._until = None  # a server part's stop is ours: it plays on without one
+                if next_sequence is not None:
+                    self._mark()
+                    next_sequence = first + self._start(playlist)  # its numbers are not ours
             other, ours = None, loaded
             self._note_window(playlist)
             if next_sequence is None:
-                next_sequence = first + self._start(playlist)
+                start = self._start(playlist)
+                next_sequence = first + start
+                if self._back is not None:  # 2.6.2: where the server part sits in time
+                    after = sum(float(s.duration or 0) for s in playlist.segments[start:])
+                    self._part_wall = _wall_time() - after
             elif first > next_sequence:
-                # Fell behind the window: rejoin at the live start, not the oldest segment.
+                # Fell behind the window: rejoin at the live start, not the oldest segment; a
+                # server part goes on from the oldest (2.6.2: it plays the past).
                 log.info("The HLS playlist moved past %d segments.", first - next_sequence)
                 self._mark()
-                next_sequence = first + self._start(playlist)
+                next_sequence = first if self._back is not None else first + self._start(playlist)
             elif newest < next_sequence - 1:
                 stale = not self._restarted(playlist, url, loaded - progress)
                 if not stale:
@@ -1307,10 +1339,14 @@ class HlsSource:
             # Frozen time runs between reloads only, never while segments download.
             if not fresh and loaded - progress >= _FROZEN_TIMEOUT:
                 raise SourceError("timeout", _FROZEN)
+            done = False  # 2.6.2: a server part reached the live buffer's first segment
             for index, segment in enumerate(playlist.segments):
                 sequence = first + index
                 if sequence < next_sequence:
                     continue
+                if self._until is not None and sequence >= self._until:
+                    done = True
+                    break
                 next_sequence = sequence + 1
                 if segment.discontinuity:
                     self._mark()
@@ -1327,7 +1363,7 @@ class HlsSource:
             if fresh:
                 progress = time.monotonic()
                 yield CaughtUp()  # what follows comes as the provider publishes it
-            if playlist.is_endlist:
+            if done or playlist.is_endlist:
                 yield from self._emit(self._release(final=True))
                 yield from self._emit(self._flush_held())
                 return
@@ -1338,7 +1374,7 @@ class HlsSource:
             content, final = http.fetch(lambda: _load_playlist(http, url))
             playlist, url, _separate = _media_playlist(http, content, final)
             self._burst = float(playlist.target_duration or 0)
-            self._finite = bool(playlist.is_endlist)
+            self._finite = bool(playlist.is_endlist) or self._back is not None
             yield from self._emit(self._release())
 
     def _segment(self, segment: Any, sequence: int, base: str) -> Iterator[bytes | Discontinuity]:
@@ -1829,9 +1865,13 @@ def _open_http(
     extra: float,
     on_answer: Callable[[bool], None] | None = None,
     capture: _Capture | None = None,
+    window: Mapping[str, Any] | None = None,
 ) -> Source:
     response, prefix, content = _first_answer(http, url, on_answer)
     if content is None:
+        if window is not None:  # 2.6.2: a server part is an HLS playlist's
+            http.release(response)
+            raise SourceError("unsupported")
         return TsSource(http, url, response, prefix, capture=capture)  # it now owns the response
     try:
         final = str(response.url)
@@ -1839,7 +1879,15 @@ def _open_http(
         http.release(response)
     playlist, base, separate = _media_playlist(http, content, final)
     return HlsSource(
-        http, playlist, base, live_delay, target, extra, separate_audio=separate, capture=capture
+        http,
+        playlist,
+        base,
+        live_delay,
+        target,
+        extra,
+        separate_audio=separate,
+        capture=capture,
+        window=window,
     )
 
 
@@ -1854,8 +1902,10 @@ def open_source(
     extra: float = 0.0,
     allow_local: bool = False,
     on_answer: Callable[[bool], None] | None = None,
+    window: Mapping[str, Any] | None = None,
 ) -> Source:
-    """Open ``url``, sniff it, and return a TS or HLS source.
+    """Open ``url``, sniff it, and return a TS or HLS source (``window``: a server part of
+    the HLS playlist, 2.6.2, `HlsSource`; raw TS then is unsupported).
 
     One request, unless the first answer fails in passing: a 5xx or 408, a broken or refused
     connection, or a body that ends before its first byte is asked for again after each of the
@@ -1897,7 +1947,7 @@ def open_source(
     http = _Http(headers, verify_ssl, stop)
     capture = _Capture.from_environment(url)
     try:
-        return _open_http(http, url, live_delay, target, extra, on_answer, capture)
+        return _open_http(http, url, live_delay, target, extra, on_answer, capture, window)
     except Exception as error:
         failure = SourceError("network", _STOPPED) if http.closed else _translate(error)
     except BaseException:

@@ -124,6 +124,11 @@ def _fallback_bytes(ring: dict[str, Any]) -> int:
     return size if isinstance(size, int) and size > 0 else _RAM_BYTES
 
 
+def _window_part(command: _Command) -> bool:
+    """A server part's open (2.6.2): its start dict names a window."""
+    return len(command) > 7 and isinstance(command[7], dict) and "window" in command[7]
+
+
 @dataclass
 class _Record:
     """The supervisor's view of a session: what reopens it and what it reported."""
@@ -560,6 +565,8 @@ class _Supervisor(QThread):
                 if not record.failed and not record.over:
                     record.failed = True
                     self._relay(("error", sid, "internal", _INTERNAL))
+                if _window_part(record.command):
+                    record.over = True  # 2.6.2: a server part is opened anew by its session
 
     def _count_death(self) -> bool:
         """True when one more helper may be started."""
@@ -752,11 +759,14 @@ class LiveEngine(QObject):
         ram_bytes: int | None = None,
         target: float | None = None,
         extra: float = 0.0,
+        window: Mapping[str, Any] | None = None,
     ) -> str:
         """`ram_bytes`: a disk session's memory if its disk fails (_RAM_BYTES when None).
         `target` and `extra`: the target the session steers to and what it adds to it (Auto's
         learned extra), so an HLS source starts far enough back for it (2.1); without
-        `target`, `live_delay` seconds back."""
+        `target`, `live_delay` seconds back. `window` (2.6.2): a server part of the HLS
+        playlist, `{"back_s", "until_seq", "ahead_s"}` (`services.live.source.HlsSource`);
+        never reopened after a helper's death."""
         sid = secrets.token_hex(8)
         if self._shut:
             return sid
@@ -775,8 +785,13 @@ class LiveEngine(QObject):
             ring,
             float(live_delay),
         )
+        start: dict[str, Any] = {}
         if target is not None:
-            command = (*command, {"target": float(target), "extra": float(extra)})
+            start.update(target=float(target), extra=float(extra))
+        if window is not None:
+            start["window"] = dict(window)
+        if start:
+            command = (*command, start)
         self._commands.put(command)
         return sid
 

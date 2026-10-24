@@ -221,6 +221,50 @@ class StartTargetTests(unittest.TestCase):
         supervisor._receive(("error", "s1", "disk", "The disk buffer failed."))
         self.assertEqual(supervisor._records["s1"].command[6:], command[6:])
 
+    def test_a_window_open_carries_its_options(self):
+        # 2.6.2: a server part's start and stop travel in the start dict.
+        import queue
+
+        from services.live import engine as engine_module
+
+        commands: queue.Queue = queue.Queue()
+        engine = engine_module.LiveEngine.__new__(engine_module.LiveEngine)
+        engine._shut, engine._sessions, engine._commands = False, {}, commands
+        window = {"back_s": 60.0, "until_seq": 108, "ahead_s": 60.0}
+        engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB, window=window
+        )
+        self.assertEqual(commands.get_nowait()[7], {"window": window})
+        engine.open_session(
+            URL_FOR_RING,
+            headers={},
+            verify_ssl=True,
+            disk=False,
+            max_bytes=MIB,
+            target=2.5,
+            window=window,
+        )
+        self.assertEqual(commands.get_nowait()[7], {"target": 2.5, "extra": 0.0, "window": window})
+
+    def test_a_server_part_is_not_reopened_after_a_helper_death(self):
+        import queue
+
+        from services.live import engine as engine_module
+
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        ring = {"kind": "ram", "max_bytes": 64 * MIB}
+        part = ("open", "p", URL_FOR_RING, {}, True, ring, 6.0, {"window": {"back_s": 9.0}})
+        live = ("open", "l", URL_FOR_RING, {}, True, ring, 6.0)
+        for sid, command in (("p", part), ("l", live)):
+            supervisor._records[sid] = engine_module._Record(command=command, sent=True)
+        relayed, sent = [], []
+        supervisor._relay = relayed.append
+        supervisor._report_lost()
+        supervisor._conn = SimpleNamespace(send=sent.append)
+        supervisor._receive(("hello", "http://127.0.0.1:1/t"))
+        self.assertEqual([command[1] for command in sent if command[0] == "open"], ["l"])
+        self.assertIn(("error", "p", "internal", engine_module._INTERNAL), relayed)
+
 
 class ResizeTests(unittest.TestCase):
     """2.2: the multiview's tiles grow and shrink their RAM buffers; a reopen keeps the size."""

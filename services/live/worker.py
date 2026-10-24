@@ -802,6 +802,7 @@ class _Session:
         from services.live.source import SourceError, open_source
 
         target = self._start.get("target")
+        window = self._start.get("window")  # 2.6.2: a server part's start and stop
         try:
             source = open_source(
                 self._url,
@@ -812,6 +813,7 @@ class _Session:
                 target=float(target) if isinstance(target, (int, float)) else None,
                 extra=float(self._start.get("extra") or 0.0),
                 on_answer=self._on_answer,
+                window=window if isinstance(window, dict) else None,
             )
         except SourceError as error:
             if not self._parking:  # a park interrupted the open: nothing to say
@@ -1373,9 +1375,13 @@ class _Session:
             "parts": [[p.first_seq, p.start, p.wall] for p in timeline.parts()],
         }
         if source is not None and source.hls:
-            # 2.6.2: how long the server keeps the channel, and its newest media sequence.
+            # 2.6.2: how long the server keeps the channel, and its newest media sequence;
+            # a server part's first segment's time of day.
             snapshot["window_s"] = float(getattr(source, "window_s", 0.0) or 0.0)
             snapshot["edge_seq"] = getattr(source, "edge_sequence", None)
+            part_wall = getattr(source, "part_wall", None)
+            if part_wall is not None:
+                snapshot["part_wall"] = float(part_wall)
         self._heard_edge = edge
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the
