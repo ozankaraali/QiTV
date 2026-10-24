@@ -209,6 +209,20 @@ class PhoneGuideTests(WindowCase):
         channel, shown, _group, _channels = watch.call_args.args
         self.assertEqual((channel["name"], shown.title), ("Channel 1", "Morning"))
 
+    def test_timetable_offers_the_servers_window(self):
+        # 2.6.2: a channel whose own server keeps hours offers its past programmes too.
+        self.start()
+        now = datetime.now(timezone.utc)
+        past = programme("Morning", now - timedelta(minutes=90))
+        controller = self.window.controller
+        with (
+            mock.patch.object(controller, "archive_reach", return_value=timedelta(hours=3)),
+            mock.patch.object(self.window.catalog, "programmes", return_value=[past]),
+        ):
+            self.guide.timetable(self.last()["rows"][0]["id"])
+            [row] = self.last("timetable")["rows"]
+        self.assertIn("id", row)
+
     def test_a_programme_guide_arriving_pushes_whats_on(self):
         self.start()
         self.assertIsNone(self.last()["rows"][0]["now"])

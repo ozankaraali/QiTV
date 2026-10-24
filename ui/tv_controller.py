@@ -841,8 +841,8 @@ class TVController(QObject):
         """Now, and `channel`'s programmes from the one on now (from up to `back` earlier when
         its archive plays), oldest first."""
         now = self._now()
-        days = self.archive_days(channel)
-        since = now - min(back, timedelta(days=days)) if days > 0 else now
+        reach = self.archive_reach(channel)
+        since = now - min(back, reach) if reach > timedelta(0) else now
         return now, self._programmes(channel, since, limit)
 
     def play_file(self, path: str) -> None:
@@ -3143,10 +3143,25 @@ class TVController(QObject):
         self, channel: dict, programme: Programme, group_key: str, channels: list[dict]
     ) -> None:
         """The guide's "Watch from the start": the channel's archive from the programme's start
-        to its end (catch-up, 2.2); live when the archive does not play."""
-        if not self._closed:
-            span = (programme.start.timestamp(), programme.stop.timestamp())
-            self._tune(channel, group_key, channels, from_zap=False, archive=span)
+        to its end (catch-up, 2.2); live when the archive does not play. Within the channel's
+        own server window (2.6.2), the live session plays from there instead."""
+        if self._closed:
+            return
+        start = programme.start.timestamp()
+        reach = self._live_controls.window_reach(channel)
+        if reach > 0.0 and self._now().timestamp() - start <= reach:
+            self._tune(channel, group_key, channels, from_zap=False)  # live, where it plays
+            self._live_controls.watch_from(channel, start)
+            return
+        span = (start, programme.stop.timestamp())
+        self._tune(channel, group_key, channels, from_zap=False, archive=span)
+
+    def archive_reach(self, channel: dict) -> timedelta:
+        """How far back the guide offers the channel's past programmes: its provider archive's
+        days, or (2.6.2) its own server window as seen this run, the longer."""
+        days = timedelta(days=self.archive_days(channel))
+        window = timedelta(seconds=self._live_controls.window_reach(channel))
+        return max(days, window)
 
     def archive_days(self, channel: dict) -> int:
         """The days of the channel's provider archive that may play now (the guide's reach):

@@ -68,6 +68,9 @@ BACK_NOTICE_MS = 60_000  # 2.6: the Resume pill shows this long (the owner: "a m
 _PAST_BUFFER_S = 1.0  # a point this far before the buffer's start is the archive's
 
 
+_WINDOW_SEEK_S = 30.0  # 2.6.2: a guide's start waits this long for its channel's window
+
+
 def _reach(state: dict) -> float:
     """How far back the live session plays (timeline seconds): its buffer's start, or (2.6.2)
     the start of the channel's own server window; a provider's archive is reached beyond."""
@@ -192,6 +195,10 @@ class LiveControls(QObject):
         self._logo = logo
         self._explain = explain
         self._ticks: list[tuple[float, str]] = []
+        # 2.6.2: how far back each channel's own server keeps it (seconds, as last seen this
+        # run, by the channel's key), and a guide's start waiting for its window to show.
+        self._windows: dict[str, float] = {}
+        self._window_seek: Optional[tuple[str, float, float]] = None  # key, moment, asked at
         self._wired = False
         self._reconnects = 0  # reopens of the current tune's ended stream so far
         self._playing_since: Optional[float] = None  # the player's last "playing" (monotonic)
@@ -311,6 +318,43 @@ class LiveControls(QObject):
         self._reconnects = 0
         self._playing_since = None
         self._cancel_reopen()
+
+    def window_reach(self, channel: dict) -> float:
+        """How far back (seconds) the channel's own server keeps it, as seen this run (2.6.2);
+        0.0 when unknown."""
+        return self._windows.get(self.catchup.key(Target(channel, "live", "")), 0.0)
+
+    def watch_from(self, channel: dict, moment: float) -> bool:
+        """The guide's "Watch from the start" within the channel's own server window (2.6.2):
+        the live session plays from `moment` (Unix seconds), at once when the channel plays,
+        else once its window shows (the caller tunes it). False when its window, as seen
+        this run, does not reach that far."""
+        key = self.catchup.key(Target(channel, "live", ""))
+        now = self._now().timestamp()
+        if now - moment > self._windows.get(key, 0.0):
+            return False
+        self._window_seek = (key, moment, now)
+        state = self._tuner.timeline
+        if state is not None and "window_start" in state:
+            self._seek_window(state)
+        return True
+
+    def _seek_window(self, state: dict) -> None:
+        pending, current = self._window_seek, self._current()
+        if pending is None or current is None or self.live is None or not self.pipeline_live():
+            return
+        key, moment, asked = pending
+        if self._now().timestamp() - asked > _WINDOW_SEEK_S:
+            self._window_seek = None  # the channel never came: forgotten
+            return
+        if self.catchup.key(current) != key:
+            return  # still tuning it
+        self._window_seek = None
+        t = live_parts.t_in(state, moment, self._now().timestamp())
+        if t is not None:
+            self.catchup.cancel()
+            self.live.seek_to(t)
+            self._show_transport()
 
     def open_archive(self, target: Target, url: str) -> bool:
         """`target` (with `archive_at`) plays its archive instead of live: False when it
@@ -500,6 +544,11 @@ class LiveControls(QObject):
         current = self._current()
         if self._closed() or not self._tuner.running() or current is None or not current.live:
             return
+        if "window_start" in state:  # 2.6.2: the channel's own server keeps more
+            now = self._now().timestamp()
+            wall = live_parts.wall_in(state, float(state["window_start"]), now)
+            self._windows[self.catchup.key(current)] = max(0.0, now - wall)
+            self._seek_window(state)
         state = self.catchup.extend(state, current)  # the bar reaches into an archive
         transport = self._transport
         if transport.isVisible():

@@ -529,3 +529,33 @@ class ServerWindowRoutingTests(CatchupCase):
         self.controller.handle(Action.SEEK_BACK)
         self.live.released.emit()
         self.assertEqual(len(self.archive_plays()), 1)
+
+    def test_watch_from_the_start_plays_from_the_window(self):
+        # 2.6.2: the guide's past programme, within the playing channel's server window.
+        self.windowed(PLAIN)
+        film = Programme("Film", NOW - timedelta(hours=2), NOW + timedelta(minutes=5))
+        self.controller._on_guide_catchup(PLAIN, film, "10", CHANNELS)
+        self.assertEqual(self.live.named("seek_to")[-1], (3600.0 - 7200.0,))
+        self.assertEqual(self.archive_plays(), [])
+
+    def test_watch_from_the_start_tunes_a_channel_seen_earlier(self):
+        # Its window was seen this run: the channel tunes live, then plays from the start.
+        self.windowed(PLAIN)
+        self.start_archived(ARCHIVED)  # another channel now
+        film = Programme("Film", NOW - timedelta(hours=2), NOW + timedelta(minutes=5))
+        count = len(self.starts())
+        self.controller._on_guide_catchup(PLAIN, film, "10", CHANNELS)
+        self.catalog.linkReady.emit(self.catalog.links[-1][0], PLAIN["cmd"])
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == count + 1))
+        self.assertEqual(self.starts()[-1][0], PLAIN["cmd"])  # live, not an archive address
+        self.live.play_pipeline()
+        self.live.timelineChanged.emit(dict(WINDOWED))
+        self.assertEqual(self.live.named("seek_to")[-1], (3600.0 - 7200.0,))
+        self.assertEqual(self.archive_plays(), [])
+
+    def test_a_known_window_is_the_guides_reach(self):
+        self.assertEqual(self.controller.archive_reach(PLAIN), timedelta(0))
+        self.windowed(PLAIN)
+        self.assertGreater(self.controller.archive_reach(PLAIN), timedelta(hours=23))
+        self.assertEqual(self.controller.archive_reach(ARCHIVED), timedelta(days=3))  # its own

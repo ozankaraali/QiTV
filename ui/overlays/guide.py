@@ -221,9 +221,11 @@ class Guide(Overlay):
         now: Callable[[], datetime],
         parent: QWidget | None = None,
         archive_days: Callable[[dict], int] = lambda channel: 0,
+        archive_reach: Callable[[dict], timedelta] | None = None,
     ) -> None:
         """`archive_days(channel)`: the days of the channel's archive that may play now (0:
-        none)."""
+        none); `archive_reach(channel)` (2.6.2): how far back its past programmes play, its
+        own server window's included (`archive_days` when not given)."""
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
@@ -235,6 +237,9 @@ class Guide(Overlay):
         self._current = -1
         self._top = 0
         self._archive_days = archive_days
+        self._archive_reach = archive_reach or (
+            lambda channel: timedelta(days=archive_days(channel))
+        )
         self._back = timedelta(0)  # how far back the window goes (the deepest archive listed)
         self._picked: tuple[int, Programme] | None = None  # a past programme clicked on
         self._window_start = slot_start(now())
@@ -266,7 +271,8 @@ class Guide(Overlay):
         self._window_start = slot_start(self._now())
         self._picked = None
         deepest = max((_archive_depth(c) for c in self._channels), default=0)
-        self._back = min(MAX_BACK, timedelta(days=deepest))
+        windows = max((self._archive_reach(c) for c in self._channels), default=timedelta(0))
+        self._back = min(MAX_BACK, max(timedelta(days=deepest), windows))
         self._forget_lookups()
         self._requested.clear()  # a reopened guide retries logos that failed
         self._relayout()
@@ -361,11 +367,11 @@ class Guide(Overlay):
         its guide lists as recorded, or says nothing of)."""
         if programme is None or channel is None:
             return False
-        days = self._archive_days(channel)
+        reach = self._archive_reach(channel)
         now = self._now().astimezone()
         return (
-            days > 0
-            and now - timedelta(days=days) <= programme.start < now
+            reach > timedelta(0)
+            and now - reach <= programme.start < now
             and programme_in_archive(channel, programme)
         )
 

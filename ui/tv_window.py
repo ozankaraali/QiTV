@@ -23,7 +23,7 @@ one drop may carry both kinds.
 from __future__ import annotations
 
 import atexit
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import multiprocessing
 import os
@@ -494,6 +494,9 @@ class TVWindow(QMainWindow):
         def archive_days(channel: dict) -> int:
             return controller.archive_days(channel)
 
+        def archive_reach(channel: dict) -> timedelta:
+            return controller.archive_reach(channel)  # 2.6.2: a server window's too
+
         host = self.host
         self.grid_tiles = GridTiles(host)  # the multiview's labels, focus ring, "+" and cards
         self.pip_label = PipLabel(host)
@@ -518,7 +521,12 @@ class TVWindow(QMainWindow):
             transport=Transport(host),
             toast=Toast(host),
             guide=Guide(
-                self.logos, guide_programmes, _local_now, parent=host, archive_days=archive_days
+                self.logos,
+                guide_programmes,
+                _local_now,
+                parent=host,
+                archive_days=archive_days,
+                archive_reach=archive_reach,
             ),
             next_card=NextCard(host),
             welcome=WelcomeCard(host),
