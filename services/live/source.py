@@ -1092,6 +1092,7 @@ class HlsSource:
         self._pending = False  # a Discontinuity is due before the next bytes
         self._joiner = ContinuityJoiner()  # the segments' counters run on across joins
         self._serial = 0  # segments started so far
+        self._sequence: int | None = None  # 2.6.2: the media sequence of the one started last
         self._fetching = 0.0  # the EXTINF of the segment being fetched (0.0: none)
         self._rest = 0.0  # the EXTINF of the listed segments after it
         self._last_whole: tuple[int, float] | None = None  # (serial, EXTINF) of the last whole
@@ -1106,6 +1107,11 @@ class HlsSource:
     def segment_serial(self) -> int:
         """Counts the segments started: it changes as the next segment's first bytes come."""
         return self._serial
+
+    @property
+    def segment_sequence(self) -> int | None:
+        """The media sequence of the segment whose bytes come now (2.6.2); None before one."""
+        return self._sequence
 
     @property
     def fmp4(self) -> bool:
@@ -1293,6 +1299,7 @@ class HlsSource:
                 self._fetching = float(segment.duration or 0)
                 self._rest = max(0.0, self._rest - self._fetching)
                 self._serial += 1
+                self._sequence = sequence
                 yield from self._segment(segment, sequence, url)
             self._fetching = 0.0
             if fresh:

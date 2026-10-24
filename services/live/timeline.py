@@ -69,6 +69,8 @@ class Span:
     # Spans made without one (an older helper's 4-field additions) count as keyframe starts,
     # as every segment start did before.
     start_quality: StartQuality = START_KEY
+    # 2.6.2: the HLS media sequence this segment begins (None: it begins none, or raw TS).
+    media_seq: Optional[int] = None
 
 
 @dataclass
@@ -77,6 +79,7 @@ class _Open:
     first_pts: Optional[int]
     wall: float
     discontinuity: bool
+    media_seq: Optional[int] = None
 
 
 class Timeline:
@@ -94,8 +97,14 @@ class Timeline:
         self._part_wall = wall
 
     def on_opened(
-        self, seq: int, first_pts: Optional[int], wall: float, discontinuity: bool
+        self,
+        seq: int,
+        first_pts: Optional[int],
+        wall: float,
+        discontinuity: bool,
+        media_seq: Optional[int] = None,
     ) -> None:
+        """`media_seq`: the HLS media sequence the segment begins (2.6.2), on its span."""
         if self._open is not None:
             log.warning("segment %r opened while %r was still open", seq, self._open.seq)
             # Its start quality came with its Closed, which never came: no jump lands there.
@@ -103,7 +112,7 @@ class Timeline:
         if self._part_wall is not None:
             self._parts.append(Part(seq, self._end, self._part_wall))
             self._part_wall = None
-        self._open = _Open(seq, first_pts, wall, discontinuity)
+        self._open = _Open(seq, first_pts, wall, discontinuity, media_seq)
 
     def on_closed(
         self,
@@ -137,7 +146,14 @@ class Timeline:
         if duration is None or duration == 0:
             # Equal stamps are not a reset, but carry no duration: use wall time.
             duration = min(max(wall - opened.wall, _MIN_WALL_DURATION), _LIMIT)
-        span = Span(opened.seq, self._end, self._end + duration, discontinuity, start_quality)
+        span = Span(
+            opened.seq,
+            self._end,
+            self._end + duration,
+            discontinuity,
+            start_quality,
+            opened.media_seq,
+        )
         self._spans.append(span)
         self._end = span.end
         self._open = None

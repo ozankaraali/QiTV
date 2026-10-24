@@ -750,6 +750,17 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(index.label, {"channel": "k1"})
         self.assertEqual(index.where, {"position": 3.0, "paused": True})
 
+    def test_the_index_keeps_a_segments_media_sequence(self):
+        # 2.6.2: a segment that begins an HLS segment notes its media sequence ("m").
+        ring = self.ring()
+        ring.open_segment(0, b"h" * 376)
+        ring.append(b"d" * 4000)
+        ring.complete(0)
+        ring.note_segment(0, 0.0, 2.0, False, "key", media_seq=42)
+        self.fill(ring, 1, start_seq=1)  # one without
+        segments = read_index(self.folder(ring)).segments
+        self.assertEqual([s.get("m") for s in segments], [42, None])
+
     def test_a_torn_last_line_is_ignored(self):
         ring = self.ring()
         self.fill(ring, 3)

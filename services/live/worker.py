@@ -65,9 +65,10 @@ Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, fi
 additions)`, also before ready while bytes arrive (`received`) and nothing is playable yet,
 and once a raw-TS source answered (`answered`, 2.1: its headers came, before its first byte;
 taken back once its body failed or turned out a playlist),
-each addition a newly closed segment's `(seq, start, end, discontinuity, start_quality)`
-(`Span`'s fields; an engine from before 2.1 would not take the fifth, but the helper and the
-engine always ship in one build, and the engine still takes four);
+each addition a newly closed segment's `(seq, start, end, discontinuity, start_quality,
+media_seq)` (`Span`'s fields; 2.6.2 added the HLS media sequence the segment begins, None when
+it begins none; the helper and the engine always ship in one build, and the engine still
+takes four or five);
 `("ready", sid)` once the first segment is open (its state comes first);
 `("recording", sid, rid, path, written)` once recording `rid` made its file and every few
 seconds while it grows (2.2), and `("recorded", sid, rid, reason, path, written)` once it ended
@@ -121,7 +122,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from services.live.timeline import StartQuality, Timeline
+from services.live.timeline import Span, StartQuality, Timeline
 from services.live.ts import (
     AudioRelabeler,
     ClockJoiner,
@@ -165,8 +166,22 @@ _NO_MEDIA = "The channel ended before any video could be buffered."
 _NO_DATA = "The channel sent no data."
 _DISK_FAILED = "The temporary playback buffer could not be created."
 
-# seq, start, end, discontinuity, start_quality
-_Addition = tuple[int, float, float, bool, StartQuality]
+# seq, start, end, discontinuity, start_quality, media_seq (2.6.2: the HLS media sequence the
+# segment begins, or None)
+_Addition = tuple[int, float, float, bool, StartQuality, int | None]
+
+
+def _addition(span: Span) -> _Addition:
+    return (
+        span.seq,
+        span.start,
+        span.end,
+        span.discontinuity,
+        span.start_quality,
+        span.media_seq,
+    )
+
+
 # PTS jumps the timeline left out, in the state while the ring holds them (2.1; and
 # `_BREAK_SLACK_S` after), at
 # most this many (a memory bound: a flaky source that reconnects every few seconds)
@@ -473,6 +488,7 @@ class _Session:
         self._segment = (0, 0.0)  # HLS: the segment being fetched (serial), the edge it began at
         self._measured = (0.0, 0.0)  # HLS: media and EXTINF seconds of the whole segments
         self._pending: list[_Addition] = []
+        self._media_next: int | None = None  # 2.6.2: an HLS segment began: the next opened
         # (timeline position, seconds left out) of the latest PTS jumps the segmenter dropped
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
         self._last_notify = 0.0
@@ -661,7 +677,6 @@ class _Session:
         said "unkept") when it cannot be."""
         from services.live.parts import Part
         from services.live.ring import DiskRing
-        from services.live.timeline import Span
 
         assert self.adopting is not None
         directory, max_bytes = self.adopting
@@ -676,7 +691,14 @@ class _Session:
             return False
         records = index.segments
         spans = [
-            Span(r["seg"], float(r["s"]), float(r["e"]), bool(r.get("d")), r.get("q") or "key")
+            Span(
+                r["seg"],
+                float(r["s"]),
+                float(r["e"]),
+                bool(r.get("d")),
+                r.get("q") or "key",
+                r["m"] if type(r.get("m")) is int else None,
+            )
             for r in records
         ]
         self._timeline.restore(
@@ -705,7 +727,7 @@ class _Session:
         self._label, self._where = index.label, index.where
         self._kept_history = self._disk = True
         self._ring_spec = {"kind": "disk", "dir": directory, "max_bytes": max_bytes}
-        self._pending = [(s.seq, s.start, s.end, s.discontinuity, s.start_quality) for s in spans]
+        self._pending = [_addition(s) for s in spans]
         self._helper.disk_budget(max_bytes).register(ring, parked=True)
         try:
             self._adopt(ring)
@@ -952,7 +974,11 @@ class _Session:
                 if began:  # a run's first segment: the part's time of day (2.6)
                     self._new_part = False
                     timeline.begin_part(_wall_time())
-                timeline.on_opened(event.seq, event.first_pts, event.wall, event.discontinuity)
+                # 2.6.2: the first segment cut after an HLS segment's bytes began begins it.
+                media, self._media_next = self._media_next, None
+                timeline.on_opened(
+                    event.seq, event.first_pts, event.wall, event.discontinuity, media
+                )
                 if began and timeline.parts() and self._ring is not None:
                     part = timeline.parts()[-1]
                     self._ring.note_part(part.first_seq, part.start, part.wall)
@@ -984,11 +1010,14 @@ class _Session:
                 )
                 if not self._skipping and self._ring is not None:
                     self._ring.note_segment(  # 2.6: the index a later helper reads
-                        span.seq, span.start, span.end, span.discontinuity, span.start_quality
+                        span.seq,
+                        span.start,
+                        span.end,
+                        span.discontinuity,
+                        span.start_quality,
+                        span.media_seq,
                     )
-                self._pending.append(
-                    (span.seq, span.start, span.end, span.discontinuity, span.start_quality)
-                )
+                self._pending.append(_addition(span))
                 self._notify(force=True)
         self._take_breaks()
 
@@ -1230,6 +1259,7 @@ class _Session:
         serial = getattr(source, "segment_serial", 0)
         if serial == self._segment[0]:
             return
+        self._media_next = getattr(source, "segment_sequence", None)
         fetching = getattr(source, "segment_s", None)
         if self._clock_joiner is not None and isinstance(fetching, float):
             self._clock_joiner.arrive(fetching)

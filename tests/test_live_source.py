@@ -1925,6 +1925,23 @@ video.m3u8
         self.assertEqual(parts, joined(self.video, Discontinuity(), self.next_video))
         self.assertEqual(requested_segments(server), ["c.ts", "d.ts"])
 
+    def test_hls_source_names_the_media_sequence_it_yields(self):
+        # 2.6.2: each buffer segment that begins an HLS segment knows its media sequence.
+        routes = {f"/{name}.ts": (200, {}, self.video) for name in "abc"}
+        routes["/live.m3u8"] = (200, {}, hls(10, ["a.ts", "b.ts", "c.ts"], ended=True))
+        server = self.server(routes)
+        source = open_source(
+            server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        seen = []
+        try:
+            for item in source.chunks():
+                if isinstance(item, bytes) and item and source.segment_sequence not in seen:
+                    seen.append(source.segment_sequence)
+        finally:
+            source.close()
+        self.assertEqual(seen, [10, 11, 12])
+
     def test_a_copy_from_another_origin_group_is_set_aside(self):
         # Two origin groups behind one address, each numbering and naming its own encoding
         # (measured 2.6.1, a 24 h public playlist): the other group's copy is neither a stale

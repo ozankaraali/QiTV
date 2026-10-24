@@ -560,6 +560,25 @@ class LiveWorkerTests(unittest.TestCase):
                 self.assertEqual({item[4] for item in buffered}, {"key"})  # IDR starts
         self.assert_no_credentials(helper)
 
+    def test_a_span_beginning_an_hls_segment_carries_its_media_sequence(self):
+        # 2.6.2: the server window's stop and hop find the buffer segment that begins an HLS
+        # segment by its media sequence; the others carry None.
+        first, second = make_stream(4), make_stream(4, pts_start=900000 + 4 * 90000)
+        source = self.source(
+            {
+                "/user/secret/channel.m3u8": (200, {}, leaf("a.ts", "b.ts")),
+                "/user/secret/a.ts": (200, {}, first),
+                "/user/secret/b.ts": (200, {}, second),
+            }
+        )
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/channel.m3u8")
+        helper.wait_for(lambda message: message == ("ended", sid))
+        buffered = spans(helper, sid)
+        starts = [(item[5], round(item[1])) for item in buffered if item[5] is not None]
+        self.assertEqual(starts, [(0, 0), (1, 4)])
+        self.assertGreater(len(buffered), 2)  # segments within an HLS segment carry None
+
     def test_an_hls_batch_reports_its_live_edge_once_delivered(self):
         # 2.1: states are throttled to four a second, so the end of a batch that
         # arrived within a quarter second waited for the next batch (a 2 s keyframe interval

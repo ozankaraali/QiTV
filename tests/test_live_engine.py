@@ -798,6 +798,17 @@ class SpanMessageTests(unittest.TestCase):
             ],
         )
 
+    def test_an_addition_with_a_media_sequence_becomes_a_span(self):
+        # 2.6.2: a sixth field, the HLS media sequence the segment begins; five mean None.
+        engine = LiveEngine(tempfile.gettempdir())  # never started: no helper, no buffer
+        self.addCleanup(engine.shutdown)
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB
+        )
+        additions = [(0, 0.0, 2.0, False, START_KEY, 7), (1, 2.0, 4.0, False, START_KEY)]
+        engine._on_message(("state", sid, {"oldest": 0}, 0, additions))
+        self.assertEqual([span.media_seq for span in engine.spans(sid)], [7, None])
+
 
 class LiveEngineTests(unittest.TestCase):
     @classmethod

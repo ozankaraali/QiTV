@@ -15,7 +15,8 @@ an index, `index.jsonl`, one JSON object per line, appended and never rewritten 
 (compacted through `index.jsonl.new` once most of its segment lines name segments gone):
 `{"v": 2}` first, then `{"seg": seq, "h": header_len, "n": size, "s": start, "e": end, "d":
 discontinuity, "q": start_quality, "w": wall, "j": junction}` per completed segment (the
-session's `note_segment`), `{"part": first_seq, "s": start, "w": wall}` per part,
+session's `note_segment`; 2.6.2 adds `"m"`, the HLS media sequence it begins, when it begins
+one), `{"part": first_seq, "s": start, "w": wall}` per part,
 `{"label": {...}}` and `{"where": {...}}` (the last counts). `close(keep=True)` leaves such a
 folder for a later helper (`read_index`); older builds' sweeps match only
 `.qitv-timeshift-<32 hex>` folders with the v1 marker, so they never touch it.
@@ -132,9 +133,16 @@ class Ring(ABC):
 
     # ---- 2.6: a kept buffer's index (a v2 disk ring writes one; others keep none) -----
     def note_segment(
-        self, seq: int, start: float, end: float, discontinuity: bool, start_quality: str
+        self,
+        seq: int,
+        start: float,
+        end: float,
+        discontinuity: bool,
+        start_quality: str,
+        media_seq: int | None = None,
     ) -> None:
-        """Segment `seq` completed and the timeline placed it."""
+        """Segment `seq` completed and the timeline placed it (`media_seq`: the HLS media
+        sequence it begins, 2.6.2)."""
 
     def note_part(self, first_seq: int, start: float, wall: float) -> None:
         """A part of the timeline begins at segment `first_seq`."""
@@ -802,7 +810,13 @@ class DiskRing(Ring):
                 self._index = None
 
     def note_segment(
-        self, seq: int, start: float, end: float, discontinuity: bool, start_quality: str
+        self,
+        seq: int,
+        start: float,
+        end: float,
+        discontinuity: bool,
+        start_quality: str,
+        media_seq: int | None = None,
     ) -> None:
         if not self._kept:
             return
@@ -821,6 +835,8 @@ class DiskRing(Ring):
                 "w": segment.wall,
                 "j": segment.junction,
             }
+            if media_seq is not None:
+                record["m"] = media_seq  # 2.6.2; older builds ignore the key
             self._index_segs[seq] = record
         self._append_index(record)
 
