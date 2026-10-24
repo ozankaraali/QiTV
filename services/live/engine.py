@@ -284,6 +284,10 @@ class _Supervisor(QThread):
             if record.sent:  # else after its open (`_send_notes`)
                 conn.send(command)
             return
+        if name == "until":  # 2.6.2: a server part's stop (never the close fallback below)
+            if record is not None and record.sent and not record.closing:
+                conn.send(command)
+            return
         if name in ("record_start", "record_stop"):
             if record is not None and record.sent and not record.closing:
                 conn.send(command)
@@ -845,6 +849,13 @@ class LiveEngine(QObject):
         """Remove the kept buffers no session holds (2.6: the disk buffer was turned off)."""
         if not self._shut:
             self._commands.put(("drop_kept",))
+
+    def set_until(self, sid: str, seq: int) -> None:
+        """Move a server part's stop to media sequence `seq` (2.6.2: the live buffer's start
+        moved, eviction): its input ends before it."""
+        view = self._sessions.get(sid)
+        if view is not None and not view.closing and not self._shut:
+            self._commands.put(("until", sid, int(seq)))
 
     def keep_session(self, sid: str, label: Mapping[str, Any]) -> None:
         """Label a disk session's buffer (2.6: the channel's key), so a later helper knows

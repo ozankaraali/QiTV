@@ -1142,6 +1142,15 @@ class HlsSource:
         return self._window
 
     @property
+    def until_seq(self) -> int | None:
+        """A server part's stop (2.6.2): its input ends before this media sequence."""
+        return self._until
+
+    @until_seq.setter
+    def until_seq(self, seq: int | None) -> None:
+        self._until = seq  # the live buffer's start moved (any thread: one attribute)
+
+    @property
     def part_wall(self) -> float | None:
         """A server part's first segment's time of day (2.6.2); None before it, or else."""
         return self._part_wall
@@ -1347,12 +1356,12 @@ class HlsSource:
                 sequence = first + index
                 if sequence < next_sequence:
                     continue
+                while self._hold is not None and self._hold():  # its stop may move meanwhile
+                    if http.wait(_HOLD_POLL_S):
+                        raise _Closed()
                 if self._until is not None and sequence >= self._until:
                     done = True
                     break
-                while self._hold is not None and self._hold():
-                    if http.wait(_HOLD_POLL_S):
-                        raise _Closed()
                 next_sequence = sequence + 1
                 if segment.discontinuity:
                     self._mark()

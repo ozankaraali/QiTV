@@ -19,7 +19,11 @@ Commands (parent to helper):
   `{"kind": "ram", "max_bytes": n}` or `{"kind": "disk", "root": path, "dir": name,
   "max_bytes": n}` (`root` defaults to the helper's own root) and `start` (2.1) is
   `{"target": seconds, "extra": seconds}`: the session's target and what it adds to it, so an
-  HLS source starts far enough back for a start at that target (`HlsSource._depth`);
+  HLS source starts far enough back for a start at that target (`HlsSource._depth`); 2.6.2
+  adds `"window": {"back_s", "until_seq", "ahead_s"}`, a server part of an HLS playlist: it
+  starts `back_s` from the playlist's end, its input ends before `until_seq`, and it fetches
+  no further while what it holds runs `ahead_s` past the segment the player reads (which,
+  and what follows, its ring never evicts);
 - `("close", sid)`, always answered by `("closed", sid)`, once the session's upstream
   connection is closed but at most 0.5 s later;
 - `("resize", sid, max_bytes)` (2.2, the multiview): a RAM session holds up to `max_bytes`
@@ -59,6 +63,8 @@ Commands (parent to helper):
   a stopped one may still be finishing. Answered by "recorded";
 - `("record_stop", sid)`: the session's recording ends at the live edge; an unknown sid, or
   one that records nothing, is ignored;
+- `("until", sid, seq)` (2.6.2): a server part's stop moves to media sequence `seq` (the live
+  buffer's start moved); unanswered;
 - `("shutdown",)`.
 
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
@@ -1253,6 +1259,15 @@ class _Session:
             self._apply(self._segmenter.feed(held))
         self._apply(self._segmenter.finish())
 
+    def set_until(self, seq: int) -> None:
+        """A server part's stop moves to media sequence `seq` (2.6.2, "until")."""
+        window = self._start.get("window")
+        if isinstance(window, dict):
+            window["until_seq"] = seq
+        source = self._source
+        if source is not None and hasattr(source, "until_seq"):
+            source.until_seq = seq
+
     def _hold(self) -> bool:
         """A server part (2.6.2) fetches no further while what it holds runs its `ahead_s`
         past the start of the segment the player reads (its oldest before any read); its
@@ -1610,6 +1625,16 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.note(name, command[2])
+            elif name == "until":  # 2.6.2: a server part's stop moved
+                if (
+                    len(command) != 3
+                    or not isinstance(command[1], str)
+                    or type(command[2]) is not int
+                ):
+                    raise ValueError("a stop needs a session and a media sequence")
+                session = self._sessions.get(command[1])
+                if session is not None:
+                    session.set_until(command[2])
             elif name == "record_start":
                 self._record(command)
             elif name == "record_stop":

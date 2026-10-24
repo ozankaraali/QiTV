@@ -1579,6 +1579,33 @@ class ServerPartProtectionTests(unittest.TestCase):
         self.assertEqual(ring._protected, 1)
 
 
+class ServerPartStopTests(unittest.TestCase):
+    def test_set_until_moves_a_server_parts_stop(self):
+        # Review Focus 3: the live buffer's start moved (eviction): the stop follows it.
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += "".join(f"#EXTINF:1,\ns{n}.ts\n" for n in range(10))
+        routes = {
+            f"/user/secret/s{n}.ts": (200, {}, make_stream(1, pts_start=900000 + n * 90000))
+            for n in range(10)
+        }
+        routes["/user/secret/live.m3u8"] = (200, {}, text.encode())
+        upstream = LocalSource(routes)
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        reading = [None]
+        helper.helper.server.reading = lambda sid: reading[0]
+        window = {"back_s": 10.0, "until_seq": 3, "ahead_s": 1.0}
+        url = upstream.url + "/user/secret/live.m3u8"
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"window": window}))
+        helper.wait_for(lambda m: m == ("ready", "p"))
+        helper.parent.send(("until", "p", 5))
+        time.sleep(0.3)
+        reading[0] = 10_000  # the player at the edge: nothing holds it any more
+        helper.wait_for(lambda m: m == ("ended", "p"))
+        fetched = [path.rsplit("/", 1)[1] for path, _h in upstream.requests if path.endswith(".ts")]
+        self.assertEqual(fetched, [f"s{n}.ts" for n in range(5)])
+
+
 AHEAD = 900_000 + 3600 * 90_000  # the provider's clock an hour later
 
 

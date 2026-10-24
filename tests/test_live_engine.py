@@ -265,6 +265,31 @@ class StartTargetTests(unittest.TestCase):
         self.assertEqual([command[1] for command in sent if command[0] == "open"], ["l"])
         self.assertIn(("error", "p", "internal", engine_module._INTERNAL), relayed)
 
+    def test_set_until_reaches_the_helper_and_never_closes(self):
+        # 2.6.2: a server part's stop follows the live buffer's start; the supervisor's
+        # fallback for an unknown command is a close, so this one has its own branch.
+        import queue
+
+        from services.live import engine as engine_module
+
+        commands: queue.Queue = queue.Queue()
+        engine = engine_module.LiveEngine.__new__(engine_module.LiveEngine)
+        engine._shut, engine._sessions, engine._commands = False, {}, commands
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB, window={}
+        )
+        opened = commands.get_nowait()
+        engine.set_until(sid, 110)
+        until = commands.get_nowait()
+        self.assertEqual(until, ("until", sid, 110))
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        supervisor._records[sid] = engine_module._Record(command=opened, sent=True)
+        supervisor._commands.put(until)
+        sent = []
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent, [until])
+        self.assertFalse(supervisor._records[sid].closing)
+
 
 class ResizeTests(unittest.TestCase):
     """2.2: the multiview's tiles grow and shrink their RAM buffers; a reopen keeps the size."""
