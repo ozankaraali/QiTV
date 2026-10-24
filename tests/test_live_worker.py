@@ -1548,6 +1548,37 @@ class ServerPartPacingTests(unittest.TestCase):
         self.assertGreater(len(fetched()), len(before))
 
 
+class ServerPartProtectionTests(unittest.TestCase):
+    def test_a_server_part_protects_what_the_player_reads(self):
+        # 2.6.2: what the player reads, and what lies ahead, is never evicted.
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += "".join(f"#EXTINF:1,\ns{n}.ts\n" for n in range(6))
+        routes = {
+            f"/user/secret/s{n}.ts": (200, {}, make_stream(1, pts_start=900000 + n * 90000))
+            for n in range(6)
+        }
+        routes["/user/secret/live.m3u8"] = (200, {}, text.encode())
+        upstream = LocalSource(routes)
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        reading = [None]
+        helper.helper.server.reading = lambda sid: reading[0]
+        window = {"back_s": 6.0, "ahead_s": 2.0}
+        url = upstream.url + "/user/secret/live.m3u8"
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"window": window}))
+        helper.wait_for(lambda m: m == ("ready", "p"))
+        ring = helper.helper._sessions["p"]._ring
+        deadline = time.monotonic() + 5
+        while ring._protected is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(ring._protected, ring.oldest_seq)  # nothing read yet: all ahead
+        reading[0] = 1
+        deadline = time.monotonic() + 5
+        while ring._protected != 1 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(ring._protected, 1)
+
+
 AHEAD = 900_000 + 3600 * 90_000  # the provider's clock an hour later
 
 

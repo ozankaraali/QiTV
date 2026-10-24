@@ -110,6 +110,36 @@ class RamRingTests(unittest.TestCase):
         self.assertIsNone(ring.read_at(0, 0, 1))
         self.assertIsNotNone(ring.read_at(5, 0, 1))
 
+    def test_a_protected_segment_is_never_retired(self):
+        # 2.6.2: what the player reads in a server part, and what lies ahead, stays.
+        ring = RamRing(10_000)
+        for seq in range(6):
+            ring.open_segment(seq, b"h")
+            ring.append(b"x" * 100)
+            ring.complete(seq)
+        ring.protect_from(2)
+        self.assertTrue(ring.retire_oldest())
+        self.assertTrue(ring.retire_oldest())
+        self.assertFalse(ring.retire_oldest())
+        self.assertEqual(ring.oldest_seq, 2)
+        ring.set_max_bytes(10)  # a smaller cap keeps them too
+        self.assertEqual(ring.oldest_seq, 2)
+        ring.protect_from(None)
+        self.assertTrue(ring.retire_oldest())
+
+    def test_a_full_ring_with_only_protected_segments_takes_more_without_failing(self):
+        # The writer is paced instead (a disk RingError would send the session to memory).
+        ring = RamRing(300)
+        for seq in range(2):
+            ring.open_segment(seq, b"h")
+            ring.append(b"x" * 140)
+            ring.complete(seq)
+        ring.protect_from(0)
+        ring.open_segment(2, b"h")
+        ring.append(b"x" * 140)  # over the cap, nothing may go: no RingError
+        self.assertEqual(ring.oldest_seq, 0)
+        self.assertGreater(ring.charged, 300)
+
     def test_open_segment_never_evicted_and_oversize_raises(self):
         ring = RamRing(50)
         ring.open_segment(0, b"")
@@ -655,6 +685,20 @@ class DiskBudgetTests(unittest.TestCase):
         self.fill(second, 1)
         budget.trim()
         self.assertEqual((first.oldest_seq, second.oldest_seq), (1, 0))
+
+    def test_the_disk_budget_passes_over_a_protected_ring(self):
+        # 2.6.2: a parked ring whose oldest is protected is no victim; the next one is.
+        kept, live = self.ring(), self.ring()
+        self.fill(kept, 3)
+        self.fill(live, 3)
+        budget = DiskBudget(kept.charged + live.charged)
+        budget.register(kept, parked=True)
+        budget.register(live)
+        kept.protect_from(0)
+        self.fill(live, 1)
+        budget.trim()
+        self.assertEqual(kept.oldest_seq, 0)
+        self.assertEqual(live.oldest_seq, 1)
 
     def test_a_ring_that_unregisters_no_longer_counts(self):
         kept, live = self.ring(), self.ring()

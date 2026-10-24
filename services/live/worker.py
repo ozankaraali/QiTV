@@ -1255,7 +1255,8 @@ class _Session:
 
     def _hold(self) -> bool:
         """A server part (2.6.2) fetches no further while what it holds runs its `ahead_s`
-        past the start of the segment the player reads (its oldest before any read)."""
+        past the start of the segment the player reads (its oldest before any read); its
+        ring keeps that segment and what follows (`Ring.protect_from`)."""
         window = self._start.get("window")
         ahead = window.get("ahead_s") if isinstance(window, dict) else None
         if not isinstance(ahead, (int, float)):
@@ -1265,6 +1266,8 @@ class _Session:
         if not spans:
             return False
         reading = self._helper.server.reading(self.sid)
+        if self._ring is not None:  # what the player reads and what lies ahead stay
+            self._ring.protect_from(reading if reading is not None else spans[0].seq)
         if reading is None:
             start = spans[0].start
         else:

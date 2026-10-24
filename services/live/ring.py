@@ -98,6 +98,7 @@ class Ring(ABC):
         self._charged = 0
         self._failure = ""
         self.closed = False
+        self._protected: int | None = None  # 2.6.2: never retire from this segment on
 
     # ---- storage hooks (called with the disk lock held) -------------------------------
     @abstractmethod
@@ -188,6 +189,22 @@ class Ring(ABC):
         with self._state_lock:
             return self._max_bytes
 
+    def protect_from(self, seq: int | None) -> None:
+        """Never retire segment `seq` or a later one (2.6.2: what the player reads in a server
+        part, and what lies ahead of it); None lifts it. Over the cap with only protected
+        segments left, the ring takes more instead of failing (its writer is paced)."""
+        with self._state_lock:
+            self._protected = seq
+
+    def retirable(self) -> bool:
+        """It holds a completed segment that may go (2.6.2: none, or only protected ones)."""
+        with self._state_lock:
+            return self._retirable_locked()
+
+    def _retirable_locked(self) -> bool:
+        protected = self._protected
+        return bool(self._completed) and (protected is None or self._completed[0].seq < protected)
+
     def set_max_bytes(self, max_bytes: int) -> None:
         """Hold up to `max_bytes` from now on (a multiview tile's ring grows with the focus and
         shrinks without it): a smaller cap evicts the oldest completed segments at once until
@@ -199,7 +216,7 @@ class Ring(ABC):
                 if self.closed:
                     return
                 self._max_bytes = max_bytes
-            while self._charged > max_bytes and self._completed:
+            while self._charged > max_bytes and self._retirable_locked():
                 self._retire_oldest_locked()
             with self.changed:
                 self.changed.notify_all()
@@ -281,10 +298,10 @@ class Ring(ABC):
     def _reserve_write(self, segment: Segment, length: int) -> None:
         charge = self._charge_for(segment.size + length)
         additional = charge - segment.charge
-        while self._charged + additional > self._max_bytes and self._completed:
+        while self._charged + additional > self._max_bytes and self._retirable_locked():
             self._retire_oldest_locked()
-        if self._charged + additional > self._max_bytes:
-            raise RingError(self._LIMIT_TEXT)
+        if self._charged + additional > self._max_bytes and not self._completed:
+            raise RingError(self._LIMIT_TEXT)  # (only protected ones left: it takes more)
         self._extra_check(segment, additional)
         with self._state_lock:
             self._charged += additional
@@ -341,7 +358,7 @@ class Ring(ABC):
     def retire_oldest(self) -> bool:
         """Let the oldest completed segment go (2.6, the disk amount); False without one."""
         with self._disk_lock:
-            if self.closed or not self._completed:
+            if self.closed or not self._retirable_locked():
                 return False
             self._retire_oldest_locked()
             with self.changed:
@@ -353,7 +370,7 @@ class Ring(ABC):
         the open one stays. Returns how many went."""
         count = 0
         with self._disk_lock:
-            while not self.closed and self._completed and self._completed[0].wall < wall:
+            while not self.closed and self._retirable_locked() and self._completed[0].wall < wall:
                 self._retire_oldest_locked()
                 count += 1
             if count:
@@ -1084,7 +1101,7 @@ class DiskBudget:
     def _victim(rings: list[tuple[Ring, bool]]) -> tuple[Ring, bool] | None:
         """The ring whose oldest segment goes next: a parked one's oldest, else any one's."""
         for parked in (True, False):
-            held = [(r, p) for r, p in rings if p is parked and r.oldest_wall() is not None]
+            held = [(r, p) for r, p in rings if p is parked and r.retirable()]
             if held:
                 return min(held, key=lambda item: item[0].oldest_wall() or 0.0)
         return None
