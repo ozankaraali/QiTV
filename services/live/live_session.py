@@ -307,6 +307,10 @@ _OPEN_SEED_S = 0.5  # VLC's open time (play() to Playing) before any was measure
 _OPEN_MAX_S = 2.0  # a longer open (a stalled source, say) counts as this long
 _OPEN_WEIGHT = 0.3  # of each new measurement in the open time's moving average
 _EDGE_S = 1.0  # VLC this close to the live edge is at it (a starvation, and its restart after)
+# 2.6.2: a channel's own server window (a long HLS playlist) is offered past the buffer when it
+# keeps at least this much more; the bar reaches this far past the buffer (as catch-up's).
+WINDOW_MIN_S = 300.0
+WINDOW_BAR_S = 30 * 60.0
 # VLC's clock, which moved since the open, standing still this long while VLC plays with media
 # ahead and the source sending is lost (`_clock_lost`): it opens again.
 _CLOCK_LOST_S = 10.0
@@ -1040,6 +1044,19 @@ class LiveSession(QObject):
             return (0.0, 0.0)
         snapshot = self._snapshot()
         return (self._buffer_start(snapshot), self._live_edge(snapshot))
+
+    def server_window(self) -> float:
+        """How many seconds the channel's own server keeps beyond the buffer (2.6.2): its HLS
+        playlist's window less what the buffer spans, when that is `WINDOW_MIN_S` or more;
+        else 0.0."""
+        if self._phase is not _Phase.PIPELINE:
+            return 0.0
+        snapshot = self._snapshot()
+        window = _number(snapshot.get("window_s"))
+        if snapshot.get("hls") is not True or window <= 0.0:
+            return 0.0
+        beyond = window - (self._live_edge(snapshot) - self._buffer_start(snapshot))
+        return beyond if beyond >= WINDOW_MIN_S else 0.0
 
     def position(self) -> float:
         if self._phase is _Phase.PIPELINE:
@@ -2475,32 +2492,37 @@ class LiveSession(QObject):
         learned = self._learned
         lag = self._reported_lag(snapshot, position)
         shown = self._settled.value
-        self.timelineChanged.emit(
-            {
-                "start": self._buffer_start(snapshot),
-                "end": _number(snapshot.get("end")),
-                "position": position,
-                "live_edge": edge,
-                "lag": lag,
-                # The lag as the Stay live indicator shows it: settled, in half seconds.
-                "shown": shown if shown is not None else SettledLag.rounded(lag),
-                "mode": self._stay.mode.value,
-                "rate": self._rate,
-                "nudge": self._stay.nudge,  # the rate a nudge ramps to (1.0: none)
-                "paused": self._paused,
-                "ended": self._ended,
-                "target": self._target(snapshot),
-                "stalled": self._stalled(snapshot),
-                # The helper is opening a new connection (raw TS), not waiting on this one.
-                "reconnecting": bool(snapshot.get("reconnecting", False)),
-                "auto": learned is not None,
-                "adjusted": learned is not None and learned.prior.margin() > 0.0,
-                # 2.6: the buffer's parts ([first_seq, start, wall] each) and how far behind
-                # the time of day the position is (the time away included).
-                "parts": [list(part) for part in snapshot.get("parts") or ()],
-                "behind": self._behind(snapshot, position, edge),
-            }
-        )
+        state: dict[str, Any] = {
+            "start": self._buffer_start(snapshot),
+            "end": _number(snapshot.get("end")),
+            "position": position,
+            "live_edge": edge,
+            "lag": lag,
+            # The lag as the Stay live indicator shows it: settled, in half seconds.
+            "shown": shown if shown is not None else SettledLag.rounded(lag),
+            "mode": self._stay.mode.value,
+            "rate": self._rate,
+            "nudge": self._stay.nudge,  # the rate a nudge ramps to (1.0: none)
+            "paused": self._paused,
+            "ended": self._ended,
+            "target": self._target(snapshot),
+            "stalled": self._stalled(snapshot),
+            # The helper is opening a new connection (raw TS), not waiting on this one.
+            "reconnecting": bool(snapshot.get("reconnecting", False)),
+            "auto": learned is not None,
+            "adjusted": learned is not None and learned.prior.margin() > 0.0,
+            # 2.6: the buffer's parts ([first_seq, start, wall] each) and how far behind
+            # the time of day the position is (the time away included).
+            "parts": [list(part) for part in snapshot.get("parts") or ()],
+            "behind": self._behind(snapshot, position, edge),
+        }
+        beyond = self.server_window()
+        if beyond > 0.0:  # 2.6.2: drawn as catch-up draws an archive past the buffer
+            start = float(state["start"])
+            state["buffer_start"] = start
+            state["window_start"] = start - beyond
+            state["start"] = start - min(beyond, WINDOW_BAR_S)
+        self.timelineChanged.emit(state)
 
     def _behind(self, snapshot: Mapping[str, Any], position: float, edge: float) -> float:
         parts = live_parts.from_state(snapshot.get("parts"))

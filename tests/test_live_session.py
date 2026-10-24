@@ -16,7 +16,7 @@ from services.live import learned_target, worker
 from services.live.kept import KeptRing, Where
 from services.live.learned_target import ArrivalModel, Learned, LearnedTarget
 import services.live.live_session as live_session
-from services.live.live_session import LiveSession
+from services.live.live_session import WINDOW_BAR_S, LiveSession
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.stay_live import AUTO, TARGETS, Decision, StayLive
 from services.live.timeline import Span
@@ -172,6 +172,7 @@ class FakeEngine(QObject):
         open_quality=None,
         video=None,
         parts=None,
+        window=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -205,6 +206,8 @@ class FakeEngine(QObject):
             self._snapshots[sid]["video"] = video
         if parts is not None:  # 2.6: [first_seq, start, wall] of each part
             self._snapshots[sid]["parts"] = [list(part) for part in parts]
+        if window is not None:  # 2.6.2: how long the server keeps the channel
+            self._snapshots[sid]["window_s"] = window
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def receive(self, sid, count):
@@ -5956,3 +5959,35 @@ class LearnedTargetTests(LiveSessionCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ServerWindowTests(LiveSessionCase):
+    """2.6.2: a channel whose own HLS playlist keeps far more than the buffer offers it: the
+    bar reaches past the buffer, as catch-up's does for an archive."""
+
+    def playing(self, window, *, hls=True):
+        sid = self.start()
+        spans = [Span(n, 6.0 * n, 6.0 * n + 6.0, False, media_seq=100 + n) for n in range(100)]
+        self.engine.buffer(sid, spans, hls=hls, window=window)
+        self.engine.sessionReady.emit(sid)
+        return sid
+
+    def test_a_long_server_window_is_offered_on_the_bar(self):
+        self.playing(86400.0)
+        self.assertEqual(self.live.server_window(), 85800.0)  # the buffer spans 600 s
+        self.live._emit_timeline()
+        state = self.timelines[-1]
+        self.assertEqual(state["buffer_start"], 0.0)
+        self.assertEqual(state["start"], -WINDOW_BAR_S)  # half an hour past the buffer
+        self.assertEqual(state["window_start"], -85800.0)
+
+    def test_a_short_window_is_not_offered(self):
+        self.playing(700.0)
+        self.assertEqual(self.live.server_window(), 0.0)
+        self.live._emit_timeline()
+        self.assertNotIn("buffer_start", self.timelines[-1])
+        self.assertEqual(self.timelines[-1]["start"], 0.0)
+
+    def test_raw_ts_offers_no_window(self):
+        self.playing(86400.0, hls=False)
+        self.assertEqual(self.live.server_window(), 0.0)
