@@ -1812,37 +1812,45 @@ video.m3u8
         self.assertIsInstance(parts[-1], CaughtUp)  # and after c.ts
 
     def test_a_media_sequence_restart_resumes_at_the_new_live_start(self):
+        # New names numbered back: believed once its copies persist as long as a stale copy is
+        # waited out (2.6.1: another origin group's copy looks alike, and a reload soon answers
+        # ours again); a newer discontinuity sequence says so at once.
+        restarted = hls(0, ["r0.ts", "r1.ts", "r2.ts"])
         cases = {
             "new segment names": (
-                hls(100, ["s100.ts", "s101.ts", "s102.ts"]),
-                hls(0, ["r0.ts", "r1.ts", "r2.ts"]),
-                hls(1, ["r1.ts", "r2.ts", "r3.ts"], ended=True),
+                [
+                    hls(100, ["s100.ts", "s101.ts", "s102.ts"]),
+                    *[restarted] * 4,  # three target durations: 1 s each here
+                    hls(1, ["r1.ts", "r2.ts", "r3.ts"], ended=True),
+                ],
                 ["s102.ts", "r2.ts", "r3.ts"],
             ),
             "new discontinuity sequence": (
-                hls(100, ["x.ts", "y.ts", "z.ts"], extra="#EXT-X-DISCONTINUITY-SEQUENCE:0\n"),
-                hls(5, ["y.ts", "z.ts", "n.ts"], extra="#EXT-X-DISCONTINUITY-SEQUENCE:1\n"),
-                hls(
-                    6,
-                    ["z.ts", "n.ts", "m.ts"],
-                    ended=True,
-                    extra="#EXT-X-DISCONTINUITY-SEQUENCE:1\n",
-                ),
+                [
+                    hls(100, ["x.ts", "y.ts", "z.ts"], extra="#EXT-X-DISCONTINUITY-SEQUENCE:0\n"),
+                    hls(5, ["y.ts", "z.ts", "n.ts"], extra="#EXT-X-DISCONTINUITY-SEQUENCE:1\n"),
+                    hls(
+                        6,
+                        ["z.ts", "n.ts", "m.ts"],
+                        ended=True,
+                        extra="#EXT-X-DISCONTINUITY-SEQUENCE:1\n",
+                    ),
+                ],
                 ["z.ts", "n.ts", "m.ts"],
             ),
         }
-        for name, (first, second, third, fetched) in cases.items():
+        for name, (copies, fetched) in cases.items():
             with self.subTest(name):
-                copies = [first, second, third]
 
                 def playlist(_request, count, copies=copies):
-                    return 200, {}, copies[min(count, 3) - 1]
+                    return 200, {}, copies[min(count, len(copies)) - 1]
 
                 data = dict(zip(fetched, (self.video, self.next_video, self.video)))
                 routes = {f"/{segment}": (200, {}, body) for segment, body in data.items()}
                 routes["/live.m3u8"] = playlist
                 server = self.server(routes)
-                parts = media(server.url + "/live.m3u8", live_delay=1.0)
+                with patch.object(source_module, "_OTHER_COPY_S", 0.0):  # three targets
+                    parts = media(server.url + "/live.m3u8", live_delay=1.0)
                 self.assertEqual(
                     parts, joined(self.video, Discontinuity(), self.next_video, self.video)
                 )
@@ -1916,6 +1924,84 @@ video.m3u8
             parts = media(server.url + "/live.m3u8", live_delay=1.0)
         self.assertEqual(parts, joined(self.video, Discontinuity(), self.next_video))
         self.assertEqual(requested_segments(server), ["c.ts", "d.ts"])
+
+    def test_a_copy_from_another_origin_group_is_set_aside(self):
+        # Two origin groups behind one address, each numbering and naming its own encoding
+        # (measured 2.6.1, a 24 h public playlist): the other group's copy is neither a stale
+        # copy of ours nor a restart, and a reload a second later answers ours again.
+        ours = [
+            hls(10, ["a.ts", "b.ts", "c.ts"]),
+            hls(11, ["b.ts", "c.ts", "d.ts"]),
+            hls(12, ["c.ts", "d.ts", "e.ts"], ended=True),
+        ]
+        others = {
+            "numbered far ahead": hls(500, ["x.ts", "y.ts", "z.ts"]),
+            "numbered behind": hls(2, ["x.ts", "y.ts", "z.ts"]),
+            "numbered alike": hls(11, ["x.ts", "y.ts", "z.ts"]),
+        }
+        for case, other in others.items():
+            with self.subTest(case):
+                copies = [ours[0], other, ours[1], other, other, ours[2]]
+
+                def playlist(_request, count, copies=copies):
+                    return 200, {}, copies[min(count, len(copies)) - 1]
+
+                routes = {f"/{name}.ts": (200, {}, self.video) for name in "abcexyz"}
+                routes["/d.ts"] = (200, {}, self.next_video)
+                routes["/live.m3u8"] = playlist
+                server = self.server(routes)
+                parts = media(server.url + "/live.m3u8", live_delay=1.0)
+                self.assertEqual(parts, joined(self.video, self.next_video, self.video))
+                self.assertEqual(requested_segments(server), ["c.ts", "d.ts", "e.ts"])
+
+    def test_another_groups_copy_is_asked_again_on_a_new_connection(self):
+        # A load balancer that pins a connection to one origin group (measured 2.6.1): the
+        # kept-alive connection went on answering the other group's copies, so the playlist
+        # is asked for again on a fresh one.
+        ours = [
+            hls(10, ["a.ts", "b.ts", "c.ts"]),
+            hls(11, ["b.ts", "c.ts", "d.ts"]),
+            hls(12, ["c.ts", "d.ts", "e.ts"], ended=True),
+        ]
+        first_port = []
+        served = []
+
+        def playlist(request, _count):
+            port = request.client_address[1]
+            if first_port and port == first_port[0] and served:
+                return 200, {}, hls(500, ["x.ts", "y.ts", "z.ts"])  # it went over
+            first_port[:] = first_port or [port]
+            served.append(ours[min(len(served), 2)])
+            return 200, {}, served[-1]
+
+        routes = {f"/{name}.ts": (200, {}, self.video) for name in "abcexyz"}
+        routes["/d.ts"] = (200, {}, self.next_video)
+        routes["/live.m3u8"] = playlist
+        server = self.server(routes, keep_alive=True)
+        parts = media(server.url + "/live.m3u8", live_delay=1.0)
+        self.assertEqual(parts, joined(self.video, self.next_video, self.video))
+        self.assertEqual(requested_segments(server), ["c.ts", "d.ts", "e.ts"])
+
+    def test_another_groups_copies_that_persist_are_followed(self):
+        # Ours stopped answering (its encoder went down): once the other group's copies
+        # persisted three target durations (at least `_OTHER_COPY_S`), it plays on from them.
+        def playlist(_request, count):
+            if count == 1:
+                return 200, {}, hls(10, ["a.ts", "b.ts", "c.ts"])
+            return 200, {}, hls(500, ["x.ts", "y.ts", "z.ts"], ended=count >= 6)
+
+        server = self.server(
+            {
+                "/live.m3u8": playlist,
+                "/c.ts": (200, {}, self.video),
+                "/z.ts": (200, {}, self.next_video),
+            }
+        )
+        with patch.object(source_module, "_OTHER_COPY_S", 2.0):
+            parts = media(server.url + "/live.m3u8", live_delay=1.0)
+        self.assertEqual(parts, joined(self.video, Discontinuity(), self.next_video))
+        self.assertEqual(requested_segments(server), ["c.ts", "z.ts"])
+        self.assertGreaterEqual(server.counts["/live.m3u8"], 5)  # it waited 3 s for ours
 
     def test_falling_behind_the_window_resumes_at_the_live_start(self):
         def playlist(_request, count):

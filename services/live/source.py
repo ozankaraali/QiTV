@@ -104,6 +104,11 @@ _FROZEN_TIMEOUT = 60.0
 # An older playlist copy that overlaps recent segments is waited out this many targets.
 _STALE_TARGETS = 3
 _RECENT_SEGMENTS = 10
+# 2.6.1: copies of another origin group (its own numbering and names) are set aside, the
+# playlist reloaded each _OTHER_RELOAD_S, until they persist as long as a stale copy is waited
+# out (measured: such a group answered every request for up to 14 s), at least this.
+_OTHER_COPY_S = 4.0
+_OTHER_RELOAD_S = 1.0
 _SEGMENT_FAILURES = 3
 _SKIPPABLE_STATUS = (404, 410)
 # Answers that mean the provider's stream limit is reached (spec 6.9), never retried; any other
@@ -390,6 +395,12 @@ class _Http:
         if referer:  # an M3U channel's http-referrer (2.1): every request, as VLC sends it
             self.session.headers["Referer"] = referer
         threading.Thread(target=self._watch, name="qitv-live-source-stop", daemon=True).start()
+
+    def reconnect(self) -> None:
+        """The next request opens a new connection (2.6.1: a load balancer that pins a
+        connection to one origin group answers that group's playlist copies on it for good)."""
+        for adapter in self.session.adapters.values():
+            adapter.close()
 
     def _watch(self) -> None:
         while not self._stop.wait(_STOP_POLL):
@@ -1000,6 +1011,11 @@ class HlsSource:
       skipped with a marker; three failures in a row end the session;
     - a stale playlist copy is waited out; a media-sequence restart, or falling behind the
       window, resumes at the live start;
+    - a copy of another origin group (2.6.1: two groups behind one address, each numbering and
+      naming its own encoding, a connection pinned to one) is set aside and the playlist asked
+      for again on a new connection each second, until such copies persist as long as a stale
+      copy is waited out (at least 4 s): a restart, or ours went down, followed with a marker
+      (`_other_copy`);
     - reloads that bring no new segment for 60 s (download time excluded) time out.
 
     Fragmented MP4 (CMAF) segments, a playlist with an init section (EXT-X-MAP), are fetched
@@ -1187,14 +1203,58 @@ class HlsSource:
             return True
         return stalled >= _STALE_TARGETS * float(playlist.target_duration or 1)
 
+    def _other_copy(self, playlist: Any, base: str, next_sequence: int, quiet: float) -> bool:
+        """Whether this copy is another origin group's (2.6.1: two groups behind one address,
+        each numbering and naming its own encoding, answering in turn): it names the segment
+        last fetched otherwise; or it lists none of them and is numbered ahead further than
+        `quiet` (the time since a copy of ours) explains, or behind with none of their names
+        and no newer discontinuity sequence (a stale copy overlaps; a restart says so)."""
+        if not self._recent:
+            return False
+        first = playlist.media_sequence or 0
+        segments = playlist.segments
+        for sequence in range(next_sequence - 1, next_sequence - 1 - len(self._recent), -1):
+            index = sequence - first
+            if 0 <= index < len(segments) and not segments[index].gap_tag:
+                return _identity(_resolve(base, segments[index].uri)) not in self._recent
+        if first > next_sequence:  # a fall behind the window comes no faster than its segments
+            step = 0.5 * max(1.0, float(playlist.target_duration or 0))
+            return first - next_sequence > math.ceil(quiet / step) + 3
+        if first + len(segments) >= next_sequence:  # it goes on from where ours stops
+            return False
+        if (playlist.discontinuity_sequence or 0) > (self._discontinuity_sequence or 0):
+            return False
+        names = {_identity(_resolve(base, segment.uri)) for segment in segments}
+        return names.isdisjoint(self._recent)
+
     def _run(self) -> Iterator[Chunk]:
         http, playlist, url = self._http, self._playlist, self._url
-        loaded = progress = self._loaded
+        loaded = progress = ours = self._loaded
+        other: float | None = None  # when copies of another origin group began
         next_sequence: int | None = None
         while True:
             first = playlist.media_sequence or 0
             newest = first + len(playlist.segments) - 1
             stale = False
+            if next_sequence is not None and self._other_copy(
+                playlist, url, next_sequence, loaded - ours
+            ):
+                if other is None:
+                    other = loaded
+                    log.info("An HLS playlist copy numbers another encoding; waiting for ours.")
+                bound = max(_OTHER_COPY_S, _STALE_TARGETS * float(playlist.target_duration or 0))
+                if loaded - other < bound:
+                    if http.wait(_OTHER_RELOAD_S - (time.monotonic() - loaded)):
+                        raise _Closed()
+                    http.reconnect()  # its server may stay with that group
+                    loaded = time.monotonic()
+                    content, final = http.fetch(lambda: _load_playlist(http, url))
+                    playlist, url, _separate = _media_playlist(http, content, final)
+                    continue
+                log.info("The other HLS encoding persisted; following it.")
+                self._mark()
+                next_sequence = first + self._start(playlist)  # its numbers are not ours
+            other, ours = None, loaded
             if next_sequence is None:
                 next_sequence = first + self._start(playlist)
             elif first > next_sequence:
