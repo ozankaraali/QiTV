@@ -579,6 +579,27 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertEqual(starts, [(0, 0), (1, 4)])
         self.assertGreater(len(buffered), 2)  # segments within an HLS segment carry None
 
+    def test_the_state_reports_the_server_window(self):
+        # 2.6.2: a live HLS source's window and newest media sequence; raw TS has neither.
+        first, second = make_stream(4), make_stream(4, pts_start=900000 + 4 * 90000)
+        source = self.source(
+            {
+                SECRET_PATH: (200, {}, make_stream(9)),
+                "/user/secret/live.m3u8": (200, {}, leaf("a.ts", "b.ts", ended=False)),
+                "/user/secret/a.ts": (200, {}, first),
+                "/user/secret/b.ts": (200, {}, second),
+            }
+        )
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/live.m3u8", live_delay=100.0)
+        state = helper.wait_for(lambda m: m[:2] == ("state", sid) and m[2].get("window_s") == 8.0)
+        self.assertEqual(state[2]["edge_seq"], 1)
+        raw = helper.open(source.url + SECRET_PATH)
+        helper.wait_for(lambda message: message == ("ended", raw))
+        for state in helper.of(raw, "state"):
+            self.assertNotIn("window_s", state[2])
+            self.assertNotIn("edge_seq", state[2])
+
     def test_an_hls_batch_reports_its_live_edge_once_delivered(self):
         # 2.1: states are throttled to four a second, so the end of a batch that
         # arrived within a quarter second waited for the next batch (a 2 s keyframe interval

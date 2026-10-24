@@ -1942,6 +1942,23 @@ video.m3u8
             source.close()
         self.assertEqual(seen, [10, 11, 12])
 
+    def test_a_live_hls_source_reports_its_window(self):
+        # 2.6.2: how long the server keeps the channel (a long window is offered on the bar).
+        cases = (("live", False, 30.0, 104), ("finished", True, 0.0, 104))
+        for name, ended, window, edge in cases:
+            with self.subTest(name):
+                names = [f"s{n}.ts" for n in range(5)]
+                routes = {"/live.m3u8": (200, {}, hls(100, names, target=6, ended=ended))}
+                server = self.server(routes)
+                source = open_source(
+                    server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+                )
+                try:
+                    self.assertEqual(source.window_s, window)
+                    self.assertEqual(source.edge_sequence, edge)
+                finally:
+                    source.close()
+
     def test_a_copy_from_another_origin_group_is_set_aside(self):
         # Two origin groups behind one address, each numbering and naming its own encoding
         # (measured 2.6.1, a 24 h public playlist): the other group's copy is neither a stale

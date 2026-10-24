@@ -1083,6 +1083,9 @@ class HlsSource:
         self._extra = extra  # what the session adds to its target (Auto's learned extra)
         self._loaded = time.monotonic()
         self._burst = float(playlist.target_duration or 0)
+        self._window = 0.0  # 2.6.2: how long a live playlist's window lasts (0.0: finished)
+        self._edge_sequence: int | None = None  # its newest segment's media sequence
+        self._note_window(playlist)
         self._keys: dict[str, bytes] = {}
         self._recent: deque[str] = deque(maxlen=_RECENT_SEGMENTS)
         self._discontinuity_sequence = playlist.discontinuity_sequence
@@ -1107,6 +1110,24 @@ class HlsSource:
     def segment_serial(self) -> int:
         """Counts the segments started: it changes as the next segment's first bytes come."""
         return self._serial
+
+    @property
+    def window_s(self) -> float:
+        """How long the live playlist's window lasts, its segments' EXTINF summed (2.6.2: a
+        server that keeps hours offers them past the buffer); 0.0 once it is finished."""
+        return self._window
+
+    @property
+    def edge_sequence(self) -> int | None:
+        """The media sequence of the newest segment its playlist lists (2.6.2)."""
+        return self._edge_sequence
+
+    def _note_window(self, playlist: Any) -> None:
+        segments = playlist.segments
+        live = not playlist.is_endlist
+        self._window = sum(float(segment.duration or 0) for segment in segments) if live else 0.0
+        if segments:
+            self._edge_sequence = (playlist.media_sequence or 0) + len(segments) - 1
 
     @property
     def segment_sequence(self) -> int | None:
@@ -1261,6 +1282,7 @@ class HlsSource:
                 self._mark()
                 next_sequence = first + self._start(playlist)  # its numbers are not ours
             other, ours = None, loaded
+            self._note_window(playlist)
             if next_sequence is None:
                 next_sequence = first + self._start(playlist)
             elif first > next_sequence:

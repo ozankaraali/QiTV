@@ -1372,6 +1372,10 @@ class _Session:
             # 2.6: the buffer's parts, [first_seq, start, wall] each (`services.live.parts`).
             "parts": [[p.first_seq, p.start, p.wall] for p in timeline.parts()],
         }
+        if source is not None and source.hls:
+            # 2.6.2: how long the server keeps the channel, and its newest media sequence.
+            snapshot["window_s"] = float(getattr(source, "window_s", 0.0) or 0.0)
+            snapshot["edge_seq"] = getattr(source, "edge_sequence", None)
         self._heard_edge = edge
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the
