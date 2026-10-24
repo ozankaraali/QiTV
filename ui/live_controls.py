@@ -66,6 +66,14 @@ logger = logging.getLogger(__name__)
 LIVE_SEEK_S = 10.0  # ←/→ while time-shifting (spec §6.7)
 BACK_NOTICE_MS = 60_000  # 2.6: the Resume pill shows this long (the owner: "a minute or so")
 _PAST_BUFFER_S = 1.0  # a point this far before the buffer's start is the archive's
+
+
+def _reach(state: dict) -> float:
+    """How far back the live session plays (timeline seconds): its buffer's start, or (2.6.2)
+    the start of the channel's own server window; a provider's archive is reached beyond."""
+    return float(state.get("window_start", state["start"]))
+
+
 _AT_START_S = 5.0  # ⏮ this near a programme's start goes to the one before (the archive)
 TICK_PROGRAMMES = 6  # programme starts marked on the time-shift bar
 # When its limit is not known (shown with translate()).
@@ -642,7 +650,7 @@ class LiveControls(QObject):
             self.catchup.seek_to(seconds)  # the archive's bar is in Unix seconds
         elif self.pipeline_live() and self.live is not None:
             state = self._tuner.timeline
-            if state is not None and seconds < float(state["start"]) - _PAST_BUFFER_S:
+            if state is not None and seconds < _reach(state) - _PAST_BUFFER_S:
                 if self._open_archive_at(state, seconds):
                     return
             self.catchup.cancel()  # within the buffer: a probe for the archive is dropped
@@ -655,7 +663,7 @@ class LiveControls(QObject):
         if state is None:
             return False
         t = float(state["position"]) + seconds
-        return t < float(state["start"]) - _PAST_BUFFER_S and self._open_archive_at(state, t)
+        return t < _reach(state) - _PAST_BUFFER_S and self._open_archive_at(state, t)
 
     def _open_archive_at(self, state: dict, t: float) -> bool:
         """The channel's archive at the time-shift timeline's `t` (its live edge is now; 2.6:
@@ -700,7 +708,7 @@ class LiveControls(QObject):
         if not self.pipeline_live() or self.live is None or current is None or state is None:
             return
         stamp = self._now().timestamp()
-        oldest = float(state["start"])
+        oldest = _reach(state)  # 2.6.2: the channel's server window, past the bar too
         moment = min(live_parts.wall_in(state, float(state["position"]), stamp), stamp)
         watching = datetime.fromtimestamp(moment, timezone.utc)
         target = oldest

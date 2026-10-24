@@ -483,3 +483,49 @@ class ProbeTests(CatchupCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# 2.6.2: the session draws the channel's own server window past the buffer (a day here), the
+# bar reaching half an hour past the buffer.
+WINDOWED = dict(STATE, start=3000.0 - 1800.0, buffer_start=3000.0, window_start=3000.0 - 86000.0)
+
+
+class ServerWindowRoutingTests(CatchupCase):
+    """2.6.2: within the channel's own server window the session plays it (a server part);
+    a provider's archive is reached beyond it."""
+
+    def windowed(self, channel=ARCHIVED, **state):
+        self.start_archived(channel)
+        self.live.timelineChanged.emit(dict(WINDOWED, **state))
+        self.controller.mouse_moved()
+
+    def test_the_bar_draws_the_window_as_the_session_sends_it(self):
+        self.windowed()
+        state, _ticks = self.transport.named("update_timeline")[-1]
+        self.assertEqual((state["start"], state["buffer_start"]), (1200.0, 3000.0))
+
+    def test_left_past_the_buffer_goes_into_the_server_window(self):
+        self.windowed()
+        self.controller.handle(Action.SEEK_BACK)  # 10 s back from 5 s after the buffer's start
+        self.assertEqual(self.live.named("seek_relative"), [(-10.0,)])
+        self.assertEqual(self.archive_plays(), [])
+
+    def test_programme_start_reaches_into_the_window(self):
+        # A programme that began two hours ago: the server keeps it, the bar shows 30 min.
+        self.catalog.epg[1] = [
+            Programme("Film", NOW - timedelta(hours=2), NOW + timedelta(minutes=5))
+        ]
+        self.catalog.epg[2] = self.catalog.epg[1]
+        for channel in (ARCHIVED, PLAIN):
+            with self.subTest(channel=channel["name"]):
+                self.windowed(channel)
+                self.transport.programmeStartRequested.emit()
+                self.assertEqual(self.live.named("seek_to")[-1], (3600.0 - 7200.0,))
+                self.assertEqual(self.archive_plays(), [])
+
+    def test_beyond_the_window_a_provider_archive_opens(self):
+        # The window's start reached: the provider's archive goes on before it.
+        self.windowed(start=1200.0, window_start=1200.0, position=1205.0)
+        self.controller.handle(Action.SEEK_BACK)
+        self.live.released.emit()
+        self.assertEqual(len(self.archive_plays()), 1)

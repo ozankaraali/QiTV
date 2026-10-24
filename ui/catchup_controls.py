@@ -326,8 +326,8 @@ class CatchUp(QObject):
         """A time-shift state whose bar reaches into the channel's archive (see the module
         docstring); the state as it is when the archive is not offered."""
         archive = self.offered(target)
-        if archive is None:
-            return state
+        if archive is None or "window_start" in state:
+            return state  # 2.6.2: the session draws the channel's own window; this one is beyond
         start = float(state["start"])
         now = self._now().timestamp()
         ring_wall = live_parts.wall_in(state, start, now)  # 2.6: a kept buffer's own time
