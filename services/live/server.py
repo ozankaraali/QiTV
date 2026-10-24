@@ -58,6 +58,10 @@ class _Session:
     is_ended: Callable[[], bool]
     removed: bool = False
     clients: set[socket.socket] = field(default_factory=set)
+    # 2.6.2: the segment the newest client streams now (a server part is paced by it), and
+    # that client's turn (an older client still open after a reopen no longer moves it).
+    reading: int | None = None
+    reader: int = 0
 
 
 def _wake(ring: Ring) -> None:
@@ -138,6 +142,13 @@ class StreamServer:
             session = self._sessions.pop(session_id, None)
         if session is not None:
             self._end(session)
+
+    def reading(self, session_id: str) -> int | None:
+        """The segment the newest client of the session streams now (2.6.2); None before one
+        did, or for an unknown session."""
+        with self._lock:
+            session = self._sessions.get(session_id)
+        return session.reading if session is not None else None
 
     def stream_url(self, session_id: str, seq: int) -> str:
         if not self._base_url:
@@ -275,6 +286,9 @@ class _Handler(BaseHTTPRequestHandler):
         """Stream from segment `seq`; returns the status to send when nothing was sent."""
         ring = session.ring
         number, offset, started = seq, 0, False
+        session.reader += 1
+        turn = session.reader
+        session.reading = number
         while not session.removed:
             # Before the read, so any later append, completion or eviction ends the wait.
             with ring.changed:
@@ -312,6 +326,8 @@ class _Handler(BaseHTTPRequestHandler):
                 # A new run's tables (2.6) come with it; else the header is skipped.
                 number = number + 1
                 offset = 0 if ring.junction(number) else following[2]
+                if session.reader == turn:
+                    session.reading = number
             elif status != "timeout" or ended:
                 return 0  # the next segment was evicted, the ring closed, or the session ended
             else:

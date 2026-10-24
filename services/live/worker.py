@@ -814,6 +814,7 @@ class _Session:
                 extra=float(self._start.get("extra") or 0.0),
                 on_answer=self._on_answer,
                 window=window if isinstance(window, dict) else None,
+                hold=self._hold if isinstance(window, dict) and "ahead_s" in window else None,
             )
         except SourceError as error:
             if not self._parking:  # a park interrupted the open: nothing to say
@@ -1251,6 +1252,26 @@ class _Session:
         if held:
             self._apply(self._segmenter.feed(held))
         self._apply(self._segmenter.finish())
+
+    def _hold(self) -> bool:
+        """A server part (2.6.2) fetches no further while what it holds runs its `ahead_s`
+        past the start of the segment the player reads (its oldest before any read)."""
+        window = self._start.get("window")
+        ahead = window.get("ahead_s") if isinstance(window, dict) else None
+        if not isinstance(ahead, (int, float)):
+            return False
+        timeline = self._timeline
+        spans = timeline.spans()
+        if not spans:
+            return False
+        reading = self._helper.server.reading(self.sid)
+        if reading is None:
+            start = spans[0].start
+        else:
+            start = next((span.start for span in spans if span.seq == reading), None)
+            if start is None:  # the open segment (at the edge) or one evicted: fetch on
+                return False
+        return timeline.end - start > float(ahead)
 
     def _follow(self, source: Source) -> None:
         """HLS: note the live edge where each segment's first bytes begin (`_backlog`), and

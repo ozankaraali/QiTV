@@ -1512,6 +1512,42 @@ class InProcessHelper:
         self.parent.close()
 
 
+class ServerPartPacingTests(unittest.TestCase):
+    """2.6.2: a server part fetches only `ahead_s` past what the player reads."""
+
+    def test_a_server_part_buffers_about_its_ahead_of_the_reader(self):
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += "".join(f"#EXTINF:1,\ns{n}.ts\n" for n in range(10))
+        routes = {
+            f"/user/secret/s{n}.ts": (200, {}, make_stream(1, pts_start=900000 + n * 90000))
+            for n in range(10)
+        }
+        routes["/user/secret/live.m3u8"] = (200, {}, text.encode())
+        upstream = LocalSource(routes)
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        reading = [None]
+        helper.helper.server.reading = lambda sid: reading[0]
+
+        def fetched():
+            return [path for path, _headers in upstream.requests if path.endswith(".ts")]
+
+        window = {"back_s": 10.0, "ahead_s": 3.0}
+        url = upstream.url + "/user/secret/live.m3u8"
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"window": window}))
+        helper.wait_for(lambda m: m == ("ready", "p"))
+        time.sleep(1.5)
+        before = fetched()
+        self.assertGreaterEqual(len(before), 3)
+        self.assertLessEqual(len(before), 5)  # about 3 s ahead, never all 10
+        while helper.parent.poll(0.05):  # the states sent meanwhile
+            helper.messages.append(helper.parent.recv())
+        states = [m for m in helper.messages if m[:2] == ("state", "p")]
+        reading[0] = states[-1][2]["newest"]  # the player reaches the newest segment
+        time.sleep(1.5)
+        self.assertGreater(len(fetched()), len(before))
+
+
 AHEAD = 900_000 + 3600 * 90_000  # the provider's clock an hour later
 
 

@@ -257,6 +257,24 @@ class StreamServerTests(unittest.TestCase):
         # Well under the 0.5 s wait: appends wake the response instead of being polled.
         self.assertLess(max(latencies), 0.25, "appends were polled, not delivered on wakeup")
 
+    def test_the_server_says_which_segment_a_client_reads(self):
+        # 2.6.2: a server part fetches only so far ahead of what the player reads.
+        server = self.start_server()
+        writer = Writer(RamRing())
+        writer.open(0)
+        writer.append(1000)
+        writer.open()
+        writer.append(1000)
+        server.add_session("part", writer.ring, lambda: False)
+        self.assertIsNone(server.reading("part"))
+        client = self.client(server.stream_url("part", 0))
+        client.read(len(writer.stream(0)))
+        deadline = time.monotonic() + LIVE
+        while server.reading("part") != 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(server.reading("part"), 1)  # on the open segment now
+        self.assertIsNone(server.reading("unknown"))
+
     def test_response_ends_after_the_last_segment_of_an_ended_session(self):
         server = self.start_server()
         ended = threading.Event()

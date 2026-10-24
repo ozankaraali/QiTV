@@ -2005,6 +2005,31 @@ video.m3u8
         self.assertEqual(parts, joined(self.video, self.next_video))
         self.assertEqual(requested_segments(server), ["s106.ts", "s107.ts"])
 
+    def test_a_held_hls_source_fetches_nothing_until_let_go(self):
+        # 2.6.2: `hold` pauses the fetching between segments (a server part's pacing).
+        names = ["a.ts", "b.ts", "c.ts"]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        routes["/live.m3u8"] = (200, {}, hls(0, names, ended=True))
+        server = self.server(routes)
+        held = threading.Event()
+        held.set()
+        source = open_source(
+            server.url + "/live.m3u8",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            hold=held.is_set,
+        )
+        got = []
+        reader = threading.Thread(target=lambda: got.extend(source.chunks()), daemon=True)
+        reader.start()
+        time.sleep(0.6)
+        self.assertEqual(requested_segments(server), [])
+        held.clear()
+        reader.join(5)
+        source.close()
+        self.assertEqual(requested_segments(server), names)
+
     def test_a_server_parts_first_wall_is_its_time_of_day(self):
         # Its first segment's time of day: the opened copy's segments after it, counted back
         # from now (the bar places the part by it).

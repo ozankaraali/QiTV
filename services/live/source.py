@@ -105,6 +105,7 @@ _FROZEN_TIMEOUT = 60.0
 _STALE_TARGETS = 3
 _RECENT_SEGMENTS = 10
 _wall_time = time.time  # 2.6.2: a server part's time of day; tests replace it
+_HOLD_POLL_S = 0.25  # 2.6.2: how often a held source asks again
 # 2.6.1: copies of another origin group (its own numbering and names) are set aside, the
 # playlist reloaded each _OTHER_RELOAD_S, until they persist as long as a stale copy is waited
 # out (measured: such a group answered every request for up to 14 s), at least this.
@@ -1063,6 +1064,7 @@ class HlsSource:
         separate_audio: str | None = None,
         capture: _Capture | None = None,
         window: Mapping[str, Any] | None = None,
+        hold: Callable[[], bool] | None = None,
     ) -> None:
         """`window` (2.6.2): a server part, `{"back_s": seconds, "until_seq": sequence}`: it
         starts that far back from the playlist's end and its input ends before that media
@@ -1073,6 +1075,7 @@ class HlsSource:
         self._back = float(back) if isinstance(back, (int, float)) else None
         self._until = until if type(until) is int else None
         self._part_wall: float | None = None
+        self._hold = hold  # 2.6.2: fetch no further segment while it says so (pacing)
         self._http = http
         self._capture = capture
         self._playlist = playlist
@@ -1347,6 +1350,9 @@ class HlsSource:
                 if self._until is not None and sequence >= self._until:
                     done = True
                     break
+                while self._hold is not None and self._hold():
+                    if http.wait(_HOLD_POLL_S):
+                        raise _Closed()
                 next_sequence = sequence + 1
                 if segment.discontinuity:
                     self._mark()
@@ -1866,6 +1872,7 @@ def _open_http(
     on_answer: Callable[[bool], None] | None = None,
     capture: _Capture | None = None,
     window: Mapping[str, Any] | None = None,
+    hold: Callable[[], bool] | None = None,
 ) -> Source:
     response, prefix, content = _first_answer(http, url, on_answer)
     if content is None:
@@ -1888,6 +1895,7 @@ def _open_http(
         separate_audio=separate,
         capture=capture,
         window=window,
+        hold=hold,
     )
 
 
@@ -1903,9 +1911,11 @@ def open_source(
     allow_local: bool = False,
     on_answer: Callable[[bool], None] | None = None,
     window: Mapping[str, Any] | None = None,
+    hold: Callable[[], bool] | None = None,
 ) -> Source:
     """Open ``url``, sniff it, and return a TS or HLS source (``window``: a server part of
-    the HLS playlist, 2.6.2, `HlsSource`; raw TS then is unsupported).
+    the HLS playlist, 2.6.2, `HlsSource`; raw TS then is unsupported; ``hold``: an HLS
+    source fetches no further segment while it says so).
 
     One request, unless the first answer fails in passing: a 5xx or 408, a broken or refused
     connection, or a body that ends before its first byte is asked for again after each of the
@@ -1947,7 +1957,7 @@ def open_source(
     http = _Http(headers, verify_ssl, stop)
     capture = _Capture.from_environment(url)
     try:
-        return _open_http(http, url, live_delay, target, extra, on_answer, capture, window)
+        return _open_http(http, url, live_delay, target, extra, on_answer, capture, window, hold)
     except Exception as error:
         failure = SourceError("network", _STOPPED) if http.closed else _translate(error)
     except BaseException:
