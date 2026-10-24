@@ -16,7 +16,7 @@ from services.live import learned_target, worker
 from services.live.kept import KeptRing, Where
 from services.live.learned_target import ArrivalModel, Learned, LearnedTarget
 import services.live.live_session as live_session
-from services.live.live_session import WINDOW_BAR_S, LiveSession
+from services.live.live_session import WINDOW_AHEAD_S, WINDOW_BAR_S, LiveSession
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.stay_live import AUTO, TARGETS, Decision, StayLive
 from services.live.timeline import Span
@@ -173,6 +173,7 @@ class FakeEngine(QObject):
         video=None,
         parts=None,
         window=None,
+        part_wall=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -208,6 +209,8 @@ class FakeEngine(QObject):
             self._snapshots[sid]["parts"] = [list(part) for part in parts]
         if window is not None:  # 2.6.2: how long the server keeps the channel
             self._snapshots[sid]["window_s"] = window
+        if part_wall is not None:  # 2.6.2: a server part's first segment's time of day
+            self._snapshots[sid]["part_wall"] = part_wall
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def receive(self, sid, count):
@@ -5966,11 +5969,24 @@ class ServerWindowTests(LiveSessionCase):
     bar reaches past the buffer, as catch-up's does for an archive."""
 
     def playing(self, window, *, hls=True):
+        """A 600 s buffer (100 segments of 6 s, HLS media sequences 100 on) that began at
+        10,000 (Unix seconds); its live edge is now, 10,600."""
+        self.live._wall = lambda: 10_600.0
         sid = self.start()
         spans = [Span(n, 6.0 * n, 6.0 * n + 6.0, False, media_seq=100 + n) for n in range(100)]
-        self.engine.buffer(sid, spans, hls=hls, window=window)
+        self.engine.buffer(sid, spans, hls=hls, window=window, parts=[[0, 0.0, 10_000.0]])
         self.engine.sessionReady.emit(sid)
         return sid
+
+    def in_part(self, at=-300.0):
+        """Playing the server part opened by a seek to `at` (two 6 s segments from there)."""
+        sid = self.playing(86400.0)
+        self.live.seek_to(at)
+        part = self.engine.opened[-1][0]
+        own = [Span(0, 0.0, 6.0, False, media_seq=40), Span(1, 6.0, 12.0, False, media_seq=41)]
+        self.engine.buffer(part, own, hls=True, part_wall=10_000.0 + at)
+        self.engine.sessionReady.emit(part)
+        return sid, part
 
     def test_a_long_server_window_is_offered_on_the_bar(self):
         self.playing(86400.0)
@@ -5991,3 +6007,43 @@ class ServerWindowTests(LiveSessionCase):
     def test_raw_ts_offers_no_window(self):
         self.playing(86400.0, hls=False)
         self.assertEqual(self.live.server_window(), 0.0)
+
+    def test_a_seek_before_the_buffer_opens_a_server_part(self):
+        sid, part = self.in_part(-300.0)
+        self.assertNotEqual(part, sid)
+        window = self.engine.opened[-1][2]["window"]
+        self.assertEqual(window, {"back_s": 900.0, "until_seq": 100, "ahead_s": WINDOW_AHEAD_S})
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 0))
+        self.assertTrue(self.live.in_server_part())
+        self.assertAlmostEqual(self.live.position(), -300.0)
+        self.live._emit_timeline()
+        state = self.timelines[-1]
+        self.assertAlmostEqual(state["position"], -300.0)
+        self.assertEqual(state["start"], -300.0 - WINDOW_BAR_S)  # the bar reaches on past it
+        self.assertEqual(state["buffer_start"], 0.0)
+
+    def test_a_seek_within_the_part_is_local(self):
+        _sid, part = self.in_part(-300.0)
+        opens = len(self.engine.opened)
+        self.live.seek_to(-294.0)
+        self.assertEqual(len(self.engine.opened), opens)  # nothing opens anew
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 1))
+
+    def test_a_seek_into_the_buffer_closes_the_part(self):
+        sid, part = self.in_part(-300.0)
+        self.live.seek_to(30.0)
+        self.assertIn(part, self.engine.closed)
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 5))
+        self.assertFalse(self.live.in_server_part())
+
+    def test_stay_live_leaves_a_server_part_alone(self):
+        self.in_part(-300.0)
+        plays, rates = len(self.playback.plays), list(self.playback.rates)
+        self.playback.set_state(PlaybackState.PLAYING)
+        for _ in range(40):  # ten seconds
+            self.clock.now += 0.25
+            self.playback.ms += 250
+            self.live._tick()
+        self.assertEqual(len(self.playback.plays), plays)  # no jump to live
+        self.assertEqual(self.playback.rates, rates)  # no nudge
+        self.assertAlmostEqual(self.live.position(), -290.0, delta=0.5)

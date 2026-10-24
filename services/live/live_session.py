@@ -247,6 +247,7 @@ from services.live.kept import KeptRing, Where, where_dict
 from services.live.learned_target import LearnedTarget, learned_target
 from services.live.recorder import MAX_SECONDS, MIN_FREE_BYTES
 from services.live.refusals import REFUSALS, STREAM_LIMIT
+from services.live.server_part import ServerPart, back_for, buffer_first_media, hop_seq
 from services.live.stay_live import (
     AUTO,
     LATENCIES,
@@ -289,6 +290,8 @@ RECONNECTING = N_("Reconnecting…")  # i18n: toast: the channel's stream is ope
 KEPT_ONLY = N_("This channel can't open right now. Playing what was kept.")
 # i18n: toast: playback reached the end of a channel's kept buffer; the channel cannot open
 KEPT_END = N_("That's all that was kept. The channel can't open right now.")
+# i18n: toast: rewinding past QiTV's buffer into what the channel's server keeps failed
+PART_FAILED = N_("The channel's server didn't send that part")
 # i18n: toast: the disk under a channel's kept buffer failed; what was kept plays, Go live
 # plays the channel live again
 KEPT_DISK = N_("The disk buffer failed. Playing what was kept; Go live plays the channel again.")
@@ -311,6 +314,7 @@ _EDGE_S = 1.0  # VLC this close to the live edge is at it (a starvation, and its
 # keeps at least this much more; the bar reaches this far past the buffer (as catch-up's).
 WINDOW_MIN_S = 300.0
 WINDOW_BAR_S = 30 * 60.0
+WINDOW_AHEAD_S = 60.0  # a server part fetches this far ahead of the player
 # VLC's clock, which moved since the open, standing still this long while VLC plays with media
 # ahead and the source sending is lost (`_clock_lost`): it opens again.
 _CLOCK_LOST_S = 10.0
@@ -599,6 +603,11 @@ class LiveSession(QObject):
         # after all, it plays live and where the user was is offered, unless they moved.
         self._late: Optional[Where] = None
         self._aside: Optional[Where] = None  # where the user was when its player was set aside
+        # 2.6.2: the server part (the channel's own server window, before the buffer), whether
+        # its helper said ready, and whether VLC plays it.
+        self._part: Optional[ServerPart] = None
+        self._part_ready = False
+        self._in_part = False
         self._from_kept = False
         self._disk_failures = 0  # of the kept buffer taken back, this tune: a second starts afresh
         # Where a session with kept history goes when it is let go otherwise than by `park`
@@ -807,8 +816,9 @@ class LiveSession(QObject):
         return Where(self._advance(), self._paused)
 
     def _halt(self, *, park: bool) -> None:
-        """Stop playback; the session closes, or parks (2.6)."""
+        """Stop playback; the session closes, or parks (2.6); a server part closes."""
         self._end_recording()
+        self._close_part()
         pending, self._kept = self._kept, None
         if pending is not None:
             self._engine.close_session(pending.sid)  # never taken back: it goes
@@ -875,6 +885,11 @@ class LiveSession(QObject):
         if self._phase is not _Phase.PIPELINE or self._sid is None:
             return
         snapshot = self._snapshot()
+        before = t < self._buffer_start(snapshot)
+        if before and (self._part is not None or self.server_window() > 0.0):
+            self._seek_part(t, lo=lo, hi=hi)  # 2.6.2: what the channel's server keeps
+            return
+        self._close_part()  # within the buffer: never the server's again
         parts = live_parts.from_state(snapshot.get("parts"))
         # Only the newest part ends at the edge (2.6): an older one's end is not live.
         newest = not parts or live_parts.index_of(parts, t) == len(parts) - 1
@@ -905,6 +920,7 @@ class LiveSession(QObject):
         """The Go live button: back to the live edge at 1x, playing (not paused). While a
         kept buffer plays without its stream (2.6), the channel is tried again first; after
         its disk failed twice, it starts afresh (the helper's own memory fallback)."""
+        self._close_part()  # 2.6.2: the server part goes
         if self._kept_only and self._sid is not None and self._phase is _Phase.PIPELINE:
             if self._disk_failures >= 2:
                 self._start_afresh()
@@ -1057,6 +1073,10 @@ class LiveSession(QObject):
             return 0.0
         beyond = window - (self._live_edge(snapshot) - self._buffer_start(snapshot))
         return beyond if beyond >= WINDOW_MIN_S else 0.0
+
+    def in_server_part(self) -> bool:
+        """VLC plays the server part, before the buffer (2.6.2)."""
+        return self._in_part
 
     def position(self) -> float:
         if self._phase is _Phase.PIPELINE:
@@ -1434,6 +1454,10 @@ class LiveSession(QObject):
             self._all_closed()
 
     def _on_ready(self, sid: str) -> None:
+        if self._part is not None and sid == self._part.sid:
+            self._part_ready = True
+            self._play_part()
+            return
         if sid != self._sid:
             return
         if self._phase is _Phase.WAITING:
@@ -1451,8 +1475,14 @@ class LiveSession(QObject):
                 self._reland_edge = self._live_edge(self._snapshot())
 
     def _on_updated(self, sid: str, snapshot: dict) -> None:
+        part = self._part
+        if part is not None and sid == part.sid:
+            self._on_part_updated(part, snapshot)
+            return
         if sid != self._sid:
             return
+        if part is not None:
+            self._follow_buffer_start(part)
         self._since_edge_moved(snapshot)  # when a burst lands, to the update
         if self._phase is _Phase.WAITING:
             self._edges.append((self._clock(), self._live_edge(snapshot)))
@@ -1660,6 +1690,9 @@ class LiveSession(QObject):
             self._fall_back(LOST)
 
     def _on_failed(self, sid: str, kind: str, message: str) -> None:
+        if self._part is not None and sid == self._part.sid:
+            self._part_failed()
+            return
         if sid != self._sid:
             return
         if self._from_kept and (self._resuming or kind == "disk") and kind != "internal":
@@ -1709,7 +1742,9 @@ class LiveSession(QObject):
             self._fall_back(LOST)
 
     def _on_ended(self, sid: str) -> None:
-        if sid == self._sid:
+        if self._part is not None and sid == self._part.sid:
+            self._part.ended = True  # 2.6.2: it reached the buffer (VLC's end hops)
+        elif sid == self._sid:
             self._ended = True
 
     def _on_closed(self, sid: str) -> None:
@@ -1823,6 +1858,12 @@ class LiveSession(QObject):
     def _resume(self) -> None:
         """Get playing again after an interruption, or fall back once nothing more can."""
         self._retry = None
+        if self._in_part and self._part is not None:
+            if self._part.ended:
+                self._hop()  # 2.6.2: the server part ran into the buffer
+            else:
+                self._seek(self._advance())
+            return
         if self._kept_only:
             self.notice.emit(KEPT_END)  # 2.6: Go live tries the channel again
             return
@@ -2517,12 +2558,115 @@ class LiveSession(QObject):
             "behind": self._behind(snapshot, position, edge),
         }
         beyond = self.server_window()
-        if beyond > 0.0:  # 2.6.2: drawn as catch-up draws an archive past the buffer
+        if beyond > 0.0 or self._part is not None:
+            # 2.6.2: drawn as catch-up draws an archive past the buffer, half an hour past it
+            # or past where the server part plays.
             start = float(state["start"])
+            reach = start - min(beyond, WINDOW_BAR_S)
+            if position < start:
+                reach = min(reach, position - WINDOW_BAR_S)
             state["buffer_start"] = start
-            state["window_start"] = start - beyond
-            state["start"] = start - min(beyond, WINDOW_BAR_S)
+            state["window_start"] = start - beyond if beyond > 0.0 else min(reach, position)
+            state["start"] = max(reach, state["window_start"])
         self.timelineChanged.emit(state)
+
+    # ---- 2.6.2: the server part ------------------------------------------------------------
+    def _seek_part(self, t: float, *, lo: float = -math.inf, hi: float = math.inf) -> None:
+        """A seek before the buffer: within what the server part holds, locally; else a
+        server part opens there."""
+        self._stay.user_seeked_back()
+        part = self._part
+        if part is not None:
+            placed = part.spans(self._engine.spans(part.sid))
+            inside = [span for span in placed if lo <= span.start < hi]
+            if placed and placed[0].start <= t < placed[-1].end and inside:
+                before = [span for span in inside if span.start <= t]
+                span = before[-1] if before else inside[0]
+                self._open_at(span.seq, part)
+                return
+        self._open_part(t)
+
+    def _open_part(self, t: float) -> None:
+        """A server part from live timeline second `t`, stopping before the media sequence
+        the buffer begins with; it plays once its helper says ready and its state placed it."""
+        assert self._sid is not None
+        self._close_part()
+        snapshot = self._snapshot()
+        parts = live_parts.from_state(snapshot.get("parts"))
+        back = back_for(t, parts, live_edge=self._live_edge(snapshot), now=self._wall())
+        until = buffer_first_media(self._engine.spans(self._sid))
+        window = {"back_s": back, "until_seq": until, "ahead_s": WINDOW_AHEAD_S}
+        sid = self._engine.open_session(self._url, **self._open_args, window=window)
+        self._part = ServerPart(sid, t, until)
+
+    def _on_part_updated(self, part: ServerPart, snapshot: Mapping[str, Any]) -> None:
+        wall = snapshot.get("part_wall")
+        if part.offset is None and isinstance(wall, (int, float)):
+            live = self._snapshot()
+            parts = live_parts.from_state(live.get("parts"))
+            part.place(float(wall), parts, live_edge=self._live_edge(live), now=self._wall())
+        if self._part_ready and not self._in_part:
+            self._play_part()
+
+    def _play_part(self) -> None:
+        """Play the server part once it is ready and placed: from the segment holding the
+        point asked, else its first."""
+        part = self._part
+        if part is None or not self._part_ready or part.offset is None or self._in_part:
+            return
+        placed = part.spans(self._engine.spans(part.sid))
+        holding = [span for span in placed if span.start <= part.asked]
+        if holding:
+            seq = holding[-1].seq
+        else:
+            oldest = self._engine.snapshot(part.sid).get("oldest")
+            if not isinstance(oldest, int):
+                return
+            seq = placed[0].seq if placed else oldest
+        if not self._open_at(seq, part):
+            self._part_failed()
+
+    def _part_start_of(self, part: ServerPart, seq: int) -> float:
+        """Where segment `seq` of the server part starts on the live timeline."""
+        for span in part.spans(self._engine.spans(part.sid)):
+            if span.seq == seq:
+                return span.start
+        # The open segment starts where the closed ones end (0.0 for the very first).
+        return (part.offset or 0.0) + _number(self._engine.snapshot(part.sid).get("end"))
+
+    def _follow_buffer_start(self, part: ServerPart) -> None:
+        """The buffer's start moved on (eviction): the server part's stop follows it."""
+        assert self._sid is not None
+        first = buffer_first_media(self._engine.spans(self._sid))
+        if part.until is not None and first is not None and first > part.until:
+            part.until = first
+            self._engine.set_until(part.sid, first)
+
+    def _hop(self) -> None:
+        """The server part ran into the buffer: playback goes on there (a local seek)."""
+        assert self._sid is not None
+        part = self._part
+        until = part.until if part is not None else None
+        self._close_part()
+        seq = hop_seq(self._engine.spans(self._sid), until)
+        if seq is None or not self._open_at(seq):
+            self._go_live(unpause=False)
+
+    def _part_failed(self) -> None:
+        """The server part did not open, or broke: back into the buffer, saying so."""
+        playing = self._in_part
+        self._close_part()
+        self.notice.emit(PART_FAILED)
+        if playing and self._sid is not None:
+            seq = hop_seq(self._engine.spans(self._sid), None)
+            if seq is None or not self._open_at(seq):
+                self._go_live(unpause=False)
+
+    def _close_part(self) -> None:
+        part, self._part = self._part, None
+        self._part_ready = self._in_part = False
+        if part is not None:
+            self._close(part.sid)  # never labelled, parked or kept
 
     def _behind(self, snapshot: Mapping[str, Any], position: float, edge: float) -> float:
         parts = live_parts.from_state(snapshot.get("parts"))
@@ -2804,14 +2948,20 @@ class LiveSession(QObject):
             self._rate = rate
             self._playback.set_rate(rate)
 
-    def _open_at(self, seq: int) -> bool:
-        """Play the loopback stream from segment `seq`; False while no helper serves it."""
+    def _open_at(self, seq: int, part: Optional[ServerPart] = None) -> bool:
+        """Play the loopback stream from segment `seq` (of the server `part`, 2.6.2); False
+        while no helper serves it."""
         assert self._sid is not None
-        url = self._engine.stream_url(self._sid, seq)
+        url = self._engine.stream_url(self._sid if part is None else part.sid, seq)
         if not url:
             return False
-        self._say_unclean(seq)
-        self._base, self._elapsed = self._start_of(seq), 0.0
+        if part is None:
+            self._say_unclean(seq)
+            self._base = self._start_of(seq)
+        else:
+            self._base = self._part_start_of(part, seq)
+        self._in_part = part is not None
+        self._elapsed = 0.0
         self._last_ms = 0
         self._opened_at = self._last_open = self._clock()
         self._vlc.restart(self._last_open)  # VLC's clock starts at the segment's start
