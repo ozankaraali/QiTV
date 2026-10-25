@@ -221,6 +221,75 @@ class StartTargetTests(unittest.TestCase):
         supervisor._receive(("error", "s1", "disk", "The disk buffer failed."))
         self.assertEqual(supervisor._records["s1"].command[6:], command[6:])
 
+    def test_a_window_open_carries_its_options(self):
+        # 2.7: a server part's start and stop travel in the start dict.
+        import queue
+
+        from services.live import engine as engine_module
+
+        commands: queue.Queue = queue.Queue()
+        engine = engine_module.LiveEngine.__new__(engine_module.LiveEngine)
+        engine._shut, engine._sessions, engine._commands = False, {}, commands
+        window = {"back_s": 60.0, "until_seq": 108, "ahead_s": 60.0}
+        engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB, window=window
+        )
+        self.assertEqual(commands.get_nowait()[7], {"window": window})
+        engine.open_session(
+            URL_FOR_RING,
+            headers={},
+            verify_ssl=True,
+            disk=False,
+            max_bytes=MIB,
+            target=2.5,
+            window=window,
+        )
+        self.assertEqual(commands.get_nowait()[7], {"target": 2.5, "extra": 0.0, "window": window})
+
+    def test_a_server_part_is_not_reopened_after_a_helper_death(self):
+        import queue
+
+        from services.live import engine as engine_module
+
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        ring = {"kind": "ram", "max_bytes": 64 * MIB}
+        part = ("open", "p", URL_FOR_RING, {}, True, ring, 6.0, {"window": {"back_s": 9.0}})
+        live = ("open", "l", URL_FOR_RING, {}, True, ring, 6.0)
+        for sid, command in (("p", part), ("l", live)):
+            supervisor._records[sid] = engine_module._Record(command=command, sent=True)
+        relayed, sent = [], []
+        supervisor._relay = relayed.append
+        supervisor._report_lost()
+        supervisor._conn = SimpleNamespace(send=sent.append)
+        supervisor._receive(("hello", "http://127.0.0.1:1/t"))
+        self.assertEqual([command[1] for command in sent if command[0] == "open"], ["l"])
+        self.assertIn(("error", "p", "internal", engine_module._INTERNAL), relayed)
+
+    def test_set_until_reaches_the_helper_and_never_closes(self):
+        # 2.7: a server part's stop follows the live buffer's start; the supervisor's
+        # fallback for an unknown command is a close, so this one has its own branch.
+        import queue
+
+        from services.live import engine as engine_module
+
+        commands: queue.Queue = queue.Queue()
+        engine = engine_module.LiveEngine.__new__(engine_module.LiveEngine)
+        engine._shut, engine._sessions, engine._commands = False, {}, commands
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB, window={}
+        )
+        opened = commands.get_nowait()
+        engine.set_until(sid, 110)
+        until = commands.get_nowait()
+        self.assertEqual(until, ("until", sid, 110))
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        supervisor._records[sid] = engine_module._Record(command=opened, sent=True)
+        supervisor._commands.put(until)
+        sent = []
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent, [until])
+        self.assertFalse(supervisor._records[sid].closing)
+
 
 class ResizeTests(unittest.TestCase):
     """2.2: the multiview's tiles grow and shrink their RAM buffers; a reopen keeps the size."""
@@ -797,6 +866,17 @@ class SpanMessageTests(unittest.TestCase):
                 Span(3, 14.0, 16.0, False, START_KEY),
             ],
         )
+
+    def test_an_addition_with_a_media_sequence_becomes_a_span(self):
+        # 2.7: a sixth field, the HLS media sequence the segment begins; five mean None.
+        engine = LiveEngine(tempfile.gettempdir())  # never started: no helper, no buffer
+        self.addCleanup(engine.shutdown)
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB
+        )
+        additions = [(0, 0.0, 2.0, False, START_KEY, 7), (1, 2.0, 4.0, False, START_KEY)]
+        engine._on_message(("state", sid, {"oldest": 0}, 0, additions))
+        self.assertEqual([span.media_seq for span in engine.spans(sid)], [7, None])
 
 
 class LiveEngineTests(unittest.TestCase):

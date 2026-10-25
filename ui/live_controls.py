@@ -37,6 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import logging
+import math
 import time
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
@@ -66,6 +67,20 @@ logger = logging.getLogger(__name__)
 LIVE_SEEK_S = 10.0  # ←/→ while time-shifting (spec §6.7)
 BACK_NOTICE_MS = 60_000  # 2.6: the Resume pill shows this long (the owner: "a minute or so")
 _PAST_BUFFER_S = 1.0  # a point this far before the buffer's start is the archive's
+
+
+_WINDOW_SEEK_S = 30.0  # 2.7: a guide's start waits this long for its channel's window
+
+
+def _reach(state: dict) -> float:
+    """How far back the live session plays (timeline seconds): its buffer's start, or (2.7)
+    the start of the channel's own server window; a provider's archive is reached beyond,
+    unless it plays through the session already (its steps and seeks are the session's)."""
+    if state.get("archive_part"):
+        return -math.inf
+    return float(state.get("window_start", state["start"]))
+
+
 _AT_START_S = 5.0  # ⏮ this near a programme's start goes to the one before (the archive)
 TICK_PROGRAMMES = 6  # programme starts marked on the time-shift bar
 # When its limit is not known (shown with translate()).
@@ -184,6 +199,10 @@ class LiveControls(QObject):
         self._logo = logo
         self._explain = explain
         self._ticks: list[tuple[float, str]] = []
+        # 2.7: how far back each channel's own server keeps it (seconds, as last seen this
+        # run, by the channel's key), and a guide's start waiting for its window to show.
+        self._windows: dict[str, float] = {}
+        self._window_seek: Optional[tuple[str, float, float]] = None  # key, moment, asked at
         self._wired = False
         self._reconnects = 0  # reopens of the current tune's ended stream so far
         self._playing_since: Optional[float] = None  # the player's last "playing" (monotonic)
@@ -303,6 +322,43 @@ class LiveControls(QObject):
         self._reconnects = 0
         self._playing_since = None
         self._cancel_reopen()
+
+    def window_reach(self, channel: dict) -> float:
+        """How far back (seconds) the channel's own server keeps it, as seen this run (2.7);
+        0.0 when unknown."""
+        return self._windows.get(self.catchup.key(Target(channel, "live", "")), 0.0)
+
+    def watch_from(self, channel: dict, moment: float) -> bool:
+        """The guide's "Watch from the start" within the channel's own server window (2.7):
+        the live session plays from `moment` (Unix seconds), at once when the channel plays,
+        else once its window shows (the caller tunes it). False when its window, as seen
+        this run, does not reach that far."""
+        key = self.catchup.key(Target(channel, "live", ""))
+        now = self._now().timestamp()
+        if now - moment > self._windows.get(key, 0.0):
+            return False
+        self._window_seek = (key, moment, now)
+        state = self._tuner.timeline
+        if state is not None and "window_start" in state:
+            self._seek_window(state)
+        return True
+
+    def _seek_window(self, state: dict) -> None:
+        pending, current = self._window_seek, self._current()
+        if pending is None or current is None or self.live is None or not self.pipeline_live():
+            return
+        key, moment, asked = pending
+        if self._now().timestamp() - asked > _WINDOW_SEEK_S:
+            self._window_seek = None  # the channel never came: forgotten
+            return
+        if self.catchup.key(current) != key:
+            return  # still tuning it
+        self._window_seek = None
+        t = live_parts.t_in(state, moment, self._now().timestamp())
+        if t is not None:
+            self.catchup.cancel()
+            self.live.seek_to(t)
+            self._show_transport()
 
     def open_archive(self, target: Target, url: str) -> bool:
         """`target` (with `archive_at`) plays its archive instead of live: False when it
@@ -492,6 +548,12 @@ class LiveControls(QObject):
         current = self._current()
         if self._closed() or not self._tuner.running() or current is None or not current.live:
             return
+        # 2.7: the channel's own server keeps more (a provider archive's part is not that)
+        if "window_start" in state and not state.get("archive_part"):
+            now = self._now().timestamp()
+            wall = live_parts.wall_in(state, float(state["window_start"]), now)
+            self._windows[self.catchup.key(current)] = max(0.0, now - wall)
+            self._seek_window(state)
         state = self.catchup.extend(state, current)  # the bar reaches into an archive
         transport = self._transport
         if transport.isVisible():
@@ -642,7 +704,7 @@ class LiveControls(QObject):
             self.catchup.seek_to(seconds)  # the archive's bar is in Unix seconds
         elif self.pipeline_live() and self.live is not None:
             state = self._tuner.timeline
-            if state is not None and seconds < float(state["start"]) - _PAST_BUFFER_S:
+            if state is not None and seconds < _reach(state) - _PAST_BUFFER_S:
                 if self._open_archive_at(state, seconds):
                     return
             self.catchup.cancel()  # within the buffer: a probe for the archive is dropped
@@ -655,7 +717,7 @@ class LiveControls(QObject):
         if state is None:
             return False
         t = float(state["position"]) + seconds
-        return t < float(state["start"]) - _PAST_BUFFER_S and self._open_archive_at(state, t)
+        return t < _reach(state) - _PAST_BUFFER_S and self._open_archive_at(state, t)
 
     def _open_archive_at(self, state: dict, t: float) -> bool:
         """The channel's archive at the time-shift timeline's `t` (its live edge is now; 2.6:
@@ -700,10 +762,13 @@ class LiveControls(QObject):
         if not self.pipeline_live() or self.live is None or current is None or state is None:
             return
         stamp = self._now().timestamp()
-        oldest = float(state["start"])
-        moment = min(live_parts.wall_in(state, float(state["position"]), stamp), stamp)
+        oldest = _reach(state)  # 2.7: the channel's server window, past the bar too
+        position = float(state["position"])
+        moment = min(live_parts.wall_in(state, position, stamp), stamp)
         watching = datetime.fromtimestamp(moment, timezone.utc)
-        target = oldest
+        # Without a programme: the buffer's oldest point (the bar's start before it, 2.7).
+        buffer_start = float(state.get("buffer_start", state["start"]))
+        target = buffer_start if position >= buffer_start else float(state["start"])
         for programme in self._programmes(current.item, watching, 1):
             if not programme.is_on(watching):
                 continue

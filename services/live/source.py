@@ -23,7 +23,7 @@ be saved for replay: `services.live.capture`.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import logging
 import math
@@ -104,6 +104,16 @@ _FROZEN_TIMEOUT = 60.0
 # An older playlist copy that overlaps recent segments is waited out this many targets.
 _STALE_TARGETS = 3
 _RECENT_SEGMENTS = 10
+_wall_time = time.time  # 2.7: a server part's time of day; tests replace it
+_HOLD_POLL_S = 0.25  # 2.7: how often a held source asks again
+# 2.7: a server part held this long (a pause, not its pacing: about a segment at a time)
+# reads its playlist again before going on (a 24 h playlist costs ~0.6 s of CPU to read).
+_HELD_RELOAD_S = 30.0
+# 2.6.1: copies of another origin group (its own numbering and names) are set aside, the
+# playlist reloaded each _OTHER_RELOAD_S, until they persist as long as a stale copy is waited
+# out (measured: such a group answered every request for up to 14 s), at least this.
+_OTHER_COPY_S = 4.0
+_OTHER_RELOAD_S = 1.0
 _SEGMENT_FAILURES = 3
 _SKIPPABLE_STATUS = (404, 410)
 # Answers that mean the provider's stream limit is reached (spec 6.9), never retried; any other
@@ -391,6 +401,12 @@ class _Http:
             self.session.headers["Referer"] = referer
         threading.Thread(target=self._watch, name="qitv-live-source-stop", daemon=True).start()
 
+    def reconnect(self) -> None:
+        """The next request opens a new connection (2.6.1: a load balancer that pins a
+        connection to one origin group answers that group's playlist copies on it for good)."""
+        for adapter in self.session.adapters.values():
+            adapter.close()
+
     def _watch(self) -> None:
         while not self._stop.wait(_STOP_POLL):
             if self.closed:
@@ -613,7 +629,9 @@ class TsSource:
     """Raw MPEG-TS from one HTTP(S) response; reconnects after the connection breaks.
 
     Only a body with a Content-Length ends the input when complete; every other end
-    reconnects while the backoff schedule allows.
+    reconnects while the backoff schedule allows. A provider archive's (2.7, `archive`)
+    never reconnects: a new request would play its address from the start again, so any end
+    ends the input; and it reads no further while `hold` says so (its pacing).
     """
 
     hls = False
@@ -626,6 +644,8 @@ class TsSource:
         prefix: bytes,
         *,
         capture: _Capture | None = None,
+        archive: bool = False,
+        hold: Callable[[], bool] | None = None,
     ) -> None:
         self.user_agent = http.user_agent
         http.stall_after(_TS_STALL_TIMEOUT)
@@ -635,6 +655,8 @@ class TsSource:
         self._prefix = prefix
         self._prefix_at = time.monotonic()  # the open has just read it
         self._capture = capture
+        self._archive = archive
+        self._hold = hold
 
     @property
     def burst_s(self) -> float:
@@ -666,7 +688,7 @@ class TsSource:
             yield prefix
         while True:
             try:
-                while block := http.read(response):
+                while block := self._read(response):
                     if capture is not None:
                         capture.write(block)
                     if reconnected:
@@ -679,12 +701,15 @@ class TsSource:
                     ):
                         backoff.reset()
                     yield block
-                if _sized(response):
-                    return  # a finite body reached its declared end
+                if _sized(response) or self._archive:
+                    return  # a finite body reached its declared end (an archive: any end)
                 # Any other end of a live body is a disconnect, also a clean one: a FIN, or
                 # a chunked body's last chunk (nginx when the channel's upstream restarts).
                 log.info("The channel closed its stream; reconnecting.")
             except _ReadError as error:
+                if self._archive:
+                    log.info("The archive's connection broke off (%s).", error.kind)
+                    return
                 log.info("The channel connection broke off (%s); reconnecting.", error.kind)
             finally:
                 http.release(response)
@@ -693,6 +718,13 @@ class TsSource:
             if capture is not None:
                 capture.mark("reconnect")
             connected, received, reconnected = time.monotonic(), 0, True
+
+    def _read(self, response: Any) -> bytes:
+        """The next block, once `hold` lets it be read (2.7: an archive's pacing)."""
+        while self._hold is not None and self._hold():
+            if self._http.wait(_HOLD_POLL_S):
+                raise _Closed()
+        return self._http.read(response)
 
 
 class LocalTsSource(TsSource):
@@ -992,6 +1024,16 @@ def _checked_ts(blocks: Iterator[bytes]) -> Iterator[bytes]:
         yield head
 
 
+def _back_from_end(segments: Sequence[Any], seconds: float) -> int:
+    """The index where the segments' EXTINF, summed from the end, reaches `seconds`."""
+    total = 0.0
+    for index in range(len(segments) - 1, -1, -1):
+        total += float(segments[index].duration or 0)
+        if total >= seconds:
+            return index
+    return 0
+
+
 class HlsSource:
     """HLS of MPEG-TS segments: live reloads, AES-128 and discontinuity markers.
 
@@ -1000,6 +1042,11 @@ class HlsSource:
       skipped with a marker; three failures in a row end the session;
     - a stale playlist copy is waited out; a media-sequence restart, or falling behind the
       window, resumes at the live start;
+    - a copy of another origin group (2.6.1: two groups behind one address, each numbering and
+      naming its own encoding, a connection pinned to one) is set aside and the playlist asked
+      for again on a new connection each second, until such copies persist as long as a stale
+      copy is waited out (at least 4 s): a restart, or ours went down, followed with a marker
+      (`_other_copy`);
     - reloads that bring no new segment for 60 s (download time excluded) time out.
 
     Fragmented MP4 (CMAF) segments, a playlist with an init section (EXT-X-MAP), are fetched
@@ -1035,8 +1082,27 @@ class HlsSource:
         *,
         separate_audio: str | None = None,
         capture: _Capture | None = None,
+        window: Mapping[str, Any] | None = None,
+        hold: Callable[[], bool] | None = None,
     ) -> None:
+        """`window` (2.7): a server part, `{"back_s": seconds, "until_seq": sequence}`: it
+        starts that far back from the playlist's end and its input ends before that media
+        sequence (the live buffer's first), placed in time by `part_wall`; a provider
+        archive's, `{"until_s": seconds}`, starts at its first segment (the helper ends it
+        at that much media)."""
         self.user_agent = http.user_agent
+        back = window.get("back_s") if window is not None else None
+        if window is not None and back is None and _archive_window(window):
+            back = math.inf  # 2.7: a provider archive's playlist begins at the moment asked
+        before = window.get("before_s") if window is not None else None
+        until = window.get("until_seq") if window is not None else None
+        self._back = float(back) if isinstance(back, (int, float)) else None
+        self._before = float(before) if isinstance(before, (int, float)) else None
+        self._until = until if type(until) is int else None
+        self._stop_dropped = False  # another encoding persisted: its stop is not this one's
+        self._part_wall: float | None = None
+        self._part_media: float | None = None  # the media before its stop, as first listed
+        self._hold = hold  # 2.7: fetch no further segment while it says so (pacing)
         self._http = http
         self._capture = capture
         self._playlist = playlist
@@ -1067,6 +1133,9 @@ class HlsSource:
         self._extra = extra  # what the session adds to its target (Auto's learned extra)
         self._loaded = time.monotonic()
         self._burst = float(playlist.target_duration or 0)
+        self._window = 0.0  # 2.7: how long a live playlist's window lasts (0.0: finished)
+        self._edge_sequence: int | None = None  # its newest segment's media sequence
+        self._note_window(playlist)
         self._keys: dict[str, bytes] = {}
         self._recent: deque[str] = deque(maxlen=_RECENT_SEGMENTS)
         self._discontinuity_sequence = playlist.discontinuity_sequence
@@ -1076,10 +1145,12 @@ class HlsSource:
         self._pending = False  # a Discontinuity is due before the next bytes
         self._joiner = ContinuityJoiner()  # the segments' counters run on across joins
         self._serial = 0  # segments started so far
+        self._sequence: int | None = None  # 2.7: the media sequence of the one started last
         self._fetching = 0.0  # the EXTINF of the segment being fetched (0.0: none)
         self._rest = 0.0  # the EXTINF of the listed segments after it
         self._last_whole: tuple[int, float] | None = None  # (serial, EXTINF) of the last whole
-        self._finite = bool(playlist.is_endlist)  # the playlist is finished (ENDLIST)
+        # The playlist is finished (ENDLIST), or a server part's input ends (2.7).
+        self._finite = bool(playlist.is_endlist) or self._back is not None
 
     @property
     def burst_s(self) -> float:
@@ -1090,6 +1161,55 @@ class HlsSource:
     def segment_serial(self) -> int:
         """Counts the segments started: it changes as the next segment's first bytes come."""
         return self._serial
+
+    @property
+    def window_s(self) -> float:
+        """How long the live playlist's window lasts, its segments' EXTINF summed (2.7: a
+        server that keeps hours offers them past the buffer); 0.0 once it is finished."""
+        return self._window
+
+    @property
+    def until_seq(self) -> int | None:
+        """A server part's stop (2.7): its input ends before this media sequence."""
+        return self._until
+
+    @until_seq.setter
+    def until_seq(self, seq: int | None) -> None:
+        if not self._stop_dropped:  # (its numbers are another encoding's then)
+            self._until = seq  # the live buffer's start moved (any thread: one attribute)
+
+    @property
+    def until_dropped(self) -> bool:
+        """A server part's stop went: another encoding persisted (2.7, `_other_copy`)."""
+        return self._stop_dropped
+
+    @property
+    def part_media_s(self) -> float | None:
+        """A server part's media from its first segment to its stop (2.7: the session
+        places it flush against the buffer's segment that begins the stop)."""
+        return self._part_media
+
+    @property
+    def part_wall(self) -> float | None:
+        """A server part's first segment's time of day (2.7); None before it, or else."""
+        return self._part_wall
+
+    @property
+    def edge_sequence(self) -> int | None:
+        """The media sequence of the newest segment its playlist lists (2.7)."""
+        return self._edge_sequence
+
+    def _note_window(self, playlist: Any) -> None:
+        segments = playlist.segments
+        live = not playlist.is_endlist
+        self._window = sum(float(segment.duration or 0) for segment in segments) if live else 0.0
+        if segments:
+            self._edge_sequence = (playlist.media_sequence or 0) + len(segments) - 1
+
+    @property
+    def segment_sequence(self) -> int | None:
+        """The media sequence of the segment whose bytes come now (2.7); None before one."""
+        return self._sequence
 
     @property
     def fmp4(self) -> bool:
@@ -1138,16 +1258,21 @@ class HlsSource:
         self._pending = self._pending or self._started
 
     def _start(self, playlist: Any) -> int:
-        """The first segment to fetch: `_depth` seconds from a live playlist's end."""
+        """The first segment to fetch: `_depth` seconds from a live playlist's end; a server
+        part's `back_s` from it (2.7)."""
+        if self._back is not None:
+            segments, first = playlist.segments, playlist.media_sequence or 0
+            until = self._until
+            if (
+                self._before is not None
+                and until is not None
+                and first < until <= first + len(segments)
+            ):  # counted back from its stop: at least the segment before it
+                return _back_from_end(segments[: until - first], self._before)
+            return _back_from_end(segments, self._back)
         if playlist.is_endlist:
             return 0
-        depth = self._depth(playlist)
-        total = 0.0
-        for index in range(len(playlist.segments) - 1, -1, -1):
-            total += float(playlist.segments[index].duration or 0)
-            if total >= depth:
-                return index
-        return 0
+        return _back_from_end(playlist.segments, self._depth(playlist))
 
     def _depth(self, playlist: Any) -> float:
         """How far back from a live playlist's end the start goes (2.1).
@@ -1187,21 +1312,79 @@ class HlsSource:
             return True
         return stalled >= _STALE_TARGETS * float(playlist.target_duration or 1)
 
+    def _other_copy(self, playlist: Any, base: str, next_sequence: int, quiet: float) -> bool:
+        """Whether this copy is another origin group's (2.6.1: two groups behind one address,
+        each numbering and naming its own encoding, answering in turn): it names the segment
+        last fetched otherwise; or it lists none of them and is numbered ahead further than
+        `quiet` (the time since a copy of ours) explains, or behind with none of their names
+        and no newer discontinuity sequence (a stale copy overlaps; a restart says so)."""
+        if not self._recent:
+            return False
+        first = playlist.media_sequence or 0
+        segments = playlist.segments
+        for sequence in range(next_sequence - 1, next_sequence - 1 - len(self._recent), -1):
+            index = sequence - first
+            if 0 <= index < len(segments) and not segments[index].gap_tag:
+                return _identity(_resolve(base, segments[index].uri)) not in self._recent
+        if first > next_sequence:  # a fall behind the window comes no faster than its segments
+            step = 0.5 * max(1.0, float(playlist.target_duration or 0))
+            return first - next_sequence > math.ceil(quiet / step) + 3
+        if first + len(segments) >= next_sequence:  # it goes on from where ours stops
+            return False
+        if (playlist.discontinuity_sequence or 0) > (self._discontinuity_sequence or 0):
+            return False
+        names = {_identity(_resolve(base, segment.uri)) for segment in segments}
+        return names.isdisjoint(self._recent)
+
     def _run(self) -> Iterator[Chunk]:
         http, playlist, url = self._http, self._playlist, self._url
-        loaded = progress = self._loaded
+        loaded = progress = ours = self._loaded
+        other: float | None = None  # when copies of another origin group began
         next_sequence: int | None = None
         while True:
             first = playlist.media_sequence or 0
             newest = first + len(playlist.segments) - 1
             stale = False
+            if next_sequence is not None:
+                doubtful = self._other_copy(playlist, url, next_sequence, loaded - ours)
+            else:  # 2.7: a server part's stop must be in the copy it starts from
+                doubtful = self._until is not None and not first <= self._until <= newest + 1
+            if doubtful:
+                if other is None:
+                    other = loaded
+                    log.info("An HLS playlist copy numbers another encoding; waiting for ours.")
+                bound = max(_OTHER_COPY_S, _STALE_TARGETS * float(playlist.target_duration or 0))
+                if loaded - other < bound:
+                    if http.wait(_OTHER_RELOAD_S - (time.monotonic() - loaded)):
+                        raise _Closed()
+                    http.reconnect()  # its server may stay with that group
+                    loaded = time.monotonic()
+                    content, final = http.fetch(lambda: _load_playlist(http, url))
+                    playlist, url, _separate = _media_playlist(http, content, final)
+                    continue
+                log.info("The other HLS encoding persisted; following it.")
+                if self._until is not None:  # a server part's stop is ours: it plays on
+                    self._until, self._stop_dropped = None, True
+                if next_sequence is not None:
+                    self._mark()
+                    next_sequence = first + self._start(playlist)  # its numbers are not ours
+            other, ours = None, loaded
+            self._note_window(playlist)
             if next_sequence is None:
-                next_sequence = first + self._start(playlist)
+                start = self._start(playlist)
+                next_sequence = first + start
+                if self._back is not None:  # 2.7: where the server part sits in time
+                    after = sum(float(s.duration or 0) for s in playlist.segments[start:])
+                    self._part_wall = _wall_time() - after
+                    if self._until is not None and first <= self._until <= newest + 1:
+                        stop = playlist.segments[start : self._until - first]
+                        self._part_media = sum(float(s.duration or 0) for s in stop)
             elif first > next_sequence:
-                # Fell behind the window: rejoin at the live start, not the oldest segment.
+                # Fell behind the window: rejoin at the live start, not the oldest segment; a
+                # server part goes on from the oldest (2.7: it plays the past).
                 log.info("The HLS playlist moved past %d segments.", first - next_sequence)
                 self._mark()
-                next_sequence = first + self._start(playlist)
+                next_sequence = first if self._back is not None else first + self._start(playlist)
             elif newest < next_sequence - 1:
                 stale = not self._restarted(playlist, url, loaded - progress)
                 if not stale:
@@ -1219,10 +1402,23 @@ class HlsSource:
             # Frozen time runs between reloads only, never while segments download.
             if not fresh and loaded - progress >= _FROZEN_TIMEOUT:
                 raise SourceError("timeout", _FROZEN)
+            done = again = False  # 2.7: a server part reached its stop / reloads first
             for index, segment in enumerate(playlist.segments):
                 sequence = first + index
                 if sequence < next_sequence:
                     continue
+                held = time.monotonic()
+                while self._hold is not None and self._hold():  # its stop may move meanwhile
+                    if http.wait(_HOLD_POLL_S):
+                        raise _Closed()
+                if time.monotonic() - held > max(
+                    _HELD_RELOAD_S, float(playlist.target_duration or 0)
+                ):
+                    again = True  # held long: the window may have moved on, its URLs expired
+                    break
+                if self._until is not None and sequence >= self._until:
+                    done = True
+                    break
                 next_sequence = sequence + 1
                 if segment.discontinuity:
                     self._mark()
@@ -1233,12 +1429,13 @@ class HlsSource:
                 self._fetching = float(segment.duration or 0)
                 self._rest = max(0.0, self._rest - self._fetching)
                 self._serial += 1
+                self._sequence = sequence
                 yield from self._segment(segment, sequence, url)
             self._fetching = 0.0
-            if fresh:
+            if fresh and not again:
                 progress = time.monotonic()
                 yield CaughtUp()  # what follows comes as the provider publishes it
-            if playlist.is_endlist:
+            if done or (playlist.is_endlist and not again):  # a held one reloads, goes on
                 yield from self._emit(self._release(final=True))
                 yield from self._emit(self._flush_held())
                 return
@@ -1249,7 +1446,7 @@ class HlsSource:
             content, final = http.fetch(lambda: _load_playlist(http, url))
             playlist, url, _separate = _media_playlist(http, content, final)
             self._burst = float(playlist.target_duration or 0)
-            self._finite = bool(playlist.is_endlist)
+            self._finite = bool(playlist.is_endlist) or self._back is not None
             yield from self._emit(self._release())
 
     def _segment(self, segment: Any, sequence: int, base: str) -> Iterator[bytes | Discontinuity]:
@@ -1732,6 +1929,12 @@ def _first_answer(
             raise _Closed()
 
 
+def _archive_window(window: Mapping[str, Any]) -> bool:
+    """A provider archive's server part (2.7): its input ends at `until_s` seconds of its
+    media, an HLS one's from its first segment."""
+    return isinstance(window.get("until_s"), (int, float))
+
+
 def _open_http(
     http: _Http,
     url: str,
@@ -1740,17 +1943,33 @@ def _open_http(
     extra: float,
     on_answer: Callable[[bool], None] | None = None,
     capture: _Capture | None = None,
+    window: Mapping[str, Any] | None = None,
+    hold: Callable[[], bool] | None = None,
 ) -> Source:
     response, prefix, content = _first_answer(http, url, on_answer)
     if content is None:
-        return TsSource(http, url, response, prefix, capture=capture)  # it now owns the response
+        archive = window is not None and _archive_window(window)
+        if window is not None and not archive:  # 2.7: a server part is an HLS playlist's
+            http.release(response)
+            raise SourceError("unsupported")
+        # It now owns the response.
+        return TsSource(http, url, response, prefix, capture=capture, archive=archive, hold=hold)
     try:
         final = str(response.url)
     finally:
         http.release(response)
     playlist, base, separate = _media_playlist(http, content, final)
     return HlsSource(
-        http, playlist, base, live_delay, target, extra, separate_audio=separate, capture=capture
+        http,
+        playlist,
+        base,
+        live_delay,
+        target,
+        extra,
+        separate_audio=separate,
+        capture=capture,
+        window=window,
+        hold=hold,
     )
 
 
@@ -1765,8 +1984,13 @@ def open_source(
     extra: float = 0.0,
     allow_local: bool = False,
     on_answer: Callable[[bool], None] | None = None,
+    window: Mapping[str, Any] | None = None,
+    hold: Callable[[], bool] | None = None,
 ) -> Source:
-    """Open ``url``, sniff it, and return a TS or HLS source.
+    """Open ``url``, sniff it, and return a TS or HLS source (``window``: a server part of
+    the HLS playlist, 2.7, `HlsSource`; raw TS then is unsupported, but for a provider
+    archive's (`until_s`: a `TsSource` that never reconnects); ``hold``: the source fetches
+    no further while it says so).
 
     One request, unless the first answer fails in passing: a 5xx or 408, a broken or refused
     connection, or a body that ends before its first byte is asked for again after each of the
@@ -1808,7 +2032,7 @@ def open_source(
     http = _Http(headers, verify_ssl, stop)
     capture = _Capture.from_environment(url)
     try:
-        return _open_http(http, url, live_delay, target, extra, on_answer, capture)
+        return _open_http(http, url, live_delay, target, extra, on_answer, capture, window, hold)
     except Exception as error:
         failure = SourceError("network", _STOPPED) if http.closed else _translate(error)
     except BaseException:

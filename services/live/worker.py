@@ -19,7 +19,13 @@ Commands (parent to helper):
   `{"kind": "ram", "max_bytes": n}` or `{"kind": "disk", "root": path, "dir": name,
   "max_bytes": n}` (`root` defaults to the helper's own root) and `start` (2.1) is
   `{"target": seconds, "extra": seconds}`: the session's target and what it adds to it, so an
-  HLS source starts far enough back for a start at that target (`HlsSource._depth`);
+  HLS source starts far enough back for a start at that target (`HlsSource._depth`); 2.7
+  adds `"window": {"back_s", "until_seq", "ahead_s"}`, a server part of an HLS playlist: it
+  starts `back_s` from the playlist's end, its input ends before `until_seq`, and it fetches
+  no further while what it holds runs `ahead_s` past the segment the player reads (which,
+  and what follows, its ring never evicts); a provider archive's, `{"until_s", "ahead_s"}`,
+  raw TS or HLS from its start, ends its input once its media reaches `until_s` (where the
+  live buffer begins, by time of day);
 - `("close", sid)`, always answered by `("closed", sid)`, once the session's upstream
   connection is closed but at most 0.5 s later;
 - `("resize", sid, max_bytes)` (2.2, the multiview): a RAM session holds up to `max_bytes`
@@ -59,15 +65,18 @@ Commands (parent to helper):
   a stopped one may still be finishing. Answered by "recorded";
 - `("record_stop", sid)`: the session's recording ends at the live edge; an unknown sid, or
   one that records nothing, is ignored;
+- `("until", sid, seq)` (2.7): a server part's stop moves to media sequence `seq` (the live
+  buffer's start moved); unanswered;
 - `("shutdown",)`.
 
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
 additions)`, also before ready while bytes arrive (`received`) and nothing is playable yet,
 and once a raw-TS source answered (`answered`, 2.1: its headers came, before its first byte;
 taken back once its body failed or turned out a playlist),
-each addition a newly closed segment's `(seq, start, end, discontinuity, start_quality)`
-(`Span`'s fields; an engine from before 2.1 would not take the fifth, but the helper and the
-engine always ship in one build, and the engine still takes four);
+each addition a newly closed segment's `(seq, start, end, discontinuity, start_quality,
+media_seq)` (`Span`'s fields; 2.7 added the HLS media sequence the segment begins, None when
+it begins none; the helper and the engine always ship in one build, and the engine still
+takes four or five);
 `("ready", sid)` once the first segment is open (its state comes first);
 `("recording", sid, rid, path, written)` once recording `rid` made its file and every few
 seconds while it grows (2.2), and `("recorded", sid, rid, reason, path, written)` once it ended
@@ -121,7 +130,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from services.live.timeline import StartQuality, Timeline
+from services.live.timeline import Span, StartQuality, Timeline
 from services.live.ts import (
     AudioRelabeler,
     ClockJoiner,
@@ -165,8 +174,22 @@ _NO_MEDIA = "The channel ended before any video could be buffered."
 _NO_DATA = "The channel sent no data."
 _DISK_FAILED = "The temporary playback buffer could not be created."
 
-# seq, start, end, discontinuity, start_quality
-_Addition = tuple[int, float, float, bool, StartQuality]
+# seq, start, end, discontinuity, start_quality, media_seq (2.7: the HLS media sequence the
+# segment begins, or None)
+_Addition = tuple[int, float, float, bool, StartQuality, int | None]
+
+
+def _addition(span: Span) -> _Addition:
+    return (
+        span.seq,
+        span.start,
+        span.end,
+        span.discontinuity,
+        span.start_quality,
+        span.media_seq,
+    )
+
+
 # PTS jumps the timeline left out, in the state while the ring holds them (2.1; and
 # `_BREAK_SLACK_S` after), at
 # most this many (a memory bound: a flaky source that reconnects every few seconds)
@@ -473,6 +496,7 @@ class _Session:
         self._segment = (0, 0.0)  # HLS: the segment being fetched (serial), the edge it began at
         self._measured = (0.0, 0.0)  # HLS: media and EXTINF seconds of the whole segments
         self._pending: list[_Addition] = []
+        self._media_next: int | None = None  # 2.7: an HLS segment began: the next opened
         # (timeline position, seconds left out) of the latest PTS jumps the segmenter dropped
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
         self._last_notify = 0.0
@@ -661,7 +685,6 @@ class _Session:
         said "unkept") when it cannot be."""
         from services.live.parts import Part
         from services.live.ring import DiskRing
-        from services.live.timeline import Span
 
         assert self.adopting is not None
         directory, max_bytes = self.adopting
@@ -676,7 +699,14 @@ class _Session:
             return False
         records = index.segments
         spans = [
-            Span(r["seg"], float(r["s"]), float(r["e"]), bool(r.get("d")), r.get("q") or "key")
+            Span(
+                r["seg"],
+                float(r["s"]),
+                float(r["e"]),
+                bool(r.get("d")),
+                r.get("q") or "key",
+                r["m"] if type(r.get("m")) is int else None,
+            )
             for r in records
         ]
         self._timeline.restore(
@@ -705,7 +735,7 @@ class _Session:
         self._label, self._where = index.label, index.where
         self._kept_history = self._disk = True
         self._ring_spec = {"kind": "disk", "dir": directory, "max_bytes": max_bytes}
-        self._pending = [(s.seq, s.start, s.end, s.discontinuity, s.start_quality) for s in spans]
+        self._pending = [_addition(s) for s in spans]
         self._helper.disk_budget(max_bytes).register(ring, parked=True)
         try:
             self._adopt(ring)
@@ -780,6 +810,7 @@ class _Session:
         from services.live.source import SourceError, open_source
 
         target = self._start.get("target")
+        window = self._start.get("window")  # 2.7: a server part's start and stop
         try:
             source = open_source(
                 self._url,
@@ -790,6 +821,8 @@ class _Session:
                 target=float(target) if isinstance(target, (int, float)) else None,
                 extra=float(self._start.get("extra") or 0.0),
                 on_answer=self._on_answer,
+                window=window if isinstance(window, dict) else None,
+                hold=self._hold if isinstance(window, dict) and "ahead_s" in window else None,
             )
         except SourceError as error:
             if not self._parking:  # a park interrupted the open: nothing to say
@@ -804,6 +837,10 @@ class _Session:
             raise _Cancelled()
         if self._ring is None:  # a resumed run goes on in its ring
             self._adopt(self._make_ring())
+            if isinstance(window, dict) and self._ring is not None:
+                # 2.7: a server part's segments are all unread until the player reads one
+                # (`_hold` moves this on): none may go to make room in a full disk amount.
+                self._ring.protect_from(0)
         segmenter = self._segmenter
         # A resumed run of the same kind keeps the clock joiner: it re-bases the new run onto
         # the old run's last picture (2.6). Another kind starts afresh.
@@ -834,6 +871,9 @@ class _Session:
                 for item in source.chunks():
                     with self._moving:
                         self._take(item, source, trimmer, rejoiner)
+                    if self._past_until():
+                        source.close()  # 2.7: an archive reached where the buffer begins
+                        break
             finally:
                 if ticking is not None:
                     ticking.set()
@@ -887,7 +927,8 @@ class _Session:
         root = Path(spec.get("root") or self._helper.root)
         try:
             ring: Ring = DiskRing(root, spec["dir"], spec["max_bytes"], stop=self.stop)
-            self._helper.disk_budget(spec["max_bytes"]).register(ring)
+            part = isinstance(self._start.get("window"), dict)  # 2.7: a server part's
+            self._helper.disk_budget(spec["max_bytes"]).register(ring, part=part)
             if self._label is not None:
                 ring.note_label(self._label)
             if self._where is not None:
@@ -952,7 +993,11 @@ class _Session:
                 if began:  # a run's first segment: the part's time of day (2.6)
                     self._new_part = False
                     timeline.begin_part(_wall_time())
-                timeline.on_opened(event.seq, event.first_pts, event.wall, event.discontinuity)
+                # 2.7: the first segment cut after an HLS segment's bytes began begins it.
+                media, self._media_next = self._media_next, None
+                timeline.on_opened(
+                    event.seq, event.first_pts, event.wall, event.discontinuity, media
+                )
                 if began and timeline.parts() and self._ring is not None:
                     part = timeline.parts()[-1]
                     self._ring.note_part(part.first_seq, part.start, part.wall)
@@ -984,11 +1029,14 @@ class _Session:
                 )
                 if not self._skipping and self._ring is not None:
                     self._ring.note_segment(  # 2.6: the index a later helper reads
-                        span.seq, span.start, span.end, span.discontinuity, span.start_quality
+                        span.seq,
+                        span.start,
+                        span.end,
+                        span.discontinuity,
+                        span.start_quality,
+                        span.media_seq,
                     )
-                self._pending.append(
-                    (span.seq, span.start, span.end, span.discontinuity, span.start_quality)
-                )
+                self._pending.append(_addition(span))
                 self._notify(force=True)
         self._take_breaks()
 
@@ -1221,6 +1269,45 @@ class _Session:
             self._apply(self._segmenter.feed(held))
         self._apply(self._segmenter.finish())
 
+    def set_until(self, seq: int) -> None:
+        """A server part's stop moves to media sequence `seq` (2.7, "until")."""
+        window = self._start.get("window")
+        if isinstance(window, dict):
+            window["until_seq"] = seq
+        source = self._source
+        if source is not None and hasattr(source, "until_seq"):
+            source.until_seq = seq
+
+    def _past_until(self) -> bool:
+        """A provider archive's server part (2.7) has its `until_s` seconds of media: where
+        the live buffer begins, by time of day (an archive shares no media sequence)."""
+        window = self._start.get("window")
+        until = window.get("until_s") if isinstance(window, dict) else None
+        return isinstance(until, (int, float)) and self._timeline.end >= float(until)
+
+    def _hold(self) -> bool:
+        """A server part (2.7) fetches no further while what it holds runs its `ahead_s`
+        past the start of the segment the player reads (its oldest before any read); its
+        ring keeps that segment and what follows (`Ring.protect_from`)."""
+        window = self._start.get("window")
+        ahead = window.get("ahead_s") if isinstance(window, dict) else None
+        if not isinstance(ahead, (int, float)):
+            return False
+        timeline = self._timeline
+        spans = timeline.spans()
+        if not spans:
+            return False
+        reading = self._helper.server.reading(self.sid)
+        if self._ring is not None:  # what the player reads and what lies ahead stay
+            self._ring.protect_from(reading if reading is not None else spans[0].seq)
+        if reading is None:
+            start = spans[0].start
+        else:
+            start = next((span.start for span in spans if span.seq == reading), None)
+            if start is None:  # the open segment (at the edge) or one evicted: fetch on
+                return False
+        return timeline.end - start > float(ahead)
+
     def _follow(self, source: Source) -> None:
         """HLS: note the live edge where each segment's first bytes begin (`_backlog`), and
         measure the one before if it arrived whole: its media against its EXTINF. Not the
@@ -1230,6 +1317,7 @@ class _Session:
         serial = getattr(source, "segment_serial", 0)
         if serial == self._segment[0]:
             return
+        self._media_next = getattr(source, "segment_sequence", None)
         fetching = getattr(source, "segment_s", None)
         if self._clock_joiner is not None and isinstance(fetching, float):
             self._clock_joiner.arrive(fetching)
@@ -1342,6 +1430,19 @@ class _Session:
             # 2.6: the buffer's parts, [first_seq, start, wall] each (`services.live.parts`).
             "parts": [[p.first_seq, p.start, p.wall] for p in timeline.parts()],
         }
+        if source is not None and source.hls:
+            # 2.7: how long the server keeps the channel, and its newest media sequence;
+            # a server part's first segment's time of day.
+            snapshot["window_s"] = float(getattr(source, "window_s", 0.0) or 0.0)
+            snapshot["edge_seq"] = getattr(source, "edge_sequence", None)
+            part_wall = getattr(source, "part_wall", None)
+            if part_wall is not None:
+                snapshot["part_wall"] = float(part_wall)
+            part_media = getattr(source, "part_media_s", None)
+            if part_media is not None:
+                snapshot["part_media_s"] = float(part_media)
+            if getattr(source, "until_dropped", False) is True:
+                snapshot["until_dropped"] = True  # another encoding persisted: no stop
         self._heard_edge = edge
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the
@@ -1546,6 +1647,16 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.note(name, command[2])
+            elif name == "until":  # 2.7: a server part's stop moved
+                if (
+                    len(command) != 3
+                    or not isinstance(command[1], str)
+                    or type(command[2]) is not int
+                ):
+                    raise ValueError("a stop needs a session and a media sequence")
+                session = self._sessions.get(command[1])
+                if session is not None:
+                    session.set_until(command[2])
             elif name == "record_start":
                 self._record(command)
             elif name == "record_stop":

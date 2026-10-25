@@ -14,7 +14,7 @@ from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QPixmap, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QMenu, QWidget
-from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config
+from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config, shut_hub
 from test_browsed_catalog import FakeEpg, ScriptedFactory
 from timer_fixtures import elapse, wait_until
 
@@ -2853,6 +2853,7 @@ class PipelineTuneTests(PipelineCase):
                 "disk": False,
                 "max_bytes": 256 * MIB,  # without consent, the memory per stream: 256 MiB
                 "channel": channel_key("Home", CHANNELS[0]),  # what it taught is kept (2.0.2)
+                "one_stream": True,  # 2.7: a provider with a limit: no second download
             },
         )
         self.assertEqual(self.session.plays, [])  # the live session plays it, not the controller
@@ -4829,7 +4830,7 @@ class AllProvidersLaunchTests(ControllerTestCase):
             factory=self.factory,
             make_epg=lambda manager: FakeEpg(manager._pinned_provider),
         )
-        self.addCleanup(self.hub.shutdown)
+        self.addCleanup(shut_hub, self.hub)
         config.selected_provider_name = "Demo TV"
         config.tv_all_providers = True
         config.start_with_last_channel = True

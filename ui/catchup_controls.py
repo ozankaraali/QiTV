@@ -143,6 +143,7 @@ class _Ask:
     retried: bool = False  # it opens again after a failure once it played (a second: live)
     programme: str = ""  # an STB portal's: the programme whose recording plays (its guide id)
     fresh: bool = False  # an STB portal's: its link was made again after a new sign-in
+    link: str = ""  # the channel's live link, its addresses' base when its item has no cmd
 
 
 @dataclass
@@ -209,6 +210,9 @@ class CatchUp(QObject):
         # By channel key: when it was asked (the clock's) whether the guide names the STB
         # channel's recordings, and the answer (`_guide_names_recordings`).
         self._named: dict[str, tuple[float, bool]] = {}
+        # By channel key (2.7): the helper read no TS or HLS at its archive's address, so it
+        # plays directly, not through the buffer, this run.
+        self._direct: set[str] = set()
         self._key: tuple[Optional[dict], str, str] = (None, "", "")  # item, provider, its key
         self._timer = QTimer(self, interval=TICK_MS)
         self._timer.timeout.connect(self._tick)
@@ -326,8 +330,8 @@ class CatchUp(QObject):
         """A time-shift state whose bar reaches into the channel's archive (see the module
         docstring); the state as it is when the archive is not offered."""
         archive = self.offered(target)
-        if archive is None:
-            return state
+        if archive is None or "window_start" in state:
+            return state  # 2.7: the session draws the channel's own window; this one is beyond
         start = float(state["start"])
         now = self._now().timestamp()
         ring_wall = live_parts.wall_in(state, start, now)  # 2.6: a kept buffer's own time
@@ -358,10 +362,41 @@ class CatchUp(QObject):
             return False
         if archive.kind == STB:
             return self._open_recording(target, archive, moment, live_playing, retried)
-        item = target.item
         if archive.kind in ("default", "append") and not archive.source:
-            source = item_provider.playlist_source(self.catalog, item)  # its #EXTM3U line's
+            source = item_provider.playlist_source(self.catalog, target.item)  # #EXTM3U line's
             archive = replace(archive, source=source)
+        ask = self._ask_for(target, archive, moment, until, link, live_playing, retried)
+        if ask is None:
+            return False
+        key = ask.key
+        asked = self._asked
+        if self._probing and asked is not None and asked.key == key:
+            # A probe of this channel's archive runs: its answer serves this newer ask (← held
+            # down opens one archive, not one per press).
+            self._asked = replace(ask, live_playing=asked.live_playing and live_playing)
+            return True
+        self._generation += 1
+        self._probing = False
+        form = self.memory.answered(key)
+        if form is not None and form < len(ask.urls):
+            self._play(ask, form, probed=True)
+        elif not self._probe(ask):
+            self._play(ask, 0, probed=False)
+        return True
+
+    def _ask_for(
+        self,
+        target: Target,
+        archive: Archive,
+        moment: float,
+        until: Optional[float],
+        link: str,
+        live_playing: bool,
+        retried: bool,
+    ) -> Optional[_Ask]:
+        """An ask for `target`'s archive from `moment`, its addresses built (`open`); None
+        when none can be made."""
+        item = target.item
         now = self._now().timestamp()
         moment = min(max(moment, now - archive.seconds + EDGE_S), now - MIN_AGE_S)
         when = datetime.fromtimestamp(moment, timezone.utc)
@@ -386,23 +421,21 @@ class CatchUp(QObject):
         )
         if not urls:
             logger.info("No archive address for %s", target.title)
-            return False
+            return None
         key = self.key(target)
-        ask = _Ask(target, archive, key, moment, begins, ends, urls, live_playing, guessed, retried)
-        asked = self._asked
-        if self._probing and asked is not None and asked.key == key:
-            # A probe of this channel's archive runs: its answer serves this newer ask (← held
-            # down opens one archive, not one per press).
-            self._asked = replace(ask, live_playing=asked.live_playing and live_playing)
-            return True
-        self._generation += 1
-        self._probing = False
-        form = self.memory.answered(key)
-        if form is not None and form < len(urls):
-            self._play(ask, form, probed=True)
-        elif not self._probe(ask):
-            self._play(ask, 0, probed=False)
-        return True
+        return _Ask(
+            target,
+            archive,
+            key,
+            moment,
+            begins,
+            ends,
+            urls,
+            live_playing,
+            guessed,
+            retried,
+            link=link,
+        )
 
     # ---- an STB portal's recordings --------------------------------------------------------
 
@@ -570,6 +603,53 @@ class CatchUp(QObject):
             self._request(replace(ask.target, archive_at=None, archive_until=None, zapped=False))
 
     def _play(self, ask: _Ask, form: int, *, probed: bool) -> None:
+        """Open the archive: through the buffer while the channel plays there
+        (`_through_buffer`), else directly."""
+        if not self._through_buffer(ask, form, probed):
+            self._play_direct(ask, form, probed=probed)
+
+    def _through_buffer(self, ask: _Ask, form: int, probed: bool) -> bool:
+        """2.7: while the channel plays through its buffer, its archive plays there too,
+        server parts of the live session (`LiveSession.play_archive`): the bar, seeks and
+        the way back into the buffer are the session's then. True when it does. Not an STB
+        portal's recording (a link per programme, made one by one), nor an archive the
+        helper could not read this run (`_direct`); a first part that does not play opens
+        the address directly, as before."""
+        live = getattr(self._tuner, "live", None)
+        play_archive = getattr(live, "play_archive", None)
+        if (
+            play_archive is None
+            or not ask.live_playing
+            or ask.programme
+            or ask.key in self._direct
+            or not self._tuner.pipeline()
+        ):
+            return False
+        generation = self._generation
+
+        def build(moment: float) -> Optional[tuple[str, float]]:
+            built = self._ask_for(
+                ask.target, ask.archive, moment, None, ask.link, live_playing=True, retried=False
+            )
+            if built is None or form >= len(built.urls):
+                return None
+            return built.urls[form], built.begins
+
+        def fallback(kind: str) -> bool:
+            if generation != self._generation:
+                return False  # a newer ask, a zap or a swap came meanwhile
+            if kind == "unsupported":
+                self._direct.add(ask.key)  # no TS or HLS there: VLC may read it
+            self._play_direct(ask, form, probed=probed)
+            return True
+
+        if not play_archive(ask.moment, build, fallback):
+            return False
+        logger.info("Opening the archive of %s through the buffer", ask.target.title)
+        self._toast(translate(ARCHIVE_TEXT))
+        return True
+
+    def _play_direct(self, ask: _Ask, form: int, *, probed: bool) -> None:
         """Open the archive in the large picture once the stream before it is let go."""
         url = ask.urls[form]
         target, session = ask.target, self._session

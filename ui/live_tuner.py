@@ -162,6 +162,7 @@ class LiveTuner(QObject):
         self._action_slot = False  # that open plays a provider stream: it holds a slot
         self._action_provider: Optional[str] = None  # whose slot it holds
         self._action_limit: Optional[int] = None  # within which it is taken (None: always)
+        self._pending_limit: Optional[int] = None  # the provider's limit for the pending tune
         self._peers: list[LiveTuner] = []  # the other pictures' (wait_for_each_other)
         self._input_cap = QTimer(self, singleShot=True, interval=RELEASE_CAP_MS)
         self._input_cap.timeout.connect(self._on_input_cap)
@@ -263,6 +264,7 @@ class LiveTuner(QObject):
         assert self._stream is not None
         self.stop()
         self._pending = start
+        self._pending_limit = limit
         self._stream.request(provider, limit)
 
     def refused(self, provider: str, limit: Optional[int], *, direct: bool = False) -> bool:
@@ -332,7 +334,11 @@ class LiveTuner(QObject):
         self._latency = self.config.live_latency
         try:
             disk = None if self._disk_allowed() else False
-            stream.start(**start_kwargs(pending, self.config, disk=disk))
+            kwargs = start_kwargs(pending, self.config, disk=disk)
+            # 2.7: a server part's download is no budget slot of its own: with any limit
+            # the live upstream parks while one plays (LiveSession.start's one_stream).
+            kwargs["one_stream"] = self._pending_limit is not None
+            stream.start(**kwargs)
         except Exception as error:  # the stream gave its slot back and stopped the session
             logger.warning("Could not start the live channel (%s)", type(error).__name__)
             self._pause = False

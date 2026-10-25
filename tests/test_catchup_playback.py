@@ -483,3 +483,160 @@ class ProbeTests(CatchupCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# 2.7: the session draws the channel's own server window past the buffer (a day here), the
+# bar reaching half an hour past the buffer.
+WINDOWED = dict(STATE, start=3000.0 - 1800.0, buffer_start=3000.0, window_start=3000.0 - 86000.0)
+
+
+class ServerWindowRoutingTests(CatchupCase):
+    """2.7: within the channel's own server window the session plays it (a server part);
+    a provider's archive is reached beyond it."""
+
+    def windowed(self, channel=ARCHIVED, **state):
+        self.start_archived(channel)
+        self.live.timelineChanged.emit(dict(WINDOWED, **state))
+        self.controller.mouse_moved()
+
+    def test_the_bar_draws_the_window_as_the_session_sends_it(self):
+        self.windowed()
+        state, _ticks = self.transport.named("update_timeline")[-1]
+        self.assertEqual((state["start"], state["buffer_start"]), (1200.0, 3000.0))
+
+    def test_left_past_the_buffer_goes_into_the_server_window(self):
+        self.windowed()
+        self.controller.handle(Action.SEEK_BACK)  # 10 s back from 5 s after the buffer's start
+        self.assertEqual(self.live.named("seek_relative"), [(-10.0,)])
+        self.assertEqual(self.archive_plays(), [])
+
+    def test_programme_start_reaches_into_the_window(self):
+        # A programme that began two hours ago: the server keeps it, the bar shows 30 min.
+        self.catalog.epg[1] = [
+            Programme("Film", NOW - timedelta(hours=2), NOW + timedelta(minutes=5))
+        ]
+        self.catalog.epg[2] = self.catalog.epg[1]
+        for channel in (ARCHIVED, PLAIN):
+            with self.subTest(channel=channel["name"]):
+                self.windowed(channel)
+                self.transport.programmeStartRequested.emit()
+                self.assertEqual(self.live.named("seek_to")[-1], (3600.0 - 7200.0,))
+                self.assertEqual(self.archive_plays(), [])
+
+    def test_beyond_the_window_a_provider_archive_opens(self):
+        # The window's start reached: the provider's archive goes on before it.
+        self.windowed(start=1200.0, window_start=1200.0, position=1205.0)
+        self.controller.handle(Action.SEEK_BACK)
+        self.live.released.emit()
+        self.assertEqual(len(self.archive_plays()), 1)
+
+    def test_watch_from_the_start_plays_from_the_window(self):
+        # 2.7: the guide's past programme, within the playing channel's server window.
+        self.windowed(PLAIN)
+        film = Programme("Film", NOW - timedelta(hours=2), NOW + timedelta(minutes=5))
+        self.controller._on_guide_catchup(PLAIN, film, "10", CHANNELS)
+        self.assertEqual(self.live.named("seek_to")[-1], (3600.0 - 7200.0,))
+        self.assertEqual(self.archive_plays(), [])
+
+    def test_watch_from_the_start_tunes_a_channel_seen_earlier(self):
+        # Its window was seen this run: the channel tunes live, then plays from the start.
+        self.windowed(PLAIN)
+        self.start_archived(ARCHIVED)  # another channel now
+        film = Programme("Film", NOW - timedelta(hours=2), NOW + timedelta(minutes=5))
+        count = len(self.starts())
+        self.controller._on_guide_catchup(PLAIN, film, "10", CHANNELS)
+        self.catalog.linkReady.emit(self.catalog.links[-1][0], PLAIN["cmd"])
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == count + 1))
+        self.assertEqual(self.starts()[-1][0], PLAIN["cmd"])  # live, not an archive address
+        self.live.play_pipeline()
+        self.live.timelineChanged.emit(dict(WINDOWED))
+        self.assertEqual(self.live.named("seek_to")[-1], (3600.0 - 7200.0,))
+        self.assertEqual(self.archive_plays(), [])
+
+    def test_a_known_window_is_the_guides_reach(self):
+        self.assertEqual(self.controller.archive_reach(PLAIN), timedelta(0))
+        self.windowed(PLAIN)
+        self.assertGreater(self.controller.archive_reach(PLAIN), timedelta(hours=23))
+        self.assertEqual(self.controller.archive_reach(ARCHIVED), timedelta(days=3))  # its own
+
+
+class ArchiveThroughBufferTests(CatchupCase):
+    """2.7: past the buffer, the provider's archive plays through the live session (a
+    server part of its address) while the buffer plays; directly, as before, otherwise."""
+
+    def setUp(self):
+        super().setUp()
+        self.archives = []
+
+        def play_archive(moment, build, fallback):
+            self.archives.append((moment, build, fallback))
+            return True
+
+        self.live.play_archive = play_archive
+
+    def test_a_ts_archive_plays_through_the_buffer(self):
+        self.start_archived()
+        self.controller.handle(Action.SEEK_BACK)  # 10 s back from 5 s after the buffer's start
+        [(moment, build, _fallback)] = self.archives
+        self.assertEqual(moment, NOW.timestamp() - 605.0)  # 9:55 + 10 s before 20:30: 20:19:55
+        self.assertNotIn(("stop",), self.live.calls)  # live plays on: no direct open
+        self.assertEqual(self.archive_plays(), [])
+        url, begins = build(moment)
+        self.assertEqual(url, "http://panel.test/timeshift/viewer/secret/11/2026-10-15:20-19/1.ts")
+        self.assertEqual(begins, moment - 55.0)
+        self.assertIn((ARCHIVE_TEXT, "info"), self.toast.messages())
+        self.assertFalse(self.catchup.active())  # the session draws the bar
+
+    def test_an_unreadable_archive_plays_directly_as_before(self):
+        self.start_archived()
+        self.controller.handle(Action.SEEK_BACK)
+        [(_moment, _build, fallback)] = self.archives
+        fallback("unsupported")  # the helper reads no TS or HLS there
+        self.assertEqual(self.live.calls[-1], ("stop",))  # live closes first ...
+        self.live.released.emit()
+        [(url, kwargs)] = self.archive_plays()
+        self.assertIn("/2026-10-15:20-19/1.ts", url)
+        self.assertEqual(kwargs["start_ms"], 55_000)
+        self.assertTrue(self.catchup.active())
+        # It is remembered: the channel's next rewind opens it directly.
+        self.controller.handle(Action.GO_LIVE)
+        self.catalog.linkReady.emit(self.catalog.links[-1][0], ARCHIVED["cmd"])
+        self.session.stateChanged.emit("idle")
+        self.assertTrue(wait_until(lambda: self.live.running))
+        self.live.play_pipeline()
+        self.live.timelineChanged.emit(dict(STATE))
+        self.controller.handle(Action.SEEK_BACK)
+        self.assertEqual(len(self.archives), 1)
+
+    def test_an_archive_part_is_not_the_channels_own_window(self):
+        # The session draws the archive part's bar as it draws a server window's.
+        self.start_archived()
+        part = dict(STATE, start=1200.0, buffer_start=3000.0, window_start=1200.0)
+        self.live.timelineChanged.emit(dict(part, archive_part=True))
+        self.assertEqual(self.controller._live_controls.window_reach(ARCHIVED), 0.0)
+
+    def test_steps_within_an_archive_part_are_the_sessions(self):  # final review C1, I2
+        # While the archive plays through the buffer, ← and the bar are the live session's
+        # (it steps on from the point asked and opens its archive's addresses itself).
+        self.start_archived()
+        part = dict(STATE, start=1200.0, buffer_start=3000.0, window_start=1200.0)
+        self.live.timelineChanged.emit(dict(part, position=1201.0, archive_part=True))
+        for _ in range(3):
+            self.controller.handle(Action.SEEK_BACK)
+        self.assertEqual(self.live.named("seek_relative"), [(-10.0,)] * 3)
+        self.transport.seekToRequested.emit(100.0)  # before the bar's start too
+        self.assertEqual(self.live.named("seek_to")[-1], (100.0,))
+        self.assertEqual(self.archives, [])
+        self.assertEqual(self.archive_plays(), [])
+
+
+class ProgrammeStartWithoutGuideTests(CatchupCase):
+    def test_programme_start_without_a_programme_goes_to_the_buffers_start(self):  # I4
+        # A channel whose server keeps a day but whose guide is empty: ⏮ goes to the oldest
+        # point of the buffer, not a day back.
+        self.start_archived(PLAIN)
+        self.live.timelineChanged.emit(dict(WINDOWED))
+        self.controller.mouse_moved()
+        self.transport.programmeStartRequested.emit()
+        self.assertEqual(self.live.named("seek_to")[-1], (3000.0,))

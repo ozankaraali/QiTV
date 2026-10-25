@@ -15,7 +15,8 @@ an index, `index.jsonl`, one JSON object per line, appended and never rewritten 
 (compacted through `index.jsonl.new` once most of its segment lines name segments gone):
 `{"v": 2}` first, then `{"seg": seq, "h": header_len, "n": size, "s": start, "e": end, "d":
 discontinuity, "q": start_quality, "w": wall, "j": junction}` per completed segment (the
-session's `note_segment`), `{"part": first_seq, "s": start, "w": wall}` per part,
+session's `note_segment`; 2.7 adds `"m"`, the HLS media sequence it begins, when it begins
+one), `{"part": first_seq, "s": start, "w": wall}` per part,
 `{"label": {...}}` and `{"where": {...}}` (the last counts). `close(keep=True)` leaves such a
 folder for a later helper (`read_index`); older builds' sweeps match only
 `.qitv-timeshift-<32 hex>` folders with the v1 marker, so they never touch it.
@@ -97,6 +98,7 @@ class Ring(ABC):
         self._charged = 0
         self._failure = ""
         self.closed = False
+        self._protected: int | None = None  # 2.7: never retire from this segment on
 
     # ---- storage hooks (called with the disk lock held) -------------------------------
     @abstractmethod
@@ -132,9 +134,16 @@ class Ring(ABC):
 
     # ---- 2.6: a kept buffer's index (a v2 disk ring writes one; others keep none) -----
     def note_segment(
-        self, seq: int, start: float, end: float, discontinuity: bool, start_quality: str
+        self,
+        seq: int,
+        start: float,
+        end: float,
+        discontinuity: bool,
+        start_quality: str,
+        media_seq: int | None = None,
     ) -> None:
-        """Segment `seq` completed and the timeline placed it."""
+        """Segment `seq` completed and the timeline placed it (`media_seq`: the HLS media
+        sequence it begins, 2.7)."""
 
     def note_part(self, first_seq: int, start: float, wall: float) -> None:
         """A part of the timeline begins at segment `first_seq`."""
@@ -180,6 +189,22 @@ class Ring(ABC):
         with self._state_lock:
             return self._max_bytes
 
+    def protect_from(self, seq: int | None) -> None:
+        """Never retire segment `seq` or a later one (2.7: what the player reads in a server
+        part, and what lies ahead of it); None lifts it. Over the cap with only protected
+        segments left, the ring takes more instead of failing (its writer is paced)."""
+        with self._state_lock:
+            self._protected = seq
+
+    def retirable(self) -> bool:
+        """It holds a completed segment that may go (2.7: none, or only protected ones)."""
+        with self._state_lock:
+            return self._retirable_locked()
+
+    def _retirable_locked(self) -> bool:
+        protected = self._protected
+        return bool(self._completed) and (protected is None or self._completed[0].seq < protected)
+
     def set_max_bytes(self, max_bytes: int) -> None:
         """Hold up to `max_bytes` from now on (a multiview tile's ring grows with the focus and
         shrinks without it): a smaller cap evicts the oldest completed segments at once until
@@ -191,7 +216,7 @@ class Ring(ABC):
                 if self.closed:
                     return
                 self._max_bytes = max_bytes
-            while self._charged > max_bytes and self._completed:
+            while self._charged > max_bytes and self._retirable_locked():
                 self._retire_oldest_locked()
             with self.changed:
                 self.changed.notify_all()
@@ -273,10 +298,10 @@ class Ring(ABC):
     def _reserve_write(self, segment: Segment, length: int) -> None:
         charge = self._charge_for(segment.size + length)
         additional = charge - segment.charge
-        while self._charged + additional > self._max_bytes and self._completed:
+        while self._charged + additional > self._max_bytes and self._retirable_locked():
             self._retire_oldest_locked()
-        if self._charged + additional > self._max_bytes:
-            raise RingError(self._LIMIT_TEXT)
+        if self._charged + additional > self._max_bytes and not self._completed:
+            raise RingError(self._LIMIT_TEXT)  # (only protected ones left: it takes more)
         self._extra_check(segment, additional)
         with self._state_lock:
             self._charged += additional
@@ -333,7 +358,7 @@ class Ring(ABC):
     def retire_oldest(self) -> bool:
         """Let the oldest completed segment go (2.6, the disk amount); False without one."""
         with self._disk_lock:
-            if self.closed or not self._completed:
+            if self.closed or not self._retirable_locked():
                 return False
             self._retire_oldest_locked()
             with self.changed:
@@ -345,7 +370,7 @@ class Ring(ABC):
         the open one stays. Returns how many went."""
         count = 0
         with self._disk_lock:
-            while not self.closed and self._completed and self._completed[0].wall < wall:
+            while not self.closed and self._retirable_locked() and self._completed[0].wall < wall:
                 self._retire_oldest_locked()
                 count += 1
             if count:
@@ -802,7 +827,13 @@ class DiskRing(Ring):
                 self._index = None
 
     def note_segment(
-        self, seq: int, start: float, end: float, discontinuity: bool, start_quality: str
+        self,
+        seq: int,
+        start: float,
+        end: float,
+        discontinuity: bool,
+        start_quality: str,
+        media_seq: int | None = None,
     ) -> None:
         if not self._kept:
             return
@@ -821,6 +852,8 @@ class DiskRing(Ring):
                 "w": segment.wall,
                 "j": segment.junction,
             }
+            if media_seq is not None:
+                record["m"] = media_seq  # 2.7; older builds ignore the key
             self._index_segs[seq] = record
         self._append_index(record)
 
@@ -1013,18 +1046,22 @@ class DiskBudget:
 
     Each ring keeps under its own cap as it writes; `trim()`, called once a segment completed
     and without any ring's lock held, lets the oldest segments go until all of them fit: a
-    kept (parked) ring's first, the oldest first, then the oldest of any. Lock order: the
-    budget's lock, then one ring's at a time.
+    server part's played ones first (2.7: never the live buffer it runs into), then a kept
+    (parked) ring's, the oldest first, then the oldest of any. Lock order: the budget's lock,
+    then one ring's at a time.
     """
 
     def __init__(self, max_bytes: int) -> None:
         self.max_bytes = max_bytes
         self._lock = threading.Lock()
         self._rings: dict[int, tuple[Ring, bool]] = {}  # id -> (ring, parked)
+        self._parts: set[int] = set()  # 2.7: server parts' rings
 
-    def register(self, ring: Ring, *, parked: bool = False) -> None:
+    def register(self, ring: Ring, *, parked: bool = False, part: bool = False) -> None:
         with self._lock:
             self._rings[id(ring)] = (ring, parked)
+            if part:
+                self._parts.add(id(ring))
 
     def set_parked(self, ring: Ring, parked: bool) -> None:
         with self._lock:
@@ -1034,6 +1071,7 @@ class DiskBudget:
     def unregister(self, ring: Ring) -> None:
         with self._lock:
             self._rings.pop(id(ring), None)
+            self._parts.discard(id(ring))
 
     def trim(self) -> list[Ring]:
         """Fit the rings into `max_bytes`; returns the parked rings that lost segments (their
@@ -1042,7 +1080,11 @@ class DiskBudget:
         with self._lock:
             rings = list(self._rings.values())
             while sum(ring.charged for ring, _ in rings) > self.max_bytes:
-                victim = self._victim(rings)
+                parts = [(r, p) for r, p in rings if id(r) in self._parts and r.retirable()]
+                victim = (
+                    min(parts, key=lambda item: item[0].oldest_wall() or 0.0) if parts else None
+                )
+                victim = victim or self._victim(rings)
                 if victim is None:
                     break
                 ring, parked = victim
@@ -1068,7 +1110,7 @@ class DiskBudget:
     def _victim(rings: list[tuple[Ring, bool]]) -> tuple[Ring, bool] | None:
         """The ring whose oldest segment goes next: a parked one's oldest, else any one's."""
         for parked in (True, False):
-            held = [(r, p) for r, p in rings if p is parked and r.oldest_wall() is not None]
+            held = [(r, p) for r, p in rings if p is parked and r.retirable()]
             if held:
                 return min(held, key=lambda item: item[0].oldest_wall() or 0.0)
         return None

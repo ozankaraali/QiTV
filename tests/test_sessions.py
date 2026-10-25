@@ -79,6 +79,7 @@ class FakeLive(QObject):
     def start(self, url, **kwargs):
         if self.fail_start:
             raise RuntimeError("could not open http://user:secret@provider.test/2.ts")
+        self.kwargs = kwargs  # what it started with besides its URL
         self.log.append((self.name, "live", "start", url))
         if self.fail_inside_start:
             self.failed.emit(self.fail_inside_start)  # e.g. direct play without libVLC
@@ -757,6 +758,25 @@ class _Tiles(_Fixture):
             self.manager.add_slot(self.tiles[name])
         self.changes = []
         self.manager.largeChanged.connect(lambda new, old: self.changes.append((new, old)))
+
+
+class OneStreamTests(_Tiles):
+    """2.7 (final review C2): a PiP's or a tile's live session knows its provider limits
+    its streams, so a server part parks its live upstream there too, as the main one's does
+    (`LiveSession.start`'s one_stream): the PiP swapped large, or the focused tile."""
+
+    def test_a_pips_live_session_parks_for_a_part_on_a_limited_provider(self):
+        self.open_granted(B, limit=2)
+        self.assertIs(self.pip.live.kwargs["one_stream"], True)
+
+    def test_a_tiles_live_session_parks_for_a_part_on_a_limited_provider(self):
+        for name, limit, parks in (("t2", 3, True), ("t3", None, False)):
+            with self.subTest(limit=limit):
+                self.manager.open_slot(
+                    name, channel=B, provider=PROVIDER, limit=limit, start_kwargs=start_kwargs(B)
+                )
+                self.pump()
+                self.assertIs(self.tiles[name].live.kwargs["one_stream"], parks)
 
 
 class NamedSlotTests(_Tiles):

@@ -375,6 +375,16 @@ class SlotRoleTests(unittest.TestCase):
         self.assertEqual(self.live.kwargs[-1]["disk"], True)
         self.assertTrue(self.tuner.on_disk())
 
+    def test_a_provider_with_a_limit_parks_live_for_a_server_part(self):
+        # 2.7: the server part's download is not a budget slot of its own: with any limit
+        # the live upstream parks for it; a provider without one has both.
+        for limit, one_stream in ((1, True), (2, True), (None, False)):
+            with self.subTest(limit=limit):
+                self.tuner.stop()
+                self.tuner.tune(LiveStart(URL, "QiTV", True), PROVIDER, limit)
+                QTest.qWait(10)
+                self.assertIs(self.live.kwargs[-1]["one_stream"], one_stream)
+
     def test_one_disk_ring_among_every_player(self):
         names = ("main", "pip", "t2")
         tuners = [

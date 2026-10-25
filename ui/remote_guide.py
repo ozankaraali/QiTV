@@ -153,7 +153,7 @@ class PhoneGuide(QObject):
         channel, group_key, channels = cast(tuple, found[1])
         controller = self._window.controller
         now, listed = controller.timetable(channel, TIMETABLE_LIMIT, TIMETABLE_BACK)
-        days = controller.archive_days(channel)
+        reach = controller.archive_reach(channel)  # 2.7: a server window's too
         rows = []
         for programme in listed:
             on = programme.is_on(now)
@@ -168,8 +168,8 @@ class PhoneGuide(QObject):
             if on:
                 row["id"] = handle  # watching what's on: the channel live
             elif (
-                days > 0
-                and now - timedelta(days=days) <= programme.start < now
+                reach > timedelta(0)
+                and now - reach <= programme.start < now
                 and programme_in_archive(channel, programme)
             ):
                 payload = (channel, programme, group_key, channels)

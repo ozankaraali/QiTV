@@ -560,6 +560,46 @@ class LiveWorkerTests(unittest.TestCase):
                 self.assertEqual({item[4] for item in buffered}, {"key"})  # IDR starts
         self.assert_no_credentials(helper)
 
+    def test_a_span_beginning_an_hls_segment_carries_its_media_sequence(self):
+        # 2.7: the server window's stop and hop find the buffer segment that begins an HLS
+        # segment by its media sequence; the others carry None.
+        first, second = make_stream(4), make_stream(4, pts_start=900000 + 4 * 90000)
+        source = self.source(
+            {
+                "/user/secret/channel.m3u8": (200, {}, leaf("a.ts", "b.ts")),
+                "/user/secret/a.ts": (200, {}, first),
+                "/user/secret/b.ts": (200, {}, second),
+            }
+        )
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/channel.m3u8")
+        helper.wait_for(lambda message: message == ("ended", sid))
+        buffered = spans(helper, sid)
+        starts = [(item[5], round(item[1])) for item in buffered if item[5] is not None]
+        self.assertEqual(starts, [(0, 0), (1, 4)])
+        self.assertGreater(len(buffered), 2)  # segments within an HLS segment carry None
+
+    def test_the_state_reports_the_server_window(self):
+        # 2.7: a live HLS source's window and newest media sequence; raw TS has neither.
+        first, second = make_stream(4), make_stream(4, pts_start=900000 + 4 * 90000)
+        source = self.source(
+            {
+                SECRET_PATH: (200, {}, make_stream(9)),
+                "/user/secret/live.m3u8": (200, {}, leaf("a.ts", "b.ts", ended=False)),
+                "/user/secret/a.ts": (200, {}, first),
+                "/user/secret/b.ts": (200, {}, second),
+            }
+        )
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/live.m3u8", live_delay=100.0)
+        state = helper.wait_for(lambda m: m[:2] == ("state", sid) and m[2].get("window_s") == 8.0)
+        self.assertEqual(state[2]["edge_seq"], 1)
+        raw = helper.open(source.url + SECRET_PATH)
+        helper.wait_for(lambda message: message == ("ended", raw))
+        for state in helper.of(raw, "state"):
+            self.assertNotIn("window_s", state[2])
+            self.assertNotIn("edge_seq", state[2])
+
     def test_an_hls_batch_reports_its_live_edge_once_delivered(self):
         # 2.1: states are throttled to four a second, so the end of a batch that
         # arrived within a quarter second waited for the next batch (a 2 s keyframe interval
@@ -1472,6 +1512,151 @@ class InProcessHelper:
         self.parent.close()
 
 
+class ServerPartPacingTests(unittest.TestCase):
+    """2.7: a server part fetches only `ahead_s` past what the player reads."""
+
+    def test_a_server_part_buffers_about_its_ahead_of_the_reader(self):
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += "".join(f"#EXTINF:1,\ns{n}.ts\n" for n in range(10))
+        routes = {
+            f"/user/secret/s{n}.ts": (200, {}, make_stream(1, pts_start=900000 + n * 90000))
+            for n in range(10)
+        }
+        routes["/user/secret/live.m3u8"] = (200, {}, text.encode())
+        upstream = LocalSource(routes)
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        reading = [None]
+        helper.helper.server.reading = lambda sid: reading[0]
+
+        def fetched():
+            return [path for path, _headers in upstream.requests if path.endswith(".ts")]
+
+        window = {"back_s": 10.0, "ahead_s": 3.0}
+        url = upstream.url + "/user/secret/live.m3u8"
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"window": window}))
+        helper.wait_for(lambda m: m == ("ready", "p"))
+        time.sleep(1.5)
+        before = fetched()
+        self.assertGreaterEqual(len(before), 3)
+        self.assertLessEqual(len(before), 5)  # about 3 s ahead, never all 10
+        while helper.parent.poll(0.05):  # the states sent meanwhile
+            helper.messages.append(helper.parent.recv())
+        states = [m for m in helper.messages if m[:2] == ("state", "p")]
+        reading[0] = states[-1][2]["newest"]  # the player reaches the newest segment
+        time.sleep(1.5)
+        self.assertGreater(len(fetched()), len(before))
+
+
+class ServerPartProtectionTests(unittest.TestCase):
+    def test_a_server_part_protects_what_the_player_reads(self):
+        # 2.7: what the player reads, and what lies ahead, is never evicted.
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += "".join(f"#EXTINF:1,\ns{n}.ts\n" for n in range(6))
+        routes = {
+            f"/user/secret/s{n}.ts": (200, {}, make_stream(1, pts_start=900000 + n * 90000))
+            for n in range(6)
+        }
+        routes["/user/secret/live.m3u8"] = (200, {}, text.encode())
+        upstream = LocalSource(routes)
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        reading = [None]
+        helper.helper.server.reading = lambda sid: reading[0]
+        window = {"back_s": 6.0, "ahead_s": 2.0}
+        url = upstream.url + "/user/secret/live.m3u8"
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"window": window}))
+        helper.wait_for(lambda m: m == ("ready", "p"))
+        ring = helper.helper._sessions["p"]._ring
+        deadline = time.monotonic() + 5
+        while ring._protected is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(ring._protected, ring.oldest_seq)  # nothing read yet: all ahead
+        reading[0] = 1
+        deadline = time.monotonic() + 5
+        while ring._protected != 1 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(ring._protected, 1)
+
+
+class ServerPartFullDiskTests(unittest.TestCase):
+    def test_a_parts_ring_is_protected_before_its_first_segment(self):
+        # A full disk amount: the budget lets a part's retirable segments go first,
+        # and before its first pacing check a new part's ring protected nothing, so the
+        # segment VLC was about to read went; the stream ended and the part opened again.
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        first = make_stream(1, pts_start=900000)
+
+        def slow(request):
+            gate.wait(5)
+            request.wfile.write(first)
+
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\ns0.ts\n"
+        routes = {"/user/secret/s0.ts": (200, {}, slow)}
+        routes["/user/secret/live.m3u8"] = (200, {}, text.encode())
+        upstream = LocalSource(routes)
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        window = {"back_s": 1.0, "ahead_s": 60.0}
+        url = upstream.url + "/user/secret/live.m3u8"
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"window": window}))
+        deadline = time.monotonic() + 5
+        session = None
+        while time.monotonic() < deadline:
+            session = helper.helper._sessions.get("p")
+            if session is not None and session._ring is not None:
+                break
+            time.sleep(0.02)
+        self.assertIsNotNone(session._ring)
+        self.assertEqual(session._ring._protected, 0)  # all it will hold, until VLC reads
+
+
+class ServerPartStopTests(unittest.TestCase):
+    def test_set_until_moves_a_server_parts_stop(self):
+        # Review Focus 3: the live buffer's start moved (eviction): the stop follows it.
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += "".join(f"#EXTINF:1,\ns{n}.ts\n" for n in range(10))
+        routes = {
+            f"/user/secret/s{n}.ts": (200, {}, make_stream(1, pts_start=900000 + n * 90000))
+            for n in range(10)
+        }
+        routes["/user/secret/live.m3u8"] = (200, {}, text.encode())
+        upstream = LocalSource(routes)
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        reading = [None]
+        helper.helper.server.reading = lambda sid: reading[0]
+        window = {"back_s": 10.0, "until_seq": 3, "ahead_s": 1.0}
+        url = upstream.url + "/user/secret/live.m3u8"
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"window": window}))
+        helper.wait_for(lambda m: m == ("ready", "p"))
+        helper.parent.send(("until", "p", 5))
+        time.sleep(0.3)
+        reading[0] = 10_000  # the player at the edge: nothing holds it any more
+        helper.wait_for(lambda m: m == ("ended", "p"))
+        fetched = [path.rsplit("/", 1)[1] for path, _h in upstream.requests if path.endswith(".ts")]
+        self.assertEqual(fetched, [f"s{n}.ts" for n in range(5)])
+
+
+class ArchivePartTests(unittest.TestCase):
+    def test_an_archive_part_ends_at_the_buffers_time_of_day(self):
+        # 2.7: a provider archive (raw TS: no media sequence to share) ends its input once
+        # its media reaches `until_s`, where the live buffer begins: never what that holds.
+        body = make_stream(60)
+        upstream = LocalSource({SECRET_PATH: (200, {"Content-Length": str(len(body))}, body)})
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        helper.helper.server.reading = lambda sid: 10_000  # the player far on: no hold
+        window = {"until_s": 10.0, "ahead_s": 60.0}
+        url = upstream.url + SECRET_PATH
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"window": window}))
+        helper.wait_for(lambda m: m == ("ended", "p"))
+        states = [m for m in helper.messages if m[:2] == ("state", "p")]
+        self.assertGreaterEqual(states[-1][2]["end"], 10.0)
+        self.assertLess(states[-1][2]["end"], 15.0)  # not the whole minute
+
+
 AHEAD = 900_000 + 3600 * 90_000  # the provider's clock an hour later
 
 
@@ -1932,7 +2117,7 @@ class RecordedReadTests(unittest.TestCase):
 class StartQualityTests(unittest.TestCase):
     """In process: the spans message carries how cleanly each segment starts."""
 
-    def test_each_addition_ends_with_its_segments_start_quality(self):
+    def test_each_addition_carries_its_segments_start_quality(self):
         # One IDR every 15 s: IDR starts at 0 and 15 s, a forced cut without one at 10 s.
         upstream = LocalSource({SECRET_PATH: (200, {}, make_stream(24, gop_s=15.0))})
         self.addCleanup(upstream.close)
@@ -1940,11 +2125,13 @@ class StartQualityTests(unittest.TestCase):
         helper.parent.send(("open", "q", upstream.url + SECRET_PATH, {}, True, RAM, 6.0))
         helper.wait_for(lambda message: message == ("ended", "q"))
         buffered = rebuild(m for m in helper.messages if m[:2] == ("state", "q"))
-        # (seq, start, end, discontinuity) as before, then the start quality.
+        # (seq, start, end, discontinuity) as before, then the start quality (then, 2.7,
+        # the HLS media sequence: None for raw TS).
         self.assertEqual([item[0] for item in buffered], [0, 1, 2])
         self.assertEqual([round(item[1], 3) for item in buffered], [0.0, 10.0, 15.0])
+        self.assertEqual([item[5] for item in buffered], [None, None, None])
         self.assertEqual(
-            [item[3:] for item in buffered],
+            [item[3:5] for item in buffered],
             [
                 (False, "key"),
                 (False, "none"),

@@ -110,6 +110,36 @@ class RamRingTests(unittest.TestCase):
         self.assertIsNone(ring.read_at(0, 0, 1))
         self.assertIsNotNone(ring.read_at(5, 0, 1))
 
+    def test_a_protected_segment_is_never_retired(self):
+        # 2.7: what the player reads in a server part, and what lies ahead, stays.
+        ring = RamRing(10_000)
+        for seq in range(6):
+            ring.open_segment(seq, b"h")
+            ring.append(b"x" * 100)
+            ring.complete(seq)
+        ring.protect_from(2)
+        self.assertTrue(ring.retire_oldest())
+        self.assertTrue(ring.retire_oldest())
+        self.assertFalse(ring.retire_oldest())
+        self.assertEqual(ring.oldest_seq, 2)
+        ring.set_max_bytes(10)  # a smaller cap keeps them too
+        self.assertEqual(ring.oldest_seq, 2)
+        ring.protect_from(None)
+        self.assertTrue(ring.retire_oldest())
+
+    def test_a_full_ring_with_only_protected_segments_takes_more_without_failing(self):
+        # The writer is paced instead (a disk RingError would send the session to memory).
+        ring = RamRing(300)
+        for seq in range(2):
+            ring.open_segment(seq, b"h")
+            ring.append(b"x" * 140)
+            ring.complete(seq)
+        ring.protect_from(0)
+        ring.open_segment(2, b"h")
+        ring.append(b"x" * 140)  # over the cap, nothing may go: no RingError
+        self.assertEqual(ring.oldest_seq, 0)
+        self.assertGreater(ring.charged, 300)
+
     def test_open_segment_never_evicted_and_oversize_raises(self):
         ring = RamRing(50)
         ring.open_segment(0, b"")
@@ -656,6 +686,35 @@ class DiskBudgetTests(unittest.TestCase):
         budget.trim()
         self.assertEqual((first.oldest_seq, second.oldest_seq), (1, 0))
 
+    def test_the_disk_budget_passes_over_a_protected_ring(self):
+        # 2.7: a parked ring whose oldest is protected is no victim; the next one is.
+        kept, live = self.ring(), self.ring()
+        self.fill(kept, 3)
+        self.fill(live, 3)
+        budget = DiskBudget(kept.charged + live.charged)
+        budget.register(kept, parked=True)
+        budget.register(live)
+        kept.protect_from(0)
+        self.fill(live, 1)
+        budget.trim()
+        self.assertEqual(kept.oldest_seq, 0)
+        self.assertEqual(live.oldest_seq, 1)
+
+    def test_a_server_parts_played_segments_go_before_the_live_buffer(self):
+        # Review I2: the part's oldest (played, behind the player) go first, never the live
+        # buffer the part runs into.
+        live, part = self.ring(), self.ring()
+        self.fill(live, 3)
+        self.fill(part, 3)
+        budget = DiskBudget(live.charged + part.charged)
+        budget.register(live)
+        budget.register(part, part=True)
+        part.protect_from(1)
+        self.fill(live, 1)
+        budget.trim()
+        self.assertEqual(live.oldest_seq, 0)
+        self.assertEqual(part.oldest_seq, 1)
+
     def test_a_ring_that_unregisters_no_longer_counts(self):
         kept, live = self.ring(), self.ring()
         self.fill(kept, 2)
@@ -749,6 +808,17 @@ class IndexTests(unittest.TestCase):
         )
         self.assertEqual(index.label, {"channel": "k1"})
         self.assertEqual(index.where, {"position": 3.0, "paused": True})
+
+    def test_the_index_keeps_a_segments_media_sequence(self):
+        # 2.7: a segment that begins an HLS segment notes its media sequence ("m").
+        ring = self.ring()
+        ring.open_segment(0, b"h" * 376)
+        ring.append(b"d" * 4000)
+        ring.complete(0)
+        ring.note_segment(0, 0.0, 2.0, False, "key", media_seq=42)
+        self.fill(ring, 1, start_seq=1)  # one without
+        segments = read_index(self.folder(ring)).segments
+        self.assertEqual([s.get("m") for s in segments], [42, None])
 
     def test_a_torn_last_line_is_ignored(self):
         ring = self.ring()
