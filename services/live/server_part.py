@@ -1,4 +1,4 @@
-"""A server part (2.6.2): a channel's own server window, past QiTV's buffer.
+"""A server part (2.7): a channel's own server window, past QiTV's buffer.
 
 A live HLS playlist may keep hours of its channel. When the user goes back past what QiTV
 buffered, the session opens a second helper session of the channel, the server part

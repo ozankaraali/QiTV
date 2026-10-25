@@ -561,7 +561,7 @@ class LiveWorkerTests(unittest.TestCase):
         self.assert_no_credentials(helper)
 
     def test_a_span_beginning_an_hls_segment_carries_its_media_sequence(self):
-        # 2.6.2: the server window's stop and hop find the buffer segment that begins an HLS
+        # 2.7: the server window's stop and hop find the buffer segment that begins an HLS
         # segment by its media sequence; the others carry None.
         first, second = make_stream(4), make_stream(4, pts_start=900000 + 4 * 90000)
         source = self.source(
@@ -580,7 +580,7 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertGreater(len(buffered), 2)  # segments within an HLS segment carry None
 
     def test_the_state_reports_the_server_window(self):
-        # 2.6.2: a live HLS source's window and newest media sequence; raw TS has neither.
+        # 2.7: a live HLS source's window and newest media sequence; raw TS has neither.
         first, second = make_stream(4), make_stream(4, pts_start=900000 + 4 * 90000)
         source = self.source(
             {
@@ -1513,7 +1513,7 @@ class InProcessHelper:
 
 
 class ServerPartPacingTests(unittest.TestCase):
-    """2.6.2: a server part fetches only `ahead_s` past what the player reads."""
+    """2.7: a server part fetches only `ahead_s` past what the player reads."""
 
     def test_a_server_part_buffers_about_its_ahead_of_the_reader(self):
         text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n"
@@ -1550,7 +1550,7 @@ class ServerPartPacingTests(unittest.TestCase):
 
 class ServerPartProtectionTests(unittest.TestCase):
     def test_a_server_part_protects_what_the_player_reads(self):
-        # 2.6.2: what the player reads, and what lies ahead, is never evicted.
+        # 2.7: what the player reads, and what lies ahead, is never evicted.
         text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n"
         text += "".join(f"#EXTINF:1,\ns{n}.ts\n" for n in range(6))
         routes = {
@@ -1581,7 +1581,7 @@ class ServerPartProtectionTests(unittest.TestCase):
 
 class ServerPartFullDiskTests(unittest.TestCase):
     def test_a_parts_ring_is_protected_before_its_first_segment(self):
-        # The owner's full disk amount: the budget lets a part's retirable segments go first,
+        # A full disk amount: the budget lets a part's retirable segments go first,
         # and before its first pacing check a new part's ring protected nothing, so the
         # segment VLC was about to read went; the stream ended and the part opened again.
         gate = threading.Event()
@@ -1641,7 +1641,7 @@ class ServerPartStopTests(unittest.TestCase):
 
 class ArchivePartTests(unittest.TestCase):
     def test_an_archive_part_ends_at_the_buffers_time_of_day(self):
-        # 2.6.2: a provider archive (raw TS: no media sequence to share) ends its input once
+        # 2.7: a provider archive (raw TS: no media sequence to share) ends its input once
         # its media reaches `until_s`, where the live buffer begins: never what that holds.
         body = make_stream(60)
         upstream = LocalSource({SECRET_PATH: (200, {"Content-Length": str(len(body))}, body)})
@@ -2125,7 +2125,7 @@ class StartQualityTests(unittest.TestCase):
         helper.parent.send(("open", "q", upstream.url + SECRET_PATH, {}, True, RAM, 6.0))
         helper.wait_for(lambda message: message == ("ended", "q"))
         buffered = rebuild(m for m in helper.messages if m[:2] == ("state", "q"))
-        # (seq, start, end, discontinuity) as before, then the start quality (then, 2.6.2,
+        # (seq, start, end, discontinuity) as before, then the start quality (then, 2.7,
         # the HLS media sequence: None for raw TS).
         self.assertEqual([item[0] for item in buffered], [0, 1, 2])
         self.assertEqual([round(item[1], 3) for item in buffered], [0.0, 10.0, 15.0])

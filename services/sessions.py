@@ -691,7 +691,7 @@ class SessionManager(QObject):
         size = self.tile_bytes(slot is self._large)  # the focus may have moved since
         if size is not None and not kwargs.get("disk"):
             kwargs["max_bytes"] = size
-        # 2.6.2: with any limit its live upstream parks while a server part plays, as the main
+        # 2.7: with any limit its live upstream parks while a server part plays, as the main
         # session's does (LiveTuner): a part takes no budget slot of its own.
         kwargs["one_stream"] = opening.limit is not None
         try:

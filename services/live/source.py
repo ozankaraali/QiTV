@@ -104,9 +104,9 @@ _FROZEN_TIMEOUT = 60.0
 # An older playlist copy that overlaps recent segments is waited out this many targets.
 _STALE_TARGETS = 3
 _RECENT_SEGMENTS = 10
-_wall_time = time.time  # 2.6.2: a server part's time of day; tests replace it
-_HOLD_POLL_S = 0.25  # 2.6.2: how often a held source asks again
-# 2.6.2: a server part held this long (a pause, not its pacing: about a segment at a time)
+_wall_time = time.time  # 2.7: a server part's time of day; tests replace it
+_HOLD_POLL_S = 0.25  # 2.7: how often a held source asks again
+# 2.7: a server part held this long (a pause, not its pacing: about a segment at a time)
 # reads its playlist again before going on (a 24 h playlist costs ~0.6 s of CPU to read).
 _HELD_RELOAD_S = 30.0
 # 2.6.1: copies of another origin group (its own numbering and names) are set aside, the
@@ -629,7 +629,7 @@ class TsSource:
     """Raw MPEG-TS from one HTTP(S) response; reconnects after the connection breaks.
 
     Only a body with a Content-Length ends the input when complete; every other end
-    reconnects while the backoff schedule allows. A provider archive's (2.6.2, `archive`)
+    reconnects while the backoff schedule allows. A provider archive's (2.7, `archive`)
     never reconnects: a new request would play its address from the start again, so any end
     ends the input; and it reads no further while `hold` says so (its pacing).
     """
@@ -720,7 +720,7 @@ class TsSource:
             connected, received, reconnected = time.monotonic(), 0, True
 
     def _read(self, response: Any) -> bytes:
-        """The next block, once `hold` lets it be read (2.6.2: an archive's pacing)."""
+        """The next block, once `hold` lets it be read (2.7: an archive's pacing)."""
         while self._hold is not None and self._hold():
             if self._http.wait(_HOLD_POLL_S):
                 raise _Closed()
@@ -1085,7 +1085,7 @@ class HlsSource:
         window: Mapping[str, Any] | None = None,
         hold: Callable[[], bool] | None = None,
     ) -> None:
-        """`window` (2.6.2): a server part, `{"back_s": seconds, "until_seq": sequence}`: it
+        """`window` (2.7): a server part, `{"back_s": seconds, "until_seq": sequence}`: it
         starts that far back from the playlist's end and its input ends before that media
         sequence (the live buffer's first), placed in time by `part_wall`; a provider
         archive's, `{"until_s": seconds}`, starts at its first segment (the helper ends it
@@ -1093,7 +1093,7 @@ class HlsSource:
         self.user_agent = http.user_agent
         back = window.get("back_s") if window is not None else None
         if window is not None and back is None and _archive_window(window):
-            back = math.inf  # 2.6.2: a provider archive's playlist begins at the moment asked
+            back = math.inf  # 2.7: a provider archive's playlist begins at the moment asked
         before = window.get("before_s") if window is not None else None
         until = window.get("until_seq") if window is not None else None
         self._back = float(back) if isinstance(back, (int, float)) else None
@@ -1102,7 +1102,7 @@ class HlsSource:
         self._stop_dropped = False  # another encoding persisted: its stop is not this one's
         self._part_wall: float | None = None
         self._part_media: float | None = None  # the media before its stop, as first listed
-        self._hold = hold  # 2.6.2: fetch no further segment while it says so (pacing)
+        self._hold = hold  # 2.7: fetch no further segment while it says so (pacing)
         self._http = http
         self._capture = capture
         self._playlist = playlist
@@ -1133,7 +1133,7 @@ class HlsSource:
         self._extra = extra  # what the session adds to its target (Auto's learned extra)
         self._loaded = time.monotonic()
         self._burst = float(playlist.target_duration or 0)
-        self._window = 0.0  # 2.6.2: how long a live playlist's window lasts (0.0: finished)
+        self._window = 0.0  # 2.7: how long a live playlist's window lasts (0.0: finished)
         self._edge_sequence: int | None = None  # its newest segment's media sequence
         self._note_window(playlist)
         self._keys: dict[str, bytes] = {}
@@ -1145,11 +1145,11 @@ class HlsSource:
         self._pending = False  # a Discontinuity is due before the next bytes
         self._joiner = ContinuityJoiner()  # the segments' counters run on across joins
         self._serial = 0  # segments started so far
-        self._sequence: int | None = None  # 2.6.2: the media sequence of the one started last
+        self._sequence: int | None = None  # 2.7: the media sequence of the one started last
         self._fetching = 0.0  # the EXTINF of the segment being fetched (0.0: none)
         self._rest = 0.0  # the EXTINF of the listed segments after it
         self._last_whole: tuple[int, float] | None = None  # (serial, EXTINF) of the last whole
-        # The playlist is finished (ENDLIST), or a server part's input ends (2.6.2).
+        # The playlist is finished (ENDLIST), or a server part's input ends (2.7).
         self._finite = bool(playlist.is_endlist) or self._back is not None
 
     @property
@@ -1164,13 +1164,13 @@ class HlsSource:
 
     @property
     def window_s(self) -> float:
-        """How long the live playlist's window lasts, its segments' EXTINF summed (2.6.2: a
+        """How long the live playlist's window lasts, its segments' EXTINF summed (2.7: a
         server that keeps hours offers them past the buffer); 0.0 once it is finished."""
         return self._window
 
     @property
     def until_seq(self) -> int | None:
-        """A server part's stop (2.6.2): its input ends before this media sequence."""
+        """A server part's stop (2.7): its input ends before this media sequence."""
         return self._until
 
     @until_seq.setter
@@ -1180,23 +1180,23 @@ class HlsSource:
 
     @property
     def until_dropped(self) -> bool:
-        """A server part's stop went: another encoding persisted (2.6.2, `_other_copy`)."""
+        """A server part's stop went: another encoding persisted (2.7, `_other_copy`)."""
         return self._stop_dropped
 
     @property
     def part_media_s(self) -> float | None:
-        """A server part's media from its first segment to its stop (2.6.2: the session
+        """A server part's media from its first segment to its stop (2.7: the session
         places it flush against the buffer's segment that begins the stop)."""
         return self._part_media
 
     @property
     def part_wall(self) -> float | None:
-        """A server part's first segment's time of day (2.6.2); None before it, or else."""
+        """A server part's first segment's time of day (2.7); None before it, or else."""
         return self._part_wall
 
     @property
     def edge_sequence(self) -> int | None:
-        """The media sequence of the newest segment its playlist lists (2.6.2)."""
+        """The media sequence of the newest segment its playlist lists (2.7)."""
         return self._edge_sequence
 
     def _note_window(self, playlist: Any) -> None:
@@ -1208,7 +1208,7 @@ class HlsSource:
 
     @property
     def segment_sequence(self) -> int | None:
-        """The media sequence of the segment whose bytes come now (2.6.2); None before one."""
+        """The media sequence of the segment whose bytes come now (2.7); None before one."""
         return self._sequence
 
     @property
@@ -1259,7 +1259,7 @@ class HlsSource:
 
     def _start(self, playlist: Any) -> int:
         """The first segment to fetch: `_depth` seconds from a live playlist's end; a server
-        part's `back_s` from it (2.6.2)."""
+        part's `back_s` from it (2.7)."""
         if self._back is not None:
             segments, first = playlist.segments, playlist.media_sequence or 0
             until = self._until
@@ -1347,7 +1347,7 @@ class HlsSource:
             stale = False
             if next_sequence is not None:
                 doubtful = self._other_copy(playlist, url, next_sequence, loaded - ours)
-            else:  # 2.6.2: a server part's stop must be in the copy it starts from
+            else:  # 2.7: a server part's stop must be in the copy it starts from
                 doubtful = self._until is not None and not first <= self._until <= newest + 1
             if doubtful:
                 if other is None:
@@ -1373,7 +1373,7 @@ class HlsSource:
             if next_sequence is None:
                 start = self._start(playlist)
                 next_sequence = first + start
-                if self._back is not None:  # 2.6.2: where the server part sits in time
+                if self._back is not None:  # 2.7: where the server part sits in time
                     after = sum(float(s.duration or 0) for s in playlist.segments[start:])
                     self._part_wall = _wall_time() - after
                     if self._until is not None and first <= self._until <= newest + 1:
@@ -1381,7 +1381,7 @@ class HlsSource:
                         self._part_media = sum(float(s.duration or 0) for s in stop)
             elif first > next_sequence:
                 # Fell behind the window: rejoin at the live start, not the oldest segment; a
-                # server part goes on from the oldest (2.6.2: it plays the past).
+                # server part goes on from the oldest (2.7: it plays the past).
                 log.info("The HLS playlist moved past %d segments.", first - next_sequence)
                 self._mark()
                 next_sequence = first if self._back is not None else first + self._start(playlist)
@@ -1402,7 +1402,7 @@ class HlsSource:
             # Frozen time runs between reloads only, never while segments download.
             if not fresh and loaded - progress >= _FROZEN_TIMEOUT:
                 raise SourceError("timeout", _FROZEN)
-            done = again = False  # 2.6.2: a server part reached its stop / reloads first
+            done = again = False  # 2.7: a server part reached its stop / reloads first
             for index, segment in enumerate(playlist.segments):
                 sequence = first + index
                 if sequence < next_sequence:
@@ -1930,7 +1930,7 @@ def _first_answer(
 
 
 def _archive_window(window: Mapping[str, Any]) -> bool:
-    """A provider archive's server part (2.6.2): its input ends at `until_s` seconds of its
+    """A provider archive's server part (2.7): its input ends at `until_s` seconds of its
     media, an HLS one's from its first segment."""
     return isinstance(window.get("until_s"), (int, float))
 
@@ -1949,7 +1949,7 @@ def _open_http(
     response, prefix, content = _first_answer(http, url, on_answer)
     if content is None:
         archive = window is not None and _archive_window(window)
-        if window is not None and not archive:  # 2.6.2: a server part is an HLS playlist's
+        if window is not None and not archive:  # 2.7: a server part is an HLS playlist's
             http.release(response)
             raise SourceError("unsupported")
         # It now owns the response.
@@ -1988,7 +1988,7 @@ def open_source(
     hold: Callable[[], bool] | None = None,
 ) -> Source:
     """Open ``url``, sniff it, and return a TS or HLS source (``window``: a server part of
-    the HLS playlist, 2.6.2, `HlsSource`; raw TS then is unsupported, but for a provider
+    the HLS playlist, 2.7, `HlsSource`; raw TS then is unsupported, but for a provider
     archive's (`until_s`: a `TsSource` that never reconnects); ``hold``: the source fetches
     no further while it says so).
 

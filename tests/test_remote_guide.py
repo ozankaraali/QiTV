@@ -210,7 +210,7 @@ class PhoneGuideTests(WindowCase):
         self.assertEqual((channel["name"], shown.title), ("Channel 1", "Morning"))
 
     def test_timetable_offers_the_servers_window(self):
-        # 2.6.2: a channel whose own server keeps hours offers its past programmes too.
+        # 2.7: a channel whose own server keeps hours offers its past programmes too.
         self.start()
         now = datetime.now(timezone.utc)
         past = programme("Morning", now - timedelta(minutes=90))

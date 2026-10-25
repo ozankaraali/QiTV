@@ -84,7 +84,7 @@ class FakeEngine(QObject):
         self.resizes = []  # (sid, max_bytes): a multiview tile's buffer grew or shrank
         self.recordings = []  # (rid, sid, path, seq, keyword arguments)
         self.record_stops = []  # sids
-        self.untils = []  # (sid, seq): a server part's stop moved (2.6.2)
+        self.untils = []  # (sid, seq): a server part's stop moved (2.7)
         self.events = []  # ("open", sid) as sessions open
         self._answered = set()
         self._spans = {}
@@ -133,7 +133,7 @@ class FakeEngine(QObject):
         self.events.append(("resume", sid))
 
     def set_until(self, sid, seq):
-        self.untils.append((sid, seq))  # 2.6.2: a server part's stop moved
+        self.untils.append((sid, seq))  # 2.7: a server part's stop moved
 
     def start_recording(self, sid, path, seq, **kwargs):
         rid = f"r{len(self.recordings) + 1}"
@@ -220,9 +220,9 @@ class FakeEngine(QObject):
             self._snapshots[sid]["video"] = video
         if parts is not None:  # 2.6: [first_seq, start, wall] of each part
             self._snapshots[sid]["parts"] = [list(part) for part in parts]
-        if window is not None:  # 2.6.2: how long the server keeps the channel
+        if window is not None:  # 2.7: how long the server keeps the channel
             self._snapshots[sid]["window_s"] = window
-        if part_wall is not None:  # 2.6.2: a server part's first segment's time of day
+        if part_wall is not None:  # 2.7: a server part's first segment's time of day
             self._snapshots[sid]["part_wall"] = part_wall
         if part_media is not None:  # and the media before its stop
             self._snapshots[sid]["part_media_s"] = part_media
@@ -5986,7 +5986,7 @@ if __name__ == "__main__":
 
 
 class ServerWindowTests(LiveSessionCase):
-    """2.6.2: a channel whose own HLS playlist keeps far more than the buffer offers it: the
+    """2.7: a channel whose own HLS playlist keeps far more than the buffer offers it: the
     bar reaches past the buffer, as catch-up's does for an archive."""
 
     SPANS = [Span(n, 6.0 * n, 6.0 * n + 6.0, False, media_seq=100 + n) for n in range(100)]
@@ -6018,7 +6018,7 @@ class ServerWindowTests(LiveSessionCase):
         self.live._emit_timeline()
         state = self.timelines[-1]
         self.assertEqual(state["buffer_start"], 0.0)
-        self.assertEqual(state["start"], -85800.0)  # the owner: the whole window, as kept
+        self.assertEqual(state["start"], -85800.0)  # the whole window, as the server keeps it
         self.assertEqual(state["window_start"], -85800.0)
 
     def test_a_short_window_is_not_offered(self):
@@ -6267,7 +6267,7 @@ class ServerWindowTests(LiveSessionCase):
 
 
 class ArchivePartTests(LiveSessionCase):
-    """2.6.2: a provider archive past the buffer plays through it: a server part of the
+    """2.7: a provider archive past the buffer plays through it: a server part of the
     archive's address, placed by its time of day, hopping into the buffer by time of day."""
 
     playing = ServerWindowTests.playing
@@ -6498,7 +6498,7 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 1))
 
     def test_a_part_played_by_a_seek_is_played(self):
-        # The owner's run: a part VLC plays through a seek (its state came before its ready)
+        # A part VLC plays through a seek (its state came before its ready)
         # counts as played: a seek outside it opens a new part, steps count from where it plays.
         sid = self.playing(86400.0)
         self.live.seek_to(-300.0)
@@ -6513,7 +6513,7 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertEqual(self.engine.opened[0][0], sid)
 
     def test_the_knob_shows_the_point_asked_while_its_part_opens(self):
-        # The owner: a click on the bar seemed to wait for a confirmation before it went.
+        # A click on the bar seemed to wait for a confirmation before it went.
         self.playing(86400.0)
         self.live.seek_to(-300.0)
         self.live._emit_timeline()
@@ -6523,7 +6523,7 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertAlmostEqual(self.timelines[-1]["position"], -310.0)
 
     def test_a_part_waiting_for_its_next_segment_is_not_opened_again(self):
-        # The owner: the same few seconds replayed with sound. VLC waited at what the part
+        # The same few seconds replayed with sound. VLC waited at what the part
         # had fetched (its helper slow) and the lost-clock watchdog, reading the live
         # stream's state, opened it again there, again and again.
         sid, _part = self.in_part(-300.0)  # the part holds -300 to -288
@@ -6555,7 +6555,7 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertEqual(len(self.engine.opened), opens)  # nor a part opened anew
 
     def test_a_parts_steps_are_logged_without_addresses(self):
-        # For the owner's terminal: where a part opens and plays, and its hop; no address.
+        # For the terminal: where a part opens and plays, and its hop; no address.
         with self.assertLogs("services.live.live_session", "INFO") as logs:
             sid, part = self.in_part(-300.0)
             self.engine.sessionEnded.emit(part)
@@ -6568,7 +6568,7 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertNotIn("secret", text)
 
     def test_a_part_refused_after_it_played_goes_on_from_what_it_fetched(self):
-        # The owner's log: a part refused a few seconds after it played was asked again from
+        # A part refused a few seconds after it played was asked again from
         # the point first asked, so the same seconds played again. What it fetched now plays
         # on, and a new part goes on from where that ends.
         sid, part = self.in_part(-300.0)  # it holds -300 to -288
@@ -6600,7 +6600,7 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertAlmostEqual(self.live.position(), -12.0)
 
     def test_a_seek_says_where_it_went_at_once(self):
-        # The owner: the bar jumped back and forth: on release it drew the old position
+        # The bar jumped back and forth: on release it drew the old position
         # until the session's next tick said the new one.
         self.playing(86400.0)
         self.timelines.clear()

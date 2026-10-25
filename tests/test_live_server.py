@@ -258,7 +258,7 @@ class StreamServerTests(unittest.TestCase):
         self.assertLess(max(latencies), 0.25, "appends were polled, not delivered on wakeup")
 
     def test_the_server_says_which_segment_a_client_reads(self):
-        # 2.6.2: a server part fetches only so far ahead of what the player reads.
+        # 2.7: a server part fetches only so far ahead of what the player reads.
         server = self.start_server()
         writer = Writer(RamRing())
         writer.open(0)

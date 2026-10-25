@@ -224,7 +224,7 @@ class Guide(Overlay):
         archive_reach: Callable[[dict], timedelta] | None = None,
     ) -> None:
         """`archive_days(channel)`: the days of the channel's archive that may play now (0:
-        none); `archive_reach(channel)` (2.6.2): how far back its past programmes play, its
+        none); `archive_reach(channel)` (2.7): how far back its past programmes play, its
         own server window's included (`archive_days` when not given)."""
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)

@@ -222,7 +222,7 @@ class StartTargetTests(unittest.TestCase):
         self.assertEqual(supervisor._records["s1"].command[6:], command[6:])
 
     def test_a_window_open_carries_its_options(self):
-        # 2.6.2: a server part's start and stop travel in the start dict.
+        # 2.7: a server part's start and stop travel in the start dict.
         import queue
 
         from services.live import engine as engine_module
@@ -266,7 +266,7 @@ class StartTargetTests(unittest.TestCase):
         self.assertIn(("error", "p", "internal", engine_module._INTERNAL), relayed)
 
     def test_set_until_reaches_the_helper_and_never_closes(self):
-        # 2.6.2: a server part's stop follows the live buffer's start; the supervisor's
+        # 2.7: a server part's stop follows the live buffer's start; the supervisor's
         # fallback for an unknown command is a close, so this one has its own branch.
         import queue
 
@@ -868,7 +868,7 @@ class SpanMessageTests(unittest.TestCase):
         )
 
     def test_an_addition_with_a_media_sequence_becomes_a_span(self):
-        # 2.6.2: a sixth field, the HLS media sequence the segment begins; five mean None.
+        # 2.7: a sixth field, the HLS media sequence the segment begins; five mean None.
         engine = LiveEngine(tempfile.gettempdir())  # never started: no helper, no buffer
         self.addCleanup(engine.shutdown)
         sid = engine.open_session(

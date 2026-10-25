@@ -273,7 +273,7 @@ class PipTests(PipCase):
                 "disk": False,
                 "max_bytes": 256 * MIB,  # the memory per stream
                 "channel": channel_key("Home", CHANNELS[0]),
-                "one_stream": True,  # 2.6.2: its provider limits streams (a part parks live)
+                "one_stream": True,  # 2.7: its provider limits streams (a part parks live)
             },
         )
         self.assertTrue(self.sessions.pip_open())

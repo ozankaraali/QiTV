@@ -1,4 +1,4 @@
-"""2.6.2: a server part placed on the live session's timeline by time of day."""
+"""2.7: a server part placed on the live session's timeline by time of day."""
 
 import unittest
 

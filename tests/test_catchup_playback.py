@@ -485,13 +485,13 @@ if __name__ == "__main__":
     unittest.main()
 
 
-# 2.6.2: the session draws the channel's own server window past the buffer (a day here), the
+# 2.7: the session draws the channel's own server window past the buffer (a day here), the
 # bar reaching half an hour past the buffer.
 WINDOWED = dict(STATE, start=3000.0 - 1800.0, buffer_start=3000.0, window_start=3000.0 - 86000.0)
 
 
 class ServerWindowRoutingTests(CatchupCase):
-    """2.6.2: within the channel's own server window the session plays it (a server part);
+    """2.7: within the channel's own server window the session plays it (a server part);
     a provider's archive is reached beyond it."""
 
     def windowed(self, channel=ARCHIVED, **state):
@@ -531,7 +531,7 @@ class ServerWindowRoutingTests(CatchupCase):
         self.assertEqual(len(self.archive_plays()), 1)
 
     def test_watch_from_the_start_plays_from_the_window(self):
-        # 2.6.2: the guide's past programme, within the playing channel's server window.
+        # 2.7: the guide's past programme, within the playing channel's server window.
         self.windowed(PLAIN)
         film = Programme("Film", NOW - timedelta(hours=2), NOW + timedelta(minutes=5))
         self.controller._on_guide_catchup(PLAIN, film, "10", CHANNELS)
@@ -562,7 +562,7 @@ class ServerWindowRoutingTests(CatchupCase):
 
 
 class ArchiveThroughBufferTests(CatchupCase):
-    """2.6.2: past the buffer, the provider's archive plays through the live session (a
+    """2.7: past the buffer, the provider's archive plays through the live session (a
     server part of its address) while the buffer plays; directly, as before, otherwise."""
 
     def setUp(self):

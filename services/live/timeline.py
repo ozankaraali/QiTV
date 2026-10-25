@@ -69,7 +69,7 @@ class Span:
     # Spans made without one (an older helper's 4-field additions) count as keyframe starts,
     # as every segment start did before.
     start_quality: StartQuality = START_KEY
-    # 2.6.2: the HLS media sequence this segment begins (None: it begins none, or raw TS).
+    # 2.7: the HLS media sequence this segment begins (None: it begins none, or raw TS).
     media_seq: Optional[int] = None
 
 
@@ -104,7 +104,7 @@ class Timeline:
         discontinuity: bool,
         media_seq: Optional[int] = None,
     ) -> None:
-        """`media_seq`: the HLS media sequence the segment begins (2.6.2), on its span."""
+        """`media_seq`: the HLS media sequence the segment begins (2.7), on its span."""
         if self._open is not None:
             log.warning("segment %r opened while %r was still open", seq, self._open.seq)
             # Its start quality came with its Closed, which never came: no jump lands there.

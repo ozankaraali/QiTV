@@ -125,7 +125,7 @@ def _fallback_bytes(ring: dict[str, Any]) -> int:
 
 
 def _window_part(command: _Command) -> bool:
-    """A server part's open (2.6.2): its start dict names a window."""
+    """A server part's open (2.7): its start dict names a window."""
     return len(command) > 7 and isinstance(command[7], dict) and "window" in command[7]
 
 
@@ -284,7 +284,7 @@ class _Supervisor(QThread):
             if record.sent:  # else after its open (`_send_notes`)
                 conn.send(command)
             return
-        if name == "until":  # 2.6.2: a server part's stop (never the close fallback below)
+        if name == "until":  # 2.7: a server part's stop (never the close fallback below)
             if record is not None and record.sent and not record.closing:
                 conn.send(command)
             return
@@ -570,7 +570,7 @@ class _Supervisor(QThread):
                     record.failed = True
                     self._relay(("error", sid, "internal", _INTERNAL))
                 if _window_part(record.command):
-                    record.over = True  # 2.6.2: a server part is opened anew by its session
+                    record.over = True  # 2.7: a server part is opened anew by its session
 
     def _count_death(self) -> bool:
         """True when one more helper may be started."""
@@ -768,7 +768,7 @@ class LiveEngine(QObject):
         """`ram_bytes`: a disk session's memory if its disk fails (_RAM_BYTES when None).
         `target` and `extra`: the target the session steers to and what it adds to it (Auto's
         learned extra), so an HLS source starts far enough back for it (2.1); without
-        `target`, `live_delay` seconds back. `window` (2.6.2): a server part of the HLS
+        `target`, `live_delay` seconds back. `window` (2.7): a server part of the HLS
         playlist, `{"back_s", "until_seq", "ahead_s"}` (`services.live.source.HlsSource`);
         never reopened after a helper's death."""
         sid = secrets.token_hex(8)
@@ -851,7 +851,7 @@ class LiveEngine(QObject):
             self._commands.put(("drop_kept",))
 
     def set_until(self, sid: str, seq: int) -> None:
-        """Move a server part's stop to media sequence `seq` (2.6.2: the live buffer's start
+        """Move a server part's stop to media sequence `seq` (2.7: the live buffer's start
         moved, eviction): its input ends before it."""
         view = self._sessions.get(sid)
         if view is not None and not view.closing and not self._shut:

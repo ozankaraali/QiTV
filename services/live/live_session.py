@@ -321,7 +321,7 @@ _OPEN_SEED_S = 0.5  # VLC's open time (play() to Playing) before any was measure
 _OPEN_MAX_S = 2.0  # a longer open (a stalled source, say) counts as this long
 _OPEN_WEIGHT = 0.3  # of each new measurement in the open time's moving average
 _EDGE_S = 1.0  # VLC this close to the live edge is at it (a starvation, and its restart after)
-# 2.6.2: a channel's own server window (a long HLS playlist) is offered past the buffer when it
+# 2.7: a channel's own server window (a long HLS playlist) is offered past the buffer when it
 # keeps at least this much more (the bar then shows all of it); a part played without one (a
 # provider archive's) has the bar reach this far past where it plays (as catch-up's).
 WINDOW_MIN_S = 300.0
@@ -619,7 +619,7 @@ class LiveSession(QObject):
         # after all, it plays live and where the user was is offered, unless they moved.
         self._late: Optional[Where] = None
         self._aside: Optional[Where] = None  # where the user was when its player was set aside
-        # 2.6.2: the server part (the channel's own server window, before the buffer), whether
+        # 2.7: the server part (the channel's own server window, before the buffer), whether
         # its helper said ready, and whether VLC plays it.
         self._part: Optional[ServerPart] = None
         self._part_ready = False
@@ -738,7 +738,7 @@ class LiveSession(QObject):
         `referrer`: the channel's M3U http-referrer, for a direct play (`headers` carry it to
         the helper as Referer). `kept` (2.6): the channel's parked session, taken back where
         the user was (`_resume_kept`) instead of a new one; one with nothing left starts
-        afresh. `one_stream` (2.6.2): the provider leaves no second stream, so the live
+        afresh. `one_stream` (2.7): the provider leaves no second stream, so the live
         upstream parks while a server part plays and resumes after it."""
         self.stop()
         self._kept = kept
@@ -918,7 +918,7 @@ class LiveSession(QObject):
 
     def _said_where(self) -> None:
         """A seek's new position goes to the bar at once: else it draws the old one until
-        the next tick (the owner saw the knob jump back and forth)."""
+        the next tick (the knob jumped back and forth)."""
         if self._phase is _Phase.PIPELINE:
             self._emit_timeline()
 
@@ -931,9 +931,9 @@ class LiveSession(QObject):
         before = t < self._buffer_start(snapshot)
         offered = self._part is not None or self._archive is not None or self.server_window() > 0.0
         if before and offered and self._one_stream and self._recording is not None:
-            self.notice.emit(PART_RECORDING)  # 2.6.2: its one stream records: no part
+            self.notice.emit(PART_RECORDING)  # 2.7: its one stream records: no part
         elif before and offered:
-            self._seek_part(t, lo=lo, hi=hi)  # 2.6.2: what the channel's server keeps
+            self._seek_part(t, lo=lo, hi=hi)  # 2.7: what the channel's server keeps
             return
         self._leave_part()  # within the buffer: never the server's again
         parts = live_parts.from_state(snapshot.get("parts"))
@@ -965,12 +965,12 @@ class LiveSession(QObject):
 
     def _asked_point(self) -> float:
         """Where a step counts from: the point a server part on its way (or waiting) was
-        asked for (2.6.2: a held ← goes on back from there), else the position."""
+        asked for (2.7: a held ← goes on back from there), else the position."""
         point = self._part_point()
         return point if point is not None else self.position()
 
     def _part_point(self) -> Optional[float]:
-        """The point a server part on its way (or waiting to open) was asked for (2.6.2);
+        """The point a server part on its way (or waiting to open) was asked for (2.7);
         None without one."""
         part = self._part
         for point in (
@@ -988,7 +988,7 @@ class LiveSession(QObject):
         kept buffer plays without its stream (2.6), the channel is tried again first; after
         its disk failed twice, it starts afresh (the helper's own memory fallback)."""
         if self._live_parked and self._sid is not None and self._phase is _Phase.PIPELINE:
-            # 2.6.2: a live upstream parked for a server part opens again; live once its new
+            # 2.7: a live upstream parked for a server part opens again; live once its new
             # run comes (as a kept buffer's), not at the parked ring's stale edge.
             self._close_part(resume=False)
             self._live_parked = False
@@ -996,7 +996,7 @@ class LiveSession(QObject):
             self._resume_retried = False
             self._send_resume(self._sid)
             return
-        self._close_part()  # 2.6.2: the server part goes
+        self._close_part()  # 2.7: the server part goes
         if self._kept_only and self._sid is not None and self._phase is _Phase.PIPELINE:
             if self._disk_failures >= 2:
                 self._start_afresh()
@@ -1138,7 +1138,7 @@ class LiveSession(QObject):
         return (self._buffer_start(snapshot), self._live_edge(snapshot))
 
     def server_window(self) -> float:
-        """How many seconds the channel's own server keeps beyond the buffer (2.6.2): its HLS
+        """How many seconds the channel's own server keeps beyond the buffer (2.7): its HLS
         playlist's window back from now, less the time since the buffer's start (a kept
         buffer's gaps included: they have no width on the timeline), when that is
         `WINDOW_MIN_S` or more; else 0.0."""
@@ -1157,7 +1157,7 @@ class LiveSession(QObject):
         return beyond if beyond >= WINDOW_MIN_S else 0.0
 
     def in_server_part(self) -> bool:
-        """VLC plays the server part, before the buffer (2.6.2)."""
+        """VLC plays the server part, before the buffer (2.7)."""
         return self._in_part
 
     def play_archive(
@@ -1166,7 +1166,7 @@ class LiveSession(QObject):
         build: Callable[[float], Optional[tuple[str, float]]],
         fallback: Callable[[str], bool],
     ) -> bool:
-        """The provider's archive past the buffer plays through it (2.6.2), from Unix second
+        """The provider's archive past the buffer plays through it (2.7), from Unix second
         `moment`: server parts of the addresses `build` makes for a moment ((its URL, the
         Unix second it starts at); `ArchiveRoute`), each placed on the timeline by its
         start, its input ending where the buffer begins, by time of day; the last hops into
@@ -1218,7 +1218,7 @@ class LiveSession(QObject):
         if not self.recordable() or self._recording is not None:
             return False
         if self._live_parked:
-            self.notice.emit(PART_NOT_RECORDED)  # 2.6.2: its stream is parked for a part
+            self.notice.emit(PART_NOT_RECORDED)  # 2.7: its stream is parked for a part
             return False
         assert self._sid is not None
         seq = self._record_from()
@@ -1319,7 +1319,7 @@ class LiveSession(QObject):
 
     def set_aside(self) -> None:
         """2.6: its channel was left while it records: the player pauses (the helper records
-        on) and where the user was is kept for `bring_back`; a server part goes (2.6.2: a live
+        on) and where the user was is kept for `bring_back`; a server part goes (2.7: a live
         upstream parked for it records again)."""
         self._aside = self._where()
         self._close_part()
@@ -1365,7 +1365,7 @@ class LiveSession(QObject):
     def _on_resumed(self, sid: str) -> None:
         """The resumed run's first segment came (2.6): live again."""
         if sid == self._sid:
-            self._part_resuming = False  # 2.6.2: a live upstream parked for a part is back
+            self._part_resuming = False  # 2.7: a live upstream parked for a part is back
         if sid != self._sid or not (self._resuming or self._kept_only):
             return
         self._resuming = self._kept_only = False
@@ -1485,7 +1485,7 @@ class LiveSession(QObject):
         if self._limited:
             self._refuse()
             return
-        self._close_part(resume=False)  # 2.6.2: a server part goes with it
+        self._close_part(resume=False)  # 2.7: a server part goes with it
         self._live_parked = False
         phase = self._phase
         self._end_recording()  # a direct play has no buffer to record from
@@ -1832,7 +1832,7 @@ class LiveSession(QObject):
         if sid != self._sid:
             return
         if self._part_resuming and kind != "internal":
-            # 2.6.2: the live upstream parked for a server part did not open again: refused
+            # 2.7: the live upstream parked for a server part did not open again: refused
             # (the part's connection may still count), it is asked once more; then what was
             # kept plays on (its newest point after Go live), and Go live tries again.
             if message in REFUSALS and not self._resume_retried:
@@ -1896,16 +1896,16 @@ class LiveSession(QObject):
 
     def _on_ended(self, sid: str) -> None:
         if self._part is not None and sid == self._part.sid:
-            self._part.ended = True  # 2.6.2: it reached the buffer (VLC's end hops)
+            self._part.ended = True  # 2.7: it reached the buffer (VLC's end hops)
         elif sid == self._sid:
             self._ended = True
 
     def _on_closed(self, sid: str) -> None:
         if sid == self._part_closing:
-            self._part_closing = None  # 2.6.2: the old part's connection closed
+            self._part_closing = None  # 2.7: the old part's connection closed
             self._open_pending_part()
         elif sid == self._sid and self._part_pending is not None and self._live_parked:
-            self._open_pending_part()  # 2.6.2: its upstream closed: the part's may open
+            self._open_pending_part()  # 2.7: its upstream closed: the part's may open
             return
         if sid not in self._unclosed:
             return
@@ -2021,7 +2021,7 @@ class LiveSession(QObject):
         """Get playing again after an interruption, or fall back once nothing more can."""
         self._retry = None
         if self._part_resuming and self._live_after_resume:
-            return  # 2.6.2: Go live after a server part waits for the resumed run
+            return  # 2.7: Go live after a server part waits for the resumed run
         if self._in_part:
             part = self._part
             if part is None or not self._part_playing:
@@ -2030,7 +2030,7 @@ class LiveSession(QObject):
                 if not self._part_goes_on(part):
                     if part.failed:
                         self.notice.emit(PART_FAILED)  # it broke off with nothing to go on from
-                    self._hop()  # 2.6.2: the server part ran into the buffer
+                    self._hop()  # 2.7: the server part ran into the buffer
             else:
                 position = self._advance()
                 _LOG.info(
@@ -2076,7 +2076,7 @@ class LiveSession(QObject):
         if self._part_playing and part is not None and part.until is None:
             position = self._advance()
             if position >= self._buffer_start():
-                self._hop(at=position)  # 2.6.2: a part without a stop played into the buffer
+                self._hop(at=position)  # 2.7: a part without a stop played into the buffer
                 return
         if self._deferred is not None:  # waiting for the RAM ring's first state
             # An HLS source may send it only with its next burst. Counted from the disk
@@ -2512,7 +2512,7 @@ class LiveSession(QObject):
         would stand still, stay-live wait and the lag grow a second a second. Counted from
         when all of that holds: a stall's or a starvation's own time counts for nothing (VLC
         says Playing then, and refills after it with its clock standing still). In a server
-        part (2.6.2) VLC waiting at what the part fetched so far is starved, not lost."""
+        part (2.7) VLC waiting at what the part fetched so far is starved, not lost."""
         suspect = (
             self._playback.state() is PlaybackState.PLAYING
             and self._vlc.changes > 0
@@ -2529,7 +2529,7 @@ class LiveSession(QObject):
         return now - self._lost_since >= _CLOCK_LOST_S - 1e-9
 
     def _playing_edge(self, snapshot: Mapping[str, Any]) -> float:
-        """The most VLC can have played: the live edge, or in a server part (2.6.2) what the
+        """The most VLC can have played: the live edge, or in a server part (2.7) what the
         part has fetched so far."""
         part = self._part
         if self._part_playing and part is not None and part.offset is not None:
@@ -2719,7 +2719,7 @@ class LiveSession(QObject):
         its arrivals need, which a burst sets under any latency too)."""
         snapshot = self._snapshot()
         edge = self._live_edge(snapshot)
-        asked = self._part_point()  # 2.6.2: the knob goes where it was asked at once
+        asked = self._part_point()  # 2.7: the knob goes where it was asked at once
         position = asked if asked is not None else min(self._base + self._elapsed, edge)
         learned = self._learned
         lag = self._reported_lag(snapshot, position)
@@ -2751,7 +2751,7 @@ class LiveSession(QObject):
         beyond = self.server_window()
         archive = self._archive is not None
         if beyond > 0.0 or self._part is not None or archive:
-            # 2.6.2: drawn as catch-up draws an archive past the buffer (dashed): the whole
+            # 2.7: drawn as catch-up draws an archive past the buffer (dashed): the whole
             # window the channel's server keeps; else half an hour past where a part plays.
             start = float(state["start"])
             if beyond > 0.0:
@@ -2768,7 +2768,7 @@ class LiveSession(QObject):
             state["start"] = max(reach, window_start)
         self.timelineChanged.emit(state)
 
-    # ---- 2.6.2: the server part ------------------------------------------------------------
+    # ---- 2.7: the server part ------------------------------------------------------------
     def _seek_part(self, t: float, *, lo: float = -math.inf, hi: float = math.inf) -> None:
         """A seek before the buffer: within what the server part holds, locally; else a
         server part opens there."""
@@ -3324,7 +3324,7 @@ class LiveSession(QObject):
             self._playback.set_rate(rate)
 
     def _open_at(self, seq: int, part: Optional[ServerPart] = None) -> bool:
-        """Play the loopback stream from segment `seq` (of the server `part`, 2.6.2); False
+        """Play the loopback stream from segment `seq` (of the server `part`, 2.7); False
         while no helper serves it."""
         assert self._sid is not None
         url = self._engine.stream_url(self._sid if part is None else part.sid, seq)
@@ -3373,7 +3373,7 @@ class LiveSession(QObject):
         """
         assert self._sid is not None
         if self._in_part:
-            self._seek(self._advance())  # 2.6.2: where the server part plays
+            self._seek(self._advance())  # 2.7: where the server part plays
             return
         position = self._advance()
         snapshot = self._snapshot()

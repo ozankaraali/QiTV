@@ -335,7 +335,7 @@ class LiveTuner(QObject):
         try:
             disk = None if self._disk_allowed() else False
             kwargs = start_kwargs(pending, self.config, disk=disk)
-            # 2.6.2: a server part's download is no budget slot of its own: with any limit
+            # 2.7: a server part's download is no budget slot of its own: with any limit
             # the live upstream parks while one plays (LiveSession.start's one_stream).
             kwargs["one_stream"] = self._pending_limit is not None
             stream.start(**kwargs)

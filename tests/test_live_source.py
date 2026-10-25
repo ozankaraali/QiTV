@@ -1926,7 +1926,7 @@ video.m3u8
         self.assertEqual(requested_segments(server), ["c.ts", "d.ts"])
 
     def test_hls_source_names_the_media_sequence_it_yields(self):
-        # 2.6.2: each buffer segment that begins an HLS segment knows its media sequence.
+        # 2.7: each buffer segment that begins an HLS segment knows its media sequence.
         routes = {f"/{name}.ts": (200, {}, self.video) for name in "abc"}
         routes["/live.m3u8"] = (200, {}, hls(10, ["a.ts", "b.ts", "c.ts"], ended=True))
         server = self.server(routes)
@@ -1943,7 +1943,7 @@ video.m3u8
         self.assertEqual(seen, [10, 11, 12])
 
     def test_a_live_hls_source_reports_its_window(self):
-        # 2.6.2: how long the server keeps the channel (a long window is offered on the bar).
+        # 2.7: how long the server keeps the channel (a long window is offered on the bar).
         cases = (("live", False, 30.0, 104), ("finished", True, 0.0, 104))
         for name, ended, window, edge in cases:
             with self.subTest(name):
@@ -1960,7 +1960,7 @@ video.m3u8
                     source.close()
 
     def test_a_server_part_starts_back_and_stops_before_a_sequence(self):
-        # 2.6.2: a server part opens back in the window and its input ends before the live
+        # 2.7: a server part opens back in the window and its input ends before the live
         # buffer's first media sequence: it never fetches what the buffer holds.
         names = [f"s{n}.ts" for n in range(100, 110)]
         routes = {f"/{name}": (200, {}, self.video) for name in names}
@@ -2006,7 +2006,7 @@ video.m3u8
         self.assertEqual(requested_segments(server), ["s106.ts", "s107.ts"])
 
     def test_a_server_part_reports_the_media_before_its_stop(self):
-        # 2.6.2: the session places the part flush against the buffer's first HLS segment.
+        # 2.7: the session places the part flush against the buffer's first HLS segment.
         names = [f"s{n}.ts" for n in range(100, 110)]
         routes = {f"/{name}": (200, {}, self.video) for name in names}
         routes["/live.m3u8"] = (200, {}, hls(100, names))
@@ -2103,7 +2103,7 @@ video.m3u8
         self.assertIn(Discontinuity(), got)
 
     def test_a_part_held_for_a_segment_goes_on_without_reloading(self):
-        # The owner's replays: a paced part holds about a segment at a time; reading a 24 h
+        # A paced part holds about a segment at a time; reading a 24 h
         # playlist again (~0.6 s of the helper's CPU) after each such hold starved the player.
         held = threading.Event()
 
@@ -2134,7 +2134,7 @@ video.m3u8
         self.assertEqual(server.counts["/live.m3u8"], 1)
 
     def test_a_held_hls_source_fetches_nothing_until_let_go(self):
-        # 2.6.2: `hold` pauses the fetching between segments (a server part's pacing).
+        # 2.7: `hold` pauses the fetching between segments (a server part's pacing).
         names = ["a.ts", "b.ts", "c.ts"]
         routes = {f"/{name}": (200, {}, self.video) for name in names}
         routes["/live.m3u8"] = (200, {}, hls(0, names, ended=True))
@@ -2159,7 +2159,7 @@ video.m3u8
         self.assertEqual(requested_segments(server), names)
 
     def test_a_ts_archive_plays_through_the_buffer(self):
-        # 2.6.2: a provider archive's raw TS opens as a server part (an archive's window,
+        # 2.7: a provider archive's raw TS opens as a server part (an archive's window,
         # `until_s`): paced by `hold`, and a broken connection ends it (a reconnect would play
         # the address from its start again).
         body = self.video * 4
@@ -2193,7 +2193,7 @@ video.m3u8
         self.assertEqual(server.counts["/archive.ts"], 1)
 
     def test_an_hls_archive_starts_at_its_first_segment(self):
-        # 2.6.2: an archive's playlist begins at the moment asked, also one still listed live.
+        # 2.7: an archive's playlist begins at the moment asked, also one still listed live.
         names = [f"s{n}.ts" for n in range(30)]  # a live start would be ~6 s from its end
         routes = {f"/{name}": (200, {}, self.video) for name in names}
         routes["/archive.m3u8"] = (200, {}, hls(0, names, ended=False))

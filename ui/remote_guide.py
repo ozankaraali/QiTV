@@ -153,7 +153,7 @@ class PhoneGuide(QObject):
         channel, group_key, channels = cast(tuple, found[1])
         controller = self._window.controller
         now, listed = controller.timetable(channel, TIMETABLE_LIMIT, TIMETABLE_BACK)
-        reach = controller.archive_reach(channel)  # 2.6.2: a server window's too
+        reach = controller.archive_reach(channel)  # 2.7: a server window's too
         rows = []
         for programme in listed:
             on = programme.is_on(now)

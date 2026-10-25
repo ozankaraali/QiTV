@@ -495,7 +495,7 @@ class TVWindow(QMainWindow):
             return controller.archive_days(channel)
 
         def archive_reach(channel: dict) -> timedelta:
-            return controller.archive_reach(channel)  # 2.6.2: a server window's too
+            return controller.archive_reach(channel)  # 2.7: a server window's too
 
         host = self.host
         self.grid_tiles = GridTiles(host)  # the multiview's labels, focus ring, "+" and cards

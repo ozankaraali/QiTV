@@ -761,7 +761,7 @@ class _Tiles(_Fixture):
 
 
 class OneStreamTests(_Tiles):
-    """2.6.2 (final review C2): a PiP's or a tile's live session knows its provider limits
+    """2.7 (final review C2): a PiP's or a tile's live session knows its provider limits
     its streams, so a server part parks its live upstream there too, as the main one's does
     (`LiveSession.start`'s one_stream): the PiP swapped large, or the focused tile."""
 

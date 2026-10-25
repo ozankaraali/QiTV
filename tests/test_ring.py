@@ -111,7 +111,7 @@ class RamRingTests(unittest.TestCase):
         self.assertIsNotNone(ring.read_at(5, 0, 1))
 
     def test_a_protected_segment_is_never_retired(self):
-        # 2.6.2: what the player reads in a server part, and what lies ahead, stays.
+        # 2.7: what the player reads in a server part, and what lies ahead, stays.
         ring = RamRing(10_000)
         for seq in range(6):
             ring.open_segment(seq, b"h")
@@ -687,7 +687,7 @@ class DiskBudgetTests(unittest.TestCase):
         self.assertEqual((first.oldest_seq, second.oldest_seq), (1, 0))
 
     def test_the_disk_budget_passes_over_a_protected_ring(self):
-        # 2.6.2: a parked ring whose oldest is protected is no victim; the next one is.
+        # 2.7: a parked ring whose oldest is protected is no victim; the next one is.
         kept, live = self.ring(), self.ring()
         self.fill(kept, 3)
         self.fill(live, 3)
@@ -810,7 +810,7 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(index.where, {"position": 3.0, "paused": True})
 
     def test_the_index_keeps_a_segments_media_sequence(self):
-        # 2.6.2: a segment that begins an HLS segment notes its media sequence ("m").
+        # 2.7: a segment that begins an HLS segment notes its media sequence ("m").
         ring = self.ring()
         ring.open_segment(0, b"h" * 376)
         ring.append(b"d" * 4000)

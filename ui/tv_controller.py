@@ -3144,7 +3144,7 @@ class TVController(QObject):
     ) -> None:
         """The guide's "Watch from the start": the channel's archive from the programme's start
         to its end (catch-up, 2.2); live when the archive does not play. Within the channel's
-        own server window (2.6.2), the live session plays from there instead."""
+        own server window (2.7), the live session plays from there instead."""
         if self._closed:
             return
         start = programme.start.timestamp()
@@ -3158,7 +3158,7 @@ class TVController(QObject):
 
     def archive_reach(self, channel: dict) -> timedelta:
         """How far back the guide offers the channel's past programmes: its provider archive's
-        days, or (2.6.2) its own server window as seen this run, the longer."""
+        days, or (2.7) its own server window as seen this run, the longer."""
         days = timedelta(days=self.archive_days(channel))
         window = timedelta(seconds=self._live_controls.window_reach(channel))
         return max(days, window)

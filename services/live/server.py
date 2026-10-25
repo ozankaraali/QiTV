@@ -58,7 +58,7 @@ class _Session:
     is_ended: Callable[[], bool]
     removed: bool = False
     clients: set[socket.socket] = field(default_factory=set)
-    # 2.6.2: the segment the newest client streams now (a server part is paced by it), and
+    # 2.7: the segment the newest client streams now (a server part is paced by it), and
     # that client's turn (an older client still open after a reopen no longer moves it).
     reading: int | None = None
     reader: int = 0
@@ -144,7 +144,7 @@ class StreamServer:
             self._end(session)
 
     def reading(self, session_id: str) -> int | None:
-        """The segment the newest client of the session streams now (2.6.2); None before one
+        """The segment the newest client of the session streams now (2.7); None before one
         did, or for an unknown session."""
         with self._lock:
             session = self._sessions.get(session_id)

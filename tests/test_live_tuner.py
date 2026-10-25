@@ -376,7 +376,7 @@ class SlotRoleTests(unittest.TestCase):
         self.assertTrue(self.tuner.on_disk())
 
     def test_a_provider_with_a_limit_parks_live_for_a_server_part(self):
-        # 2.6.2: the server part's download is not a budget slot of its own: with any limit
+        # 2.7: the server part's download is not a budget slot of its own: with any limit
         # the live upstream parks for it; a provider without one has both.
         for limit, one_stream in ((1, True), (2, True), (None, False)):
             with self.subTest(limit=limit):

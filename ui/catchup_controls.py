@@ -210,7 +210,7 @@ class CatchUp(QObject):
         # By channel key: when it was asked (the clock's) whether the guide names the STB
         # channel's recordings, and the answer (`_guide_names_recordings`).
         self._named: dict[str, tuple[float, bool]] = {}
-        # By channel key (2.6.2): the helper read no TS or HLS at its archive's address, so it
+        # By channel key (2.7): the helper read no TS or HLS at its archive's address, so it
         # plays directly, not through the buffer, this run.
         self._direct: set[str] = set()
         self._key: tuple[Optional[dict], str, str] = (None, "", "")  # item, provider, its key
@@ -331,7 +331,7 @@ class CatchUp(QObject):
         docstring); the state as it is when the archive is not offered."""
         archive = self.offered(target)
         if archive is None or "window_start" in state:
-            return state  # 2.6.2: the session draws the channel's own window; this one is beyond
+            return state  # 2.7: the session draws the channel's own window; this one is beyond
         start = float(state["start"])
         now = self._now().timestamp()
         ring_wall = live_parts.wall_in(state, start, now)  # 2.6: a kept buffer's own time
@@ -609,7 +609,7 @@ class CatchUp(QObject):
             self._play_direct(ask, form, probed=probed)
 
     def _through_buffer(self, ask: _Ask, form: int, probed: bool) -> bool:
-        """2.6.2: while the channel plays through its buffer, its archive plays there too,
+        """2.7: while the channel plays through its buffer, its archive plays there too,
         server parts of the live session (`LiveSession.play_archive`): the bar, seeks and
         the way back into the buffer are the session's then. True when it does. Not an STB
         portal's recording (a link per programme, made one by one), nor an archive the

@@ -1,6 +1,6 @@
-# QiTV 2.6.2
+# QiTV 2.7.0
 
-QiTV 2.6.2 rewinds a live channel as far back as the channel's own server keeps it, and plays
+QiTV 2.7.0 rewinds a live channel as far back as the channel's own server keeps it, and plays
 your provider's archive through the time-shift buffer.
 
 **Download QiTV from [qitv.app](https://qitv.app), which picks the right build for your
@@ -12,8 +12,8 @@ others' distributions, which may have malware.**
 - **As far back as the channel's server keeps it.** Some live channels' own servers keep hours
   of the channel, a day for some, while QiTV's buffer begins when you tune in. On such a
   channel the bar now reaches as far back as the server keeps it (dashed before the buffer),
-  and ←, the bar and ⏮ go back there. The guide's **▶ Watch from the start**
-  plays a past programme from there too, on the channel you watch or one you watched earlier.
+  and ←, the bar and ⏮ go back there. The guide's **▶ Watch from the start** plays a past
+  programme from there too, on the channel you watch or one you watched earlier.
 - **Your buffer first.** What the buffer holds always plays from the buffer. Only what lies
   before it comes from the server, a minute ahead of what plays and never twice, and at the
   buffer's start playback goes on into the buffer without a break. What came from the server
@@ -34,3 +34,5 @@ others' distributions, which may have malware.**
   each switch between them for a break: the picture jumped back, and the sound dropped out and
   came back, sometimes louder. It now waits a moment for its own group's copy, and follows the
   other only when that one stays.
+- **The knob goes where you click.** After a seek on the time-shift bar, the knob showed the
+  old position for a moment before it jumped to the new one. It now goes there at once.

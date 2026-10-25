@@ -15,7 +15,7 @@ an index, `index.jsonl`, one JSON object per line, appended and never rewritten 
 (compacted through `index.jsonl.new` once most of its segment lines name segments gone):
 `{"v": 2}` first, then `{"seg": seq, "h": header_len, "n": size, "s": start, "e": end, "d":
 discontinuity, "q": start_quality, "w": wall, "j": junction}` per completed segment (the
-session's `note_segment`; 2.6.2 adds `"m"`, the HLS media sequence it begins, when it begins
+session's `note_segment`; 2.7 adds `"m"`, the HLS media sequence it begins, when it begins
 one), `{"part": first_seq, "s": start, "w": wall}` per part,
 `{"label": {...}}` and `{"where": {...}}` (the last counts). `close(keep=True)` leaves such a
 folder for a later helper (`read_index`); older builds' sweeps match only
@@ -98,7 +98,7 @@ class Ring(ABC):
         self._charged = 0
         self._failure = ""
         self.closed = False
-        self._protected: int | None = None  # 2.6.2: never retire from this segment on
+        self._protected: int | None = None  # 2.7: never retire from this segment on
 
     # ---- storage hooks (called with the disk lock held) -------------------------------
     @abstractmethod
@@ -143,7 +143,7 @@ class Ring(ABC):
         media_seq: int | None = None,
     ) -> None:
         """Segment `seq` completed and the timeline placed it (`media_seq`: the HLS media
-        sequence it begins, 2.6.2)."""
+        sequence it begins, 2.7)."""
 
     def note_part(self, first_seq: int, start: float, wall: float) -> None:
         """A part of the timeline begins at segment `first_seq`."""
@@ -190,14 +190,14 @@ class Ring(ABC):
             return self._max_bytes
 
     def protect_from(self, seq: int | None) -> None:
-        """Never retire segment `seq` or a later one (2.6.2: what the player reads in a server
+        """Never retire segment `seq` or a later one (2.7: what the player reads in a server
         part, and what lies ahead of it); None lifts it. Over the cap with only protected
         segments left, the ring takes more instead of failing (its writer is paced)."""
         with self._state_lock:
             self._protected = seq
 
     def retirable(self) -> bool:
-        """It holds a completed segment that may go (2.6.2: none, or only protected ones)."""
+        """It holds a completed segment that may go (2.7: none, or only protected ones)."""
         with self._state_lock:
             return self._retirable_locked()
 
@@ -853,7 +853,7 @@ class DiskRing(Ring):
                 "j": segment.junction,
             }
             if media_seq is not None:
-                record["m"] = media_seq  # 2.6.2; older builds ignore the key
+                record["m"] = media_seq  # 2.7; older builds ignore the key
             self._index_segs[seq] = record
         self._append_index(record)
 
@@ -1046,7 +1046,7 @@ class DiskBudget:
 
     Each ring keeps under its own cap as it writes; `trim()`, called once a segment completed
     and without any ring's lock held, lets the oldest segments go until all of them fit: a
-    server part's played ones first (2.6.2: never the live buffer it runs into), then a kept
+    server part's played ones first (2.7: never the live buffer it runs into), then a kept
     (parked) ring's, the oldest first, then the oldest of any. Lock order: the budget's lock,
     then one ring's at a time.
     """
@@ -1055,7 +1055,7 @@ class DiskBudget:
         self.max_bytes = max_bytes
         self._lock = threading.Lock()
         self._rings: dict[int, tuple[Ring, bool]] = {}  # id -> (ring, parked)
-        self._parts: set[int] = set()  # 2.6.2: server parts' rings
+        self._parts: set[int] = set()  # 2.7: server parts' rings
 
     def register(self, ring: Ring, *, parked: bool = False, part: bool = False) -> None:
         with self._lock:
