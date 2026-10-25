@@ -691,6 +691,9 @@ class SessionManager(QObject):
         size = self.tile_bytes(slot is self._large)  # the focus may have moved since
         if size is not None and not kwargs.get("disk"):
             kwargs["max_bytes"] = size
+        # 2.6.2: with any limit its live upstream parks while a server part plays, as the main
+        # session's does (LiveTuner): a part takes no budget slot of its own.
+        kwargs["one_stream"] = opening.limit is not None
         try:
             stream.start(**kwargs)
         except Exception as error:  # the stream gave its slot back and stopped the session
@@ -816,8 +819,9 @@ class SessionManager(QObject):
         # _stop) and PlaybackSession applies this within ~30 ms of it opening.
         self._set_mute(slot, self._muted[slot.name])
         self._limit = pending.limit
+        kwargs = dict(pending.start_kwargs, one_stream=pending.limit is not None)  # as a tile's
         try:
-            stream.start(**pending.start_kwargs)
+            stream.start(**kwargs)
         except Exception as error:  # the stream gave its slot back and stopped the session
             logger.warning("Could not start the PiP channel (%s)", type(error).__name__)
             self._fail(translate(PIP_FAILED))

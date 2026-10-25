@@ -16,14 +16,16 @@ others' distributions, which may have malware.**
   plays a past programme from there too, on the channel you watch or one you watched earlier.
 - **Your buffer first.** What the buffer holds always plays from the buffer. Only what lies
   before it comes from the server, a minute ahead of what plays and never twice, and at the
-  buffer's start playback goes on into the buffer without a break. With a provider that allows
-  one stream, the live stream pauses meanwhile and opens again when you are back in the buffer
-  or go live.
+  buffer's start playback goes on into the buffer without a break. What came from the server
+  plays again at once until you go live, leave the channel or go back further. With a provider
+  that limits its streams, the live stream pauses meanwhile and opens again when you are back
+  in the buffer or go live.
 - **The provider's archive, through the buffer too.** Rewinding past the buffer into your
   provider's archive (catch-up) plays the archive the same way when it comes as a stream QiTV
   can buffer, as most do: it stays on the channel's own bar, what came of it replays at once,
-  and when it reaches the buffer's start, playback goes on into the buffer. Other archives, an
-  STB portal's recordings and the guide's Watch from the start play as before.
+  and when it reaches the buffer's start, playback goes on into the buffer. So does the
+  guide's Watch from the start on the channel you are watching. Other archives, an STB
+  portal's recordings and Watch from the start on another channel play as before.
 
 ## Fixed
 

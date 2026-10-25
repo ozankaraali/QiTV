@@ -615,3 +615,28 @@ class ArchiveThroughBufferTests(CatchupCase):
         part = dict(STATE, start=1200.0, buffer_start=3000.0, window_start=1200.0)
         self.live.timelineChanged.emit(dict(part, archive_part=True))
         self.assertEqual(self.controller._live_controls.window_reach(ARCHIVED), 0.0)
+
+    def test_steps_within_an_archive_part_are_the_sessions(self):  # final review C1, I2
+        # While the archive plays through the buffer, ← and the bar are the live session's
+        # (it steps on from the point asked and opens its archive's addresses itself).
+        self.start_archived()
+        part = dict(STATE, start=1200.0, buffer_start=3000.0, window_start=1200.0)
+        self.live.timelineChanged.emit(dict(part, position=1201.0, archive_part=True))
+        for _ in range(3):
+            self.controller.handle(Action.SEEK_BACK)
+        self.assertEqual(self.live.named("seek_relative"), [(-10.0,)] * 3)
+        self.transport.seekToRequested.emit(100.0)  # before the bar's start too
+        self.assertEqual(self.live.named("seek_to")[-1], (100.0,))
+        self.assertEqual(self.archives, [])
+        self.assertEqual(self.archive_plays(), [])
+
+
+class ProgrammeStartWithoutGuideTests(CatchupCase):
+    def test_programme_start_without_a_programme_goes_to_the_buffers_start(self):  # I4
+        # A channel whose server keeps a day but whose guide is empty: ⏮ goes to the oldest
+        # point of the buffer, not a day back.
+        self.start_archived(PLAIN)
+        self.live.timelineChanged.emit(dict(WINDOWED))
+        self.controller.mouse_moved()
+        self.transport.programmeStartRequested.emit()
+        self.assertEqual(self.live.named("seek_to")[-1], (3000.0,))

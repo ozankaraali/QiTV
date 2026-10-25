@@ -37,6 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import logging
+import math
 import time
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
@@ -73,7 +74,10 @@ _WINDOW_SEEK_S = 30.0  # 2.6.2: a guide's start waits this long for its channel'
 
 def _reach(state: dict) -> float:
     """How far back the live session plays (timeline seconds): its buffer's start, or (2.6.2)
-    the start of the channel's own server window; a provider's archive is reached beyond."""
+    the start of the channel's own server window; a provider's archive is reached beyond,
+    unless it plays through the session already (its steps and seeks are the session's)."""
+    if state.get("archive_part"):
+        return -math.inf
     return float(state.get("window_start", state["start"]))
 
 
@@ -759,9 +763,12 @@ class LiveControls(QObject):
             return
         stamp = self._now().timestamp()
         oldest = _reach(state)  # 2.6.2: the channel's server window, past the bar too
-        moment = min(live_parts.wall_in(state, float(state["position"]), stamp), stamp)
+        position = float(state["position"])
+        moment = min(live_parts.wall_in(state, position, stamp), stamp)
         watching = datetime.fromtimestamp(moment, timezone.utc)
-        target = oldest
+        # Without a programme: the buffer's oldest point (the bar's start before it, 2.6.2).
+        buffer_start = float(state.get("buffer_start", state["start"]))
+        target = buffer_start if position >= buffer_start else float(state["start"])
         for programme in self._programmes(current.item, watching, 1):
             if not programme.is_on(watching):
                 continue

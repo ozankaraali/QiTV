@@ -300,6 +300,9 @@ KEPT_END = N_("That's all that was kept. The channel can't open right now.")
 PART_FAILED = N_("The channel's server didn't send that part")
 # i18n: toast: ← past QiTV's buffer while it records, on a provider that allows one stream
 PART_RECORDING = N_("Can't go further back while recording: the provider allows one stream")
+# i18n: toast: R while the channel plays from its server's part (or its provider's archive)
+# past QiTV's buffer on a provider that limits streams: the live stream is paused meanwhile
+PART_NOT_RECORDED = N_("Can't record here: go back into the buffer or live to record")
 # i18n: toast: the disk under a channel's kept buffer failed; what was kept plays, Go live
 # plays the channel live again
 KEPT_DISK = N_("The disk buffer failed. Playing what was kept; Go live plays the channel again.")
@@ -324,6 +327,7 @@ WINDOW_MIN_S = 300.0
 WINDOW_BAR_S = 30 * 60.0
 WINDOW_AHEAD_S = 60.0  # a server part fetches this far ahead of the player
 _ARCHIVE_JOIN_S = 2.0  # an archive part ending this near the buffer's start hops into it
+_PART_SLACK_S = 10.0  # a point this far before a part's start is still played from it
 _ARCHIVE_STEP_S = 30.0  # one that brought less than this past its point has nothing more
 # VLC's clock, which moved since the open, standing still this long while VLC plays with media
 # ahead and the source sending is lost (`_clock_lost`): it opens again.
@@ -624,6 +628,11 @@ class LiveSession(QObject):
         self._one_stream = False
         self._live_parked = False
         self._part_pending: Optional[float] = None
+        # The newest point asked while a part is on its way (it opens one part at a time), and
+        # a closed part whose connection a provider with a limit must see closed first.
+        self._part_next: Optional[float] = None
+        self._part_closing: Optional[str] = None
+        self._resume_retried = False  # a refused resume after a part was tried again
         self._part_retry_ms = 3000  # a refused part is tried once more after this (tests: 0)
         self._part_tries = 0  # opens of the server part the user asked for (a retry counts)
         self._part_again: Optional[float] = None  # a refused part's point, opened again soon
@@ -911,13 +920,13 @@ class LiveSession(QObject):
             return
         snapshot = self._snapshot()
         before = t < self._buffer_start(snapshot)
-        offered = self._part is not None or self.server_window() > 0.0
+        offered = self._part is not None or self._archive is not None or self.server_window() > 0.0
         if before and offered and self._one_stream and self._recording is not None:
             self.notice.emit(PART_RECORDING)  # 2.6.2: its one stream records: no part
         elif before and offered:
             self._seek_part(t, lo=lo, hi=hi)  # 2.6.2: what the channel's server keeps
             return
-        self._close_part()  # within the buffer: never the server's again
+        self._leave_part()  # within the buffer: never the server's again
         parts = live_parts.from_state(snapshot.get("parts"))
         # Only the newest part ends at the edge (2.6): an older one's end is not live.
         newest = not parts or live_parts.index_of(parts, t) == len(parts) - 1
@@ -938,11 +947,25 @@ class LiveSession(QObject):
         """A step back or on (←/→): it opens a segment starting before where it plays, or
         after it (a keyframe after the point asked could take a step back to where it played,
         again and again)."""
-        position = self.position()
+        position = self._asked_point()
         if dt < 0:
             self._seek(position + dt, hi=position)
         elif dt > 0:
             self._seek(position + dt, lo=position + 1e-6)
+
+    def _asked_point(self) -> float:
+        """Where a step counts from: the point a server part on its way (or waiting) was
+        asked for (2.6.2: a held ← goes on back from there), else the position."""
+        part = self._part
+        for point in (
+            self._part_next,
+            part.asked if part is not None and not part.played else None,
+            self._part_pending,
+            self._part_again,
+        ):
+            if point is not None:
+                return point
+        return self.position()
 
     def go_live(self) -> None:
         """The Go live button: back to the live edge at 1x, playing (not paused). While a
@@ -954,6 +977,7 @@ class LiveSession(QObject):
             self._close_part(resume=False)
             self._live_parked = False
             self._resuming = self._live_after_resume = self._part_resuming = True
+            self._resume_retried = False
             self._send_resume(self._sid)
             return
         self._close_part()  # 2.6.2: the server part goes
@@ -1099,15 +1123,21 @@ class LiveSession(QObject):
 
     def server_window(self) -> float:
         """How many seconds the channel's own server keeps beyond the buffer (2.6.2): its HLS
-        playlist's window less what the buffer spans, when that is `WINDOW_MIN_S` or more;
-        else 0.0."""
+        playlist's window back from now, less the time since the buffer's start (a kept
+        buffer's gaps included: they have no width on the timeline), when that is
+        `WINDOW_MIN_S` or more; else 0.0."""
         if self._phase is not _Phase.PIPELINE:
             return 0.0
         snapshot = self._snapshot()
         window = _number(snapshot.get("window_s"))
         if snapshot.get("hls") is not True or window <= 0.0:
             return 0.0
-        beyond = window - (self._live_edge(snapshot) - self._buffer_start(snapshot))
+        parts = live_parts.from_state(snapshot.get("parts"))
+        now = self._wall()
+        start = live_parts.wall_at(
+            parts, self._buffer_start(snapshot), live_edge=self._live_edge(snapshot), now=now
+        )
+        beyond = window - (now - start)
         return beyond if beyond >= WINDOW_MIN_S else 0.0
 
     def in_server_part(self) -> bool:
@@ -1170,6 +1200,9 @@ class LiveSession(QObject):
         helper writes it from the buffer, opening no connection. False when it cannot start
         (not `recordable()`, or it records already)."""
         if not self.recordable() or self._recording is not None:
+            return False
+        if self._live_parked:
+            self.notice.emit(PART_NOT_RECORDED)  # 2.6.2: its stream is parked for a part
             return False
         assert self._sid is not None
         seq = self._record_from()
@@ -1776,10 +1809,21 @@ class LiveSession(QObject):
         if sid != self._sid:
             return
         if self._part_resuming and kind != "internal":
-            # 2.6.2: the live upstream parked for a server part did not open again: what was
-            # kept plays on, and Go live tries again (as a kept buffer's resume).
+            # 2.6.2: the live upstream parked for a server part did not open again: refused
+            # (the part's connection may still count), it is asked once more; then what was
+            # kept plays on (its newest point after Go live), and Go live tries again.
+            if message in REFUSALS and not self._resume_retried:
+                self._resume_retried = True
+                QTimer.singleShot(self._part_retry_ms, self._resume_again)
+                return
             self._part_resuming = False
+            live = self._live_after_resume
             self._kept_fallback(KEPT_ONLY)
+            if live and self._sid is not None:
+                pick = self._live_start()
+                seq = pick[0] if pick is not None else self._oldest_seq()
+                if seq is not None:
+                    self._open_at(seq)
             return
         if self._from_kept and (self._resuming or kind == "disk") and kind != "internal":
             # 2.6: the kept buffer's channel did not open again, or its disk failed (the
@@ -1834,9 +1878,11 @@ class LiveSession(QObject):
             self._ended = True
 
     def _on_closed(self, sid: str) -> None:
-        if sid == self._sid and self._part_pending is not None and self._live_parked:
-            t, self._part_pending = self._part_pending, None
-            self._open_part_now(t)  # 2.6.2: its upstream closed: the part's may open
+        if sid == self._part_closing:
+            self._part_closing = None  # 2.6.2: the old part's connection closed
+            self._open_pending_part()
+        elif sid == self._sid and self._part_pending is not None and self._live_parked:
+            self._open_pending_part()  # 2.6.2: its upstream closed: the part's may open
             return
         if sid not in self._unclosed:
             return
@@ -1850,6 +1896,9 @@ class LiveSession(QObject):
             return
         _LOG.warning("The live buffer did not confirm a close in time; going on without it.")
         self._unclosed.clear()
+        if self._part_closing is not None:
+            self._part_closing = None
+            self._open_pending_part()
         self._all_closed()
 
     def _on_input_ended(self) -> None:
@@ -2660,18 +2709,22 @@ class LiveSession(QObject):
             "behind": self._behind(snapshot, position, edge),
         }
         beyond = self.server_window()
-        if beyond > 0.0 or self._part is not None:
+        archive = self._archive is not None
+        if beyond > 0.0 or self._part is not None or archive:
             # 2.6.2: drawn as catch-up draws an archive past the buffer, half an hour past it
             # or past where the server part plays.
             start = float(state["start"])
             reach = start - min(beyond, WINDOW_BAR_S)
             if position < start:
                 reach = min(reach, position - WINDOW_BAR_S)
+            window_start = start - beyond if beyond > 0.0 else min(reach, position)
+            if archive:  # a provider archive's: half an hour past it, beyond any window too
+                reach = min(start, position) - WINDOW_BAR_S
+                window_start = min(window_start, reach)
+                state["archive_part"] = True  # not the channel's own window
             state["buffer_start"] = start
-            state["window_start"] = start - beyond if beyond > 0.0 else min(reach, position)
-            state["start"] = max(reach, state["window_start"])
-            if self._archive is not None:
-                state["archive_part"] = True  # a provider archive's, not the channel's window
+            state["window_start"] = window_start
+            state["start"] = max(reach, window_start)
         self.timelineChanged.emit(state)
 
     # ---- 2.6.2: the server part ------------------------------------------------------------
@@ -2693,28 +2746,52 @@ class LiveSession(QObject):
     def _open_part(self, t: float) -> None:
         """A server part from live timeline second `t`, stopping before the media sequence
         the buffer begins with; it plays once its helper says ready and its state placed it.
-        On a provider with one stream the live upstream parks first."""
+        One at a time: while a part is on its way (or waits to open), the newest point waits
+        for it (`_play_part`), so a held ← opens no part per step."""
+        part = self._part
+        if self._part_pending is not None:
+            self._part_pending = t  # still parking, or an old part's close is awaited
+        elif part is not None and not part.played:
+            self._part_next = t
+        else:
+            self._replace_part(t)
+
+    def _replace_part(self, t: float) -> None:
+        """The part goes (one on its way too) and one from `t` opens: on a provider with a
+        limit once the live upstream parked and the old part's connection closed."""
         assert self._sid is not None
-        parking = self._part_pending is not None
+        old = self._part
         playing = self._in_part
         self._close_part(resume=False, replacing=True)
         self._in_part = playing  # VLC's end of the old part waits for this one (`_resume`)
         self._part_tries = 0
-        if self._one_stream and not self._live_parked:
-            self._live_parked = True
+        if self._one_stream:
+            if old is not None:
+                self._part_closing = old.sid  # `_on_closed` opens the new one then
             self._part_pending = t
-            self._engine.park_session(self._sid)
+            if not self._live_parked:
+                self._live_parked = True
+                self._engine.park_session(self._sid)
+            else:
+                self._open_pending_part()
             return
-        if parking:
-            self._part_pending = t  # still parking: the newest point asked opens then
+        self._open_part_now(t)
+
+    def _open_pending_part(self) -> None:
+        """The point waiting opens, once the live upstream parked and no old part's
+        connection is still closing."""
+        t = self._part_pending
+        if t is None or not self._live_parked or self._part_closing is not None:
             return
+        self._part_pending = None
         self._open_part_now(t)
 
     def _open_part_now(self, t: float) -> None:
         assert self._sid is not None
-        if self._archive is not None:
+        if self._archive is not None and t < self._buffer_start() - self.server_window():
             self._open_archive_now(t, self._archive)
             return
+        self._archive = None  # within the channel's own window: its server's, not an archive
         snapshot = self._snapshot()
         parts = live_parts.from_state(snapshot.get("parts"))
         back = back_for(t, parts, live_edge=self._live_edge(snapshot), now=self._wall())
@@ -2788,12 +2865,22 @@ class LiveSession(QObject):
 
     def _play_part(self) -> None:
         """Play the server part once it is ready and placed: from the segment holding the
-        point asked, else its first."""
+        point asked (the newest asked while it was on its way: one it starts after opens a
+        part anew), once that came within what it fetches ahead (an archive's address starts
+        on the minute), else from its first."""
         part = self._part
-        if part is None or not self._part_ready or part.offset is None or self._part_playing:
+        if part is None or not self._part_ready or part.offset is None or part.played:
             return
+        if self._part_next is not None:
+            part.asked, self._part_next = self._part_next, None
         placed = part.spans(self._engine.spans(part.sid))
+        if placed and part.asked < placed[0].start - _PART_SLACK_S:
+            self._replace_part(part.asked)  # a step back went past where it starts
+            return
         holding = [span for span in placed if span.start <= part.asked]
+        coming = placed and part.asked < placed[0].start + WINDOW_AHEAD_S - _PART_SLACK_S
+        if coming and not part.ended and part.asked >= placed[-1].end:
+            return  # what holds it is on its way (`_on_part_updated` asks again)
         if holding:
             seq = holding[-1].seq
         else:
@@ -2803,7 +2890,9 @@ class LiveSession(QObject):
             seq = placed[0].seq if placed else oldest
         if not self._open_at(seq, part):
             self._part_failed()
-        elif self._archive is not None:
+            return
+        part.played = True
+        if self._archive is not None:
             self._archive.played = True
 
     def _part_start_of(self, part: ServerPart, seq: int) -> float:
@@ -2828,7 +2917,7 @@ class LiveSession(QObject):
         assert self._sid is not None
         part = self._part
         until = part.until if part is not None else None
-        self._close_part()
+        self._leave_part()
         if at is not None:
             self._seek(at)
             return
@@ -2869,13 +2958,35 @@ class LiveSession(QObject):
         if not replacing:
             self._archive = None
         self._part_ready = self._in_part = self._part_playing = False
-        self._part_pending = self._part_again = None
+        self._part_pending = self._part_again = self._part_next = None
         if part is not None:
             self._close(part.sid)
-        if resume and self._live_parked and self._sid is not None:
+        if resume:
+            self._resume_parked()
+
+    def _leave_part(self) -> None:
+        """Playback goes on in the buffer: a part whose input ended stays (what came from the
+        server plays again locally, until Go live, leaving or another part); one still
+        fetching closes. A live upstream parked for it opens again."""
+        part = self._part
+        if part is None or not part.ended:
+            self._close_part()
+            return
+        self._in_part = self._part_playing = False
+        self._part_pending = self._part_again = self._part_next = None
+        self._resume_parked()
+
+    def _resume_parked(self) -> None:
+        if self._live_parked and self._sid is not None:
             self._live_parked = False
             self._part_resuming = True
+            self._resume_retried = False
             self._send_resume(self._sid)  # a new run after the gap, as a kept buffer's
+
+    def _resume_again(self) -> None:
+        """A refused resume after a server part, asked once more."""
+        if self._part_resuming and self._sid is not None and self._phase is _Phase.PIPELINE:
+            self._send_resume(self._sid)
 
     def _behind(self, snapshot: Mapping[str, Any], position: float, edge: float) -> float:
         parts = live_parts.from_state(snapshot.get("parts"))

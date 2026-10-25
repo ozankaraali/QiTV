@@ -1430,7 +1430,7 @@ class HlsSource:
             if fresh and not again:
                 progress = time.monotonic()
                 yield CaughtUp()  # what follows comes as the provider publishes it
-            if done or playlist.is_endlist:
+            if done or (playlist.is_endlist and not again):  # a held one reloads, goes on
                 yield from self._emit(self._release(final=True))
                 yield from self._emit(self._flush_held())
                 return

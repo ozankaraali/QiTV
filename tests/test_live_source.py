@@ -2182,6 +2182,36 @@ video.m3u8
             source.close()
         self.assertEqual(requested_segments(server)[0], "s0.ts")
 
+    def test_a_finished_archive_goes_on_after_a_long_hold(self):
+        # Final review C3: a held ENDLIST archive (the player behind) reloads and goes on; it
+        # does not end at the hold.
+        held = threading.Event()
+        names = [f"s{n}.ts" for n in range(4)]
+
+        def first(request):
+            held.set()
+            request.wfile.write(self.video)
+
+        routes = {f"/{name}": (200, {}, self.video) for name in names[1:]}
+        routes["/s0.ts"] = (200, {"Content-Length": str(len(self.video))}, first)
+        routes["/archive.m3u8"] = (200, {}, hls(0, names, ended=True))
+        server = self.server(routes)
+        source = open_source(
+            server.url + "/archive.m3u8",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            window={"until_s": 600.0, "ahead_s": 60.0},
+            hold=held.is_set,
+        )
+        reader = threading.Thread(target=lambda: list(source.chunks()), daemon=True)
+        reader.start()
+        time.sleep(1.5)  # held longer than a target duration (1 s)
+        held.clear()
+        reader.join(5)
+        source.close()
+        self.assertEqual(requested_segments(server), names)
+
     def test_a_server_parts_first_wall_is_its_time_of_day(self):
         # Its first segment's time of day: the opened copy's segments after it, counted back
         # from now (the bar places the part by it).

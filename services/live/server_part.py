@@ -34,6 +34,7 @@ class ServerPart:
     until: Optional[int]  # the media sequence its input ends before (the buffer's first)
     offset: Optional[float] = None  # the live timeline second of its own second 0
     ended: bool = False  # its input ended (at its stop, or the window's end)
+    played: bool = False  # VLC played it (before: on its way)
 
     def place(
         self,
