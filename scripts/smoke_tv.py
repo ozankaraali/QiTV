@@ -23,10 +23,10 @@ segment's length (the starts it can land on are a segment apart) + 0.5 s (VLC's 
 and at the end of the 6 s it holds there or closes in (2.1's stay-live keeps 1x inside its dead
 band and nudges only after 15 s outside it: not drifting away is enough); ← moves
 the position back 8-12 s; 1.5x is applied and returns to 1x once stay-live is back at live;
-Catch-up (2.2): Channel 3 is given an archive (an M3U "append" type its source serves, starting
-mid-packet and mid-GOP as a real panel's does); a seek 5 minutes before its buffer probes the
-archive, closes the live stream and plays the archive (VLC plays its address itself, an
-on-demand stream, on the transport's archive bar), and L tunes the channel live again; its
+Catch-up (2.2; 2.7 through the buffer): Channel 3 is given an archive (an M3U "append" type its
+source serves, starting mid-packet and mid-GOP as a real panel's does); a seek 5 minutes before
+its buffer probes the archive and plays it through the buffer (a server part of the live
+session, before the buffer on the channel's own bar), and L plays the channel live again; its
 source sees one connection at a time (the probe beside the live stream is counted apart).
 R records Channel 3 from the buffer into <out>/recordings for 3 s and R stops it: the file is
 saved (MPEG-TS from its first byte), the controls showed REC meanwhile and the toast says
@@ -253,8 +253,8 @@ RECORD_CHECK = (
     f"{PIPELINE_PREFIX}R records {LIVE_CHANNEL} from the buffer to a saved MPEG-TS file, R stops it"
 )
 CATCHUP_CHECK = (
-    f"{PIPELINE_PREFIX}a seek before {LIVE_CHANNEL}'s buffer plays its provider archive on the "
-    "archive bar, and L plays it live again"
+    f"{PIPELINE_PREFIX}a seek before {LIVE_CHANNEL}'s buffer plays its provider archive through "
+    "the buffer, before it on the bar, and L plays it live again"
 )
 CATCHUP_SOURCE_CHECK = (
     f"{PIPELINE_PREFIX}{LIVE_CHANNEL}'s archive was probed, then played on a connection of its own"
@@ -654,8 +654,13 @@ def _judge_sources(report: Report, sources: list[LiveSource], pipeline: bool, pi
     if pipeline:
         zap = facts.get("zap") or {}
         zapped = bool(zap.get("opened")) and bool(zap.get("back"))
-        peaks = [peak_of(source.events, end=pip_from) for source in sources]
-        both = peak_of(first.events + second.events, end=pip_from)
+        # From the zap on: a provider archive before it plays through the buffer (2.7), on
+        # a provider without a limit beside the live stream.
+        zap_from = None
+        if isinstance(zap.get("started_at"), (int, float)):
+            zap_from = zap["started_at"] - (time.time() - time.monotonic())
+        peaks = [peak_of(source.events, start=zap_from, end=pip_from) for source in sources]
+        both = peak_of(first.events + second.events, start=zap_from, end=pip_from)
         report.check(
             ZAP_CHECK,
             zapped and peaks == [1, 1] and both == 1,
@@ -1587,24 +1592,26 @@ class Driver:
 
         # 6c. Catch-up (2.2): the provider's archive before the buffer, then L back to live.
         report.step("pipeline 6c. catch-up")
-        yield from self._catchup(session)
+        yield from self._catchup(live, session)
 
         # 7. Down to Channel 4, and Up back as soon as its upstream delivers: each opens only
         # once the other's upstream is closed. The parent judges it by what the sources saw.
         report.step("pipeline 7. zap to Channel 4 and back")
         first, second = self.live_urls[0], self.live_urls[1]
+        yield 1_500  # 2.7: the archive's server part, beside the live stream, closes (≤ 0.5 s)
+        zap_at = time.time()  # the parent judges the zap's connections from here on
         self._key(Qt.Key.Key_Down)
         opened = yield from self._wait(lambda: self._delivering(second), ZAP_OPEN_TIMEOUT_MS)
         self._key(Qt.Key.Key_Up)
         back = yield from self._wait(
             lambda: self._tuned(first) and self._pipeline_playing(), LIVE_PLAY_TIMEOUT_MS
         )
-        facts["zap"] = {"opened": opened, "back": back}
+        facts["zap"] = {"opened": opened, "back": back, "started_at": zap_at}
         report.save()
 
-    def _catchup(self, session: Any) -> Generator[int, None, None]:
-        """Channel 3 gets an archive its source serves; a seek 5 min before the buffer plays it,
-        L returns to live."""
+    def _catchup(self, live: Any, session: Any) -> Generator[int, None, None]:
+        """Channel 3 gets an archive its source serves; a seek 5 min before the buffer plays it
+        through the buffer (2.7: a server part), L returns to live."""
         w, report = self.window, self.report
         current = getattr(w.controller, "_current", None)
         if current is None or not self.timeline:
@@ -1615,25 +1622,33 @@ class Driver:
         transport = w.overlays.transport
         transport.seekToRequested.emit(float(state["start"]) - CATCHUP_BEFORE_S)
         archive = yield from self._wait(
-            lambda: session.kind is PlayKind.VOD_STREAM
-            and session.state() is PlaybackState.PLAYING,
+            lambda: live.in_server_part() and self._pipeline_playing(live, session),
             CATCHUP_TIMEOUT_MS,
         )
         self._move_mouse()
         yield from self._wait(transport.isVisible, TRANSPORT_TIMEOUT_MS)
         yield 1_000  # the bar follows the archive's position
         texts = transport.texts()
+        bar = self.timeline[-1][1] if self.timeline else {}
+        before = bar.get("archive_part") is True and float(bar.get("position", 0.0)) < float(
+            bar.get("buffer_start", 0.0)
+        )
         self._capture(PIPELINE_CATCHUP)
         self._key(Qt.Key.Key_L)
         back = yield from self._wait(self._pipeline_playing, LIVE_PLAY_TIMEOUT_MS)
         for key in ("archive_days", "catchup", "catchup_source"):
             current.item.pop(key, None)  # the steps after it are the live channel's
-        report.data["pipeline"]["catchup"] = {"archive": archive, "texts": texts, "back": back}
+        report.data["pipeline"]["catchup"] = {
+            "archive": archive,
+            "before": before,
+            "texts": texts,
+            "back": back,
+        }
         report.check(
             CATCHUP_CHECK,
-            archive and texts[0].startswith("Archive from") and back,
-            f"archive played {archive} ({_redacted(session.url)}), transport {texts!r}, live "
-            f"again {back}",
+            archive and before and back,
+            f"archive played through the buffer {archive} ({_redacted(session.url)}), before the "
+            f"buffer on the bar {before}, transport {texts!r}, live again {back}",
         )
 
     def _record(self, live: Any) -> Generator[int, None, None]:
