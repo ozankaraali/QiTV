@@ -6598,3 +6598,15 @@ class ServerWindowFixTests(LiveSessionCase):
         self.engine.buffer(part, own, hls=True, part_wall=10_000.0 - 100.0, part_media=12.0)
         self.engine.sessionReady.emit(part)
         self.assertAlmostEqual(self.live.position(), -12.0)
+
+    def test_a_seek_says_where_it_went_at_once(self):
+        # The owner: the bar jumped back and forth: on release it drew the old position
+        # until the session's next tick said the new one.
+        self.playing(86400.0)
+        self.timelines.clear()
+        self.live.seek_to(-300.0)  # into the server's window
+        self.assertAlmostEqual(self.timelines[-1]["position"], -300.0)
+        self.live.seek_to(30.0)  # within the buffer
+        self.assertAlmostEqual(self.timelines[-1]["position"], 30.0)
+        self.live.seek_relative(-10.0)
+        self.assertAlmostEqual(self.timelines[-1]["position"], 18.0)  # the segment holding 20

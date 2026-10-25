@@ -914,6 +914,13 @@ class LiveSession(QObject):
 
     def seek_to(self, t: float) -> None:
         self._seek(t)
+        self._said_where()
+
+    def _said_where(self) -> None:
+        """A seek's new position goes to the bar at once: else it draws the old one until
+        the next tick (the owner saw the knob jump back and forth)."""
+        if self._phase is _Phase.PIPELINE:
+            self._emit_timeline()
 
     def _seek(self, t: float, *, lo: float = -math.inf, hi: float = math.inf) -> None:
         """Seek to `t`, opening a segment that starts in [`lo`, `hi`) (a step's direction)."""
@@ -954,6 +961,7 @@ class LiveSession(QObject):
             self._seek(position + dt, hi=position)
         elif dt > 0:
             self._seek(position + dt, lo=position + 1e-6)
+        self._said_where()
 
     def _asked_point(self) -> float:
         """Where a step counts from: the point a server part on its way (or waiting) was
