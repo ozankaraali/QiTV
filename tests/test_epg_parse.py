@@ -505,7 +505,6 @@ class XtreamAnswersTests(_FileCase):
 
     def fetch(self, *answers):
         config = SimpleNamespace(
-            prefer_https=True,
             ssl_verify=True,
             epg_expiration=3600,
             xmltv_channel_map=MultiKeyDict(),

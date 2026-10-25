@@ -741,8 +741,8 @@ class LiveSession(QObject):
         the helper as Referer). `kept` (2.6): the channel's parked session, taken back where
         the user was (`_resume_kept`) instead of a new one; one with nothing left starts
         afresh. `one_stream` (2.7): the provider leaves no second stream, so the live
-        upstream parks while a server part plays and resumes after it. `https_first` (2.7.1:
-        the provider prefers HTTPS): every stream the helper opens for it, a server part's
+        upstream parks while a server part plays and resumes after it. `https_first` (2.7.1):
+        every stream the helper opens for it, a server part's
         and a resume's too, is asked over HTTPS first (a direct play stays as given)."""
         self.stop()
         self._kept = kept

@@ -63,7 +63,7 @@ class LiveStart:
     verify_ssl: bool
     channel: str = ""  # its key for what it taught (services.live.tuning; "": none)
     referrer: str = ""  # the channel's M3U http-referrer (2.1; "": none)
-    https: bool = False  # 2.7.1: its provider prefers HTTPS (the helper asks that first)
+    https: bool = False  # 2.7.1: the helper asks it over HTTPS first (see live_start)
 
 
 def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) -> dict[str, Any]:
@@ -73,7 +73,7 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
     the same), else the memory per stream (`timeshift_ram_mib`). A disk buffer that fails
     goes on in that memory (`ram_bytes`). A channel with a key passes it (`channel`), one whose
     M3U names a referrer passes that (`referrer`, and its `Referer` header for the helper).
-    A provider preferring HTTPS has its stream asked over HTTPS first (`https_first`, 2.7.1).
+    A start asked over HTTPS first has the helper try that first (`https_first`, 2.7.1).
     """
     consent = bool(config.timeshift_enabled)
     disk = consent if disk is None else disk and consent

@@ -35,7 +35,6 @@ from services.lazy_import import lazy_module
 from services.provider_api import (
     CLIENT_HEADERS,
     https_fallback_candidates,
-    provider_prefers_https,
     remember_xtream_root,
     xtream_elsewhere,
     xtream_player_api_url,
@@ -197,19 +196,18 @@ def has_account(provider: dict) -> bool:
 def check_account(
     provider: dict,
     *,
-    prefer_https: bool = False,
     ssl_verify: bool = True,
     now: Optional[datetime] = None,
     session: Optional[dict] = None,
 ) -> Optional[Reason]:
-    """Ask `provider`'s account (blocking: run it on a worker). `prefer_https` and `ssl_verify`
-    are the global settings, which the provider's own override; `session`, an STB portal's
+    """Ask `provider`'s account (blocking: run it on a worker), over HTTPS first. `ssl_verify`
+    is the global setting, which the provider's own overrides; `session`, an STB portal's
     signed-in headers (see check_stb). None: nothing to ask."""
     kind = str(provider.get("type", "")).upper()
     url = str(provider.get("url") or "").strip()
     if not url:
         return None
-    reason = _check(provider, kind, url, prefer_https, ssl_verify, now, session)
+    reason = _check(provider, kind, url, ssl_verify, now, session)
     if reason is not None:
         logger.debug("Account check (%s): %s", kind, reason.kind)
     return reason
@@ -219,19 +217,17 @@ def _check(
     provider: dict,
     kind: str,
     url: str,
-    prefer_https: bool,
     ssl_verify: bool,
     now: Optional[datetime],
     session: Optional[dict],
 ) -> Optional[Reason]:
-    https = provider_prefers_https(provider, prefer_https)
     verify = bool(provider.get("ssl_verify", ssl_verify))
     if kind == "XTREAM":
         username, password = provider.get("username"), provider.get("password")
         if not username or not password:
             return Reason(reasons.WRONG_LOGIN, translate(reasons.WRONG_LOGIN_MESSAGE))
         return check_xtream(
-            url, str(username), str(password), prefer_https=https, ssl_verify=verify, now=now
+            url, str(username), str(password), prefer_https=True, ssl_verify=verify, now=now
         )
     if kind == "STB":
         return check_stb(
@@ -239,7 +235,7 @@ def _check(
             str(provider.get("mac") or ""),
             serial_number=str(provider.get("serial_number") or ""),
             device_id=str(provider.get("device_id") or ""),
-            prefer_https=https,
+            prefer_https=True,
             ssl_verify=verify,
             now=now,
             session=session,
@@ -247,7 +243,7 @@ def _check(
     link = parse_provider_link(url) if kind in ("M3UPLAYLIST", "M3USTREAM") else None
     if link is not None and link.type == XTREAM:  # a playlist from an Xtream panel
         return check_xtream(
-            link.url, link.username, link.password, prefer_https=https, ssl_verify=verify, now=now
+            link.url, link.username, link.password, prefer_https=True, ssl_verify=verify, now=now
         )
     return None
 
@@ -261,13 +257,11 @@ class AccountCheckWorker(QObject):
     def __init__(
         self,
         provider: dict,
-        prefer_https: bool,
         ssl_verify: bool,
         session: Optional[dict] = None,
     ) -> None:
         super().__init__()
         self._provider = dict(provider)
-        self._prefer_https = prefer_https
         self._ssl_verify = ssl_verify
         self._session = dict(session) if session else None  # copied on the GUI thread
 
@@ -275,7 +269,6 @@ class AccountCheckWorker(QObject):
         try:
             reason = check_account(
                 self._provider,
-                prefer_https=self._prefer_https,
                 ssl_verify=self._ssl_verify,
                 session=self._session,
             )
@@ -299,7 +292,7 @@ class AccountChecks(QObject):
         clock: Callable[[], float] = time.monotonic,
         parent: Optional[QObject] = None,
     ) -> None:
-        """`config` gives the global prefer_https and ssl_verify; `runner` runs the workers
+        """`config` gives the global ssl_verify; `runner` runs the workers
         (a JobRunner of its own by default)."""
         super().__init__(parent)
         self._config = config
@@ -332,7 +325,6 @@ class AccountChecks(QObject):
         self._checked[key] = (self._clock(), None)  # the minute starts with the ask
         worker = AccountCheckWorker(
             provider,
-            bool(getattr(self._config, "prefer_https", False)),
             bool(getattr(self._config, "ssl_verify", True)),
             session,
         )

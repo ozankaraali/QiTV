@@ -47,7 +47,6 @@ class _Config(SimpleNamespace):
             epg_expiration=3600,
             epg_stb_period_hours=5,
             epg_list_window_hours=0,
-            prefer_https=False,
             ssl_verify=True,
             xmltv_channel_map=MultiKeyDict(),
         )

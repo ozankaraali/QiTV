@@ -274,6 +274,7 @@ class PipTests(PipCase):
                 "max_bytes": 256 * MIB,  # the memory per stream
                 "channel": channel_key("Home", CHANNELS[0]),
                 "one_stream": True,  # 2.7: its provider limits streams (a part parks live)
+                "https_first": True,  # 2.7.1: HTTPS is chosen by what answers
             },
         )
         self.assertTrue(self.sessions.pip_open())

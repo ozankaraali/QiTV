@@ -6,10 +6,11 @@ from urllib.parse import parse_qs, urlsplit
 
 import requests
 
+from services import provider_api
 from services.catalog import UNEXPECTED_ANSWER_MESSAGE, UNREACHABLE_MESSAGE
 from services.config_manager import ConfigManager
 from services.provider_manager import ProviderManager, StbHandshake
-from services.workers import STB_DEVICE_REJECTED_MESSAGE, ProviderSetupWorker
+from services.workers import STB_DEVICE_REJECTED_MESSAGE, ProviderSetupWorker, STBCategoriesWorker
 
 PREHASH = "2614ddf9829ba9d284f389d88e8c669d81f6a5c2"
 
@@ -26,6 +27,10 @@ class _Response:
         if isinstance(self._body, Exception):
             raise self._body
         return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(str(self.status_code))
 
 
 def _accepting(url, **kwargs):
@@ -72,7 +77,10 @@ class StbHandshakeTests(unittest.TestCase):
                     return _accepting(url)
 
                 handshake = StbHandshake(prefer_https=True)
-                with patch("services.provider_manager.requests.get", side_effect=fake_get):
+                with (
+                    patch.object(provider_api, "_http_only", set()),
+                    patch("services.provider_manager.requests.get", side_effect=fake_get),
+                ):
                     self.assertTrue(handshake.run("http://portal.test", "00:1A:79:00:00:01"))
                 self.assertIsNone(handshake.failure)
                 self.assertEqual(
@@ -84,6 +92,37 @@ class StbHandshakeTests(unittest.TestCase):
                     ],
                 )
                 self.assertTrue(calls[-1].startswith(f"http://portal.test{path}"), calls)
+
+    def test_a_portal_signed_in_over_http_is_asked_over_http_from_then_on(self):
+        # 2.7.1: its lists, links and guide too, and the next sign-in asks no HTTPS
+        calls = []
+
+        def fake_get(url, **kwargs):
+            calls.append(urlsplit(url).scheme)
+            if url.startswith("https://"):
+                raise requests.exceptions.SSLError("wrong version number")
+            if "action=get_genres" in url:
+                return _Response({"js": [{"id": "1", "title": "News"}]})
+            if "action=get_all_channels" in url:
+                return _Response({"js": {"data": []}})
+            return _accepting(url)
+
+        url = "http://portal.test/c/"
+        with (
+            patch.object(provider_api, "_http_only", set()),
+            patch("services.provider_manager.requests.get", side_effect=fake_get),
+            patch("services.workers.requests.get", side_effect=fake_get),
+        ):
+            handshake = StbHandshake(prefer_https=True)
+            self.assertTrue(handshake.run(url, "00:1A:79:00:00:01"))
+            calls.clear()
+            worker = STBCategoriesWorker(url, handshake.headers, "itv", prefer_https=True)
+            done = []
+            worker.finished.connect(done.append)
+            worker.run()
+            self.assertEqual(len(done), 1)
+            self.assertTrue(StbHandshake(prefer_https=True).run(url, "00:1A:79:00:00:01"))
+        self.assertEqual(set(calls), {"http"})
 
     def test_prefer_https_failing_everywhere_warns_once(self):
         calls = []

@@ -18,7 +18,11 @@ from services.atomic_write import atomic_write
 from services.catchup import mark_stb_archives
 from services.lazy_import import lazy_module
 from services.m3u import split_cached_groups
-from services.provider_api import provider_prefers_https
+from services.provider_api import (
+    https_fallback_candidates,
+    known_http_only,
+    remember_http_only,
+)
 from services.redact import safe_exc
 
 logger = logging.getLogger(__name__)
@@ -104,16 +108,14 @@ class ProviderManager(QObject):
     def _current_provider_cache_name(self):
         return self._provider_cache_name(self.current_provider["name"])
 
-    def provider_cache_identity(self, provider, *, prefer_https=None, ssl_verify=None):
-        """Identify the effective connection, without persisting credentials in metadata."""
+    def provider_cache_identity(self, provider, *, ssl_verify=None):
+        """Identify the effective connection, without persisting credentials in metadata.
+        (2.7.1: without the retired "Prefer HTTPS", so a list saved under it, its addresses
+        HTTPS whether the provider answered there or not, is loaded again once.)"""
         connection = {
             key: provider.get(key, "")
             for key in ("type", "url", "mac", "username", "password", "serial_number", "device_id")
         }
-        connection["prefer_https"] = provider_prefers_https(
-            provider,
-            self.config_manager.prefer_https if prefer_https is None else prefer_https,
-        )
         connection["ssl_verify"] = provider.get(
             "ssl_verify",
             self.config_manager.ssl_verify if ssl_verify is None else ssl_verify,
@@ -361,9 +363,7 @@ class ProviderManager(QObject):
         ssl_verify_override=None,
     ):
         handshake = StbHandshake(
-            prefer_https=provider_prefers_https(
-                self.current_provider, self.config_manager.prefer_https
-            ),
+            prefer_https=True,
             ssl_verify=self.current_provider.get("ssl_verify", self.config_manager.ssl_verify),
             token=self.token,
         )
@@ -419,7 +419,14 @@ class StbHandshake:
                 prefer_https_override if prefer_https_override is not None else self.prefer_https
             )
             ssl_verify = ssl_verify_override if ssl_verify_override is not None else self.ssl_verify
-            if prefer_https and not _prefer_attempted and url.startswith("http://"):
+            # HTTPS first, unless the portal answered only over HTTP this run
+            try_https = (
+                prefer_https
+                and not _prefer_attempted
+                and url.startswith("http://")
+                and not known_http_only(url)
+            )
+            if try_https:
                 url = "https://" + url[len("http://") :]
 
             fetchurl = f"{url}{serverload}?type=stb&action=handshake&prehash={_PREHASH}&token=&JsHttpRequest=1-xml"
@@ -458,9 +465,7 @@ class StbHandshake:
                 _HANDSHAKE_FAILURE_RANK[reason] > _HANDSHAKE_FAILURE_RANK[self.failure]
             ):
                 self.failure = reason
-            http_retry = (
-                prefer_https and not _prefer_attempted and original_url.startswith("http://")
-            )
+            http_retry = try_https
             load_retry = serverload != "/server/load.php" and "handshake" in fetchurl
             # The other portal path on the same scheme first; when that fails too, the HTTP
             # fallback below still runs (both paths again, over HTTP).
@@ -479,7 +484,7 @@ class StbHandshake:
             # If HTTPS attempt failed and we preferred HTTPS, fall back to HTTP once
             if http_retry:
                 logger.info("HTTPS handshake failed; retrying over HTTP")
-                return self.run(
+                signed_in = self.run(
                     original_url,
                     mac,
                     serverload,
@@ -489,6 +494,9 @@ class StbHandshake:
                     ssl_verify_override=ssl_verify_override,
                     _prefer_attempted=True,
                 )
+                if signed_in:  # its lists, links and guide are asked over HTTP too
+                    remember_http_only(original_url)
+                return signed_in
             if not load_retry and not _quiet:
                 logger.warning("STB handshake failed (%s): %s", self.failure, safe_exc(e))
             return False
@@ -525,9 +533,7 @@ class StbHandshake:
         bind one token to a MAC). True when the portal knows the device; `statuses`,
         `timed_out` and `profile` record what came, as run() records them."""
         self.headers = dict(headers)
-        bases = [url]
-        if self.prefer_https and url.startswith("http://"):
-            bases.insert(0, "https://" + url[len("http://") :])
+        bases = https_fallback_candidates(url, self.prefer_https)
         for base in bases:
             for serverload in ("/portal.php", "/server/load.php"):
                 try:

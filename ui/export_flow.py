@@ -140,7 +140,6 @@ class ExportFlow(QObject):
             section,
             path,
             verify_ssl=bool(provider.get("ssl_verify", self._config.ssl_verify)),
-            prefer_https=bool(self._config.prefer_https),
             headers=dict(manager.headers or {}),
             cancel=cancel,
         )

@@ -231,15 +231,13 @@ def run_child(scenario, playlist):
             gated = False
             last = None
 
-            def m3u(self, url, verify_ssl, prefer_https):
+            def m3u(self, url, verify_ssl):
                 if not self.gated:
-                    return super().m3u(url, verify_ssl, prefer_https)
+                    return super().m3u(url, verify_ssl)
                 self.last = GatedM3ULoaderWorker(url, verify_ssl=verify_ssl)
                 return self.last
 
-        config = SimpleNamespace(
-            selected_provider_name="Local", prefer_https=False, ssl_verify=True, channel_epg=False
-        )
+        config = SimpleNamespace(selected_provider_name="Local", ssl_verify=True, channel_epg=False)
         epg = SimpleNamespace(get_programs_for_channel=lambda channel: [])
         factory = Factory()
         # Only the provider and EPG stand-ins are fakes: the worker factory, the JobRunner

@@ -101,7 +101,6 @@ class ManualRunner:
 def make_service(provider, factory=None, runner=None):
     config = SimpleNamespace(
         selected_provider_name=provider["name"],
-        prefer_https=False,
         ssl_verify=True,
         channel_epg=True,
         save_config=lambda: None,
@@ -286,7 +285,8 @@ class CatalogServiceTests(unittest.TestCase):
         self.assertEqual(service.items("movies", "5"), [{"id": 9, "name": "F", "_provider": "S"}])
         self.assertEqual(service.groups("movies"), [Group("movies", "5", "Films", 1)])
         kwargs = factory.calls[-1][2]
-        self.assertEqual(kwargs["url"], "http://portal/server/load.php")
+        # 2.7.1: over HTTPS first (HTTP once the portal's sign-in found it answers only so)
+        self.assertEqual(kwargs["url"], "https://portal/server/load.php")
         self.assertEqual(kwargs["category_id"], "5")
 
     def test_results_after_provider_switch_are_dropped(self):

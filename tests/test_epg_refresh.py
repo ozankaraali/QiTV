@@ -13,7 +13,11 @@ from unittest.mock import patch
 
 import requests
 
-from services import epg_manager as epg_manager_module, epg_store as epg_store_module
+from services import (
+    epg_manager as epg_manager_module,
+    epg_store as epg_store_module,
+    provider_api,
+)
 from services.epg_manager import (
     _INDEX_TIME_FORMAT,
     EpgManager,
@@ -66,7 +70,6 @@ class _Config(SimpleNamespace):
             epg_expiration=3600,
             epg_stb_period_hours=5,
             epg_list_window_hours=0,
-            prefer_https=False,
             ssl_verify=True,
             xmltv_channel_map=MultiKeyDict(),
             **overrides,
@@ -239,7 +242,10 @@ class EpgRefreshTests(_GuideCase):
                 self.items = [guide] if guide else []
 
         manager = self.manager()
-        with patch("services.epg_manager.ContentLoader", Loader):
+        with (
+            patch.object(provider_api, "_http_only", {"s:80"}),  # its sign-in found it so
+            patch("services.epg_manager.ContentLoader", Loader),
+        ):
             manager.set_current_epg()
             manager.force_refresh_current_epg()  # the portal answers with nothing
         self.assertEqual(manager.get_programs_for_channel({"id": "7"}), [programme])

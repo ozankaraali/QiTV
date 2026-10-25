@@ -17,7 +17,12 @@ from PySide6.QtCore import QObject, Signal
 from services.export import save_m3u_content, save_stb_content
 from services.i18n import N_, tr
 from services.lazy_import import lazy_module
-from services.provider_api import provider_prefers_https, stb_endpoint, stb_portal_base
+from services.provider_api import (
+    https_fallback_candidates,
+    remember_http_only,
+    stb_endpoint,
+    stb_portal_base,
+)
 from services.redact import safe_exc
 from services.search import iter_items
 
@@ -128,7 +133,6 @@ class ExportWorker(QObject):
         path: str,
         *,
         verify_ssl: bool,
-        prefer_https: bool,
         headers: dict,
         cancel: threading.Event,
     ):
@@ -139,7 +143,6 @@ class ExportWorker(QObject):
         self._section = section
         self._path = path
         self._verify_ssl = verify_ssl
-        self._prefer_https = prefer_https
         self._headers = headers
         self._cancel = cancel
 
@@ -204,17 +207,14 @@ class ExportWorker(QObject):
     def _fetch(
         self, session: requests.Session, series: dict, season_id: Any, sortby: str
     ) -> Optional[dict]:
-        """One STB series listing (season_id 0 lists the seasons); None on failure.
+        """One STB series listing (season_id 0 lists the seasons); None on failure. Asked
+        over HTTPS first: a portal that does not answer there is asked over HTTP (and so
+        from then on, `remember_http_only`).
 
         The request runs on a helper thread so cancelling returns at once even while the
         portal stalls; the abandoned request is aborted by closing the session.
         """
-        base = stb_endpoint(
-            stb_portal_base(
-                self._provider.get("url", ""),
-                provider_prefers_https(self._provider, self._prefer_https),
-            )
-        )
+        bases = https_fallback_candidates(stb_portal_base(self._provider.get("url", "")), True)
         params = {
             "type": "series",
             "action": "get_ordered_list",
@@ -227,15 +227,24 @@ class ExportWorker(QObject):
         box: dict[str, Any] = {}
         done = threading.Event()
 
+        def ask(base: str) -> Any:
+            return session.get(
+                stb_endpoint(base),
+                headers=self._headers,
+                params=params,
+                timeout=REQUEST_TIMEOUT,
+                verify=self._verify_ssl,
+            )
+
         def request() -> None:
             try:
-                response = session.get(
-                    base,
-                    headers=self._headers,
-                    params=params,
-                    timeout=REQUEST_TIMEOUT,
-                    verify=self._verify_ssl,
-                )
+                try:
+                    response = ask(bases[0])
+                except requests.RequestException:
+                    if len(bases) == 1 or self._cancel.is_set():  # a cancel closed the session
+                        raise
+                    remember_http_only(bases[-1])  # HTTPS did not answer
+                    response = ask(bases[-1])
                 if response.status_code == 200:
                     js = response.json().get("js", {})
                     box["result"] = js if isinstance(js, dict) else None

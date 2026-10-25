@@ -304,7 +304,6 @@ class PortalLoadTests(PortalCase):
             epg_expiration=3600,
             epg_stb_period_hours=24,
             epg_list_window_hours=0,
-            prefer_https=False,
             ssl_verify=True,
             xmltv_channel_map=MultiKeyDict(),
             get_config_dir=lambda: self.dir,

@@ -2035,7 +2035,7 @@ def open_source(
 
     With ``QITV_CAPTURE_DIR`` set, the source also saves what it reads there (`_Capture`).
 
-    ``https_first`` (2.7.1, the provider prefers HTTPS): an ``http://`` address is opened over
+    ``https_first`` (2.7.1): an ``http://`` address is opened over
     HTTPS first, the same host and port (`_HTTPS_CONNECT_S` to connect); when that fails for
     any reason but a stop, over HTTP, and that host is asked over HTTP at once from then on
     (`_HTTPS_FAILED`, for the helper's run).

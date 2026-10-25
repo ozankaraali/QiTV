@@ -3,7 +3,7 @@
 from functools import partial
 import logging
 import re
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from PySide6.QtCore import QObject, Qt, Signal
 
@@ -25,8 +25,8 @@ from services.lazy_import import lazy_module
 from services.m3u import decode_playlist, parse_m3u
 from services.provider_api import (
     CLIENT_HEADERS,
-    base_from_url,
     https_fallback_candidates,
+    remember_http_only,
     remember_xtream_root,
     stb_archive_link_url,
     stb_create_link_url,
@@ -35,6 +35,7 @@ from services.provider_api import (
     xtream_base,
     xtream_choose_resolved_base,
     xtream_elsewhere,
+    xtream_https_bases,
     xtream_player_api_url,
     xtream_sign_in_bases,
     xtream_stream_url,
@@ -50,9 +51,9 @@ NO_PORTAL_DATA_MESSAGE = N_("The portal returned no data")
 STB_DEVICE_REJECTED_MESSAGE = DEVICE_MESSAGE
 
 
-def _resolve_xtream_base(server_info: dict, base_url: str, prefer_https: bool) -> str:
+def _resolve_xtream_base(server_info: dict, base_url: str) -> str:
     """Pick the panel-advertised base, falling back to the user's URL when there is none."""
-    resolved_base = xtream_choose_resolved_base(server_info, base_url, prefer_https=prefer_https)
+    resolved_base = xtream_choose_resolved_base(server_info, base_url)
     return resolved_base or xtream_base(base_url)
 
 
@@ -144,12 +145,76 @@ _XTREAM_CATALOG_ACTIONS = {
 # verify_ssl and prefer_https. `get` is requests' or a session's, sending CLIENT_HEADERS.
 
 
+# This run's resolved HTTP bases of Xtream panels, each with the HTTPS base its panel answered
+# its sign-in at ("": none did).
+_https_bases: Dict[str, str] = {}
+_HTTPS_CONNECT_S = 5.0  # an HTTPS address that never answers does not hold a list up long
+
+
 def _xtream_sign_in(get: Callable[..., Any], worker: Any) -> Tuple[Any, str, Any]:
     """Sign in to an Xtream panel (the Player API without an action): the reply's user_info,
     the base its API and streams are at, and its server_info (its time zone: catch-up). An
     address with a path whose panel is not there (a 404 or a page, not the API's JSON) is asked
     once more at its server's root, which is used from then on when it answers (a stray path
-    2.2.0 and older cut off)."""
+    2.2.0 and older cut off). With HTTPS preferred, an HTTP base becomes the HTTPS one its
+    panel answers at (`_xtream_https_base`)."""
+    user_info, base, server_info = _xtream_sign_in_at(get, worker)
+    if worker.prefer_https and base.startswith("http://"):
+        base = _xtream_https_base(get, worker, base, server_info) or base
+    return user_info, base, server_info
+
+
+def _xtream_https_base(get: Callable[..., Any], worker: Any, base: str, server_info: Any) -> str:
+    """The HTTPS base the panel signed in at the HTTP `base` answers its sign-in at
+    (`xtream_https_bases`), asked once a run; "" when it answers at none, and its host is
+    asked over HTTP from then on (the streams too)."""
+    if base in _https_bases:
+        return _https_bases[base]
+    secure = ""
+    for candidate in xtream_https_bases(base, server_info):
+        url = xtream_player_api_url(candidate, worker.username, worker.password)
+        try:
+            response = get(url, timeout=(_HTTPS_CONNECT_S, 10), verify=worker.verify_ssl)
+            try:
+                body = response.json() if response.ok and response.content else None
+            finally:
+                response.close()
+        except requests.RequestException, ValueError:
+            continue
+        if isinstance(body, dict) and isinstance(body.get("user_info"), dict):
+            secure = candidate
+            break
+    _https_bases[base] = secure
+    if secure:
+        logger.info("The Xtream panel answers over HTTPS: its lists and streams come over HTTPS.")
+    else:
+        remember_http_only(base)
+        logger.info("The Xtream panel does not answer over HTTPS: it is asked over HTTP.")
+    return secure
+
+
+class _XtreamAccount(NamedTuple):
+    """An Xtream account as `_xtream_sign_in` reads it off a worker."""
+
+    base_url: str
+    username: str
+    password: str
+    verify_ssl: bool
+    prefer_https: bool = True
+
+
+def xtream_answers_https(base_url: str, username: str, password: str, verify_ssl: bool) -> bool:
+    """Whether the Xtream panel at `base_url` gives its lists and streams over HTTPS: its
+    address is HTTPS, or the panel answers its sign-in over HTTPS (Settings' Verify Provider
+    says when it does not, 2.7.1). Blocking: run it on a worker."""
+    account = _XtreamAccount(base_url, username, password, verify_ssl)
+    with requests.Session() as session:
+        session.headers.update(CLIENT_HEADERS)
+        return _xtream_sign_in(session.get, account)[1].startswith("https://")
+
+
+def _xtream_sign_in_at(get: Callable[..., Any], worker: Any) -> Tuple[Any, str, Any]:
+    """`_xtream_sign_in` at the address as saved."""
     bases = xtream_sign_in_bases(worker.base_url)
     for at, server in enumerate(bases):
         url = xtream_player_api_url(server, worker.username, worker.password)
@@ -163,7 +228,7 @@ def _xtream_sign_in(get: Callable[..., Any], worker: Any) -> Tuple[Any, str, Any
         if at:
             remember_xtream_root(worker.base_url, server)
         server_info = body.get("server_info", {})
-        resolved = _resolve_xtream_base(server_info, server, worker.prefer_https)
+        resolved = _resolve_xtream_base(server_info, server)
         return body.get("user_info", {}), resolved, server_info
     raise AssertionError("unreachable: the last base always answers or raises")
 
@@ -482,9 +547,7 @@ class STBCategoriesWorker(QObject):
 
     def run(self):
         try:
-            base = base_from_url(self.base_url)
-            if self.prefer_https and base.startswith("http://"):
-                base = "https://" + base[len("http://") :]
+            base = stb_portal_base(self.base_url, self.prefer_https)
 
             # Use correct action based on content type
             action = "get_genres" if self.content_type == "itv" else "get_categories"

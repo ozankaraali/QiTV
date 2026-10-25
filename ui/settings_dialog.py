@@ -44,7 +44,12 @@ from services.i18n import N_, tr, tr_n, translate
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
 from services.opensubtitles import ANONYMOUS_DAILY, CONSUMERS_URL, built_in_key
-from services.provider_api import CLIENT_HEADERS
+from services.provider_api import (
+    CLIENT_HEADERS,
+    https_fallback_candidates,
+    known_http_only,
+    remember_http_only,
+)
 from services.provider_link import parse_provider_link
 from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
@@ -84,6 +89,8 @@ EXTERNAL_PLAYERS_HINT = N_(
 )
 
 WARNING_COLOR = "#b26a00"  # verified, with a note (a portal profile dated in the past)
+# i18n: Verify Provider's note under "Provider verified successfully."
+HTTP_ONLY_NOTE = N_("This provider does not answer over HTTPS, so QiTV connects to it over HTTP.")
 PASTE_LINK_TEXT = N_("Paste link")  # i18n: a button beside the provider's address (verb)
 PASTE_LINK_TIP = N_(
     "Fill in this provider from one link your provider gave you: an Xtream link with the"
@@ -151,28 +158,28 @@ _verification_jobs: list[tuple[QThread, QObject]] = []
 class ProviderVerificationWorker(QObject):
     """Settings' Verify Provider, off the GUI thread: an STB or Xtream account is asked as
     the account check asks it (services.account_check: no stream is opened), and a refusal
-    says why in plain words (`reason`, before `result`); a playlist must answer."""
+    says why in plain words (`reason`, before `result`); a playlist must answer. Each is
+    asked over HTTPS first: one that answered only over HTTP says so (`http_only`, before
+    `result`; 2.7.1)."""
 
     result = Signal(int, object, bool)
     reason = Signal(int, str)  # the plain reason a verification failed ("" when none)
+    http_only = Signal(int)  # the verified provider answered only over HTTP
     finished = Signal()
 
-    def __init__(self, request_id, provider, prefer_https, ssl_verify):
+    def __init__(self, request_id, provider, ssl_verify):
         super().__init__()
         self.request_id = request_id
         self.provider = provider
-        self.prefer_https = prefer_https
         self.ssl_verify = ssl_verify
 
     @Slot()
     def run(self):
-        verified, why = False, ""
+        verified, why, http_only = False, "", False
         try:
             provider = self.provider
             if provider["type"] in ("STB", "XTREAM"):
-                found = check_account(
-                    provider, prefer_https=self.prefer_https, ssl_verify=self.ssl_verify
-                )
+                found = check_account(provider, ssl_verify=self.ssl_verify)
                 # An account at its stream limit is still a working account, and a portal
                 # profile dated in the past alone is only warned of (such dates go stale).
                 working = (reasons.OK, reasons.LIMIT, reasons.DATED)
@@ -180,33 +187,48 @@ class ProviderVerificationWorker(QObject):
                 if found is not None and found.kind != reasons.LIMIT and found.plain:
                     why = found.text  # why it failed, or (DATED) the warning
             elif provider["type"] in ("M3UPLAYLIST", "M3USTREAM"):
-                verified = self.verify_url(
-                    provider["url"],
-                    prefer_https=self.prefer_https,
-                    verify_ssl=self.ssl_verify,
-                )
+                verified = self.verify_url(provider["url"], verify_ssl=self.ssl_verify)
+            http_only = verified and self.answered_only_over_http(provider)
         except Exception as e:
             # requests exceptions name the URL, credentials and all: the type and host only.
             logging.getLogger(__name__).warning("Provider verification failed: %s", safe_exc(e))
         finally:
             self.reason.emit(self.request_id, why)
+            if http_only:
+                self.http_only.emit(self.request_id)
             self.result.emit(self.request_id, self.provider, verified)
             self.finished.emit()
 
+    def answered_only_over_http(self, provider) -> bool:
+        """Whether the verified `provider`, asked over HTTPS first, answered only over HTTP:
+        an Xtream panel at neither its address's HTTPS form nor the HTTPS port it advertises;
+        a portal or a playlist at its address's HTTPS form."""
+        url = str(provider.get("url") or "").strip()
+        if not url.startswith("http://"):
+            return False
+        if provider["type"] == "XTREAM":
+            from services.workers import xtream_answers_https
+
+            username, password = provider.get("username"), provider.get("password")
+            return not xtream_answers_https(
+                url, str(username or ""), str(password or ""), verify_ssl=self.ssl_verify
+            )
+        return known_http_only(url)
+
     @staticmethod
-    def verify_url(url, *, prefer_https=False, verify_ssl=True):
+    def verify_url(url, *, verify_ssl=True):
+        """Whether the playlist at `url` answers (over HTTPS first: an HTTP address that
+        answers only over HTTP is remembered so, `known_http_only`)."""
         if url.startswith(("http://", "https://")):
             try:
-                test_urls = []
-                if prefer_https and url.startswith("http://"):
-                    test_urls.append("https://" + url[len("http://") :])
-                test_urls.append(url)
-                for turl in test_urls:
+                for turl in https_fallback_candidates(url, True):
                     try:
                         response = requests.head(
                             turl, timeout=5, headers=CLIENT_HEADERS, verify=verify_ssl
                         )
                         if response.status_code == 200:
+                            if turl.startswith("http://"):
+                                remember_http_only(turl)
                             return True
                     except requests.RequestException:
                         continue
@@ -300,6 +322,7 @@ class OptionsDialog(QDialog):
         self._refresh_provider_ids = set()
         self._verification_request = 0
         self._verification_why = ""  # the plain reason the verification on its way failed
+        self._verification_insecure = False  # the provider it verifies answered only over HTTP
         self._verification_closed = False
         self.selected_provider_name = self.config_manager.selected_provider_name
         self.selected_provider_index = 0
@@ -386,16 +409,7 @@ class OptionsDialog(QDialog):
         self.clear_image_cache_button.clicked.connect(self.clear_image_cache)
         self.settings_layout.addRow(self.clear_image_cache_button)
 
-        # Network security options
-        self.prefer_https_checkbox = QCheckBox(
-            tr("Prefer HTTPS when available (Xtream/STB/M3U)"), self.settings_tab
-        )
-        self.prefer_https_checkbox.setToolTip(
-            tr("When enabled, the app will try HTTPS endpoints first when providers support them.")
-        )
-        self.prefer_https_checkbox.setChecked(self.config_manager.prefer_https)
-        self.settings_layout.addRow(self.prefer_https_checkbox)
-
+        # Network security options (2.7.1: HTTPS is chosen by what each provider answers)
         self.ssl_verify_checkbox = QCheckBox(
             tr("Verify SSL certificates (recommended)"), self.settings_tab
         )
@@ -847,13 +861,9 @@ class OptionsDialog(QDialog):
         self.providers_layout.addRow(self.password_label, self.password_input)
 
         # Per-provider network preferences
-        self.provider_prefer_https_checkbox = QCheckBox(
-            tr("Prefer HTTPS for this provider"), self.providers_tab
-        )
         self.provider_ssl_verify_checkbox = QCheckBox(
             tr("Verify SSL certificates for this provider"), self.providers_tab
         )
-        self.providers_layout.addRow(self.provider_prefer_https_checkbox)
         self.providers_layout.addRow(self.provider_ssl_verify_checkbox)
 
         self.max_streams_label = QLabel(tr("Max simultaneous streams:"), self.providers_tab)
@@ -1105,9 +1115,6 @@ class OptionsDialog(QDialog):
         self.username_input.setText(self.edited_provider.get("username", ""))
         self.password_input.setText(self.edited_provider.get("password", ""))
         # Set per-provider network preferences with global fallbacks
-        self.provider_prefer_https_checkbox.setChecked(
-            self.edited_provider.get("prefer_https", self.prefer_https_checkbox.isChecked())
-        )
         self.provider_ssl_verify_checkbox.setChecked(
             self.edited_provider.get("ssl_verify", self.ssl_verify_checkbox.isChecked())
         )
@@ -1120,7 +1127,6 @@ class OptionsDialog(QDialog):
         offset = guide_offset_minutes(self.edited_provider)
         self.guide_offset_combo.setCurrentIndex(self.guide_offset_combo.findData(offset))
         self._loaded_provider_network = {
-            "prefer_https": self.provider_prefer_https_checkbox.isChecked(),
             "ssl_verify": self.provider_ssl_verify_checkbox.isChecked(),
         }
         self.update_radio_buttons()
@@ -1249,9 +1255,7 @@ class OptionsDialog(QDialog):
         self._store_provider_edits()
         new_identities = {
             provider["name"]: self.provider_manager.provider_cache_identity(
-                provider,
-                prefer_https=self.prefer_https_checkbox.isChecked(),
-                ssl_verify=self.ssl_verify_checkbox.isChecked(),
+                provider, ssl_verify=self.ssl_verify_checkbox.isChecked()
             )
             for provider in self.providers
         }
@@ -1272,7 +1276,6 @@ class OptionsDialog(QDialog):
         self.config_manager.language = self.language_combo.currentData() or None
         self.config_manager.check_updates = self.check_updates_checkbox.isChecked()
         self.config_manager.max_cache_image_size = int(self.cache_image_size_input.text())
-        self.config_manager.prefer_https = self.prefer_https_checkbox.isChecked()
         self.config_manager.ssl_verify = self.ssl_verify_checkbox.isChecked()
         self.config_manager.live_latency = self.live_latency_combo.currentData()
         self.config_manager.hardware_decoding = self.hardware_decoding_checkbox.isChecked()
@@ -1433,14 +1436,12 @@ class OptionsDialog(QDialog):
         self.verify_button.setEnabled(False)
         thread = QThread()
         worker = ProviderVerificationWorker(
-            request_id,
-            provider,
-            provider.get("prefer_https", self.prefer_https_checkbox.isChecked()),
-            provider.get("ssl_verify", self.ssl_verify_checkbox.isChecked()),
+            request_id, provider, provider.get("ssl_verify", self.ssl_verify_checkbox.isChecked())
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.reason.connect(self._verification_reason, Qt.QueuedConnection)
+        worker.http_only.connect(self._verification_http_only, Qt.QueuedConnection)
         worker.result.connect(self._provider_verified, Qt.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.DirectConnection)
         ThreadCleanup(thread, worker).finished.connect(
@@ -1455,11 +1456,18 @@ class OptionsDialog(QDialog):
         if request_id == self._verification_request:
             self._verification_why = reason
 
+    @Slot(int)
+    def _verification_http_only(self, request_id):
+        """The provider on its way answered only over HTTP: `_provider_verified` notes it."""
+        if request_id == self._verification_request:
+            self._verification_insecure = True
+
     @Slot(int, object, bool)
     def _provider_verified(self, request_id, provider, verified):
         if self._verification_closed or request_id != self._verification_request:
             return
         why, self._verification_why = self._verification_why, ""
+        insecure, self._verification_insecure = self._verification_insecure, False
         self.verify_button.setEnabled(True)
         if provider != self._verification_provider():
             self.verify_result.clear()
@@ -1472,7 +1480,9 @@ class OptionsDialog(QDialog):
                 text = tr("Provider verified successfully. Note: {why}.", why=why)
             else:
                 text = tr("Provider verified successfully.")
-            color = WARNING_COLOR if why else "green"
+            if insecure:  # the only place QiTV says so (2.7.1)
+                text = f"{text}\n{translate(HTTP_ONLY_NOTE)}"
+            color = WARNING_COLOR if why or insecure else "green"
         else:
             if why:
                 # i18n: why is the reason, as "The username or password is wrong"
@@ -1490,7 +1500,6 @@ class OptionsDialog(QDialog):
 
     def _verification_provider(self):
         provider = self._provider_from_inputs()
-        provider.setdefault("prefer_https", self.prefer_https_checkbox.isChecked())
         provider.setdefault("ssl_verify", self.ssl_verify_checkbox.isChecked())
         return provider
 
@@ -1520,13 +1529,11 @@ class OptionsDialog(QDialog):
             provider[GUIDE_OFFSET_KEY] = offset
         else:
             provider.pop(GUIDE_OFFSET_KEY, None)
-        for key, checkbox in (
-            ("prefer_https", self.provider_prefer_https_checkbox),
-            ("ssl_verify", self.provider_ssl_verify_checkbox),
-        ):
-            # Preserve inheritance when merely viewing or saving an unchanged provider.
-            if key in provider or checkbox.isChecked() != self._loaded_provider_network[key]:
-                provider[key] = checkbox.isChecked()
+        # Preserve inheritance when merely viewing or saving an unchanged provider. (2.7.1
+        # reads no "prefer_https": one an older QiTV saved stays as it was.)
+        verify = self.provider_ssl_verify_checkbox.isChecked()
+        if "ssl_verify" in provider or verify != self._loaded_provider_network["ssl_verify"]:
+            provider["ssl_verify"] = verify
         return provider
 
     def _store_provider_edits(self):

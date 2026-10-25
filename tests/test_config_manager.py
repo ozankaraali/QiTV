@@ -89,7 +89,8 @@ class WatchHistoryIdentityTests(unittest.TestCase):
 
 class NewConfigTests(unittest.TestCase):
     """A new config.json is written as 2.1 wrote it (the fixture, which ends in a newline as
-    the repository's files do), and an older config gains the settings it lacks."""
+    the repository's files do; without "prefer_https" since 2.7.1, which chooses HTTPS by
+    what answers), and an older config gains the settings it lacks."""
 
     FRESH = Path(__file__).parent / "fixtures" / "fresh_config.json"
 

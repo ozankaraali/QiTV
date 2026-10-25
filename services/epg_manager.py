@@ -28,7 +28,6 @@ from services.provider_api import (
     CLIENT_HEADERS,
     base_from_url,
     https_fallback_candidates,
-    provider_prefers_https,
     stb_endpoint,
     xtream_sign_in_bases,
     xtream_xmltv_url,
@@ -676,9 +675,6 @@ class EpgManager:
         headers = self.provider_manager.headers
         provider_hash = _cache_key(provider_url)
         base = base_from_url(provider_url)
-        prefer_https = provider_prefers_https(
-            self.provider_manager.current_provider, self.config_manager.prefer_https
-        )
         verify_ssl = self.provider_manager.current_provider.get(
             "ssl_verify", self.config_manager.ssl_verify
         )
@@ -686,8 +682,8 @@ class EpgManager:
         period = self.config_manager.epg_stb_period_hours
 
         items = []
-        # Honor per-provider HTTPS preference with graceful fallback
-        for b in https_fallback_candidates(base, prefer_https):
+        # HTTPS first, HTTP when it does not answer
+        for b in https_fallback_candidates(base, True):
             url = stb_endpoint(b)
             logger.debug("STB EPG endpoint: %s?action=get_epg_info&period=%s", url, period)
             content_loader = ContentLoader(
@@ -715,20 +711,17 @@ class EpgManager:
         provider_hash = _xtream_cache_key(provider_url, username)
         xmltv_url = xtream_xmltv_url(provider_url, username, password)
         logger.debug("Xtream XMLTV URL: %s", redact_url(xmltv_url))
-        prefer_https = provider_prefers_https(
-            self.provider_manager.current_provider, self.config_manager.prefer_https
-        )
         verify_ssl = self.provider_manager.current_provider.get(
             "ssl_verify", self.config_manager.ssl_verify
         )
 
-        # HTTPS first when preferred; an address with a path is asked at its server's root
+        # HTTPS first; an address with a path is asked at its server's root
         # too when nothing came under the path (a stray path: xtream_sign_in_bases).
         candidates = [
             candidate
             for base in xtream_sign_in_bases(provider_url)
             for candidate in https_fallback_candidates(
-                xtream_xmltv_url(base, username, password), prefer_https
+                xtream_xmltv_url(base, username, password), True
             )
         ]
         r = None  # the answer in use: every streamed answer is closed

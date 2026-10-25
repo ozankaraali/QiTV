@@ -15,7 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from services import thread_cleanup
+from services import provider_api, thread_cleanup
 from services.exporter import (
     MSG_NOTHING_LOADED,
     ExportKind,
@@ -141,7 +141,6 @@ class ExporterTests(unittest.TestCase):
             section,
             self.path,
             verify_ssl=True,
-            prefer_https=False,
             headers={"User-Agent": "t"},
             cancel=cancel or threading.Event(),
         )
@@ -264,22 +263,20 @@ class ExporterTests(unittest.TestCase):
         self.assertEqual(headers.get("User-Agent"), "t")
         self.assertTrue(any(r[1]["sortby"] == "added" for r in portal.requests))
 
-    def test_provider_https_preference_overrides_global(self):
+    def test_a_portal_answering_only_over_http_is_fetched_over_http(self):
+        # 2.7.1: asked over HTTPS first; HTTP is used when HTTPS does not answer, and the
+        # portal is asked over HTTP alone from then on
         portal = FakePortal()
         self.addCleanup(portal.close)
-        # the provider says no HTTPS: the global preference must not upgrade the fetch
-        provider = {"type": "STB", "url": portal.url, "mac": "m", "prefer_https": False}
-        w = self.worker(ExportKind.COMPLETE_SERIES, provider, series_content(), "series")
-        w._prefer_https = True
-        self.assertEqual(self.run_worker(w)["finished"], 8)
-        # global preference applies when the provider is silent: http portal is not reached
         provider = {"type": "STB", "url": portal.url, "mac": "m"}
-        w = self.worker(ExportKind.COMPLETE_SERIES, provider, series_content(), "series")
-        w._prefer_https = True
-        before = len(portal.requests)
-        out = self.run_worker(w)
-        self.assertEqual(len(portal.requests), before)
-        self.assertEqual(out["error"], "Couldn\u2019t reach the provider to fetch episodes.")
+        with mock.patch.object(provider_api, "_http_only", set()):
+            w = self.worker(ExportKind.COMPLETE_SERIES, provider, series_content(), "series")
+            with mock.patch("requests.Session.get", wraps=requests.Session().get) as get:
+                self.assertEqual(self.run_worker(w)["finished"], 8)
+            schemes = [urlsplit(c.args[0]).scheme for c in get.call_args_list]
+            self.assertEqual(schemes[:2], ["https", "http"])
+            self.assertEqual(set(schemes[2:]), {"http"})
+            self.assertTrue(provider_api.known_http_only(portal.url))
 
     def test_verify_flag_is_passed(self):
         provider = {"type": "STB", "url": "http://portal.test/c/", "mac": "m"}

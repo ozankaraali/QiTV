@@ -2,14 +2,18 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
+
+import requests
 
 from services import provider_api, workers
 from services.account_check import check_xtream
 from services.catalog import format_xtream_episodes
 from services.provider_api import (
+    known_http_only,
     xtream_base,
     xtream_choose_resolved_base,
     xtream_hls,
@@ -36,7 +40,7 @@ class ResolvedBaseTests(unittest.TestCase):
             ("http://panel.example/xc/", "http://panel.example/xc"),  # under a path
         ):
             with self.subTest(url=url):
-                self.assertEqual(_resolve_xtream_base({}, url, prefer_https=False), base)
+                self.assertEqual(_resolve_xtream_base({}, url), base)
 
 
 class XtreamRequestTests(unittest.TestCase):
@@ -48,6 +52,12 @@ class XtreamRequestTests(unittest.TestCase):
         roots = patch.dict(provider_api._answered_at_root, clear=True)  # this test's session
         roots.start()
         self.addCleanup(roots.stop)
+        for memory in (
+            patch.object(provider_api, "_http_only", set()),
+            patch.dict(workers._https_bases, clear=True),
+        ):
+            memory.start()
+            self.addCleanup(memory.stop)
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -125,8 +135,8 @@ class XtreamRequestTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         self.base = f"http://127.0.0.1:{server.server_port}"
 
-    def load_catalog(self, content_type, server=None):
-        worker = XtreamLoaderWorker(server or self.base, "user", "password", content_type)
+    def load_catalog(self, content_type, server=None, **kwargs):
+        worker = XtreamLoaderWorker(server or self.base, "user", "password", content_type, **kwargs)
         results = []
         errors = []
         worker.finished.connect(results.append)
@@ -172,6 +182,18 @@ class XtreamRequestTests(unittest.TestCase):
             ],
         )
         self.assertEqual(catalog["contents"][0]["cmd"], f"{self.base}/movie/user/password/8.mkv")
+
+    def test_a_panel_advertising_https_it_does_not_serve_loads_over_http(self):
+        # 2.7.1: it advertises an HTTPS port nothing answers on, and its own port speaks only
+        # HTTP: its films and their streams stay on HTTP (HTTPS was never answered)
+        catalog = self.load_catalog("vod", prefer_https=True)
+        self.assertEqual(catalog["resolved_base"], self.base)
+        self.assertEqual(catalog["contents"][0]["cmd"], f"{self.base}/movie/user/password/8.mkv")
+        self.assertTrue(known_http_only(f"{self.base}/live/user/password/7.ts"))
+        self.requests.clear()  # the run remembers: the next list asks no HTTPS
+        with patch.object(requests.Session, "request", wraps=requests.Session().request) as asked:
+            self.load_catalog("itv", prefer_https=True)
+        self.assertFalse(any(str(c.args[1]).startswith("https://") for c in asked.call_args_list))
 
     def test_a_panel_under_a_path_is_asked_and_played_under_it(self):
         self.prefix = "/xc"  # it advertises 127.0.0.1:1 over https, its own address
@@ -250,6 +272,93 @@ class XtreamRequestTests(unittest.TestCase):
         self.assertEqual(self.requests, [("/c/player_api.php", None), ("/player_api.php", None)])
 
 
+class _Answer:
+    """A Player API answer as `requests` gives it."""
+
+    def __init__(self, body, status=200):
+        self.status_code = status
+        self.ok = status < 400
+        self._body = body
+        self.content = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+
+    def json(self):
+        return json.loads(self.content)
+
+    def raise_for_status(self):
+        if not self.ok:
+            raise requests.HTTPError(str(self.status_code))
+
+    def close(self):
+        pass
+
+
+class HttpsPanelTests(unittest.TestCase):
+    """2.7.1: an Xtream panel's lists and streams come over HTTPS when it answers its sign-in
+    there (on the HTTPS port it advertises, or its own); over HTTP otherwise."""
+
+    INFO = {"url": "panel.example.test", "port": "80", "https_port": "443"}
+
+    def setUp(self):
+        for memory in (
+            patch.object(provider_api, "_http_only", set()),
+            patch.dict(workers._https_bases, clear=True),
+            patch.dict(provider_api._answered_at_root, clear=True),
+        ):
+            memory.start()
+            self.addCleanup(memory.stop)
+        self.asked = []
+
+    def sign_in(self, over_https, prefer_https=True):
+        def get(url, **kwargs):
+            parts = urlsplit(url)
+            self.asked.append(f"{parts.scheme}://{parts.netloc}")
+            if parts.scheme == "https":
+                if isinstance(over_https, Exception):
+                    raise over_https
+                return over_https
+            return _Answer({"user_info": {"auth": 1}, "server_info": self.INFO})
+
+        worker = SimpleNamespace(
+            base_url="http://panel.example.test",
+            username="u",
+            password="p",
+            verify_ssl=True,
+            prefer_https=prefer_https,
+        )
+        return workers._xtream_sign_in(get, worker)[1]
+
+    def test_a_panel_answering_over_https_has_its_lists_and_streams_over_https(self):
+        panel = _Answer({"user_info": {"auth": 1}, "server_info": self.INFO})
+        with self.assertLogs("services.workers", "INFO") as logs:
+            self.assertEqual(self.sign_in(panel), "https://panel.example.test")
+        self.assertEqual(self.asked, ["http://panel.example.test", "https://panel.example.test"])
+        self.assertIn("HTTPS", logs.output[0])
+        self.assertNotIn("panel.example", "".join(logs.output))
+
+    def test_a_panel_advertising_https_it_does_not_serve_stays_on_http(self):
+        refused = requests.ConnectionError("Connection refused")
+        self.assertEqual(self.sign_in(refused), "http://panel.example.test")
+        self.assertTrue(known_http_only("http://panel.example.test/live/u/p/1.ts"))
+
+    def test_an_https_answer_that_is_not_the_panel_keeps_http(self):
+        for answer in (_Answer("<html>It works!</html>"), _Answer({}), _Answer({}, 404)):
+            with self.subTest(answer=answer.content):
+                workers._https_bases.clear()
+                self.assertEqual(self.sign_in(answer), "http://panel.example.test")
+
+    def test_the_answer_over_https_is_asked_once_a_run(self):
+        panel = _Answer({"user_info": {"auth": 1}, "server_info": self.INFO})
+        self.sign_in(panel)
+        self.asked.clear()
+        self.assertEqual(self.sign_in(panel), "https://panel.example.test")
+        self.assertEqual(self.asked, ["http://panel.example.test"])
+
+    def test_without_https_preferred_nothing_is_asked_over_https(self):
+        panel = _Answer({"user_info": {"auth": 1}, "server_info": self.INFO})
+        self.assertEqual(self.sign_in(panel, prefer_https=False), "http://panel.example.test")
+        self.assertEqual(self.asked, ["http://panel.example.test"])
+
+
 class XtreamBaseTests(unittest.TestCase):
     """Every Xtream address is built on the same base: a panel's path is kept when the saved
     server address has one, and an address without one gives scheme and host as before."""
@@ -291,13 +400,7 @@ class XtreamBaseTests(unittest.TestCase):
         info = {"url": "10.0.0.5", "port": "25461", "server_protocol": "http"}
         server = "http://panel.example.test/xc/"
         self.assertEqual(xtream_choose_resolved_base(info, server), "http://panel.example.test/xc")
-        self.assertEqual(
-            xtream_choose_resolved_base(info, server, prefer_https=True),
-            "https://panel.example.test/xc",
-        )
-        self.assertEqual(
-            _resolve_xtream_base({}, server, prefer_https=False), "http://panel.example.test/xc"
-        )
+        self.assertEqual(_resolve_xtream_base({}, server), "http://panel.example.test/xc")
 
     def test_streams_and_episodes_are_under_the_path(self):
         base = "http://panel.example.test/xc"
