@@ -870,7 +870,11 @@ video.m3u8
             server = self.server({"/user/secret.ts": (200, {}, self.video)}, tls=context)
             plain = server.url.replace("https://", "http://", 1) + "/user/secret.ts"
             with insecure():
-                parts = media(plain, verify_ssl=False, https_first=True)
+                source = open_source(
+                    plain, headers={}, verify_ssl=False, stop=threading.Event(), https_first=True
+                )
+                self.assertTrue(source.secure)  # the helper's state says so (`secure`)
+                parts = drain(source)
             self.assertEqual(parts, [self.video])
             self.assertEqual(server.counts["/user/secret.ts"], 1)
 
@@ -885,7 +889,15 @@ video.m3u8
         self.assertTrue(any("HTTPS" in line for line in logs))
         self.assertFalse(any("secret" in line or "127.0.0.1" in line for line in logs))
         connections = server.connections
-        self.assertEqual(media(server.url + "/user/secret.ts", https_first=True), [self.video])
+        source = open_source(
+            server.url + "/user/secret.ts",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            https_first=True,
+        )
+        self.assertFalse(source.secure)
+        self.assertEqual(drain(source), [self.video])
         self.assertEqual(server.connections, connections + 1)  # no second HTTPS attempt
 
     def test_http_redirect_to_tls_obeys_verification_setting(self):

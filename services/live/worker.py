@@ -72,7 +72,8 @@ Commands (parent to helper):
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
 additions)`, also before ready while bytes arrive (`received`) and nothing is playable yet,
 and once a raw-TS source answered (`answered`, 2.1: its headers came, before its first byte;
-taken back once its body failed or turned out a playlist),
+taken back once its body failed or turned out a playlist); once a source opened, `secure`
+(2.7.1) says whether its address is HTTPS,
 each addition a newly closed segment's `(seq, start, end, discontinuity, start_quality,
 media_seq)` (`Span`'s fields; 2.7 added the HLS media sequence the segment begins, None when
 it begins none; the helper and the engine always ship in one build, and the engine still
@@ -1431,6 +1432,8 @@ class _Session:
             # 2.6: the buffer's parts, [first_seq, start, wall] each (`services.live.parts`).
             "parts": [[p.first_seq, p.start, p.wall] for p in timeline.parts()],
         }
+        if source is not None:
+            snapshot["secure"] = bool(getattr(source, "secure", False))  # 2.7.1: over HTTPS
         if source is not None and source.hls:
             # 2.7: how long the server keeps the channel, and its newest media sequence;
             # a server part's first segment's time of day.

@@ -65,6 +65,7 @@ STATE_KEYS = {
     "answered",
     "reconnecting",
     "parts",  # 2.6: a kept buffer's runs, each with its time of day
+    "secure",  # 2.7.1: its source's address is HTTPS
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024

@@ -667,6 +667,11 @@ class TsSource:
     def burst_s(self) -> float:
         return 0.0
 
+    @property
+    def secure(self) -> bool:
+        """Its address is HTTPS (2.7.1: the helper's state says so)."""
+        return str(getattr(self, "_url", "")).lower().startswith("https://")
+
     def chunks(self) -> Iterator[Chunk]:
         return _guarded(self._http, self._run(), self._capture)
 
@@ -1161,6 +1166,11 @@ class HlsSource:
     def burst_s(self) -> float:
         """The media playlist's target duration, updated on every reload."""
         return self._burst
+
+    @property
+    def secure(self) -> bool:
+        """Its media playlist's address is HTTPS (2.7.1: the helper's state says so)."""
+        return self._url.lower().startswith("https://")
 
     @property
     def segment_serial(self) -> int:

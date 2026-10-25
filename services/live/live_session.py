@@ -640,6 +640,7 @@ class LiveSession(QObject):
         self._part_again: Optional[float] = None  # a refused part's point, opened again soon
         self._part_resuming = False  # the live upstream parked for a part is opening again
         self._archive: Optional[ArchiveRoute] = None  # the parts are a provider archive's
+        self._said_scheme: Optional[str] = None  # 2.7.1: the session whose scheme the log said
         self._from_kept = False
         self._disk_failures = 0  # of the kept buffer taken back, this tune: a second starts afresh
         # Where a session with kept history goes when it is let go otherwise than by `park`
@@ -1582,6 +1583,17 @@ class LiveSession(QObject):
         elif waited:
             self._all_closed()
 
+    def _say_scheme(self, snapshot: Mapping[str, Any]) -> None:
+        """Once per session that asked HTTPS first (2.7.1), the log says how its stream came:
+        the helper's own lines do not reach QiTV's log."""
+        secure = snapshot.get("secure")
+        if not self._open_args.get("https_first") or not isinstance(secure, bool):
+            return
+        if self._said_scheme == self._sid:
+            return
+        self._said_scheme = self._sid
+        _LOG.info("The channel's stream comes over %s.", "HTTPS" if secure else "HTTP")
+
     def _on_ready(self, sid: str) -> None:
         if self._part is not None and sid == self._part.sid:
             self._part_ready = True
@@ -1610,6 +1622,7 @@ class LiveSession(QObject):
             return
         if sid != self._sid:
             return
+        self._say_scheme(snapshot)
         if part is not None:
             self._follow_buffer_start(part)
         self._since_edge_moved(snapshot)  # when a burst lands, to the update

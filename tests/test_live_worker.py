@@ -61,6 +61,7 @@ STATE_KEYS = {
     "answered",
     "reconnecting",
     "parts",
+    "secure",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -934,7 +935,7 @@ class LiveWorkerTests(unittest.TestCase):
             for message in helper.messages[: helper.messages.index(ready)]
             if message[:2] == ("state", sid) and message[2]["oldest"] is None
         ]
-        self.assertEqual(set(early[0]), STATE_KEYS)
+        self.assertEqual(set(early[0]), STATE_KEYS - {"secure"})  # no source opened yet
         # The answer's state may come first, before any byte (2.1).
         received = [snapshot["received"] for snapshot in early if snapshot["received"]]
         self.assertGreaterEqual(len(received), 2, "no state while bytes arrived before ready")
@@ -963,7 +964,7 @@ class LiveWorkerTests(unittest.TestCase):
         sid = helper.open(source.url + SECRET_PATH)
         state = helper.wait_for(lambda message: message[:2] == ("state", sid))
         snapshot = state[2]
-        self.assertEqual(set(snapshot), STATE_KEYS)
+        self.assertEqual(set(snapshot), STATE_KEYS - {"secure"})  # no source opened yet
         self.assertIs(snapshot["answered"], True)
         self.assertEqual(snapshot["received"], 0)
         self.assertIsNone(snapshot["oldest"])
