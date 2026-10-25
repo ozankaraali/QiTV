@@ -98,7 +98,7 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication
     import qdarktheme
 
-    from services import i18n
+    from services import i18n, log_file
     from services.atomic_write import sweep_in_background
     from services.config_manager import ConfigManager, get_app_version
     from services.epg_manager import EpgManager
@@ -114,6 +114,10 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # A packaged app has no terminal: its log is kept in a file too, where it can be read (2.7.2).
+    log_file.install()
+    log = logging.getLogger("qitv")
+    log.info("QiTV %s starts.", get_app_version())
 
     # Handle Windows auto-update replacement if launched with --replace flag
     if platform.system() == "Windows":
@@ -131,6 +135,9 @@ def main() -> int:
     # the window responsive while it works.
     sys.setswitchinterval(0.0005)
     app = QApplication(sys.argv)
+    # Why QiTV ended, in its log: the window closed (tv_window says how), or its last one.
+    app.lastWindowClosed.connect(lambda: log.info("The last window closed."))
+    app.aboutToQuit.connect(lambda: log.info("QiTV quits."))
     # Before any worker starts: garbage cycles are collected on this (the GUI) thread only.
     gc_guard = GcGuard(app)
     gc_guard.start()
@@ -185,9 +192,12 @@ def main() -> int:
         if config_manager.check_updates:
             check_for_updates(config_manager=config_manager)
 
-        return app.exec()
+        code = app.exec()
+        log.info("QiTV's event loop ended (%d).", code)
+        return code
     finally:
         allow_sleep()
+        log_file.close()
 
 
 if __name__ == "__main__":

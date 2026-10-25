@@ -1587,6 +1587,10 @@ class TVWindow(QMainWindow):
             self._come_forward()  # the question shows where it can be answered
             return
         if not self._closing:
+            # Why QiTV ends (its log is kept in a file since 2.7.2): from the system or the
+            # window's own button, or from QiTV's Quit.
+            how = "the system or the window" if event.spontaneous() else "QiTV's Quit"
+            logger.info("The window closes (%s).", how)
             self._closing = True
             self._mini_waiting = False
             try:
