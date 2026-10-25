@@ -32,7 +32,7 @@ import re
 import threading
 import time
 from typing import Any, BinaryIO, Protocol, TypeVar
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import url2pathname
 
 from Cryptodome.Cipher import AES
@@ -2035,10 +2035,11 @@ def open_source(
 
     With ``QITV_CAPTURE_DIR`` set, the source also saves what it reads there (`_Capture`).
 
-    ``https_first`` (2.7.1): an ``http://`` address is opened over
-    HTTPS first, the same host and port (`_HTTPS_CONNECT_S` to connect); when that fails for
-    any reason but a stop, over HTTP, and that host is asked over HTTP at once from then on
-    (`_HTTPS_FAILED`, for the helper's run).
+    ``https_first`` (2.7.1): HTTPS first, HTTP when it does not open. An ``http://`` address
+    is opened over HTTPS first, the same host and port (`_HTTPS_CONNECT_S` to connect); when
+    that fails for any reason but a stop, over HTTP, and that host is asked over HTTP at once
+    from then on (`_HTTPS_FAILED`, for the helper's run). An ``https://`` one (an Xtream
+    panel's that answered over HTTPS) that fails so is opened over HTTP, the same host.
     """
     try:
         scheme = _scheme(url)
@@ -2071,6 +2072,16 @@ def open_source(
                 raise
             _HTTPS_FAILED.add(host)
             log.info("The channel did not open over HTTPS (%s); opening it over HTTP.", error.kind)
+    elif https_first and scheme == "https":
+        try:
+            return _open_url(url, **opening)
+        except SourceError as error:
+            if stop.is_set():
+                raise
+            log.info("The channel did not open over HTTPS (%s); opening it over HTTP.", error.kind)
+            plain = urlsplit(url)
+            netloc = plain.netloc[: -len(":443")] if plain.netloc.endswith(":443") else plain.netloc
+            return _open_url(urlunsplit(plain._replace(scheme="http", netloc=netloc)), **opening)
     return _open_url(url, **opening)
 
 

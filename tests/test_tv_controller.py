@@ -2804,10 +2804,17 @@ class HttpsFirstTuneTests(PipelineCase):
         self.assertNotIn("https_first", self.starts()[-1][1])
 
     def test_an_xtream_channel_keeps_the_scheme_its_panel_chose(self):
-        self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
-        self.ready("http://stream/1")
-        self.assertTrue(wait_until(lambda: self.starts()))
-        self.assertNotIn("https_first", self.starts()[-1][1])
+        # over HTTP: not asked over HTTPS; over HTTPS: HTTP when that does not open
+        for url, https_first in (("http://stream/1", None), ("https://stream/1", True)):
+            with self.subTest(url=url):
+                count = len(self.starts())
+                if self.live.running:
+                    self.controller.stop()
+                    self.live.released.emit()
+                self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
+                self.ready(url)
+                self.assertTrue(wait_until(lambda: len(self.starts()) > count))
+                self.assertEqual(self.starts()[-1][1].get("https_first"), https_first)
 
 
 class BackNoticeTests(PipelineCase):

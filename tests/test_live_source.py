@@ -900,6 +900,23 @@ video.m3u8
         self.assertEqual(drain(source), [self.video])
         self.assertEqual(server.connections, connections + 1)  # no second HTTPS attempt
 
+    def test_https_first_opens_an_https_address_that_fails_over_http(self):
+        # An address QiTV chose HTTPS for (an Xtream panel's that answered there): when its
+        # stream does not open over HTTPS, it opens over HTTP (the user can watch).
+        source_module._HTTPS_FAILED.clear()
+        server = self.server({"/user/secret.ts": (200, {}, self.video)})  # HTTP alone
+        secure = server.url.replace("http://", "https://", 1) + "/user/secret.ts"
+        with self.assertRaises(SourceError):
+            media(secure)  # as given, without the flag: it fails
+        with source_logs() as logs:
+            source = open_source(
+                secure, headers={}, verify_ssl=True, stop=threading.Event(), https_first=True
+            )
+            self.assertFalse(source.secure)
+            self.assertEqual(drain(source), [self.video])
+        self.assertTrue(any("over HTTP" in line for line in logs))
+        self.assertFalse(any("secret" in line or "127.0.0.1" in line for line in logs))
+
     def test_http_redirect_to_tls_obeys_verification_setting(self):
         with self.tls_context() as context:
             secure = self.server({"/video.ts": (200, {}, self.video)}, tls=context)
