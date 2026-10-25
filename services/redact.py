@@ -50,10 +50,14 @@ def safe_exc(exc: BaseException) -> str:
     return f"{name} ({redact_url(url)})" if url else name
 
 
+def mask(text: object) -> str:
+    """Hide the addresses and query strings in a text, its lines as they are."""
+    return _QUERY.sub(_HIDDEN, _ADDRESS.sub(_HIDDEN, str(text)))
+
+
 def scrub(text: object) -> str:
     """Drop addresses and query strings from a message: they can carry credentials."""
-    cleaned = _QUERY.sub(_HIDDEN, _ADDRESS.sub(_HIDDEN, str(text)))
-    return " ".join(cleaned.split())
+    return " ".join(mask(text).split())
 
 
 def safe_message(exc: BaseException) -> str:

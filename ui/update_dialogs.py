@@ -74,7 +74,7 @@ class _Dialogs:
             tr(
                 # i18n: Applications, Replace: as Finder names them; Not Now: this dialog's button
                 "In the window that opens, drag QiTV onto Applications and choose Replace.\n\n"
-                "Not Now keeps the update in your Downloads folder."
+                "Not Now keeps this version; QiTV offers the update again at its next check."
             )
         )
         # i18n: a button: QiTV closes and opens the downloaded update
@@ -102,7 +102,7 @@ class _Dialogs:
         return msg.clickedButton() == quit_btn
 
     def downloaded(self, downloaded_path: str) -> None:
-        """A zip on macOS, or Linux: say where the update is, then open the Downloads folder."""
+        """A zip on macOS, or Linux: say where the update is, then open its folder."""
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Information)
         msg.setWindowTitle(tr("Update Downloaded"))

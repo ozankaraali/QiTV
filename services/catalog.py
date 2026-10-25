@@ -32,7 +32,6 @@ from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as
 from services.i18n import N_, tr, translate
 from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
 from services.provider_api import (
-    provider_prefers_https,
     stb_endpoint,
     stb_portal_base,
     xtream_stream_url,
@@ -320,7 +319,8 @@ class _CatalogRequest:
 
 
 class WorkerFactory:
-    """Creates the real workers; tests substitute a fake with the same method names."""
+    """Creates the real workers; tests substitute a fake with the same method names. Each asks
+    its provider over HTTPS first and keeps HTTP where HTTPS does not answer (2.7.1)."""
 
     def provider_setup(self, provider_manager, force_refresh) -> QObject:
         from services.workers import ProviderSetupWorker
@@ -332,30 +332,23 @@ class WorkerFactory:
 
         return EpgLoadWorker(epg_manager, force_refresh)
 
-    def m3u(self, url, verify_ssl, prefer_https) -> QObject:
+    def m3u(self, url, verify_ssl) -> QObject:
         from services.workers import M3ULoaderWorker
 
-        return M3ULoaderWorker(url, verify_ssl=verify_ssl, prefer_https=prefer_https)
+        return M3ULoaderWorker(url, verify_ssl=verify_ssl, prefer_https=True)
 
-    def xtream(
-        self, base_url, username, password, content_type, verify_ssl, prefer_https
-    ) -> QObject:
+    def xtream(self, base_url, username, password, content_type, verify_ssl) -> QObject:
         from services.workers import XtreamLoaderWorker
 
         return XtreamLoaderWorker(
-            base_url,
-            username,
-            password,
-            content_type,
-            verify_ssl=verify_ssl,
-            prefer_https=prefer_https,
+            base_url, username, password, content_type, verify_ssl=verify_ssl, prefer_https=True
         )
 
-    def stb_categories(self, url, headers, content_type, verify_ssl, prefer_https) -> QObject:
+    def stb_categories(self, url, headers, content_type, verify_ssl) -> QObject:
         from services.workers import STBCategoriesWorker
 
         return STBCategoriesWorker(
-            url, headers, content_type, verify_ssl=verify_ssl, prefer_https=prefer_https
+            url, headers, content_type, verify_ssl=verify_ssl, prefer_https=True
         )
 
     def stb_list(self, **loader_kwargs) -> QObject:
@@ -366,12 +359,12 @@ class WorkerFactory:
     def xtream_series(self, **kwargs) -> QObject:
         from services.workers import XtreamSeriesInfoWorker
 
-        return XtreamSeriesInfoWorker(**kwargs)
+        return XtreamSeriesInfoWorker(prefer_https=True, **kwargs)
 
     def link(self, **kwargs) -> QObject:
         from services.workers import LinkCreatorWorker
 
-        return LinkCreatorWorker(**kwargs)
+        return LinkCreatorWorker(prefer_https=True, **kwargs)
 
 
 class CatalogService(QObject):
@@ -747,9 +740,8 @@ class CatalogService(QObject):
         provider, ptype = self.current_provider(), self.provider_type()
         ct = SECTION_CONTENT_TYPES[section]
         verify = provider.get("ssl_verify", self.config.ssl_verify)
-        https = provider_prefers_https(provider, self.config.prefer_https)
         if ptype == "M3UPLAYLIST":
-            return self.factory.m3u(provider.get("url", ""), verify, https)
+            return self.factory.m3u(provider.get("url", ""), verify)
         if ptype == "XTREAM":
             return self.factory.xtream(
                 provider.get("url", ""),
@@ -757,10 +749,9 @@ class CatalogService(QObject):
                 provider.get("password", ""),
                 ct,
                 verify,
-                https,
             )
         return self.factory.stb_categories(
-            provider.get("url", ""), self.provider_manager.headers, ct, verify, https
+            provider.get("url", ""), self.provider_manager.headers, ct, verify
         )
 
     def _on_section_loaded(self, job: _Job, payload) -> None:
@@ -895,12 +886,7 @@ class CatalogService(QObject):
         section, group_id = data
         provider = self.current_provider()
         return self.factory.stb_list(
-            url=stb_endpoint(
-                stb_portal_base(
-                    provider.get("url", ""),
-                    provider_prefers_https(provider, self.config.prefer_https),
-                )
-            ),
+            url=stb_endpoint(stb_portal_base(provider.get("url", ""), True)),
             headers=self.provider_manager.headers,
             content_type=SECTION_CONTENT_TYPES[section],
             category_id=group_id,
@@ -957,7 +943,6 @@ class CatalogService(QObject):
     def _seasons_worker(self, series: dict) -> QObject:
         provider = self.current_provider()
         verify = provider.get("ssl_verify", self.config.ssl_verify)
-        https = provider_prefers_https(provider, self.config.prefer_https)
         if self.provider_type() == "XTREAM":
             return self.factory.xtream_series(
                 base_url=provider.get("url", ""),
@@ -966,10 +951,9 @@ class CatalogService(QObject):
                 series_id=str(series.get("id")),
                 resolved_base=self._series_cache().get("resolved_base", ""),
                 verify_ssl=verify,
-                prefer_https=https,
             )
         return self.factory.stb_list(
-            url=stb_endpoint(stb_portal_base(provider.get("url", ""), https)),
+            url=stb_endpoint(stb_portal_base(provider.get("url", ""), True)),
             headers=self.provider_manager.headers,
             content_type="series",
             category_id=series.get("category_id") or series.get("tv_genre_id", ""),
@@ -1037,12 +1021,7 @@ class CatalogService(QObject):
         series, season = data
         provider = self.current_provider()
         return self.factory.stb_list(
-            url=stb_endpoint(
-                stb_portal_base(
-                    provider.get("url", ""),
-                    provider_prefers_https(provider, self.config.prefer_https),
-                )
-            ),
+            url=stb_endpoint(stb_portal_base(provider.get("url", ""), True)),
             headers=self.provider_manager.headers,
             content_type="series",
             category_id=series.get("category_id") or series.get("tv_genre_id", ""),
@@ -1117,7 +1096,6 @@ class CatalogService(QObject):
             is_episode=is_episode,
             series_param=item.get("series") if is_episode else None,
             verify_ssl=provider.get("ssl_verify", self.config.ssl_verify),
-            prefer_https=provider_prefers_https(provider, self.config.prefer_https),
         )
         self._start(worker, "link", request_id, self._on_link_ready, self._on_link_error)
         return request_id
@@ -1143,7 +1121,6 @@ class CatalogService(QObject):
             content_type="tv_archive",
             cmd="",
             verify_ssl=provider.get("ssl_verify", self.config.ssl_verify),
-            prefer_https=provider_prefers_https(provider, self.config.prefer_https),
             programme=programme,
         )
         self._start(worker, "link", request_id, self._on_link_ready, self._on_link_error)

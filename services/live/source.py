@@ -32,7 +32,7 @@ import re
 import threading
 import time
 from typing import Any, BinaryIO, Protocol, TypeVar
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import url2pathname
 
 from Cryptodome.Cipher import AES
@@ -106,6 +106,10 @@ _STALE_TARGETS = 3
 _RECENT_SEGMENTS = 10
 _wall_time = time.time  # 2.7: a server part's time of day; tests replace it
 _HOLD_POLL_S = 0.25  # 2.7: how often a held source asks again
+# 2.7.1 ("Prefer HTTPS"): an http:// address is asked over HTTPS first, connecting within this;
+# the hosts whose HTTPS did not open are asked over HTTP at once for the rest of the run.
+_HTTPS_CONNECT_S = 5.0
+_HTTPS_FAILED: set[str] = set()
 # 2.7: a server part held this long (a pause, not its pacing: about a segment at a time)
 # reads its playlist again before going on (a 24 h playlist costs ~0.6 s of CPU to read).
 _HELD_RELOAD_S = 30.0
@@ -387,6 +391,7 @@ class _Http:
         self._verify_ssl = verify_ssl
         self._stop = stop
         self._stall_timeout = _STALL_TIMEOUT
+        self.connect_timeout = _TIMEOUT  # 2.7.1: an HTTPS-first attempt's is shorter
         self.closed = False
         provided = {name.lower(): value for name, value in headers.items() if value}
         self.user_agent = provided.get("user-agent") or DEFAULT_USER_AGENT
@@ -429,7 +434,7 @@ class _Http:
             response = self.session.get(
                 url,
                 stream=True,
-                timeout=(_TIMEOUT, _TIMEOUT),
+                timeout=(self.connect_timeout, _TIMEOUT),
                 verify=self._verify_ssl,
                 headers=dict(headers or {}),
             )
@@ -661,6 +666,11 @@ class TsSource:
     @property
     def burst_s(self) -> float:
         return 0.0
+
+    @property
+    def secure(self) -> bool:
+        """Its address is HTTPS (2.7.1: the helper's state says so)."""
+        return str(getattr(self, "_url", "")).lower().startswith("https://")
 
     def chunks(self) -> Iterator[Chunk]:
         return _guarded(self._http, self._run(), self._capture)
@@ -1156,6 +1166,11 @@ class HlsSource:
     def burst_s(self) -> float:
         """The media playlist's target duration, updated on every reload."""
         return self._burst
+
+    @property
+    def secure(self) -> bool:
+        """Its media playlist's address is HTTPS (2.7.1: the helper's state says so)."""
+        return self._url.lower().startswith("https://")
 
     @property
     def segment_serial(self) -> int:
@@ -1986,6 +2001,7 @@ def open_source(
     on_answer: Callable[[bool], None] | None = None,
     window: Mapping[str, Any] | None = None,
     hold: Callable[[], bool] | None = None,
+    https_first: bool = False,
 ) -> Source:
     """Open ``url``, sniff it, and return a TS or HLS source (``window``: a server part of
     the HLS playlist, 2.7, `HlsSource`; raw TS then is unsupported, but for a provider
@@ -2018,6 +2034,12 @@ def open_source(
     interrupted open raises ``SourceError("network")``; an interrupted ``chunks()`` ends.
 
     With ``QITV_CAPTURE_DIR`` set, the source also saves what it reads there (`_Capture`).
+
+    ``https_first`` (2.7.1): HTTPS first, HTTP when it does not open. An ``http://`` address
+    is opened over HTTPS first, the same host and port (`_HTTPS_CONNECT_S` to connect); when
+    that fails for any reason but a stop, over HTTP, and that host is asked over HTTP at once
+    from then on (`_HTTPS_FAILED`, for the helper's run). An ``https://`` one (an Xtream
+    panel's that answered over HTTPS) that fails so is opened over HTTP, the same host.
     """
     try:
         scheme = _scheme(url)
@@ -2029,14 +2051,77 @@ def open_source(
         return _open_local(url, scheme)
     if scheme not in ("http", "https"):
         raise SourceError("unsupported")
+    opening: dict[str, Any] = dict(
+        headers=headers,
+        verify_ssl=verify_ssl,
+        stop=stop,
+        live_delay=live_delay,
+        target=target,
+        extra=extra,
+        on_answer=on_answer,
+        window=window,
+        hold=hold,
+    )
+    host = _host_key(url)
+    if https_first and scheme == "http" and host not in _HTTPS_FAILED:
+        try:
+            secure = "https://" + url[len("http://") :]
+            return _open_url(secure, connect_timeout=_HTTPS_CONNECT_S, **opening)
+        except SourceError as error:
+            if stop.is_set():
+                raise
+            _HTTPS_FAILED.add(host)
+            log.info("The channel did not open over HTTPS (%s); opening it over HTTP.", error.kind)
+    elif https_first and scheme == "https":
+        try:
+            return _open_url(url, **opening)
+        except SourceError as error:
+            if stop.is_set():
+                raise
+            log.info("The channel did not open over HTTPS (%s); opening it over HTTP.", error.kind)
+            plain = urlsplit(url)
+            netloc = plain.netloc[: -len(":443")] if plain.netloc.endswith(":443") else plain.netloc
+            return _open_url(urlunsplit(plain._replace(scheme="http", netloc=netloc)), **opening)
+    return _open_url(url, **opening)
+
+
+def _host_key(url: str) -> str:
+    """An address's host and port, as `_HTTPS_FAILED` remembers it."""
+    parts = urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return f"{(parts.hostname or '').lower()}:{port or ''}"
+
+
+def _open_url(
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    verify_ssl: bool,
+    stop: threading.Event,
+    live_delay: float,
+    target: float | None,
+    extra: float,
+    on_answer: Callable[[bool], None] | None,
+    window: Mapping[str, Any] | None,
+    hold: Callable[[], bool] | None,
+    connect_timeout: float = _TIMEOUT,
+) -> Source:
+    """`open_source`'s open of one address (its connect timeout `connect_timeout`)."""
     http = _Http(headers, verify_ssl, stop)
+    http.connect_timeout = connect_timeout
     capture = _Capture.from_environment(url)
     try:
-        return _open_http(http, url, live_delay, target, extra, on_answer, capture, window, hold)
+        source = _open_http(http, url, live_delay, target, extra, on_answer, capture, window, hold)
     except Exception as error:
         failure = SourceError("network", _STOPPED) if http.closed else _translate(error)
     except BaseException:
         http.close()
         raise
+    else:
+        http.connect_timeout = _TIMEOUT  # its segments and reconnects as any source's
+        return source
     http.close()
     raise failure

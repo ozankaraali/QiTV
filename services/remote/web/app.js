@@ -35,6 +35,11 @@ const FALLBACK = {
   full: "Too many phones are connected to this TV.",
   connect_directly: "Connect directly",
   tap_retry: "Tap here to try again.",
+  add_home: "Add to Home Screen",
+  add_home_safari: "Open this page in Safari (from a scanned code: tap the compass).",
+  add_home_share: "Tap Share (under ⋯ if you don't see it), then Add to Home Screen.",
+  add_home_pair: "Open QiTV from your Home Screen and scan the code on the TV once more.",
+  add_home_menu: "Open your browser's menu, then Add to Home screen or Install app.",
 };
 export const t = (key) => strings[key] || FALLBACK[key] || key;
 
@@ -363,6 +368,8 @@ function openMenu() {
     const item = extra();
     if (item) list.append(item);
   }
+  const home = addHomeItem();
+  if (home) list.append(home);
   if (app.tvId) {
     list.append(
       menuItem(t("forget"), () => {
@@ -372,6 +379,43 @@ function openMenu() {
     );
   }
   openSheet("menuSheet");
+}
+
+// ---- Add to Home Screen ---------------------------------------------------------------------
+// The remote as an app of its own, on the Home Screen. An Android browser installs it from here
+// (its install prompt, kept when it comes); an iPhone only from Safari's Share, so the menu shows
+// the steps. A Home Screen copy on an iPhone keeps its own storage: it pairs once more.
+
+let installPrompt = null;
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  installPrompt = event;
+});
+
+const onHomeScreen = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const iPhone = () =>
+  /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+function addHomeItem() {
+  if (onHomeScreen()) return null;
+  return menuItem(t("add_home"), () => {
+    if (installPrompt) {
+      installPrompt.prompt();
+      installPrompt = null; // a prompt answers once
+      return;
+    }
+    const steps = iPhone() ? ["add_home_safari", "add_home_share", "add_home_pair"] : ["add_home_menu"];
+    const list = $("menuList");
+    list.replaceChildren();
+    $("menuTitle").textContent = t("add_home");
+    steps.forEach((key, at) => {
+      const step = document.createElement("p");
+      step.className = "step";
+      step.textContent = steps.length > 1 ? `${at + 1}. ${t(key)}` : t(key);
+      list.append(step);
+    });
+    openSheet("menuSheet");
+  });
 }
 
 // ---- start --------------------------------------------------------------------------------

@@ -1164,7 +1164,9 @@ def scenario_pip_close(rig: Rig) -> None:
     assert pip.inner_text().strip() == "Picture in picture", pip.inner_text()
     rig.hub.send(sid, dict(STATE, pip=True, recording=True))
     rig.page.locator("#moreSheet [data-key=pip].on").wait_for()
-    assert rig.page.locator("#moreSheet [data-key=record].on").count() == 1  # lit as it records
+    # lit as it records: the remote's own Record key (2.7.2: no longer under More)
+    assert rig.page.locator(".cluster [data-key=record].on").count() == 1
+    assert rig.page.locator("#moreSheet [data-key=record]").count() == 0
     assert pip.inner_text().strip() == "Close picture in picture", pip.inner_text()
     rig.shot("more-pip")
     mark = rig.events.mark()
@@ -1173,6 +1175,22 @@ def scenario_pip_close(rig: Rig) -> None:
     rig.hub.send(sid, dict(STATE, pip=False))
     rig.page.locator("#moreSheet [data-key=pip]:not(.on)").wait_for()
     assert pip.inner_text().strip() == "Picture in picture", pip.inner_text()
+
+
+def scenario_add_home(rig: Rig) -> None:
+    """2.7.2: the menu offers Add to Home Screen; without a browser's install prompt it shows
+    the steps; the LIVE key lights while the channel plays behind its live point."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, dict(STATE, now=dict(STATE["now"], behind_s=90)))
+    rig.page.locator(".cluster [data-key=live].behind").wait_for()
+    rig.page.click("#menuButton")
+    rig.page.wait_for_selector("#menuSheet:not([hidden])")
+    rig.page.locator("#menuList button", has_text="Add to Home Screen").click()
+    rig.page.locator("#menuSheet:not([hidden]) .step").first.wait_for()
+    assert rig.page.locator("#menuTitle").inner_text() == "Add to Home Screen"
+    rig.shot("add-home")
+    rig.hub.send(sid, STATE)
+    rig.page.locator(".cluster [data-key=live]:not(.behind)").wait_for()
 
 
 def scenario_guide_follows_tv(rig: Rig) -> None:
@@ -1302,6 +1320,7 @@ SCENARIOS.update(
         "lists-after-reconnect": scenario_lists_after_reconnect,
         "more-numpad": scenario_more_numpad,
         "pip-close": scenario_pip_close,
+        "add-home": scenario_add_home,
         "guide-follows-tv": scenario_guide_follows_tv,
         "touchpad": scenario_touchpad,
     }

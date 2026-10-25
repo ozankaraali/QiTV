@@ -53,6 +53,7 @@ from services.live import parts as live_parts
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
+from services.provider_api import known_http_only
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from ui import item_provider
 from ui.catchup_controls import NO_RECORDING_TEXT, NOT_AVAILABLE_TEXT, CatchUp
@@ -428,14 +429,19 @@ class LiveControls(QObject):
         return True
 
     def live_start(self, target: Target, url: str) -> LiveStart:
-        """How the pipeline asks for `target`'s link: its agent and the provider's TLS check;
-        and the channel's key for what it taught stay-live (Auto's target, a locked rate)."""
+        """How the pipeline asks for `target`'s link: its agent, the provider's TLS check and
+        whether the helper asks it over HTTPS first, HTTP when that does not open (2.7.1:
+        unless its host answered only over HTTP this run, or it is an Xtream panel's HTTP
+        address: the panel's sign-in found no HTTPS); and the channel's key for what it
+        taught stay-live (Auto's target, a locked rate)."""
         provider = item_provider.provider_dict(self.catalog, target.item)
         user_agent = target.item.get("user_agent") or DEFAULT_USER_AGENT
         verify_ssl = bool(provider.get("ssl_verify", self.config.ssl_verify))
         channel = channel_key(str(provider.get("name", "")), target.item)
         referrer = str(target.item.get("referrer") or "")
-        return LiveStart(url, user_agent, verify_ssl, channel, referrer)
+        xtream = item_provider.provider_type(self.catalog, target.item) == "XTREAM"
+        https = not known_http_only(url) and not (xtream and url.startswith("http://"))
+        return LiveStart(url, user_agent, verify_ssl, channel, referrer, https)
 
     def pipeline_live(self) -> bool:
         """The current channel plays from the time-shift buffer."""

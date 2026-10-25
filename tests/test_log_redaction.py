@@ -143,7 +143,6 @@ class LogPathTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         config = SimpleNamespace(
             get_config_dir=lambda: directory.name,
-            prefer_https=False,
             ssl_verify=True,
             xmltv_channel_map=SimpleNamespace(get_keys=lambda key: None),
         )
@@ -304,7 +303,7 @@ class RawUrlLogTests(unittest.TestCase):
         from ui.settings_dialog import ProviderVerificationWorker
 
         stb = {"type": "STB", "url": "http://h/c/", "mac": MAC}
-        worker = ProviderVerificationWorker(1, stb, False, True)
+        worker = ProviderVerificationWorker(1, stb, True)
         with (
             patch("services.provider_manager.StbHandshake.run", side_effect=refused()),
             self.assertLogs(level="DEBUG") as logs,

@@ -18,6 +18,7 @@ from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config,
 from test_browsed_catalog import FakeEpg, ScriptedFactory
 from timer_fixtures import elapse, wait_until
 
+from services import provider_api
 from services.browsed_catalog import BrowsedCatalog
 from services.catalog import PROVIDER_LOADING_MESSAGE, UNREACHABLE_MESSAGE
 from services.catalogs import Catalogs
@@ -2781,6 +2782,41 @@ class PipelineCase(ControllerTestCase):
         self.live.play_pipeline()
 
 
+class HttpsFirstTuneTests(PipelineCase):
+    """2.7.1: HTTPS is chosen by what answers. A channel's stream is asked over HTTPS first by
+    the time-shift helper, unless its host answered only over HTTP this run, or it is an
+    Xtream panel's (whose sign-in chose its streams' scheme)."""
+
+    def setUp(self):
+        super().setUp()
+        memory = mock.patch.object(provider_api, "_http_only", set())
+        memory.start()
+        self.addCleanup(memory.stop)
+
+    def test_a_channel_is_asked_over_https_first(self):
+        self.start_channel(0)
+        self.assertIs(self.starts()[-1][1]["https_first"], True)
+
+    def test_a_host_that_answered_only_over_http_is_asked_over_http(self):
+        self.start_channel(0)
+        provider_api.remember_http_only(self.starts()[-1][0])
+        self.start_channel(1)  # the same host
+        self.assertNotIn("https_first", self.starts()[-1][1])
+
+    def test_an_xtream_channel_keeps_the_scheme_its_panel_chose(self):
+        # over HTTP: not asked over HTTPS; over HTTPS: HTTP when that does not open
+        for url, https_first in (("http://stream/1", None), ("https://stream/1", True)):
+            with self.subTest(url=url):
+                count = len(self.starts())
+                if self.live.running:
+                    self.controller.stop()
+                    self.live.released.emit()
+                self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
+                self.ready(url)
+                self.assertTrue(wait_until(lambda: len(self.starts()) > count))
+                self.assertEqual(self.starts()[-1][1].get("https_first"), https_first)
+
+
 class BackNoticeTests(PipelineCase):
     """2.6: coming back to a channel plays it live and offers where it was left, a minute."""
 
@@ -2854,6 +2890,7 @@ class PipelineTuneTests(PipelineCase):
                 "max_bytes": 256 * MIB,  # without consent, the memory per stream: 256 MiB
                 "channel": channel_key("Home", CHANNELS[0]),  # what it taught is kept (2.0.2)
                 "one_stream": True,  # 2.7: a provider with a limit: no second download
+                "https_first": True,  # 2.7.1: HTTPS is chosen by what answers
             },
         )
         self.assertEqual(self.session.plays, [])  # the live session plays it, not the controller

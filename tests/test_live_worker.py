@@ -61,6 +61,7 @@ STATE_KEYS = {
     "answered",
     "reconnecting",
     "parts",
+    "secure",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -934,7 +935,7 @@ class LiveWorkerTests(unittest.TestCase):
             for message in helper.messages[: helper.messages.index(ready)]
             if message[:2] == ("state", sid) and message[2]["oldest"] is None
         ]
-        self.assertEqual(set(early[0]), STATE_KEYS)
+        self.assertEqual(set(early[0]), STATE_KEYS - {"secure"})  # no source opened yet
         # The answer's state may come first, before any byte (2.1).
         received = [snapshot["received"] for snapshot in early if snapshot["received"]]
         self.assertGreaterEqual(len(received), 2, "no state while bytes arrived before ready")
@@ -963,7 +964,7 @@ class LiveWorkerTests(unittest.TestCase):
         sid = helper.open(source.url + SECRET_PATH)
         state = helper.wait_for(lambda message: message[:2] == ("state", sid))
         snapshot = state[2]
-        self.assertEqual(set(snapshot), STATE_KEYS)
+        self.assertEqual(set(snapshot), STATE_KEYS - {"secure"})  # no source opened yet
         self.assertIs(snapshot["answered"], True)
         self.assertEqual(snapshot["received"], 0)
         self.assertIsNone(snapshot["oldest"])
@@ -1637,6 +1638,22 @@ class ServerPartStopTests(unittest.TestCase):
         helper.wait_for(lambda m: m == ("ended", "p"))
         fetched = [path.rsplit("/", 1)[1] for path, _h in upstream.requests if path.endswith(".ts")]
         self.assertEqual(fetched, [f"s{n}.ts" for n in range(5)])
+
+
+class HttpsFirstTests(unittest.TestCase):
+    def test_a_session_asked_https_first_tries_https_then_plays_over_http(self):
+        # 2.7.1: the start's "https" reaches the source: its HTTPS attempt fails on a plain
+        # server, and the session plays over HTTP.
+        source_module._HTTPS_FAILED.clear()
+        self.addCleanup(source_module._HTTPS_FAILED.clear)
+        body = make_stream(4)
+        upstream = LocalSource({SECRET_PATH: (200, {"Content-Length": str(len(body))}, body)})
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        url = upstream.url + SECRET_PATH
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"https": True}))
+        helper.wait_for(lambda m: m == ("ready", "p"))
+        self.assertEqual(upstream.connections, 2)  # the HTTPS attempt, then HTTP
 
 
 class ArchivePartTests(unittest.TestCase):

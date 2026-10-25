@@ -37,7 +37,7 @@ class ExportFlowTests(unittest.TestCase):
             current_provider_content={"itv": {"contents": list(CHANNELS)}},
             headers={},
         )
-        self.config = SimpleNamespace(ssl_verify=True, prefer_https=False)
+        self.config = SimpleNamespace(ssl_verify=True)
         self.runner = HeldRunner()
         self.toasts = []
         self.flow = ExportFlow(

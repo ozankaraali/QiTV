@@ -187,6 +187,7 @@ class FakeEngine(QObject):
         part_wall=None,
         part_media=None,
         until_dropped=None,
+        secure=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -228,6 +229,8 @@ class FakeEngine(QObject):
             self._snapshots[sid]["part_media_s"] = part_media
         if until_dropped is not None:  # its stop dropped (another encoding persisted)
             self._snapshots[sid]["until_dropped"] = until_dropped
+        if secure is not None:  # 2.7.1: its stream came over HTTPS
+            self._snapshots[sid]["secure"] = secure
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def receive(self, sid, count):
@@ -6610,3 +6613,62 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertAlmostEqual(self.timelines[-1]["position"], 30.0)
         self.live.seek_relative(-10.0)
         self.assertAlmostEqual(self.timelines[-1]["position"], 18.0)  # the segment holding 20
+
+
+class HttpsFirstTests(LiveSessionCase):
+    """2.7.1: a provider preferring HTTPS has every stream the session opens asked over HTTPS
+    first: its channel, a server part, a parked upstream's resume."""
+
+    playing = ServerWindowTests.playing
+    SPANS = ServerWindowTests.SPANS
+
+    def test_the_session_asks_its_streams_over_https_first(self):
+        self.live._wall = lambda: 10_600.0
+        self.live.start(
+            URL,
+            headers={"User-Agent": "QiTV-Test"},
+            verify_ssl=True,
+            latency="normal",
+            user_agent="QiTV-Test",
+            disk=False,
+            max_bytes=128 * MiB,
+            one_stream=True,
+            https_first=True,
+        )
+        sid = self.engine.last_sid
+        self.assertIs(self.engine.opened[-1][2]["https_first"], True)
+        self.engine.buffer(sid, self.SPANS, hls=True, window=86400.0, parts=[[0, 0.0, 10_000.0]])
+        self.engine.sessionReady.emit(sid)
+        self.live.seek_to(-300.0)  # a server part: the live upstream parks first
+        self.engine.sessionParked.emit(sid)
+        self.assertIs(self.engine.opened[-1][2]["https_first"], True)
+        self.live.go_live()  # the parked upstream resumes
+        self.assertIs(self.engine.resumes[-1][2]["https_first"], True)
+
+    def test_without_it_nothing_changes(self):
+        sid = self.start()
+        self.assertNotIn("https_first", self.engine.opened[-1][2])
+        self.assertEqual(self.engine.opened[0][0], sid)
+
+    def test_the_log_says_once_whether_the_stream_came_over_https(self):
+        # The terminal shows it: the helper's own lines do not reach it.
+        for secure, words in ((True, "over HTTPS"), (False, "over HTTP")):
+            with self.subTest(secure=secure):
+                self.live = self.make()
+                self.live.start(
+                    URL,
+                    headers={},
+                    verify_ssl=True,
+                    latency="normal",
+                    user_agent="QiTV-Test",
+                    disk=False,
+                    max_bytes=128 * MiB,
+                    https_first=True,
+                )
+                sid = self.engine.last_sid
+                with self.assertLogs("services.live.live_session", "INFO") as logs:
+                    for _ in range(3):
+                        self.engine.buffer(sid, ServerWindowTests.SPANS[:3], secure=secure)
+                said = [line for line in logs.output if "stream comes" in line]
+                self.assertEqual(len(said), 1)
+                self.assertTrue(said[0].endswith(words + "."), said[0])

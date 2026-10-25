@@ -863,6 +863,60 @@ video.m3u8
                 parts = media(server.url + "/user/secret.ts", verify_ssl=False)
             self.assertEqual(parts, [self.video])
 
+    def test_https_first_opens_a_stream_over_https(self):
+        # 2.7.1: "Prefer HTTPS": the provider's http:// address is asked over HTTPS first.
+        source_module._HTTPS_FAILED.clear()
+        with self.tls_context() as context:
+            server = self.server({"/user/secret.ts": (200, {}, self.video)}, tls=context)
+            plain = server.url.replace("https://", "http://", 1) + "/user/secret.ts"
+            with insecure():
+                source = open_source(
+                    plain, headers={}, verify_ssl=False, stop=threading.Event(), https_first=True
+                )
+                self.assertTrue(source.secure)  # the helper's state says so (`secure`)
+                parts = drain(source)
+            self.assertEqual(parts, [self.video])
+            self.assertEqual(server.counts["/user/secret.ts"], 1)
+
+    def test_https_first_falls_back_to_http_and_remembers_the_host(self):
+        # A provider whose streams have no HTTPS: HTTP after the failed attempt, and for the
+        # rest of the run that host opens over HTTP at once.
+        source_module._HTTPS_FAILED.clear()
+        server = self.server({"/user/secret.ts": (200, {}, self.video)})
+        with source_logs() as logs:
+            parts = media(server.url + "/user/secret.ts", https_first=True)
+        self.assertEqual(parts, [self.video])
+        self.assertTrue(any("HTTPS" in line for line in logs))
+        self.assertFalse(any("secret" in line or "127.0.0.1" in line for line in logs))
+        connections = server.connections
+        source = open_source(
+            server.url + "/user/secret.ts",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            https_first=True,
+        )
+        self.assertFalse(source.secure)
+        self.assertEqual(drain(source), [self.video])
+        self.assertEqual(server.connections, connections + 1)  # no second HTTPS attempt
+
+    def test_https_first_opens_an_https_address_that_fails_over_http(self):
+        # An address QiTV chose HTTPS for (an Xtream panel's that answered there): when its
+        # stream does not open over HTTPS, it opens over HTTP (the user can watch).
+        source_module._HTTPS_FAILED.clear()
+        server = self.server({"/user/secret.ts": (200, {}, self.video)})  # HTTP alone
+        secure = server.url.replace("http://", "https://", 1) + "/user/secret.ts"
+        with self.assertRaises(SourceError):
+            media(secure)  # as given, without the flag: it fails
+        with source_logs() as logs:
+            source = open_source(
+                secure, headers={}, verify_ssl=True, stop=threading.Event(), https_first=True
+            )
+            self.assertFalse(source.secure)
+            self.assertEqual(drain(source), [self.video])
+        self.assertTrue(any("over HTTP" in line for line in logs))
+        self.assertFalse(any("secret" in line or "127.0.0.1" in line for line in logs))
+
     def test_http_redirect_to_tls_obeys_verification_setting(self):
         with self.tls_context() as context:
             secure = self.server({"/video.ts": (200, {}, self.video)}, tls=context)

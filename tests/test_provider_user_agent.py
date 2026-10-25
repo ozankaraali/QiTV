@@ -117,7 +117,7 @@ class BlockedLibraryAgentTests(unittest.TestCase):
 
     def _verify(self, **provider):
         verified = []
-        worker = ProviderVerificationWorker(1, provider, False, True)
+        worker = ProviderVerificationWorker(1, provider, True)
         worker.result.connect(lambda _id, _provider, ok: verified.append(ok))
         worker.run()
         return verified[0]
@@ -140,7 +140,6 @@ class BlockedLibraryAgentTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         config = SimpleNamespace(
             get_config_dir=lambda: directory.name,
-            prefer_https=False,
             ssl_verify=True,
             xmltv_channel_map=SimpleNamespace(get_keys=lambda key: None),
         )

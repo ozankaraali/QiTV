@@ -28,17 +28,50 @@ def base_from_url(url: str) -> str:
         return url
 
 
+# The hosts ("host:port" of their HTTP address) that answered only over HTTP this run: they
+# are asked over HTTP from then on (2.7.1: HTTPS is chosen by what answers).
+_http_only: set[str] = set()
+
+
+def _http_host(url: str) -> str:
+    """`url`'s "host:port" when it is an HTTP address (80 when it names none), else ""."""
+    try:
+        parts = urlsplit(url.strip())
+        if parts.scheme.lower() != "http" or not parts.hostname:
+            return ""
+        return f"{parts.hostname}:{parts.port or 80}"
+    except ValueError:
+        return ""
+
+
+def remember_http_only(url: str) -> None:
+    """The host of the HTTP address `url` did not answer over HTTPS: for the rest of the run
+    it is asked over HTTP at once."""
+    host = _http_host(url)
+    if host:
+        _http_only.add(host)
+
+
+def known_http_only(url: str) -> bool:
+    """Whether the host of the HTTP address `url` answered only over HTTP this run."""
+    host = _http_host(url)
+    return bool(host) and host in _http_only
+
+
 def https_fallback_candidates(url: str, prefer_https: bool) -> List[str]:
-    """Return the URLs to try in order: the HTTPS form first when it is preferred."""
-    if prefer_https and url.startswith("http://"):
+    """Return the URLs to try in order: the HTTPS form first when it is preferred (and its
+    host has not answered only over HTTP this run)."""
+    if prefer_https and url.startswith("http://") and not known_http_only(url):
         return ["https://" + url[len("http://") :], url]
     return [url]
 
 
 def stb_portal_base(url: str, prefer_https: bool = False) -> str:
-    """Reduce an STB portal URL to 'scheme://netloc', upgrading http when HTTPS is preferred."""
+    """Reduce an STB portal URL to 'scheme://netloc', upgrading http when HTTPS is preferred
+    (and the portal has not answered only over HTTP this run)."""
     parts = urlsplit(url)
-    scheme = "https" if prefer_https and parts.scheme == "http" else parts.scheme
+    upgrade = prefer_https and parts.scheme == "http" and not known_http_only(url)
+    scheme = "https" if upgrade else parts.scheme
     return f"{scheme}://{parts.netloc}"
 
 
@@ -241,12 +274,13 @@ def xtream_signed_in(body: Any) -> bool:
 
 
 def xtream_choose_resolved_base(
-    server_info: Dict[str, str], input_base: Optional[str] = None, prefer_https: bool = False
+    server_info: Dict[str, str], input_base: Optional[str] = None
 ) -> str:
     """Choose the correct base from Player API server_info payload.
 
-    Respect the user's original scheme when provided (do not auto-upgrade to
-    HTTPS). If no input_base is given, use the panel-advertised server_protocol.
+    Respect the scheme of the address the panel answered at (never upgraded to HTTPS here:
+    `xtream_https_bases` gives where to ask it over HTTPS, and only an answer there makes a
+    base HTTPS). If no input_base is given, use the panel-advertised server_protocol.
 
     This avoids forcing HTTPS on providers that only serve HTTP or present
     self-signed certificates.
@@ -258,11 +292,8 @@ def xtream_choose_resolved_base(
         if input_base and _xtream_path(input_base):
             # A panel under a path sits behind a web server it doesn't know of: the host
             # and port it advertises are its own, not that server's. The user's address is
-            # where its API and streams are (HTTPS when preferred).
-            base = xtream_base(input_base)
-            if prefer_https and base.startswith("http://"):
-                base = "https://" + base[len("http://") :]
-            return base
+            # where its API and streams are.
+            return xtream_base(input_base)
 
         # Determine preferred scheme from input_base if provided
         preferred_scheme = None
@@ -279,12 +310,8 @@ def xtream_choose_resolved_base(
             except Exception:
                 pass
 
-        # Determine scheme preference
-        if prefer_https:
-            scheme = "https"
-        else:
-            # Fall back to server-advertised protocol if no user preference
-            scheme = (preferred_scheme or server_info.get("server_protocol") or "http").strip()
+        # The answering address's scheme; the panel-advertised protocol without one
+        scheme = (preferred_scheme or server_info.get("server_protocol") or "http").strip()
 
         # Choose port based on chosen scheme, prioritizing user's input port
         if preferred_port:
@@ -307,6 +334,27 @@ def xtream_choose_resolved_base(
     except Exception:
         # Fallback to empty; caller should handle
         return ""
+
+
+def xtream_https_bases(base: str, server_info: Any) -> List[str]:
+    """Where the panel signed in at the HTTP `base` may answer over HTTPS, in order: on the
+    HTTPS port its sign-in advertises (`server_info`), then on `base`'s own port (443 for
+    80); none when `base` is HTTPS already. A panel under a path keeps it."""
+    parts = urlsplit(base)
+    if parts.scheme != "http" or not parts.hostname:
+        return []
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    info = server_info if isinstance(server_info, dict) else {}
+    advertised = str(info.get("https_port") or "").strip()
+    ports = [advertised] if advertised.isdigit() and advertised != "0" else []
+    ports.append("" if parts.port in (None, 80) else str(parts.port))
+    bases: List[str] = []
+    for port in ports:
+        netloc = host if port in ("", "443") else f"{host}:{port}"
+        candidate = urlunsplit(("https", netloc, parts.path, "", ""))
+        if candidate not in bases:
+            bases.append(candidate)
+    return bases
 
 
 def xtream_xmltv_url(base: str, username: str, password: str) -> str:
@@ -339,9 +387,3 @@ def xtream_hls(url: str, username: str, password: str) -> str:
     if not dot or ext.lower() != "ts" or not stem or "/" in stem:
         return url
     return urlunsplit(parts._replace(path=f"{parts.path[: at + len(marker)]}{stem}.m3u8"))
-
-
-def provider_prefers_https(provider: Dict[str, Any], global_default: bool) -> bool:
-    """A provider's own 'prefer_https' wins; unset (missing/None) falls back to the global setting."""
-    value = provider.get("prefer_https")
-    return global_default if value is None else bool(value)

@@ -149,7 +149,6 @@ class CachedContentTests(unittest.TestCase):
         config = SimpleNamespace(
             get_config_dir=lambda: directory.name,
             selected_provider_name="List",
-            prefer_https=False,
             ssl_verify=True,
         )
         manager = ProviderManager(config)
@@ -187,7 +186,6 @@ class LoadedContentTests(unittest.TestCase):
         config = SimpleNamespace(
             get_config_dir=lambda: directory.name,
             selected_provider_name="P",
-            prefer_https=False,
             ssl_verify=True,
         )
         manager = ProviderManager(config)
@@ -221,7 +219,6 @@ class LoadedContentTests(unittest.TestCase):
         config = SimpleNamespace(
             get_config_dir=lambda: directory.name,
             selected_provider_name="Portal",
-            prefer_https=False,
             ssl_verify=True,
         )
         manager = ProviderManager(config)

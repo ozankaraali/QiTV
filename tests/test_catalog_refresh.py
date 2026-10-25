@@ -26,7 +26,6 @@ class ProviderCacheTests(unittest.TestCase):
         self.config = SimpleNamespace(
             get_config_dir=lambda: self.directory.name,
             selected_provider_name="Fixture",
-            prefer_https=False,
             ssl_verify=True,
         )
         self.manager = ProviderManager(self.config)
@@ -173,7 +172,6 @@ class CatalogFreshnessTests(unittest.TestCase):
         self.config = SimpleNamespace(
             get_config_dir=lambda: self.directory.name,
             selected_provider_name="Fixture",
-            prefer_https=False,
             ssl_verify=True,
             channel_epg=False,
             save_config=lambda: None,

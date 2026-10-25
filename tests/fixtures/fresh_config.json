@@ -1,7 +1,6 @@
 {
   "selected_provider_name": "iptv-org.github.io",
   "check_updates": true,
-  "prefer_https": false,
   "ssl_verify": true,
   "data": [
     {

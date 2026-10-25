@@ -136,7 +136,6 @@ class ConfigManager:
         "Months": 30 * 24 * 60 * 60,  # approximate month as 30 days
     }
     EPG_EXPIRATION_CHOICES = ("Hours", "Days", "Weeks", "Months")  # what Settings offers
-    DEFAULT_OPTION_PREFER_HTTPS = False
     DEFAULT_OPTION_SSL_VERIFY = True
     # Auto learns each channel's latency; every saved latency is moved to it once.
     DEFAULT_OPTION_LIVE_LATENCY = "auto"
@@ -379,7 +378,6 @@ class ConfigManager:
     xmltv_channel_map = _config_property("xmltv_channel_map", MultiKeyDict())
 
     # Boolean config properties using factory with coercion
-    prefer_https = _config_property("prefer_https", DEFAULT_OPTION_PREFER_HTTPS, coerce=bool)
     ssl_verify = _config_property("ssl_verify", DEFAULT_OPTION_SSL_VERIFY, coerce=bool)
     play_in_vlc = _config_property("play_in_vlc", DEFAULT_OPTION_PLAY_IN_VLC, coerce=bool)
     play_in_mpv = _config_property("play_in_mpv", DEFAULT_OPTION_PLAY_IN_MPV, coerce=bool)
@@ -532,7 +530,6 @@ class ConfigManager:
         return {
             "selected_provider_name": ALL_NAME,
             "check_updates": ConfigManager.DEFAULT_OPTION_CHECKUPDATE,
-            "prefer_https": ConfigManager.DEFAULT_OPTION_PREFER_HTTPS,
             "ssl_verify": ConfigManager.DEFAULT_OPTION_SSL_VERIFY,
             "data": [
                 {
