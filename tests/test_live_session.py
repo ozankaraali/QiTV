@@ -6584,3 +6584,17 @@ class ServerWindowFixTests(LiveSessionCase):
         _new, _url, kwargs = self.engine.opened[-1]
         self.assertEqual(kwargs["window"]["before_s"], 288.0)  # on from -288, not -300
         self.assertEqual(self.engine.opened[0][0], sid)
+
+    def test_a_part_is_placed_by_where_its_stop_was_at_its_open(self):
+        # A full disk amount: the buffer's first segments go while the part opens. The part
+        # is placed by where its stop began then, not by the segment the stop moved to.
+        sid = self.playing(86400.0)
+        self.live.seek_to(-12.0)
+        part = self.engine.opened[-1][0]
+        self.engine.buffer(  # the buffer's first five went meanwhile
+            sid, self.SPANS[5:], hls=True, window=86400.0, parts=[[5, 30.0, 10_030.0]]
+        )
+        own = [Span(0, 0.0, 6.0, False, media_seq=98), Span(1, 6.0, 12.0, False, media_seq=99)]
+        self.engine.buffer(part, own, hls=True, part_wall=10_000.0 - 100.0, part_media=12.0)
+        self.engine.sessionReady.emit(part)
+        self.assertAlmostEqual(self.live.position(), -12.0)

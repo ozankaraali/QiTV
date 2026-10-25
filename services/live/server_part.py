@@ -36,6 +36,9 @@ class ServerPart:
     ended: bool = False  # its input ended (at its stop, or the window's end)
     played: bool = False  # VLC played it (before: on its way)
     failed: bool = False  # its input broke off after it played (what it fetched plays on)
+    # Where the buffer's segment beginning its stop began at its open (live timeline
+    # seconds): the place to put it flush against, though that segment may go meanwhile.
+    stop_t: Optional[float] = None
 
     def place(
         self,
@@ -53,7 +56,9 @@ class ServerPart:
         a live segment arrives after its time in the playlist). A later state leaves it."""
         if self.offset is not None:
             return
-        stop = next((s.start for s in live if s.media_seq == self.until), None)
+        stop = self.stop_t
+        if stop is None:
+            stop = next((s.start for s in live if s.media_seq == self.until), None)
         if media_before is not None and stop is not None and self.until is not None:
             self.offset = stop - media_before
             return

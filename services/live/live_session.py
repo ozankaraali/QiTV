@@ -2835,7 +2835,7 @@ class LiveSession(QObject):
         if until is not None and stop is not None:
             window["before_s"] = max(0.0, stop - t)  # counted back from the stop (the helper)
         sid = self._engine.open_session(self._url, **self._open_args, window=window)
-        self._part = ServerPart(sid, t, until)
+        self._part = ServerPart(sid, t, until, stop_t=stop if until is not None else None)
         self._part_tries += 1
         _LOG.info("Opening the channel's server part %.0f s before the buffer.", -self._before(t))
 
