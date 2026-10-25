@@ -322,7 +322,8 @@ _OPEN_MAX_S = 2.0  # a longer open (a stalled source, say) counts as this long
 _OPEN_WEIGHT = 0.3  # of each new measurement in the open time's moving average
 _EDGE_S = 1.0  # VLC this close to the live edge is at it (a starvation, and its restart after)
 # 2.6.2: a channel's own server window (a long HLS playlist) is offered past the buffer when it
-# keeps at least this much more; the bar reaches this far past the buffer (as catch-up's).
+# keeps at least this much more (the bar then shows all of it); a part played without one (a
+# provider archive's) has the bar reach this far past where it plays (as catch-up's).
 WINDOW_MIN_S = 300.0
 WINDOW_BAR_S = 30 * 60.0
 WINDOW_AHEAD_S = 60.0  # a server part fetches this far ahead of the player
@@ -956,6 +957,12 @@ class LiveSession(QObject):
     def _asked_point(self) -> float:
         """Where a step counts from: the point a server part on its way (or waiting) was
         asked for (2.6.2: a held ← goes on back from there), else the position."""
+        point = self._part_point()
+        return point if point is not None else self.position()
+
+    def _part_point(self) -> Optional[float]:
+        """The point a server part on its way (or waiting to open) was asked for (2.6.2);
+        None without one."""
         part = self._part
         for point in (
             self._part_next,
@@ -965,7 +972,7 @@ class LiveSession(QObject):
         ):
             if point is not None:
                 return point
-        return self.position()
+        return None
 
     def go_live(self) -> None:
         """The Go live button: back to the live edge at 1x, playing (not paused). While a
@@ -2680,7 +2687,8 @@ class LiveSession(QObject):
         its arrivals need, which a burst sets under any latency too)."""
         snapshot = self._snapshot()
         edge = self._live_edge(snapshot)
-        position = min(self._base + self._elapsed, edge)
+        asked = self._part_point()  # 2.6.2: the knob goes where it was asked at once
+        position = asked if asked is not None else min(self._base + self._elapsed, edge)
         learned = self._learned
         lag = self._reported_lag(snapshot, position)
         shown = self._settled.value
@@ -2711,13 +2719,14 @@ class LiveSession(QObject):
         beyond = self.server_window()
         archive = self._archive is not None
         if beyond > 0.0 or self._part is not None or archive:
-            # 2.6.2: drawn as catch-up draws an archive past the buffer, half an hour past it
-            # or past where the server part plays.
+            # 2.6.2: drawn as catch-up draws an archive past the buffer (dashed): the whole
+            # window the channel's server keeps; else half an hour past where a part plays.
             start = float(state["start"])
-            reach = start - min(beyond, WINDOW_BAR_S)
-            if position < start:
-                reach = min(reach, position - WINDOW_BAR_S)
-            window_start = start - beyond if beyond > 0.0 else min(reach, position)
+            if beyond > 0.0:
+                reach = window_start = start - beyond
+            else:
+                reach = start if position >= start else position - WINDOW_BAR_S
+                window_start = min(reach, position)
             if archive:  # a provider archive's: half an hour past it, beyond any window too
                 reach = min(start, position) - WINDOW_BAR_S
                 window_start = min(window_start, reach)
@@ -2890,10 +2899,6 @@ class LiveSession(QObject):
             seq = placed[0].seq if placed else oldest
         if not self._open_at(seq, part):
             self._part_failed()
-            return
-        part.played = True
-        if self._archive is not None:
-            self._archive.played = True
 
     def _part_start_of(self, part: ServerPart, seq: int) -> float:
         """Where segment `seq` of the server part starts on the live timeline."""
@@ -3280,6 +3285,9 @@ class LiveSession(QObject):
             self._base = self._start_of(seq)
         else:
             self._base = self._part_start_of(part, seq)
+            part.played = True  # however VLC came to play it (a seek too): no longer on its way
+            if self._archive is not None:
+                self._archive.played = True
         self._in_part = self._part_playing = part is not None
         self._elapsed = 0.0
         self._last_ms = 0

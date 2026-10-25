@@ -6018,7 +6018,7 @@ class ServerWindowTests(LiveSessionCase):
         self.live._emit_timeline()
         state = self.timelines[-1]
         self.assertEqual(state["buffer_start"], 0.0)
-        self.assertEqual(state["start"], -WINDOW_BAR_S)  # half an hour past the buffer
+        self.assertEqual(state["start"], -85800.0)  # the owner: the whole window, as kept
         self.assertEqual(state["window_start"], -85800.0)
 
     def test_a_short_window_is_not_offered(self):
@@ -6046,7 +6046,7 @@ class ServerWindowTests(LiveSessionCase):
         self.live._emit_timeline()
         state = self.timelines[-1]
         self.assertAlmostEqual(state["position"], -300.0)
-        self.assertEqual(state["start"], -300.0 - WINDOW_BAR_S)  # the bar reaches on past it
+        self.assertEqual(state["start"], -85800.0)  # the whole window still
         self.assertEqual(state["buffer_start"], 0.0)
 
     def test_a_seek_within_the_part_is_local(self):
@@ -6496,3 +6496,28 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), plays)  # not 40 s early
         self.engine.buffer(part, [Span(0, 0.0, 30.0, False), Span(1, 30.0, 60.0, False)])
         self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 1))
+
+    def test_a_part_played_by_a_seek_is_played(self):
+        # The owner's run: a part VLC plays through a seek (its state came before its ready)
+        # counts as played: a seek outside it opens a new part, steps count from where it plays.
+        sid = self.playing(86400.0)
+        self.live.seek_to(-300.0)
+        part = self.engine.opened[-1][0]
+        own = [Span(0, 0.0, 6.0, False, media_seq=40), Span(1, 6.0, 12.0, False, media_seq=41)]
+        self.engine.buffer(part, own, hls=True, part_wall=10_000.0 - 300.0)  # placed, not ready
+        self.live.seek_to(-294.0)
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 1))
+        self.live.seek_to(-600.0)  # outside it: a new part
+        self.assertNotEqual(self.engine.opened[-1][0], part)
+        self.assertIn(part, self.engine.closed)
+        self.assertEqual(self.engine.opened[0][0], sid)
+
+    def test_the_knob_shows_the_point_asked_while_its_part_opens(self):
+        # The owner: a click on the bar seemed to wait for a confirmation before it went.
+        self.playing(86400.0)
+        self.live.seek_to(-300.0)
+        self.live._emit_timeline()
+        self.assertAlmostEqual(self.timelines[-1]["position"], -300.0)
+        self.live.seek_relative(-10.0)  # a step meanwhile: from there
+        self.live._emit_timeline()
+        self.assertAlmostEqual(self.timelines[-1]["position"], -310.0)

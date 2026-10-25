@@ -11,8 +11,8 @@ others' distributions, which may have malware.**
 
 - **As far back as the channel's server keeps it.** Some live channels' own servers keep hours
   of the channel, a day for some, while QiTV's buffer begins when you tune in. On such a
-  channel the bar now reaches half an hour further back than the buffer (dashed), and ←, the
-  bar and ⏮ go on back as far as the server keeps it. The guide's **▶ Watch from the start**
+  channel the bar now reaches as far back as the server keeps it (dashed before the buffer),
+  and ←, the bar and ⏮ go back there. The guide's **▶ Watch from the start**
   plays a past programme from there too, on the channel you watch or one you watched earlier.
 - **Your buffer first.** What the buffer holds always plays from the buffer. Only what lies
   before it comes from the server, a minute ahead of what plays and never twice, and at the
