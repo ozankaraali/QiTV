@@ -357,6 +357,29 @@ class DiskImageDownloadTests(unittest.TestCase):
         self.assertEqual(self.download("qitv-macos-universal.zip"), b"new")
 
 
+class DownloadFolderTests(unittest.TestCase):
+    """2.7.1: macOS asks before an app touches the Downloads folder, and an ad-hoc signed
+    app's Allow may not stick (a friend's Mac asked again and again): there an update
+    downloads to QiTV's own cache folder, which macOS does not guard."""
+
+    def folder(self, system):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            mock.patch.object(update_checker.Path, "home", return_value=Path(home)),
+            mock.patch.object(update_checker.platform, "system", return_value=system),
+        ):
+            folder = update_checker.get_downloads_folder()
+            return folder.relative_to(home), folder.is_dir()
+
+    def test_on_macos_an_update_downloads_to_qitvs_cache(self):
+        self.assertEqual(self.folder("Darwin"), (Path("Library/Caches/QiTV/Updates"), True))
+
+    def test_elsewhere_to_the_downloads_folder_as_before(self):
+        for system in ("Windows", "Linux"):
+            with self.subTest(system):
+                self.assertEqual(self.folder(system)[0], Path("Downloads"))
+
+
 class ShortDownloadTests(unittest.TestCase):
     """A disk image must arrive whole: `open` succeeds before macOS checks it."""
 

@@ -291,7 +291,13 @@ def is_disk_image(name: str) -> bool:
 
 
 def get_downloads_folder() -> Path:
-    """Get the user's Downloads folder path."""
+    """Where an update downloads: on macOS QiTV's own cache folder (2.7.1: macOS asks before an
+    app touches the Downloads folder, and an ad-hoc signed app's Allow may not stick, so it
+    asked again and again), made when missing; elsewhere the user's Downloads folder."""
+    if platform.system() == "Darwin":
+        folder = Path.home() / "Library" / "Caches" / "QiTV" / "Updates"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
     return Path.home() / "Downloads"
 
 
@@ -571,7 +577,7 @@ def _launch_failed(downloaded_path: str, release_url: str, ui: Optional[UpdateUI
 
 
 def open_downloads_folder() -> None:
-    """Show the Downloads folder (best effort), where the update was saved."""
+    """Show the folder the update was saved to (best effort; `get_downloads_folder`)."""
     downloads_folder = get_downloads_folder()
     try:
         if platform.system() == "Darwin":
