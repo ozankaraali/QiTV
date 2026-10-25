@@ -6553,3 +6553,16 @@ class ServerWindowFixTests(LiveSessionCase):
                 tick()
         self.assertEqual(len(self.playback.plays), plays)
         self.assertEqual(len(self.engine.opened), opens)  # nor a part opened anew
+
+    def test_a_parts_steps_are_logged_without_addresses(self):
+        # For the owner's terminal: where a part opens and plays, and its hop; no address.
+        with self.assertLogs("services.live.live_session", "INFO") as logs:
+            sid, part = self.in_part(-300.0)
+            self.engine.sessionEnded.emit(part)
+            self.playback.ended.emit()
+        text = "\n".join(logs.output)
+        self.assertIn("server part 300 s before the buffer", text)
+        self.assertIn("Playing the server part", text)
+        self.assertIn("into the buffer", text)
+        self.assertNotIn("http", text)
+        self.assertNotIn("secret", text)

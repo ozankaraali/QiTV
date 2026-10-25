@@ -2822,6 +2822,7 @@ class LiveSession(QObject):
         sid = self._engine.open_session(self._url, **self._open_args, window=window)
         self._part = ServerPart(sid, t, until)
         self._part_tries += 1
+        _LOG.info("Opening the channel's server part %.0f s before the buffer.", -self._before(t))
 
     def _open_archive_now(self, t: float, route: ArchiveRoute) -> None:
         """A provider archive's part from live timeline second `t`: its address for that
@@ -2840,6 +2841,11 @@ class LiveSession(QObject):
         self._part = ServerPart(sid, t, None)
         self._part.place(begins, parts, live_edge=edge, now=now)
         self._part_tries += 1
+        _LOG.info("Opening the provider's archive %.0f s before the buffer.", -self._before(t))
+
+    def _before(self, t: float) -> float:
+        """Live timeline second `t` from the buffer's start (negative before it), for logs."""
+        return t - self._buffer_start()
 
     def _archive_goes_on(self, part: ServerPart) -> bool:
         """An archive's part ended before the buffer (its address covers a stretch, or its
@@ -2849,6 +2855,7 @@ class LiveSession(QObject):
         end = part.offset + _number(self._engine.snapshot(part.sid).get("end"))
         if end >= self._buffer_start() - _ARCHIVE_JOIN_S or end < part.asked + _ARCHIVE_STEP_S:
             return False
+        _LOG.info("The archive's part ended before the buffer; its next address opens.")
         self._open_part(end)
         return True
 
@@ -2857,6 +2864,7 @@ class LiveSession(QObject):
         may read what the helper does not), else the buffer plays on, saying so."""
         route = self._archive
         assert route is not None
+        _LOG.info("The archive's part did not play (%s); opening the archive directly.", kind)
         self._close_part(resume=False)  # a parked upstream stays parked: the archive opens
         if not route.fallback(kind):
             self.notice.emit(PART_FAILED)
@@ -2908,6 +2916,10 @@ class LiveSession(QObject):
             seq = placed[0].seq if placed else oldest
         if not self._open_at(seq, part):
             self._part_failed()
+            return
+        _LOG.info(
+            "Playing the server part from %.0f s before the buffer.", -self._before(part.asked)
+        )
 
     def _part_start_of(self, part: ServerPart, seq: int) -> float:
         """Where segment `seq` of the server part starts on the live timeline."""
@@ -2931,6 +2943,7 @@ class LiveSession(QObject):
         assert self._sid is not None
         part = self._part
         until = part.until if part is not None else None
+        _LOG.info("The server part ran into the buffer; playing on there.")
         self._leave_part()
         if at is not None:
             self._seek(at)
@@ -2957,6 +2970,7 @@ class LiveSession(QObject):
     def _part_failed(self) -> None:
         """The server part did not open, or broke: back into the buffer, saying so."""
         playing = self._in_part
+        _LOG.info("The server part did not open or broke off; back to the buffer.")
         self._close_part()
         self.notice.emit(PART_FAILED)
         if playing and self._sid is not None:
