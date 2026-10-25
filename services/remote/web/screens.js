@@ -55,6 +55,8 @@ const words = {
   go_back: "Go back to {channel}",
   stop_recording: "Stop recording",
   recording_kept: "The recording goes on: nothing opened on this phone",
+  record: "Record",
+  go_live: "Go live",
 };
 const w = (key) => (t(key) === key ? words[key] || key : t(key));
 
@@ -133,8 +135,10 @@ function onState(message) {
   const mute = document.querySelector("[data-key=mute]");
   if (mute) mute.classList.toggle("on", !!message.muted);
   for (const [key, on] of [["record", message.recording], ["multiview", message.multiview]]) {
-    const button = document.querySelector(`#moreSheet [data-key=${key}]`);
-    if (button) button.classList.toggle("on", !!on); // lit while the TV does it
+    for (const button of document.querySelectorAll(`[data-key=${key}]`)) button.classList.toggle("on", !!on); // lit while the TV does it
+  }
+  for (const [key, word] of [["record", "record"], ["live", "go_live"]]) {
+    for (const button of document.querySelectorAll(`.cluster [data-key=${key}]`)) button.setAttribute("aria-label", w(word));
   }
   const pip = document.querySelector("#moreSheet [data-key=pip]");
   if (pip) {
@@ -220,6 +224,8 @@ function drawNow() {
   const now = current && current.now;
   const name = $("nowName");
   const live = $("nowLive");
+  const toLive = document.querySelector(".cluster [data-key=live]");
+  toLive.classList.remove("behind"); // lit only while a live channel plays behind its live point
   if (!now) {
     name.textContent = w("nothing_playing");
     $("nowNum").textContent = "";
@@ -240,6 +246,7 @@ function drawNow() {
     live.hidden = false;
     const behind = now.behind_s || 0;
     live.classList.toggle("behind", behind > 0);
+    toLive.classList.toggle("behind", behind > 0);
     live.textContent = behind > 0 ? `−${Math.floor(behind / 60)}:${String(behind % 60).padStart(2, "0")}` : t("live") === "live" ? "LIVE" : t("live");
     $("nowShow").textContent = now.now ? now.now.title : "";
     $("nowProg").style.width = `${(share(now.now) * 100).toFixed(1)}%`;

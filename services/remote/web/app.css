@@ -13,7 +13,7 @@
   --live: #d6453a;
   --ok: #5fbf7a;
   --warn: #e0b24a;
-  --pad: min(64vw, 34dvh, 300px);
+  --pad: min(64vw, 300px); /* at most: the pad takes what the rows around it leave */
   color-scheme: dark;
 }
 
@@ -70,7 +70,7 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .scanner video { width: 100%; height: 100%; object-fit: cover; }
 
 /* ---- remote ---- */
-.remote { justify-content: space-evenly; gap: 10px; padding: 4px 20px 10px; }
+.remote { justify-content: space-evenly; gap: 10px; padding: 4px 20px 10px; overflow-y: auto; }
 .remote > * { flex: none; }
 .nowbar { display: flex; gap: 8px; }
 .now { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 18px; text-align: left; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
@@ -130,8 +130,11 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .seg button.on { background: var(--accent-fill); color: var(--text); }
 .seg button.pressed { background: rgba(238, 242, 246, 0.08); }
 
+/* The pad grows into the height the other rows leave (up to --pad), so the rockers never reach
+   the tabs: a short screen, or a browser's own bars around the page, gets a smaller pad. */
+.remote > .pad { flex: 1 1 0; }
 .pad {
-  position: relative; width: var(--pad); height: var(--pad); margin: 0 auto; border-radius: 50%; overflow: hidden;
+  position: relative; min-height: 140px; max-height: var(--pad); aspect-ratio: 1; align-self: center; border-radius: 50%; overflow: hidden;
   background:
     linear-gradient(45deg, transparent calc(50% - 0.5px), rgba(238, 242, 246, 0.07) 50%, transparent calc(50% + 0.5px)),
     linear-gradient(-45deg, transparent calc(50% - 0.5px), rgba(238, 242, 246, 0.07) 50%, transparent calc(50% + 0.5px)),
@@ -156,7 +159,7 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 }
 .ok.pressed { background: var(--accent); color: #1a0f0a; }
 /* The touchpad: a trackpad as wide as the screen, not the round pad, so its hint has room. */
-.pad.touch { width: 100%; border-radius: 26px; background: #11161d; }
+.pad.touch { align-self: stretch; aspect-ratio: auto; border-radius: 26px; background: #11161d; }
 .touchpad { position: absolute; inset: 0; z-index: 3; display: flex; align-items: flex-end; justify-content: center; padding: 0 24px 18px; border-radius: inherit; background: linear-gradient(180deg, #1b222b, #12171e); color: var(--faint); font-size: 13px; line-height: 1.4; text-align: center; touch-action: none; }
 .touchpad.pressed { background: linear-gradient(180deg, #222c38, #141b23); }
 .pad.touch .wedge, .pad.touch .ok { visibility: hidden; }
@@ -176,16 +179,33 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .sq svg { width: 20px; height: 20px; }
 .sq.pressed { background: var(--accent-fill); color: var(--accent); }
 .sq.on { color: var(--accent); }
-.golive { grid-column: span 2; justify-self: stretch; height: 50px; border-radius: 25px; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; font-weight: 700; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
-.golive i { width: 9px; height: 9px; border-radius: 50%; background: var(--live); }
-.golive.pressed { background: rgba(214, 69, 58, 0.22); }
+.sq.rec svg { color: var(--live); }
+.sq.rec.on { background: rgba(214, 69, 58, 0.22); box-shadow: inset 0 0 0 1.5px var(--live); }
+/* LIVE, as a TV remote's key: back to the live point. Lit while the channel plays behind it. */
+.tolive { justify-self: stretch; height: 50px; padding: 0 2px; border-radius: 16px; display: grid; place-items: center; font-size: min(12px, 3.1vw); font-weight: 800; letter-spacing: 0.05em; white-space: nowrap; color: var(--text); background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
+.tolive.behind { color: var(--accent); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.tolive.pressed { background: var(--accent-fill); color: var(--accent); }
 
 @media (max-height: 700px) {
   .rocker { height: 120px; }
   .round .b { width: 48px; height: 48px; }
-  .sq, .golive { height: 44px; }
+  .sq, .tolive { height: 44px; }
   .sq { width: 44px; }
   .now { padding: 9px 12px; }
+}
+/* A small phone in a browser view (its bars around the page): tighter still. */
+@media (max-height: 600px) {
+  .remote { gap: 6px; padding-bottom: 6px; }
+  .remote > .pad { min-height: 120px; }
+  .rocker { height: 104px; }
+  .round { gap: 3px; }
+  .round .b { width: 42px; height: 42px; }
+  .sq, .tolive { height: 40px; }
+  .sq { width: 40px; }
+  .mid { row-gap: 10px; }
+  .seg button { height: 32px; }
+  .now { padding: 7px 10px; }
+  .now .logo { width: 38px; height: 38px; }
 }
 
 /* ---- lists: guide, search, library ---- */
@@ -273,17 +293,15 @@ mark { background: none; color: var(--accent); font-weight: 600; }
 .acts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .acts button { height: 74px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; border-radius: 16px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); font-size: 12px; font-weight: 600; color: var(--muted); text-align: center; padding: 0 4px; }
 .acts button svg { color: var(--text); }
-.acts .rec svg { color: var(--live); }
 .acts button.pressed { background: var(--accent-fill); }
 .acts button.on { color: var(--text); box-shadow: inset 0 0 0 1.5px var(--accent); }
 .acts button.on svg { color: var(--accent); }
-.acts .rec.on svg { color: var(--live); }
-.acts .stop { grid-column: 1 / -1; height: 52px; flex-direction: row; gap: 10px; font-size: 14px; }
 .menu-list { display: flex; flex-direction: column; }
 .menu-list button { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 4px; border-bottom: 1px solid var(--line); font-size: 16px; text-align: left; }
 .menu-list button .muted { font-size: 13px; }
 .menu-list button.danger { color: var(--live); }
 .menu-list button.current::after { content: "✓"; color: var(--accent); }
+.menu-list .step { margin: 0; padding: 12px 4px; border-bottom: 1px solid var(--line); font-size: 15px; line-height: 1.45; }
 /* 2.6: QiTV's question (stop a recording?): the safe answer first and lit. */
 .ask { box-shadow: 0 -1px 0 rgba(214, 69, 58, 0.5), 0 -20px 40px rgba(0, 0, 0, 0.5); }
 .ask-text { margin: 4px 2px 6px; font-size: 17px; font-weight: 600; line-height: 1.35; }

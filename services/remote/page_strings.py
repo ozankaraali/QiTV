@@ -107,6 +107,20 @@ PAGE_STRINGS: dict[str, str] = {
     "full": N_("Too many phones are connected to this TV."),
     # i18n: the phone remote's menu: skip the relay, talk to QiTV over the home Wi-Fi
     "connect_directly": N_("Connect directly"),
+    # i18n: the phone remote's menu: keep the remote as an app on the phone's Home Screen (as
+    # iOS names it); also the title of the steps that follow
+    "add_home": N_("Add to Home Screen"),
+    # i18n: the phone remote's Add to Home Screen, step 1 (iPhone): a page opened from the camera
+    # shows in a browser view whose compass button opens it in Safari
+    "add_home_safari": N_("Open this page in Safari (from a scanned code: tap the compass)."),
+    # i18n: the phone remote's Add to Home Screen, step 2 (iPhone): Share and Add to Home Screen
+    # as Safari names them; "⋯" is Safari's menu button
+    "add_home_share": N_("Tap Share (under ⋯ if you don't see it), then Add to Home Screen."),
+    # i18n: the phone remote's Add to Home Screen, step 3 (iPhone): the Home Screen copy pairs
+    # anew
+    "add_home_pair": N_("Open QiTV from your Home Screen and scan the code on the TV once more."),
+    # i18n: the phone remote's Add to Home Screen on other phones: as their browsers name it
+    "add_home_menu": N_("Open your browser's menu, then Add to Home screen or Install app."),
     "watching": N_("Watching"),  # i18n: the phone remote's guide: the channel on the TV now
     "watch": N_("Watch"),  # i18n: the phone remote's timetable: tune this channel (a verb)
     "on_now": N_("Now"),  # i18n: the phone remote's timetable: the programme on now (short)
