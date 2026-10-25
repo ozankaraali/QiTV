@@ -35,6 +35,7 @@ class ServerPart:
     offset: Optional[float] = None  # the live timeline second of its own second 0
     ended: bool = False  # its input ended (at its stop, or the window's end)
     played: bool = False  # VLC played it (before: on its way)
+    failed: bool = False  # its input broke off after it played (what it fetched plays on)
 
     def place(
         self,

@@ -6566,3 +6566,21 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertIn("into the buffer", text)
         self.assertNotIn("http", text)
         self.assertNotIn("secret", text)
+
+    def test_a_part_refused_after_it_played_goes_on_from_what_it_fetched(self):
+        # The owner's log: a part refused a few seconds after it played was asked again from
+        # the point first asked, so the same seconds played again. What it fetched now plays
+        # on, and a new part goes on from where that ends.
+        sid, part = self.in_part(-300.0)  # it holds -300 to -288
+        with self.assertLogs("services.live.live_session", "INFO") as logs:
+            self.engine.sessionFailed.emit(part, "http", STREAM_REFUSED)
+        self.assertIn("refused", "\n".join(logs.output))
+        self.assertNotIn(part, self.engine.closed)  # VLC plays on what it holds
+        opens, plays = len(self.engine.opened), len(self.playback.plays)
+        QTest.qWait(20)
+        self.assertEqual((len(self.engine.opened), len(self.playback.plays)), (opens, plays))
+        self.playback.ended.emit()  # VLC played what it fetched
+        self.assertIn(part, self.engine.closed)
+        _new, _url, kwargs = self.engine.opened[-1]
+        self.assertEqual(kwargs["window"]["before_s"], 288.0)  # on from -288, not -300
+        self.assertEqual(self.engine.opened[0][0], sid)

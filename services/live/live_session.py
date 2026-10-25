@@ -329,6 +329,7 @@ WINDOW_BAR_S = 30 * 60.0
 WINDOW_AHEAD_S = 60.0  # a server part fetches this far ahead of the player
 _ARCHIVE_JOIN_S = 2.0  # an archive part ending this near the buffer's start hops into it
 _PART_SLACK_S = 10.0  # a point this far before a part's start is still played from it
+_PART_STEP_S = 6.0  # a part that broke off having brought less than this has nothing more
 _ARCHIVE_STEP_S = 30.0  # one that brought less than this past its point has nothing more
 # VLC's clock, which moved since the open, standing still this long while VLC plays with media
 # ahead and the source sending is lost (`_clock_lost`): it opens again.
@@ -1806,7 +1807,14 @@ class LiveSession(QObject):
     def _on_failed(self, sid: str, kind: str, message: str) -> None:
         part = self._part
         if part is not None and sid == part.sid:
-            if message in REFUSALS and self._part_tries < 2:
+            refused = "refused" if message in REFUSALS else kind
+            if part.played and not part.ended:
+                # What it fetched plays on; at its end a new part goes on from there
+                # (`_part_goes_on`), not from the point first asked.
+                _LOG.info("The server part broke off (%s); playing what came, then on.", refused)
+                part.ended = part.failed = True
+            elif message in REFUSALS and self._part_tries < 2:
+                _LOG.info("The server part was refused; asking once more.")
                 self._retry_part(part)  # a stream just closed may still count: once more
             elif self._archive is not None and not self._archive.played:
                 self._archive_failed(kind)
@@ -2011,7 +2019,9 @@ class LiveSession(QObject):
             if part is None or not self._part_playing:
                 return  # a server part on its way plays once ready
             if part.ended:
-                if not self._archive_goes_on(part):
+                if not self._part_goes_on(part):
+                    if part.failed:
+                        self.notice.emit(PART_FAILED)  # it broke off with nothing to go on from
                     self._hop()  # 2.6.2: the server part ran into the buffer
             else:
                 self._seek(self._advance())
@@ -2847,15 +2857,19 @@ class LiveSession(QObject):
         """Live timeline second `t` from the buffer's start (negative before it), for logs."""
         return t - self._buffer_start()
 
-    def _archive_goes_on(self, part: ServerPart) -> bool:
-        """An archive's part ended before the buffer (its address covers a stretch, or its
-        connection broke): the next address opens where it ended (True)."""
-        if self._archive is None or part.offset is None:
+    def _part_goes_on(self, part: ServerPart) -> bool:
+        """A part ended before the buffer: an archive's (its address covers a stretch, or its
+        connection broke) or one that broke off after it played; a new part opens where it
+        ended (True), unless it brought too little to go on from."""
+        if (self._archive is None and not part.failed) or part.offset is None:
             return False
         end = part.offset + _number(self._engine.snapshot(part.sid).get("end"))
-        if end >= self._buffer_start() - _ARCHIVE_JOIN_S or end < part.asked + _ARCHIVE_STEP_S:
+        step = _ARCHIVE_STEP_S if self._archive is not None else _PART_STEP_S
+        if end >= self._buffer_start() - _ARCHIVE_JOIN_S or end < part.asked + step:
             return False
-        _LOG.info("The archive's part ended before the buffer; its next address opens.")
+        _LOG.info(
+            "The server part ended %.0f s before the buffer; on from there.", -self._before(end)
+        )
         self._open_part(end)
         return True
 
