@@ -6521,3 +6521,35 @@ class ServerWindowFixTests(LiveSessionCase):
         self.live.seek_relative(-10.0)  # a step meanwhile: from there
         self.live._emit_timeline()
         self.assertAlmostEqual(self.timelines[-1]["position"], -310.0)
+
+    def test_a_part_waiting_for_its_next_segment_is_not_opened_again(self):
+        # The owner: the same few seconds replayed with sound. VLC waited at what the part
+        # had fetched (its helper slow) and the lost-clock watchdog, reading the live
+        # stream's state, opened it again there, again and again.
+        sid, _part = self.in_part(-300.0)  # the part holds -300 to -288
+        self.playback.set_state(PlaybackState.PLAYING)
+        edge = 600.0
+
+        def tick():
+            nonlocal edge
+            self.clock.now += 0.25
+            edge += 0.25  # the live stream arrives meanwhile: no stall of the live session
+            self.engine.buffer(
+                sid,
+                self.SPANS,
+                hls=True,
+                window=86400.0,
+                parts=[[0, 0.0, 10_000.0]],
+                live_edge=edge,
+            )
+            self.live._tick()
+
+        for _ in range(4 * 12):  # it plays to what the part holds
+            self.playback.ms = min(self.playback.ms + 250, 12_000)
+            tick()
+        plays, opens = len(self.playback.plays), len(self.engine.opened)
+        with self.assertNoLogs("services.live.live_session", "WARNING"):
+            for _ in range(4 * 20):  # and waits there 20 s for its next segment
+                tick()
+        self.assertEqual(len(self.playback.plays), plays)
+        self.assertEqual(len(self.engine.opened), opens)  # nor a part opened anew

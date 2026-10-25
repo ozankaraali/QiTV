@@ -106,6 +106,9 @@ _STALE_TARGETS = 3
 _RECENT_SEGMENTS = 10
 _wall_time = time.time  # 2.6.2: a server part's time of day; tests replace it
 _HOLD_POLL_S = 0.25  # 2.6.2: how often a held source asks again
+# 2.6.2: a server part held this long (a pause, not its pacing: about a segment at a time)
+# reads its playlist again before going on (a 24 h playlist costs ~0.6 s of CPU to read).
+_HELD_RELOAD_S = 30.0
 # 2.6.1: copies of another origin group (its own numbering and names) are set aside, the
 # playlist reloaded each _OTHER_RELOAD_S, until they persist as long as a stale copy is waited
 # out (measured: such a group answered every request for up to 14 s), at least this.
@@ -1408,7 +1411,9 @@ class HlsSource:
                 while self._hold is not None and self._hold():  # its stop may move meanwhile
                     if http.wait(_HOLD_POLL_S):
                         raise _Closed()
-                if time.monotonic() - held > max(1.0, float(playlist.target_duration or 0)):
+                if time.monotonic() - held > max(
+                    _HELD_RELOAD_S, float(playlist.target_duration or 0)
+                ):
                     again = True  # held long: the window may have moved on, its URLs expired
                     break
                 if self._until is not None and sequence >= self._until:

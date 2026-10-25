@@ -2065,9 +2065,10 @@ video.m3u8
         self.assertIsNone(source.until_seq)
         self.assertTrue(any(isinstance(part, bytes) and part for part in parts))
 
+    @patch.object(source_module, "_HELD_RELOAD_S", 1.0)
     def test_a_held_part_reloads_before_going_on(self):
-        # Review I4: a part held past a target duration reloads first: the window may have
-        # slid past its next segment, and its URLs may have expired.
+        # Review I4: a part held long (a pause) reloads first: the window may have slid past
+        # its next segment, and its URLs may have expired.
         held = threading.Event()
 
         def first(request):
@@ -2100,6 +2101,37 @@ video.m3u8
         source.close()
         self.assertEqual(requested_segments(server), ["s100.ts", "s105.ts", "s106.ts", "s107.ts"])
         self.assertIn(Discontinuity(), got)
+
+    def test_a_part_held_for_a_segment_goes_on_without_reloading(self):
+        # The owner's replays: a paced part holds about a segment at a time; reading a 24 h
+        # playlist again (~0.6 s of the helper's CPU) after each such hold starved the player.
+        held = threading.Event()
+
+        def first(request):
+            held.set()  # the player is a segment behind: hold before the next one
+            request.wfile.write(self.video)
+
+        names = ["s100.ts", "s101.ts", "s102.ts"]
+        routes = {f"/{name}": (200, {}, self.video) for name in names[1:]}
+        routes["/s100.ts"] = (200, {"Content-Length": str(len(self.video))}, first)
+        routes["/live.m3u8"] = (200, {}, hls(100, names, ended=True))
+        server = self.server(routes)
+        source = open_source(
+            server.url + "/live.m3u8",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            window={"back_s": 3.0},
+            hold=held.is_set,
+        )
+        reader = threading.Thread(target=lambda: list(source.chunks()), daemon=True)
+        reader.start()
+        time.sleep(1.5)  # longer than a target duration (1 s), shorter than a pause
+        held.clear()
+        reader.join(5)
+        source.close()
+        self.assertEqual(requested_segments(server), names)
+        self.assertEqual(server.counts["/live.m3u8"], 1)
 
     def test_a_held_hls_source_fetches_nothing_until_let_go(self):
         # 2.6.2: `hold` pauses the fetching between segments (a server part's pacing).
@@ -2182,6 +2214,7 @@ video.m3u8
             source.close()
         self.assertEqual(requested_segments(server)[0], "s0.ts")
 
+    @patch.object(source_module, "_HELD_RELOAD_S", 1.0)
     def test_a_finished_archive_goes_on_after_a_long_hold(self):
         # Final review C3: a held ENDLIST archive (the player behind) reloads and goes on; it
         # does not end at the hold.

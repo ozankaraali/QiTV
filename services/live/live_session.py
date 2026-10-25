@@ -2488,13 +2488,14 @@ class LiveSession(QObject):
         while the picture plays on (measured). As a starved VLC (`_clock_frozen`) the position
         would stand still, stay-live wait and the lag grow a second a second. Counted from
         when all of that holds: a stall's or a starvation's own time counts for nothing (VLC
-        says Playing then, and refills after it with its clock standing still)."""
+        says Playing then, and refills after it with its clock standing still). In a server
+        part (2.6.2) VLC waiting at what the part fetched so far is starved, not lost."""
         suspect = (
             self._playback.state() is PlaybackState.PLAYING
             and self._vlc.changes > 0
             and self._vlc.frozen()
             and not stalled
-            and self._live_edge(snapshot) - position > _EDGE_S
+            and self._playing_edge(snapshot) - position > _EDGE_S
         )
         if not suspect:
             self._lost_since = None
@@ -2503,6 +2504,14 @@ class LiveSession(QObject):
         if self._lost_since is None:
             self._lost_since = now
         return now - self._lost_since >= _CLOCK_LOST_S - 1e-9
+
+    def _playing_edge(self, snapshot: Mapping[str, Any]) -> float:
+        """The most VLC can have played: the live edge, or in a server part (2.6.2) what the
+        part has fetched so far."""
+        part = self._part
+        if self._part_playing and part is not None and part.offset is not None:
+            return part.offset + self._live_edge(self._engine.snapshot(part.sid))
+        return self._live_edge(snapshot)
 
     def _open_again(self, position: float) -> None:
         """VLC's clock is lost (`_clock_lost`): open again, at live when stay-live is there,
