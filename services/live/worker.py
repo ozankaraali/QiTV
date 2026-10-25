@@ -837,6 +837,10 @@ class _Session:
             raise _Cancelled()
         if self._ring is None:  # a resumed run goes on in its ring
             self._adopt(self._make_ring())
+            if isinstance(window, dict) and self._ring is not None:
+                # 2.6.2: a server part's segments are all unread until the player reads one
+                # (`_hold` moves this on): none may go to make room in a full disk amount.
+                self._ring.protect_from(0)
         segmenter = self._segmenter
         # A resumed run of the same kind keeps the clock joiner: it re-bases the new run onto
         # the old run's last picture (2.6). Another kind starts afresh.

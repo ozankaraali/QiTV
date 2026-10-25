@@ -1579,6 +1579,39 @@ class ServerPartProtectionTests(unittest.TestCase):
         self.assertEqual(ring._protected, 1)
 
 
+class ServerPartFullDiskTests(unittest.TestCase):
+    def test_a_parts_ring_is_protected_before_its_first_segment(self):
+        # The owner's full disk amount: the budget lets a part's retirable segments go first,
+        # and before its first pacing check a new part's ring protected nothing, so the
+        # segment VLC was about to read went; the stream ended and the part opened again.
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        first = make_stream(1, pts_start=900000)
+
+        def slow(request):
+            gate.wait(5)
+            request.wfile.write(first)
+
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\ns0.ts\n"
+        routes = {"/user/secret/s0.ts": (200, {}, slow)}
+        routes["/user/secret/live.m3u8"] = (200, {}, text.encode())
+        upstream = LocalSource(routes)
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        window = {"back_s": 1.0, "ahead_s": 60.0}
+        url = upstream.url + "/user/secret/live.m3u8"
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"window": window}))
+        deadline = time.monotonic() + 5
+        session = None
+        while time.monotonic() < deadline:
+            session = helper.helper._sessions.get("p")
+            if session is not None and session._ring is not None:
+                break
+            time.sleep(0.02)
+        self.assertIsNotNone(session._ring)
+        self.assertEqual(session._ring._protected, 0)  # all it will hold, until VLC reads
+
+
 class ServerPartStopTests(unittest.TestCase):
     def test_set_until_moves_a_server_parts_stop(self):
         # Review Focus 3: the live buffer's start moved (eviction): the stop follows it.

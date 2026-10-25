@@ -2024,7 +2024,12 @@ class LiveSession(QObject):
                         self.notice.emit(PART_FAILED)  # it broke off with nothing to go on from
                     self._hop()  # 2.6.2: the server part ran into the buffer
             else:
-                self._seek(self._advance())
+                position = self._advance()
+                _LOG.info(
+                    "VLC's stream of the server part ended %.0f s before the buffer; again there.",
+                    -self._before(position),
+                )
+                self._seek(position)
             return
         if self._kept_only:
             self.notice.emit(KEPT_END)  # 2.6: Go live tries the channel again
