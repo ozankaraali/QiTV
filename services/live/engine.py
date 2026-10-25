@@ -764,13 +764,15 @@ class LiveEngine(QObject):
         target: float | None = None,
         extra: float = 0.0,
         window: Mapping[str, Any] | None = None,
+        https_first: bool = False,
     ) -> str:
         """`ram_bytes`: a disk session's memory if its disk fails (_RAM_BYTES when None).
         `target` and `extra`: the target the session steers to and what it adds to it (Auto's
         learned extra), so an HLS source starts far enough back for it (2.1); without
         `target`, `live_delay` seconds back. `window` (2.7): a server part of the HLS
         playlist, `{"back_s", "until_seq", "ahead_s"}` (`services.live.source.HlsSource`);
-        never reopened after a helper's death."""
+        never reopened after a helper's death. `https_first` (2.7.1): an http:// address is
+        asked over HTTPS first (`open_source`)."""
         sid = secrets.token_hex(8)
         if self._shut:
             return sid
@@ -794,6 +796,8 @@ class LiveEngine(QObject):
             start.update(target=float(target), extra=float(extra))
         if window is not None:
             start["window"] = dict(window)
+        if https_first:
+            start["https"] = True
         if start:
             command = (*command, start)
         self._commands.put(command)
@@ -824,6 +828,7 @@ class LiveEngine(QObject):
         live_delay: float = 6.0,
         target: float | None = None,
         extra: float = 0.0,
+        https_first: bool = False,
     ) -> None:
         """A new upstream for a parked session (2.6): `sessionResumed` once its first
         segment came, else `sessionFailed` (it stays parked). The arguments as for
@@ -832,8 +837,13 @@ class LiveEngine(QObject):
         if view is None or view.closing or self._shut:
             return
         command: _Command = ("resume", sid, url, dict(headers), bool(verify_ssl), float(live_delay))
+        start: dict[str, Any] = {}
         if target is not None:
-            command = (*command, {"target": float(target), "extra": float(extra)})
+            start.update(target=float(target), extra=float(extra))
+        if https_first:
+            start["https"] = True
+        if start:
+            command = (*command, start)
         self._commands.put(command)
 
     def holds(self, sid: str) -> bool:

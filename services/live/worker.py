@@ -823,6 +823,7 @@ class _Session:
                 on_answer=self._on_answer,
                 window=window if isinstance(window, dict) else None,
                 hold=self._hold if isinstance(window, dict) and "ahead_s" in window else None,
+                https_first=self._start.get("https") is True,
             )
         except SourceError as error:
             if not self._parking:  # a park interrupted the open: nothing to say

@@ -2781,6 +2781,20 @@ class PipelineCase(ControllerTestCase):
         self.live.play_pipeline()
 
 
+class HttpsFirstTuneTests(PipelineCase):
+    def test_prefer_https_has_the_channel_asked_over_https_first(self):
+        # 2.7.1: the provider prefers HTTPS (here the global setting): its live channel's
+        # stream is asked over HTTPS first by the time-shift helper.
+        self.config.prefer_https = True
+        self.start_channel(0)
+        self.assertIs(self.starts()[-1][1]["https_first"], True)
+
+    def test_without_prefer_https_the_channel_starts_as_before(self):
+        self.config.prefer_https = False
+        self.start_channel(0)
+        self.assertNotIn("https_first", self.starts()[-1][1])
+
+
 class BackNoticeTests(PipelineCase):
     """2.6: coming back to a channel plays it live and offers where it was left, a minute."""
 

@@ -6610,3 +6610,39 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertAlmostEqual(self.timelines[-1]["position"], 30.0)
         self.live.seek_relative(-10.0)
         self.assertAlmostEqual(self.timelines[-1]["position"], 18.0)  # the segment holding 20
+
+
+class HttpsFirstTests(LiveSessionCase):
+    """2.7.1: a provider preferring HTTPS has every stream the session opens asked over HTTPS
+    first: its channel, a server part, a parked upstream's resume."""
+
+    playing = ServerWindowTests.playing
+    SPANS = ServerWindowTests.SPANS
+
+    def test_the_session_asks_its_streams_over_https_first(self):
+        self.live._wall = lambda: 10_600.0
+        self.live.start(
+            URL,
+            headers={"User-Agent": "QiTV-Test"},
+            verify_ssl=True,
+            latency="normal",
+            user_agent="QiTV-Test",
+            disk=False,
+            max_bytes=128 * MiB,
+            one_stream=True,
+            https_first=True,
+        )
+        sid = self.engine.last_sid
+        self.assertIs(self.engine.opened[-1][2]["https_first"], True)
+        self.engine.buffer(sid, self.SPANS, hls=True, window=86400.0, parts=[[0, 0.0, 10_000.0]])
+        self.engine.sessionReady.emit(sid)
+        self.live.seek_to(-300.0)  # a server part: the live upstream parks first
+        self.engine.sessionParked.emit(sid)
+        self.assertIs(self.engine.opened[-1][2]["https_first"], True)
+        self.live.go_live()  # the parked upstream resumes
+        self.assertIs(self.engine.resumes[-1][2]["https_first"], True)
+
+    def test_without_it_nothing_changes(self):
+        sid = self.start()
+        self.assertNotIn("https_first", self.engine.opened[-1][2])
+        self.assertEqual(self.engine.opened[0][0], sid)

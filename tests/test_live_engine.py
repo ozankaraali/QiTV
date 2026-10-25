@@ -381,6 +381,18 @@ class ParkResumeTests(unittest.TestCase):
         )
         self.assertTrue(commands.empty())
 
+    def test_https_first_reaches_the_helper_on_an_open_and_a_resume(self):
+        # 2.7.1: a provider preferring HTTPS has its stream asked over HTTPS first.
+        engine, commands = self.engine()
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB, https_first=True
+        )
+        self.assertEqual(commands.get_nowait()[7], {"https": True})
+        engine.resume_session(sid, URL_FOR_RING, headers={}, verify_ssl=True, https_first=True)
+        self.assertEqual(commands.get_nowait()[5:], (6.0, {"https": True}))
+        engine.open_session(URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB)
+        self.assertEqual(len(commands.get_nowait()), 7)  # without it, as before
+
     def test_parked_and_resumed_keep_the_view(self):
         engine, _ = self.engine()
         engine._sessions["s"] = engine_module._View()

@@ -863,6 +863,31 @@ video.m3u8
                 parts = media(server.url + "/user/secret.ts", verify_ssl=False)
             self.assertEqual(parts, [self.video])
 
+    def test_https_first_opens_a_stream_over_https(self):
+        # 2.7.1: "Prefer HTTPS": the provider's http:// address is asked over HTTPS first.
+        source_module._HTTPS_FAILED.clear()
+        with self.tls_context() as context:
+            server = self.server({"/user/secret.ts": (200, {}, self.video)}, tls=context)
+            plain = server.url.replace("https://", "http://", 1) + "/user/secret.ts"
+            with insecure():
+                parts = media(plain, verify_ssl=False, https_first=True)
+            self.assertEqual(parts, [self.video])
+            self.assertEqual(server.counts["/user/secret.ts"], 1)
+
+    def test_https_first_falls_back_to_http_and_remembers_the_host(self):
+        # A provider whose streams have no HTTPS: HTTP after the failed attempt, and for the
+        # rest of the run that host opens over HTTP at once.
+        source_module._HTTPS_FAILED.clear()
+        server = self.server({"/user/secret.ts": (200, {}, self.video)})
+        with source_logs() as logs:
+            parts = media(server.url + "/user/secret.ts", https_first=True)
+        self.assertEqual(parts, [self.video])
+        self.assertTrue(any("HTTPS" in line for line in logs))
+        self.assertFalse(any("secret" in line or "127.0.0.1" in line for line in logs))
+        connections = server.connections
+        self.assertEqual(media(server.url + "/user/secret.ts", https_first=True), [self.video])
+        self.assertEqual(server.connections, connections + 1)  # no second HTTPS attempt
+
     def test_http_redirect_to_tls_obeys_verification_setting(self):
         with self.tls_context() as context:
             secure = self.server({"/video.ts": (200, {}, self.video)}, tls=context)

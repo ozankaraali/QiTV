@@ -732,6 +732,7 @@ class LiveSession(QObject):
         referrer: Optional[str] = None,
         kept: Optional[KeptRing] = None,
         one_stream: bool = False,
+        https_first: bool = False,
     ) -> None:
         """`ram_bytes`: the memory a disk buffer that fails goes on in (the helper's default
         when None). `channel`: the channel's key in the tuning store ("": nothing kept).
@@ -739,7 +740,9 @@ class LiveSession(QObject):
         the helper as Referer). `kept` (2.6): the channel's parked session, taken back where
         the user was (`_resume_kept`) instead of a new one; one with nothing left starts
         afresh. `one_stream` (2.7): the provider leaves no second stream, so the live
-        upstream parks while a server part plays and resumes after it."""
+        upstream parks while a server part plays and resumes after it. `https_first` (2.7.1:
+        the provider prefers HTTPS): every stream the helper opens for it, a server part's
+        and a resume's too, is asked over HTTPS first (a direct play stays as given)."""
         self.stop()
         self._kept = kept
         self._one_stream = one_stream
@@ -770,6 +773,8 @@ class LiveSession(QObject):
         }
         if ram_bytes is not None:
             self._open_args["ram_bytes"] = ram_bytes
+        if https_first:
+            self._open_args["https_first"] = True
         self._stay = StayLive(self._latency)
         self._stay.set_background(self._background)  # a multiview tile without the focus
         self._stay.jump_lag = self._jump_lag  # where a jump to live would land
@@ -1360,6 +1365,7 @@ class LiveSession(QObject):
             live_delay=LIVE_DELAY[self._latency],
             target=start_target(self._latency) if learned is None else learned.target(0.0),
             extra=0.0,
+            https_first=bool(self._open_args.get("https_first")),
         )
 
     def _on_resumed(self, sid: str) -> None:

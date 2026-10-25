@@ -1639,6 +1639,22 @@ class ServerPartStopTests(unittest.TestCase):
         self.assertEqual(fetched, [f"s{n}.ts" for n in range(5)])
 
 
+class HttpsFirstTests(unittest.TestCase):
+    def test_a_session_asked_https_first_tries_https_then_plays_over_http(self):
+        # 2.7.1: the start's "https" reaches the source: its HTTPS attempt fails on a plain
+        # server, and the session plays over HTTP.
+        source_module._HTTPS_FAILED.clear()
+        self.addCleanup(source_module._HTTPS_FAILED.clear)
+        body = make_stream(4)
+        upstream = LocalSource({SECRET_PATH: (200, {"Content-Length": str(len(body))}, body)})
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        url = upstream.url + SECRET_PATH
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"https": True}))
+        helper.wait_for(lambda m: m == ("ready", "p"))
+        self.assertEqual(upstream.connections, 2)  # the HTTPS attempt, then HTTP
+
+
 class ArchivePartTests(unittest.TestCase):
     def test_an_archive_part_ends_at_the_buffers_time_of_day(self):
         # 2.7: a provider archive (raw TS: no media sequence to share) ends its input once

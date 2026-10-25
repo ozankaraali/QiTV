@@ -320,6 +320,12 @@ class SlotRoleTests(unittest.TestCase):
         self.assertEqual(kwargs["referrer"], "https://site.test/")
         self.assertNotIn("referrer", start_kwargs(LiveStart(URL, "UA/1", True), self.config))
 
+    def test_a_start_preferring_https_asks_https_first(self):
+        # 2.7.1: "Prefer HTTPS" reaches the helper; without it the arguments are as before.
+        kwargs = start_kwargs(LiveStart(URL, "UA/1", True, https=True), self.config)
+        self.assertIs(kwargs["https_first"], True)
+        self.assertNotIn("https_first", start_kwargs(LiveStart(URL, "UA/1", True), self.config))
+
     def test_start_kwargs_are_a_main_tunes(self):
         self.start_pipeline()
         kwargs = start_kwargs(LiveStart(URL, "QiTV", True), self.config)
