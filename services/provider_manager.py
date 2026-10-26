@@ -171,6 +171,22 @@ class ProviderManager(QObject):
         age = time.time() - refreshed_at
         return not 0 <= age < self.CONTENT_CACHE_TTL
 
+    def content_expired(self, content_type) -> bool:
+        """The saved content is the current provider's as set up now, only older than
+        CONTENT_CACHE_TTL (2.8: a film or series list then shows while it loads again)."""
+        if content_type not in self.current_provider_content:
+            return False
+        metadata = self.current_provider_content.get("_cache")
+        if not isinstance(metadata, dict):
+            return False
+        if metadata.get("identity") != self.provider_cache_identity(self.current_provider):
+            return False
+        timestamps = metadata.get("refreshed_at")
+        refreshed_at = timestamps.get(content_type) if isinstance(timestamps, dict) else None
+        if isinstance(refreshed_at, bool) or not isinstance(refreshed_at, (int, float)):
+            return False
+        return self.is_content_stale(content_type)
+
     def mark_content_fresh(self, content_type) -> None:
         """Mark only a successful root fetch; category persistence must not call this."""
         metadata = self._cache_metadata()

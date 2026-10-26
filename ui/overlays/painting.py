@@ -484,6 +484,23 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             ):
                 for x0, x1 in spans:
                     fill(_rrect(x0, y, x1 - x0, 0.14, 0.04))
+        elif name == "clapper":  # the Library (2.8): a clapperboard, its striped arm raised
+            line(_rrect(0.12, 0.44, 0.76, 0.42, 0.06))
+
+            def arm(t: float, dy: float = 0.0) -> tuple[float, float]:
+                return (0.12 + 0.74 * t, 0.36 - 0.22 * t + dy)
+
+            for t0, t1 in ((0.0, 0.26), (0.37, 0.63), (0.74, 1.0)):
+                fill(
+                    _poly(
+                        [
+                            arm(t0 + 0.08),
+                            arm(t1 + 0.08 if t1 < 1 else t1),
+                            arm(t1, 0.11)[:2],
+                            arm(t0, 0.11),
+                        ]
+                    )
+                )
         elif name == "file":  # Open file: a page with a folded corner and a play mark
             page = QPainterPath(QPointF(0.22, 0.1))
             page.lineTo(0.58, 0.1)

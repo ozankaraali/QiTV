@@ -46,6 +46,10 @@ others' distributions, which may have malware.**
   What you hid leaves Recent and Continue, locked or not.
 - **New for Xtream films and series.** The Library's New shelf and Recently added sort now
   know when an Xtream provider added each film and series.
+- **The Library in one click, and without waiting.** The player controls have a Library button
+  (a clapperboard, as Ctrl/⌘+2) that opens Movies, or the section you opened last. An Xtream
+  provider's and a media server's film and series lists load ahead once the provider is
+  ready, and a list past its six hours shows at once while the new one loads behind it.
 - **Film and series details from TMDB.** Where your provider leaves a film or a series without
   a poster (or with one that doesn't load), a story, a year, a running time, a genre, a rating
   or a cast, the Library shows TMDB's, in QiTV's language; the strip now names the cast too.

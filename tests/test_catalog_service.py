@@ -71,6 +71,11 @@ class FakeProviders:
     def is_content_stale(self, ct):
         return ct in self.stale
 
+    other_identity = False  # the saved content is for other settings of the provider
+
+    def content_expired(self, ct):
+        return ct in self.stale and ct in self.current_provider_content and not self.other_identity
+
     def mark_content_fresh(self, ct):
         self.stale.discard(ct)
 

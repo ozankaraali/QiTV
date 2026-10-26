@@ -614,6 +614,28 @@ class OnScreenKeysTests(unittest.TestCase):
         lefts = [t.button_rect(n).left() for n in ("previous", "guide", "search", "volume")]
         self.assertEqual(lefts, sorted(lefts))
 
+    def test_live_tv_opens_the_library_in_one_click(self):  # 2.8: no climb up the list
+        t = self.make()
+        t.show_live("One", "News at six")
+        rect = t.button_rect("movies")
+        self.assert_big_enough(rect, "movies")
+        self.assertEqual(t.tooltip_at(rect.center()), key_hint("Movies and series", "Ctrl+2"))
+        spy = QSignalSpy(t.moviesRequested)
+        self.click(t, rect.center())
+        self.assertEqual(spy.count(), 1)
+        # ⟲ ▦ 🎬 ⌕: beside Search, on its left
+        lefts = [t.button_rect(n).left() for n in ("previous", "guide", "movies", "search")]
+        self.assertEqual(lefts, sorted(lefts))
+        self.assertTrue(t.hole_claims().contains(rect.center().toPoint()))
+
+    def test_a_film_has_the_library_button_unless_it_came_from_there(self):
+        t = self.make()
+        t.show_vod("A local file", "")
+        t.update_position(0, 100_000)
+        self.assertIn("movies", t._layout())
+        t.set_library_available(True)  # "‹ Library" goes back to where it came from
+        self.assertNotIn("movies", t._layout())
+
     def test_a_movie_has_search_but_not_the_channel_buttons(self):
         t = self.make()
         t.show_vod("Film", "")

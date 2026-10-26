@@ -2150,6 +2150,22 @@ class LibraryReturnTests(WindowCase):
         self.assertFalse(self.window.windowFlags() & Qt.WindowType.FramelessWindowHint)
 
 
+class LibraryButtonTests(WindowCase):  # 2.8: the Library in one click from the TV
+    def test_the_player_controls_open_the_library_at_the_section_used_last(self):
+        self.show()
+        self.wait_for_drawer()
+        screens = self.window.screens
+        self.window.overlays.transport.moviesRequested.emit()
+        self.assertTrue(screens.library_shown())
+        self.assertEqual(screens.library_controller.section, "movies")
+        screens.open_library("series")
+        screens.back_to_tv()
+        self.assertFalse(screens.library_shown())
+        self.window.overlays.transport.moviesRequested.emit()
+        self.assertTrue(screens.library_shown())
+        self.assertEqual(screens.library_controller.section, "series")
+
+
 class DrawerSettingsTests(WindowCase):
     def test_the_drawer_reaches_settings_and_add_provider_with_arrows_and_enter(self):
         self.show()

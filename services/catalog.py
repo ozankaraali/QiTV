@@ -56,6 +56,9 @@ EMPTY_LINK_MESSAGE = N_("The portal returned an empty link")
 # Catalog network jobs (sections, groups, seasons, episodes) running at once per service:
 # portals rate-limit, and some ban a MAC that opens many connections.
 MAX_CATALOG_JOBS = 2
+# 2.8: a ready provider's film and series lists load this long after it, ahead of the Library
+# (its channels and guide go first).
+LOAD_AHEAD_MS = 5_000
 
 # --- failure messages shown to the user ---------------------------------------------------
 # Worker errors are exception texts that can carry URLs, query strings and credentials
@@ -453,12 +456,15 @@ class CatalogService(QObject):
         self._catalog_inflight: dict[tuple, str] = {}
         self._catalog_handlers: dict[str, tuple[Callable, Callable]] = {
             "section": (self._on_section_loaded, self._on_section_error),
+            # 2.8: a list loading behind a saved one, or ahead of the Library
+            "section_behind": (self._on_section_loaded, self._on_section_behind_error),
             "group": (self._on_group_loaded, self._on_group_error),
             "seasons": (self._on_seasons_loaded, self._on_seasons_error),
             "episodes": (self._on_episodes_loaded, self._on_episodes_error),
         }
         self._link_ids = link_ids if link_ids is not None else itertools.count(1)
         self._closed = False  # shutdown(): nothing starts or reports any more
+        self._waited_sections: set[str] = set()  # asked for with nothing saved to show (2.8)
 
     # --- providers -------------------------------------------------------------------
     def provider_names(self) -> list[str]:
@@ -591,6 +597,32 @@ class CatalogService(QObject):
         self.providerReady.emit(self._ready_provider)
         self._request_epg(job.data[1])
         self._pump_catalog()
+        if self._loads_behind(self.provider_type()):
+            generation = self._generation
+            QTimer.singleShot(LOAD_AHEAD_MS, self, lambda: self._load_ahead(generation))
+
+    @staticmethod
+    def _loads_behind(ptype: str) -> bool:
+        """Whether a provider's film and series lists load behind what shows (2.8): an Xtream
+        panel's and a media server's, each a whole list (a portal loads its genres one by
+        one; a playlist has none)."""
+        return ptype == "XTREAM" or is_media_server(ptype)
+
+    def _load_ahead(self, generation: int) -> None:
+        """Load the ready provider's film and series lists that are missing or past their
+        time, before the Library asks: it opens on them at once."""
+        if self._closed or generation != self._generation or self._setup_active():
+            return
+        for section in ("movies", "series"):
+            if section not in self.sections():
+                continue
+            content = self._content(section)
+            ct = SECTION_CONTENT_TYPES[section]
+            if self._usable(content) and not self.provider_manager.is_content_stale(ct):
+                continue
+            self._request_catalog(
+                ("section", section), "section_behind", section, self._section_worker
+            )
 
     def _on_provider_error(self, job: _Job, message: str) -> None:
         if self._next_state_job() or job.generation != self._generation:
@@ -737,6 +769,19 @@ class CatalogService(QObject):
             self._emit_later(self.sectionReady, section)
             return
         provider, ptype = self.current_provider(), self.provider_type()
+        if (
+            not force
+            and section != "live"
+            and self._loads_behind(ptype)
+            and self._usable(content)
+            and self._expired(ct)
+        ):
+            # 2.8: the saved list shows now; the new one takes its place once loaded.
+            self._emit_later(self.sectionReady, section)
+            self._request_catalog(
+                ("section", section), "section_behind", section, self._section_worker
+            )
+            return
         if ptype == "M3USTREAM":
             item = {
                 "id": 1,
@@ -756,7 +801,13 @@ class CatalogService(QObject):
         if ptype not in ("M3UPLAYLIST", "XTREAM", "STB") and not is_media_server(ptype):
             self._fail_later(self.sectionFailed, section, f"Unsupported provider: {ptype}")
             return
+        self._waited_sections.add(section)
         self._request_catalog(("section", section), "section", section, self._section_worker)
+
+    def _expired(self, ct: str) -> bool:
+        """The saved content is this provider's as set up now, only past its time."""
+        expired = getattr(self.provider_manager, "content_expired", None)
+        return bool(expired(ct)) if callable(expired) else False
 
     def _section_worker(self, section: str) -> QObject:
         provider, ptype = self.current_provider(), self.provider_type()
@@ -780,11 +831,20 @@ class CatalogService(QObject):
 
     def _on_section_loaded(self, job: _Job, payload) -> None:
         section = job.data
+        self._waited_sections.discard(section)
         self._store_section(SECTION_CONTENT_TYPES[section], payload)
         self.sectionReady.emit(section)
 
     def _on_section_error(self, job: _Job, message: str) -> None:
+        self._waited_sections.discard(job.data)
         self._fail(self.sectionFailed, job.data, message)
+
+    def _on_section_behind_error(self, job: _Job, message: str) -> None:
+        """A list loading behind failed: the saved one stays, quietly; told only when the
+        Library asked for it meanwhile with nothing saved to show."""
+        logger.info("A %s list couldn't load in the background", job.data)
+        if job.data in self._waited_sections:
+            self._on_section_error(job, message)
 
     def _store_section(self, ct: str, payload) -> None:
         self._stamp_content(payload)

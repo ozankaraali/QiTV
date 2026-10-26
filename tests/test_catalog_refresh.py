@@ -62,6 +62,19 @@ class ProviderCacheTests(unittest.TestCase):
             self.assertTrue(manager.is_content_stale("itv"))
             self.assertFalse(manager.is_content_stale("series"))
 
+    def test_only_a_list_past_its_time_for_these_settings_is_expired(self):  # 2.8
+        manager = self.manager
+        with patch("services.provider_manager.time.time", return_value=1000):
+            manager.current_provider_content = {"vod": {"categories": []}}
+            manager.mark_content_fresh("vod")
+            self.assertFalse(manager.content_expired("vod"))  # fresh
+        later = 1000 + manager.CONTENT_CACHE_TTL
+        with patch("services.provider_manager.time.time", return_value=later):
+            self.assertTrue(manager.content_expired("vod"))  # shown while it loads again
+            self.assertFalse(manager.content_expired("series"))  # never saved
+            manager.providers[0]["url"] = "https://example.test/other"
+            self.assertFalse(manager.content_expired("vod"))  # another account's list
+
     def test_same_name_connection_change_rejects_cached_channels(self):
         manager = self.manager
         manager.current_provider_content = {"itv": {"contents": [{"name": "Old"}]}}

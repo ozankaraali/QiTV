@@ -28,7 +28,8 @@ above it and the subtitles button the Subtitles panel (ui/track_controls.py), an
 button beside them the Picture panel (ui/picture_controls.py): the controls stay up while one
 shows (`hold`).
 Without a keyboard every key of the player has a control here too: left of the speaker sit
-Search, and on live TV the guide and the previous channel; a time-shifted channel at its live
+Search, the Library (2.8, a clapperboard; not beside "‹ Library"), and on live TV the guide and
+the previous channel; a time-shifted channel at its live
 edge has ◀10 beside play; on live TV the channel's name (and logo) shows its info, and a star
 after the name adds or removes it from the favorites. Each names its key when hovered. A movie
 or an episode played from the Library has "‹ Library" at the left of the right-hand buttons:
@@ -154,6 +155,8 @@ KEY_HINTS = {
     "previous": (N_("Previous channel"), "Backspace"),
     "guide": (N_("Guide"), "G"),  # i18n: tooltip; the programme guide (EPG)
     "search": (N_("Search"), "Ctrl+F"),  # i18n: tooltip of the search button (verb)
+    # i18n: tooltip of the button that opens the Library (2.8)
+    "movies": (N_("Movies and series"), "Ctrl+2"),
     "title": (N_("Channel info"), "I"),  # i18n: tooltip of the channel's name and logo
     "library": (N_("Back to the Library"), "Esc"),
     # 2.2: each opens a panel whose − and + are these keys.
@@ -170,7 +173,7 @@ RECORD_KEY = "R"  # record the channel, or stop recording (2.2)
 # i18n: tooltip of the record button (and a toast) on a channel played without time-shift
 NO_RECORDING = N_("Can't record: this channel plays without time-shift")
 # button name -> painting icon, if they differ
-_ICONS = {"mini": "mini_player", "pip": "pip", "previous": "recent"}
+_ICONS = {"mini": "mini_player", "pip": "pip", "previous": "recent", "movies": "clapper"}
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
 # A quick second click (a double-click) repeats these steps; on any other control it counts
 # once: a toggle (★, ⛶, ▶) would undo itself, a jump (⟲, Next) go one further.
@@ -178,6 +181,7 @@ _REPEATS = ("back10", "fwd10", "fwd60", "slower", "faster")
 _ICON_BUTTONS = (  # painted as icons
     "previous",
     "guide",
+    "movies",
     "search",
     "subtitles",
     "picture",
@@ -361,6 +365,7 @@ class Transport(Overlay):
     infoRequested = Signal()  # the channel's name: its info (the banner)
     favoriteRequested = Signal()  # the star after the name: add or remove the channel
     libraryRequested = Signal()  # ‹ Library: back to the Library the title came from (Esc)
+    moviesRequested = Signal()  # 2.8: the Library, from what plays (Ctrl+2)
     recordRequested = Signal()  # the record button: record the channel, or stop (2.2)
     bandChanged = Signal()  # its controls changed (a mode, the bar): controls_top() moved
 
@@ -1073,14 +1078,20 @@ class Transport(Overlay):
         before a text gives way: the multiview's chips, the Stay live indicator or the speed
         chip's − and +."""
         rects, crowded = self._layout_at(_ICON_GAP_U)
-        if crowded or self._grid_chips_short(rects) or self._squeezed(rects):
-            return self._layout_at(_TIGHT_GAP_U)[0]
+        if not (crowded or self._grid_chips_short(rects) or self._squeezed(rects)):
+            return rects
+        rects, crowded = self._layout_at(_TIGHT_GAP_U)
+        if "movies" in rects and (
+            crowded or self._grid_chips_short(rects) or self._squeezed(rects)
+        ):
+            # 2.8: the Library button gives way first (Ctrl+2 and the channel list open it).
+            return self._layout_at(_TIGHT_GAP_U, library=False)[0]
         return rects
 
     def _squeezed(self, rects: dict[str, QRectF]) -> bool:
         """The Stay live indicator went without a part of its text (or altogether), or the
-        speed chip without its − and +."""
-        if "speed" in rects and "slower" not in rects:
+        speed chip without its − and + (or altogether: 2.8, the Library button gives way)."""
+        if ("speed" in rects or self._shows_bar()) and "slower" not in rects:
             return True
         variants = self._indicator_variants() if self._timeshift and not self._shows_bar() else []
         if not variants:
@@ -1102,9 +1113,10 @@ class Transport(Overlay):
             return True
         return self._grid_restorable and "restore" not in rects
 
-    def _layout_at(self, icon_gap: float) -> tuple[dict[str, QRectF], bool]:
-        """The rects with `icon_gap` (u) between the icons, and whether the chips at their left
-        (LIVE, Go live, ‹ Library) run into the buttons at the row's left."""
+    def _layout_at(self, icon_gap: float, library: bool = True) -> tuple[dict[str, QRectF], bool]:
+        """The rects with `icon_gap` (u) between the icons (without the Library button unless
+        `library`), and whether the chips at their left (LIVE, Go live, ‹ Library) run into the
+        buttons at the row's left."""
         un = Units(self.width())
         left, right = un.px(3), self.width() - un.px(3)
         bottom = self.height() - un.px(3)
@@ -1141,7 +1153,9 @@ class Transport(Overlay):
             # As wide as its word in a longer language ("EN VIVO"), never narrower than LIVE's.
             badge = QFontMetricsF(self._live_font(un)).horizontalAdvance(_live_label())
             pill_w = max(float(un.px(5.2)), badge + un.px(1.6))
-            buttons = self._right_buttons("picture", "subtitles", "audio", "volume")
+            buttons = self._right_buttons(
+                "picture", "subtitles", "audio", "volume", library=library
+            )
             floor = left_end + pill_w + un.px(0.4)  # the LIVE badge keeps its room
             x = self._put_right(rects, un, buttons, cy, floor, icon_gap)
             rects["live"] = QRectF(x - pill_w - un.px(0.4), cy - un.px(1.1), pill_w, un.px(2.2))
@@ -1174,7 +1188,7 @@ class Transport(Overlay):
             x = self._put_right(
                 rects,
                 un,
-                self._right_buttons("picture", "audio", "volume", "subtitles"),
+                self._right_buttons("picture", "audio", "volume", "subtitles", library=library),
                 cy,
                 room,
                 icon_gap,
@@ -1287,12 +1301,19 @@ class Transport(Overlay):
             return False
         return chip.width() >= self._layout_chip_width(Units(self.width()), True) - 0.5
 
-    def _right_buttons(self, *rest: str) -> tuple[str, ...]:
+    def _right_buttons(self, *rest: str, library: bool = True) -> tuple[str, ...]:
         """The icon buttons from the right edge inwards: the window's and the picture's, the
-        sound's (`rest`), then Search and, on live TV, the guide and the previous channel."""
+        sound's (`rest`), then Search, the Library (2.8; not beside "‹ Library", which goes
+        back to it) and, on live TV, the guide and the previous channel."""
         grid = ("grid",) if self._grid_available and self._live else ()
         pip = ("pip",) if self._pip_available and self._live and not self._grid_shown else ()
-        tv = ("search", "guide", "previous") if self._live else ("search",)
+        shown = library and not (self._library and not self._live)
+        library_button = ("movies",) if shown else ()
+        tv = (
+            ("search", *library_button, "guide", "previous")
+            if self._live
+            else ("search", *library_button)
+        )
         cast = ("cast",) if self._cast_available else ()
         return ("fullscreen", "mini", *pip, *grid, *cast, "external", *rest, *tv)
 
@@ -1893,6 +1914,8 @@ class Transport(Overlay):
                 self.castRequested.emit(self.mapToGlobal(rect.topLeft().toPoint()))
             elif name == "search":
                 self.searchRequested.emit()
+            elif name == "movies":
+                self.moviesRequested.emit()
             elif name == "guide":
                 self.guideRequested.emit()
             elif name == "previous":
