@@ -264,6 +264,14 @@ class ProviderFlow(QObject):
         self._foreign_timer.stop()
         if wanted and last is None:
             self._start_foreign(self._foreign_channel(name))
+        if "live" not in self.catalog.sections():
+            # 2.8: a Jellyfin or Emby server lists no channels: its Movies and Series rows.
+            self.nav.focus_source(name or self.catalog.current_provider_name())
+            self._autotune = None
+            self._end_loading()
+            if self._foreign is None and not self._in_library:
+                self._open_drawer_if_idle()  # (the last channel of another, else the list)
+            return
         self._await_live = True
         if last is not None:
             self.nav.reset_to("live", last[1])

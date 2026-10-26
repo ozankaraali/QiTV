@@ -1653,6 +1653,20 @@ class StartupTests(ControllerTestCase):
         self.assertEqual(self.drawer.named("open_drawer"), [(None, "left")])
         self.assertEqual([(n.layer, n.key) for n in self.nav.path], [("source", "Home")])
 
+    def test_a_provider_without_live_channels_lists_its_sections_without_an_error(self):  # 2.8
+        # A Jellyfin or Emby server chosen for the TV: its Movies and Series rows, no Live TV.
+        self.catalog.sections = lambda: ["movies", "series"]
+        self.controller.start()
+        self.catalog.hub_ready("Home")
+        self.assertEqual([(n.layer, n.key) for n in self.nav.path], [("source", "Home")])
+        self.assertNotIn(("section", "live"), self.catalog.requests)
+        self.assertEqual(self.toast.messages(), [])
+        self.assertIsNone(self.toast.hint)  # "Loading Home…" ends with its setup
+        self.assertEqual(len(self.drawer.named("open_drawer")), 1)  # nothing plays: the list
+        self.controller.handle(Action.OPEN_DRAWER)  # the list opened again: still there
+        self.assertEqual([(n.layer, n.key) for n in self.nav.path], [("source", "Home")])
+        self.assertNotIn(("section", "live"), self.catalog.requests)
+
     def test_live_section_failure_opens_the_drawer_with_a_hint(self):
         self.controller.start()
         self.catalog.loaded = False  # nothing saved to fall back on

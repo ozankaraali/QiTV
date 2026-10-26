@@ -105,7 +105,7 @@ class TVPages(QObject):
         )
         self.library_controller.notice.connect(self.notify)
         window.library_catalog.providerFailed.connect(self._on_provider_failed)
-        window.overlays.drawer.libraryRequested.connect(self.open_library)
+        window.overlays.drawer.libraryRequested.connect(self.open_from_list)
 
     # ---- pages --------------------------------------------------------------------------------
 
@@ -196,6 +196,16 @@ class TVPages(QObject):
         self.recordings.refresh()  # read again: a recording made meanwhile shows (2.8)
         self._enter_library()
         self.library_controller.open(section)
+        self._guard_second_click()
+
+    def open_from_list(self, section: str) -> None:
+        """The channel list's Movies or Series row: the Library of the provider the list shows
+        (2.8; Ctrl/⌘+2, the menu and the list's Library button keep the Library's own)."""
+        if self._window.closing():
+            return
+        self.recordings.refresh()
+        self._enter_library()
+        self.library_controller.open_on(self._window.catalog.source(), section)
         self._guard_second_click()
 
     def open_search(self, query: str = "") -> None:

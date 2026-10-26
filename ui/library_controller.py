@@ -347,6 +347,16 @@ class LibraryController(QObject):
             self._on_model_changed()
         self._focus("grid")
 
+    def open_on(self, provider: str, section: str) -> None:
+        """Show Movies or Series of `provider` (a provider's name, or All providers): the
+        channel list's rows open the Library on the provider they are listed under (2.8). An
+        empty or unknown one keeps the Library's own source."""
+        if self._closed:
+            return
+        if provider == ALL_PROVIDERS or provider in self._catalog.provider_names():
+            self._choose_source(provider)
+        self.open(section)
+
     def remote_search(self, query: str) -> None:
         """The phone remote's typing: the search shows and searches `query` as it is now."""
         if self._closed:

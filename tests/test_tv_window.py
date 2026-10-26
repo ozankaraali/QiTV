@@ -65,7 +65,7 @@ from tests.ts_fixtures import make_stream
 from ui.brand import logo_aspect
 from ui.keymap import SHORTCUTS, shortcut_keys
 from ui.overlay_host import OverlayHost
-from ui.overlays.drawer import ERROR_TEXT
+from ui.overlays.drawer import ERROR_TEXT, LIBRARY_ACTION
 from ui.overlays.zap_banner import BannerInfo
 from ui.page_stack import PageStack
 from ui.settings_dialog import OptionsDialog
@@ -2154,19 +2154,28 @@ class LibraryReturnTests(WindowCase):
 
 
 class LibraryButtonTests(WindowCase):  # 2.8: the Library in one click from the TV
-    def test_the_player_controls_open_the_library_at_the_section_used_last(self):
+    def test_the_channel_list_opens_the_library_at_the_section_used_last(self):
         self.show()
-        self.wait_for_drawer()
+        drawer = self.wait_for_drawer()
         screens = self.window.screens
-        self.window.overlays.transport.moviesRequested.emit()
+        drawer.actionRequested.emit(LIBRARY_ACTION)  # its header's Library button
         self.assertTrue(screens.library_shown())
         self.assertEqual(screens.library_controller.section, "movies")
         screens.open_library("series")
         screens.back_to_tv()
         self.assertFalse(screens.library_shown())
-        self.window.overlays.transport.moviesRequested.emit()
+        drawer.actionRequested.emit(LIBRARY_ACTION)
         self.assertTrue(screens.library_shown())
         self.assertEqual(screens.library_controller.section, "series")
+
+    def test_the_channel_lists_movies_row_opens_the_library_on_its_provider(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        screens = self.window.screens
+        with mock.patch.object(screens.library_controller, "open_on") as open_on:
+            drawer.libraryRequested.emit("movies")
+        open_on.assert_called_once_with(self.window.catalog.source(), "movies")
+        self.assertTrue(screens.library_shown())
 
 
 class DrawerSettingsTests(WindowCase):

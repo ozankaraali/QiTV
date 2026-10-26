@@ -1397,6 +1397,28 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.screen.genres.rows(), [])
 
 
+class OpenOnProviderTests(unittest.TestCase):  # 2.8: the list's Movies row is its provider's
+    setUp = LibraryControllerTests.setUp
+    build = LibraryControllerTests.build
+
+    def test_the_library_opens_on_the_provider_asked_for(self):
+        ctl = self.build()
+        ctl.open("movies")  # on P, its own source
+        ctl.open_on("Q", "series")
+        self.assertEqual(self.catalog.selected, ["Q"])
+        self.assertEqual(ctl.section, "series")
+        ctl.open_on("Q", "movies")  # already there: not asked again
+        self.assertEqual(self.catalog.selected, ["Q"])
+        self.assertEqual(ctl.section, "movies")
+
+    def test_an_unknown_or_no_provider_keeps_the_library_s_own(self):
+        ctl = self.build()
+        ctl.open_on("", "movies")
+        ctl.open_on("Gone", "movies")
+        self.assertEqual(self.catalog.selected, [])
+        self.assertEqual(ctl.section, "movies")
+
+
 class FakeTmdb(QObject):
     """Stands in for ui.tmdb_fill.TmdbFill: what it was asked for, and what it "knows" by
     title name ({"fields": {...}, "poster": url})."""

@@ -733,10 +733,6 @@ class TVWindow(QMainWindow):
         self.overlays.transport.searchRequested.connect(self.screens.open_search)
         # ‹ Library on the player controls: back to the Library a title came from, as Esc.
         self.overlays.transport.libraryRequested.connect(self.screens.back_to_library)
-        # 2.8: their Library button opens it at the section used last (Movies the first time).
-        self.overlays.transport.moviesRequested.connect(
-            lambda: self.screens.open_library(self.screens.library_controller.section or "movies")
-        )
         self.overlays.guide.searchRequested.connect(self.screens.open_search)
         # The corner player (the Library with what plays in a corner of it): ⤢ and a click on
         # it bring the player back, × stops it, the speaker mutes.

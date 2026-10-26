@@ -37,6 +37,7 @@ from ui.overlays.drawer import (
     EMPTY_TEXT,
     FIND_LIBRARY_TEXT,
     FIND_TOOLTIP,
+    LIBRARY_ACTION,
     LOADING_TEXT,
     PAD_SIDE_U,
     PREVIEW_DEBOUNCE_MS,
@@ -383,6 +384,20 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.actions, [SEARCH_ACTION])
         self.assertEqual(self.library, [])
         self.assertTrue(self.drawer.isVisible())  # the shell opens the search
+
+    def test_the_header_opens_the_library_in_one_click(self):  # 2.8: no climb to the sections
+        self.drawer.open_drawer("1")
+        self.record_hand_offs()
+        d = self.drawer
+        library, search, crumb = d.library_rect(), d.search_rect(), d.breadcrumb_text_rect()
+        self.assertLess(library.right(), search.left())  # ▤ ⌕ ↻ ⚙
+        self.assertAlmostEqual(library.center().y(), crumb.center().y(), delta=1)
+        self.assertLessEqual(crumb.right(), library.left())  # the names never run under it
+        hit = d.header_hit_rect(library)
+        self.assertGreaterEqual(min(hit.width(), hit.height()), 28)
+        self.assertEqual(d.tooltip_at(library.center()), key_hint("Movies and series", "Ctrl+2"))
+        self.click(library.center())
+        self.assertEqual(self.actions, [LIBRARY_ACTION])
 
     def test_the_header_buttons_take_clicks_over_28_px(self):
         self.drawer.open_drawer("1")

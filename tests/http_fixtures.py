@@ -14,6 +14,7 @@ from pathlib import Path
 import shutil
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -27,6 +28,17 @@ __all__ = [
     "leaf",
     "tls_server_context",
 ]
+
+
+class _QuietServer(ThreadingLoopbackHTTPServer):
+    """A fixture server that prints no traceback when its client went away: QiTV asks a
+    provider over HTTPS first and hangs up on a server that speaks HTTP only (its "bad
+    request" answer meets a closed socket). Other errors print as before."""
+
+    def handle_error(self, request, client_address) -> None:
+        if isinstance(sys.exception(), (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
 
 
 @contextmanager
@@ -120,7 +132,7 @@ class LocalSource:
                 except ConnectionError, ssl.SSLError:
                     pass
 
-        self.server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = _QuietServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         if tls:
             self.server.socket = tls.wrap_socket(self.server.socket, server_side=True)

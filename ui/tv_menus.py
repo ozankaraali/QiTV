@@ -34,7 +34,7 @@ from ui.free_channels_menu import (
     build_menu as build_free_channels_menu,
 )
 from ui.keymap import Action
-from ui.overlays.drawer import REFRESH_ACTION, SEARCH_ACTION
+from ui.overlays.drawer import LIBRARY_ACTION, REFRESH_ACTION, SEARCH_ACTION
 from ui.shortcuts_dialog import ShortcutsDialog
 from ui.update_dialogs import check_for_updates
 
@@ -353,7 +353,7 @@ class TVMenus(QObject):
 
     def on_drawer_action(self, row: str) -> None:
         """The drawer's Settings, Add provider, Free channels and Open file rows, and its
-        header's ⌕ and refresh buttons."""
+        header's Library, ⌕ and refresh buttons."""
         if row == SETTINGS_ROW:
             self._window.options_dialog()
         elif row == ADD_PROVIDER_ROW:
@@ -365,6 +365,9 @@ class TVMenus(QObject):
             self._window.screens.open_file()
         elif row == SEARCH_ACTION:
             self._window.screens.open_search()
+        elif row == LIBRARY_ACTION:  # 2.8: the section opened last, Movies the first time
+            screens = self._window.screens
+            screens.open_library(screens.library_controller.section or "movies")
         elif row == REFRESH_ACTION:
             self.refresh_content()
 

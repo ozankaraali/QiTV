@@ -124,6 +124,7 @@ GEAR_GAP_U = 0.7
 MIN_HIT_PX = 28  # the header's buttons take clicks over this square at least
 REFRESH_ACTION = "refresh"  # the header's refresh button: the provider's channels and guide
 SEARCH_ACTION = "search"  # the header's ⌕: the Library's search
+LIBRARY_ACTION = "library"  # 2.8: the header's Library button (Movies, or the section last open)
 BACK_BUTTON = "back"  # the header's ‹: a layer up
 _CRUMB = "crumb:"  # a name in the header, by its path index ("crumb:up": the elided head)
 SEPARATOR = " › "
@@ -167,6 +168,8 @@ _ACTION_ICONS = {
 }
 _HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key (see _hint)
     SEARCH_ACTION: (N_("Search"), "Ctrl+F"),  # i18n: a button's tooltip (verb)
+    # i18n: a button's tooltip: it opens the Library (2.8)
+    LIBRARY_ACTION: (N_("Movies and series"), "Ctrl+2"),
     REFRESH_ACTION: (N_("Refresh channels and guide"), "Ctrl+R"),
     SETTINGS_ROW: (N_("Settings"), "Ctrl+,"),
 }
@@ -227,6 +230,7 @@ class _Header:
     search: QRectF
     refresh: QRectF
     gear: QRectF
+    library: QRectF  # 2.8: left of Search
 
 
 @dataclass(frozen=True)
@@ -635,7 +639,7 @@ class Drawer(Overlay):
     playRequested = Signal(object, object, object)
     contextRequested = Signal(object, QPoint)  # node, global position
     # An action row (SETTINGS_ROW, ADD_PROVIDER_ROW, OPEN_FILE_ROW) or a header button
-    # (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION).
+    # (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION).
     actionRequested = Signal(str)
     libraryRequested = Signal(str)  # "movies" or "series", for the Library
     # A channel the find found (stamped with its provider), and the genre it is first listed in.
@@ -1239,7 +1243,7 @@ class Drawer(Overlay):
         event.accept()
         button = self._header_button_at(event.position())
         if event.button() == Qt.LeftButton and button is not None:
-            if button in (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION):
+            if button in (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION):
                 self.actionRequested.emit(button)
             elif button == FIND_ACTION:
                 self.start_find()
@@ -1326,6 +1330,8 @@ class Drawer(Overlay):
             return REFRESH_ACTION
         if hit(header.search).contains(point):
             return SEARCH_ACTION
+        if hit(header.library).contains(point):
+            return LIBRARY_ACTION
         if hit(header.back).contains(point):
             return BACK_BUTTON
         for index, _text, rect in header.names:
@@ -1481,9 +1487,10 @@ class Drawer(Overlay):
 
     def _header(self) -> _Header:
         """The left column's top row: ‹ at its left (but on the sources), then the names of
-        the left column's path, then Search, the refresh button and the Settings gear at its
-        right end. The names elide before they reach the buttons: the last one at its end, the
-        others ("the head") from their start, into one name that goes a layer up."""
+        the left column's path, then the Library (2.8), Search, the refresh button and the
+        Settings gear at its right end. The names elide before they reach the buttons: the
+        last one at its end, the others ("the head") from their start, into one name that goes
+        a layer up."""
         units = self._units
         col = self._columns["left"]
         side = units.px(PAD_SIDE_U)
@@ -1498,10 +1505,11 @@ class Drawer(Overlay):
         gear = QRectF(row.right() - size, top, size, size)
         refresh = QRectF(gear.left() - gap - size, top, size, size)
         search = QRectF(refresh.left() - gap - size, top, size, size)
+        library = QRectF(search.left() - gap - size, top, size, size)
         path = self._nav.path
         back = QRectF(row.x(), top, size, size) if len(path) > 1 else QRectF()
         x = back.right() + gap if not back.isEmpty() else row.x()
-        room = max(0.0, search.left() - gap - x)  # never under the buttons
+        room = max(0.0, library.left() - gap - x)  # never under the buttons
         fm = QFontMetrics(units.font(CRUMB_FONT_U))
         titles = [n.title for n in path[:-1]]
         names: list[tuple[int | None, str, QRectF]] = []
@@ -1527,7 +1535,7 @@ class Drawer(Overlay):
             names.append((len(titles) - 1, last, QRectF(x, row.y(), last_w, row.height())))
             x += last_w
         text = QRectF(start, row.y(), x - start, row.height())
-        return _Header(back, names, text, search, refresh, gear)
+        return _Header(back, names, text, search, refresh, gear, library)
 
     def breadcrumb_text_rect(self) -> QRectF:
         """Where the header's names are (drawer coordinates)."""
@@ -1545,6 +1553,10 @@ class Drawer(Overlay):
     def search_rect(self) -> QRectF:
         """⌕ (the Library's search), left of the refresh button (drawer coordinates)."""
         return self._header().search
+
+    def library_rect(self) -> QRectF:
+        """The Library button (2.8), left of ⌕ (drawer coordinates)."""
+        return self._header().library
 
     def refresh_rect(self) -> QRectF:
         """The refresh button (the provider's channels and guide), left of the gear."""
@@ -1576,6 +1588,7 @@ class Drawer(Overlay):
                 p.drawText(QRectF(rect.right(), rect.y(), after, rect.height()), align, SEPARATOR)
         buttons = (
             (BACK_BUTTON, header.back),
+            (LIBRARY_ACTION, header.library),
             (SEARCH_ACTION, header.search),
             (REFRESH_ACTION, header.refresh),
             (SETTINGS_ROW, header.gear),
@@ -1588,6 +1601,8 @@ class Drawer(Overlay):
                 draw_icon(p, "gear", rect, tone)
             elif key == SEARCH_ACTION:
                 draw_icon(p, "search", rect, tone)
+            elif key == LIBRARY_ACTION:
+                draw_icon(p, "clapper", rect, tone)
             elif key == BACK_BUTTON:
                 _draw_back(p, rect, tone)
             else:

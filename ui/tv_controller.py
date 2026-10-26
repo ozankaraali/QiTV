@@ -3231,6 +3231,8 @@ class TVController(QObject):
                 shown.group_key or self.zap.context.group_key,
                 shown.item,
             )
+        elif "live" not in self.catalog.sections():  # 2.8: a media server: its sections
+            self.nav.focus_source(self.catalog.current_provider_name())
         else:
             self.nav.reset_to("live", self.zap.context.group_key or ALL_GROUP_ID)
         channel = shown.item if shown is not None else self._channel or self.zap.context.current()
