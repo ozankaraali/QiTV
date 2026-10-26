@@ -698,10 +698,23 @@ class WatchHereTests(WindowCase):
         second = controller.resume_key(controller.title_target(films[1], "movie"))
         with mock.patch.object(self.window.watch, "update_position") as update:
             remote.bridge.post(Position("s8", 61000, 5400000, plays[0]))
-            remote.bridge.post(Position("s8", 1000, 3600000))  # no number: whose, unknown
             remote.bridge.post(Position("s8", 2000, 3600000, plays[1]))
             self.assertTrue(wait_until(lambda: update.called))
         update.assert_called_once_with(second, 2000, 3600000)
+
+    def test_a_page_from_before_play_numbers_keeps_its_positions(self):  # 2.8 review M6
+        """A page loaded before QiTV was updated says no play number: its reports are kept as
+        2.7 kept them (what plays now is the one it reports on)."""
+        self.connect()
+        remote, controller = self.window.remote, self.window.controller
+        film = {"id": 7, "name": "Harbour Lights", "cmd": "http://p.test/movie/u/p/7.mp4"}
+        handle = remote._library("s8").handles.issue("title", (film, "movie", None))
+        self.hand_off(film["cmd"], handle=handle)
+        key = controller.resume_key(controller.title_target(film, "movie"))
+        with mock.patch.object(self.window.watch, "update_position") as update:
+            remote.bridge.post(Position("s8", 1000, 3600000))
+            self.assertTrue(wait_until(lambda: update.called))
+        update.assert_called_once_with(key, 1000, 3600000)
 
     def test_a_channel_on_the_phone_keeps_no_position(self):
         self.connect()

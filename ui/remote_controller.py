@@ -707,9 +707,10 @@ class RemoteController(QObject):
     def _position(self, sid: str, position_ms: int, length_ms: int, play: int) -> None:
         """How far a phone got in the film or episode it plays: kept as the TV keeps its own,
         so the TV (and the Library's Continue) goes on from there. Only a report of the play
-        handed last: one made before a zap (on its way meanwhile) is another title's."""
+        handed last: one made before a zap (on its way meanwhile) is another title's. A page
+        from before 2.8 says no number (`play` -1): its reports are kept, as 2.7 kept them."""
         watched = self._watching.get(self._device(sid))
-        if watched is None or self._plays.get(self._device(sid)) != play:
+        if watched is None or play not in (-1, self._plays.get(self._device(sid))):
             return
         key = self._resume_key(watched[0])
         if key:
