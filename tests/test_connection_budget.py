@@ -227,14 +227,6 @@ class LearnedLimitTests(unittest.TestCase):
         self.b.learn("P", 3)
         self.assertEqual(self.b.cap("P", None), 1)
 
-    def test_free_counts_the_other_purposes(self):
-        self.b.request("P", 2, purpose="rec")
-        self.assertTrue(self.b.free("P", 2, purpose="main"))
-        self.b.request("P", 2, purpose="pip")
-        self.assertFalse(self.b.free("P", 2, purpose="main"))
-        self.assertTrue(self.b.free("P", 2, purpose="pip"))  # its own does not count
-        self.assertTrue(self.b.free("P", None, purpose="main"))
-
     def test_a_release_is_told(self):
         released = []
         self.b.released.connect(released.append)

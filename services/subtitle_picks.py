@@ -21,13 +21,13 @@ from dataclasses import dataclass
 import hashlib
 import logging
 import os
-import tempfile
 import threading
 import time
 from typing import Any, Callable, Mapping, Optional
 
 import orjson as json
 
+from services.atomic_write import atomic_write
 from services.next_episode import season_and_episode
 from services.redact import safe_message
 
@@ -219,20 +219,8 @@ class SubtitlePicks:
                 return
         path = self._path
         assert path is not None
-        temporary = None
         try:
-            fd, temporary = tempfile.mkstemp(
-                dir=os.path.dirname(path) or ".", prefix=".subtitle_picks-", suffix=".tmp"
-            )
-            with os.fdopen(fd, "wb") as f:
+            with atomic_write(path) as f:
                 f.write(json.dumps(snapshot))
-            os.replace(temporary, path)
-            temporary = None
         except Exception as e:  # anything else would stay in the Future, unseen
             _LOG.warning("Couldn't save the subtitle picks: %s", safe_message(e))
-        finally:
-            if temporary is not None:
-                try:
-                    os.remove(temporary)
-                except OSError:
-                    pass

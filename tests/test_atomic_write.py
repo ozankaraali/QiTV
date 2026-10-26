@@ -132,9 +132,22 @@ class SweepTests(unittest.TestCase):
             self.addCleanup(providers._cache_writer.shutdown, wait=True)
             epg = EpgManager(config, SimpleNamespace(current_provider={}))
             config_dir = config.get_config_dir()  # the config, and the channel stores beside it
+            cache = os.path.join(config_dir, "cache")  # 2.8: TMDB's cache is written there
             self.assertEqual(
-                written_dirs(config_dir), [config_dir, epg._cache_dir(), providers.provider_dir]
+                written_dirs(config_dir),
+                [config_dir, cache, epg._cache_dir(), providers.provider_dir],
             )
+
+    def test_each_downloaded_subtitles_folder_is_swept_too(self):  # 2.8
+        subtitles = self.dir / "subtitles"
+        folder = subtitles / "12345"
+        folder.mkdir(parents=True)
+        old = self.make(".Film.en-abcdefgh.tmp", 2 * STALE_AFTER_S, folder)
+        kept = self.make("Film.en.srt", 2 * STALE_AFTER_S, folder)
+        thread = sweep_in_background([], nested=[str(subtitles)])
+        thread.join(5)
+        self.assertFalse(old.exists())
+        self.assertTrue(kept.exists())
 
 
 if __name__ == "__main__":

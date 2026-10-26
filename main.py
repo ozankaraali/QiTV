@@ -77,9 +77,9 @@ def handle_replace_flag():
 
 def written_dirs(config_dir: str) -> list[str]:
     """Where QiTV writes files through services.atomic_write: the config (and the channel
-    stores beside it), the guide cache and the provider cache."""
+    stores beside it), the cache (TMDB's, 2.8), the guide cache and the provider cache."""
     cache = os.path.join(config_dir, "cache")
-    return [config_dir, os.path.join(cache, "epg"), os.path.join(cache, "provider")]
+    return [config_dir, cache, os.path.join(cache, "epg"), os.path.join(cache, "provider")]
 
 
 def _migrate_favorites(config_manager) -> None:
@@ -176,7 +176,9 @@ def main() -> int:
     provider_manager = ProviderManager(config_manager)
     epg_manager = EpgManager(config_manager, provider_manager)
     # Temporary files of writes killed midway, a day old, go (on a thread of their own).
-    sweep_in_background(written_dirs(config_manager.get_config_dir()))
+    sweep_in_background(  # each downloaded subtitle's folder too (2.8)
+        written_dirs(config_manager.get_config_dir()), nested=[config_manager.subtitles_dir()]
+    )
 
     if platform.system() == "Windows":
         myappid = f"com.ozankaraali.qitv.{get_app_version()}"

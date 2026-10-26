@@ -37,7 +37,6 @@ import datetime as _dt
 import logging
 import os
 import re
-import tempfile
 import threading
 from typing import Any, Iterable, Optional, Sequence
 import unicodedata
@@ -46,6 +45,7 @@ from urllib.parse import urljoin, urlsplit
 from PySide6.QtCore import QLocale, QObject, Signal, Slot
 
 from services import _build_keys, i18n
+from services.atomic_write import atomic_write
 from services.config_manager import get_app_version
 from services.i18n import N_, tr, tr_n, translate
 from services.jobs import cancel_requested
@@ -1277,19 +1277,10 @@ def subtitle_path(folder: str, file_id: int, name: str) -> str:
 
 
 def save_subtitle(path: str, content: bytes) -> None:
-    """Write `content` at `path` whole (a temporary file swapped in)."""
+    """Write `content` at `path` whole (`atomic_write`: a temporary file swapped in)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd, temporary = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".download-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(content)
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.remove(temporary)
-        except OSError:
-            pass
-        raise
+    with atomic_write(path) as f:
+        f.write(content)
 
 
 # ---- the jobs -----------------------------------------------------------------------------

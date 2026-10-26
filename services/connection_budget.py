@@ -72,14 +72,6 @@ class ConnectionBudget(QObject):
             return limit
         return learned if limit is None else min(limit, learned)
 
-    def free(self, provider_name: str, limit: Optional[int], *, purpose: str) -> bool:
-        """`purpose` could take a stream of `provider_name` beside the others' now."""
-        capped = self.cap(provider_name, limit)
-        if capped is None:
-            return True
-        others = [p for p in self.holders(provider_name) if p != purpose]
-        return len(others) < capped
-
     def limit_for(self, provider: dict[str, Any], xtream_max: Optional[int]) -> Optional[int]:
         """Streams allowed at once, under what was learned this run; None means unlimited."""
         return self.cap(str(provider.get("name", "")), self._given_limit(provider, xtream_max))
