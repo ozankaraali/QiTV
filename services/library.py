@@ -435,8 +435,11 @@ class LibraryCache(QObject):
         self.pending: set[tuple] = set()
         self.failed: set[tuple] = set()
         # Each list's last answer, by its key without the content version: what answers while
-        # the next version's is worked out.
-        self.latest: OrderedDict[tuple, Any] = OrderedDict()
+        # the next version's is worked out, with what parental controls hid when it was worked
+        # out (`lock_state()`): one from another state answers nothing (it may hold titles
+        # hidden now).
+        self.latest: OrderedDict[tuple, tuple[Any, Any]] = OrderedDict()
+        self.lock_state: Callable[[], Any] = lambda: None
         self.finds: OrderedDict[tuple, Any] = OrderedDict()  # what the finds found, by find
         # Counts the answers that were not the final ones (an earlier version's, or nothing
         # yet): what is built on one is not kept.
@@ -445,26 +448,35 @@ class LibraryCache(QObject):
     def start(self, keys: tuple, work: Callable[..., tuple], inputs: tuple) -> None:
         self.pending.update(keys)
         worker = LibraryWork(keys, work, inputs)
-        self.jobs.run_worker(worker, self._arrived, self._failed, context=keys)
+        self.jobs.run_worker(worker, self._arrived, self._failed, context=(keys, self.lock_state()))
 
-    def keep(self, key: tuple, value: Any) -> None:
-        """`value` for the memo's `key` (its content version last), the latest of its list."""
+    def keep(self, key: tuple, value: Any, state: Any) -> None:
+        """`value` for the memo's `key` (its content version last), the latest of its list
+        (worked out under the lock state `state`)."""
         _kept(self.memo, key, value, MEMO_SIZE)
-        _kept(self.latest, key[:-1], value, LATEST_KEPT)
+        _kept(self.latest, key[:-1], (state, value), LATEST_KEPT)
+
+    def stale(self, key: tuple, default: Any) -> Any:
+        """The latest list of the memo's `key` (an earlier content version's) if it was worked
+        out under today's lock state, else `default`."""
+        state, value = self.latest.get(key[:-1], (None, default))
+        return value if key[:-1] in self.latest and state == self.lock_state() else default
 
     def found(self, key: tuple, value: Any) -> None:
         _kept(self.finds, key, value, FINDS_KEPT)
 
-    def _arrived(self, keys: tuple, answers: dict) -> None:
+    def _arrived(self, context: tuple, answers: dict) -> None:
+        keys, state = context
         self.pending.difference_update(keys)
         for key, value in answers.items():
             if key[1] in _FINDS:
                 self.found(key, value)
             else:
-                self.keep(key, value)
+                self.keep(key, value, state)
         self.landed.emit(set(keys))
 
-    def _failed(self, keys: tuple, message: str) -> None:
+    def _failed(self, context: tuple, message: str) -> None:
+        keys, _state = context
         self.pending.difference_update(keys)
         self.failed.update(keys)
         logger.warning("The Library's %s could not be worked out (%s)", keys[0][1], message)
@@ -516,6 +528,7 @@ class LibraryModel(QObject):
         self._filler: Optional[Callable[[dict, str], dict]] = None
         # A JobRunner (`jobs`, or the shared cache's) works out a large section's lists.
         self.cache = cache if cache is not None else LibraryCache(jobs)
+        self.cache.lock_state = self._lock_state
         self.cache.landed.connect(self._on_landed)
         self._waiting: set[tuple] = set()  # the keys on their way this model answered without
         self._deferred: Optional[str] = None  # a section ready once its titles are worked out
@@ -770,7 +783,12 @@ class LibraryModel(QObject):
         cache.interim += 1
         if not stale:
             return interims
-        return tuple(cache.latest.get(key[:-1], interim) for key, interim in zip(keys, interims))
+        return tuple(cache.stale(key, interim) for key, interim in zip(keys, interims))
+
+    def _lock_state(self) -> Any:
+        """What parental controls hide now, as the catalog says (None: it says nothing)."""
+        state = getattr(self._catalog, "parental_state", None)
+        return state() if callable(state) else None
 
     def _final(self, ask: Callable[[], T]) -> tuple[T, bool]:
         """`ask()`, and whether its answer is the final one (no worker's still on its way)."""
@@ -1104,6 +1122,8 @@ class LibraryModel(QObject):
             return items
         if not final:
             return None  # the genre's titles come first
+        if self._genre in PINNED_TITLES:  # a shelf changes with the stars, not the version
+            return _having(items, self.folded_titles(), words)
         version = self._catalog.content_version()
         folded_key = self._key(("folded", self._section, self._genre, self.sort, version))
         key = (folded_key[0], "found", *folded_key[2:], text)
@@ -1111,7 +1131,7 @@ class LibraryModel(QObject):
         if key in cache.finds:
             cache.finds.move_to_end(key)
             return list(cache.finds[key])
-        if self._genre in PINNED_TITLES or not self._background(len(items), folded_key, key):
+        if not self._background(len(items), folded_key, key):
             found = _having(items, self.folded_titles(), words)
             cache.found(key, found)
             return list(found)
@@ -1132,7 +1152,7 @@ class LibraryModel(QObject):
         if full not in self._memo:
             if not final:  # the sorted list on its way brings them: an earlier one's meanwhile
                 self.cache.interim += 1
-                return dict(self.cache.latest.get(full[:-1], {})) if items else {}
+                return dict(self.cache.stale(full, {})) if items else {}
             if self._background(len(items), full):
                 return dict(self._later((full,), _letters_work, lambda: (items,), ({},), False)[0])
         return dict(self._memoized(key, lambda: _letters(items)))

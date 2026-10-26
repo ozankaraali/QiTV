@@ -190,6 +190,17 @@ class LibraryModelTests(unittest.TestCase):
         model, _ = build(plain)
         self.assertEqual([g.id for g in model.genres()], ["1"])
 
+    def test_a_find_in_a_pinned_shelf_follows_the_shelf(self):  # 2.8 review M2
+        # My list changes with the stars, not the content version: its find is not kept.
+        cat = FakeCatalog({"movies": [("1", "G", 2)]}, {("movies", "1"): [movie(1), movie(2)]})
+        model, cfg = build(cat)
+        item = movie(1)
+        model.toggle_favorite(item)
+        model.select_genre(MY_LIST)
+        self.assertEqual([i["name"] for i in model.find_in_genre("movie")], ["Movie 1"])
+        model.toggle_favorite(movie(2))
+        self.assertEqual([i["name"] for i in model.find_in_genre("movie")], ["Movie 1", "Movie 2"])
+
     def test_favorites_toggle(self):
         cat = FakeCatalog({"movies": [("1", "G", 2)]}, {("movies", "1"): [movie(1), movie(2)]})
         model, cfg = build(cat)
@@ -1164,6 +1175,23 @@ class BackgroundWorkTests(unittest.TestCase):
         key = ("P", "items", "movies", "1", model.sort, cat.version)
         self.assertTrue(wait_until(lambda: key in model.cache.memo))
         self.assertEqual(model.items(), before)
+
+    def test_a_list_from_before_a_parental_lock_never_answers_after_it(self):  # review M3
+        # The lock changes what is hidden (and the content version): until the worker's
+        # answer comes, nothing answers rather than the list from before (it may hold titles
+        # hidden now).
+        model, cat = self.opened()
+        cat.lock = 0
+        cat.parental_state = lambda: cat.lock
+        model.select_genre("1")
+        self.assertTrue(wait_until(lambda: model.items() is not None))
+        before = model.items()
+        cat.version += 1  # a content change of the same lock: the earlier list answers
+        self.assertEqual(model.items(), before)
+        self.assertTrue(wait_until(lambda: model.cache.pending == set()))
+        cat.lock, cat.version = 1, cat.version + 1  # locked
+        self.assertIsNone(model.items())
+        self.assertTrue(wait_until(lambda: model.items() is not None))
 
     def test_without_a_runner_everything_is_worked_out_here(self):
         added = OnThreads(library._added)

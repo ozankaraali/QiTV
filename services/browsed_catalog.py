@@ -334,6 +334,12 @@ class BrowsedCatalog(QObject):
             + (catalog.content_version() if catalog is not None else 0)
         )
 
+    def parental_state(self) -> int:
+        """What parental controls hide now (changes as content_version() does with them): a
+        Library list worked out under another state is never shown meanwhile."""
+        guard = self._parental()
+        return guard.state_version() if guard is not None else 0
+
     def _all_version(self) -> int:
         """Changes whenever the content of any provider (or the provider list) does."""
         names = self.mixed_names()

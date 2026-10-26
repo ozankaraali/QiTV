@@ -177,10 +177,11 @@ class BrowsedCatalogTests(unittest.TestCase):
         view.select_provider()
         for channel in view.items("live", "Sports"):
             channel["tv_genre_id"] = "Sports"  # its group, as M3U and Xtream channels name it
-        before = view.content_version()
+        before, state = view.content_version(), view.parental_state()
         all_count = len(view.items("live", ALL_GROUP_ID))
         guard.hide_group("live", "Demo TV", "Sports")
         self.assertNotEqual(view.content_version(), before)  # the lists rebuild
+        self.assertNotEqual(view.parental_state(), state)  # and none from before answers
         self.assertEqual([g.title for g in view.groups("live") if g.id == "Sports"], [])
         self.assertEqual(view.items("live", "Sports"), [])
         self.assertEqual(len(view.items("live", ALL_GROUP_ID)), all_count - 12)
