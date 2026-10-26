@@ -1,4 +1,5 @@
 import os
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -7,8 +8,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import wait_until
 
 from services import library
+from services.jobs import JobRunner
 from services.library import (
     CONTINUE,
     MY_LIST,
@@ -1049,3 +1052,152 @@ class RecordingsShelfTests(unittest.TestCase):
         cat = FakeCatalog({"movies": [("1", "Drama", 1)]}, {("movies", "1"): [movie(1)]})
         model = self.model(cat, FakeRecordings())
         self.assertEqual([g.id for g in model.genres()], ["1"])
+
+
+class OnThreads:
+    """A spy: how often `function` ran on the GUI thread and on the others."""
+
+    def __init__(self, function):
+        self.function = function
+        self.gui = self.workers = 0
+        self.lock = threading.Lock()
+
+    def __call__(self, *args, **kwargs):
+        with self.lock:
+            if threading.current_thread() is threading.main_thread():
+                self.gui += 1
+            else:
+                self.workers += 1
+        return self.function(*args, **kwargs)
+
+
+class BackgroundWorkTests(unittest.TestCase):
+    """A large section (BACKGROUND_FROM titles and more): its titles each once, the newest, a
+    genre's sorted list and its letters, and its finds are worked out by a worker; the GUI
+    thread applies them. The answers are the ones worked out on the GUI thread for a small
+    one."""
+
+    def setUp(self):
+        self.items = [
+            movie(i, f"Título {300 - i}", added=str(1700000000 + (i * 7919) % 300))
+            for i in range(300)
+        ]
+        self.groups = {"movies": [("1", "Big", 300), ("2", "Small", 3)]}
+        self.lists = {("movies", "1"): self.items, ("movies", "2"): self.items[:3]}
+        self.jobs = JobRunner()
+        patch = mock.patch.object(library, "BACKGROUND_FROM", 100)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def model(self, jobs=True):
+        cfg = make_config()
+        cat = FakeCatalog(self.groups, self.lists)
+        model = LibraryModel(cat, cfg, WatchState(cfg), jobs=self.jobs if jobs else None)
+        self.addCleanup(model.deleteLater)
+        return model, cat
+
+    def opened(self, jobs=True):
+        model, cat = self.model(jobs)
+        model.set_section("movies")
+        cat.sectionReady.emit("movies")
+        if jobs:
+            self.assertTrue(wait_until(lambda: model.ready))
+        return model, cat
+
+    def test_a_large_sections_titles_are_worked_out_by_a_worker(self):
+        added = OnThreads(library._added)
+        with mock.patch.object(library, "_added", added):
+            model, cat = self.model()
+            changed = []
+            model.changed.connect(lambda: changed.append(model.ready))
+            model.set_section("movies")
+            cat.sectionReady.emit("movies")
+            self.assertFalse(model.ready)  # on their way: opened once they are
+            self.assertTrue(wait_until(lambda: model.ready))
+            genres = model.genres()
+        self.assertEqual((added.gui, added.workers >= 300), (0, True))
+        self.assertTrue(changed[-1])
+        small, _cat = self.opened(jobs=False)
+        self.assertEqual(genres, small.genres())
+        self.assertEqual(model.genre_id, NEW)  # the first shelf, as on the GUI thread
+        self.assertEqual(model.items(), small.items())
+
+    def test_a_large_genre_is_sorted_by_a_worker(self):
+        az = OnThreads(library._az_key)
+        small, _cat = self.opened(jobs=False)
+        model, _cat = self.opened()
+        with mock.patch.object(library, "_az_key", az):
+            for each in (model, small):
+                each.select_genre("1")
+                each.set_sort(Sort.AZ)
+            self.assertIsNone(model.items())  # on its way
+            self.assertEqual(model.letter_index(), {})
+            self.assertTrue(wait_until(lambda: model.items() is not None))
+            gui = az.gui
+            self.assertEqual(model.items(), small.items())
+        self.assertEqual((gui, az.gui - gui), (0, 300))  # then the small model's, here
+        self.assertEqual(model.letter_index(), small.letter_index())
+        self.assertEqual(model.folded_titles(), [])  # on its way
+        self.assertTrue(wait_until(lambda: model.folded_titles()))
+        self.assertEqual(model.folded_titles(), small.folded_titles())
+        for sort in (Sort.ADDED, Sort.YEAR, Sort.RATING):
+            model.set_sort(sort)
+            small.set_sort(sort)
+            self.assertTrue(wait_until(lambda: model.items() is not None))
+            self.assertEqual(model.items(), small.items(), sort)
+
+    def test_meanwhile_the_last_lists_answer_and_the_shelf_stays(self):
+        """The content changed (another list loaded): until the worker's answer comes, the
+        lists worked out before answer; the shelf shown stays."""
+        model, cat = self.opened()
+        model.select_genre("1")
+        self.assertTrue(wait_until(lambda: model.items() is not None))
+        before = model.items()
+        model.select_genre(NEW)
+        shelf = model.items()
+        cat.version += 1
+        cat.groupReady.emit("movies", "2")
+        self.assertEqual(model.genre_id, NEW)
+        self.assertEqual(model.items(), shelf)
+        model.select_genre("1")
+        self.assertEqual(model.items(), before)  # the earlier version's, meanwhile
+        key = ("P", "items", "movies", "1", model.sort, cat.version)
+        self.assertTrue(wait_until(lambda: key in model.cache.memo))
+        self.assertEqual(model.items(), before)
+
+    def test_without_a_runner_everything_is_worked_out_here(self):
+        added = OnThreads(library._added)
+        with mock.patch.object(library, "_added", added):
+            model, _cat = self.opened(jobs=False)
+            self.assertTrue(model.ready)
+            model.genres()
+        self.assertEqual(added.workers, 0)
+
+    def test_a_find_in_the_section_is_worked_out_by_a_worker(self):
+        folds = OnThreads(library.fold)
+        small, _cat = self.opened(jobs=False)
+        model, _cat = self.opened()
+        with mock.patch.object(library, "fold", folds):
+            self.assertIsNone(model.find_titles("título 1"))  # on its way
+            self.assertTrue(wait_until(lambda: model.find_titles("título 1") is not None))
+            self.assertIsNone(model.find_titles("título 12"))  # the next letter: a worker's too
+            self.assertTrue(wait_until(lambda: model.find_titles("título 12") is not None))
+        self.assertLess(folds.gui, 10)  # the find's own text, not 300 titles
+        self.assertGreaterEqual(folds.workers, 300)
+        self.assertEqual(model.find_titles("título 12"), small.find_titles("título 12"))
+        self.assertTrue(model.find_titles("título 1"))
+
+    def test_a_find_in_a_genre_is_worked_out_by_a_worker(self):
+        folds = OnThreads(library.fold)
+        small, _cat = self.opened(jobs=False)
+        model, _cat = self.opened()
+        for each in (model, small):
+            each.select_genre("1")
+        self.assertTrue(wait_until(lambda: model.items() is not None))
+        with mock.patch.object(library, "fold", folds):
+            self.assertIsNone(model.find_in_genre("título 2"))
+            self.assertTrue(wait_until(lambda: model.find_in_genre("título 2") is not None))
+        self.assertLess(folds.gui, 10)
+        self.assertEqual(model.find_in_genre("título 2"), small.find_in_genre("título 2"))
+        self.assertTrue(model.find_in_genre("título 2"))
+        self.assertEqual(model.find_in_genre(""), model.items())

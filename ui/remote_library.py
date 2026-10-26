@@ -2,12 +2,14 @@
 titles a page at a time. GUI thread only.
 
 Each phone browses with its own LibraryModel, so the phone leaves the TV's Library where it is,
-over the TV's cache: a genre the TV sorted is not sorted again (a large one takes a second).
-The find box searches the level shown, the whole of it, and goes on with the desktop Library's
-search (services.search through a SearchSession the phones share): every provider's films or
-series from their saved lists, read in a worker, the shown provider's first; after the genres
-it matches, or after the genre's own titles. Genres travel as short keys and titles
-as handles: nothing a phone receives names a stream, a link or a provider's own ids.
+over the TV's cache: a genre the TV sorted is not sorted again (a large one takes a second, a
+worker's: the cache's JobRunner sorts, folds and finds a large section off the GUI thread, and
+the page comes again once it has). The find box searches the level shown, the whole of it, and
+goes on with the desktop Library's search (services.search through a SearchSession the phones
+share): every provider's films or series from their saved lists, read in a worker, the shown
+provider's first; after the genres it matches, or after the genre's own titles. Genres travel
+as short keys and titles as handles: nothing a phone receives names a stream, a link or a
+provider's own ids.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from PySide6.QtCore import QObject, QTimer
 from services.library import Genre, LibraryCache, LibraryModel, title_of
 from services.navigation import item_key
 from services.provider_ids import ALL_PROVIDERS, provider_of
-from services.search import Hit, search_index
+from services.search import Hit
 from services.text_fold import fold
 from ui.remote_snapshots import Handles, find_page, stable_key
 
@@ -221,22 +223,19 @@ class PhoneLibrary(QObject):
             shown["count"] = genre.count
         return shown
 
-    def _found(self, items: list[dict], find: str) -> list[dict]:
-        words = fold(find).split()  # every word, in any order: as the desktop search
-        if not words:
-            return items
-        titles = self.model.folded_titles()  # the shared cache's, beside the sorted list
-        return [i for i, title in zip(items, titles) if all(w in title for w in words)]
-
     def _titles_page(self, page: int) -> tuple[dict, tuple]:
         model, find = self.model, self._find()
         items = model.items()
-        found = self._found(items, find) if items is not None else []
+        # Every word, in any order (as the desktop search), in the shared cache's folded titles
+        # beside the sorted list; a large genre's found by a worker (None meanwhile).
+        found = model.find_in_genre(find) if items is not None else []
+        searching = found is None
+        found = found or []
         own = len(found)  # the genre's own; the others the find finds follow them
-        searching = False
         if items is not None and find.strip():
             listed = {(provider_of(i), item_key(i)) for i in items}
-            hits, searching = self._everywhere(find)
+            hits, more = self._everywhere(find)
+            searching = searching or more
             found = found + [
                 h.item for h in hits if (provider_of(h.item), item_key(h.item)) not in listed
             ]
@@ -279,19 +278,16 @@ class PhoneLibrary(QObject):
     def _everywhere(self, find: str) -> tuple[list[Hit], bool]:
         """The desktop search's films or series (the section shown) at every provider for
         `find`, the shown provider's first, and whether they are still on their way: meanwhile
-        the shown provider's own, found here at once."""
+        the shown provider's own (a large section's found by a worker)."""
         if not find.strip():
             return [], False
-        local = search_index(self.model.search_index(), find)  # the shown provider's, at once
         searcher = self._searcher
-        if searcher is None:
-            return local, False
-        if searcher.query != find:
-            if not self._claiming:  # another search holds it (the phone's Search, say)
-                return local, False
-            searcher.set_query(find)
-        if searcher.searching or searcher.hits is None:
-            return local, True  # every provider's follow
+        if searcher is not None and searcher.query != find and self._claiming:
+            searcher.set_query(find)  # (another search may hold it: the phone's Search, say)
+        following = searcher is not None and searcher.query == find  # every provider's follow
+        if not following or searcher.searching or searcher.hits is None:
+            local = self.model.find_titles(find)  # the shown provider's, meanwhile
+            return local or [], following or local is None
         words = fold(find).split()
         section = self.model.section
         hits = [

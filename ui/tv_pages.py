@@ -80,6 +80,7 @@ class TVPages(QObject):
             window.watch,
             self,
             recordings=self.recordings,
+            jobs=window.jobs,  # a large section's lists are worked out off the GUI thread
         )
         # 2.8: TMDB fills in what the Library's titles lack (Settings turns it off).
         self.tmdb = TmdbFill(
