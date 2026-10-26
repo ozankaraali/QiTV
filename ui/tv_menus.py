@@ -221,8 +221,9 @@ class TVMenus(QObject):
         add(help_menu, tr("Keyboard Shortcuts…"), "", self.show_shortcuts)
         add(help_menu, tr("Report an Issue…"), "", self.report_issue)
         catalog = window.catalog
-        catalog.providerReady.connect(lambda _name: self.rebuild_providers())
-        catalog.providerFailed.connect(lambda _name, _message: self.rebuild_providers())
+        # Bound slots: Qt lets go of them with this object (a lambda would outlive it).
+        catalog.providerReady.connect(self._on_providers_changed)
+        catalog.providerFailed.connect(self._on_providers_changed)
 
     def _add_action(
         self,
@@ -288,6 +289,9 @@ class TVMenus(QObject):
             action.setEnabled(enabled)
 
     # ---- providers ----------------------------------------------------------------------------
+
+    def _on_providers_changed(self, *_args: object) -> None:
+        self.rebuild_providers()
 
     def rebuild_providers(self) -> None:
         """One checkable entry per provider, after "All providers" when there are two or more
