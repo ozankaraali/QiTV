@@ -16,6 +16,11 @@ session offers where the user was (`LiveSession.backOffered`): the Resume pill
 (ui/overlays/back_notice.py) says when for `BACK_NOTICE_MS`, until the channel changes; a click,
 Enter or the phone's Resume plays on from there (`go_back`).
 
+The live ⚙ (2.8): a channel whose HLS stream comes in several picture sizes (the helper names
+them, `LiveSession`'s timeline carries them) offers them; the sizes are kept per channel for
+the run, so the ⚙ stays while a new size opens. A size chosen there tunes the channel again
+(TVController.change_live_quality); where the user was is then played on at once, not offered.
+
 Recording (2.2): R and the record button record the time-shifted channel being watched from
 where it plays (rewound or not) into the Recordings folder (`services.recording`), or stop
 it; the record button is lit and the REC chip counts while the large picture's channel
@@ -110,11 +115,15 @@ def stream_options(item: dict, catalog: Any = None) -> dict[str, Any]:
 
 
 def reopen_options(player, item: dict, catalog: Any = None) -> dict[str, Any]:
-    """An ended stream opened again in `player`: the channel's options, and software decoding
-    when its open decoded in software (a channel whose picture froze before, or since)."""
+    """An ended stream opened again in `player`: the channel's options, software decoding
+    when its open decoded in software (a channel whose picture froze before, or since), and the
+    size cap its open asked VLC for (2.8, the live ⚙)."""
     options = stream_options(item, catalog)
     if player.decodes_in_software():
         options["software"] = True
+    cap = player.max_height()
+    if cap > 0:
+        options["max_height"] = cap
     return options
 
 
@@ -165,6 +174,7 @@ class LiveControls(QObject):
         archive_allowed: Callable[[], bool] = lambda: True,
         runner: Any = None,
         back_notice: Callable[[], Any] = lambda: None,
+        on_sizes: Callable[[], None] = lambda: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`explain(item, title)` asks why the failure just toasted happened at the item's
@@ -173,8 +183,14 @@ class LiveControls(QObject):
         first). Catch-up: `memory` keeps whether each channel's archive answered (None: for
         this run only), `prepare(session, target)` readies the player for a channel before
         its archive opens, `archive_allowed()` says whether archives may play now, `runner`
-        runs the archive probes (a JobRunner by default)."""
+        runs the archive probes (a JobRunner by default). `on_sizes()`: the channel's picture
+        sizes came, or an archive started or ended (2.8: the ⚙ may show or go)."""
         super().__init__(parent)
+        self._on_sizes = on_sizes
+        # 2.8: each channel's picture sizes as last seen this run (by its key), and whether the
+        # next place offered is played on at once (a size chosen in the ⚙).
+        self._sizes: dict[str, dict] = {}
+        self._back_at_once = False
         self._back_notice = back_notice  # 2.6: the Resume pill (None: none)
         self._back: Optional[float] = None  # where the user was, while it is offered
         self._back_label: Optional[str] = None
@@ -267,6 +283,11 @@ class LiveControls(QObject):
     def _on_back_offered(self, t: float, wall: float) -> None:
         if self._closed():
             return
+        if self._back_at_once:  # 2.8: a new size of the channel goes on where the user was
+            self._back_at_once = False
+            self._back = t
+            self.go_back()
+            return
         self._back = t
         self._back_label = fmt_clock(datetime.fromtimestamp(wall, timezone.utc).astimezone())
         notice = self._back_notice()
@@ -316,6 +337,7 @@ class LiveControls(QObject):
     def new_target(self) -> None:
         """A new target plays: the old channel's ticks, reopen and archive are gone, and so is
         the Resume pill (2.6)."""
+        self._back_at_once = False
         self.forget_back()
         self._forget_channel()
         self.catchup.reset()
@@ -443,7 +465,7 @@ class LiveControls(QObject):
         referrer = str(target.item.get("referrer") or "")
         xtream = item_provider.provider_type(self.catalog, target.item) == "XTREAM"
         https = not known_http_only(url) and not (xtream and url.startswith("http://"))
-        return LiveStart(url, user_agent, verify_ssl, channel, referrer, https)
+        return LiveStart(url, user_agent, verify_ssl, channel, referrer, https, target.max_height)
 
     def pipeline_live(self) -> bool:
         """The current channel plays from the time-shift buffer."""
@@ -552,10 +574,35 @@ class LiveControls(QObject):
         if self._transport.isVisible():
             self.show_live_transport(current)  # the time-shift bar, or plain live
 
+    # ---- 2.8: the live ⚙ ----------------------------------------------------------------------
+    def sizes(self, target: Target) -> Optional[dict]:
+        """The channel's picture sizes when it has two or more: {"heights" (largest first),
+        "height" (the playing one's, 0: not named), "max_height" (the cap, 0: none)}."""
+        found = self._sizes.get(self.catchup.key(target))
+        if found is None or len(found["heights"]) < 2:
+            return None
+        return dict(found, heights=list(found["heights"]))
+
+    def go_back_when_offered(self) -> None:
+        """The channel opens again in another size: where the user was is played on at once."""
+        self._back_at_once = True
+
+    def _note_sizes(self, current: Target, state: dict) -> None:
+        heights = state.get("heights")
+        if not isinstance(heights, list):
+            return
+        self._sizes[self.catchup.key(current)] = {
+            "heights": [int(h) for h in heights],
+            "height": int(state.get("height") or 0),
+            "max_height": int(state.get("max_height") or 0),
+        }
+        self._on_sizes()
+
     def _on_live_timeline(self, state: dict) -> None:
         current = self._current()
         if self._closed() or not self._tuner.running() or current is None or not current.live:
             return
+        self._note_sizes(current, state)
         # 2.7: the channel's own server keeps more (a provider archive's part is not that)
         if "window_start" in state and not state.get("archive_part"):
             now = self._now().timestamp()
@@ -573,6 +620,7 @@ class LiveControls(QObject):
         current = self._current()
         if self._closed() or current is None or not current.live:
             return
+        self._on_sizes()  # 2.8: an archive has no sizes to choose
         state = self.catchup.timeline()
         if state is None:
             return

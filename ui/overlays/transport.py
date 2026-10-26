@@ -621,7 +621,8 @@ class Transport(Overlay):
 
     def set_quality_available(self, available: bool) -> None:
         """The ⚙ quality menu's button (2.8): shown during a film or an episode whose server
-        offers versions or conversions; never on live TV."""
+        offers versions or conversions, and on a channel whose stream comes in several picture
+        sizes (the controller says which)."""
         if available != self._quality:
             self._quality = available
             self.update()
@@ -1308,13 +1309,13 @@ class Transport(Overlay):
 
     def _right_buttons(self, *rest: str, extras: bool = True) -> tuple[str, ...]:
         """The icon buttons from the right edge inwards: the window's and the picture's, the
-        sound's (`rest`), the ⚙ quality menu (2.8, a film's or an episode's, with `extras`),
-        then Search and, on live TV, the guide and the previous channel."""
+        sound's (`rest`), the ⚙ quality menu (2.8, with `extras`), then Search and, on live
+        TV, the guide and the previous channel."""
         grid = ("grid",) if self._grid_available and self._live else ()
         pip = ("pip",) if self._pip_available and self._live and not self._grid_shown else ()
         tv = ("search", "guide", "previous") if self._live else ("search",)
         cast = ("cast",) if self._cast_available else ()
-        quality = ("quality",) if self._quality and extras and not self._live else ()
+        quality = ("quality",) if self._quality and extras else ()
         return ("fullscreen", "mini", *pip, *grid, *cast, "external", *rest, *quality, *tv)
 
     def seek_rect(self) -> QRectF:

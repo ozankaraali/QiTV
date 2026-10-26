@@ -1,15 +1,20 @@
 """The ⚙ quality menu (2.8): a Jellyfin or Emby title's versions, each as its file is, and the
-server's conversions below the version playing.
+server's conversions below the version playing; a channel's picture sizes, when its stream
+comes in several (Auto, its best, first).
 
 The transport's ⚙ (shown while such a title plays: TVController sets it) opens the panel above
 it, as the Picture panel opens (ui/overlays/track_panel.py). A row plays the title again in
 that quality, on from where it is (`choose`: TVController.change_quality). The first conversion
 chosen on a server asks first, on its own question card: converting uses the server's
 processor, which its owner may not want. QiTV never converts unless asked here.
+
+A channel's size (`LiveSize`) goes to `choose_live`: TVController.change_live_quality tunes
+the channel again with that cap, and the channel keeps it for its next tunes.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 from typing import Any, Callable, Optional
 
@@ -35,6 +40,17 @@ CONVERT_QUESTION = N_(
 )
 CONVERT_YES = N_("Convert")  # i18n: the answer that converts
 CONVERT_NO = N_("Keep the original")  # i18n: the answer that plays the file as it is
+# i18n: the ⚙ panel's first row on a channel: its best picture size, as its stream offers
+AUTO_ROW = N_("Auto (best)")
+# i18n: a toast: a channel's picture size cannot change while it records
+SIZE_WHILE_RECORDING = N_("Stop the recording to change the picture size")
+
+
+@dataclass(frozen=True)
+class LiveSize:
+    """A channel's ⚙ row (2.8): the size cap its streams open with, in lines (0: its best)."""
+
+    max_height: int = 0
 
 
 def rate_text(bitrate: int) -> str:
@@ -83,11 +99,15 @@ class QualityControls(QObject):
         current: Callable[[], Optional[Any]],
         menu: Callable[[dict], Optional[dict]],
         choose: Callable[[ms.Quality], None],
+        live_menu: Callable[[], Optional[dict]] = lambda: None,
+        choose_live: Callable[[int], None] = lambda max_height: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`panel` is a TrackPanel, `card` a QuestionCard of its own; `current()` is what plays
         (a Target), `menu(item)` what its server offers ({"versions", "quality"}: the
-        catalog's media_menu), `choose(quality)` plays it again in that quality."""
+        catalog's media_menu), `choose(quality)` plays it again in that quality. On a channel,
+        `live_menu()` is its sizes ({"heights", "height", "max_height"}: LiveControls.sizes)
+        and `choose_live(max_height)` tunes it again with that cap."""
         super().__init__(parent)
         self._panel = panel
         self._transport = transport
@@ -95,6 +115,8 @@ class QualityControls(QObject):
         self._current = current
         self._menu = menu
         self._choose = choose
+        self._live_menu = live_menu
+        self._choose_live = choose_live
         self._warned: set[str] = set()  # servers whose question was answered yes
         self._pending: Optional[tuple[str, ms.Quality]] = None  # the conversion asked about
 
@@ -147,12 +169,17 @@ class QualityControls(QObject):
 
     def _offered(self) -> Optional[dict]:
         target = self._current()
-        if target is None or getattr(target, "live", False):
+        if target is None:
             return None
+        if getattr(target, "live", False):
+            sizes = self._live_menu()
+            return sizes if sizes and len(sizes.get("heights") or ()) >= 2 else None
         data = self._menu(target.item)
         return data if data and data.get("versions") else None
 
     def _model(self, data: dict) -> PanelModel:
+        if "heights" in data:
+            return self._sizes_model(data)
         playing = data.get("quality") or ms.Quality()
         versions = list(data.get("versions") or [])
         rows = [
@@ -173,6 +200,20 @@ class QualityControls(QObject):
                     key=quality, text=conversion_text(quality), checked=playing.same_as(quality)
                 )
             )
+        return PanelModel(title=translate(QUALITY_TITLE), rows=tuple(rows))
+
+    @staticmethod
+    def _sizes_model(sizes: dict) -> PanelModel:
+        """A channel's rows: Auto, then each size, largest first. The cap is ticked; one kept
+        from another day that names no size the channel has now ticks the size playing."""
+        heights = [int(h) for h in sizes["heights"]]
+        cap, height = int(sizes.get("max_height") or 0), int(sizes.get("height") or 0)
+        ticked = cap if cap == 0 or cap in heights else height
+        rows = [PanelRow(key=LiveSize(0), text=translate(AUTO_ROW), checked=ticked == 0)]
+        rows += [
+            PanelRow(key=LiveSize(h), text=size_text(h, h >= 2160), checked=ticked == h)
+            for h in heights
+        ]
         return PanelModel(title=translate(QUALITY_TITLE), rows=tuple(rows))
 
     def _anchor(self) -> Optional[QRectF]:
@@ -197,6 +238,12 @@ class QualityControls(QObject):
     # ---- choices ------------------------------------------------------------------------
 
     def _on_row(self, key: Any) -> None:
+        if isinstance(key, LiveSize) and self._transport.held() == QUALITY:
+            sizes = self._offered()
+            self.close()
+            if sizes is not None and key.max_height != int(sizes.get("max_height") or 0):
+                self._choose_live(key.max_height)
+            return
         if not isinstance(key, ms.Quality) or self._transport.held() != QUALITY:
             return
         data = self._offered()

@@ -253,6 +253,7 @@ class PlaybackSession(QObject):
         self._hardware = hardware
         self._clock = clock
         self._software = False  # this media decodes in software
+        self._max_height = 0  # 2.8: the size cap its open asked VLC for
         self._froze_url: Optional[str] = None  # the stream whose picture froze here
         self._frozen = FrozenPicture()
         self._had_vout = False  # VLC made a video output for one of this player's media
@@ -379,6 +380,11 @@ class PlaybackSession(QObject):
         it, or its picture froze (a reopen of the stream passes it on)."""
         return self._software
 
+    def max_height(self) -> int:
+        """The size cap the media playing (or the last one opened) asked VLC for (2.8; 0:
+        none): a reopen of the stream passes it on."""
+        return self._max_height
+
     # --- output -----------------------------------------------------------------------
     def set_window(self, win_id: int) -> None:
         # Sets a variable on the player, without its input lock: allowed during a job.
@@ -403,15 +409,22 @@ class PlaybackSession(QObject):
         start_ms: Optional[int] = None,
         referrer: Optional[str] = None,
         software: bool = False,
+        max_height: int = 0,
     ) -> None:
         """`software`: decode this stream in software (with hardware decoding; a channel
-        whose picture froze before)."""
+        whose picture froze before). `max_height` (2.8): VLC's own HLS plays no variant
+        taller (`max_height()` tells a reopen)."""
         if self._released:
             return
         self._cancel_pending()
         self._url, self._kind = url, kind
+        self._max_height = max(0, int(max_height))
         self._options = media_options(
-            kind, latency=latency, user_agent=user_agent, referrer=referrer
+            kind,
+            latency=latency,
+            user_agent=user_agent,
+            referrer=referrer,
+            max_height=self._max_height,
         )
         self._start_ms = start_ms if start_ms and start_ms > 0 else None
         self._stalls, self._restarted = 0, False
@@ -1156,6 +1169,8 @@ class Session(Protocol):
 
     def decodes_in_software(self) -> bool: ...
 
+    def max_height(self) -> int: ...
+
     def set_window(self, win_id: int) -> None: ...
 
     def play(
@@ -1168,6 +1183,7 @@ class Session(Protocol):
         start_ms: Optional[int] = None,
         referrer: Optional[str] = None,
         software: bool = False,
+        max_height: int = 0,
     ) -> None: ...
 
     def stop(self) -> None: ...
@@ -1270,6 +1286,9 @@ class NullSession(QObject):
     def decodes_in_software(self) -> bool:
         return False
 
+    def max_height(self) -> int:
+        return 0
+
     def set_window(self, win_id: int) -> None:
         pass
 
@@ -1283,6 +1302,7 @@ class NullSession(QObject):
         start_ms: Optional[int] = None,
         referrer: Optional[str] = None,
         software: bool = False,
+        max_height: int = 0,
     ) -> None:
         self.errorOccurred.emit(translate(NO_VLC_MESSAGE))
 

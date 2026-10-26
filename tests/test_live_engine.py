@@ -394,6 +394,20 @@ class ParkResumeTests(unittest.TestCase):
         engine.open_session(URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB)
         self.assertEqual(len(commands.get_nowait()), 7)  # without it, as before
 
+    def test_a_size_cap_reaches_the_helper_on_an_open_and_a_resume(self):
+        # 2.8, the live ⚙: the user's cap for an HLS master's variants.
+        engine, commands = self.engine()
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB, max_height=720
+        )
+        self.assertEqual(commands.get_nowait()[7], {"max_height": 720})
+        engine.resume_session(sid, URL_FOR_RING, headers={}, verify_ssl=True, max_height=720)
+        self.assertEqual(commands.get_nowait()[5:], (6.0, {"max_height": 720}))
+        engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB, max_height=0
+        )
+        self.assertEqual(len(commands.get_nowait()), 7)  # no cap: as before
+
     def test_parked_and_resumed_keep_the_view(self):
         engine, _ = self.engine()
         engine._sessions["s"] = engine_module._View()

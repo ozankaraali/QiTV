@@ -27,7 +27,10 @@ field of version 1, so 2.0.x reads 2.1's file (it ignores the field): one that m
 sense, or would not change the next tune (`Learned.informative`), is left out on its own,
 and an entry left with nothing is none. A 2.0.2 `extra` stays as it was: `LearnedTarget` reads it as
 a prior. Software decoding (2.1) is an optional field too, written only when it is so: 2.0.x reads
-an entry with it as without it. A write that fails is logged (without its path or any address).
+an entry with it as without it. So is the user's size cap (2.8, the live ⚙: `max_height`, the
+lines of the largest HLS variant to play), written only when there is one; a cap is the
+user's choice, so it outlasts learned entries when the file is full. A write that fails is
+logged (without its path or any address).
 """
 
 from __future__ import annotations
@@ -56,6 +59,7 @@ RATE_LOCK_S = 24 * 60 * 60  # a lock older than this is tried again
 DIRECT_S = 24 * 60 * 60  # so is a channel played directly
 SOFTWARE_S = 24 * 60 * 60  # and one decoded in software
 _VERSION = 1  # 2.1's learned target is an optional field: 2.0.x still reads the file
+MAX_LINES = 4320  # the largest size cap kept (8K's lines)
 _MIN_HOURS = 1e-6  # a learned target's hours of playing are more than nothing
 # What lasts a while, with when it was set and for how long: (flag, its time's key, seconds).
 _FLAGS = (
@@ -74,6 +78,7 @@ class Tuning:
     direct: bool = False  # it crawled through the pipeline even at 1x: play it directly
     learned: Optional[Learned] = None  # its learned target (2.1), if any
     software: bool = False  # hardware decoding froze its picture: decode it in software
+    max_height: int = 0  # 2.8: the user's size cap for its HLS variants (0: the best)
 
 
 def channel_key(provider: str, item: Mapping[str, Any]) -> str:
@@ -124,6 +129,11 @@ def _learned(value: Any) -> Optional[dict[str, Any]]:
     return fields
 
 
+def _lines(value: Any) -> int:
+    """A stored size cap: whole lines up to `MAX_LINES`, else 0 (none)."""
+    return value if type(value) is int and 0 < value <= MAX_LINES else 0
+
+
 def _entry(value: Any) -> Optional[dict[str, Any]]:
     """A stored entry as written by `remember()`; None when it is not one. A learned target
     that makes no sense is left out on its own."""
@@ -138,13 +148,17 @@ def _entry(value: Any) -> Optional[dict[str, Any]]:
         return None
     if not isinstance(software, bool):
         return None
-    if extra is None and not locked and not direct and learned is None and not software:
+    cap = _lines(value.get("max_height"))  # a wrong one is left out on its own
+    lessons = (extra is not None, locked, direct, learned is not None, software, cap)
+    if not any(lessons):
         return None
     entry = {"extra": extra, "rate_locked": locked, "direct": direct, "used": used}
     if learned is not None:
         entry["learned"] = learned
     if software:
         entry["software"] = True
+    if cap:
+        entry["max_height"] = cap
     for flag, at, _lasts in _FLAGS:
         if entry.get(flag):
             when = value.get(at, used)  # without its time: when it was learned
@@ -185,6 +199,7 @@ class LiveTuning(ChannelStore):
             direct,
             Learned(**learned) if learned else None,
             software=software,
+            max_height=entry.get("max_height", 0),
         )
 
     def remember(self, key: str, tuning: Tuning) -> None:
@@ -204,8 +219,9 @@ class LiveTuning(ChannelStore):
                     "hold": what.hold,
                 }
             )
+        cap = _lines(tuning.max_height)
         lessons = (tuning.extra is not None, tuning.rate_locked, tuning.direct, tuning.software)
-        if not any(lessons) and not learned:
+        if not any(lessons) and not learned and not cap:
             if self._entries.pop(key, None) is None:
                 return
         else:
@@ -220,6 +236,8 @@ class LiveTuning(ChannelStore):
                 entry["learned"] = learned
             if tuning.software:
                 entry["software"] = True  # only when it is so (2.0.x reads it as without)
+            if cap:
+                entry["max_height"] = cap  # 2.8: only when there is one
             # A lock (or direct play, or software decoding) still in force keeps its time;
             # else it counts from now.
             for flag, at, lasts in _FLAGS:
@@ -233,14 +251,15 @@ class LiveTuning(ChannelStore):
 
     def _trim(self, now: Optional[float] = None) -> None:
         """Drop the entries beyond the cap: the least recently learned first, those with a
-        locked rate, direct play or software decoding still in force last."""
+        locked rate, direct play or software decoding still in force, or a size cap, last."""
         excess = len(self._entries) - self._max
         if excess > 0:
             when = self._now() if now is None else now
 
             def worth(key: str) -> tuple[bool, float]:
                 entry = self._entries[key]
-                return any(_in_force(entry, when)), entry["used"]
+                kept = any(_in_force(entry, when)) or "max_height" in entry
+                return kept, entry["used"]
 
             for key in sorted(self._entries, key=worth)[:excess]:
                 del self._entries[key]

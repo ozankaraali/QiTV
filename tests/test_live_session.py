@@ -188,6 +188,8 @@ class FakeEngine(QObject):
         part_media=None,
         until_dropped=None,
         secure=None,
+        heights=None,
+        height=0,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -231,6 +233,8 @@ class FakeEngine(QObject):
             self._snapshots[sid]["until_dropped"] = until_dropped
         if secure is not None:  # 2.7.1: its stream came over HTTPS
             self._snapshots[sid]["secure"] = secure
+        if heights is not None:  # 2.8: an HLS master's picture sizes, the playing one's
+            self._snapshots[sid].update(heights=list(heights), height=height)
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def receive(self, sid, count):
@@ -286,6 +290,7 @@ class FakePlayback(QObject):
         self.current = PlaybackState.IDLE
         self.fail_on_play = False
         self.http = []  # (user_agent, referrer) of each play
+        self.caps = []  # the size cap of each play (2.8)
 
     def play(
         self,
@@ -297,9 +302,11 @@ class FakePlayback(QObject):
         start_ms=None,
         referrer=None,
         software=False,
+        max_height=0,
     ):
         self.plays.append((url, kind, latency))
         self.http.append((user_agent, referrer))
+        self.caps.append(max_height)
         self.software.append(software)
         self.ms = 0
         self.set_state(PlaybackState.OPENING)
@@ -6613,6 +6620,102 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertAlmostEqual(self.timelines[-1]["position"], 30.0)
         self.live.seek_relative(-10.0)
         self.assertAlmostEqual(self.timelines[-1]["position"], 18.0)  # the segment holding 20
+
+
+class SizeCapTests(LiveSessionCase):
+    """2.8, the live ⚙: an HLS channel's picture sizes reach the timeline, and the user's cap
+    reaches every stream the session opens and stays the channel's."""
+
+    playing = ServerWindowTests.playing
+    SPANS = ServerWindowTests.SPANS
+
+    def setUp(self):
+        super().setUp()
+        self.store = LiveTuning(None)
+        self.live = self.make(tuning=self.store)
+
+    def begin(self, **kwargs):
+        kwargs.setdefault("latency", "normal")
+        self.live.start(
+            URL,
+            headers={},
+            verify_ssl=True,
+            user_agent="QiTV-Test",
+            disk=False,
+            max_bytes=128 * MiB,
+            channel="c",
+            **kwargs,
+        )
+        return self.engine.last_sid
+
+    def test_the_timeline_names_the_sizes_and_the_cap(self):
+        sid = self.begin(max_height=720)
+        self.engine.buffer(sid, self.SPANS, hls=True, heights=[1080, 720, 360], height=720)
+        self.engine.sessionReady.emit(sid)
+        self.live._emit_timeline()
+        state = self.timelines[-1]
+        self.assertEqual(
+            (state["heights"], state["height"], state["max_height"]), ([1080, 720, 360], 720, 720)
+        )
+        self.assertEqual(self.live.max_height(), 720)
+
+    def test_without_sizes_the_timeline_names_none(self):
+        sid = self.begin()
+        self.engine.buffer(sid, self.SPANS, hls=True)
+        self.engine.sessionReady.emit(sid)
+        self.live._emit_timeline()
+        self.assertNotIn("heights", self.timelines[-1])
+
+    def test_a_cap_is_remembered_for_the_channel(self):
+        self.begin(max_height=720)
+        self.assertEqual(self.engine.opened[-1][2]["max_height"], 720)
+        self.assertEqual(self.store.get("c").max_height, 720)
+        self.live.stop()
+        self.engine.answer()
+        self.begin()  # the channel's next tune
+        self.assertEqual(self.engine.opened[-1][2]["max_height"], 720)
+        self.live.stop()
+        self.engine.answer()
+        self.begin(max_height=0)  # back to the best
+        self.assertNotIn("max_height", self.engine.opened[-1][2])
+        self.assertEqual(self.store.get("c").max_height, 0)
+
+    def test_what_the_channel_teaches_keeps_its_cap(self):
+        self.begin(latency="auto", max_height=480)
+        self.live.stop()  # Auto keeps what the tune learned
+        self.engine.answer()
+        self.assertEqual(self.store.get("c").max_height, 480)
+
+    def test_a_new_size_resumes_the_kept_buffer_with_its_cap(self):
+        # The ⚙'s choice tunes the channel again: the tuner parks it, then takes it back.
+        sid = self.begin()
+        self.engine.buffer(sid, segments(0, 30), hls=True, heights=[1080, 720], height=1080)
+        self.engine.sessionReady.emit(sid)
+        self.playback.set_state(PlaybackState.PLAYING)
+        kept = self.live.park()
+        self.engine.sessionParked.emit(sid)
+        self.begin(kept=kept, max_height=720)
+        self.assertEqual(self.engine.resumes[-1][0], sid)  # its buffer, not a new one
+        self.assertEqual(self.engine.resumes[-1][2]["max_height"], 720)
+        self.assertEqual(len(self.engine.opened), 1)
+
+    def test_a_channel_played_directly_keeps_its_cap_in_vlc(self):  # Stage 3
+        sid = self.begin(max_height=720)
+        self.engine.sessionFailed.emit(sid, "unsupported", "This stream format isn't supported.")
+        self.engine.answer()
+        self.assertEqual(self.playback.plays[-1][1], PlayKind.LIVE)
+        self.assertEqual(self.playback.caps, [720])
+
+    def test_a_server_part_and_a_resume_take_the_cap(self):
+        self.live._wall = lambda: 10_600.0
+        sid = self.begin(max_height=720, one_stream=True)
+        self.engine.buffer(sid, self.SPANS, hls=True, window=86400.0, parts=[[0, 0.0, 10_000.0]])
+        self.engine.sessionReady.emit(sid)
+        self.live.seek_to(-300.0)  # a server part: the live upstream parks first
+        self.engine.sessionParked.emit(sid)
+        self.assertEqual(self.engine.opened[-1][2]["max_height"], 720)
+        self.live.go_live()  # the parked upstream resumes
+        self.assertEqual(self.engine.resumes[-1][2]["max_height"], 720)
 
 
 class HttpsFirstTests(LiveSessionCase):

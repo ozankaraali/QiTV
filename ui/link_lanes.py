@@ -57,6 +57,8 @@ class Target:
     # and where the title goes on from (ms) when its quality changed while it played.
     quality: Any = None
     start_ms: Optional[int] = None
+    # 2.8: a channel's size cap chosen in the ⚙ (lines; 0: its best; None: the one it keeps).
+    max_height: Optional[int] = None
 
     @property
     def live(self) -> bool:

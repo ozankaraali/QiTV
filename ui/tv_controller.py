@@ -134,7 +134,7 @@ from ui.pip_controls import PipControls
 from ui.player_keys import PlayerKeys
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
-from ui.quality_controls import QualityControls
+from ui.quality_controls import SIZE_WHILE_RECORDING, QualityControls
 from ui.record_guard import RecordGuard
 from ui.stream_question import StreamQuestion, quit_text
 from ui.subtitle_search import OnlineSetup, OnlineSubtitles
@@ -321,6 +321,7 @@ class TVController(QObject):
             prepare=lambda session, target: self._prepare(session, target, None),
             back_notice=lambda: self.overlays.back_notice,
             archive_allowed=self._archive_allowed,
+            on_sizes=self._offer_live_quality,
             parent=self,
         )
         # Provider setups: the loading and welcome hints, the last channel, the Library's
@@ -468,6 +469,8 @@ class TVController(QObject):
                 current=lambda: self._current,
                 menu=self._media_menu,
                 choose=self.change_quality,
+                live_menu=self.live_menu,
+                choose_live=self.change_live_quality,
                 parent=self,
             )
         # 2.6: before a recording is stopped for a stream, the question.
@@ -1531,6 +1534,37 @@ class TVController(QObject):
             replace(target, quality=quality, start_ms=start, start_over=False, zapped=False)
         )
 
+    def live_menu(self) -> Optional[dict]:
+        """The live ⚙ (2.8): the large picture's channel's picture sizes, when its stream comes
+        in two or more (LiveControls.sizes); None in the multiview or while an archive plays."""
+        target = self._current
+        if target is None or not target.live or self._closed:
+            return None
+        if self.multiview_shown() or self._live_controls.catchup.active():
+            return None
+        return self._live_controls.sizes(target)
+
+    def _offer_live_quality(self) -> None:
+        """The channel's sizes came (or an archive started or ended): the ⚙ shows or goes."""
+        current = self._current
+        if current is not None and current.live:
+            self.overlays.transport.set_quality_available(self.live_menu() is not None)
+
+    def change_live_quality(self, max_height: int) -> None:
+        """The live ⚙'s choice (2.8): the channel tunes again with that size cap (0: its
+        best), which it keeps for its next tunes. Its time-shift buffer is kept (the tuner parks
+        it and takes it back) and it plays on from where the user was. While it records it
+        stays as it is: a tune would set the recording aside on a second stream."""
+        target, sizes = self._current, self.live_menu()
+        cap = max(0, int(max_height))
+        if target is None or sizes is None or cap == sizes["max_height"]:
+            return
+        live = self._live_controls.live
+        if live is not None and live.recording():
+            self._toast(SIZE_WHILE_RECORDING)
+            return
+        self._request(replace(target, max_height=cap, zapped=False, retried=False))
+
     def _title_beside_channel(self) -> bool:
         """A movie or an episode is the large picture's (playing, ended or failed) while the
         small picture shows a channel (the one kept small for a title from the Library)."""
@@ -1773,6 +1807,8 @@ class TVController(QObject):
             if self._live_controls.through_pipeline(url, kind):
                 if not self._live_controls.tune_pipeline(target, url):
                     return  # over the provider's stream limit: nothing opens
+                if target.max_height is not None:
+                    self._live_controls.go_back_when_offered()  # 2.8: a new size, on from there
                 # The old stream is stopped: the channel's sync waits for its player's open.
                 self._prepare(self.session, target, previous)
                 self._current, self._cid = target, None
@@ -1876,9 +1912,13 @@ class TVController(QObject):
     def _delivered(self, target: Target, url: str) -> None:
         """The target is playing (or opening): confirm the zap and record it in the history."""
         self._current_url = url
-        # 2.8: the ⚙ quality menu, for a media server's title its server offers choices for.
-        offered = not target.live and not target.local and self._media_menu(target.item)
-        self.overlays.transport.set_quality_available(bool(offered))
+        # 2.8: the ⚙ quality menu, for a media server's title its server offers choices for,
+        # and a channel whose stream comes in several sizes (known once it played this run).
+        if target.live:
+            offered = self.live_menu() is not None
+        else:
+            offered = not target.local and bool(self._media_menu(target.item))
+        self.overlays.transport.set_quality_available(offered)
         if self.sessions is not None:  # what the large picture shows (a zap onto it stays)
             large = self.sessions.large()
             large.channel = target.item if target.live else None

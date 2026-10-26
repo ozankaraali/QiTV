@@ -629,8 +629,21 @@ class OnScreenKeysTests(unittest.TestCase):
         spy = QSignalSpy(t.qualityRequested)
         self.click(t, rect.center())
         self.assertEqual(spy.count(), 1)
+        t.set_quality_available(False)
+        self.assertNotIn("quality", t._layout())
+
+    def test_a_channel_with_several_sizes_has_the_quality_button(self):  # 2.8, the live ⚙
+        t = self.make()
         t.show_live("One", "")
-        self.assertNotIn("quality", t._layout())  # a channel's own: never on live TV
+        self.assertNotIn("quality", t._layout())
+        t.set_quality_available(True)
+        rect = t.button_rect("quality")
+        self.assert_big_enough(rect, "quality")
+        self.assertGreater(rect.left(), t.button_rect("search").right())  # ⌕ ⚙ then the sound
+        self.assertLess(rect.right(), t.button_rect("volume").left())
+        spy = QSignalSpy(t.qualityRequested)
+        self.click(t, rect.center())
+        self.assertEqual(spy.count(), 1)
 
     def test_the_quality_button_never_crowds_out_the_speed(self):
         t = Transport(idle_ms=3000)

@@ -254,6 +254,7 @@ class FakeSession(QObject):
         self.deinterlacing = "auto"
         self.stats = {}  # what video_stats() reads
         self.software = False  # decodes_in_software(): asked for, or the picture froze
+        self.cap = 0  # max_height(): the size cap its open asked VLC for (2.8)
 
     now_ms = 0  # time_ms(): where what plays is (2.8: a quality change goes on from there)
 
@@ -265,10 +266,14 @@ class FakeSession(QObject):
         self.play_delays.append(self.delay)
         self.url, self.kind = url, kwargs.get("kind")
         self.software = bool(kwargs.get("software"))
+        self.cap = int(kwargs.get("max_height") or 0)
         self.stateChanged.emit("opening")
 
     def decodes_in_software(self):
         return self.software
+
+    def max_height(self):
+        return self.cap
 
     def stop(self):
         self.stops += 1
@@ -3003,6 +3008,82 @@ class BackNoticeTests(PipelineCase):
         self.assertFalse(self.notice.isVisible())
 
 
+class LiveQualityTests(PipelineCase):
+    """2.8, the live ⚙: a channel whose HLS master names several picture sizes offers them; a
+    size tunes the channel again with that cap (its buffer kept: the tuner parks it and takes
+    it back) and plays on from where the user was."""
+
+    STATE = {
+        "start": 0.0,
+        "end": 3600.0,
+        "position": 3000.0,
+        "live_edge": 3600.0,
+        "lag": 600.0,
+        "mode": "shifted",
+        "rate": 1.0,
+        "paused": False,
+        "ended": False,
+        "target": 2.5,
+        "heights": [1080, 720, 360],
+        "height": 1080,
+        "max_height": 0,
+    }
+
+    def test_several_sizes_show_the_quality_button(self):
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE, heights=[1080]))
+        self.assertFalse(any(self.transport.quality_states))  # one size: nothing to choose
+        self.assertIsNone(self.controller.live_menu())
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.assertEqual(self.transport.quality_states[-1], True)
+        self.assertEqual(
+            self.controller.live_menu(),
+            {"heights": [1080, 720, 360], "height": 1080, "max_height": 0},
+        )
+        self.start_channel(1)  # another channel: its own sizes, once known
+        self.assertEqual(self.transport.quality_states[-1], False)
+        self.assertIsNone(self.controller.live_menu())
+
+    def test_a_size_tunes_the_channel_again_and_goes_on_from_where_it_was(self):
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.controller.change_live_quality(720)
+        self.ready("http://stream/1")  # its link, as a tune asks for it
+        self.assertEqual(self.live.calls[-1], ("stop",))  # parked (its buffer is kept)
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: self.starts()[-1][1].get("max_height") == 720))
+        self.assertEqual(self.transport.quality_states[-1], True)  # its sizes stay known
+        self.live.backOffered.emit(3000.0, NOW.timestamp())  # where the user was
+        self.assertEqual(self.live.calls[-1], ("go_back_to", 3000.0))  # no Resume pill
+        self.assertIsNone(self.controller.back_label())
+
+    def test_auto_tunes_again_without_a_cap_and_the_same_size_changes_nothing(self):
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE, max_height=720, height=720))
+        links = len(self.catalog.links)
+        self.controller.change_live_quality(720)
+        self.assertEqual(len(self.catalog.links), links)
+        self.controller.change_live_quality(0)
+        self.ready("http://stream/1")
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: self.starts()[-1][1].get("max_height") == 0))
+
+    def test_a_tune_of_the_channel_otherwise_keeps_its_cap_as_kept(self):
+        self.start_pipeline(0)
+        self.assertNotIn("max_height", self.starts()[-1][1])  # the session's own (remembered)
+
+    def test_while_the_channel_records_its_size_stays(self):
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.live.recorded_since = 100.0
+        links = len(self.catalog.links)
+        self.controller.change_live_quality(720)
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertEqual(
+            self.toast.messages()[-1], ("Stop the recording to change the picture size", "info")
+        )
+
+
 class PipelineTuneTests(PipelineCase):
     def test_a_tune_takes_a_budget_slot_and_starts_the_live_session_on_grant(self):
         self.play(0)
@@ -3723,6 +3804,13 @@ class ReconnectTests(PipelineCase):
         self.session.software = True  # hardware decoding froze its picture: software since
         self.end_and_reopen(plays)
         self.assertIs(self.session.plays[-1][1]["software"], True)
+
+    def test_a_reopen_keeps_the_size_cap_the_stream_had(self):  # 2.8, the live ⚙
+        plays = self.fall_back()
+        self.assertNotIn("max_height", self.session.plays[-1][1])
+        self.session.cap = 720  # the channel's cap, as LiveSession opened it directly
+        self.end_and_reopen(plays)
+        self.assertEqual(self.session.plays[-1][1]["max_height"], 720)
 
     def test_each_tune_may_reconnect_twice(self):
         plays = self.fall_back(0)

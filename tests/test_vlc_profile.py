@@ -110,6 +110,17 @@ class MediaOptionsTests(unittest.TestCase):
         for kind in ("XTREAM", "M3UPLAYLIST", "JELLYFIN", ""):
             self.assertEqual(user_agent_for({}, kind), DEFAULT_USER_AGENT)
 
+    def test_a_size_cap_reaches_vlcs_own_adaptive_streams(self):  # 2.8, the live ⚙
+        for kind in (PlayKind.LIVE, PlayKind.UNKNOWN):
+            self.assertIn(":adaptive-maxheight=720", media_options(kind, max_height=720))
+            self.assertNotIn(
+                "adaptive-maxheight",
+                " ".join(media_options(kind) + media_options(kind, max_height=0)),
+            )
+        # The loopback stream is one transport stream: nothing to pick from.
+        pipeline = media_options(PlayKind.LIVE_PIPELINE, max_height=720)
+        self.assertNotIn("adaptive-maxheight", " ".join(pipeline))
+
     def test_referrer(self):
         # A channel's M3U http-referrer goes with VLC's own requests; without one, none.
         for kind in PlayKind:

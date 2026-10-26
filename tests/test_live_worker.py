@@ -601,6 +601,35 @@ class LiveWorkerTests(unittest.TestCase):
             self.assertNotIn("window_s", state[2])
             self.assertNotIn("edge_seq", state[2])
 
+    def test_the_state_reports_the_channels_sizes_and_takes_a_cap(self):
+        # 2.8: the live ⚙ lists an HLS channel's picture sizes; "open" (and "resume") take
+        # the user's cap. Raw TS reports none.
+        master = (
+            b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080\nhd.m3u8\n"
+            b"#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nlow.m3u8\n"
+        )
+        source = self.source(
+            {
+                SECRET_PATH: (200, {}, make_stream(9)),
+                "/user/secret/master.m3u8": (200, {}, master),
+                "/user/secret/hd.m3u8": (200, {}, leaf("a.ts")),
+                "/user/secret/low.m3u8": (200, {}, leaf("a.ts")),
+                "/user/secret/a.ts": (200, {}, make_stream(4)),
+            }
+        )
+        helper = self.helper()
+        url = source.url + "/user/secret/master.m3u8"
+        for start, height in ((None, 1080), ({"max_height": 480}, 360)):
+            sid = helper.open(url, start=start)
+            state = helper.wait_for(lambda m: m[:2] == ("state", sid) and "heights" in m[2])
+            self.assertEqual((state[2]["heights"], state[2]["height"]), ([1080, 360], height))
+            helper.wait_for(lambda message: message == ("ended", sid))
+        self.assertEqual(source.counts["/user/secret/low.m3u8"], 1)
+        raw = helper.open(source.url + SECRET_PATH)
+        helper.wait_for(lambda message: message == ("ended", raw))
+        for state in helper.of(raw, "state"):
+            self.assertNotIn("heights", state[2])
+
     def test_an_hls_batch_reports_its_live_edge_once_delivered(self):
         # 2.1: states are throttled to four a second, so the end of a batch that
         # arrived within a quarter second waited for the next batch (a 2 s keyframe interval

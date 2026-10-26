@@ -231,6 +231,7 @@ position's time of day and now (the time away included).
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+import dataclasses
 from enum import Enum
 import logging
 import math
@@ -733,6 +734,7 @@ class LiveSession(QObject):
         kept: Optional[KeptRing] = None,
         one_stream: bool = False,
         https_first: bool = False,
+        max_height: Optional[int] = None,
     ) -> None:
         """`ram_bytes`: the memory a disk buffer that fails goes on in (the helper's default
         when None). `channel`: the channel's key in the tuning store ("": nothing kept).
@@ -742,7 +744,10 @@ class LiveSession(QObject):
         afresh. `one_stream` (2.7): the provider leaves no second stream, so the live
         upstream parks while a server part plays and resumes after it. `https_first` (2.7.1):
         every stream the helper opens for it, a server part's
-        and a resume's too, is asked over HTTPS first (a direct play stays as given)."""
+        and a resume's too, is asked over HTTPS first (a direct play stays as given).
+        `max_height` (2.8, the live ⚙): every stream the helper opens for it plays an HLS
+        master's best variant of at most that many lines, and the channel keeps it (0: the
+        best again); None: the cap the channel kept, if any."""
         self.stop()
         self._kept = kept
         self._one_stream = one_stream
@@ -754,6 +759,10 @@ class LiveSession(QObject):
         self._channel = channel
         memory = self._tuning.get(channel) if self._tuning is not None else None
         self._memory = memory or Tuning()
+        if max_height is not None and max(0, max_height) != self._memory.max_height:
+            self._memory = dataclasses.replace(self._memory, max_height=max(0, max_height))
+            if self._tuning is not None:
+                self._tuning.remember(channel, self._memory)
         self._software = self._memory.software
         self._latency = latency if latency in LATENCIES else "normal"
         self._learned = self._new_learned() if self._latency == AUTO else None
@@ -775,6 +784,8 @@ class LiveSession(QObject):
             self._open_args["ram_bytes"] = ram_bytes
         if https_first:
             self._open_args["https_first"] = True
+        if self._memory.max_height > 0:
+            self._open_args["max_height"] = self._memory.max_height
         self._stay = StayLive(self._latency)
         self._stay.set_background(self._background)  # a multiview tile without the focus
         self._stay.jump_lag = self._jump_lag  # where a jump to live would land
@@ -1142,6 +1153,10 @@ class LiveSession(QObject):
         snapshot = self._snapshot()
         return (self._buffer_start(snapshot), self._live_edge(snapshot))
 
+    def max_height(self) -> int:
+        """The size cap the channel's streams open with (2.8, the live ⚙; 0: their best)."""
+        return int(self._open_args.get("max_height", 0)) if self._open_args else 0
+
     def server_window(self) -> float:
         """How many seconds the channel's own server keeps beyond the buffer (2.7): its HLS
         playlist's window back from now, less the time since the buffer's start (a kept
@@ -1375,6 +1390,7 @@ class LiveSession(QObject):
             target=start_target(self._latency) if learned is None else learned.target(0.0),
             extra=0.0,
             https_first=bool(self._open_args.get("https_first")),
+            max_height=int(self._open_args.get("max_height", 0)),
         )
 
     def _on_resumed(self, sid: str) -> None:
@@ -2006,8 +2022,11 @@ class LiveSession(QObject):
 
     def _play_provider(self) -> None:
         """The provider's stream in VLC itself, with the channel's agent and, when its M3U
-        names one, its referrer (2.1; the loopback stream needs neither)."""
+        names one, its referrer (2.1; the loopback stream needs neither), and its size cap
+        (2.8, the live ⚙: VLC's own HLS plays no taller variant)."""
         extra: dict[str, Any] = {"referrer": self._referrer} if self._referrer else {}
+        if self._memory.max_height > 0:
+            extra["max_height"] = self._memory.max_height
         self._playback.play(
             self._url,
             kind=PlayKind.LIVE,
@@ -2377,17 +2396,26 @@ class LiveSession(QObject):
                 stored.direct,
                 learned.learned(),
                 software=stored.software,
+                max_height=stored.max_height,
             )
             if self._tuning is not None:
                 self._tuning.remember(self._channel, self._memory)
             return
         locked, direct = self._stay.rate_locked, self._memory.direct or direct
         software = self._memory.software or software
+        cap = self._memory.max_height
         if learned is not None:
-            self._memory = Tuning(None, locked, direct, learned.learned(), software=software)
+            self._memory = Tuning(
+                None, locked, direct, learned.learned(), software=software, max_height=cap
+            )
         else:
             self._memory = Tuning(
-                self._memory.extra, locked, direct, self._memory.learned, software=software
+                self._memory.extra,
+                locked,
+                direct,
+                self._memory.learned,
+                software=software,
+                max_height=cap,
             )
         if self._tuning is not None:
             self._tuning.remember(self._channel, self._memory)
@@ -2775,6 +2803,12 @@ class LiveSession(QObject):
             "parts": [list(part) for part in snapshot.get("parts") or ()],
             "behind": self._behind(snapshot, position, edge),
         }
+        heights = snapshot.get("heights")
+        if isinstance(heights, list) and heights:
+            # 2.8, the live ⚙: the channel's picture sizes, the playing one's and the cap.
+            state["heights"] = [int(h) for h in heights if type(h) is int]
+            state["height"] = int(_number(snapshot.get("height")))
+            state["max_height"] = self.max_height()
         beyond = self.server_window()
         archive = self._archive is not None
         if beyond > 0.0 or self._part is not None or archive:

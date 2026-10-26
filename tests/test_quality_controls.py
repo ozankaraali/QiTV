@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from services import media_server as ms
 from ui.keymap import Action
-from ui.quality_controls import QUALITY, QualityControls
+from ui.quality_controls import QUALITY, LiveSize, QualityControls
 
 
 class FakePanel(QObject):
@@ -113,6 +113,8 @@ class QualityControlsTests(unittest.TestCase):
         self.target = SimpleNamespace(item={"id": "f1", "_provider": "Home server"}, live=False)
         self.menu = {"versions": list(VERSIONS), "quality": ms.Quality(source="hd")}
         self.chosen = []
+        self.sizes = {"heights": [1080, 720, 360], "height": 1080, "max_height": 0}
+        self.capped = []
         self.controls = QualityControls(
             panel=self.panel,
             transport=self.transport,
@@ -120,6 +122,8 @@ class QualityControlsTests(unittest.TestCase):
             current=lambda: self.target,
             menu=lambda item: self.menu,
             choose=self.chosen.append,
+            live_menu=lambda: self.sizes,
+            choose_live=self.capped.append,
         )
         self.controls.wire()
 
@@ -193,6 +197,40 @@ class QualityControlsTests(unittest.TestCase):
         self.panel.rowChosen.emit(ms.CONVERSIONS[1])
         self.assertTrue(self.controls.handle(Action.ESCAPE))
         self.assertEqual(self.card.keys, [Action.ESCAPE])
+
+    def test_a_channel_lists_the_best_and_its_sizes(self):  # the live ⚙
+        self.target = SimpleNamespace(item={"id": 7}, live=True)
+        self.transport.qualityRequested.emit()
+        self.assertEqual(
+            self.rows(),
+            [("Auto (best)", True), ("1080p", False), ("720p", False), ("360p", False)],
+        )
+        self.sizes = {"heights": [2160, 1080], "height": 1080, "max_height": 1080}
+        self.transport.qualityRequested.emit()
+        self.assertEqual(self.rows(), [("Auto (best)", False), ("4K", False), ("1080p", True)])
+
+    def test_a_cap_between_sizes_ticks_the_size_playing(self):
+        # A cap kept from another day (480) where the channel now offers 1080, 720, 360.
+        self.target = SimpleNamespace(item={"id": 7}, live=True)
+        self.sizes = {"heights": [1080, 720, 360], "height": 360, "max_height": 480}
+        self.transport.qualityRequested.emit()
+        self.assertEqual([checked for _text, checked in self.rows()], [False, False, False, True])
+
+    def test_a_size_is_chosen_without_a_question(self):
+        self.target = SimpleNamespace(item={"id": 7}, live=True)
+        self.transport.qualityRequested.emit()
+        self.panel.rowChosen.emit(LiveSize(720))
+        self.assertEqual((self.capped, self.chosen, self.card.asked), ([720], [], []))
+        self.panel.rowChosen.emit(LiveSize(0))  # the best again: what plays (nothing to do)
+        self.assertEqual(self.capped, [720])
+
+    def test_a_channel_with_one_size_offers_nothing(self):
+        self.target = SimpleNamespace(item={"id": 7}, live=True)
+        self.sizes = {"heights": [1080], "height": 1080, "max_height": 0}
+        self.transport.qualityRequested.emit()
+        self.sizes = None
+        self.transport.qualityRequested.emit()
+        self.assertEqual(self.panel.shown, [])
 
     def test_nothing_offered_shows_nothing(self):
         self.menu = None

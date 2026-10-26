@@ -326,6 +326,13 @@ class SlotRoleTests(unittest.TestCase):
         self.assertIs(kwargs["https_first"], True)
         self.assertNotIn("https_first", start_kwargs(LiveStart(URL, "UA/1", True), self.config))
 
+    def test_start_kwargs_carry_a_size_cap_only_when_chosen(self):  # 2.8, the live ⚙
+        kwargs = start_kwargs(LiveStart(URL, "UA/1", True, max_height=720), self.config)
+        self.assertEqual(kwargs["max_height"], 720)
+        kwargs = start_kwargs(LiveStart(URL, "UA/1", True, max_height=0), self.config)
+        self.assertEqual(kwargs["max_height"], 0)  # the best again
+        self.assertNotIn("max_height", start_kwargs(LiveStart(URL, "UA/1", True), self.config))
+
     def test_start_kwargs_are_a_main_tunes(self):
         self.start_pipeline()
         kwargs = start_kwargs(LiveStart(URL, "QiTV", True), self.config)

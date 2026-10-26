@@ -31,7 +31,7 @@ import os
 import re
 import threading
 import time
-from typing import Any, BinaryIO, Protocol, TypeVar
+from typing import Any, BinaryIO, NamedTuple, Protocol, TypeVar
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import url2pathname
 
@@ -790,15 +790,40 @@ def _whole_segments(playlist: Any) -> Any:
     return playlist
 
 
-def _select_manifest(content, url):
+def _height(variant: Any) -> int:
+    """A variant's picture height as its master names it (RESOLUTION); 0 when it names none."""
+    resolution = variant.stream_info.resolution
+    return int(resolution[1]) if resolution else 0
+
+
+def _within(candidates: list[Any], max_height: int) -> list[Any]:
+    """The variants a cap of `max_height` lines leaves (2.8, the live ⚙): those whose size is
+    known and fits, else the smallest; all of them without a cap or when none names a size."""
+    sized = [item for item in candidates if _height(item) > 0]
+    if max_height <= 0 or not sized:
+        return candidates
+    fitting = [item for item in sized if _height(item) <= max_height]
+    if fitting:
+        return fitting
+    smallest = min(_height(item) for item in sized)
+    return [item for item in sized if _height(item) == smallest]
+
+
+def _select_manifest(content, url, max_height: int = 0) -> tuple[Any, tuple[int, ...]]:
+    """The playlist with only the variant to play left in a master (the best within
+    `max_height` lines, `_within`), and the master's picture sizes (its playable variants'
+    heights, largest first; none for a media playlist)."""
     try:
         playlist = m3u8.loads(content.decode("utf-8-sig"), uri=url)
         if not playlist.is_variant:
-            return _whole_segments(playlist)
+            return _whole_segments(playlist), ()
         candidates = [item for item in playlist.playlists if _video_compatible(item)]
         if not candidates:
             raise SourceError("unsupported", _NO_VIDEO)
-        selected = max(candidates, key=lambda item: item.stream_info.bandwidth or 0)
+        heights = tuple(sorted({_height(item) for item in candidates} - {0}, reverse=True))
+        selected = max(
+            _within(candidates, max_height), key=lambda item: item.stream_info.bandwidth or 0
+        )
         groups = {
             "AUDIO": selected.stream_info.audio,
             "SUBTITLES": selected.stream_info.subtitles,
@@ -822,7 +847,7 @@ def _select_manifest(content, url):
         playlist.image_playlists.clear()
         # Steering could reintroduce discarded pathways/qualities.
         playlist.content_steering = None
-        return playlist
+        return playlist, heights
     except SourceError:
         raise
     except Exception:
@@ -940,15 +965,30 @@ def _load_playlist(http: _Http, url: str) -> tuple[bytes, str]:
     return content, final
 
 
-def _media_playlist(http: _Http, content: bytes, url: str) -> tuple[Any, str, str | None]:
-    """Follow the best variant down to a checked media playlist and its final URL; and the
-    separate default audio playlist a master on the way named (`_check_audio`), if any."""
+class _Media(NamedTuple):
+    """`_media_playlist`'s answer."""
+
+    playlist: Any  # the checked media playlist
+    url: str  # its final URL
+    separate: str | None  # the separate default audio playlist a master named, if any
+    heights: tuple[int, ...] = ()  # 2.8: the master's picture sizes, largest first
+    height: int = 0  # 2.8: the chosen variant's (0: not known)
+
+
+def _media_playlist(http: _Http, content: bytes, url: str, max_height: int = 0) -> _Media:
+    """Follow the best variant (within `max_height` lines, 2.8) down to a checked media
+    playlist and its final URL; and the separate default audio playlist a master on the way
+    named (`_check_audio`), if any, and the first master's sizes."""
     separate: str | None = None
+    heights: tuple[int, ...] = ()
+    height = 0
     for _hop in range(_PLAYLIST_HOPS):
-        playlist = _select_manifest(content, url)
+        playlist, sizes = _select_manifest(content, url, max_height)
         if not playlist.is_variant:
             _check_media(playlist, url)
-            return playlist, url, separate
+            return _Media(playlist, url, separate, heights, height)
+        if not heights:
+            heights, height = sizes, _height(playlist.playlists[0])
         separate = _check_audio(playlist, url) or separate
         content, url = _load_playlist(http, _resolve(url, playlist.playlists[0].uri))
     raise SourceError("unsupported", _INVALID_PLAYLIST)
@@ -1094,13 +1134,18 @@ class HlsSource:
         capture: _Capture | None = None,
         window: Mapping[str, Any] | None = None,
         hold: Callable[[], bool] | None = None,
+        heights: tuple[int, ...] = (),
+        height: int = 0,
+        max_height: int = 0,
     ) -> None:
         """`window` (2.7): a server part, `{"back_s": seconds, "until_seq": sequence}`: it
         starts that far back from the playlist's end and its input ends before that media
         sequence (the live buffer's first), placed in time by `part_wall`; a provider
         archive's, `{"until_s": seconds}`, starts at its first segment (the helper ends it
-        at that much media)."""
+        at that much media). `heights` and `height` (2.8): its master's picture sizes and the
+        variant's; `max_height`: the cap it was chosen under, which a reload's keeps."""
         self.user_agent = http.user_agent
+        self.heights, self.height, self._max_height = heights, height, max_height
         back = window.get("back_s") if window is not None else None
         if window is not None and back is None and _archive_window(window):
             back = math.inf  # 2.7: a provider archive's playlist begins at the moment asked
@@ -1375,7 +1420,7 @@ class HlsSource:
                     http.reconnect()  # its server may stay with that group
                     loaded = time.monotonic()
                     content, final = http.fetch(lambda: _load_playlist(http, url))
-                    playlist, url, _separate = _media_playlist(http, content, final)
+                    playlist, url = _media_playlist(http, content, final, self._max_height)[:2]
                     continue
                 log.info("The other HLS encoding persisted; following it.")
                 if self._until is not None:  # a server part's stop is ours: it plays on
@@ -1459,7 +1504,7 @@ class HlsSource:
                 raise _Closed()
             loaded = time.monotonic()
             content, final = http.fetch(lambda: _load_playlist(http, url))
-            playlist, url, _separate = _media_playlist(http, content, final)
+            playlist, url = _media_playlist(http, content, final, self._max_height)[:2]
             self._burst = float(playlist.target_duration or 0)
             self._finite = bool(playlist.is_endlist) or self._back is not None
             yield from self._emit(self._release())
@@ -1960,6 +2005,7 @@ def _open_http(
     capture: _Capture | None = None,
     window: Mapping[str, Any] | None = None,
     hold: Callable[[], bool] | None = None,
+    max_height: int = 0,
 ) -> Source:
     response, prefix, content = _first_answer(http, url, on_answer)
     if content is None:
@@ -1973,18 +2019,21 @@ def _open_http(
         final = str(response.url)
     finally:
         http.release(response)
-    playlist, base, separate = _media_playlist(http, content, final)
+    media = _media_playlist(http, content, final, max_height)
     return HlsSource(
         http,
-        playlist,
-        base,
+        media.playlist,
+        media.url,
         live_delay,
         target,
         extra,
-        separate_audio=separate,
+        separate_audio=media.separate,
         capture=capture,
         window=window,
         hold=hold,
+        heights=media.heights,
+        height=media.height,
+        max_height=max_height,
     )
 
 
@@ -2002,6 +2051,7 @@ def open_source(
     window: Mapping[str, Any] | None = None,
     hold: Callable[[], bool] | None = None,
     https_first: bool = False,
+    max_height: int = 0,
 ) -> Source:
     """Open ``url``, sniff it, and return a TS or HLS source (``window``: a server part of
     the HLS playlist, 2.7, `HlsSource`; raw TS then is unsupported, but for a provider
@@ -2040,6 +2090,9 @@ def open_source(
     that fails for any reason but a stop, over HTTP, and that host is asked over HTTP at once
     from then on (`_HTTPS_FAILED`, for the helper's run). An ``https://`` one (an Xtream
     panel's that answered over HTTPS) that fails so is opened over HTTP, the same host.
+
+    ``max_height`` (2.8, the live ⚙): an HLS master plays its best variant of at most that
+    many lines (`_within`); 0 its best. The source's ``heights`` are the master's sizes.
     """
     try:
         scheme = _scheme(url)
@@ -2061,6 +2114,7 @@ def open_source(
         on_answer=on_answer,
         window=window,
         hold=hold,
+        max_height=max_height,
     )
     host = _host_key(url)
     if https_first and scheme == "http" and host not in _HTTPS_FAILED:
@@ -2107,6 +2161,7 @@ def _open_url(
     on_answer: Callable[[bool], None] | None,
     window: Mapping[str, Any] | None,
     hold: Callable[[], bool] | None,
+    max_height: int = 0,
     connect_timeout: float = _TIMEOUT,
 ) -> Source:
     """`open_source`'s open of one address (its connect timeout `connect_timeout`)."""
@@ -2114,7 +2169,9 @@ def _open_url(
     http.connect_timeout = connect_timeout
     capture = _Capture.from_environment(url)
     try:
-        source = _open_http(http, url, live_delay, target, extra, on_answer, capture, window, hold)
+        source = _open_http(
+            http, url, live_delay, target, extra, on_answer, capture, window, hold, max_height
+        )
     except Exception as error:
         failure = SourceError("network", _STOPPED) if http.closed else _translate(error)
     except BaseException:

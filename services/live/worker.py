@@ -25,7 +25,8 @@ Commands (parent to helper):
   no further while what it holds runs `ahead_s` past the segment the player reads (which,
   and what follows, its ring never evicts); a provider archive's, `{"until_s", "ahead_s"}`,
   raw TS or HLS from its start, ends its input once its media reaches `until_s` (where the
-  live buffer begins, by time of day);
+  live buffer begins, by time of day); 2.8 adds `"max_height": lines`, the user's cap for an
+  HLS master's variants (the best within it plays, `open_source`), which a "resume" takes too;
 - `("close", sid)`, always answered by `("closed", sid)`, once the session's upstream
   connection is closed but at most 0.5 s later;
 - `("resize", sid, max_bytes)` (2.2, the multiview): a RAM session holds up to `max_bytes`
@@ -73,7 +74,8 @@ Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, fi
 additions)`, also before ready while bytes arrive (`received`) and nothing is playable yet,
 and once a raw-TS source answered (`answered`, 2.1: its headers came, before its first byte;
 taken back once its body failed or turned out a playlist); once a source opened, `secure`
-(2.7.1) says whether its address is HTTPS,
+(2.7.1) says whether its address is HTTPS, and an HLS master's (2.8) `heights` its picture
+sizes, largest first, and `height` the playing variant's (0: not named),
 each addition a newly closed segment's `(seq, start, end, discontinuity, start_quality,
 media_seq)` (`Span`'s fields; 2.7 added the HLS media sequence the segment begins, None when
 it begins none; the helper and the engine always ship in one build, and the engine still
@@ -431,6 +433,11 @@ class _Outbox:
                 return
             except Exception as error:  # nothing was written: the pickling failed
                 _LOG.warning("A live helper message was dropped (%s).", type(error).__name__)
+
+
+def _lines(value: Any) -> int:
+    """A start's `max_height` (2.8): a positive whole number of lines, else 0 (no cap)."""
+    return value if type(value) is int and value > 0 else 0
 
 
 class _Session:
@@ -824,6 +831,7 @@ class _Session:
                 window=window if isinstance(window, dict) else None,
                 hold=self._hold if isinstance(window, dict) and "ahead_s" in window else None,
                 https_first=self._start.get("https") is True,
+                max_height=_lines(self._start.get("max_height")),
             )
         except SourceError as error:
             if not self._parking:  # a park interrupted the open: nothing to say
@@ -1433,6 +1441,10 @@ class _Session:
         }
         if source is not None:
             snapshot["secure"] = bool(getattr(source, "secure", False))  # 2.7.1: over HTTPS
+        heights = getattr(source, "heights", ())
+        if heights:  # 2.8: an HLS master's picture sizes (the live ⚙), and the playing one's
+            snapshot["heights"] = list(heights)
+            snapshot["height"] = int(getattr(source, "height", 0) or 0)
         if source is not None and source.hls:
             # 2.7: how long the server keeps the channel, and its newest media sequence;
             # a server part's first segment's time of day.

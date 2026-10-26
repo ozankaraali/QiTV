@@ -765,6 +765,7 @@ class LiveEngine(QObject):
         extra: float = 0.0,
         window: Mapping[str, Any] | None = None,
         https_first: bool = False,
+        max_height: int = 0,
     ) -> str:
         """`ram_bytes`: a disk session's memory if its disk fails (_RAM_BYTES when None).
         `target` and `extra`: the target the session steers to and what it adds to it (Auto's
@@ -772,7 +773,8 @@ class LiveEngine(QObject):
         `target`, `live_delay` seconds back. `window` (2.7): a server part of the HLS
         playlist, `{"back_s", "until_seq", "ahead_s"}` (`services.live.source.HlsSource`);
         never reopened after a helper's death. `https_first` (2.7.1): an http:// address is
-        asked over HTTPS first (`open_source`)."""
+        asked over HTTPS first (`open_source`). `max_height` (2.8, the live ⚙): an HLS master
+        plays its best variant of at most that many lines (0: its best)."""
         sid = secrets.token_hex(8)
         if self._shut:
             return sid
@@ -798,6 +800,8 @@ class LiveEngine(QObject):
             start["window"] = dict(window)
         if https_first:
             start["https"] = True
+        if max_height > 0:
+            start["max_height"] = int(max_height)
         if start:
             command = (*command, start)
         self._commands.put(command)
@@ -829,6 +833,7 @@ class LiveEngine(QObject):
         target: float | None = None,
         extra: float = 0.0,
         https_first: bool = False,
+        max_height: int = 0,
     ) -> None:
         """A new upstream for a parked session (2.6): `sessionResumed` once its first
         segment came, else `sessionFailed` (it stays parked). The arguments as for
@@ -842,6 +847,8 @@ class LiveEngine(QObject):
             start.update(target=float(target), extra=float(extra))
         if https_first:
             start["https"] = True
+        if max_height > 0:
+            start["max_height"] = int(max_height)
         if start:
             command = (*command, start)
         self._commands.put(command)

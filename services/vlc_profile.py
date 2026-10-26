@@ -62,8 +62,11 @@ def media_options(
     latency: str = "normal",
     user_agent: Optional[str] = None,
     referrer: Optional[str] = None,
+    max_height: int = 0,
 ) -> list[str]:
-    """`referrer`: the channel's M3U http-referrer (2.1), sent with VLC's own requests."""
+    """`referrer`: the channel's M3U http-referrer (2.1), sent with VLC's own requests.
+    `max_height` (2.8, the live ⚙): VLC's own HLS or DASH plays no variant taller than that
+    (0: its best); the loopback stream has no variants."""
     options = [
         f":http-user-agent={user_agent or DEFAULT_USER_AGENT}",
         # No ":avcodec-hw" here: a media option overrides the instance's, and the decoder is
@@ -94,6 +97,8 @@ def media_options(
             ":clock-jitter=0",
             f":adaptive-livedelay={delay}",
         ]
+        if max_height > 0:
+            options.append(f":adaptive-maxheight={int(max_height)}")
     elif kind is PlayKind.VOD_FILE:
         options += [
             ":network-caching=4000",
