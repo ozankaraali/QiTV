@@ -149,6 +149,10 @@ class RemoteController(QObject):
         # What a phone plays in its own player, and the group it was picked in (for the TV), by
         # device: a phone that slept comes back as another session.
         self._watching: dict[str, tuple[Target, Optional[tuple[str, list]]]] = {}
+        # The number of the "play" each phone was handed last, by device: its position reports
+        # carry it back, so one made for the title before a zap is not the new one's.
+        self._plays: dict[str, int] = {}
+        self._play_number = 0
         self.result_handles = Handles(limit=500)  # the search's
         self._removing: dict[str, str] = {}  # device id → name, until the hub confirms
         self._phones: set[str] = set()
@@ -334,7 +338,7 @@ class RemoteController(QObject):
         elif isinstance(event, ToTv):
             self._to_tv(event.sid)
         elif isinstance(event, Position):
-            self._position(event.sid, event.position_ms, event.length_ms)
+            self._position(event.sid, event.position_ms, event.length_ms, event.play)
         elif isinstance(event, Answered):
             self._on_answered(event.sid, event.n, event.yes)
         elif isinstance(event, RecAct):
@@ -604,7 +608,10 @@ class RemoteController(QObject):
                 return False, PHONE_GONE_TEXT
             first = self._device(sid) not in self._watching
             self._watching[self._device(sid)] = (target, group)
+            self._play_number = (self._play_number + 1) % MAX_ASK
+            self._plays[self._device(sid)] = self._play_number
             message: dict = {"t": "play", "name": target.title[:TITLE_CHARS]}
+            message["p"] = self._play_number  # what its position reports carry back
             if target.live:
                 message["num"] = str(controller.channel_number(target.item) or "")
             else:  # a film, an episode or a recording goes on where it stopped (as on the TV)
@@ -692,11 +699,12 @@ class RemoteController(QObject):
             return str(target.item.get("id") or "") or None
         return cast(Optional[str], self._window.controller.resume_key(target))
 
-    def _position(self, sid: str, position_ms: int, length_ms: int) -> None:
+    def _position(self, sid: str, position_ms: int, length_ms: int, play: int) -> None:
         """How far a phone got in the film or episode it plays: kept as the TV keeps its own,
-        so the TV (and the Library's Continue) goes on from there."""
+        so the TV (and the Library's Continue) goes on from there. Only a report of the play
+        handed last: one made before a zap (on its way meanwhile) is another title's."""
         watched = self._watching.get(self._device(sid))
-        if watched is None:
+        if watched is None or self._plays.get(self._device(sid)) != play:
             return
         key = self._resume_key(watched[0])
         if key:

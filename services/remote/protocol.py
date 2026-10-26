@@ -170,6 +170,9 @@ def parse_phone_message(obj: object) -> Optional[dict]:
     if t == "pos":  # how far the phone got in a film or an episode it plays
         ms, length = _int(obj.get("ms")), _int(obj.get("len"))
         if ms is not None and length is not None and 0 <= ms <= MAX_POS and 0 < length <= MAX_POS:
+            play = _int(obj.get("p"))  # the number of the play it reports on (its "play")
+            if play is not None and 0 <= play <= MAX_ASK:
+                return {"t": "pos", "ms": ms, "len": length, "p": play}
             return {"t": "pos", "ms": ms, "len": length}
         return None
     if t == "answer":  # 2.6: the phone's answer to QiTV's question (its number, yes or no)
@@ -337,11 +340,13 @@ class WatchHere:
 
 @dataclass(frozen=True)
 class Position:
-    """How far the phone got in the film or episode it plays, of how long (ms)."""
+    """How far the phone got in the film or episode it plays, of how long (ms); `play` is the
+    number of the "play" message it reports on (-1: none said)."""
 
     sid: str
     position_ms: int
     length_ms: int
+    play: int = -1
 
 
 @dataclass(frozen=True)

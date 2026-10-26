@@ -1014,13 +1014,15 @@ function useHere(on) {
 const POSITION_MS = 15000;
 let positionAt = 0;
 let startAt = 0; // where a title goes on (s), until its length is known and it got there
+let playing = -1; // the number of QiTV's "play" this one came with: each report says whose it is
 
 function reportPosition(now = false) {
   const video = $("video");
   if (!hereLink || startAt > 0 || !Number.isFinite(video.duration) || video.duration <= 0) return;
   if (!now && Date.now() - positionAt < POSITION_MS) return;
   positionAt = Date.now();
-  send({ t: "pos", ms: Math.round(video.currentTime * 1000), len: Math.round(video.duration * 1000) });
+  const report = { t: "pos", ms: Math.round(video.currentTime * 1000), len: Math.round(video.duration * 1000) };
+  send(playing >= 0 ? { ...report, p: playing } : report);
 }
 
 function watchHandle(handle, num, name) {
@@ -1069,6 +1071,7 @@ function onPlay(message) {
     return;
   }
   hereLink = url;
+  playing = Number.isInteger(message.p) ? message.p : -1;
   $("playerOut").hidden = true;
   startAt = Number(message.start) > 0 ? Number(message.start) : 0; // where it stopped
   positionAt = Date.now(); // the first report in a while, not at 0:00

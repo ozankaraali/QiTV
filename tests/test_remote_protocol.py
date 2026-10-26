@@ -148,6 +148,12 @@ class MessageTests(unittest.TestCase):
             parse_phone_message({"t": "pos", "ms": 61000, "len": 5400000}),
             {"t": "pos", "ms": 61000, "len": 5400000},
         )
+        self.assertEqual(  # and the number of the play it is a report of
+            parse_phone_message({"t": "pos", "ms": 61000, "len": 5400000, "p": 3}),
+            {"t": "pos", "ms": 61000, "len": 5400000, "p": 3},
+        )
+        for bad in ("3", -1, True, 2**40):
+            self.assertNotIn("p", parse_phone_message({"t": "pos", "ms": 1, "len": 2, "p": bad}))
         q = parse_phone_message({"t": "query", "s": "h" * 150})
         self.assertEqual(len(q["s"]), 100)
         self.assertFalse(q["tv"])  # the phone's own search: the TV's picture stays

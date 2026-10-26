@@ -283,7 +283,7 @@ class Session:
         if t == "totv":
             return Reply(events=[ToTv(sid)])
         if t == "pos":
-            return Reply(events=[Position(sid, m["ms"], m["len"])])
+            return Reply(events=[Position(sid, m["ms"], m["len"], m.get("p", -1))])
         if t == "answer":
             return Reply(events=[Answered(sid, m["id"], m["yes"])])
         if t == "rec":

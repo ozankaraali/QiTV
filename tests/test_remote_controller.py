@@ -657,15 +657,39 @@ class WatchHereTests(WindowCase):
         self.hand_off("http://p.test/movie/u/p/7.mp4", handle=handle)
         key = self.window.controller.resume_key(self.window.controller.title_target(film, "movie"))
         with mock.patch.object(self.window.watch, "update_position") as update:
-            remote.bridge.post(Position("s8", 61000, 5400000))
+            remote.bridge.post(Position("s8", 61000, 5400000, self.plays()[-1]["p"]))
             self.assertTrue(wait_until(lambda: update.called))
         update.assert_called_once_with(key, 61000, 5400000)
+
+    def test_a_report_made_for_the_title_before_is_not_the_new_ones(self):
+        """The phone zapped to another film: a report of the first still on its way when the
+        second was handed over is the first one's (each play has its number), not kept."""
+        self.connect()
+        remote, controller = self.window.remote, self.window.controller
+        films = [
+            {"id": n, "name": f"Harbour {n}", "cmd": f"http://p.test/movie/u/p/{n}.mp4"}
+            for n in (7, 8)
+        ]
+        plays = []
+        for film in films:
+            handle = remote._library("s8").handles.issue("title", (film, "movie", None))
+            self.hand_off(film["cmd"], handle=handle)
+            plays.append(self.plays()[-1]["p"])
+        self.assertNotEqual(plays[0], plays[1])
+        second = controller.resume_key(controller.title_target(films[1], "movie"))
+        with mock.patch.object(self.window.watch, "update_position") as update:
+            remote.bridge.post(Position("s8", 61000, 5400000, plays[0]))
+            remote.bridge.post(Position("s8", 1000, 3600000))  # no number: whose, unknown
+            remote.bridge.post(Position("s8", 2000, 3600000, plays[1]))
+            self.assertTrue(wait_until(lambda: update.called))
+        update.assert_called_once_with(second, 2000, 3600000)
 
     def test_a_channel_on_the_phone_keeps_no_position(self):
         self.connect()
         self.hand_off("http://p.test/news.m3u8")
+        play = self.plays()[-1]["p"]
         with mock.patch.object(self.window.watch, "update_position") as update:
-            self.window.remote.bridge.post(Position("s8", 61000, 5400000))
+            self.window.remote.bridge.post(Position("s8", 61000, 5400000, play))
             QTest.qWait(200)
         update.assert_not_called()
 
@@ -708,6 +732,7 @@ class WatchHereTests(WindowCase):
         self.assertEqual((sid, device, url), ("s8", "s8", "http://p.test/movie/u/p/7.mkv"))
         self.assertTrue(headers["User-Agent"])
         self.assertIs(verify, True)
+        self.assertIsInstance(message.pop("p"), int)  # its reports carry it back
         self.assertEqual(message, {"t": "play", "name": "Harbour Lights", "start": 61})
 
     def test_an_mkv_film_for_a_phone_through_the_relay(self):
@@ -745,6 +770,8 @@ class WatchHereTests(WindowCase):
             item = self.hand_recording()
         resume.assert_called_with(item["id"])
         self.assertEqual(self.plays(), [])
+        message = self.hub.open_recording.call_args.args[3]
+        self.assertIsInstance(message.pop("p"), int)
         self.hub.open_recording.assert_called_once_with(
             "s8", "s8", item["path"], {"t": "play", "name": "Harbour News", "start": 61}
         )
@@ -761,8 +788,9 @@ class WatchHereTests(WindowCase):
     def test_how_far_the_phone_got_in_a_recording_is_kept_for_the_tv(self):
         self.connect()
         item = self.hand_recording()
+        play = self.hub.open_recording.call_args.args[3]["p"]
         with mock.patch.object(self.window.watch, "update_position") as update:
-            self.window.remote.bridge.post(Position("s8", 61000, 5400000))
+            self.window.remote.bridge.post(Position("s8", 61000, 5400000, play))
             self.assertTrue(wait_until(lambda: update.called))
         update.assert_called_once_with(item["id"], 61000, 5400000)
 
