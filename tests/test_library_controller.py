@@ -1460,6 +1460,44 @@ class SourceMixTests(unittest.TestCase):  # 2.8: the source menu's ticks mix pro
         self.assertEqual(ctl._source_title(), "All providers")
 
 
+class GenreHideTests(unittest.TestCase):  # 2.8: parental controls hide a Library genre
+    build = LibraryControllerTests.build
+
+    def setUp(self):
+        LibraryControllerTests.setUp(self)
+        self.hidden, self.may = [], True
+
+    def built(self):
+        ctl = self.build()
+        ctl.set_hiding(lambda *args: self.hidden.append(args), lambda: self.may)
+        ctl.open("movies")
+        self.catalog.sectionReady.emit("movies")
+        return ctl
+
+    def test_a_genre_hides_once_a_pin_is_set(self):
+        ctl = self.built()
+        menu = ctl.genre_menu("c")
+        self.addCleanup(menu.deleteLater)
+        (action,) = menu.actions()
+        self.assertEqual(action.text(), "Hide (parental controls)")
+        action.trigger()
+        self.assertEqual(self.hidden, [("movies", "P", "c", "Comedy")])
+
+    def test_without_a_pin_or_for_another_row_there_is_no_menu(self):
+        ctl = self.built()
+        self.assertIsNotNone(ctl.genre_menu("c"))
+        self.assertIsNone(ctl.genre_menu("@nowhere"))  # not one of the genres shown
+        self.may = False
+        self.assertIsNone(ctl.genre_menu("c"))
+
+    def test_a_right_click_on_a_genre_asks_for_its_menu(self):
+        ctl = self.built()
+        shown = []
+        ctl.genre_menu = lambda gid: shown.append(gid)  # the menu itself is asked for
+        self.screen.genres.genreMenuRequested.emit("c", QPoint(10, 10))
+        self.assertEqual(shown, ["c"])
+
+
 class RefreshTests(unittest.TestCase):  # 2.8: the Library's Refresh
     build = LibraryControllerTests.build
 

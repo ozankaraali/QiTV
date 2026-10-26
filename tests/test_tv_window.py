@@ -507,6 +507,7 @@ class TVWindowTests(WindowCase):
                 ("Restore Last Multiview", ""),
                 ("Search", "Ctrl+F"),
                 ("Refresh Channels and Guide", "Ctrl+R"),
+                ("Refresh Films and Series", "Ctrl+Shift+R"),  # 2.8: the Library's
                 ("Guide", "G"),
                 ("Channel List", "Return"),
                 ("Fullscreen", "F"),
@@ -539,6 +540,7 @@ class TVWindowTests(WindowCase):
             "Multiview",
             "Search",
             "Refresh Channels and Guide",
+            "Refresh Films and Series",
             "Mini Player",
         }
         for text, action in actions.items():

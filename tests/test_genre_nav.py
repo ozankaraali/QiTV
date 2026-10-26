@@ -71,6 +71,17 @@ class GenreListTests(unittest.TestCase):
         )
         self.assertEqual(self.list.current_id(), "continue")
 
+    def test_a_right_click_on_a_genre_asks_for_its_menu(self):  # 2.8: parental Hide
+        asked = []
+        self.list.genreMenuRequested.connect(lambda gid, pos: asked.append(gid))
+        view = self.list._view
+        row = self.list._rows_by_id["comedy"]
+        point = view.visualRect(view.model().index(row, 0)).center()
+        view.customContextMenuRequested.emit(point)
+        header = view.visualRect(view.model().index(0, 0)).center()  # "PINNED": no genre
+        view.customContextMenuRequested.emit(header)
+        self.assertEqual(asked, ["comedy"])
+
     def test_the_same_genres_again_keep_the_list(self):
         # Every genre switch and sort sets the genres again: the list is not rebuilt for that.
         resets = []

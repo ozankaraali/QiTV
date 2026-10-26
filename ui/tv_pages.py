@@ -104,6 +104,11 @@ class TVPages(QObject):
             parent=self,
         )
         self.library_controller.notice.connect(self.notify)
+        # 2.8: a Library genre's right-click hides it, as the TV list's groups.
+        self.library_controller.set_hiding(
+            lambda *args: window.controller.hide_group(*args),
+            lambda: window.parental is not None and window.parental.has_pin(),
+        )
         window.library_catalog.providerFailed.connect(self._on_provider_failed)
         window.overlays.drawer.libraryRequested.connect(self.open_from_list)
 

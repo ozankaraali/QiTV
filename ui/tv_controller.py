@@ -3655,10 +3655,20 @@ class TVController(QObject):
         if node.layer == "group":
             name, own = split_group_id(node.key)
             provider = name or self.catalog.current_provider_name()
-            hidden = guard.hide_group(section, provider, own or node.key, title=node.title)
-        else:
-            hidden = guard.hide_item(section, node.payload)
-        if hidden:
+            self.hide_group(section, provider, own or node.key, node.title)
+            return
+        if guard.hide_item(section, node.payload):
+            self._toast(translate(HIDDEN_TEXT))
+            self.parental_changed()  # out of the history; locked, it stops if it plays
+
+    def hide_group(self, section: str, provider: str, group_id: str, title: str) -> None:
+        """A group's or a Library genre's "Hide (parental controls)" (2.8): hidden while
+        locked; the PIN comes first (Settings)."""
+        guard = self.parental
+        if guard is None or not guard.has_pin():
+            self._toast(translate(SET_PIN_FIRST), "error", ERROR_MS)
+            return
+        if guard.hide_group(section, provider, group_id, title=title):
             self._toast(translate(HIDDEN_TEXT))
             self.parental_changed()  # out of the history; locked, it stops if it plays
 

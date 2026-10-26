@@ -42,9 +42,15 @@ from services.library import (
 )
 from services.navigation import episode_key
 from services.pending_action import LOAD, RUN, Pending, PendingAction
-from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, provider_of
+from services.provider_ids import (
+    ALL_PROVIDERS,
+    ALL_PROVIDERS_TITLE,
+    provider_of,
+    split_group_id,
+)
 from services.search import Hit
 from services.watch_state import RESUME_MAX_RATIO, WatchState
+from ui.context_actions import HIDE_TEXT
 from ui.keymap import Action
 from ui.library.library_screen import LibraryScreen
 from ui.library.poster_grid import poster_url
@@ -131,6 +137,9 @@ class LibraryController(QObject):
         self._tune_live = tune_live
         self._back_to_tv = back_to_tv
         self._context_menu = context_menu
+        # 2.8: parental controls hide a genre (set_hiding); none until set.
+        self._hide_genre: Optional[Callable[[str, str, str, str], None]] = None
+        self._may_hide: Callable[[], bool] = lambda: False
         self._closed = False
         self._mode = "browse"
         self._zone = "grid"
@@ -202,6 +211,7 @@ class LibraryController(QObject):
         nav.tabRequested.connect(self._on_tab)
         nav.searchRequested.connect(self.open_search)
         nav.sourceRequested.connect(self._show_source_menu)
+        genres.genreMenuRequested.connect(self._show_genre_menu)
         nav.refreshRequested.connect(self.refresh_lists)
         screen.search_field.clicked.connect(lambda: self._focus("search"))
         self._search.changed.connect(self._show_hits)
@@ -628,6 +638,39 @@ class LibraryController(QObject):
         menu.addSeparator()
         refresh = menu.addAction(translate(REFRESH_TEXT))
         refresh.triggered.connect(lambda _checked=False: self.refresh_lists())
+        return menu
+
+    def set_hiding(
+        self,
+        hide: Callable[[str, str, str, str], None],
+        may_hide: Callable[[], bool],
+    ) -> None:
+        """Parental controls (2.8): `hide(section, provider, genre id, title)` hides a genre,
+        offered on its right-click while `may_hide()` (a PIN is set)."""
+        self._hide_genre, self._may_hide = hide, may_hide
+
+    def _show_genre_menu(self, gid: str, pos: QPoint) -> None:
+        menu = self.genre_menu(gid)
+        if menu is not None:
+            menu.aboutToHide.connect(menu.deleteLater)
+            menu.popup(pos)
+
+    def genre_menu(self, gid: str) -> Optional[QMenu]:
+        """A genre's right-click menu: Hide (parental controls); None for a pinned row (My
+        list, Continue …), a genre not shown, or without a PIN."""
+        hide = self._hide_genre
+        if hide is None or not self._may_hide() or self._closed:
+            return None
+        genre = next((g for g in self._model.genres() if g.id == gid and not g.header), None)
+        if genre is None or genre.pinned:
+            return None
+        name, own = split_group_id(gid)
+        provider = name or self._catalog.current_provider_name()
+        section = self._model.section
+        menu = QMenu(self._screen)
+        menu.addAction(translate(HIDE_TEXT)).triggered.connect(
+            lambda _=False: hide(section, provider, own or gid, genre.title)
+        )
         return menu
 
     def refresh_lists(self) -> None:
