@@ -489,8 +489,9 @@ class OptionsDialog(QDialog):
         # converts it (never, by default: the file plays as it is).
         self.media_4k_combo = QComboBox(self.settings_tab)
         for text, value in (
-            # i18n: a choice for a Jellyfin or Emby title's 4K version: only on a 4K screen
-            (tr("Only on a 4K screen"), "screen"),
+            # i18n: a choice for a Jellyfin or Emby title's 4K version: it plays (rather than the
+            # title's other version) on a 4K screen
+            (tr("On a 4K screen"), "screen"),
             (tr("Always"), "always"),  # i18n: a choice: always play a title's 4K version
             (tr("Never"), "never"),  # i18n: a choice: never play a title's 4K version
         ):
@@ -500,8 +501,9 @@ class OptionsDialog(QDialog):
         )
         self.media_4k_combo.setToolTip(
             tr(
-                "Jellyfin and Emby: a title with a 4K version and another one plays the 4K one"
-                " only as chosen here."
+                "Jellyfin and Emby: when a title has a 4K version and another one, which plays."
+                " Either plays as it is: below a 4K screen your computer scales 4K down, sharper"
+                " but with more data. A title only in 4K plays unless you choose Never."
             )
         )
         # i18n: a setting (Jellyfin and Emby): when a title's 4K version plays

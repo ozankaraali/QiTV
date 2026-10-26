@@ -12,8 +12,9 @@ Both servers speak much the same API. Jellyfin 10.9 and later moved some routes 
 is missing, Emby the classic ones.
 
 A title plays as its file is (`stream_url`: never converted), in the version the setting picks
-(`choose_source`: no 4K version below a 4K screen unless chosen). Converting on the server
-(`converted_url`, HLS) happens only when Settings caps the bitrate and the file exceeds it.
+(`choose_source`: no 4K version below a 4K screen while there is another, unless chosen).
+Converting on the server (`converted_url`, HLS) happens only when Settings caps the bitrate and
+the file exceeds it.
 Where the user is in it is told back (`report`), so the server's own "continue watching" and
 watched marks follow. The client names QiTV and the system, never the computer.
 """
@@ -47,15 +48,16 @@ CONTINUE_TITLE = N_("Continue watching")
 FIELDS = "Overview,Genres,ProductionYear,CommunityRating,RunTimeTicks,ProviderIds,DateCreated"
 OVERVIEW_CHARS = 400  # a description in the list (the details strip shows a few lines)
 _LIBRARY_TYPES = {"movies", "tvshows", "mixed", "homevideos", ""}
-# 4K versions (Settings): only on a 4K screen (default), always, never.
+# 4K versions (Settings): on a 4K screen or when there is no other (default), always, never.
+# A 4K version plays as it is below a 4K screen too: the computer scales it down.
 FOUR_K_SCREEN, FOUR_K_ALWAYS, FOUR_K_NEVER = "screen", "always", "never"
 FOUR_K_CHOICES = (FOUR_K_SCREEN, FOUR_K_ALWAYS, FOUR_K_NEVER)
-ONLY_4K = "only_4k"  # choose_source's reason: the title has only 4K versions
+ONLY_4K = "only_4k"  # choose_source's reason: the title has only 4K versions, and Never
 NO_SOURCE = "none"
-# i18n: a title of a Jellyfin or Emby server has only a 4K version, and Settings plays 4K only
-# on a 4K screen
+# i18n: a title of a Jellyfin or Emby server has only a 4K version, and Settings plays no 4K
+# version (Never)
 ONLY_4K_TEXT = N_(
-    "This title is only in 4K. To play it here, choose Always for 4K versions in Settings."
+    "This title is only in 4K. To play it here, choose another 4K versions setting than Never."
 )
 # i18n: a Jellyfin or Emby server refused QiTV's access (its sign-in ended)
 SIGN_IN_AGAIN = N_("The server asks to sign in again: Settings → Providers → Verify Provider.")
@@ -423,8 +425,12 @@ def choose_source(
         return None, NO_SOURCE
     small = [s for s in playable if not is_4k(s)]
     large = [s for s in playable if is_4k(s)]
-    wants_4k = setting == FOUR_K_ALWAYS or (setting == FOUR_K_SCREEN and screen_4k)
-    pool = (large or small) if wants_4k else small
+    if setting == FOUR_K_NEVER:
+        pool = small
+    elif setting == FOUR_K_ALWAYS or screen_4k:
+        pool = large or small
+    else:  # below a 4K screen: the other version, or the 4K one as it is when it's the only one
+        pool = small or large
     if not pool:
         return None, ONLY_4K
     best = max(

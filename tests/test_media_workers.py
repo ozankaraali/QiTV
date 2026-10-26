@@ -112,8 +112,14 @@ class LinkWorkerTests(unittest.TestCase):
         kind, payload = self.link([source("hd", 1920, 1080, 4_000_000)], max_bitrate=8_000_000)
         self.assertIn("/stream.mkv?static=true", payload["link"])
 
-    def test_only_4k_says_how_to_play_it(self):
-        self.assertEqual(self.link([source("uhd", 3840, 2160)]), ("error", ms.ONLY_4K_TEXT))
+    def test_only_4k_plays_as_it_is_below_a_4k_screen(self):
+        kind, payload = self.link([source("uhd", 3840, 2160)])
+        self.assertEqual(kind, "ok")
+        self.assertIn("/stream.mkv?static=true&MediaSourceId=uhd", payload["link"])
+
+    def test_only_4k_with_never_says_how_to_play_it(self):
+        refused = self.link([source("uhd", 3840, 2160)], four_k=ms.FOUR_K_NEVER)
+        self.assertEqual(refused, ("error", ms.ONLY_4K_TEXT))
 
     def test_no_file_says_so(self):
         self.assertEqual(self.link([]), ("error", NO_VERSION_TEXT))

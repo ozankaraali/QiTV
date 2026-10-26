@@ -211,14 +211,19 @@ class SourceTests(unittest.TestCase):
         source, _ = ms.choose_source(sources, screen_4k=True, setting=ms.FOUR_K_SCREEN)
         self.assertEqual(source["Id"], "uhd")
 
-    def test_a_title_only_in_4k_is_not_played_below_a_4k_screen(self):
+    def test_a_title_only_in_4k_plays_as_it_is_below_a_4k_screen(self):
+        # Nothing is converted: the computer scales the picture down (the owner, 2.8).
         sources = [self.source("uhd", 3840, 2160)]
-        self.assertEqual(
-            ms.choose_source(sources, screen_4k=False, setting=ms.FOUR_K_SCREEN),
-            (None, ms.ONLY_4K),
-        )
+        source, why = ms.choose_source(sources, screen_4k=False, setting=ms.FOUR_K_SCREEN)
+        self.assertEqual((source["Id"], why), ("uhd", None))
+
+    def test_always_takes_the_4k_version_below_a_4k_screen(self):
+        sources = [self.source("uhd", 3840, 2160), self.source("hd", 1920, 1080)]
         source, _ = ms.choose_source(sources, screen_4k=False, setting=ms.FOUR_K_ALWAYS)
         self.assertEqual(source["Id"], "uhd")
+
+    def test_never_refuses_a_title_only_in_4k(self):
+        sources = [self.source("uhd", 3840, 2160)]
         self.assertEqual(
             ms.choose_source(sources, screen_4k=True, setting=ms.FOUR_K_NEVER), (None, ms.ONLY_4K)
         )

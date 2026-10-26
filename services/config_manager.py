@@ -470,8 +470,9 @@ class ConfigManager:
         "recordings_dir", "", coerce=lambda value: value if isinstance(value, str) else ""
     )
     # 2.8, optional (older builds ignore them): Jellyfin and Emby. Which version of a title
-    # plays ("screen": 4K only on a 4K screen, "always", "never"), and the bitrate above which
-    # the server converts it (Mbit/s; 0: never converted, the file plays as it is).
+    # plays ("screen": the 4K one on a 4K screen, or when it's the only one; "always",
+    # "never"), and the bitrate above which the server converts it (Mbit/s; 0: never
+    # converted, the file plays as it is).
     media_4k_versions = _config_property(
         "media_4k_versions", "screen", coerce=_one_of(("screen", "always", "never"), "screen")
     )

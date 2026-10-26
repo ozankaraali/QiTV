@@ -14,11 +14,11 @@ others' distributions, which may have malware.**
   genres, with Continue watching first, the server's posters and stories, and the search
   finding them beside your other providers'. A title plays as its file is, straight from the
   server, which converts nothing unless you ask it to in Settings (Server conversion). When a
-  title has a 4K version and another one, the 4K one plays only on a 4K screen (Settings → 4K
-  versions). Where you stop is told to the server, so its own Continue watching and watched
-  marks follow, and a title started only in the server's apps starts here where you left it
-  there. QiTV keeps the sign-in the server gives it, not your password. Older Jellyfin servers
-  work too.
+  title has a 4K version and another one, the 4K one plays on a 4K screen, the other below it;
+  a title only in 4K plays anywhere, as it is (Settings → 4K versions). Where you stop is told
+  to the server, so its own Continue watching and watched marks follow, and a title started
+  only in the server's apps starts here where you left it there. QiTV keeps the sign-in the
+  server gives it, not your password. Older Jellyfin servers work too.
 - **Cast to a TV.** The new cast button in the player controls sends what plays to a
   Chromecast, or a TV with Chromecast built in, on your network: a channel goes on from where
   it was in its time-shift buffer, a film from where it is. **Playing on …** says where the
