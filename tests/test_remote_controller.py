@@ -331,6 +331,17 @@ class PhoneQuestionTests(WindowCase):
         ask = self.ask()
         self.window.controller.phoneSettled.emit("s8")
         self.assertEqual(self.sent("unask"), [{"t": "unask", "id": ask["id"]}])
+        # A newer question (the TV's, another phone's) stands for it: nothing opens there,
+        # and the phone says so instead of "Opening on this phone…".
+        self.assertEqual(self.sent("play"), [{"t": "play", "failed": True, "why": "elsewhere"}])
+
+    def test_an_answered_question_closes_without_more(self):
+        ask = self.ask()
+        with mock.patch.object(self.window.controller, "answer_phone") as answer:
+            answer.side_effect = lambda yes: self.window.controller.phoneSettled.emit("s8")
+            self.window.remote.bridge.post(Answered("s8", ask["id"], True))
+            self.assertTrue(wait_until(lambda: answer.called))
+        self.assertEqual((self.sent("unask"), self.sent("play")), ([], []))
 
     def test_the_rec_line_goes_back_or_stops(self):
         self.connect()

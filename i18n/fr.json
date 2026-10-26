@@ -643,6 +643,7 @@
   "Providers": "Fournisseurs",
   "Puerto Rico": "Porto Rico",
   "Qatar": "Qatar",
+  "QiTV asked about the recording on another screen: nothing opened on this phone": "QiTV a posé la question de l’enregistrement sur un autre écran : rien ne s’est ouvert sur ce téléphone",
   "QiTV finds subtitles on <a href=\"{url}\">OpenSubtitles.com</a>. It needs a free OpenSubtitles account and an API key: sign up there, create a key on its API consumers page, and paste it here. The subtitles panel's “Search OpenSubtitles…” asks for it too.": "QiTV trouve les sous-titres sur <a href=\"{url}\">OpenSubtitles.com</a>. Il faut un compte OpenSubtitles gratuit et une clé API : inscrivez-vous sur le site, créez une clé sur sa page API consumers et collez-la ici. « Rechercher sur OpenSubtitles… » du panneau des sous-titres la demande aussi.",
   "QiTV finds subtitles on OpenSubtitles.com. It needs a free OpenSubtitles account and an API key, which takes a minute:": "QiTV trouve les sous-titres sur OpenSubtitles.com. Il faut un compte OpenSubtitles gratuit et une clé API, ce qui prend une minute :",
   "QiTV is already using all {n} streams your account allows": {

@@ -654,10 +654,12 @@ class RemoteController(QObject):
         self._send(sid, {"t": "ask", "id": self._ask_number, "text": text, "yes": yes, "no": no})
 
     def _on_phone_settled(self, sid: str) -> None:
-        """Phone `sid`'s question went otherwise (a newer one): its sheet closes."""
+        """Phone `sid`'s question went otherwise (a newer one, the TV's or another phone's):
+        its sheet closes, and nothing opens there (the phone says so, not "Opening…")."""
         number = self._asks.pop(sid, None)
         if number is not None:
             self._send(sid, {"t": "unask", "id": number})
+            self._send(sid, {"t": "play", "failed": True, "why": "elsewhere"})
 
     def _on_answered(self, sid: str, number: int, yes: bool) -> None:
         if self._asks.get(sid) != number:

@@ -636,6 +636,7 @@
   "Providers": "Sağlayıcılar",
   "Puerto Rico": "Porto Riko",
   "Qatar": "Katar",
+  "QiTV asked about the recording on another screen: nothing opened on this phone": "QiTV kayıtla ilgili soruyu başka bir ekranda sordu: bu telefonda hiçbir şey açılmadı",
   "QiTV finds subtitles on <a href=\"{url}\">OpenSubtitles.com</a>. It needs a free OpenSubtitles account and an API key: sign up there, create a key on its API consumers page, and paste it here. The subtitles panel's “Search OpenSubtitles…” asks for it too.": "QiTV altyazıları <a href=\"{url}\">OpenSubtitles.com</a> üzerinde bulur. Bunun için ücretsiz bir OpenSubtitles hesabı ve bir API anahtarı gerekir: orada kaydolun, sitenin API consumers sayfasında bir anahtar oluşturun ve buraya yapıştırın. Altyazılar panelindeki “OpenSubtitles'ta ara…” da bunu ister.",
   "QiTV finds subtitles on OpenSubtitles.com. It needs a free OpenSubtitles account and an API key, which takes a minute:": "QiTV altyazıları OpenSubtitles.com üzerinde bulur. Bunun için ücretsiz bir OpenSubtitles hesabı ve bir API anahtarı gerekir; bir dakikanızı alır:",
   "QiTV is already using all {n} streams your account allows": {

@@ -54,6 +54,7 @@ const words = {
   rec_sound: "This recording's sound doesn't play on a phone. Tap TV to watch it there.",
   rec_relay: "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).",
   rec_open: "The recording didn't open. Tap TV to watch it there.",
+  asked_elsewhere: "QiTV asked about the recording on another screen: nothing opened on this phone",
   back_to: "Resume · {time}",
   rec: "REC",
   go_back: "Go back to {channel}",
@@ -1052,6 +1053,7 @@ const FILM_WHY = {
   rec_sound: "rec_sound",
   rec_relay: "rec_relay",
   rec_open: "rec_open",
+  elsewhere: "asked_elsewhere", // its question gave way to a newer one: not "Opening…" for ever
 };
 
 function onPlay(message) {

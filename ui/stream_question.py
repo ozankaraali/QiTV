@@ -196,11 +196,15 @@ class StreamQuestion(QObject):
 
     def _ask(self, question: _Question, text: str, *, yes: str = "") -> bool:
         old = self._question
-        if old is not None and old.ask_on is not None:
-            self.settled.emit(old.ask_on)  # a newer question stands for it
+        if old is not None and old.ask_on is not None and old.ask_on != question.ask_on:
+            self.settled.emit(old.ask_on)  # a newer question stands for it (the same phone's
+            # replaces its sheet)
         yes, no = yes or translate(STOP_RECORDING), translate(KEEP_RECORDING)
         if question.ask_on is not None:
             self._question = question
+            card, self._shown = self._shown, None
+            if card is not None:
+                card.hide()  # the TV's question: the phone's stands for it
             self.asked.emit(question.ask_on, text, yes, no)
             return True
         card = self._card()

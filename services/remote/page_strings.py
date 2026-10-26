@@ -88,6 +88,10 @@ PAGE_STRINGS: dict[str, str] = {
     ),
     # i18n: the phone remote: QiTV couldn't read the recording for the phone (deleted, say)
     "rec_open": N_("The recording didn't open. Tap TV to watch it there."),
+    # i18n: the phone remote: its Watch's question gave way to a newer one (the TV's, another's)
+    "asked_elsewhere": N_(
+        "QiTV asked about the recording on another screen: nothing opened on this phone"
+    ),
     "remote": N_("Remote"),  # i18n: the phone remote: the tab with the buttons
     "channel_number": N_("Channel number"),  # i18n: the phone remote: the numpad's heading
     "previous": N_("Previous"),  # i18n: the phone remote's numpad: the previous channel
