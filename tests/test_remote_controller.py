@@ -360,6 +360,17 @@ class PhoneQuestionTests(WindowCase):
             self.sent("cast"), [{"t": "cast", "devices": [{"name": "Den", "on": False}], "on": ""}]
         )
 
+    def test_the_phone_hears_when_casting_is_not_available(self):  # 2.8
+        self.connect()
+        controls = mock.Mock()
+        controls.menu_entries.return_value = [("Casting isn't available", None, False)]
+        controls.device.return_value = None
+        controls.available.return_value = False
+        with mock.patch.object(self.window.controller, "cast_controls", return_value=controls):
+            self.window.remote.bridge.post(Get("s8", "cast", "", 0))
+            self.assertTrue(wait_until(lambda: self.sent("cast")))
+        self.assertEqual(self.sent("cast"), [{"t": "cast", "devices": [], "on": "", "off": True}])
+
     def test_the_phone_casts_and_stops_casting(self):  # 2.8
         self.connect()
         controls = self.cast_controls()

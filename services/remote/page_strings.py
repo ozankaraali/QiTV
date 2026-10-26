@@ -97,6 +97,8 @@ PAGE_STRINGS: dict[str, str] = {
     "stop_casting": N_("Stop casting"),  # i18n: the phone remote: the picture back on QiTV
     # i18n: the phone remote: no device to cast to was found yet
     "looking_devices": N_("Looking for devices…"),
+    # i18n: the phone remote: QiTV's computer cannot cast (its VLC has no casting)
+    "no_casting": N_("Casting isn't available on this computer"),
     # i18n: the phone remote's guide: record every airing of this programme (a short chip)
     "record_series": N_("Series"),
     # i18n: the phone remote's guide: a scheduled programme's chip: it will not be recorded

@@ -108,6 +108,17 @@ class CastControlsTests(unittest.TestCase):
             self.controls.menu_entries(), [("Living Room TV", "Living Room TV", False)]
         )
 
+    def test_without_casting_in_vlc_the_menu_says_so_and_the_button_goes(self):
+        def refuse(found, lost):
+            raise RuntimeError("no renderer modules")
+
+        self.discovery.start = refuse
+        with self.assertLogs("services.casting", "WARNING"):
+            entries = self.controls.menu_entries()
+        self.assertEqual(entries, [("Casting isn't available on this computer", None, False)])
+        self.assertFalse(self.controls.available())
+        self.assertEqual(self.transport.states[-1], (False, False))
+
     def test_casting_a_channel_sends_it_to_the_device_from_its_buffer(self):
         self.found("Living Room TV")
         self.controls.cast_to("Living Room TV")

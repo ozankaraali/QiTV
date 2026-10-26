@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 # i18n: the cast menu while no device was found yet (a TV that can be cast to, a Chromecast)
 LOOKING = N_("Looking for devices…")
+# i18n: the cast menu: this computer's VLC has no casting (its renderer modules are missing)
+NO_CASTING = N_("Casting isn't available on this computer")
 # i18n: the cast menu's entry that sends the picture back to this computer
 STOP_CASTING = N_("Stop casting")
 # i18n: a pill while casting ({name}: the device, such as "Living Room TV")
@@ -67,18 +69,27 @@ class CastControls(QObject):
     def casting(self) -> bool:
         return self._device is not None
 
+    def available(self) -> bool:
+        """Casting works here: VLC looks for devices (or has found some)."""
+        return self._devices.searching() or bool(self._devices.devices())
+
     def device(self) -> Optional[str]:
         return self._device
 
     # ---- the menu ---------------------------------------------------------------------------
 
     def menu_entries(self) -> list[tuple[str, Optional[str], bool]]:
-        """(text, device name or "" for Stop casting or None for a note, checked)."""
+        """(text, device name or "" for Stop casting or None for a note, checked). Without
+        casting in VLC (no renderer modules) it says so, and the cast button goes."""
         self._devices.start()
         entries: list[tuple[str, Optional[str], bool]] = [
             (device.name, device.name, device.name == self._device)
             for device in self._devices.devices()
         ]
+        if not self.available():
+            if self._transport is not None:
+                self._transport.set_cast_state(False, False)
+            return [(translate(NO_CASTING), None, False)]
         if not entries:
             entries.append((translate(LOOKING), None, False))
         if self._device is not None:

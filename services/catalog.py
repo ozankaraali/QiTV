@@ -497,6 +497,7 @@ class CatalogService(QObject):
         # issued for the previous provider are ignored, and queued catalog requests and a
         # queued EPG load (both for the previous provider) are dropped.
         self._generation += 1
+        self._waited_sections.clear()  # their loads are dropped: nobody waits for them now
         self._content_version += 1  # the setup replaces the provider's content
         self._epg_ready = False
         self._ready_provider = None

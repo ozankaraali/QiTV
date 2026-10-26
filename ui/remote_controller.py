@@ -783,7 +783,10 @@ class RemoteController(QObject):
             for _text, name, checked in controls.menu_entries()
             if name
         ]
-        return {"t": "cast", "devices": devices, "on": controls.device() or ""}
+        message = {"t": "cast", "devices": devices, "on": controls.device() or ""}
+        if not controls.available():
+            message["off"] = True  # this computer's VLC cannot cast: the phone says so
+        return message
 
     def _push_cast(self) -> None:
         if self._phones and self.hub is not None:

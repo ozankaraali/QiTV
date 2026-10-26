@@ -64,6 +64,7 @@ const words = {
   cast_to: "Cast to a TV",
   stop_casting: "Stop casting",
   looking_devices: "Looking for devices…",
+  no_casting: "Casting isn't available on this computer",
   record_series: "Series",
   cancel_recording: "Cancel recording",
 };
@@ -567,8 +568,8 @@ function drawCast(message) {
     list.append(menuItem(device.name, () => send({ t: "cast", to: device.name }), device.on ? "current" : ""));
   }
   if (!(message.devices || []).length) {
-    const looking = el("p", "step", w("looking_devices"));
-    list.append(looking);
+    const note = el("p", "step", w(message.off ? "no_casting" : "looking_devices"));
+    list.append(note);
   }
   if (message.on) list.append(menuItem(w("stop_casting"), () => send({ t: "cast", to: "" }), "danger"));
 }

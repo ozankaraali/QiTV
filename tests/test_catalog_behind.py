@@ -194,6 +194,27 @@ class ListsBehindTests(unittest.TestCase):
         self.assertEqual([f[0] for f in failed], ["movies"])  # it waited: told
         self.assertEqual(ready, [])
 
+    def test_a_wait_dropped_with_its_provider_tells_no_later_failure(self):  # review M8
+        # The Library waited for a list (nothing saved); a new setup dropped that load. The
+        # list loaded ahead later fails quietly: nobody waits for it any more.
+        service, providers, factory = self.service()
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
+        factory.results["xtream"] = {"fail": "HTTPConnectionPool: Max retries exceeded"}
+        service.request_section("movies")  # waited: nothing saved
+        pump()
+        with mock.patch.object(catalog_module, "LOAD_AHEAD_MS", 0):
+            service.select_provider(force_refresh=True)  # its load is dropped
+            setup = next(k for k, job in enumerate(self.runner.jobs) if job[3].kind == "provider")
+            self.runner.complete(setup)
+            pump()
+        providers.current_provider_content["vod"] = FILMS  # saved since (another load)
+        failed = collect(service.sectionFailed)
+        behind = [k for k, job in enumerate(self.runner.jobs) if job[3].kind == "section_behind"]
+        with self.assertLogs("services.catalog", "INFO"):
+            for k in behind:
+                self.runner.complete(k)
+        self.assertEqual(failed, [])
+
     def test_a_portal_or_a_playlist_loads_nothing_ahead(self):
         for ptype in ("STB", "M3UPLAYLIST"):
             with self.subTest(ptype=ptype):
