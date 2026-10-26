@@ -8,7 +8,7 @@ import threading
 import unittest
 from unittest import mock
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtTest import QTest
 from test_tv_window import WindowCase, wait_until
 
@@ -23,6 +23,7 @@ from services.remote.protocol import (
     Paired,
     Position,
     Press,
+    Query,
     RecAct,
     Status,
     StoreSaved,
@@ -407,6 +408,88 @@ class PhoneQuestionTests(WindowCase):
             self.window.remote.bridge.post(WatchHere("s8"))
             self.assertTrue(wait_until(lambda: asked_on))
         self.assertEqual(asked_on, ["s8"])
+
+
+class FakeSearcher(QObject):
+    """The remote's SearchSession as the phones' own Search uses it."""
+
+    changed = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.query, self.hits, self.searching, self.asked = "", None, False, []
+
+    def set_query(self, text):
+        self.query, self.searching = text, True
+        self.asked.append(text)
+
+    def land(self, hits):
+        self.hits, self.searching = hits, False
+        self.changed.emit()
+
+    def clear(self):
+        self.query, self.hits, self.searching = "", None, False
+
+
+class QuietSearchTests(WindowCase):
+    """A phone's own Search (the TV's picture stays) answers that phone: two phones searching
+    at once each get what their own text finds, one after the other."""
+
+    def setUp(self):
+        super().setUp()
+        remote = self.window.remote
+        self.hub = mock.Mock()
+        remote.hub = self.hub
+        self.addCleanup(setattr, remote, "hub", None)
+        for sid in ("s1", "s2"):
+            remote._phones.add(sid)
+            self.addCleanup(remote._phones.discard, sid)
+        self.searcher = FakeSearcher()
+        self.searcher.changed.connect(remote._push_quiet_results)
+        remote._title_searcher = self.searcher
+        self.addCleanup(setattr, remote, "_title_searcher", None)
+
+    def answers(self, sid):
+        """The texts of the results `sid` received, and the titles of the last."""
+        sent = [c.args[1] for c in self.hub.send.call_args_list if c.args[0] == sid]
+        sent += [c.args[0] for c in self.hub.broadcast.call_args_list]
+        found = [m for m in sent if m["t"] == "results"]
+        titles = [i["title"] for g in found[-1]["groups"] for i in g["items"]] if found else []
+        return [m["q"] for m in found], titles
+
+    def hit(self, title):
+        return Hit("P", "movies", title, {"id": title, "name": title})
+
+    def test_two_phones_searching_at_once_each_get_their_own(self):
+        remote = self.window.remote
+        remote.bridge.post(Query("s1", "dune"))
+        remote.bridge.post(Query("s2", "alien"))
+        self.assertEqual(self.searcher.asked, ["dune", "alien"])
+        self.searcher.land([self.hit("Alien")])
+        self.assertEqual(self.answers("s2"), (["alien"], ["Alien"]))
+        self.assertEqual(self.answers("s1"), ([], []))  # not another phone's text
+        self.assertEqual(self.searcher.asked[-1], "dune")  # its turn now
+        self.searcher.land([self.hit("Dune")])
+        self.assertEqual(self.answers("s1"), (["dune"], ["Dune"]))
+        self.assertEqual(self.answers("s2"), (["alien"], ["Alien"]))
+
+    def test_a_phone_clearing_its_text_leaves_the_others_search(self):
+        remote = self.window.remote
+        remote.bridge.post(Query("s1", "dune"))
+        remote.bridge.post(Query("s2", ""))
+        self.assertEqual(self.answers("s2"), ([""], []))
+        self.assertEqual(self.answers("s1"), ([], []))
+        self.assertEqual(self.searcher.query, "dune")  # still searched for
+        self.searcher.land([self.hit("Dune")])
+        self.assertEqual(self.answers("s1"), (["dune"], ["Dune"]))
+
+    def test_a_phone_gone_is_searched_for_no_more(self):
+        remote = self.window.remote
+        remote.bridge.post(Query("s1", "dune"))
+        remote.bridge.post(Query("s2", "alien"))
+        remote.bridge.post(Closed("s1", "d1"))
+        self.searcher.land([self.hit("Alien")])
+        self.assertEqual(self.searcher.asked, ["dune", "alien"])
 
 
 class WatchHereTests(WindowCase):

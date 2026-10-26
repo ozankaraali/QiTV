@@ -141,7 +141,10 @@ class RemoteController(QObject):
         self._phone_catalogs: dict[str, BrowsedCatalog] = {}
         self._channel_finder: Optional[FindSession] = None  # the phones' finds, shared
         self._title_searcher: Optional[SearchSession] = None  # and their Library's
-        self._quiet_query = ""  # what a phone searches for on its own (the TV's picture stays)
+        # What each phone searches for on its own (the TV's picture stays), by session; those
+        # not answered yet wait their turn at the shared search.
+        self._quiet: dict[str, str] = {}
+        self._quiet_waiting: set[str] = set()
         self._find_source = ""  # the provider the phone's list that found last shows
         # What a phone plays in its own player, and the group it was picked in (for the TV), by
         # device: a phone that slept comes back as another session.
@@ -303,6 +306,8 @@ class RemoteController(QObject):
             self._phones.discard(event.sid)
             self._devices.pop(event.sid, None)
             self._relayed.discard(event.sid)
+            self._quiet.pop(event.sid, None)
+            self._quiet_waiting.discard(event.sid)
             for browsing in (self._guides, self._libraries, self._channel_lists):
                 gone = browsing.pop(event.sid, None)
                 if gone is not None:
@@ -321,7 +326,7 @@ class RemoteController(QObject):
         elif isinstance(event, Get):
             self._answer(event)
         elif isinstance(event, Query):
-            self._search(event.text, event.tv)
+            self._search(event.sid, event.text, event.tv)
         elif isinstance(event, OpenItem):
             self._open(event.sid, event.handle)
         elif isinstance(event, WatchHere):
@@ -529,7 +534,7 @@ class RemoteController(QObject):
         if finder is not None and finder.query and not any(g.finding() for g in lists):
             finder.clear()
         searcher = self._title_searcher
-        searched = self._quiet_query.strip() or any(
+        searched = bool(self._quiet) or any(
             library.finding() for library in self._libraries.values()
         )
         if searcher is not None and searcher.query and not searched:
@@ -745,24 +750,29 @@ class RemoteController(QObject):
         return xtream_hls(url, str(entry.get("username") or ""), str(entry.get("password") or ""))
 
     def _push_quiet_results(self) -> None:
-        """What a phone's own search found (the desktop's search, every provider's), for the
-        phones: they show what answers the text they hold."""
+        """What a phone's own search found (the desktop's search, every provider's), for each
+        phone whose text it answers; then the next phone waiting has its text searched for."""
         searcher = self._title_searcher
-        if self.hub is None or not self._phones or searcher is None:
-            return
-        query = self._quiet_query
-        if query.strip() and (searcher.query != query or searcher.searching):
+        if self.hub is None or searcher is None or searcher.searching:
             return  # what is on its way answers it
-        hits = (searcher.hits or []) if query.strip() else []
-        self.hub.broadcast(results_of(hits, query, self.result_handles))
+        for sid, text in self._quiet.items():
+            if text == searcher.query:
+                self._quiet_waiting.discard(sid)
+                self._send(sid, results_of(searcher.hits or [], text, self.result_handles))
+        waiting = [text for sid, text in self._quiet.items() if sid in self._quiet_waiting]
+        if waiting:
+            searcher.set_query(waiting[0])  # one search at a time: the next phone's turn
 
-    def _search(self, text: str, tv: bool = True) -> None:
+    def _search(self, sid: str, text: str, tv: bool = True) -> None:
         if not tv:  # the phone's own search: the TV's picture stays
-            self._quiet_query = text
             if text.strip():
+                self._quiet[sid] = text
+                self._quiet_waiting.add(sid)
                 self._searcher().set_query(text)
             else:
-                self._push_quiet_results()
+                self._quiet.pop(sid, None)
+                self._quiet_waiting.discard(sid)
+                self._send(sid, results_of([], text, self.result_handles))
                 self._release_finds()
             return
         screens = self._window.screens
