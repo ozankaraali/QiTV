@@ -611,8 +611,8 @@ class MixTests(unittest.TestCase):  # 2.8: the Library mixes the providers ticke
         asked = []
         for name in self.catalogs.names():
             catalog = self.catalogs.catalog(name)
-            catalog.refresh_section = lambda s, n=name: asked.append((n, s))
-        view.refresh_sections()
+            catalog.refresh_section = lambda s, n=name: asked.append((n, s)) or s == "movies"
+        self.assertEqual(view.refresh_sections(), 1)  # the lists that load (here its films)
         shown = {n for n, _s in asked}
         self.assertEqual(shown, {"Harbor IPTV"})  # not Cove TV; Demo TV (a playlist) has none
         self.assertTrue(all(s in ("movies", "series") for _n, s in asked))

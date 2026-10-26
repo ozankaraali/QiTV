@@ -809,18 +809,20 @@ class CatalogService(QObject):
         self._waited_sections.add(section)
         self._request_catalog(("section", section), "section", section, self._section_worker)
 
-    def refresh_section(self, section: str) -> None:
+    def refresh_section(self, section: str) -> bool:
         """Load the section's list again (2.8: the Library's Refresh). An Xtream panel's and a
         media server's load behind the saved list, which shows meanwhile (a server's asks only
-        what changed); a portal's genres load again. One load at a time."""
+        what changed); a portal's genres load again. One load at a time. Whether it loads (or
+        loads already): not while the provider sets up, nor a section it has not."""
         if self._closed or self._setup_active() or section not in self.sections():
-            return
+            return False
         if self._loads_behind(self.provider_type()) and self._usable(self._content(section)):
             self._request_catalog(
                 ("section", section), "section_behind", section, self._section_worker
             )
         else:
             self.request_section(section, force=True)
+        return True
 
     def _expired(self, ct: str) -> bool:
         """The saved content is this provider's as set up now, only past its time."""

@@ -194,7 +194,7 @@ class MediaServerClient:
             return
         try:
             self.server_time = parsedate_to_datetime(str(date)).timestamp()
-        except (TypeError, ValueError, IndexError, OverflowError):
+        except TypeError, ValueError, IndexError, OverflowError:
             pass  # a malformed Date: this computer's clock stands in
 
     def _user_routes(self, modern: str, classic: str) -> list[str]:

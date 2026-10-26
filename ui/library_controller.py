@@ -676,11 +676,12 @@ class LibraryController(QObject):
     def refresh_lists(self) -> None:
         """The films and series of the providers shown load again (2.8: ↻, the source menu,
         Ctrl/⌘+Shift+R): an Xtream panel's and a server's behind the saved lists, which show
-        meanwhile (a server's asks only what changed); a portal's genres anew."""
+        meanwhile (a server's asks only what changed); a portal's genres anew. Says so when
+        any loads (none while a provider sets up)."""
         if self._closed:
             return
-        self._catalog.refresh_sections()
-        self.notice.emit(translate(REFRESHING_TEXT))
+        if self._catalog.refresh_sections():
+            self.notice.emit(translate(REFRESHING_TEXT))
 
     def _shown_providers(self) -> list[str]:
         """The providers the Library shows: those it mixes, else its own."""

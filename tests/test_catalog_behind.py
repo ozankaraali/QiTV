@@ -87,7 +87,7 @@ class ListsBehindTests(unittest.TestCase):
         providers.current_provider_content["vod"] = FILMS  # fresh: still asked again
         factory.results["xtream"] = {"result": NEWER}
         ready = collect(service.sectionReady)
-        service.refresh_section("movies")
+        self.assertTrue(service.refresh_section("movies"))
         pump()
         self.assertEqual([c[0] for c in factory.calls], ["xtream"])
         self.assertIs(providers.current_provider_content["vod"], FILMS)  # shown meanwhile
@@ -95,9 +95,15 @@ class ListsBehindTests(unittest.TestCase):
         self.assertEqual(ready, [("movies",)])
         self.assertEqual(len(providers.current_provider_content["vod"]["contents"]), 2)
         service.refresh_section("movies")
-        service.refresh_section("movies")  # asked again while it loads: one load
+        self.assertTrue(service.refresh_section("movies"))  # asked again while it loads: one
         pump()
         self.assertEqual(len(factory.calls), 2)
+
+    def test_refresh_says_whether_anything_loads(self):  # 2.8 review M7
+        service, _providers, factory = self.service("M3UPLAYLIST")
+        self.assertFalse(service.refresh_section("movies"))  # a playlist has no films
+        pump()
+        self.assertEqual(factory.calls, [])
 
     def test_refresh_asks_a_server_what_changed_and_merges_it(self):
         from services import media_server as ms

@@ -21,8 +21,9 @@ counts as expired.
 
 `LiveTuning` keeps the entries in memory and in `live_tuning.json` beside the config, at
 most `MAX_ENTRIES` (beyond it a channel's sizes alone go first, then the least recently
-learned, a locked rate, direct play or software decoding still in force last), as `services.channel_store` keeps them: read
-once, written in the background, a bad entry left out. The learned target is an optional
+learned, a locked rate, direct play or software decoding still in force last), as
+`services.channel_store` keeps them: read once, written in the background, a bad entry left
+out. The learned target is an optional
 field of version 1, so 2.0.x reads 2.1's file (it ignores the field): one that makes no
 sense, or would not change the next tune (`Learned.informative`), is left out on its own,
 and an entry left with nothing is none. A 2.0.2 `extra` stays as it was: `LearnedTarget` reads it as

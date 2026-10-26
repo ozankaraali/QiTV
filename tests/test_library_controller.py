@@ -174,9 +174,11 @@ class FakeCatalog(QObject):
         return self.version
 
     refreshed = 0  # refresh_sections() asked (2.8: the Library's Refresh)
+    refreshing = 2  # the lists it loads again (or that load already)
 
     def refresh_sections(self):
         self.refreshed += 1
+        return self.refreshing
 
     def sections(self):
         return list(self.section_list)
@@ -1519,6 +1521,17 @@ class RefreshTests(unittest.TestCase):  # 2.8: the Library's Refresh
         ctl.open("series")
         self.screen.nav.refreshRequested.emit()
         self.assertEqual(self.catalog.refreshed, 1)
+
+    def test_nothing_to_load_says_nothing(self):  # 2.8 review M7
+        # A provider setting up (or one without films or series): nothing loads, no notice.
+        ctl = self.build()
+        ctl.open("movies")
+        notices = []
+        ctl.notice.connect(notices.append)
+        self.catalog.refreshing = 0
+        ctl.refresh_lists()
+        self.assertEqual(self.catalog.refreshed, 1)
+        self.assertEqual(notices, [])
 
 
 class OpenOnProviderTests(unittest.TestCase):  # 2.8: the list's Movies row is its provider's
