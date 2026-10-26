@@ -293,6 +293,11 @@ def _xtream_item(
         tmdb = _tmdb_of(stream)  # finds its subtitles on OpenSubtitles
         if tmdb:
             item["tmdb"] = tmdb
+        # When the panel added it (a series: last changed), a unix time: the Library's New
+        # shelf and its "Recently added" order, as STB portals' titles have them (2.8).
+        added = str(stream.get("added" if content_type == "vod" else "last_modified") or "")
+        if added.strip().isdigit() and int(added) > 0:
+            item["added"] = added.strip()
     return item
 
 
