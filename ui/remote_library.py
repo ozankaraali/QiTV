@@ -21,7 +21,7 @@ from services.navigation import item_key
 from services.provider_ids import ALL_PROVIDERS, provider_of
 from services.search import Hit, search_index
 from services.text_fold import fold
-from ui.remote_snapshots import Handles, stable_key
+from ui.remote_snapshots import Handles, find_page, stable_key
 
 GENRES_PAGE = 100
 LIBRARY_PAGE = 50
@@ -153,18 +153,14 @@ class PhoneLibrary(QObject):
         return self._titles_page(page)
 
     def _genres_page(self, page: int) -> tuple[dict, tuple]:
-        """The genres; with a find, the genres it matches on the first page and the section's
-        titles it finds (the desktop search's rules) a page at a time after them."""
+        """The genres; with a find, the genres it matches and the section's titles it finds
+        (the desktop search's rules) after them, each a page at a time."""
         model, find = self.model, self._find()
         genres = model.genres(find.strip())
         hits, searching = self._everywhere(find)
-        if hits:
-            shown = genres[:GENRES_PAGE] if page == 0 else []
-            pages = _pages(len(hits), LIBRARY_PAGE)
-        else:
-            shown = genres[page * GENRES_PAGE : (page + 1) * GENRES_PAGE]
-            pages = _pages(len(genres), GENRES_PAGE)
-        found = [hit.item for hit in hits[page * LIBRARY_PAGE : (page + 1) * LIBRARY_PAGE]]
+        listed, at, pages = find_page(page, len(genres), len(hits), GENRES_PAGE, LIBRARY_PAGE)
+        shown = genres[listed]
+        found = [hit.item for hit in hits[at]]
         loading = not model.ready and not self._failed
         message: dict = {
             "t": "genres",

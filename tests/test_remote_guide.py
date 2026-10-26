@@ -374,32 +374,60 @@ class GuideFindTests(WindowCase):
 
     def test_the_largest_find_fits_a_frame_in_any_script(self):
         """100 rows of groups (the shown provider's and others' genres), and the channels found
-        below them with what's on, in a three-byte script."""
+        below them with what's on, in a three-byte script: the page where the groups end."""
         self.open_first_channel()
         guide = self.make()
         long = "字" * 300  # 3 bytes a letter
         now = datetime.now(timezone.utc)
         on = programme(long, now - timedelta(minutes=5))
-        genres = [FoundGenre("Other", str(i), f"{long}{i}", 9999) for i in range(150)]
+        genres = [FoundGenre("Other", str(i), f"{long}{i}", 9999) for i in range(99)]
         hits = [
             FoundChannel("P", f"{long}{i}", {"name": f"{long}{i}", "id": i}, "") for i in range(80)
         ]
         controller = self.window.controller
-        for nodes in (
-            [NavNode("group", f"g{i}", f"{long}{i}", None, 9999) for i in range(150)],
-            [],
+        for nodes, page in (
+            ([NavNode("group", f"g{i}", f"{long}{i}", None, 9999) for i in range(100)], 1),
+            ([], 0),
         ):
             with (
                 mock.patch.object(guide, "_group_nodes", return_value=nodes),
                 mock.patch.object(guide, "_everywhere", return_value=(genres, hits, False)),
                 mock.patch.object(controller, "now_next", return_value=(on, on)),
             ):
-                guide.groups(0, "字字")
+                guide.groups(page, "字字")
             message = self.last("groups")
             self.assertEqual(len(message["rows"]), 100)
             self.assertTrue(message["channels"])
             encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
             self.assertLessEqual(len(encoded), MAX_MESSAGE)
+
+    def test_a_finds_groups_past_the_first_hundred_come_a_page_at_a_time(self):
+        """Groups first, a page of 100 at a time (the shown provider's, then the others'), the
+        channels found 25 at a time after them: the page where the groups end begins them."""
+        self.open_first_channel()
+        guide = self.make()
+        nodes = [NavNode("group", f"g{i}", f"Group {i}", None, 3) for i in range(150)]
+        genres = [FoundGenre("Other", str(i), f"Genre {i}", 2) for i in range(30)]
+        hits = [FoundChannel("P", f"C{i}", {"name": f"C{i}", "id": i}, "") for i in range(40)]
+        pages = []
+        with (
+            mock.patch.object(guide, "_group_nodes", return_value=nodes),
+            mock.patch.object(guide, "_everywhere", return_value=(genres, hits, False)),
+            mock.patch.object(guide._catalog, "source", return_value=PROVIDER_NAME),
+        ):
+            for page in range(4):
+                guide.groups(page, "g")
+                pages.append(self.last("groups"))
+        self.assertEqual([m["pages"] for m in pages], [3] * 4)
+        rows = [r["title"] for m in pages for r in m["rows"]]
+        self.assertEqual(rows[:150], [f"Group {i}" for i in range(150)])
+        self.assertEqual(rows[150:], ["Other"] + [f"Genre {i}" for i in range(30)])
+        self.assertEqual(len(pages[0]["rows"]), 100)
+        self.assertEqual(pages[0]["channels"], [])  # more groups to come first
+        channels = [c["name"] for m in pages for c in m["channels"]]
+        self.assertEqual(channels, [f"C{i}" for i in range(40)])
+        self.assertEqual(len(pages[1]["channels"]), 25)  # with the last groups
+        self.assertEqual((pages[3]["rows"], pages[3]["channels"]), ([], []))  # past the end
 
     def test_the_guides_of_the_channels_found_load(self):
         self.open_first_channel()

@@ -367,17 +367,40 @@ class PhoneLibraryTests(unittest.TestCase):
     def test_the_largest_pages_fit_a_frame_in_any_script(self):
         long = "字" * 300  # 3 bytes a letter; titles are cut to what a row shows
         titles = [movie(i, f"{long}{i}", year=long) for i in range(120)]
-        genres = [(str(i), f"{long}{i}", 120) for i in range(150)]
+        genres = [(str(i), f"{long}{i}", 120) for i in range(200)]
         self.catalog.group_list["movies"] = genres
         for gid, _title, _count in genres:
             self.catalog.item_map[("movies", gid)] = titles
         keys = self.opened()
-        self.library.genres("movies", 0, "字字")  # 100 genres and 50 titles at once
+        self.library.genres("movies", 1, "字字")  # 100 genres and 50 titles at once
+        genres_page = self.last("genres")
         self.library.titles("movies", next(iter(keys.values())), 0, "")
-        for message in (self.last("genres"), self.last("library")):
+        for message in (genres_page, self.last("library")):
             encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
             self.assertLessEqual(len(encoded), MAX_MESSAGE, message["t"])
-        self.assertEqual(len(self.last("genres")["titles"]), LIBRARY_PAGE)
+        self.assertEqual(len(genres_page["rows"]), GENRES_PAGE)
+        self.assertEqual(len(genres_page["titles"]), LIBRARY_PAGE)
+
+    def test_a_finds_genres_past_the_first_hundred_come_a_page_at_a_time(self):
+        """The genres a find matches 100 a page, the titles it finds 50 a page after them: the
+        page where the genres end begins them."""
+        genres = [(str(i), f"Drama {i}", 1) for i in range(160)]
+        self.catalog.group_list["movies"] = genres
+        for gid, _title, _count in genres:
+            self.catalog.item_map[("movies", gid)] = [movie(int(gid), f"Drama film {gid}")]
+        self.opened()
+        pages = []
+        for page in range(5):
+            self.library.genres("movies", page, "drama")
+            pages.append(self.last("genres"))
+        self.assertEqual(pages[0]["found"], 160)
+        self.assertEqual([m["pages"] for m in pages], [5] * 5)
+        rows = [g["title"] for m in pages for g in m["rows"]]
+        self.assertEqual(rows, [f"Drama {i}" for i in range(160)])
+        self.assertEqual((len(pages[0]["rows"]), pages[0]["titles"]), (GENRES_PAGE, []))
+        self.assertEqual(len(pages[1]["titles"]), LIBRARY_PAGE)  # with the last genres
+        titles = [t["title"] for m in pages for t in m["titles"]]
+        self.assertEqual(sorted(titles), sorted(f"Drama film {i}" for i in range(160)))
 
     def test_many_genres_come_a_page_at_a_time_inside_a_frame(self):
         many = [(str(i), f"Genre {i} " + "x" * 200, 1) for i in range(450)]

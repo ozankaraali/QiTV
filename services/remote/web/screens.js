@@ -398,7 +398,7 @@ function channelList({ ids, asks, top, row, shown }) {
     showLevel();
     const rows = message.rows.map((group) => branchRow(group, () => openAt("channels", group.id, group.title)));
     const found = message.channels || []; // what the find found among every channel, below its groups
-    if (found.length && message.page === 0) rows.push(el("div", "group", w("channels")));
+    if (found.length && (message.page === 0 || rows.length)) rows.push(el("div", "group", w("channels"))); // where they begin
     rows.push(...found.map(row));
     placePage(box(), list, message, rows, () => openAt("groups"));
   };
@@ -846,7 +846,7 @@ function onGenres(message) {
   if (!answers(library, message)) return;
   const rows = message.rows.map((genre) => branchRow(genre, () => openLibraryAt("titles", genre.id, genre.title)));
   const titles = message.titles || []; // what the find found in the whole section, below its genres
-  if (titles.length && message.page === 0) rows.push(el("div", "group", w(library.section)));
+  if (titles.length && (message.page === 0 || rows.length)) rows.push(el("div", "group", w(library.section))); // where they begin
   rows.push(...titles.map(libraryRow));
   placePage($("libraryRows"), library, message, rows, () => openLibraryAt("genres"));
 }

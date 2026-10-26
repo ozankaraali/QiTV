@@ -31,7 +31,7 @@ from services.navigation import NavModel, NavNode, item_key, section_title
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, mixed_group_id, provider_of
 from services.text_fold import fold
 from services.zapping import ZapContext
-from ui.remote_snapshots import Handles, programme_dict, stable_key
+from ui.remote_snapshots import Handles, find_page, programme_dict, stable_key
 
 GROUPS_PAGE = 100
 GUIDE_PAGE = 50
@@ -298,20 +298,19 @@ class PhoneGuide(QObject):
         return self._channels_page(page)
 
     def _groups_page(self, page: int) -> tuple[dict, tuple]:
-        """The groups; with a find, the groups it matches on the first page and the channels it
-        finds (the desktop search's rules) a page at a time after them."""
+        """The groups; with a find, the groups it matches (and the genres it finds at the other
+        providers) and the channels it finds (the desktop search's rules) after them, each a
+        page at a time."""
         find = self._view[1] if self._view is not None else ""
         nodes = _matching(self._group_nodes(), fold(find.strip()))
         genres, hits, searching = self._everywhere(find)
-        if hits:
-            shown = nodes[:GROUPS_PAGE] if page == 0 else []
-            pages = _pages(len(hits), FOUND_PAGE)
-        else:
-            shown = nodes[page * GROUPS_PAGE : (page + 1) * GROUPS_PAGE]
-            pages = _pages(len(nodes), GROUPS_PAGE)
-        others = self._other_genres(genres) if page == 0 else []
-        others = others[: max(0, GROUPS_PAGE - len(shown))]  # 100 rows of groups, a frame's worth
-        found = [hit.item for hit in hits[page * FOUND_PAGE : (page + 1) * FOUND_PAGE]]
+        others = self._other_genres(genres)  # below the groups shown, as more of them
+        listed, at, pages = find_page(
+            page, len(nodes) + len(others), len(hits), GROUPS_PAGE, FOUND_PAGE
+        )
+        shown = nodes[listed]  # 100 rows of groups a page, a frame's worth
+        others = others[max(0, listed.start - len(nodes)) : max(0, listed.stop - len(nodes))]
+        found = [hit.item for hit in hits[at]]
         section = self._section()
         error = self.nav.load_error(section)
         loading = not nodes and not error and self.nav.is_loading(section)
