@@ -30,8 +30,11 @@ VERSION = 1
 UNLOCK_S = 3600
 ROUNDS = 120_000
 SEP = "\x1f"
+# "Adult" in an everyday phrase is not: a cartoon block's "… swim", "… education", "young …".
 _ADULT = re.compile(
-    r"(?<![a-z0-9])(xxx|adults?|porn\w*|erotic\w*|18\s*\+|\+\s*18)(?![a-z0-9])", re.I
+    r"(?<![a-z0-9])(xxx|(?<!young )adults?(?!\s+(?:swim|education|learning))|porn\w*|erotic\w*"
+    r"|18\s*\+|\+\s*18)(?![a-z0-9])",
+    re.I,
 )
 
 
@@ -219,6 +222,29 @@ class Parental:
                 return False  # not listed yet: decided once its list is known
             seen = self._adult_seen[key] = looks_adult(name)
         return seen
+
+    def in_adult_group(self, section: str, item: dict) -> bool:
+        """Whether `item` is listed in a group whose name looks adult, whatever the PIN, the
+        lock and the adult rule say (2.8: such titles are never sent to TMDB). A group whose
+        name isn't known yet is asked again later."""
+        resolve = self.group_title
+        if resolve is None:
+            return False
+        provider = provider_of(item) or ""
+        for field in ("tv_genre_id", "category_id"):
+            group = item.get(field)
+            if group in (None, ""):
+                continue
+            key = (section, provider, str(group))
+            seen = self._adult_seen.get(key)  # the adult rule's own memo of names
+            if seen is None:
+                name = resolve(section, provider, str(group))
+                if not name:
+                    continue
+                seen = self._adult_seen[key] = looks_adult(name)
+            if seen:
+                return True
+        return False
 
     def hides_group(self, section: str, provider: str, group_id: str, title: str = "") -> bool:
         if not self.active():

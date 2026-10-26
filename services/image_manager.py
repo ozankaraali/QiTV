@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import threading
+import time
 
 import orjson as json
 
@@ -15,6 +16,20 @@ from services.redact import redact_url, safe_exc
 logger = logging.getLogger(__name__)
 aiohttp = lazy_module("aiohttp")
 asyncio = lazy_module("asyncio")
+
+# 2.8: TMDB's images (services/tmdb.py) are fetched again once as old as the details kept with
+# them: TMDB's terms allow six months at most. A file's time is its download's.
+TMDB_IMAGES = "https://image.tmdb.org/"
+TMDB_IMAGE_MAX_AGE_S = 30 * 24 * 60 * 60
+
+
+def _too_old(url: str, path: str) -> bool:
+    if not url.startswith(TMDB_IMAGES):
+        return False
+    try:
+        return time.time() - os.path.getmtime(path) > TMDB_IMAGE_MAX_AGE_S
+    except OSError:
+        return False
 
 
 class ImageManager:
@@ -43,7 +58,11 @@ class ImageManager:
         cache_path = os.path.join(self.cache_dir, f"{url_hash}.{ext}")
 
         # If already cached on disk, update metadata and return
-        if os.path.exists(cache_path) and self._touch_cache_entry(url_hash, cache_path):
+        if (
+            os.path.exists(cache_path)
+            and not _too_old(url, cache_path)
+            and self._touch_cache_entry(url_hash, cache_path)
+        ):
             return cache_path
 
         # Download and write to disk

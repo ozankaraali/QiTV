@@ -1028,7 +1028,9 @@ class LibraryController(QObject):
         season = self._screen.series.current_season()
         if season is None or self._catalog.seasons(self._series) is None:
             details = self._series_details or self._model.details(self._series)
-            self._screen.series.set_series(self._series, details)
+            own = poster_url(self._series)
+            poster = self._poster(self._series, own, "series")
+            self._screen.series.set_series(self._series, details, poster if poster != own else "")
             self._catalog.request_seasons(self._series)
         else:
             self._screen.series.set_episodes(season, None)

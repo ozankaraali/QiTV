@@ -95,20 +95,22 @@ class WantedForTests(unittest.TestCase):
         wanted = wanted_for({"name": "Harbour Nights", "tmdb": "77"}, TV)
         self.assertEqual((wanted.kind, wanted.tmdb_id), (TV, 77))
 
-    def test_a_provider_s_own_tag_before_the_title_is_dropped(self):
-        for name, text in (
-            ("SO-IN - Harbour Apna Apna (1989)", "Harbour Apna Apna"),
-            ("ZONE+ - Harbour The Debut (2023)", "Harbour The Debut"),
-            ("IN-MM - Harbour Pratiksha", "Harbour Pratiksha"),
-            ("QQV -  The Harbour War (2021)", "The Harbour War"),
+    def test_a_provider_s_tag_before_the_title_gives_a_second_text_to_try(self):
+        for name, text, alt in (
+            ("SO-IN - Harbour Apna Apna (1989)", "SO-IN - Harbour Apna Apna", "Harbour Apna Apna"),
+            ("ZONE+ - Harbour The Debut (2023)", "ZONE+ - Harbour The Debut", "Harbour The Debut"),
+            ("IN-MM - Harbour Pratiksha", "IN-MM - Harbour Pratiksha", "Harbour Pratiksha"),
+            ("QQV -  The Harbour War (2021)", "QQV - The Harbour War", "The Harbour War"),
         ):
             with self.subTest(name=name):
-                self.assertEqual(wanted_for({"name": name}, MOVIE).text, text)
+                wanted = wanted_for({"name": name}, MOVIE)
+                self.assertEqual((wanted.text, wanted.alt), (text, alt))
 
-    def test_what_may_be_the_title_s_own_stays(self):
-        for name in ("AB - Up", "Harbour - Lights", "M - Harbour", "JFK"):
+    def test_what_may_be_the_title_s_own_stays(self):  # review #1: "SAS: …", "TRON: …"
+        for name in ("AB - Up", "Harbour - Lights", "M - Harbour", "JFK", "SAS: Harbour Notice"):
             with self.subTest(name=name):
-                self.assertEqual(wanted_for({"name": name}, MOVIE).text, name)
+                wanted = wanted_for({"name": name}, MOVIE)
+                self.assertEqual((wanted.text, wanted.alt), (name, ""))
 
     def test_dated_events_are_looked_up_only_by_an_id(self):
         event = {"name": "SOC - Harbour United - Bay Rovers 23.09.2024"}
@@ -116,11 +118,18 @@ class WantedForTests(unittest.TestCase):
         self.assertEqual(wanted_for({**event, "tmdb": "9"}, MOVIE).tmdb_id, 9)
         self.assertEqual(wanted_for({"name": "11.22.63"}, TV).text, "11 22 63")  # no date
 
-    def test_titles_tagged_adult_are_never_sent(self):
-        for name in ("XXX - Harbour Nights", "[XXX] Harbour Nights", "XXX: Harbour Nights"):
+    def test_titles_named_adult_are_never_sent(self):  # review #2: the parental words
+        for name in (
+            "XXX - Harbour Nights",
+            "[XXX] Harbour Nights",
+            "XXX: Harbour Nights",
+            "Adult Harbour",
+            "Harbour 18+",
+            "Erotic Harbour Tales",
+            "XXX (2002)",  # a film's own title too: nothing about it is sent
+        ):
             with self.subTest(name=name):
                 self.assertIsNone(wanted_for({"name": name, "tmdb": "9"}, MOVIE))
-        self.assertEqual(wanted_for({"name": "XXX (2002)"}, MOVIE).text, "XXX")  # a title
 
     def test_recordings_and_wordless_titles_are_not_looked_up(self):
         self.assertIsNone(wanted_for({"name": "The Harbour", "_recording": True}, MOVIE))
@@ -365,6 +374,48 @@ class LookUpTests(unittest.TestCase):
         http.answer("GET", f"{API}/movie/9", ok(data))
         self.assertIsNone(look_up(self.client(http), Wanted(MOVIE, "Deniz Feneri", 2019)))
 
+    def searches(self, http, table):
+        """Answer each search by its words: `table` maps a query to its results."""
+        http.answer(
+            "GET",
+            f"{API}/search/movie",
+            lambda kw: ok({"results": table.get(kw["params"]["query"], [])}),
+        )
+
+    def queries(self, http):
+        return [kw["params"]["query"] for m, u, kw in http.calls if u.endswith("/search/movie")]
+
+    def test_the_whole_title_is_searched_first(self):  # review #1
+        http = FakeHttp()
+        self.searches(
+            http, {"SAS - Harbour Notice": [film(5, "SAS - Harbour Notice", "2021-01-01")]}
+        )
+        http.answer("GET", f"{API}/movie/5", ok(details(5, "SAS - Harbour Notice", "2021-01-01")))
+        wanted = wanted_for({"name": "SAS - Harbour Notice (2021)"}, MOVIE)
+        self.assertEqual(look_up(self.client(http), wanted).tmdb_id, 5)
+        self.assertEqual(self.queries(http), ["SAS - Harbour Notice"])
+
+    def test_the_tag_less_title_is_searched_when_the_whole_one_is_not_known(self):
+        http = FakeHttp()
+        self.searches(http, {"Harbour Apna Apna": [film(6, "Harbour Apna Apna", "1989-01-01")]})
+        http.answer("GET", f"{API}/movie/6", ok(details(6, "Harbour Apna Apna", "1989-01-01")))
+        wanted = wanted_for({"name": "SO-IN - Harbour Apna Apna (1989)"}, MOVIE)
+        self.assertEqual(look_up(self.client(http), wanted).tmdb_id, 6)
+        self.assertEqual(self.queries(http), ["SO-IN - Harbour Apna Apna", "Harbour Apna Apna"])
+
+    def test_a_whole_title_tmdb_knows_in_another_year_is_not_cut_down(self):
+        http = FakeHttp()
+        self.searches(
+            http,
+            {
+                "SAS - Harbour Notice": [film(5, "SAS - Harbour Notice", "2010-01-01")],
+                "Harbour Notice": [film(7, "Harbour Notice", "2021-01-01")],
+            },
+        )
+        wanted = wanted_for({"name": "SAS - Harbour Notice (2021)"}, MOVIE)
+        self.assertIsNone(look_up(self.client(http), wanted))
+        self.assertEqual(self.queries(http), ["SAS - Harbour Notice"])
+
     def test_nothing_found_is_none(self):
         http = FakeHttp()
         http.answer("GET", f"{API}/search/movie", ok({"results": []}))
@@ -502,6 +553,19 @@ class CacheTests(unittest.TestCase):
             cache = self.cache()
             cache.load()
             self.assertEqual(cache.get("k"), (False, None))
+
+    def test_a_throttled_save_writes_at_most_every_half_minute(self):  # review #6
+        cache = self.cache()
+        cache.put("a", None)
+        self.assertTrue(cache.save(throttle=True))
+        cache.put("b", None)
+        self.now += tmdb.SAVE_EVERY_S - 1
+        self.assertFalse(cache.save(throttle=True))
+        self.now += 2
+        self.assertTrue(cache.save(throttle=True))
+        later = self.cache()
+        later.load()
+        self.assertEqual(later.get("b"), (True, None))
 
     def test_saving_nothing_new_writes_nothing(self):
         cache = self.cache()

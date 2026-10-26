@@ -19,7 +19,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services import i18n
+from services import i18n, parental
 from services.tmdb import (
     MOVIE,
     TV,
@@ -81,6 +81,7 @@ class TmdbFill(QObject):
         self._timer.setSingleShot(True)
         self._timer.setInterval(FOCUS_DELAY_MS)
         self._timer.timeout.connect(self.run_now)
+        self._was_enabled = self.enabled()  # as Settings left it (settings_changed)
 
     # ---- what the Library reads -----------------------------------------------------------
 
@@ -117,8 +118,11 @@ class TmdbFill(QObject):
         if self._closed or wanted is None or not self._should_ask(wanted):
             self._focus = None
             return
+        if item is None or self._private(item, kind):
+            self._focus = None
+            return
         self._focus = wanted
-        self._timer.start()
+        self._timer.start(FOCUS_DELAY_MS)  # (a pause may have left another interval)
 
     def want_posters(self, titles: Iterable[tuple[dict, str]]) -> None:
         """The posterless titles on screen, (item, kind) each: they replace the ones still
@@ -128,7 +132,7 @@ class TmdbFill(QObject):
         waiting: dict[str, Wanted] = {}
         for item, kind in titles:
             wanted = self._wanted(item, kind)
-            if wanted is not None and self._should_ask(wanted):
+            if wanted is not None and self._should_ask(wanted) and not self._private(item, kind):
                 waiting.setdefault(wanted.key(), wanted)
         self._waiting = list(waiting.values())
         self.run_now()
@@ -161,6 +165,16 @@ class TmdbFill(QObject):
             LookupWorker(client, self._cache, batch), self._on_looked, self._on_failed, batch
         )
 
+    def settings_changed(self) -> None:
+        """Settings closed: TMDB turned off (or on) says so, so the strip shows the provider's
+        own details again (or TMDB's)."""
+        enabled = self.enabled()
+        if enabled != self._was_enabled:
+            self._was_enabled = enabled
+            self.changed.emit()
+            if enabled:
+                self.run_now()
+
     def shutdown(self) -> None:
         """The window is closing: nothing more is asked, and late answers are dropped."""
         self._closed = True
@@ -182,6 +196,9 @@ class TmdbFill(QObject):
         elif looked.busy_s:
             self._paused_until = now + looked.busy_s
             logger.info("TMDB asked to slow down: pausing for %.0f s", looked.busy_s)
+            unanswered = [w for w in batch if w.key() not in looked.found]
+            kept = {w.key() for w in unanswered}
+            self._waiting = unanswered + [w for w in self._waiting if w.key() not in kept]
         else:
             for wanted in batch:
                 if wanted.key() not in looked.found:
@@ -197,11 +214,22 @@ class TmdbFill(QObject):
         now = self._now()
         for wanted in batch:
             self._failed[wanted.key()] = now  # not straight back: the worker itself failed
+        self.run_now()  # the titles still waiting
 
     # ---- helpers --------------------------------------------------------------------------
 
     def _token(self) -> str:
         return api_token(str(getattr(self._config, "tmdb_token", "") or ""))
+
+    @staticmethod
+    def _private(item: dict, kind: str) -> bool:
+        """A title never sent to TMDB: hidden by parental controls (locked or not), or listed
+        in a group whose name looks adult (with no PIN or rule too)."""
+        guard = parental.installed()
+        if guard is None:
+            return False
+        section = "series" if kind == "series" else "movies"
+        return guard.protects(section, item) or guard.in_adult_group(section, item)
 
     def _should_ask(self, wanted: Wanted) -> bool:
         key = wanted.key()

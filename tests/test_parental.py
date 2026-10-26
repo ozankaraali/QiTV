@@ -106,6 +106,18 @@ class ParentalTests(unittest.TestCase):
         self.assertTrue(self.guard.show_again(key))
         self.assertEqual(self.guard.hidden(), [])
 
+    def test_a_title_in_a_group_named_adult_is_told_with_no_pin_or_rule(self):  # 2.8: TMDB
+        titles = {"66": "XXX Late", "10": "News"}
+        self.guard.group_title = lambda section, provider, gid: titles.get(gid, "")
+        self.assertFalse(self.guard.has_pin())
+        self.assertTrue(self.guard.in_adult_group("movies", ADULT))
+        self.assertFalse(self.guard.in_adult_group("movies", NEWS))
+        later = {"id": "3", "name": "Night", "category_id": "88", "_provider": "P"}
+        self.assertFalse(self.guard.in_adult_group("movies", later))  # its group not known yet
+        titles["88"] = "18+ Films"
+        self.assertTrue(self.guard.in_adult_group("movies", later))  # asked again once known
+        self.assertFalse(Parental(self.config).in_adult_group("movies", ADULT))  # no names
+
     def test_the_adult_rule_hides_groups_as_they_come(self):  # review I8
         titles = {"66": "XXX Late", "10": "News"}
         self.guard.group_title = lambda section, provider, gid: titles.get(gid, "")
@@ -143,6 +155,19 @@ class ParentalTests(unittest.TestCase):
             self.assertTrue(looks_adult(title), title)
         for title in ("News", "Sports 18", "Kids", "Documentary"):
             self.assertFalse(looks_adult(title), title)
+
+    def test_adult_in_an_everyday_phrase_is_not(self):  # a cartoon block, a school, a genre
+        for title in (
+            "Adult swim lessons",
+            "US: ADULT SWIM HD",
+            "Adult education",
+            "Adult learning",
+            "Young adult",
+            "Young Adult Films",
+        ):
+            self.assertFalse(looks_adult(title), title)
+        for title in ("Adult", "ADULTS ONLY", "TR: ADULT", "Adult | VIP", "For adults"):
+            self.assertTrue(looks_adult(title), title)
 
 
 if __name__ == "__main__":

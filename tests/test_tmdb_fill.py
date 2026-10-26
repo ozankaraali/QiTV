@@ -12,9 +12,12 @@ from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 from opensubtitles_fixtures import FakeHttp, FakeResponse
 from test_tmdb import details
+from timer_fixtures import elapse
 
+from services import parental
+from services.parental import Parental
 from services.tmdb import API_URL
-from ui.tmdb_fill import BATCH, RETRY_S, TmdbFill
+from ui.tmdb_fill import BATCH, FOCUS_DELAY_MS, RETRY_S, TmdbFill
 
 API = API_URL
 
@@ -180,7 +183,7 @@ class TmdbFillTests(unittest.TestCase):
         self.assertEqual(self.asked(), ["7"])
         self.clock[0] += 6
         self.fill.run_now()
-        self.assertEqual(self.asked(), ["7", "8"])
+        self.assertEqual(self.asked(), ["7", "8", "7"])  # the focus first, then 7 again
 
     def test_a_title_that_could_not_be_asked_waits_before_another_try(self):
         self.http.answer("GET", f"{API}/movie/7", OSError("down"))
@@ -193,6 +196,82 @@ class TmdbFillTests(unittest.TestCase):
         self.fill.focus(film(7), "movie")
         self.fill.run_now()
         self.assertEqual(self.asked(), ["7", "7"])
+
+    def test_the_focus_is_asked_for_once_it_rests(self):
+        answer_ids(self.http, 7)
+        self.fill.focus(film(7), "movie")
+        elapse(FOCUS_DELAY_MS + 100)
+        self.assertEqual(self.asked(), ["7"])
+
+    def test_after_a_pause_the_focus_waits_its_moment_again(self):  # review #3
+        self.http.answer(
+            "GET", f"{API}/movie/7", FakeResponse(429, {}, headers={"Retry-After": "5"})
+        )
+        self.fill.focus(film(7), "movie")
+        self.fill.run_now()  # paused: the timer is set for the pause
+        self.clock[0] += 6
+        answer_ids(self.http, 8)
+        self.fill.focus(film(8), "movie")
+        elapse(FOCUS_DELAY_MS + 100)
+        self.assertEqual(self.asked(), ["7", "8", "7"])  # the focus first, then 7 again
+
+    def test_titles_caught_by_a_pause_are_asked_once_it_ends(self):  # review #4
+        self.http.answer(
+            "GET",
+            f"{API}/movie/1",
+            FakeResponse(429, {}, headers={"Retry-After": "5"}),
+            FakeResponse(200, details(1, "Film 1", "2019-01-01")),
+        )
+        answer_ids(self.http, 2)
+        self.fill.want_posters([(film(1), "movie"), (film(2), "movie")])
+        self.assertEqual(self.asked(), ["1"])
+        self.clock[0] += 6
+        self.fill.run_now()
+        self.assertEqual(self.asked(), ["1", "1", "2"])
+        self.assertTrue(self.fill.poster_url(film(2), "movie"))
+
+    def test_after_a_failed_batch_the_others_go_on(self):  # review #4
+        answer_ids(self.http, 2)
+        runs = []
+
+        def fail_first(worker, on_done, on_error, batch):
+            runs.append(batch)
+            if len(runs) == 1:
+                on_error(batch, "failed")
+            else:
+                ImmediateRunner().run_worker(worker, on_done, on_error, batch)
+
+        self.fill._jobs = SimpleNamespace(run_worker=fail_first)
+        titles = [(film(n), "movie") for n in (1, 3, 4, 5, 2)]
+        self.fill.want_posters(titles)
+        self.assertEqual([w.tmdb_id for w in runs[1]], [2])
+
+    def test_titles_in_adult_or_hidden_groups_are_never_asked(self):  # review #2
+        guard = Parental(SimpleNamespace(parental=None, save_config=lambda: None))
+        names = {"66": "Adults", "10": "Drama"}
+        guard.group_title = lambda section, provider, gid: names.get(gid, "")
+        parental.install(guard)
+        self.addCleanup(parental.install, None)
+        answer_ids(self.http, 7, 8, 9)
+        self.fill.focus(film(7, category_id="66"), "movie")
+        self.fill.want_posters([(film(8, category_id="66"), "movie")])
+        self.fill.run_now()
+        self.assertEqual(self.http.calls, [])
+        guard.set_pin("1234")
+        guard.hide_group("movies", "", "10")
+        self.fill.focus(film(9, category_id="10"), "movie")  # hidden by the user
+        self.fill.run_now()
+        self.assertEqual(self.http.calls, [])
+
+    def test_turning_it_off_or_on_in_settings_says_so(self):  # review #7
+        self.fill.settings_changed()
+        self.assertEqual(self.changes, [])  # nothing changed
+        self.config.tmdb_details = False
+        self.fill.settings_changed()
+        self.assertEqual(self.changes, [True])  # the strip shows the provider's own again
+        self.config.tmdb_details = True
+        self.fill.settings_changed()
+        self.assertEqual(self.changes, [True, True])
 
     def test_after_shutdown_nothing_is_asked(self):
         self.fill.shutdown()

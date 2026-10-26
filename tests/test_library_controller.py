@@ -1,4 +1,5 @@
 import os
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -1491,6 +1492,17 @@ class TmdbInTheLibraryTests(unittest.TestCase):  # 2.8
         self.tmdb.changed.emit()
         self.assertEqual(self.screen.series._details.plot, "Lighthouses.")
 
+    def test_retrying_a_series_keeps_tmdb_s_poster(self):  # review #5
+        self.tmdb = FakeTmdb()
+        self.tmdb.known["Harbour Lights"] = {"poster": "https://image.invalid/h.jpg"}
+        ctl = self.build(tmdb=self.tmdb)
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.screen.series._poster_url, "https://image.invalid/h.jpg")
+        self.screen.series.retryRequested.emit()
+        self.assertEqual(self.screen.series._poster_url, "https://image.invalid/h.jpg")
+
     def test_search_hits_are_filled_by_their_own_kind_and_channels_never(self):
         self.tmdb = FakeTmdb()
         ctl = self.build(tmdb=self.tmdb)
@@ -1507,6 +1519,40 @@ class TmdbInTheLibraryTests(unittest.TestCase):  # 2.8
         self.assertEqual(self.tmdb.focused[-1], ("Salt TV", "live"))
         grid._request_posters()
         self.assertNotIn("Salt TV", [name for name, _kind in self.tmdb.wanted[-1]])
+
+    def test_with_the_real_lookups_a_posterless_film_takes_tmdb_s_poster_and_story(self):
+        from opensubtitles_fixtures import FakeHttp, FakeResponse
+        from test_tmdb import details
+
+        from services.tmdb import API_URL
+        from ui.tmdb_fill import TmdbFill
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        http = FakeHttp()
+        answer = details(5, "Bare Film", "2019-01-01", overview="Story.", poster="/b.jpg")
+        http.answer("GET", f"{API_URL}/movie/5", FakeResponse(200, answer))
+        fill = TmdbFill(
+            config=SimpleNamespace(tmdb_details=True, tmdb_token="tok"),
+            jobs=ImmediateRunner(),
+            cache_path=os.path.join(directory.name, "tmdb.json"),
+            language="en",
+            http=http,
+        )
+        self.catalog.item_map[("movies", "d")] = [
+            SALT,
+            {"id": "5", "name": "Bare Film", "tmdb": "5"},
+        ]
+        ctl = self.build(tmdb=fill)
+        ctl.open("movies")
+        self.catalog.sectionReady.emit("movies")
+        grid = self.screen.grid
+        grid._request_posters()  # the view settled: the posterless one is asked for
+        bare = grid.item(self.grid_names().index("Bare Film"))
+        self.assertEqual(grid._poster_url(bare), "https://image.tmdb.org/t/p/w342/b.jpg")
+        grid.set_current_index(self.grid_names().index("Bare Film"))
+        self.assertEqual((grid._details().plot, grid._details().year), ("Story.", "2019"))
+        self.assertEqual(len(http.calls), 1)  # SALT has its own poster: never asked
 
     def test_shutdown_stops_tmdb(self):
         ctl = self.open_movies()

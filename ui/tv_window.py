@@ -1510,6 +1510,7 @@ class TVWindow(QMainWindow):
                 dialog.options_tab.setCurrentWidget(dialog.remote_tab)
             dialog.exec()
             self.menus.rebuild_providers()
+            self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on
 
     def open_phone_remote(self) -> None:
         """The menu's Phone Remote…: turns the remote on if it is off, then the pairing QR."""
@@ -1535,6 +1536,7 @@ class TVWindow(QMainWindow):
             dialog.fill_from_link(link)
         dialog.exec()
         self.menus.rebuild_providers()
+        self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on
 
     def add_dropped_providers(self, files: list[str], links: list[ProviderLink]) -> None:
         """Playlist files and provider links dropped on the window (2.2) become providers, as

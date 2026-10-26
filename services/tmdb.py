@@ -8,22 +8,27 @@ director where the provider's item has none (the provider's own always stays). T
 fills in only where the provider has none, or its image can't be loaded.
 
 Matching (`look_up`): by the TMDB id the provider gives (an Xtream panel's "tmdb", a Jellyfin
-or Emby item's), else its IMDb id, else by the title: `clean_title` drops a provider's tags
-and quality marks, and an original title in Latin letters is preferred. A result is the title
-only when it has the same words (`same_words`: "Harbour" is not "Harbour: Part Two") and, when
-the provider gives a year, a year within one of it; several of one name without a year are
-none of them. A title in another language than TMDB's answer is checked against the result's
-translated and alternative titles. A wrong poster is worse than none: nothing fuzzier matches.
+or Emby item's), else its IMDb id, else by the title: `clean_title` drops a provider's known
+tags and quality marks, and an original title in Latin letters is preferred. The whole title
+is searched first; without another tag before it ("SO-IN - ") only when TMDB calls nothing so
+("SAS: …" stays whole). A result is the title only when it has the same words (`same_words`:
+"Harbour" is not "Harbour: Part Two") and, when the provider gives a year, a year within one
+of it; several of one name without a year are none of them. A title in another language than
+TMDB's answer is checked against the result's translated and alternative titles. A wrong
+poster is worse than none: nothing fuzzier matches.
 
-Requests go in the app's language and carry the token (the user's own from Settings, else the
-one a release build carries: services/_build_keys.py, written by CI), never the user's name.
-Titles, the token and URLs are never logged. Answers are cached on disk (`TmdbCache`) for
-30 days, and "TMDB has no such title" for 3: TMDB's terms allow six months at most.
+Never sent: a title whose name has a word parental controls call adult (XXX, adult, 18+, …),
+a dated event without an id, and (ui/tmdb_fill.py) anything in a group named so or hidden by
+parental controls. Requests go in the app's language and carry the token (the user's own from
+Settings, else the one a release build carries: services/_build_keys.py, written by CI), never
+the user's name. Titles, the token and URLs are never logged. Answers are cached on disk
+(`TmdbCache`, saved at most every SAVE_EVERY_S) for 30 days, and "TMDB has no such title" for
+3: TMDB's terms allow six months at most (its images too: services/image_manager.py).
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import json
 import logging
 import os
@@ -47,6 +52,7 @@ from services.opensubtitles import (
     title_words,
     user_agent,
 )
+from services.parental import looks_adult
 from services.redact import safe_exc
 
 logger = logging.getLogger(__name__)
@@ -62,6 +68,7 @@ DAY_S = 24 * 60 * 60
 FOUND_S = 30 * DAY_S  # TMDB's terms: nothing cached longer than six months
 MISSING_S = 3 * DAY_S  # "no such title": a new one may be added
 MAX_ENTRIES = 20_000
+SAVE_EVERY_S = 30  # a lookup saves the cache at most this often (it is rewritten whole)
 CAST_COUNT = 5
 MAKERS_COUNT = 2  # a film's directors, a series' creators
 GENRES_SHOWN = 3
@@ -160,14 +167,16 @@ def _int_or_none(value: Any) -> Optional[int]:
 
 @dataclass(frozen=True)
 class Wanted:
-    """A title to look up: its kind (MOVIE or TV), its cleaned title and year, and the ids
-    its provider gives."""
+    """A title to look up: its kind (MOVIE or TV), its cleaned title and year, the ids its
+    provider gives, and `alt`: the title without a provider's tag before it ("SO-IN - "),
+    searched only when TMDB knows nothing by the whole one ("" when there is no tag)."""
 
     kind: str
     text: str
     year: Optional[int] = None
     tmdb_id: Optional[int] = None
     imdb_id: Optional[int] = None
+    alt: str = ""
 
     def key(self) -> str:
         """The cache's key (without the language): its id, else its title's words and year."""
@@ -178,11 +187,10 @@ class Wanted:
         return f"{self.kind}:q:{' '.join(sorted(title_words(self.text)))}:{self.year or ''}"
 
 
-# A provider's tag before a title, in capitals ("SO-IN - ", "ZONE+ - ", "QQV: "), beyond the
-# country and language codes clean_title knows; dropped while a title remains.
-_TAG = re.compile(r"^([A-Z0-9+]{2,6}(?:-[A-Z0-9+]{1,6})*)\s*[-–—|:]\s+")
-# A title tagged adult ("XXX - ", "[XXX] ", "XXX: "): never sent to TMDB.
-_ADULT = re.compile(r"^\s*(?:XXX\s*[-–—|:]|[\[(|]\s*XXX\s*[\])|])")
+# A provider's tag before a title, in capitals and before a dash or a bar ("SO-IN - ", "ZONE+
+# | "), beyond the country and language codes clean_title knows. Not before a colon: that is a
+# title's own ("SAS: …", "TRON: …"). The title without it is searched second (Wanted.alt).
+_TAG = re.compile(r"^([A-Z0-9+]{2,6}(?:-[A-Z0-9+]{1,6})*)\s*[-–—|]\s+")
 # A dated event ("… 23.09.2024"): a match or a show's day, not a film; asked only by an id.
 _DATE = re.compile(r"(?<![\d.])\d{1,2}[./]\d{1,2}[./](?:19|20)\d{2}(?![\d.])")
 
@@ -195,23 +203,25 @@ def _without_tag(text: str) -> str:
 
 def wanted_for(item: Any, kind: str) -> Optional[Wanted]:
     """What to look up for a catalog item of `kind` (MOVIE or TV); None for anything else
-    (an episode, a recording, a title tagged adult, a dated event without an id, a title
-    without words or ids)."""
+    (an episode, a recording, a title whose name has an adult word, a dated event without an
+    id, a title without words or ids). Titles in an adult group are left out by the Library's
+    side (ui/tmdb_fill.py), which knows the groups."""
     if kind not in (MOVIE, TV) or not isinstance(item, dict):
         return None
     if item.get("_recording") or item.get("_scheduled"):
         return None  # a file of the disk, named by its channel and time
     name = str(item.get("name") or item.get("title") or "")
-    if _ADULT.match(name):
-        return None
+    if looks_adult(name):
+        return None  # parental controls' words (XXX, adult, 18+, …): never sent
     tmdb_id, imdb_id = provider_ids(item)
     text, year = clean_title(original_title(item) or name)
-    text = _without_tag(text)
+    alt = _without_tag(text)
     if not title_words(text) or _DATE.search(name):
-        text = ""
+        text = alt = ""
     if not (text or tmdb_id or imdb_id):
         return None
-    return Wanted(kind, text, year or item_year(item), tmdb_id, imdb_id)
+    alt = alt if alt != text and title_words(alt) else ""
+    return Wanted(kind, text, year or item_year(item), tmdb_id, imdb_id, alt)
 
 
 # ---- matching -----------------------------------------------------------------------------
@@ -284,16 +294,26 @@ def look_up(client: TmdbClient, wanted: Wanted) -> Optional[Info]:
             info = _by_id(client, wanted.kind, tmdb_id)
             if info is not None:
                 return info
-    if not wanted.text:
-        return None
-    chosen, unsure = pick(client.search(wanted.kind, wanted.text), wanted)
-    if chosen is not None:
-        return _by_id(client, wanted.kind, chosen["id"])
-    for result in unsure:
+    # The whole title first; without a provider's tag only when TMDB calls nothing so.
+    left: list[tuple[str, dict]] = []  # (the text, a result to check by its other titles)
+    for text in (t for t in (wanted.text, wanted.alt) if t):
+        results = client.search(wanted.kind, text)
+        chosen, unsure = pick(results, replace(wanted, text=text))
+        if chosen is not None:
+            return _by_id(client, wanted.kind, chosen["id"])
+        left += [(text, result) for result in unsure]
+        if _called(results, text):
+            break  # TMDB knows that whole title (in another year): it is not cut down
+    for text, result in left[:CANDIDATES]:
         data = client.details(wanted.kind, result["id"], titles=True)
-        if data is not None and _known_as(data, wanted.text):
+        if data is not None and _known_as(data, text):
             return _info_of(client, wanted.kind, data)
     return None
+
+
+def _called(results: Iterable[Any], text: str) -> bool:
+    """Whether a search's results hold a title called `text` (any year)."""
+    return any(same_words(text, name) for r in results if isinstance(r, dict) for name in _names(r))
 
 
 def _billing(person: dict) -> int:
@@ -494,6 +514,7 @@ class TmdbCache:
         self._entries: dict[str, tuple[float, Optional[Info]]] = {}
         self._loaded = False
         self._dirty = False
+        self._saved_at: Optional[float] = None
 
     def load(self) -> None:
         """Read the file once (what's in memory wins); an unreadable one is an empty cache."""
@@ -546,11 +567,16 @@ class TmdbCache:
             self._entries[key] = (self._now(), info)
             self._dirty = True
 
-    def save(self) -> bool:
-        """Write what changed (merged with the file first); False when nothing was written."""
+    def save(self, *, throttle: bool = False) -> bool:
+        """Write what changed (merged with the file first); False when nothing was written.
+        `throttle`: not within SAVE_EVERY_S of the last write (what changed waits for the next;
+        a quit before it loses only those answers, asked again)."""
         self.load()
         with self._lock:
             if not self._dirty:
+                return False
+            last = self._saved_at
+            if throttle and last is not None and self._now() - last < SAVE_EVERY_S:
                 return False
             entries = sorted(
                 ((k, v) for k, v in self._entries.items() if self._fresh(v)),
@@ -574,6 +600,8 @@ class TmdbCache:
             with self._lock:
                 self._dirty = True
             return False
+        with self._lock:
+            self._saved_at = self._now()
         return True
 
 
@@ -627,5 +655,5 @@ class LookupWorker(QObject):
             found[wanted.key()] = info
         if failed:
             logger.info("TMDB: %d of %d titles could not be looked up", failed, len(self._wanted))
-        self._cache.save()
+        self._cache.save(throttle=True)
         self.finished.emit(Looked(found, busy, bad_token))
