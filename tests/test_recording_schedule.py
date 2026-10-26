@@ -67,6 +67,19 @@ class ScheduleTests(unittest.TestCase):
         (second,) = self.schedule.due((T0 + timedelta(minutes=121)).timestamp(), guide)
         self.assertEqual(second.start, airings[2].start.timestamp())
 
+    def test_a_series_is_found_among_short_programmes(self):  # 2.8 review M6
+        # Five-minute programmes all day: the guide lists 48 at a time from the moment asked;
+        # asked six hours back, the airing now was never among them.
+        self.schedule.add_series(CHANNEL, "Bulletin")
+        day = [programme("Filler", k * 5, 5) for k in range(-12 * 12, 12 * 12)]
+        day[12 * 12] = programme("Bulletin", 0, 5)  # at T0
+
+        def guide(channel, since):
+            return [p for p in day if p.stop.timestamp() > since][:48]
+
+        (job,) = self.schedule.due(T0.timestamp() + 30, guide)
+        self.assertEqual(job.title, "Bulletin")
+
     def test_a_once_recording_leaves_the_list_when_it_ended_and_its_outcome_stays(self):
         item = self.schedule.add_once(CHANNEL, programme("The News", 30))
         (job,) = self.schedule.due((T0 + timedelta(minutes=30)).timestamp(), lambda c, s: [])

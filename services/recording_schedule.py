@@ -334,7 +334,9 @@ class Schedule:
                         programme.start.timestamp(),
                         programme.stop.timestamp(),
                     )
-                    for programme in guide(channel, now - POST_S - 6 * 3600)
+                    # In its window now ends after now - POST_S (2.8: asked from there, not
+                    # hours back: 48 short programmes never reached now).
+                    for programme in guide(channel, now - POST_S)
                     if _fold(programme.title) == _fold(item.get("title", ""))
                 ]
             for job in candidates:
