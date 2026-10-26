@@ -497,6 +497,11 @@ class ConfigManager:
     opensubtitles_hearing_impaired = _config_property(
         "opensubtitles_hearing_impaired", False, coerce=lambda value: value is True
     )
+    # 2.8, optional (older builds ignore them): TMDB fills in what the Library's titles lack
+    # (services/tmdb.py); the token is the user's own (a source build has none built in) and is
+    # never logged.
+    tmdb_details = _config_property("tmdb_details", True, coerce=lambda value: value is not False)
+    tmdb_token = _config_property("tmdb_token", "", coerce=str)
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 

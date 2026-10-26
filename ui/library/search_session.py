@@ -261,10 +261,18 @@ class SearchSession(QObject):
         if hit is not None and section == "movies":
             cid = WatchState.content_id(hit.provider, item, item_type="movie")
             resume = self._watch.resume_position(cid)
+        kind = self.kind_of(item)
+        filled = self._model.filled(item, kind)  # 2.8: TMDB's details where the provider's lack
         return replace(
-            self._model.details(item),
-            genre=str(item.get("genre") or item.get("genres_str") or ""),
+            self._model.details(item, kind=kind),
+            genre=str(filled.get("genre") or filled.get("genres_str") or ""),
             kind="series" if section == "series" else "movie",
             resume_ms=resume,
             progress=None,
         )
+
+    def kind_of(self, item: dict) -> str:
+        """A hit's kind as the Library names it: "live", "series" or "movie"."""
+        hit = self.hit_for(item)
+        section = hit.section if hit is not None else "movies"
+        return {"live": "live", "series": "series"}.get(section, "movie")

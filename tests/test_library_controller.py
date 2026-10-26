@@ -321,7 +321,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.menus = []  # (item, section, global position) of each right-click menu
         self.model = LibraryModel(self.catalog, self.config, self.watch)
 
-    def build(self, jobs=None, logos=None):
+    def build(self, jobs=None, logos=None, tmdb=None):
         self.screen = LibraryScreen(self.posters, logos)
         self.addCleanup(self.screen.deleteLater)
         self.addCleanup(self.screen.close)
@@ -340,6 +340,7 @@ class LibraryControllerTests(unittest.TestCase):
             tune_live=self.tuned.append,
             back_to_tv=lambda: self.backs.append(True),
             context_menu=lambda item, section, pos: self.menus.append((item, section, pos)),
+            tmdb=tmdb,
         )
         self.addCleanup(self.ctl.shutdown)
         return self.ctl
@@ -1395,6 +1396,124 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.screen.genres.rows(), [])
 
 
+class FakeTmdb(QObject):
+    """Stands in for ui.tmdb_fill.TmdbFill: what it was asked for, and what it "knows" by
+    title name ({"fields": {...}, "poster": url})."""
+
+    changed = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.known = {}
+        self.focused = []  # (name, kind)
+        self.wanted = []  # [(name, kind)] per call
+        self.closed = False
+
+    def fill(self, item, kind):
+        known = self.known.get(item.get("name"))
+        return {**item, **known.get("fields", {})} if known else item
+
+    def poster_url(self, item, kind):
+        known = self.known.get(item.get("name"))
+        return known.get("poster", "") if known else ""
+
+    def focus(self, item, kind):
+        self.focused.append((item.get("name") if item else None, kind))
+
+    def want_posters(self, titles):
+        self.wanted.append([(item.get("name"), kind) for item, kind in titles])
+
+    def shutdown(self):
+        self.closed = True
+
+
+class TmdbInTheLibraryTests(unittest.TestCase):  # 2.8
+    setUp = LibraryControllerTests.setUp
+    build = LibraryControllerTests.build
+    type_text = LibraryControllerTests.type_text
+    grid_names = LibraryControllerTests.grid_names
+
+    def open_movies(self):
+        self.tmdb = FakeTmdb()
+        ctl = self.build(tmdb=self.tmdb)
+        ctl.open("movies")
+        self.catalog.sectionReady.emit("movies")
+        return ctl
+
+    def at(self, name):
+        """The grid index of the title called `name` (the grid sorts them)."""
+        return self.grid_names().index(name)
+
+    def test_the_title_in_focus_is_asked_of_tmdb(self):
+        self.open_movies()
+        self.screen.grid.set_current_index(self.at("Tide Lines"))
+        self.assertEqual(self.tmdb.focused[-1], ("Tide Lines", "movie"))
+
+    def test_what_tmdb_knows_fills_the_strip(self):
+        self.open_movies()
+        grid = self.screen.grid
+        grid.set_current_index(self.at("Tide Lines"))
+        self.assertEqual(grid._details().plot, "")
+        self.tmdb.known["Tide Lines"] = {"fields": {"plot": "Waves.", "cast": "Ana, Bo"}}
+        self.tmdb.changed.emit()
+        self.assertEqual((grid._details().plot, grid._details().cast), ("Waves.", "Ana, Bo"))
+
+    def test_posterless_titles_on_screen_go_to_tmdb_and_take_its_poster(self):
+        self.catalog.item_map[("movies", "d")] = [SALT, {"id": "5", "name": "Bare Film"}]
+        self.open_movies()
+        grid = self.screen.grid
+        grid._request_posters()
+        self.assertEqual(self.tmdb.wanted[-1], [("Bare Film", "movie")])
+        self.tmdb.known["Bare Film"] = {"poster": "https://image.invalid/b.jpg"}
+        bare, salt = grid.item(self.at("Bare Film")), grid.item(self.at("Salt Roads"))
+        self.assertEqual(grid._poster_url(bare), "https://image.invalid/b.jpg")
+        self.assertEqual(grid._poster_url(salt), SALT["logo"])  # the provider's stays
+
+    def test_a_provider_poster_that_failed_gives_way_to_tmdb_s(self):
+        self.posters.failed = lambda url: url == SALT["logo"]
+        self.open_movies()
+        grid = self.screen.grid
+        grid._request_posters()
+        self.assertIn(("Salt Roads", "movie"), self.tmdb.wanted[-1])
+        self.tmdb.known["Salt Roads"] = {"poster": "https://image.invalid/s.jpg"}
+        salt = grid.item(self.at("Salt Roads"))
+        self.assertEqual(grid._poster_url(salt), "https://image.invalid/s.jpg")
+
+    def test_a_series_opened_is_asked_for_and_its_details_follow(self):
+        self.tmdb = FakeTmdb()
+        ctl = self.build(tmdb=self.tmdb)
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(ctl.mode, "series")
+        self.assertIn(("Harbour Lights", "series"), self.tmdb.focused)
+        self.tmdb.known["Harbour Lights"] = {"fields": {"plot": "Lighthouses."}}
+        self.tmdb.changed.emit()
+        self.assertEqual(self.screen.series._details.plot, "Lighthouses.")
+
+    def test_search_hits_are_filled_by_their_own_kind_and_channels_never(self):
+        self.tmdb = FakeTmdb()
+        ctl = self.build(tmdb=self.tmdb)
+        ctl.open_search()
+        self.type_text("sal")
+        elapse(WAIT_MS)
+        self.assertEqual(self.grid_names(), ["Salt TV", "Salt Roads", "Salt Lake"])
+        grid = self.screen.grid
+        self.tmdb.known["Salt Lake"] = {"fields": {"plot": "A lake.", "genre": "Drama"}}
+        grid.set_current_index(2)
+        self.assertEqual((grid._details().plot, grid._details().genre), ("A lake.", "Drama"))
+        self.assertEqual(self.tmdb.focused[-1], ("Salt Lake", "movie"))
+        grid.set_current_index(0)
+        self.assertEqual(self.tmdb.focused[-1], ("Salt TV", "live"))
+        grid._request_posters()
+        self.assertNotIn("Salt TV", [name for name, _kind in self.tmdb.wanted[-1]])
+
+    def test_shutdown_stops_tmdb(self):
+        ctl = self.open_movies()
+        ctl.shutdown()
+        self.assertTrue(self.tmdb.closed)
+
+
 class GridPostersTests(unittest.TestCase):
     def setUp(self):
         self.posters = FakePosters()
@@ -1426,6 +1545,13 @@ class GridPostersTests(unittest.TestCase):
         self.logos.logoReady.emit("http://l/1")
         self.assertEqual(ready, [LIVE_TILE + "http://l/1"])
         self.assertIs(self.shim.pixmap(LIVE_TILE + "http://l/1"), logo)
+
+    def test_a_poster_that_failed_is_told_a_logo_never(self):  # 2.8: TMDB's poster then
+        self.posters.failed = lambda url: url == "http://p/1"
+        self.assertTrue(self.shim.failed("http://p/1"))
+        self.assertFalse(self.shim.failed("http://p/2"))
+        self.assertFalse(self.shim.failed(LIVE_TILE + "http://l/1"))
+        self.assertFalse(GridPosters(FakePosters()).failed("http://p/1"))  # it can't tell
 
     def test_posters_pass_through(self):
         pixmap = QPixmap(10, 15)

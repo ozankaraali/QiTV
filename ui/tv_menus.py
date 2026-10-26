@@ -28,7 +28,7 @@ from services.exporter import ExportKind
 from services.i18n import N_, tr, translate
 from services.navigation import ADD_PROVIDER_ROW, FREE_CHANNELS_ROW, OPEN_FILE_ROW, SETTINGS_ROW
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
-from ui.brand import logo_pixmap
+from ui.brand import logo_pixmap, scaled_asset
 from ui.free_channels_menu import (
     PICKER_TITLE as FREE_CHANNELS_TITLE,
     build_menu as build_free_channels_menu,
@@ -48,7 +48,12 @@ ABOUT_TEXT = (
     "<p><b>QiTV {version}</b></p>"
     "<p>{tagline}</p>"
     '<p><a href="{home}">{home}</a><br><a href="{issues}">{report}</a></p>'
+    "<p><small>{tmdb}</small></p>"
 )
+# 2.8: TMDB's terms ask for this notice, in their words, and their logo (assets/tmdb.png).
+TMDB_NOTICE = "This product uses the TMDB API but is not endorsed or certified by TMDB."
+TMDB_LOGO_FILE = "tmdb.png"
+ABOUT_TMDB_LOGO_PX = 12  # less prominent than QiTV's own logo, as the terms ask
 NO_PROVIDERS_TEXT = N_("No providers")  # i18n: the Providers menu's only entry, when it is empty
 ADD_PROVIDER_TEXT = N_("Add provider")  # i18n: the Providers menu's entry; opens the provider form
 _SHORTCUT_MODIFIERS = (
@@ -72,6 +77,7 @@ def about_text() -> str:
         home=HOME_URL,
         issues=ISSUES_URL,
         report=tr("Report an issue"),  # i18n: a link in About QiTV, to the project's issues
+        tmdb=TMDB_NOTICE,
     )
 
 
@@ -95,11 +101,18 @@ class AboutDialog(QDialog):
         self.text.setOpenExternalLinks(True)
         self.text.setMinimumWidth(ABOUT_TEXT_MIN_W)
         self.text.setWordWrap(True)
+        self.tmdb_logo = QLabel(self)
+        tmdb_logo = scaled_asset(TMDB_LOGO_FILE, ABOUT_TMDB_LOGO_PX, ratio)
+        if tmdb_logo is not None:
+            self.tmdb_logo.setPixmap(tmdb_logo)
+        else:
+            self.tmdb_logo.hide()
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, self)
         buttons.accepted.connect(self.accept)
         layout = QVBoxLayout(self)
         layout.addWidget(self.logo)
         layout.addWidget(self.text)
+        layout.addWidget(self.tmdb_logo)
         layout.addWidget(buttons)
 
 

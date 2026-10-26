@@ -85,11 +85,13 @@ jobs:
         id: sync
         run: uv sync --frozen --dev
       - name: Write the build's keys
-        # services/_build_keys.py gets the OpenSubtitles key from the secret, never printed;
-        # without the secret (a fork) it stays empty. Nothing here commits it.
+        # services/_build_keys.py gets the OpenSubtitles key and the TMDB token from the
+        # secrets, never printed; without a secret (a fork) its key stays empty. Nothing here
+        # commits them.
         run: uv run python scripts/write_build_keys.py
         env:
           QITV_OPENSUBTITLES_KEY: ${{ secrets.QITV_OPENSUBTITLES_KEY }}
+          QITV_TMDB_TOKEN: ${{ secrets.QITV_TMDB_TOKEN }}
       - name: Package App with PyInstaller for Linux
         id: package
         run: uv run pyinstaller qitv-linux.spec
@@ -219,11 +221,13 @@ jobs:
         id: sync
         run: uv sync --frozen --dev
       - name: Write the build's keys
-        # services/_build_keys.py gets the OpenSubtitles key from the secret, never printed;
-        # without the secret (a fork) it stays empty. Nothing here commits it.
+        # services/_build_keys.py gets the OpenSubtitles key and the TMDB token from the
+        # secrets, never printed; without a secret (a fork) its key stays empty. Nothing here
+        # commits them.
         run: uv run python scripts/write_build_keys.py
         env:
           QITV_OPENSUBTITLES_KEY: ${{ secrets.QITV_OPENSUBTITLES_KEY }}
+          QITV_TMDB_TOKEN: ${{ secrets.QITV_TMDB_TOKEN }}
       - name: Package App with PyInstaller for Windows
         id: package
         run: uv run pyinstaller qitv-windows.spec
@@ -304,11 +308,13 @@ jobs:
         id: sync
         run: uv sync --frozen --dev
       - name: Write the build's keys
-        # services/_build_keys.py gets the OpenSubtitles key from the secret, never printed;
-        # without the secret (a fork) it stays empty. Nothing here commits it.
+        # services/_build_keys.py gets the OpenSubtitles key and the TMDB token from the
+        # secrets, never printed; without a secret (a fork) its key stays empty. Nothing here
+        # commits them.
         run: uv run python scripts/write_build_keys.py
         env:
           QITV_OPENSUBTITLES_KEY: ${{ secrets.QITV_OPENSUBTITLES_KEY }}
+          QITV_TMDB_TOKEN: ${{ secrets.QITV_TMDB_TOKEN }}
       - name: Package App with PyInstaller for macOS
         id: package
         run: uv run pyinstaller qitv-macos.spec
@@ -421,11 +427,13 @@ jobs:
         id: sync
         run: uv sync --frozen --dev
       - name: Write the build's keys
-        # services/_build_keys.py gets the OpenSubtitles key from the secret, never printed;
-        # without the secret (a fork) it stays empty. Nothing here commits it.
+        # services/_build_keys.py gets the OpenSubtitles key and the TMDB token from the
+        # secrets, never printed; without a secret (a fork) its key stays empty. Nothing here
+        # commits them.
         run: uv run python scripts/write_build_keys.py
         env:
           QITV_OPENSUBTITLES_KEY: ${{ secrets.QITV_OPENSUBTITLES_KEY }}
+          QITV_TMDB_TOKEN: ${{ secrets.QITV_TMDB_TOKEN }}
       - name: Package App with PyInstaller for macOS (Intel)
         id: package
         run: uv run pyinstaller qitv-macos.spec

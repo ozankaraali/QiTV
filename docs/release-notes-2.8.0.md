@@ -46,6 +46,12 @@ others' distributions, which may have malware.**
   What you hid leaves Recent and Continue, locked or not.
 - **New for Xtream films and series.** The Library's New shelf and Recently added sort now
   know when an Xtream provider added each film and series.
+- **Film and series details from TMDB.** Where your provider leaves a film or a series without
+  a poster (or with one that doesn't load), a story, a year, a running time, a genre, a rating
+  or a cast, the Library shows TMDB's, in QiTV's language; the strip now names the cast too.
+  QiTV finds the title by the TMDB or IMDb number the provider lists, else by its name and
+  year, and shows nothing when it can't be sure. Only the title and its year are sent. Turn it
+  off in Settings.
 
 ## Fixed
 

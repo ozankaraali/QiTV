@@ -114,10 +114,13 @@ class LibraryController(QObject):
         tune_live: Callable[[dict], None],
         back_to_tv: Callable[[], None],
         context_menu: Optional[Callable[[dict, str, QPoint], None]] = None,
+        tmdb=None,
         parent: Optional[QObject] = None,
     ):
+        """`tmdb` (2.8, a ui.tmdb_fill.TmdbFill) fills titles' gaps from TMDB; None: never."""
         super().__init__(parent)
         self._config = config
+        self._tmdb = tmdb
         self._catalog = catalog
         self._model = model
         self._watch = watch
@@ -200,12 +203,66 @@ class LibraryController(QObject):
         screen.search_field.clicked.connect(lambda: self._focus("search"))
         self._search.changed.connect(self._show_hits)
         self._search.changed.connect(self.searchChanged)
+        if self._tmdb is not None:  # 2.8
+            model.set_filler(self._tmdb.fill)
+            grid.focusChanged.connect(self._on_grid_focus)
+            grid.set_settled_handler(self._on_grid_settled)
+            self._tmdb.changed.connect(self._on_tmdb_changed)
 
     def shutdown(self) -> None:
         """The window is closing: a running search's result and a pending action are dropped."""
         self._closed = True
         self._search.shutdown()
         self._pending.cancel()
+        if self._tmdb is not None:
+            self._tmdb.shutdown()
+
+    # ---- TMDB (2.8) ---------------------------------------------------------------------------
+
+    def _grid_kind(self, item: dict) -> str:
+        """A grid title's kind: a search hit's own, else the shown section's."""
+        if self._grid_content == "search":
+            return self._search.kind_of(item)
+        return self._model.item_kind(item)
+
+    def _poster(self, item: dict, own: str, kind: Optional[str] = None) -> str:
+        """A title's poster: its provider's (`own`), else TMDB's when the provider has none or
+        it could not be loaded. `kind`: the title's, a grid title's by default."""
+        if self._tmdb is None or (own and not self._screen.grid_posters.failed(own)):
+            return own
+        return self._tmdb.poster_url(item, kind or self._grid_kind(item)) or own
+
+    def _on_grid_focus(self, index: int) -> None:
+        item = self._screen.grid.item(index)
+        if item is not None and self._tmdb is not None:
+            self._tmdb.focus(item, self._grid_kind(item))
+
+    def _on_grid_settled(self, items: list[dict]) -> None:
+        if self._tmdb is None:
+            return
+        posters = self._screen.grid_posters
+        posterless = []
+        for item in items:
+            kind = self._grid_kind(item)
+            own = poster_url(item)
+            if kind in ("movie", "series") and (not own or posters.failed(own)):
+                posterless.append((item, kind))
+        self._tmdb.want_posters(posterless)
+
+    def _on_tmdb_changed(self) -> None:
+        if self._closed:
+            return
+        self._screen.grid.refresh_details()
+        series = self._series
+        if series is not None and self._tmdb is not None:
+            back = self._series_back
+            details = (
+                self._search.details(series) if back == "search" else self._model.details(series)
+            )
+            self._series_details = details
+            own = poster_url(series)
+            poster = self._poster(series, own, "series")
+            self._screen.series.set_details(details, poster if poster != own else "")
 
     def leave(self) -> None:
         """The window left the Library: nothing waiting for a provider plays any more."""
@@ -328,7 +385,9 @@ class LibraryController(QObject):
             self._grid_content = "search"
             self._grid_signature = None
             logo_key = self._screen.grid_posters.logo_key
-            grid.set_poster_url_provider(lambda item: self._search.poster_url(item, logo_key))
+            grid.set_poster_url_provider(
+                lambda item: self._poster(item, self._search.poster_url(item, logo_key))
+            )
             grid.set_tile_provider(self._search.is_channel)
             grid.set_details_provider(self._search.details)
             grid.set_progress_provider(lambda _item: None)
@@ -345,7 +404,7 @@ class LibraryController(QObject):
         grid = self._screen.grid
         self._grid_content = "browse"
         self._grid_signature = None
-        grid.set_poster_url_provider(poster_url)
+        grid.set_poster_url_provider(lambda item: self._poster(item, poster_url(item)))
         grid.set_tile_provider(None)
         grid.set_details_provider(self._model.details)
         grid.set_progress_provider(self._model.progress)
@@ -879,7 +938,11 @@ class LibraryController(QObject):
         view = self._screen.series
         details = self._search.details(series) if back == "search" else self._model.details(series)
         self._series_details = details
-        view.set_series(series, details)
+        own = poster_url(series)
+        poster = self._poster(series, own, "series")
+        view.set_series(series, details, poster if poster != own else "")
+        if self._tmdb is not None:
+            self._tmdb.focus(series, "series")
         view.set_progress_provider(self._episode_progress)
         self._history_episode = history_episode(
             self._config.watch_history, self._series_owner(), series

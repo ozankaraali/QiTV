@@ -32,6 +32,7 @@ from ui.keymap import Action
 from ui.library_controller import LibraryController
 from ui.page_stack import PageStack
 from ui.pointer import SecondClickGuard
+from ui.tmdb_fill import TmdbFill
 from ui.tv_controller import ERROR_MS, INFO_MS, scrub
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,13 @@ class TVPages(QObject):
             self,
             recordings=self.recordings,
         )
+        # 2.8: TMDB fills in what the Library's titles lack (Settings turns it off).
+        self.tmdb = TmdbFill(
+            config=window.config_manager,
+            jobs=window.jobs,
+            cache_path=os.path.join(window.config_manager.get_config_dir(), "cache", "tmdb.json"),
+            parent=self,
+        )
         self.library_controller = LibraryController(
             config=window.config_manager,
             catalog=window.library_catalog,
@@ -92,6 +100,7 @@ class TVPages(QObject):
             tune_live=self.tune_live,
             back_to_tv=self.back_to_tv,
             context_menu=self.context_menu,
+            tmdb=self.tmdb,
             parent=self,
         )
         self.library_controller.notice.connect(self.notify)

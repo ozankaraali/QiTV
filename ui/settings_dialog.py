@@ -54,6 +54,7 @@ from services.provider_link import parse_provider_link
 from services.provider_types import EMBY, JELLYFIN, is_media_server
 from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
+from services.tmdb import built_in_token as tmdb_built_in_token
 from ui.free_channels_menu import show_menu as show_free_channels_menu
 from ui.parental_settings import build_parental_tab
 from ui.provider_drop import unique_name
@@ -527,6 +528,30 @@ class OptionsDialog(QDialog):
         self.settings_layout.addRow(
             tr("Server conversion (Jellyfin, Emby)"), self.media_conversion_combo
         )
+
+        # 2.8: TMDB fills in what the Library's titles lack (services/tmdb.py).
+        self.tmdb_checkbox = QCheckBox(tr("Film and series details from TMDB"), self.settings_tab)
+        self.tmdb_checkbox.setToolTip(
+            tr(
+                "Where your provider gives a film or series no poster, story, year, running time,"
+                " genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and"
+                " its year, nothing about you."
+            )
+        )
+        self.tmdb_checkbox.setChecked(bool(self.config_manager.tmdb_details))
+        self.settings_layout.addRow(self.tmdb_checkbox)
+        self.tmdb_token_input = QLineEdit(self.settings_tab)
+        self.tmdb_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.tmdb_token_input.setPlaceholderText(
+            # i18n: the TMDB token field's hint in a build that carries one
+            tr("Built in; or paste your own")
+            if tmdb_built_in_token()
+            # i18n: the TMDB token field's hint in a build without one (from the source code)
+            else tr("Your TMDB API Read Access Token")
+        )
+        self.tmdb_token_input.setText(self.config_manager.tmdb_token)
+        # i18n: a setting: the token QiTV uses with TMDB (an API Read Access Token)
+        self.settings_layout.addRow(tr("TMDB token"), self.tmdb_token_input)
 
         # macOS only: another desktop than the fullscreen player's floats its picture.
         self.desktop_pip_checkbox = QCheckBox(
@@ -1369,6 +1394,8 @@ class OptionsDialog(QDialog):
         self.config_manager.hardware_decoding = self.hardware_decoding_checkbox.isChecked()
         self.config_manager.media_4k_versions = self.media_4k_combo.currentData() or "screen"
         self.config_manager.media_max_mbps = int(self.media_conversion_combo.currentData() or 0)
+        self.config_manager.tmdb_details = self.tmdb_checkbox.isChecked()
+        self.config_manager.tmdb_token = "".join(self.tmdb_token_input.text().split())
         if sys.platform == "darwin":
             self.config_manager.desktop_pip = self.desktop_pip_checkbox.isChecked()
         self.config_manager.mouse_wheel_action = self.mouse_wheel_combo.currentData()

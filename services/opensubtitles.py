@@ -368,6 +368,18 @@ def _key_words(text: str) -> set[str]:
     return (words - _LITTLE_WORDS) or words
 
 
+def title_words(text: str) -> frozenset[str]:
+    """The words that tell a title from another: case, accents and little words aside."""
+    return frozenset(_key_words(text))
+
+
+def same_words(a: str, b: str) -> bool:
+    """Whether two titles are one: the same words, case, accents and little words aside ("The
+    Harbour" is "harbour", but not "Harbour: Part Two"). Stricter than same_title."""
+    words = title_words(a)
+    return bool(words) and words == title_words(b)
+
+
 def same_title(asked: str, name: str) -> bool:
     """Whether `name` is the title `asked` for: at least half of the words asked for are in
     it, and they make a third of its own ("Harbour Lights" is "2019 - Harbour Lights", not

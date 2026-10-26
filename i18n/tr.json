@@ -103,6 +103,7 @@
   "Browse": "Gözat",
   "Brunei": "Brunei",
   "Buffer from {time}": "Arabellek başı {time}",
+  "Built in; or paste your own": "Yerleşik; ya da kendinizinkini yapıştırın",
   "Bulgaria": "Bulgaristan",
   "Burkina Faso": "Burkina Faso",
   "Burundi": "Burundi",
@@ -123,6 +124,7 @@
   "Cancel recording": "Kaydı iptal et",
   "Cape Verde": "Yeşil Burun Adaları",
   "Cast to a TV": "Televizyona yansıt",
+  "Cast: {names}": "Oyuncular: {names}",
   "Ch": "Kanal",
   "Chad": "Çad",
   "Change PIN…": "PIN'i değiştir…",
@@ -290,6 +292,7 @@
   "Fill the window": "Pencereyi doldur",
   "Filled in from the link ({kind}). Add the portal's MAC address, then press Verify Provider.": "Bağlantıdan dolduruldu ({kind}). Portalın MAC adresini ekleyin, sonra “Sağlayıcıyı doğrula” düğmesine basın.",
   "Filled in from the link ({kind}). Check the details, then press Verify Provider.": "Bağlantıdan dolduruldu ({kind}). Bilgileri denetleyin, sonra “Sağlayıcıyı doğrula” düğmesine basın.",
+  "Film and series details from TMDB": "Film ve dizi bilgileri TMDB'den",
   "Film or series title": "Film veya dizi adı",
   "Find a channel": "Kanal bul",
   "Find a genre or a channel at every provider: type its name": "Tüm sağlayıcılarda bir tür veya kanal bulun: adını yazın",
@@ -806,6 +809,7 @@
   "Syriac": "Süryanice",
   "System default ({language})": "Sistem varsayılanı ({language})",
   "S{n}": "S{n}",
+  "TMDB token": "TMDB anahtarı",
   "TV": "TV",
   "Taiwan": "Tayvan",
   "Tajikistan": "Tacikistan",
@@ -972,6 +976,7 @@
   "Welcome to QiTV": "QiTV'ye hoş geldiniz",
   "Western Sahara": "Batı Sahra",
   "When this provider's guide is off by whole hours, move its programmes here: with +1 h, a programme the guide lists at 20:00 shows at 21:00 (the guide, the banner, now and next and the time-shift bar).": "Bu sağlayıcının rehberi tam saatler kadar kaymışsa programlarını buradan kaydırın: +1 sa ile rehberde 20:00 olarak listelenen bir program 21:00'de gösterilir (rehberde, bilgi bandında, şimdi/sonra bilgisinde ve zaman kaydırma çubuğunda).",
+  "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Sağlayıcınız bir film ya da diziye afiş, konu, yıl, süre, tür, puan ya da oyuncu vermediğinde Kitaplık TMDB'dekileri gösterir. QiTV, TMDB'ye yalnızca adı ve yılını gönderir; sizin hakkınızda hiçbir şey göndermez.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Disk olmadan her resim yalnızca kendi yayın başına belleğini kullanır (resim içinde resmin küçük resmi her zaman böyle yapar) ve arabelleğini yalnızca en son ayrılınan kanal korur.\n\nBu kalıcı bir kayıt değil, geçici bir oynatma geçmişidir. Önbellek boyutu tüm kanalların arabellekleri için toplamdır: dolduğunda önce en eski içerik silinir; 24 saatten eski olan da silinir. Arabellek duraklatıldığında veya geri sarıldığında dolmaya devam eder, kanaldan ayrıldığınızda durur.\n\nKaydet'ten sonra açıp kapatma ve boyut değişiklikleri açtığınız bir sonraki kanalda uygulanır; diski kapatmak orada saklananları siler.",
   "Would you like to download and install the update?": "Güncellemeyi indirip yüklemek ister misiniz?",
   "Would you like to open the release page?": "Sürüm sayfasını açmak ister misiniz?",
@@ -990,6 +995,7 @@
     "other": "Bugünkü indirmelerinizi kullandınız: oturum açmadan OpenSubtitles bağlantı başına günde {n} indirmeye izin verir. Bir gün içinde yenilenecek. Ayarlar → Altyazılar bölümünden OpenSubtitles'ta oturum açmak sınırı yükseltir."
   },
   "Your PIN:": "PIN'iniz:",
+  "Your TMDB API Read Access Token": "TMDB API okuma erişim anahtarınız (Read Access Token)",
   "Your account allows 2 streams; both are in use": "Hesabınız 2 yayına izin veriyor; ikisi de kullanımda",
   "Your account allows {n} stream; all {n} are in use": {
     "other": "Hesabınız {n} yayına izin veriyor; {n} yayının hepsi kullanımda"

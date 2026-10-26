@@ -302,6 +302,32 @@ class LibraryModelTests(unittest.TestCase):
         self.assertEqual(model.details(movie(2)).rating, "")
         self.assertIsNone(model.details(movie(2)).resume_ms)
 
+    def test_details_take_what_the_filler_knows(self):  # 2.8: TMDB fills the provider's gaps
+        m = movie(1, plot="")
+        cat = FakeCatalog({"movies": [("1", "Genre One", 1)]}, {("movies", "1"): [m]})
+        model, _ = build(cat, make_config())
+        model.select_genre("1")
+        asked = []
+
+        def filler(item, kind):
+            asked.append(kind)
+            return {**item, "plot": "From elsewhere", "year": "2019", "genre": "Drama"}
+
+        model.set_filler(filler)
+        d = model.details(m)
+        self.assertEqual((d.plot, d.year, d.genre), ("From elsewhere", "2019", "Drama"))
+        self.assertEqual(asked, ["movie"])
+        self.assertEqual(model.details(m, kind="series").kind, "series")
+        self.assertEqual(asked[-1], "series")
+        self.assertEqual(m["plot"], "")  # the catalog's item stays as it is
+
+    def test_details_name_the_cast(self):
+        cat = FakeCatalog({"movies": [("1", "G", 1)]}, {("movies", "1"): [movie(1)]})
+        model, _ = build(cat, make_config())
+        self.assertEqual(model.details(movie(2, cast="Ana, Bo")).cast, "Ana, Bo")
+        self.assertEqual(model.details(movie(2, actors="Cy")).cast, "Cy")
+        self.assertEqual(model.details(movie(2)).cast, "")
+
     def test_a_title_without_a_genre_never_takes_a_shelfs_or_all_s_name(self):
         # "Continue", "New", "My list" and the provider's "All" are no genres.
         m = movie(1)

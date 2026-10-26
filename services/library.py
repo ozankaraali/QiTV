@@ -91,6 +91,7 @@ class Details:
     favorite: bool
     kind: str  # "movie" | "series" | "episode"
     provider: str = ""  # the title's provider, named in the strip while providers are mixed
+    cast: str = ""  # its leading actors, as one line ("Ana, Bo")
 
 
 # --- field parsing ------------------------------------------------------------------------
@@ -330,6 +331,9 @@ class LibraryModel(QObject):
         self._pinned_sig: tuple = ()
         self._chosen_sort: Optional[Sort] = None
         self._available = True  # the provider offers the section
+        # 2.8: what fills a title's gaps for its strip (TMDB: ui/tmdb_fill.py), as
+        # filler(item, kind) -> the item, or a copy with more fields; none by default.
+        self._filler: Optional[Callable[[dict, str], dict]] = None
         self.cache = cache if cache is not None else LibraryCache()
         catalog.sectionReady.connect(self._on_section_ready)
         catalog.sectionFailed.connect(self._on_section_failed)
@@ -843,7 +847,27 @@ class LibraryModel(QObject):
         duration = int(saved.get("duration") or 0)
         return min(1.0, resume / duration) if duration > 0 else None
 
-    def details(self, item: dict) -> Details:
+    def set_filler(self, filler: Optional[Callable[[dict, str], dict]]) -> None:
+        """`filler(item, kind)` fills a title's gaps in its details (None: none does)."""
+        self._filler = filler
+
+    def filled(self, item: dict, kind: Optional[str] = None) -> dict:
+        """`item` with its gaps filled (the item itself without a filler); `kind` is the
+        title's ("movie", "series"…), the shown section's by default."""
+        if self._filler is None:
+            return item
+        try:
+            return self._filler(item, kind or self.item_kind(item))
+        except Exception:
+            logger.exception("The details filler failed")
+            return item
+
+    def details(self, item: dict, kind: Optional[str] = None) -> Details:
+        """The strip's details of a title; `kind` as `filled` takes it."""
+        kind = kind or self.item_kind(item)
+        resume_ms = self._watch.resume_position(self._item_cid(item))
+        progress, favorite = self.progress(item), self.is_favorite(item)
+        item = self.filled(item, kind)
         year = _year(item)
         rating = _rating(item)
         genre = str(item.get("genre") or item.get("genres_str") or "")
@@ -860,11 +884,12 @@ class LibraryModel(QObject):
             genre=genre,
             rating="" if rating is None else f"{rating:.1f}",
             plot=str(item.get("plot") or item.get("description") or ""),
-            resume_ms=self._watch.resume_position(self._item_cid(item)),
-            progress=self.progress(item),
-            favorite=self.is_favorite(item),
-            kind=self.item_kind(item),
+            resume_ms=resume_ms,
+            progress=progress,
+            favorite=favorite,
+            kind=kind,
             provider=provider_of(item) if self._mixed() else "",
+            cast=str(item.get("cast") or item.get("actors") or ""),
         )
 
     def is_favorite(self, item: dict) -> bool:

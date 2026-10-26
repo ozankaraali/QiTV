@@ -28,11 +28,29 @@ _missing_logged = False
 _pixmaps: dict[tuple[int, float], QPixmap] = {}
 
 
-def logo_path() -> Path:
-    """assets/qitv.png next to the sources, or in a PyInstaller bundle's data."""
+def asset_path(name: str) -> Path:
+    """assets/<name> next to the sources, or in a PyInstaller bundle's data."""
     bundle = getattr(sys, "_MEIPASS", None)
     root = Path(bundle) if bundle else Path(__file__).resolve().parent.parent
-    return root / "assets" / LOGO_FILE
+    return root / "assets" / name
+
+
+def logo_path() -> Path:
+    """assets/qitv.png next to the sources, or in a PyInstaller bundle's data."""
+    return asset_path(LOGO_FILE)
+
+
+def scaled_asset(name: str, height: float, ratio: float) -> Optional[QPixmap]:
+    """assets/<name> `height` logical pixels tall at the pixel ratio `ratio` (None when
+    missing): another's logo QiTV credits (2.8: TMDB's in About)."""
+    image = QImage(str(asset_path(name)))
+    if image.isNull() or height <= 0:
+        return None
+    ratio = ratio if ratio > 0 else 1.0
+    scaled = image.scaledToHeight(max(1, round(height * ratio)), Qt.SmoothTransformation)
+    pixmap = QPixmap.fromImage(scaled)
+    pixmap.setDevicePixelRatio(ratio)
+    return pixmap
 
 
 def _load_master() -> Optional[QImage]:

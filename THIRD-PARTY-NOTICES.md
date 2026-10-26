@@ -125,3 +125,8 @@ stream to an MPV player you installed yourself ("Play in MPV").
   (<https://api.opensubtitles.com/api/v1>) with an API key and, when you sign in, your
   account; no OpenSubtitles code is part of QiTV. The subtitles come from its users, under
   the site's own terms.
+- **TMDB** (The Movie Database, <https://www.themoviedb.org>) gives the Library the posters,
+  stories, years, running times, genres, ratings and casts a provider leaves out. QiTV talks
+  to its API (<https://api.themoviedb.org/3>) with an API Read Access Token; no TMDB code is
+  part of QiTV, and About shows TMDB's logo (`assets/tmdb.png`, TMDB's own). This product uses
+  the TMDB API but is not endorsed or certified by TMDB.
