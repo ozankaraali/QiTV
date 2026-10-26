@@ -833,6 +833,12 @@ class TVWindow(QMainWindow):
     def _programme_scheduled(self, channel: dict, programme: Programme) -> bool:
         return self.recording_schedule.is_scheduled(channel, programme)
 
+    def writing_paths(self) -> frozenset[str]:
+        """The files recordings write now (the REC button's and the schedule's), as the
+        engine running now says; safe from other threads (a reference read)."""
+        engine = self.engine
+        return engine.writing if engine is not None else frozenset()
+
     def _account_of(self, channel: dict) -> Optional[dict]:
         """The channel's provider's account, kept out of the recording schedule (2.8)."""
         try:

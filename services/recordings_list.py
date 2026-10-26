@@ -213,13 +213,17 @@ class RecordingsList(QObject):
         self.version += 1
         self.changed.emit()
 
+    def is_writing(self, path: str) -> bool:
+        """Whether a recording writes the file at `path` now."""
+        return path in self._writing()
+
     def delete(self, path: str) -> None:
         """Delete the recording at `path` (on a thread of its own), then read the folder again.
         Only a file of the Recordings folder that this list shows goes, and never one a
         recording still writes."""
         if not any(item.get("path") == path for item in self._items):
             return
-        if path in self._writing():
+        if self.is_writing(path):
             return
         threading.Thread(
             target=self._remove, args=(path,), name="recording-delete", daemon=True

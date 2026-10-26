@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from unittest import mock
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from services import recording_schedule as rs
 from services.epg_view import Programme
@@ -20,9 +21,9 @@ CHANNEL = {
 }
 
 
-def local(day, hour, minute=0):
+def local(day, hour, minute=0, second=0):
     """A moment of this computer's clock (timers keep its times), in Unix seconds."""
-    return datetime(2026, 10, day, hour, minute).astimezone().timestamp()
+    return datetime(2026, 10, day, hour, minute, second).astimezone().timestamp()
 
 
 def at(when):
@@ -177,6 +178,19 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual([i["id"] for i in schedule.items()], ["a1"])
         self.assertEqual(schedule.outcomes(), [])
 
+    def test_a_longer_slot_at_the_same_start_extends_the_one_scheduled(self):  # review 2
+        # "Record at a time" opened on a programme, its end made later: one recording, to the
+        # later end (a shorter one asked again leaves it as long).
+        news = programme("The News", 30)
+        first = self.schedule.add_once(CHANNEL, news)
+        longer = Programme("20:30–22:00", news.start, news.stop + timedelta(minutes=60))
+        again = self.schedule.add_once(CHANNEL, longer)
+        self.assertEqual(again["id"], first["id"])
+        self.assertEqual(again["stop"], longer.stop.timestamp())
+        self.schedule.add_once(CHANNEL, news)
+        (kept,) = self.schedule.items()
+        self.assertEqual(kept["stop"], longer.stop.timestamp())
+
     def test_cancelling_removes_it(self):
         item = self.schedule.add_once(CHANNEL, programme("The News", 30))
         self.schedule.cancel(item["id"])
@@ -266,6 +280,27 @@ class TimerTests(unittest.TestCase):  # 2.8 (owner): a time on chosen days, no g
         self.schedule.add_timer(CHANNEL, begin=21 * 60, minutes=60, days=[0])
         self.assertEqual(self.schedule.missed_before(local(27, 9)), [])
         self.assertEqual(len(self.schedule.items()), 1)
+
+    def test_a_midnight_slot_starts_a_minute_early(self):  # review 6
+        self.schedule.add_timer(CHANNEL, begin=0, minutes=60, days=[1])  # Tuesday 00:00
+        (job,) = self.due(local(26, 23, 59, 30))  # Monday night
+        self.assertEqual(job.start, local(27, 0))
+
+    def test_a_timer_ends_at_its_clock_time_across_a_clock_change(self):  # review 5
+        # The clocks go back an hour on 2026-10-25 (a Sunday) at 03:00 in Berlin: 01:00–04:00
+        # is four hours that night, and ends at 04:00 by the clock.
+        try:
+            berlin = ZoneInfo("Europe/Berlin")
+        except ZoneInfoNotFoundError:
+            self.skipTest("no time zone database")
+        schedule = rs.Schedule(
+            str(self.folder / "berlin.json"), write=rs.write_now, clock=at(0), zone=berlin
+        )
+        schedule.add_timer(CHANNEL, begin=60, minutes=180, days=[6])
+        now = datetime(2026, 10, 25, 1, 30, tzinfo=berlin).timestamp()
+        (job,) = schedule.due(now, lambda channel, since: [])
+        self.assertEqual(job.stop - job.start, 4 * 3600)
+        self.assertEqual(datetime.fromtimestamp(job.stop, berlin).hour, 4)
 
     def test_the_time_of_a_slot(self):
         self.assertEqual(rs.slot_text(21 * 60, 90), "21:00–22:30")

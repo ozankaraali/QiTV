@@ -75,6 +75,7 @@ const words = {
   no_day: "Choose at least one day.",
   no_length: "From and To are the same.",
   timer_failed: "Couldn't schedule that recording",
+  tv_clock: "Times are QiTV's clock: {time} there now.",
 };
 const w = (key) => (t(key) === key ? words[key] || key : t(key));
 
@@ -506,6 +507,7 @@ function timetableTitle(num, name) {
 }
 
 let timerOffered = false; // the timetable shown says QiTV records (with its time-shift helper)
+let tvOffset = null; // QiTV's computer's clock, minutes from UTC (its times are that clock's)
 
 function openTimetable(id, num, name) {
   timetableFor = id;
@@ -573,6 +575,14 @@ const pad2 = (n) => String(n).padStart(2, "0");
 const isoDay = (date) => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
 const hhmm = (date) => `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
 
+// Now on QiTV's computer's clock, as a Date whose fields read that clock (the phone's own
+// when the timetable said nothing).
+function tvNow() {
+  const now = new Date();
+  if (tvOffset === null) return now;
+  return new Date(now.getTime() + (tvOffset + now.getTimezoneOffset()) * 60000);
+}
+
 function minutesOf(value) {
   const [hours, minutes] = (value || "").split(":").map(Number);
   return hours * 60 + minutes; // NaN while empty
@@ -605,7 +615,7 @@ function bindTimer() {
 }
 
 function openTimer() {
-  const now = new Date();
+  const now = tvNow();
   const start = new Date(now.getTime());
   start.setSeconds(0, 0);
   start.setMinutes(start.getMinutes() + ((5 - (start.getMinutes() % 5)) % 5)); // the next five
@@ -618,6 +628,9 @@ function openTimer() {
   $("timerTo").value = hhmm(stop);
   for (const button of $("timerDays").children) button.classList.remove("on");
   $("timerNote").textContent = "";
+  const clock = $("timerClock");
+  clock.hidden = tvOffset === null || tvOffset === -new Date().getTimezoneOffset();
+  clock.textContent = clock.hidden ? "" : w("tv_clock").replace("{time}", hhmm(now));
   $("timerBar").hidden = true; // the form in its place
   $("timerForm").hidden = false;
   checkTimer();
@@ -651,7 +664,7 @@ function timerChoice() {
     const [year, month, date] = day.split("-").map(Number);
     const start = new Date(year, month - 1, date, Math.floor(begin / 60), begin % 60);
     if (Number.isNaN(start.getTime())) return { why: "" };
-    if (start.getTime() + minutes * 60000 <= Date.now()) return { why: "passed" };
+    if (start.getTime() + minutes * 60000 <= tvNow().getTime()) return { why: "passed" };
   }
   const title = $("timerName").value.trim();
   const message = { t: "timer", id: timetableFor, title, begin, minutes, days, day };
@@ -717,6 +730,7 @@ function onTimetable(message) {
   if (message.id !== timetableFor) return;
   timetableTitle(message.num, message.name);
   timerOffered = Boolean(message.timer);
+  tvOffset = Number.isInteger(message.tz) ? message.tz : null;
   if ($("timerForm").hidden) $("timerBar").hidden = !timerOffered;
   const nowS = Date.now() / 1000;
   const rows = [];

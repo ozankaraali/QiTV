@@ -146,6 +146,8 @@ class MessageTests(unittest.TestCase):
             dict(every, days=[]),  # once, but on no day
             dict(once, day="27/10/2026"),
             dict(once, day="2026-02-30"),
+            dict(once, day="0001-01-01"),  # review 7: past what a clock can say
+            dict(once, day="9999-12-31"),
             dict(every, days=[7]),
             dict(every, days=[True]),
             dict(every, days="0"),

@@ -250,8 +250,10 @@ def _timer(obj: dict) -> Optional[dict]:
         if not isinstance(day, str) or not _DAY.match(day):
             return None
         try:
-            date.fromisoformat(day)
+            on = date.fromisoformat(day)
         except ValueError:
+            return None
+        if not 2000 <= on.year <= 2999:  # a clock says no time past these (review 7)
             return None
     else:
         day = ""

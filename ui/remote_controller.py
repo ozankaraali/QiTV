@@ -700,7 +700,13 @@ class RemoteController(QObject):
         if sid in self._relayed or self.hub is None:
             self._send(sid, {"t": "play", "failed": True, "why": "rec_relay"})
             return
-        self.hub.open_recording(sid, self._device(sid), path, message)
+        window = self._window
+
+        def writing() -> bool:  # asked from the home door's thread: reads only
+            paths = getattr(window, "writing_paths", None)
+            return bool(paths is not None and path in paths())
+
+        self.hub.open_recording(sid, self._device(sid), path, message, writing=writing)
 
     def _resume_key(self, target: Target) -> Optional[str]:
         """Where the position of what a phone plays is kept, as on the TV: a recording's id
@@ -858,24 +864,24 @@ class RemoteController(QObject):
         phone is told what was scheduled (or that the time is over), its timetable sent again
         (a one-time one may be a programme it lists)."""
         found = self._find_handle(event.sid, event.handle)
-        if found is None or found[0] != "channel":
-            return
-        channel = cast(tuple, found[1])[0]
-        day = date.fromisoformat(event.day) if event.day else date.today()
-        choice = TimerChoice(event.title.strip(), day, event.begin, event.minutes, event.days)
         reply: dict = {"t": "timer", "id": event.handle}
-        if not choice.days and choice.stop() <= datetime.now().astimezone():
-            reply["failed"] = "passed"
-        else:
-            try:
-                text = self._window.schedule_timer(channel, choice)
-            except Exception as error:  # a phone's ask must never take QiTV down
-                logger.error("Phone remote: scheduling failed: %s", safe_message(error))
-                text = ""
-            if text:
-                reply["text"] = text
-            else:
-                reply["failed"] = "error"
+        text = ""
+        try:
+            if found is not None and found[0] == "channel":  # else a list no longer shown
+                channel = cast(tuple, found[1])[0]
+                day = date.fromisoformat(event.day) if event.day else date.today()
+                title = event.title.strip()
+                choice = TimerChoice(title, day, event.begin, event.minutes, event.days)
+                if not choice.days and choice.stop() <= datetime.now().astimezone():
+                    reply["failed"] = "passed"
+                else:
+                    text = self._window.schedule_timer(channel, choice)
+        except Exception as error:  # a phone's ask must never take QiTV down
+            logger.error("Phone remote: scheduling failed: %s", safe_message(error))
+        if text:
+            reply["text"] = text
+        elif "failed" not in reply:
+            reply["failed"] = "error"
         self._send(event.sid, reply)
         guide = self._guides.get(event.sid)
         if guide is not None:

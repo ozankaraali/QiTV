@@ -136,6 +136,9 @@ PAGE_STRINGS: dict[str, str] = {
     "no_length": N_("From and To are the same."),
     # i18n: the phone remote: QiTV could not add the recording at a time
     "timer_failed": N_("Couldn't schedule that recording"),
+    # i18n: the phone remote's "Record at a time", when the phone's clock is another than the
+    # computer's (another time zone): the times are the computer's ({time}: its time now)
+    "tv_clock": N_("Times are QiTV's clock: {time} there now."),
     "pip": N_("Picture in picture"),  # i18n: the phone remote: a button
     # i18n: the phone remote: the same button while the TV shows a small picture
     "close_pip": N_("Close picture in picture"),

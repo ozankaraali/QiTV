@@ -69,10 +69,13 @@ class TVPages(QObject):
         self._keys_level: Optional[int] = None
         # 2.8: the Recordings folder's files, the Library's Recordings shelf (and the phone's).
         schedule = getattr(window, "recording_schedule", None)
+        writing = getattr(window, "writing_paths", None)
         self.recordings = RecordingsList(
             window.config_manager,
             parent=self,
             titles=schedule.title_of if schedule is not None else None,
+            # one still written can't be deleted (2.8)
+            writing=(lambda: set(writing())) if writing is not None else None,
         )
         self.library_model = LibraryModel(
             window.library_catalog,
@@ -376,7 +379,7 @@ class TVPages(QObject):
         menu.addAction(tr("Show in Folder"), lambda: self._show_in_folder(path))
         # i18n: a recording's right-click menu entry: deletes its file (asks first)
         delete = menu.addAction(tr("Delete Recording…"), lambda: self._delete_recording(item))
-        delete.setEnabled(not item.get("_writing"))  # one still being written stays
+        delete.setEnabled(not self.recordings.is_writing(path))  # one still written stays
         menu.popup(global_pos)
 
     def _show_in_folder(self, path: str) -> None:

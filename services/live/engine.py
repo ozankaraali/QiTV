@@ -783,6 +783,10 @@ class LiveEngine(QObject):
         # rid -> (its file, its size) as the helper last told them ("", -1 before), until it
         # ends
         self._recordings: dict[str, tuple[str, int]] = {}
+        self._writes: dict[str, str] = {}  # rid -> the file it writes, from its start (2.8)
+        # The files recordings write now (2.8): the Library keeps them from deletion, a phone
+        # reads one on as it grows. Replaced, never changed: other threads read it.
+        self.writing: frozenset[str] = frozenset()
         self._base_url = ""
         self._available = False
         self._started = False
@@ -976,6 +980,8 @@ class LiveEngine(QObject):
             return ""
         rid = secrets.token_hex(6)
         self._recordings[rid] = ("", -1)
+        self._writes[rid] = path
+        self.writing = frozenset(self._writes.values())
         limits = {"max_s": float(max_s), "min_free": int(min_free)}
         self._commands.put(("record_start", sid, rid, path, int(seq), limits))
         return rid
@@ -1010,6 +1016,7 @@ class LiveEngine(QObject):
         self._base_url = ""
         self._sessions.clear()
         self._recordings.clear()  # the helper's shutdown ends them; no signal follows
+        self._wrote(*self._writes)
         supervisor, cleanup = self._supervisor, self._cleanup
         if supervisor is None:
             return
@@ -1021,8 +1028,15 @@ class LiveEngine(QObject):
             # Run ThreadCleanup's queued check now, so no pending thread outlives shutdown.
             QCoreApplication.sendPostedEvents(cleanup, QEvent.Type.MetaCall)
 
+    def _wrote(self, *rids: str) -> None:
+        """Recordings `rids` write no more."""
+        for rid in rids:
+            self._writes.pop(rid, None)
+        self.writing = frozenset(self._writes.values())
+
     def _lose_recordings(self) -> None:
         recordings, self._recordings = self._recordings, {}
+        self._wrote(*recordings)
         for rid, (path, written) in recordings.items():
             self.recordingEnded.emit(rid, _LOST, path, written)
 
@@ -1060,6 +1074,7 @@ class LiveEngine(QObject):
             _, _, rid, reason, path, written = message
             if rid in self._recordings:
                 del self._recordings[rid]
+                self._wrote(str(rid))
                 self.recordingEnded.emit(str(rid), str(reason), str(path), int(written))
             return
         view = self._sessions.get(sid)

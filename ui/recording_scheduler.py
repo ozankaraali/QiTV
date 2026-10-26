@@ -14,15 +14,20 @@ every RETRY_S while the programme airs; it is said missed or failed only once it
 A recording the stream or the helper cuts short is kept, and the rest goes to another file. The
 next programme on a channel that records hands over: it needs no stream of its own; half a
 minute into it the earlier file ends, and the next starts from the helper's buffer a minute
-before its start. What records shows on the REC sign (`recording_now`), which stops it
-(`stop_now`).
+before its start. One that ends within a recording on its channel (a programme inside an
+evening's timer, the same programme scheduled twice) is that recording's: it is noted in its
+file once it ends (the file keeps the longer one's name), or is due again on its own when that
+recording stops before it ended. Due together, the longest begins first. A one-time recording
+made longer while it records goes on to its new end: the scheduler stops every recording at
+its window's end (the helper's own limit is only a day's). What records shows on the REC sign
+(`recording_now`), which stops it (`stop_now`).
 
 QiTV keeps the computer awake while it runs; a sleeping computer or a closed lid misses them.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 import logging
 import time
@@ -33,7 +38,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from services import recording, recording_schedule as rs
 from services.connection_budget import DENIED
 from services.i18n import N_, translate
-from services.live.recorder import FAILED, LIMIT, MIN_FREE_BYTES, STOPPED
+from services.live.recorder import FAILED, LIMIT, MAX_SECONDS, MIN_FREE_BYTES, STOPPED
 from services.provider_api import known_http_only
 from services.vlc_profile import user_agent_for
 
@@ -74,6 +79,7 @@ class _Run:
     retry: Optional[tuple[str, str]] = None  # (state, why): tried again once its session closed
     waiting_for: Optional[_Run] = None  # the earlier programme on its channel, to hand over
     handing: Optional[_Run] = None  # the next programme it hands its session to
+    covers: list[rs.Job] = field(default_factory=list)  # the jobs within it, in its file
 
 
 @dataclass
@@ -82,17 +88,6 @@ class _Try:
     at: float  # tried again from then
     state: str  # what it is if its window ends first (missed: no stream; failed: why)
     why: str
-
-
-def _airing(job: rs.Job) -> tuple[str, str, int]:
-    """One programme on one channel, however it was scheduled (once, or as a series)."""
-    channel = job.channel
-    ident = channel.get("id")
-    return (
-        job.provider,
-        str(ident if ident not in (None, "") else channel.get("name")),
-        int(job.start),
-    )
 
 
 class RecordingScheduler(QObject):
@@ -181,6 +176,12 @@ class RecordingScheduler(QObject):
         if self._closed:
             return
         now = self._clock()
+        for run in self._runs:  # a one-time recording made longer goes on to its new end
+            item = self.schedule.item(run.job.item_id)
+            if item is not None and item.get("kind") == rs.ONCE:
+                stop = float(item.get("stop") or 0)
+                if stop > run.job.stop and not run.stopping:
+                    run.job = replace(run.job, stop=stop)
         for run in list(self._runs):  # a window that ended stops its recording
             if not run.stopping and now >= rs.window(run.job)[1]:
                 self._stop(run)
@@ -191,20 +192,49 @@ class RecordingScheduler(QObject):
             if now >= rs.window(attempt.job)[1]:
                 del self._tries[key]
                 self._said(attempt.job, attempt.state, attempt.why)
-        busy = {run.job.key for run in self._runs}
-        airings = {_airing(run.job) for run in self._runs}
-        for job in self.schedule.due(now, self._guide):
+        busy = {job.key for run in self._runs for job in (run.job, *run.covers)}
+        due = self.schedule.due(now, self._guide)
+        for job in sorted(due, key=lambda job: (job.start, -job.stop)):  # the longest first
             if job.key in busy:
-                continue
-            if _airing(job) in airings:  # scheduled twice (once and as a series): one file
-                self.schedule.started(job)
                 continue
             earlier = self._tries.get(job.key)
             if earlier is not None and now < earlier.at:
                 continue
             busy.add(job.key)
-            airings.add(_airing(job))
+            holder = self._holder(job)
+            if holder is not None:  # within a recording on its channel: in that file
+                holder.covers.append(job)
+                self.schedule.started(job)
+                self._tries.pop(job.key, None)
+                continue
             self._begin(job)
+
+    def _holder(self, job: rs.Job) -> Optional[_Run]:
+        """A recording (or one about to) on `job`'s channel that goes on at least as long."""
+        for run in self._runs:
+            if (
+                not run.stopping
+                and run.handing is None
+                and run.job.provider == job.provider
+                and rs.same_channel(run.job.channel, job.channel)
+                and rs.window(job)[1] <= rs.window(run.job)[1]
+            ):
+                return run
+        return None
+
+    def _settle(self, run: _Run, written: int, path: str, why: str = "") -> None:
+        """`run`'s recording ended (or never began): the jobs within it whose window ended are
+        noted in its file (before it, so the file keeps its name); the others are due again,
+        on their own."""
+        now = self._clock()
+        covers, run.covers = run.covers, []
+        for job in covers:
+            if now < rs.window(job)[1]:
+                self.schedule.unstarted(job)
+            elif written > 0:
+                self.schedule.finished(job, rs.RECORDED, path=path)
+            else:
+                self.schedule.finished(job, rs.FAILED, why=why or "empty")
 
     def _guide(self, channel: dict, since: float) -> list:
         try:
@@ -255,6 +285,8 @@ class RecordingScheduler(QObject):
         for key, attempt in list(self._tries.items()):
             if attempt.job.item_id == item_id:
                 del self._tries[key]
+        for run in self._runs:  # one held by another's recording is noted no more
+            run.covers = [job for job in run.covers if job.item_id != item_id]
         for run in list(self._runs):
             if run.job.item_id == item_id and not run.stopping:
                 run.user_stopped = True
@@ -269,6 +301,7 @@ class RecordingScheduler(QObject):
         for run in list(self._runs):
             run.user_stopped = True
             recording = bool(run.rid and run.path and not run.ended)
+            self._settle(run, 1 if recording else 0, run.path)  # the rest of each, on reopening
             if not run.stopping:
                 self._stop(run)
             if recording and not run.ended:  # its end did not come at once
@@ -340,6 +373,7 @@ class RecordingScheduler(QObject):
         while it airs (said only if its window ends first)."""
         if not run.user_stopped:
             self._tries[run.job.key] = _Try(run.job, self._clock() + RETRY_S, state, why)
+        self._settle(run, 0, "", why)
         self._release(run)
 
     def _run_by(self, **wanted: Any) -> Optional[_Run]:
@@ -399,9 +433,10 @@ class RecordingScheduler(QObject):
             seq = next((s.seq for s in reversed(spans) if s.start <= target), spans[0].seq)
         name = str(run.job.channel.get("name") or run.job.title)
         run.path = recording.path_for(self._config, name, datetime.now().astimezone())
-        remaining = max(60.0, rs.window(run.job)[1] - now)
+        # Stopped at its window's end by `tick` (which may move, made longer): the helper's
+        # own limit is only the day's.
         run.rid = self._engine.start_recording(
-            run.sid, run.path, seq, max_s=remaining, min_free=MIN_FREE_BYTES
+            run.sid, run.path, seq, max_s=MAX_SECONDS, min_free=MIN_FREE_BYTES
         )
         if not run.rid:
             run.retry = (rs.FAILED, "helper")
@@ -419,6 +454,7 @@ class RecordingScheduler(QObject):
             return
         run.ended = True
         cut = run.cut or (reason if reason == FAILED else "")
+        self._settle(run, written, path, cut or reason)
         left = rs.window(run.job)[1] - self._clock()
         if cut and left > MIN_LEFT_S and not run.user_stopped:
             # Cut short while it airs: what it has is kept, the rest goes to another file.
@@ -475,7 +511,9 @@ class RecordingScheduler(QObject):
         run.stopping = True
         if run.sid and run.rid and not run.ended:
             self._engine.stop_recording(run.sid)
-        elif run.sid:
+            return  # its end follows (recordingEnded), with the jobs within it
+        self._settle(run, 0, "", "no picture" if run.sid else "link")
+        if run.sid:
             self._finish(run, rs.FAILED, why="no picture")
             self._engine.close_session(run.sid)
         else:  # its stream or its link is on the way, or it waits for a handover
@@ -508,6 +546,7 @@ class RecordingScheduler(QObject):
         self._release(run)
 
     def _release(self, run: _Run) -> None:
+        self._settle(run, 0, "")  # none left behind (they are due again, or noted)
         if run.ticket != DENIED:
             self._budget.release(run.ticket)
             run.ticket = DENIED

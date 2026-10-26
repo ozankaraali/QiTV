@@ -97,6 +97,38 @@ class ScheduleWindowTests(WindowCase):
             [(i["title"], i["start"]) for i in once], [("21:00–22:00", choice.start().timestamp())]
         )
 
+    def test_the_recordings_shelf_knows_the_files_being_written(self):  # 2.8 review
+        # Its Delete stays greyed out for one a recording still writes (the REC button's or
+        # the schedule's), whichever engine runs now.
+        shelf = self.window.screens.recordings
+        engine = mock.Mock(writing=frozenset({"/rec/a.ts"}))
+        with mock.patch.object(self.window, "engine", engine):
+            self.assertEqual(set(shelf._writing()), {"/rec/a.ts"})
+        with mock.patch.object(self.window, "engine", None):
+            self.assertEqual(set(shelf._writing()), set())
+
+    def test_delete_follows_whether_the_file_is_written_now(self):  # 2.8 review
+        # The shelf was read while it recorded (or before): its menu asks now.
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QMenu
+
+        pages = self.window.screens
+        item = {"path": "/rec/a.ts", "_writing": False}
+
+        def delete_enabled():
+            pages._recording_menu(item, QPoint(0, 0))
+            menu = self.window.library_page.findChildren(QMenu)[-1]
+            action = next(a for a in menu.actions() if a.text() == "Delete Recording…")
+            menu.close()
+            menu.deleteLater()
+            return action.isEnabled()
+
+        with mock.patch.object(self.window, "engine", mock.Mock(writing=frozenset({"/rec/a.ts"}))):
+            self.assertFalse(delete_enabled())
+        item["_writing"] = True  # read while it recorded; it ended since
+        with mock.patch.object(self.window, "engine", mock.Mock(writing=frozenset())):
+            self.assertTrue(delete_enabled())
+
     def test_the_helper_stopped_or_replaced_reaches_the_scheduler(self):
         scheduler = self.attach()
         window = self.window

@@ -11,7 +11,14 @@ import unittest
 from PySide6.QtCore import QDate, QTime
 from PySide6.QtWidgets import QApplication
 
-from ui.record_timer_dialog import DAILY, DAYS, ONCE, WEEKDAYS, RecordTimerDialog
+from ui.record_timer_dialog import (
+    DAILY,
+    DAYS,
+    ONCE,
+    WEEKDAYS,
+    RecordTimerDialog,
+    TimerChoice,
+)
 
 NOW = datetime(2026, 10, 26, 20, 7)  # a Monday, this computer's clock
 
@@ -90,6 +97,18 @@ class RecordTimerDialogTests(unittest.TestCase):
         dialog = self.dialog()
         self.set_times(dialog, (20, 0), (21, 0))  # began 7 minutes ago
         self.assertIsNotNone(dialog.choice())
+
+    def test_once_ends_at_its_clock_time_across_a_clock_change(self):  # 2.8 review 5
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            berlin = ZoneInfo("Europe/Berlin")
+        except ZoneInfoNotFoundError:
+            self.skipTest("no time zone database")
+        # 01:00–04:00 the night the clocks go back
+        choice = TimerChoice("", date(2026, 10, 25), 60, 180, (), zone=berlin)
+        self.assertEqual(choice.stop().timestamp() - choice.start().timestamp(), 4 * 3600)
+        self.assertEqual(choice.stop().astimezone(berlin).hour, 4)
 
     def test_the_day_cannot_be_before_today(self):
         dialog = self.dialog()

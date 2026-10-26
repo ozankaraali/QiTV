@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -111,6 +112,13 @@ def durations(text):
     return [float(line[8:].rstrip(",")) for line in lines(text) if line.startswith("#EXTINF:")]
 
 
+def wait(predicate, seconds=5.0):
+    end = time.monotonic() + seconds
+    while not predicate() and time.monotonic() < end:
+        time.sleep(0.01)
+    return predicate()
+
+
 class Files(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
@@ -208,6 +216,96 @@ class GrowingTests(Files):
         self.assertEqual(durations(ended), [6.0, 6.0, 6.0, 2.0])
         self.assertIn("#EXT-X-PLAYLIST-TYPE:EVENT", ended)  # its type stays
         self.assertEqual(lines(ended)[-1], "#EXT-X-ENDLIST")
+
+
+class LargeTests(Files):  # 2.8 final review 3, 4, 8
+    def patched(self, **values):
+        for name, value in values.items():
+            patch = mock.patch.object(rec, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def held(self):
+        """The reading behind the playlist waits for `gate`; its thread goes in `threads`."""
+        gate, threads = threading.Event(), []
+        real = rec.Recorded._read_behind
+
+        def held(recorded):
+            threads.append(threading.current_thread())
+            gate.wait(5)
+            real(recorded)
+
+        patch = mock.patch.object(rec.Recorded, "_read_behind", held)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return gate, threads
+
+    def test_a_large_recording_answers_before_it_is_read_whole(self):
+        # Read whole, a recording of hours would keep the phone waiting past its patience:
+        # once read past where the phone starts it answers, and the rest is read behind.
+        self.patched(OPEN_PREFER_S=0.0, BATCH=PACKET * 600)
+        gate, _threads = self.held()
+        recorded = self.open(self.write(stream(60)))
+        first = recorded.playlist()
+        self.assertIn("#EXT-X-PLAYLIST-TYPE:EVENT", first)
+        self.assertNotIn("#EXT-X-ENDLIST", first)
+        self.assertTrue(0 < len(durations(first)) < 10, durations(first))
+        gate.set()
+        self.assertTrue(wait(lambda: "#EXT-X-ENDLIST" in recorded.playlist()))
+        last = recorded.playlist()
+        self.assertEqual(durations(last), [6.0] * 10)
+        self.assertTrue(last.startswith(first))  # what the phone has stays as it was
+
+    def test_it_reads_on_to_where_the_phone_starts(self):
+        self.patched(OPEN_PREFER_S=0.0, BATCH=PACKET * 600)
+        self.held()
+        recorded = self.open(self.write(stream(60)), start_s=40.0)
+        self.assertGreater(sum(durations(recorded.playlist())), 40.0)
+
+    def test_closing_stops_the_reading(self):
+        self.patched(OPEN_PREFER_S=0.0, BATCH=PACKET * 600)
+        gate, threads = self.held()
+        recorded = self.open(self.write(stream(60)))
+        recorded.close()
+        gate.set()
+        threads[0].join(5)
+        self.assertFalse(threads[0].is_alive())
+        self.assertNotIn("#EXT-X-ENDLIST", recorded.playlist())  # it read no further
+
+    def test_one_closed_before_it_opens_reads_nothing(self):
+        recorded = rec.Recorded(str(self.write(stream(8))))
+        recorded.close()
+        with self.assertRaises(OSError):
+            asyncio.run(recorded.open())
+
+    def test_a_long_gop_comes_in_pieces_the_target_holds(self):
+        # Keyframes 15 s apart: pieces start at pictures in between, so a growing playlist's
+        # target duration (which may not change) holds every piece.
+        text = self.open(self.write(stream(60, key_every=25 * 15))).playlist()
+        self.assertTrue(all(d < rec.EVENT_TARGET_S for d in durations(text)), durations(text))
+        self.assertAlmostEqual(sum(durations(text)), 60.0, places=1)
+
+    def test_a_piece_too_large_is_left_out(self):
+        # Its keyframes lost (only another stream for a while): the piece over it would be
+        # read whole into memory; it is left out, and the playlist goes on after a break.
+        self.patched(MAX_PIECE_BYTES=200_000)
+        gap = packet(OTHER, b"\x00" * 184) * 2000
+        data = stream(12) + gap + stream(12, first=22 * TICKS)
+        recorded = self.open(self.write(data))
+        text = recorded.playlist()
+        self.assertEqual(durations(text), [6.0, 6.0, 6.0])
+        self.assertIn("#EXT-X-DISCONTINUITY", text)
+        self.assertTrue(all(p.end - p.start <= 200_000 for p in recorded._pieces))
+
+    def test_the_tv_says_whether_it_is_still_written(self):
+        # A stall (nothing written for minutes) does not end a recording the TV still writes.
+        still = [True]
+        path = self.write(stream(9), age=600)
+        recorded = rec.Recorded(str(path), writing=lambda: still[0])
+        asyncio.run(recorded.open())
+        self.assertNotIn("#EXT-X-ENDLIST", asyncio.run(recorded.fresh_playlist()))
+        still[0] = False
+        self.assertIn("#EXT-X-ENDLIST", asyncio.run(recorded.fresh_playlist()))
 
 
 class RefusedTests(Files):
@@ -313,6 +411,27 @@ class HomeDoorRecordingTests(unittest.TestCase):
         hevc = self.path.with_name("hevc.ts")
         hevc.write_bytes(stream(8, streams=((0x24, VIDEO, b""), AAC)))
         self.assertEqual(self.open(hevc)[1], {"t": "play", "failed": True, "why": "rec_format"})
+
+    def test_a_phone_removed_loses_its_recording(self):  # 2.8 final review 10
+        _sid, message = self.open(self.path)
+        with mock.patch.object(self.hub._core.store, "remove_device", return_value=True):
+            self.hub.remove_device("d1")
+            self.assertTrue(wait(lambda: self.get(message["url"])[0] == 404))
+
+    def test_an_opening_dropped_stops_reading(self):  # 2.8 final review 3
+        closed = threading.Event()
+
+        async def slow(recorded):
+            await asyncio.sleep(5)
+
+        with (
+            mock.patch.object(rec.Recorded, "open", slow),
+            mock.patch.object(rec.Recorded, "close", lambda recorded: closed.set()),
+        ):
+            self.hub.open_recording("s8", "d1", str(self.path), {"t": "play", "start": 0})
+            time.sleep(0.1)
+            self.hub.forget_film("d1")
+            self.assertTrue(closed.wait(3))
 
     def test_a_recording_gone_from_the_disk_says_it_did_not_open(self):
         gone = self.path.with_name("gone.ts")

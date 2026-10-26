@@ -8,8 +8,8 @@ before its start ends the next day. Once on a day that is over cannot be schedul
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, tzinfo
 from typing import Callable, Optional
 
 from PySide6.QtCore import QDate, QLocale, QTime
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from services.i18n import N_, app_locale, tr, translate
+from services.recording_schedule import local_time
 
 ONCE, DAILY, WEEKDAYS, DAYS = "once", "daily", "weekdays", "days"
 # i18n: the window that records a channel at a time of the user's choosing (no guide needed)
@@ -58,13 +59,15 @@ class TimerChoice:
     begin: int
     minutes: int
     days: tuple[int, ...]
+    zone: Optional[tzinfo] = field(default=None, compare=False)  # None: this computer's
 
     def start(self) -> datetime:
-        """Once: when it starts (this computer's clock, aware)."""
-        return datetime.combine(self.day, time(self.begin // 60, self.begin % 60)).astimezone()
+        """Once: when it starts (by the clock, aware)."""
+        return local_time(self.day, self.begin, self.zone)
 
     def stop(self) -> datetime:
-        return self.start() + timedelta(minutes=self.minutes)
+        """Once: when it stops, by the clock (across a clock change too)."""
+        return local_time(self.day, self.begin + self.minutes, self.zone)
 
 
 def _minutes(value: QTime) -> int:

@@ -284,6 +284,13 @@ class PhoneGuideTests(WindowCase):
             remote.bridge.post(Timer("s1", handle, "", 60, 30, (), "2020-01-01"))  # over
             self.assertTrue(wait_until(lambda: len(replies) == 2))
             self.assertEqual(replies[-1].get("failed"), "passed")
+            # review 7: a channel no longer listed is answered too (the phone's form closed)
+            remote.bridge.post(Timer("s1", "gone", "", 60, 30, (0,), ""))
+            self.assertTrue(wait_until(lambda: len(replies) == 3))
+            self.assertEqual(replies[-1], {"t": "timer", "id": "gone", "failed": "error"})
+        # review 11: the times are the TV's clock's: the phone is told its offset
+        offset = datetime.now().astimezone().utcoffset()
+        self.assertEqual(self.last("timetable")["tz"], int(offset.total_seconds() // 60))
         kinds = [i["kind"] for i in window.recording_schedule.items()]
         self.assertEqual(kinds, ["timer"])
 

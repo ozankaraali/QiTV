@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -1374,10 +1375,13 @@ def scenario_timer(rig: Rig) -> None:
     rig.page.locator("#guideRows .row", has_text="Harbourline News").locator(".row-tap").click()
     rig.page.wait_for_selector("[data-screen=timetable]:not([hidden])")
     table = {"t": "timetable", "id": "h1", "name": "Harbourline News", "num": "1", "rows": []}
-    rig.hub.send(sid, dict(table, timer=True))
+    offset = datetime.now().astimezone().utcoffset()
+    here = int(offset.total_seconds() // 60) if offset is not None else 0
+    rig.hub.send(sid, dict(table, timer=True, tz=here))
     rig.page.wait_for_selector("#timerOpen:visible")
     rig.page.click("#timerOpen")
     rig.page.wait_for_selector("#timerForm:not([hidden])")
+    assert rig.page.locator("#timerClock").is_hidden(), "the same clock: nothing to say"
     assert rig.page.is_enabled("#timerSchedule"), "the next hour can be scheduled at once"
     rig.page.select_option("#timerRepeat", "days")
     assert not rig.page.is_enabled("#timerSchedule"), "no day ticked"
@@ -1408,6 +1412,15 @@ def scenario_timer(rig: Rig) -> None:
     rig.page.fill("#timerTo", "00:01")
     assert not rig.page.is_enabled("#timerSchedule"), "a time gone by was offered"
     assert rig.page.inner_text("#timerHint") == "That time has passed."
+    rig.page.click("#timerCancel")
+    rig.hub.send(sid, dict(table, timer=True, tz=here + 180))  # QiTV three hours ahead
+    rig.page.wait_for_function(
+        "document.querySelector('#timerOpen') && !document.querySelector('#timerBar').hidden"
+    )
+    rig.page.click("#timerOpen")
+    clock = rig.page.inner_text("#timerClock")
+    assert clock.startswith("Times are QiTV's clock:"), clock
+    rig.shot("timer-clock")
 
 
 SCENARIOS.update(

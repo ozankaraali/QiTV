@@ -104,6 +104,11 @@ class FakeCatalogs(QObject):
         return []
 
 
+def rs_name(scheduler, title):
+    """The REC sign's name of the scheduled recording of `title`."""
+    return next("sched:" + run.job.key for run in scheduler._runs if run.job.title == title)
+
+
 class SchedulerTests(unittest.TestCase):
     def setUp(self):
         self.folder = Path(tempfile.mkdtemp(prefix="qitv-scheduler-"))
@@ -148,7 +153,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual((rec_sid, seq), (sid, 5))  # from the first segment the helper has
         self.assertTrue(path.startswith(str(self.folder)))
         self.assertTrue(os.path.basename(path).startswith("News One "))
-        self.assertAlmostEqual(max_s, (T0 + timedelta(minutes=63)).timestamp() - self.now, delta=1)
+        self.assertEqual(max_s, 24 * 3600)  # the scheduler stops it at its window's end
         self.assertTrue(any("The News" in text for text, _ in self.toasts))
 
     def test_at_its_end_it_stops_saves_and_gives_everything_back(self):
@@ -290,6 +295,84 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(self.engine.closed, [sid])
         self.assertEqual(self.budget.holders("P"), [])
         self.assertEqual(self.schedule.items(), [])
+
+    def recording(self):
+        """The first link answered and the session ready: (sid, rid, path)."""
+        self.catalogs.linkReady.emit(1, CHANNEL["cmd"])
+        sid = self.engine.opened[0][0]
+        self.engine.sessionReady.emit(sid)
+        rid, _sid, path, *_ = self.engine.recordings[0]
+        return sid, rid, path
+
+    def test_a_programme_inside_a_recording_on_its_channel_is_in_that_file(self):
+        # 2.8 final review 1: an evening's recording and a programme within it on the same
+        # channel: the evening's goes on (no hand-over to the shorter one), the programme is
+        # noted in its file, the file named after the evening's.
+        self.schedule.add_once(CHANNEL, programme("Evening", 30, 120))  # 20:30–22:30
+        self.schedule.add_once(CHANNEL, programme("Quiz", 60, 30))  # 21:00–21:30
+        self.scheduler.tick()
+        sid, rid, path = self.recording()
+        self.at(59, 30)
+        self.at(60, 40)
+        self.at(94, 0)  # after the Quiz's end
+        self.assertEqual(self.engine.stops, [])
+        self.assertEqual(len(self.catalogs.asked), 1)
+        self.assertEqual(len(self.engine.recordings), 1)
+        self.at(153, 1)  # the evening's end
+        self.assertEqual(self.engine.stops, [sid])
+        self.engine.recordingEnded.emit(rid, "stopped", path, 1_000_000)
+        outcomes = {o["title"]: (o["state"], o["path"]) for o in self.schedule.outcomes()}
+        self.assertEqual(outcomes, {"Quiz": (rs.RECORDED, path), "Evening": (rs.RECORDED, path)})
+        self.assertEqual(self.schedule.title_of(path), "Evening")
+        self.assertEqual(self.schedule.items(), [])
+
+    def test_a_longer_one_at_the_same_start_records_and_holds_the_shorter(self):
+        # The guide's half hour and a two-hour timer at the same minute: the timer records,
+        # the half hour is noted in its file (not the other way round).
+        start = (T0 + timedelta(minutes=60)).astimezone()
+        self.schedule.add_once(CHANNEL, programme("Show", 60, 30))
+        timer = self.schedule.add_timer(
+            CHANNEL, begin=start.hour * 60 + start.minute, minutes=120, days=range(7)
+        )
+        self.at(59, 30)
+        self.assertEqual(len(self.catalogs.asked), 1)
+        (run,) = self.scheduler._runs
+        self.assertEqual(run.job.item_id, timer["id"])
+        sid, rid, path = self.recording()
+        self.at(94, 0)
+        self.assertEqual(self.engine.stops, [])
+        self.at(183, 1)
+        self.engine.recordingEnded.emit(rid, "stopped", path, 1_000_000)
+        titles = [o["title"] for o in self.schedule.outcomes()]
+        self.assertEqual(sorted(titles), sorted(["Show", run.job.title]))
+        self.assertEqual(self.schedule.title_of(path), run.job.title)
+
+    def test_a_programme_held_by_a_recording_stopped_early_records_on_its_own(self):
+        self.schedule.add_once(CHANNEL, programme("Evening", 30, 120))
+        self.schedule.add_once(CHANNEL, programme("Quiz", 60, 30))
+        self.scheduler.tick()
+        sid, rid, path = self.recording()
+        self.at(60, 0)  # the Quiz is held by the evening's recording
+        self.scheduler.stop_now(rs_name(self.scheduler, "Evening"))  # the REC sign's Stop
+        self.engine.recordingEnded.emit(rid, "stopped", path, 1_000_000)
+        self.engine.sessionClosed.emit(sid)
+        self.at(61, 0)
+        self.assertEqual(len(self.catalogs.asked), 2)  # the Quiz asks a stream of its own
+        self.assertNotIn("Quiz", [o["title"] for o in self.schedule.outcomes()])
+
+    def test_a_recording_made_longer_while_it_records_goes_on(self):  # review 2
+        news = programme("The News", 30)
+        self.schedule.add_once(CHANNEL, news)
+        self.scheduler.tick()
+        sid, rid, path = self.recording()
+        _rid, _sid, _path, _seq, max_s = self.engine.recordings[0]
+        self.assertGreaterEqual(max_s, 24 * 3600)  # the scheduler stops it, at its end
+        later = Programme("20:30–21:30", news.start, news.stop + timedelta(minutes=30))
+        self.schedule.add_once(CHANNEL, later)
+        self.at(64, 0)  # past the first end
+        self.assertEqual(self.engine.stops, [])
+        self.at(93, 1)
+        self.assertEqual(self.engine.stops, [sid])
 
     def test_one_airing_scheduled_twice_records_once(self):  # review I1
         self.schedule.add_once(CHANNEL, programme("The News", 30))

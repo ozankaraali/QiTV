@@ -65,7 +65,7 @@ NO_SOURCE = "none"
 # i18n: a title of a Jellyfin or Emby server has only a 4K version, and Settings plays no 4K
 # version (Never)
 ONLY_4K_TEXT = N_(
-    "This title is only in 4K. To play it here, choose another 4K versions setting than Never."
+    "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never)."
 )
 # i18n: a Jellyfin or Emby server refused QiTV's access (its sign-in ended)
 SIGN_IN_AGAIN = N_("The server asks to sign in again: Settings → Providers → Verify Provider.")

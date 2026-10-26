@@ -19,7 +19,7 @@ The Remote tab's channel list is a bare one: the same groups and channels, witho
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QObject, QTimer
@@ -196,6 +196,9 @@ class PhoneGuide(QObject):
         }
         if getattr(self._window, "scheduler", None) is not None:
             message["timer"] = True  # 2.8: Record at a time, guide or not
+            # its times are this computer's clock's: how far from UTC (minutes)
+            offset = datetime.now().astimezone().utcoffset()
+            message["tz"] = int(offset.total_seconds() // 60) if offset is not None else 0
         if not rows and controller.guide_loading(channel):
             message["loading"] = True  # sent again once the guide is in
         self._send(message)

@@ -805,8 +805,17 @@ class WatchHereTests(WindowCase):
         message = self.hub.open_recording.call_args.args[3]
         self.assertIsInstance(message.pop("p"), int)
         self.hub.open_recording.assert_called_once_with(
-            "s8", "s8", item["path"], {"t": "play", "name": "Harbour News", "start": 61}
+            "s8",
+            "s8",
+            item["path"],
+            {"t": "play", "name": "Harbour News", "start": 61},
+            writing=mock.ANY,
         )
+        writing = self.hub.open_recording.call_args.kwargs["writing"]
+        self.assertFalse(writing())  # 2.8 final review 8: the TV says whether it is written
+        engine = mock.Mock(writing=frozenset({item["path"]}))
+        with mock.patch.object(self.window, "engine", engine):
+            self.assertTrue(writing())
 
     def test_a_recording_for_a_phone_through_the_relay(self):
         self.connect()

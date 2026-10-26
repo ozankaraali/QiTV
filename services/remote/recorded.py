@@ -7,13 +7,19 @@ nothing is re-encoded or repackaged:
   first sound a phone plays (AAC, AC-3, E-AC-3), and finds its keyframes (`_Scan`: only the
   picture's PES starts are read, found a packet column at a time). Pieces of about `TARGET_S`
   go from one keyframe to another (`plan`); a timestamp jump (the stream reconnected) starts a
-  piece after a discontinuity.
+  piece after a discontinuity. A keyframe further than `SOFT_S` away starts a piece at a picture
+  in between, so a growing playlist's target duration holds every piece; a piece over
+  `MAX_PIECE_BYTES` (its keyframes lost) is left out, and the playlist goes on after a break.
+- A recording read whole within `OPEN_PREFER_S` plays as a whole (a VOD playlist). A larger one
+  answers once read past where the phone starts (or after `OPEN_WAIT_S`), as an EVENT playlist
+  that grows as the rest is read behind (a thread of its own, stopped by `close`), until it
+  ends (`#EXT-X-ENDLIST`).
 - `Recorded.piece` reads a piece from the disk and keeps the picture's, the sound's and the
   clock's packets, behind tables naming only them (another sound, teletext and the stream's own
   tables are left out: a phone's player takes the first sound it is told of).
-- A recording still written (its file changed within `GROWING_S`) is an EVENT playlist: the
-  phone asks again, the file is read on from where it was, and pieces are added once complete,
-  until the recording ends (`#EXT-X-ENDLIST`).
+- A recording still written (as the TV says, `writing`; else its file changed within
+  `GROWING_S`) is an EVENT playlist: the phone asks again, the file is read on from where it
+  was, and pieces are added once complete, until the recording ends (`#EXT-X-ENDLIST`).
 
 The pieces' reads and the scans run on the event loop's executor: the home door's loop never
 waits for the disk. A recording a phone can't play is refused (`FilmRefused`) as a film is:
@@ -29,7 +35,7 @@ import math
 import os
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from services.live.ts import _crc32, _pes_start, pts_delta
 from services.remote.films import _H264_PROFILES, FORMAT, SOUND, FilmRefused
@@ -38,10 +44,17 @@ __all__ = ["FilmRefused", "Recorded", "Tables", "add_routes", "parse_tables", "p
 
 PACKET = 188
 TARGET_S = 6.0  # a piece's length, at the least (keyframes permitting)
-GROWING_S = 30.0  # a file changed this recently is still being recorded
-EVENT_TARGET_S = 12  # a growing playlist's target duration (it may not change as it grows)
+SOFT_S = 10.0  # a picture this long after the last keyframe starts a piece (a long GOP)
+GROWING_S = 30.0  # a file changed this recently is still being recorded (the TV not saying)
+# A growing playlist's target duration (it may not change as it grows): pieces are shorter
+# than TARGET_S + SOFT_S.
+EVENT_TARGET_S = 17
 HEAD_BYTES = 2 * 1024 * 1024  # where the program tables are looked for
 CHUNK = PACKET * 22310  # about 4 MiB, whole packets
+BATCH = 16 * CHUNK  # read between two looks at the pieces (and at `close`)
+MAX_PIECE_BYTES = 64 * 1024 * 1024  # a piece is read into memory whole: none larger
+OPEN_PREFER_S = 8.0  # read whole within this: a VOD playlist
+OPEN_WAIT_S = 20.0  # else it answers once read past where the phone starts, or after this
 _CLOCK = 90000
 _BACK = _CLOCK  # a picture this far behind the last is a new timeline (B-frames step less)
 _JUMP = 10 * _CLOCK  # ... and this far ahead
@@ -244,20 +257,23 @@ class _Scan:
         self._lo = pid & 0xFF
         self._his = (0x40 | (pid >> 8), 0x60 | (pid >> 8))  # a PES start, either priority
 
-    def read(self, file: Any, size: int) -> None:
-        """Read the file from where the last read stopped to `size`."""
-        while self.offset + PACKET <= size:
+    def read(self, file: Any, size: int) -> bool:
+        """Read the file from where the last read stopped to `size` (`BATCH` at most);
+        whether it got there."""
+        stop = min(size, self.offset + BATCH)
+        while self.offset + PACKET <= stop:
             file.seek(self.offset)
-            chunk = file.read(min(CHUNK, size - self.offset))
+            chunk = file.read(min(CHUNK, stop - self.offset))
             whole = len(chunk) // PACKET * PACKET
             if not whole:
-                return
+                return True  # the file is shorter than it was (cut): nothing more now
             chunk = chunk[:whole]
             synced = self._synced(chunk)
             self._pictures(chunk[:synced])
             self.offset += synced
             if synced < whole:
                 self.offset += self._resync(chunk[synced:])
+        return self.offset + PACKET > size
 
     @staticmethod
     def _synced(chunk: bytes) -> int:
@@ -306,16 +322,28 @@ class _Scan:
         if rai or nal_key:
             self.keys.append(_Key(offset, pts, pts, self._jumped and bool(self.keys)))
             self._jumped = False
+        elif (
+            self.keys and not self._jumped and pts_delta(self.keys[-1].pts, pts) >= SOFT_S * _CLOCK
+        ):
+            self.keys.append(_Key(offset, pts, pts, False))  # a long GOP: a piece from here
         elif self.keys and not self._jumped and pts_delta(self.keys[-1].end, pts) > 0:
             self.keys[-1].end = pts
 
 
 def plan(keys: list[_Key], frame: int, size: Optional[int]) -> list[Piece]:
     """Pieces of at least `TARGET_S` from keyframe to keyframe; the last runs to the file's
-    `size`, or is left out while the file grows (None): pieces listed never change."""
+    `size`, or is left out while the file grows (None): pieces listed never change. One over
+    `MAX_PIECE_BYTES` is left out (the next starts after a break)."""
+    return plan_from(keys, frame, size, 0, False)[0]
+
+
+def plan_from(
+    keys: list[_Key], frame: int, size: Optional[int], i: int, broken: bool
+) -> tuple[list[Piece], int, bool]:
+    """`plan` from key `i` on (`broken`: a piece before was left out): the pieces, the key the
+    next ones start at, and whether the last was left out."""
     frame = frame or _FRAME
     pieces: list[Piece] = []
-    i = 0
     while i < len(keys):
         first = keys[i]
         j = i + 1
@@ -333,9 +361,15 @@ def plan(keys: list[_Key], frame: int, size: Optional[int]) -> list[Piece]:
             ticks = last + frame
         else:
             break  # the piece still written
-        pieces.append(Piece(first.offset, end, max(ticks, frame) / _CLOCK, first.jump))
+        if end - first.offset > MAX_PIECE_BYTES:
+            broken = True
+        else:
+            pieces.append(
+                Piece(first.offset, end, max(ticks, frame) / _CLOCK, first.jump or broken)
+            )
+            broken = False
         i = j
-    return pieces
+    return pieces, i, broken
 
 
 def playlist(pieces: list[Piece], *, event: bool, ended: bool, start_s: float) -> str:
@@ -379,46 +413,115 @@ class Recorded:
 
     path: str
     start_s: float = 0.0  # where the phone starts (where it stopped before)
+    # Whether a recording still writes the file, as the TV knows (None: its file's time says).
+    writing: Optional[Callable[[], bool]] = None
     _tables: Optional[Tables] = field(default=None, init=False)
     _scan: Optional[_Scan] = field(default=None, init=False)
     _pieces: list[Piece] = field(default_factory=list, init=False)
+    _next: int = field(default=0, init=False)  # the key the next pieces start at
+    _broken: bool = field(default=False, init=False)  # the last piece was left out
     _event: bool = field(default=False, init=False)
     _ended: bool = field(default=False, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    _closed: threading.Event = field(default_factory=threading.Event, init=False)
+    _behind: Optional[threading.Thread] = field(default=None, init=False)
 
     async def open(self) -> None:
         await asyncio.get_running_loop().run_in_executor(None, self._open)
 
     def _open(self) -> None:
+        if self._closed.is_set():
+            raise OSError("closed")
         with open(self.path, "rb") as file:
             head = file.read(HEAD_BYTES)
         self._tables = parse_tables(head)
         self._scan = _Scan(self._tables)
-        self._event = self._growing()
-        self._update()
+        began = time.monotonic()
+        growing = self._growing()
+        size = os.path.getsize(self.path)
+        whole = self._read(size, lambda: time.monotonic() - began >= OPEN_PREFER_S)
+        if not whole:  # a large one: on to where the phone starts, then read behind
+
+            def far_enough() -> bool:
+                read = sum(piece.seconds for piece in self._pieces)
+                return time.monotonic() - began >= OPEN_WAIT_S or (
+                    bool(self._pieces) and read > self.start_s
+                )
+
+            whole = self._read(size, far_enough)
+        if self._closed.is_set():
+            raise OSError("closed")
         if not self._scan.keys:
             raise FilmRefused(FORMAT, "no keyframe")
         if self._scan.profile is not None and self._scan.profile not in _H264_PROFILES:
             raise FilmRefused(FORMAT, f"H.264 profile {self._scan.profile}")
+        self._event = growing or not whole
+        if whole and not growing:
+            self._end(size)
+        elif not whole:
+            self._behind = threading.Thread(
+                target=self._read_behind, name="recording-read", daemon=True
+            )
+            self._behind.start()
 
     def _growing(self) -> bool:
+        if self.writing is not None:
+            return bool(self.writing())
         return time.time() - os.stat(self.path).st_mtime < GROWING_S
 
-    def _update(self) -> None:
+    def _read(self, size: int, enough: Callable[[], bool]) -> bool:
+        """Read the file on to `size`, a batch at a time, listing the pieces read whole after
+        each, until `enough()` or `close`; whether it got to `size`."""
         scan = self._scan
-        if scan is None or self._ended:
-            return
+        assert scan is not None
+        while not self._closed.is_set():
+            with self._lock:
+                with open(self.path, "rb") as file:  # none held between batches
+                    done = scan.read(file, size)
+                found, self._next, self._broken = plan_from(
+                    scan.keys, scan.frame, None, self._next, self._broken
+                )
+                self._pieces = self._pieces + found  # a new list: a reader's stays whole
+            if done:
+                return True
+            if enough():
+                return False
+        return False
+
+    def _end(self, size: int) -> None:
+        """Read to its end, not written any more: the last pieces, and the playlist ends."""
+        scan = self._scan
+        assert scan is not None
         with self._lock:
+            found, self._next, self._broken = plan_from(
+                scan.keys, scan.frame, size, self._next, self._broken
+            )
+            self._pieces = self._pieces + found
+            self._ended = True
+
+    def _read_behind(self) -> None:
+        """The rest of a large recording, behind the playlist (to its end, or to where a
+        recording still writes it: the phone's asks read on from there)."""
+        try:
             growing = self._growing()
             size = os.path.getsize(self.path)
-            with open(self.path, "rb") as file:
-                scan.read(file, size)
-            self._pieces = plan(scan.keys, scan.frame, None if growing else size)
-            self._ended = not growing
+            if self._read(size, lambda: False) and not growing:
+                self._end(size)
+        except OSError:
+            pass  # the file went: the phone's next piece says so
+
+    def _update(self) -> None:
+        if self._scan is None or self._ended or self._closed.is_set():
+            return
+        growing = self._growing()
+        size = os.path.getsize(self.path)
+        if self._read(size, lambda: False) and not growing:
+            self._end(size)
 
     async def fresh_playlist(self) -> str:
-        """The playlist, the file read on first while it grows."""
-        if self._event and not self._ended:
+        """The playlist, the file read on first while it grows (and nothing reads behind)."""
+        behind = self._behind
+        if self._event and not self._ended and (behind is None or not behind.is_alive()):
             await asyncio.get_running_loop().run_in_executor(None, self._update)
         return self.playlist()
 
@@ -437,7 +540,9 @@ class Recorded:
         return await loop.run_in_executor(None, read_piece, self.path, pieces[index], tables, index)
 
     def close(self) -> None:
-        """Nothing is held between reads (the shelf's films stop reading here)."""
+        """No more reading (the shelf's films stop reading here): an opening or the reading
+        behind stops at its next batch. Nothing is held between reads."""
+        self._closed.set()
 
 
 def add_routes(app: Any, shelf: Any) -> None:

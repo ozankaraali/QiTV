@@ -417,6 +417,24 @@ class ParkResumeTests(unittest.TestCase):
         engine.resume_session(sid, URL_FOR_RING, headers={}, verify_ssl=True, join=True)
         self.assertEqual(commands.get_nowait()[5:], (6.0, {"join": True}))
 
+    def test_it_says_which_files_its_recordings_write(self):  # 2.8 final review 8
+        # The Library keeps a file being written from deletion; the phone reads one on as it
+        # grows. Read from other threads: a set that is replaced, never changed.
+        engine, _ = self.engine()
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB
+        )
+        self.assertEqual(engine.writing, frozenset())
+        rid = engine.start_recording(sid, "/rec/a.ts", 0, max_s=60.0, min_free=0)
+        before = engine.writing
+        self.assertEqual(before, frozenset({"/rec/a.ts"}))
+        engine._on_message(("recorded", sid, rid, "stopped", "/rec/a.ts", 1000))
+        self.assertEqual(engine.writing, frozenset())
+        self.assertEqual(before, frozenset({"/rec/a.ts"}))  # what a reader had stays whole
+        rid = engine.start_recording(sid, "/rec/b.ts", 0, max_s=60.0, min_free=0)
+        engine._lose_recordings()  # the helper died
+        self.assertEqual(engine.writing, frozenset())
+
     def test_parked_and_resumed_keep_the_view(self):
         engine, _ = self.engine()
         engine._sessions["s"] = engine_module._View()

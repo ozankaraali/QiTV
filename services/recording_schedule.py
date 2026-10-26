@@ -19,7 +19,7 @@ broken one, reads as empty (an older QiTV ignores the file).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time as clock_time, timedelta
+from datetime import date, datetime, time as clock_time, timedelta, tzinfo
 import json
 import logging
 import os
@@ -177,20 +177,24 @@ def slot_text(begin: int, minutes: int) -> str:
     return f"{begin // 60:02d}:{begin % 60:02d}–{end // 60:02d}:{end % 60:02d}"
 
 
-def _local(day: date, minutes: int) -> float:
-    """`minutes` after `day`'s midnight on this computer's clock, in Unix seconds."""
-    hour, minute = divmod(minutes, 60)
-    return datetime.combine(day, clock_time(hour, minute)).astimezone().timestamp()
+def local_time(day: date, minutes: int, zone: Optional[tzinfo] = None) -> datetime:
+    """`minutes` after `day`'s midnight by the clock of `zone` (None: this computer's)."""
+    day += timedelta(days=minutes // DAY_MINUTES)  # a time past midnight is the next day's
+    hour, minute = divmod(minutes % DAY_MINUTES, 60)
+    if zone is not None:
+        return datetime.combine(day, clock_time(hour, minute), tzinfo=zone)
+    return datetime.combine(day, clock_time(hour, minute)).astimezone()
 
 
-def _timer_starts(item: dict, now: float) -> list[float]:
-    """The starts of a timer's slots that may run at `now`: yesterday's (one past midnight)
-    and today's, on its days."""
-    today = datetime.fromtimestamp(now).date()
-    days = set(item["days"])
+def _timer_slots(item: dict, now: float, zone: Optional[tzinfo]) -> list[tuple[float, float]]:
+    """The (start, stop) of a timer's slots that may be due at `now`, on its days: yesterday's
+    (one past midnight), today's and tomorrow's (one at midnight starts a minute before). Both
+    ends are clock times: across a clock change a slot is an hour longer or shorter."""
+    today = datetime.fromtimestamp(now, zone).date()
+    days, begin, end = set(item["days"]), item["begin"], item["begin"] + item["minutes"]
     return [
-        _local(day, item["begin"])
-        for day in (today - timedelta(days=1), today)
+        (local_time(day, begin, zone).timestamp(), local_time(day, end, zone).timestamp())
+        for day in (today - timedelta(days=1), today, today + timedelta(days=1))
         if day.weekday() in days
     ]
 
@@ -220,10 +224,12 @@ class Schedule:
         path: str,
         write: Callable[[str, dict], None] = write_later,
         clock: Callable[[], float] = time.time,
+        zone: Optional[tzinfo] = None,
     ) -> None:
         self._path = path
         self._write = write
         self._clock = clock  # now, in Unix seconds (a programme that ended is not added)
+        self._zone = zone  # the clock timers keep (None: this computer's)
         self._items: list[dict] = []
         self._done: list[str] = []  # job keys started (series airings never twice)
         self._outcomes: list[dict] = []
@@ -262,6 +268,11 @@ class Schedule:
     def items(self) -> list[dict]:
         return [dict(item) for item in self._items]
 
+    def item(self, item_id: str) -> Optional[dict]:
+        """The scheduled item `item_id` as it is now (a copy), else None."""
+        found = next((i for i in self._items if i.get("id") == item_id), None)
+        return dict(found) if found is not None else None
+
     def outcomes(self) -> list[dict]:
         """What became of recent recordings, newest first."""
         return [dict(o) for o in reversed(self._outcomes)]
@@ -273,11 +284,16 @@ class Schedule:
         self, channel: dict, programme: Programme, *, account: Optional[Mapping] = None
     ) -> Optional[dict]:
         """Record `programme` at its time; None when it ended already (2.8: a phone's stale
-        timetable). `account`: the provider's (an Xtream panel's), kept out of the file."""
+        timetable). `account`: the provider's (an Xtream panel's), kept out of the file. One
+        scheduled at the same start already stays the one, to the later of the two ends
+        ("Record at a time" opened on a programme, its end made later)."""
         if programme.stop.timestamp() <= self._clock():
             return None
         existing = self._once_of(channel, programme)
         if existing is not None:
+            if programme.stop.timestamp() > float(existing.get("stop") or 0):
+                existing["stop"] = programme.stop.timestamp()
+                self._save()
             return dict(existing)
         item = {
             "id": uuid.uuid4().hex[:12],
@@ -408,8 +424,8 @@ class Schedule:
                 title = str(item.get("title") or "") or slot_text(item["begin"], item["minutes"])
                 provider = str(item.get("provider") or "")
                 candidates = [
-                    Job(item["id"], title, channel, provider, start, start + item["minutes"] * 60)
-                    for start in _timer_starts(item, now)
+                    Job(item["id"], title, channel, provider, start, stop)
+                    for start, stop in _timer_slots(item, now, self._zone)
                 ]
             else:
                 candidates = [
