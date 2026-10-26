@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, tzinfo
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -543,7 +543,7 @@ class BrowsedCatalog(QObject):
         versions = self._versions()
         hit = self._memo.get(("groups", section))
         if hit is not None and hit[0] == versions:
-            return hit[1]
+            return cast(list[Group], hit[1])
         rows: list[Group] = []
         total, any_all = 0, False
         for name in self._having(section):
@@ -577,7 +577,7 @@ class BrowsedCatalog(QObject):
         versions = self._versions()
         hit = self._memo.get(("all", section))
         if hit is not None and hit[0] == versions:
-            return hit[1]
+            return cast(list[dict], hit[1])
         joined: list[dict] = []
         loaded = False
         for provider in self._having(section):

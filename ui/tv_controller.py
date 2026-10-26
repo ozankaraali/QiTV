@@ -65,7 +65,7 @@ from functools import partial
 import logging
 from pathlib import Path
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QPixmap
@@ -1430,7 +1430,10 @@ class TVController(QObject):
         if target.live or target.local:
             return None
         provider_name = item_provider.provider_name(self.catalog, target.item)
-        return self.watch.content_id(provider_name, target.item, item_type=target.item_type)
+        return cast(
+            Optional[str],
+            self.watch.content_id(provider_name, target.item, item_type=target.item_type),
+        )
 
     def play_vod(
         self,
@@ -2899,7 +2902,7 @@ class TVController(QObject):
     def _guide_context(self) -> ZapContext:
         """What the guide lists: the zap group's channels, but in all mode the live group the
         drawer shows when it is another one (its channels may be any provider's)."""
-        context = self.zap.context
+        context: ZapContext = self.zap.context
         if not self.nav.all_mode():
             return context
         group = self._drawer_group()
@@ -2912,7 +2915,7 @@ class TVController(QObject):
 
     def _drawer_group(self) -> Optional[NavNode]:
         """The live group the drawer's path ends in (None: not in a live group)."""
-        group = next((n for n in self.nav.path if n.layer == "group"), None)
+        group: Optional[NavNode] = next((n for n in self.nav.path if n.layer == "group"), None)
         if group is None or self.nav.section_of(group) != "live":
             return None
         return group
@@ -3459,7 +3462,9 @@ class TVController(QObject):
             if not isinstance(item, dict):
                 return False
             section = sections.get(str(entry.get("item_type") or ""), "live")
-            return guard.protects(section, with_provider(item, entry.get("provider_name")))
+            return bool(
+                guard.protects(section, with_provider(item, str(entry.get("provider_name") or "")))
+            )
 
         forget = getattr(self.watch, "forget", None)
         if forget is not None and forget(protected):

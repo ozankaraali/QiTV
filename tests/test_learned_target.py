@@ -80,7 +80,8 @@ def regular(gap, media, until, *, start=0.0):
 
 
 def six_and_twelve(until):
-    """A public HLS channel as measured in 2.1: a batch every 7 s, 6 s of media, every sixth 12 s."""
+    """A public HLS channel as measured in 2.1: a batch every 7 s, 6 s of media, every sixth
+    12 s."""
     return regular(7.0, lambda n: 12.0 if n % 6 == 5 else 6.0, until)
 
 

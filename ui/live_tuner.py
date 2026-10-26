@@ -22,8 +22,9 @@ catalog's, as for pipeline tunes), from its start until libVLC let go of its str
 PiP sees the slot taken. It never waits for one: this gate already orders the main player's
 streams. It waits for the other pictures' tuners of its provider, though
 (`wait_for_each_other`): a closing PiP's stream may still hold the provider's last slot, so
-the open runs at that tuner's `released`; another provider's closing stream holds none. A local file (`local=True`) is no provider's stream: it is stopped and waited for
-like a direct play, but holds no slot.
+the open runs at that tuner's `released`; another provider's closing stream holds none. A local file
+(`local=True`) is no provider's stream: it is stopped and waited for like a direct play, but holds
+no slot.
 
 Picture in picture and the multiview's tiles give each player a tuner of its own.
 Its budget slots carry the player's slot name as their purpose ("main", "pip", "t2" …): a

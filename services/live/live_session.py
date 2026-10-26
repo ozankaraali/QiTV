@@ -91,25 +91,24 @@ within stay-live's band or 5 s nearer and nothing jumped within a minute (a tune
 reopen: see `StayLive`). Its reopen at live (such a jump, or beyond the target plus 20 s)
 waits until a stream opened (Go live, a seek, a reopen) has played and `_REOPEN_HOLD_S`
 passed, and a Go live right after stay-live's reopen (also one the tick made after it could
-not open at once) opens nothing more: never two opens in a row. The timeline's `shown` is the lag as the
-indicator shows it (`SettledLag`: half seconds, changed after 3 s), `nudge` the rate a nudge
+not open at once) opens nothing more: never two opens in a row. The timeline's `shown` is the lag as
+the indicator shows it (`SettledLag`: half seconds, changed after 3 s), `nudge` the rate a nudge
 ramps to. On some channels VLC cannot play at any rate but 1x: its position crawls. While
-stay-live's rate is not 1x, VLC's progress is checked against rate x wall time
-(`RateHealth`), counted only while VLC plays and at least `_MEASURE_AHEAD_S` of media is
-ahead at both ends of a tick, and from `_RATE_GRACE_S` after an opened stream plays or after
-VLC was at the live edge (within `_EDGE_S`, BUFFERING, or the source stalled): a starved
-VLC, and its restart once data comes again (it refills its caching while its clock stands
-still), are not taken for a slow one. The progress is VLC's own clock's, in its steps, never
-the position (whose clock runs at the rate by design): a stretch runs from VLC's first step
-once counting starts to a later step (a step only late or missing counts at its end), or
-holds nothing played once VLC's clock stood still a whole window and two of its holds. Under
-70% of it over 3 s (at least two such stretches), the rate goes back to 1x at once and
-stay-live changes it no more on that channel (`StayLive.lock_rate`). On some HLS
-channels VLC crawls through the pipeline even at 1x (measured, 2.0.2), while its own HLS
-plays them smoothly: counted the same way at 1x, under 70% progress in `_CRAWL_WINDOWS`
-windows of `_CRAWL_WINDOW_S` in a row makes the channel play directly ("Plays without rewind
-for smoother playback", `CRAWLING`), and the channel's next tune plays directly at once (for
-a day: see `services.live.tuning`). A raw TS channel never does.
+stay-live's rate is not 1x, VLC's progress is checked against rate x wall time (`RateHealth`),
+counted only while VLC plays and at least `_MEASURE_AHEAD_S` of media is ahead at both ends of a
+tick, and from `_RATE_GRACE_S` after an opened stream plays or after VLC was at the live edge
+(within `_EDGE_S`, BUFFERING, or the source stalled): a starved VLC, and its restart once data comes
+again (it refills its caching while its clock stands still), are not taken for a slow one. The
+progress is VLC's own clock's, in its steps, never the position (whose clock runs at the rate by
+design): a stretch runs from VLC's first step once counting starts to a later step (a step only late
+or missing counts at its end), or holds nothing played once VLC's clock stood still a whole window
+and two of its holds. Under 70% of it over 3 s (at least two such stretches), the rate goes back to
+1x at once and stay-live changes it no more on that channel (`StayLive.lock_rate`). On some HLS
+channels VLC crawls through the pipeline even at 1x (measured, 2.0.2), while its own HLS plays them
+smoothly: counted the same way at 1x, under 70% progress in `_CRAWL_WINDOWS` windows of
+`_CRAWL_WINDOW_S` in a row makes the channel play directly ("Plays without rewind for smoother
+playback", `CRAWLING`), and the channel's next tune plays directly at once (for a day: see
+`services.live.tuning`). A raw TS channel never does.
 
 With hardware decoding (Settings), a picture that stands still while the sound plays
 (`PlaybackSession.pictureFroze`, `services.picture_watch`) makes the channel decode in
@@ -175,9 +174,9 @@ Interruptions while playing from the pipeline:
   refill after it do not count). It opens again: at live in LIVE, else where VLC got to.
 - VLC ended or failed: reopen at the position, or 30 s past the oldest buffered point (half
   way into a shorter buffer) with "Rewound past the buffer" (once until VLC plays again) when
-  the ring evicted it (after a long pause, say). Resuming from a pause checks for that eviction first. Nothing is reopened
-  once the session ended: playback runs to the end of the buffer. Interruptions that do not reach playing again within
-  `ready_timeout_ms` fall back.
+  the ring evicted it (after a long pause, say). Resuming from a pause checks for that eviction
+  first. Nothing is reopened once the session ended: playback runs to the end of the buffer.
+  Interruptions that do not reach playing again within `ready_timeout_ms` fall back.
 - `sessionFailed("disk")`: the helper went on in RAM without the history: a notice, then go
   live on the RAM ring's first state (`sessionUpdated`), not on the old ring's spans. A
   seek, Go live or resume meanwhile waits for that state too. Fall back when it does not
@@ -2361,10 +2360,10 @@ class LiveSession(QObject):
         """Keep what the channel taught (Auto's learned target, a locked rate, playing
         directly, decoding in software) for its next tune. Under Auto the learned target,
         and no 2.0.2 `extra` (it was read as the prior: left, it would be read so again);
-        under another latency what Auto learned before stays as it was. `learned_only` (the learned target's own saves:
-        trouble, a move worth saying, the tune's end): the lock, direct play and software
-        decoding as the store has them now, so a lock restored at the tune and expired since
-        is not set again."""
+        under another latency what Auto learned before stays as it was. `learned_only` (the learned
+        target's own saves: trouble, a move worth saying, the tune's end): the lock, direct play and
+        software decoding as the store has them now, so a lock restored at the tune and expired
+        since is not set again."""
         learned = self._learned
         if learned_only:
             if learned is None:

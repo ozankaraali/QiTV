@@ -54,11 +54,12 @@ speaker) makes the grid "mixed" (`mixed()`, `mixChanged`). From then until the g
 moving the focus moves the controls only: no mute changes, and each tile keeps its own level,
 the focused one too. The main level is put aside meanwhile; as the mix ends the big picture
 plays at the level the user gave that tile during the mix, else at the main level put aside,
-so a tile focused untouched never leaves its default level behind as the main one. Changes to the focused tile alone never start a mix:
-they are the main sound, which follows the focus. `follow_focus()` goes back: the focused tile heard, the others
-muted. `end_mix()`, as the grid is left (before its tiles stop), and `leave_grid` end it:
-the big picture is heard, unless the mix had every tile muted, and the PiP kept from the
-grid keeps its mute, as a PiP made audible does; the normal rule holds again.
+so a tile focused untouched never leaves its default level behind as the main one. Changes to the
+focused tile alone never start a mix: they are the main sound, which follows the focus.
+`follow_focus()` goes back: the focused tile heard, the others muted. `end_mix()`, as the grid is
+left (before its tiles stop), and `leave_grid` end it: the big picture is heard, unless the mix had
+every tile muted, and the PiP kept from the grid keeps its mute, as a PiP made audible does; the
+normal rule holds again.
 
 Recording as a PVR (2.6): a slot that records is never stopped for a channel change: it is set
 aside (`set_aside`) and records on in the background, muted, its surface hidden (neither large

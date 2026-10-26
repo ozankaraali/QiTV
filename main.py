@@ -144,7 +144,8 @@ def main() -> int:
 
     # Optional: capture Qt warnings to help debug thread/timer issues
     def _qt_msg_handler(mode, context, message):
-        # Focus on timer/thread-related warnings only when enabled. Print directly to stderr to avoid recursion.
+        # Focus on timer/thread-related warnings only when enabled. Print directly to stderr to
+        # avoid recursion.
         if "QBasicTimer::start" in message or "QObject::startTimer" in message:
             try:
                 sys.stderr.write(f"Qt: {message}\n")
@@ -179,7 +180,7 @@ def main() -> int:
 
     if platform.system() == "Windows":
         myappid = f"com.ozankaraali.qitv.{get_app_version()}"
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)  # type: ignore
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
     app.setWindowIcon(QtGui.QIcon(icon_path))
     qdarktheme.setup_theme("dark", custom_colors={"primary": "#C96B43"})

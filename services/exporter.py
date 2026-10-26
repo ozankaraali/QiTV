@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import Enum
 import logging
 import threading
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from PySide6.QtCore import QObject, Signal
 
@@ -29,6 +29,8 @@ from services.search import iter_items
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
+if TYPE_CHECKING:  # the real module, for annotations only: the lazy one loads later
+    import requests as requests_types
 
 SECTION_KEYS = {"live": "itv", "movies": "vod", "series": "series"}
 REQUEST_TIMEOUT = (10, 30)
@@ -210,7 +212,7 @@ class ExportWorker(QObject):
             raise _Cancelled
 
     def _fetch(
-        self, session: requests.Session, series: dict, season_id: Any, sortby: str
+        self, session: requests_types.Session, series: dict, season_id: Any, sortby: str
     ) -> Optional[dict]:
         """One STB series listing (season_id 0 lists the seasons); None on failure. Asked
         over HTTPS first: a portal that does not answer there is asked over HTTP (and so

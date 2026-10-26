@@ -1043,7 +1043,8 @@ provider = write_local_provider(os.environ["QITV_CONFIG_DIR"])
 config = ConfigManager()
 providers = ProviderManager(config)
 seed_channels(providers, provider)
-window = tw.TVWindow(app, config, providers, ImageManager(config, 1 << 20), EpgManager(config, providers))
+images = ImageManager(config, 1 << 20)
+window = tw.TVWindow(app, config, providers, images, EpgManager(config, providers))
 
 
 class StuckWorker(QObject):
@@ -1054,7 +1055,8 @@ class StuckWorker(QObject):
         time.sleep(30)
 
 
-window.catalogs.catalog(window.catalog.source()).runner.run_worker(StuckWorker(), lambda *a: None, lambda *a: None)
+runner = window.catalogs.catalog(window.catalog.source()).runner
+runner.run_worker(StuckWorker(), lambda *a: None, lambda *a: None)
 window.show()
 QTimer.singleShot(300, window.close)
 print("exec returned", app.exec(), flush=True)
@@ -1641,7 +1643,8 @@ def click_library_button(case, window):
     QTest.mouseClick(host.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
     case.library_click_state = (
         f"hit={hit} titles={titles} under={type(under).__name__ if under else None} "
-        f"can_return={window.screens._can_return()} page={type(window.pages.currentWidget()).__name__}"
+        f"can_return={window.screens._can_return()} "
+        f"page={type(window.pages.currentWidget()).__name__}"
     )
     return host.mapToGlobal(point)
 
@@ -2112,7 +2115,7 @@ class LibraryReturnTests(WindowCase):
         self.assertTrue(self.window.screens.library_shown())
 
     def test_a_live_channel_chosen_after_the_movie_keeps_esc(self):
-        ids = self.held_links()
+        self.held_links()
         self.play_from_the_library()
         channel = self.window.catalog.items("live", "*")[0]
         self.window.controller.tune(channel, group_key="*", channels=[channel])

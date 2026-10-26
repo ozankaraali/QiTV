@@ -1,4 +1,5 @@
-"""History, last-watched, last live channel, resume points (spec §4.1 PlaybackSession bookkeeping)."""
+"""History, last-watched, last live channel, resume points (spec §4.1 PlaybackSession
+bookkeeping)."""
 
 from __future__ import annotations
 

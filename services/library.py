@@ -121,12 +121,12 @@ def _added(item: dict) -> Optional[float]:
     if "-" in text[1:] or ":" in text:  # a date: skip the (raising) number attempt
         return _iso_time(text)
     try:
-        value = float(text)
+        number = float(text)
     except ValueError:
         return _iso_time(text)
-    if not math.isfinite(value) or value <= 0:
+    if not math.isfinite(number) or number <= 0:
         return None
-    return value / 1000 if value > 1e11 else value
+    return number / 1000 if number > 1e11 else number
 
 
 def _iso_time(text: str) -> Optional[float]:

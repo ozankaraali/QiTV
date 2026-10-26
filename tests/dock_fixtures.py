@@ -1,11 +1,11 @@
 """A real macOS window minimized to the Dock and restored, watched by the window server.
 
 Not a test module: tests/test_macos_window.py runs it in a child process on the cocoa platform
-(``python tests/dock_fixtures.py``), only with QITV_GUI_TESTS=1, and reads the JSON it prints. A QMainWindow with a video
-surface and the overlay host (a persistent hint up) is minimized with AppKit's miniaturize:,
-then restored two ways: by Qt (showNormal(), how the smoke test restores) and by AppKit
-(deminiaturize:, as from the Dock). Meanwhile a thread samples CGWindowListCopyWindowInfo, which
-needs no permission: whether each window is on screen and its bounds, which follow the genie
+(``python tests/dock_fixtures.py``), only with QITV_GUI_TESTS=1, and reads the JSON it prints. A
+QMainWindow with a video surface and the overlay host (a persistent hint up) is minimized with
+AppKit's miniaturize:, then restored two ways: by Qt (showNormal(), how the smoke test restores) and
+by AppKit (deminiaturize:, as from the Dock). Meanwhile a thread samples CGWindowListCopyWindowInfo,
+which needs no permission: whether each window is on screen and its bounds, which follow the genie
 animation of the TV window. The overlay host is also checked as it is shown: the TV window's
 NSWindow must not be in the Dock (isMiniaturized) by then.
 """

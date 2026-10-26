@@ -1,6 +1,5 @@
 """Provider credentials never reach the logs, at any level (URLs carry them)."""
 
-import logging
 import os
 import tempfile
 from types import SimpleNamespace

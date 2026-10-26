@@ -75,7 +75,8 @@ class ImageManager:
                             break
                         wait_time = (2**attempt) + random.uniform(0, 1)
                         logger.debug(
-                            f"Received error or empty response. Retrying in {wait_time:.2f} seconds..."
+                            "Received error or empty response. "
+                            f"Retrying in {wait_time:.2f} seconds..."
                         )
                         await asyncio.sleep(wait_time)
                         continue

@@ -762,7 +762,7 @@ class LiveTuning:
                     os.remove(temporary)
                 except OSError:
                     pass
-'''
+'''  # noqa: E501 (verbatim copy of the released file)
 
 
 if __name__ == "__main__":

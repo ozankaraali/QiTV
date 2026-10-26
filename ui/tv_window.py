@@ -1430,7 +1430,8 @@ class TVWindow(QMainWindow):
         return self.geometry()
 
     def _update_menu_bar(self) -> None:
-        """After fullscreen or the mini player changed: the menu bar and the transport's way back."""
+        """After fullscreen or the mini player changed: the menu bar and the transport's way
+        back."""
         mini = self._mini_restore is not None
         bar = self.menuBar()
         if not bar.isNativeMenuBar():  # the macOS menu bar is outside the window

@@ -148,7 +148,6 @@ from services.live.ts import (
 if TYPE_CHECKING:
     from services.live.recorder import Recorder
     from services.live.ring import DiskBudget, Ring
-    from services.live.server import StreamServer
     from services.live.source import Source
 
 _LOG = logging.getLogger(__name__)
@@ -242,18 +241,18 @@ class BurstMeter:
     though at most `_CONNECT_PERIOD_RATIO` times the media and `_CONNECT_PERIOD_MAX_S`, since
     a steady source that paused after connect (an on-demand restream starting up) looks the
     same; for such a source the bounds keep the slow-down that builds a burst's room short.
-    It holds only until bursts are alike: the run counts the media, as for any burst. Once two bursts in a row
-    are alike (within `_BURST_SPREAD`), the estimate is the largest of the last `_BURST_RUN`
-    alike ones: a burst larger than the estimate would starve the player before the next one
-    lands (and count as a stall), one smaller costs nothing. A burst unlike the one before
-    starts a new run and leaves the estimate as it was until two are alike again, which
-    corrects a first burst that was not typical. Once `_STEADY_BURSTS` estimates' worth of
-    seconds pass without a gap, the source is steady again (0.0); for an estimate from a single
-    burst that no second one has confirmed yet, once `_STEADY_UNCONFIRMED` estimate's worth has.
-    A bursty source shows its next gap within half a period of a burst's first byte, inside an
-    estimate of about its period (a measured channel: 2-4 s at connect, then 10 s every 10 s),
-    while a steady source that paused after connect (4 s, then 12 s without a byte, then real
-    time) is taken for 10 s bursts for 10 s (before 2.0.1: for 12 s ones for 36 s).
+    It holds only until bursts are alike: the run counts the media, as for any burst. Once two
+    bursts in a row are alike (within `_BURST_SPREAD`), the estimate is the largest of the last
+    `_BURST_RUN` alike ones: a burst larger than the estimate would starve the player before the
+    next one lands (and count as a stall), one smaller costs nothing. A burst unlike the one before
+    starts a new run and leaves the estimate as it was until two are alike again, which corrects a
+    first burst that was not typical. Once `_STEADY_BURSTS` estimates' worth of seconds pass without
+    a gap, the source is steady again (0.0); for an estimate from a single burst that no second one
+    has confirmed yet, once `_STEADY_UNCONFIRMED` estimate's worth has. A bursty source shows its
+    next gap within half a period of a burst's first byte, inside an estimate of about its period (a
+    measured channel: 2-4 s at connect, then 10 s every 10 s), while a steady source that paused
+    after connect (4 s, then 12 s without a byte, then real time) is taken for 10 s bursts for 10 s
+    (before 2.0.1: for 12 s ones for 36 s).
 
     Pure logic: no clock of its own.
     """

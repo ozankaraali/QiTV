@@ -335,7 +335,8 @@ class TimeShiftCase(unittest.TestCase):
         self.assertEqual(t.texts(), ("Buffer from 18:44", "−00:38 behind live"))
 
     def test_live_mode_shows_the_edge_row_whatever_the_lag(self):
-        # After Go live on a long-GOP source the lag sits above the target while stay-live closes it.
+        # After Go live on a long-GOP source the lag sits above the target while stay-live closes
+        # it.
         t = self.shifted()
         t.update_timeline(at_edge(lag=20.0, rate=1.10), PROGRAMME)
         layout = t._layout()

@@ -35,6 +35,7 @@ behind the list instead of the one the list was opened for.
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 import logging
+from typing import cast
 
 from PySide6.QtCore import (
     QEvent,
@@ -583,7 +584,7 @@ class _RowIndex:
     def get(self, node, default=None):
         if node is None:
             return default
-        row = self._seq.row_of(node) if self._seq is not None else self._map.get(node)  # type: ignore[union-attr]
+        row = self._seq.row_of(node) if self._seq is not None else self._map.get(node)
         return default if row is None else row
 
     def __contains__(self, node) -> bool:
@@ -593,7 +594,7 @@ class _RowIndex:
         row = self.get(node)
         if row is None:
             raise KeyError(node)
-        return row
+        return cast(int, row)
 
 
 class _Column:
@@ -729,7 +730,7 @@ class Drawer(Overlay):
             return
         self._pending_key = None
         self._find_moved = self.finding()
-        row = col.rows.get(col.current, -1 if delta > 0 else len(col.nodes))  # type: ignore[arg-type]
+        row = col.rows.get(col.current, -1 if delta > 0 else len(col.nodes))
         target = self._selectable_row(col, min(len(col.nodes) - 1, max(0, row + delta)), delta)
         if target is not None:
             self._select(col, target)

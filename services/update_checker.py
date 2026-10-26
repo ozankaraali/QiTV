@@ -348,7 +348,8 @@ class UpdateDownloader(QObject):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
-                        # Throttle progress updates to every 500KB to avoid overwhelming Qt event loop
+                        # Throttle progress updates to every 500KB to avoid overwhelming the Qt
+                        # event loop
                         if (
                             downloaded - last_progress_update >= 512 * 1024
                             or downloaded >= total_size

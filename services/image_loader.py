@@ -1,4 +1,5 @@
 import logging
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QImage, QImageReader
@@ -6,6 +7,9 @@ from PySide6.QtGui import QImage, QImageReader
 from services.lazy_import import lazy_module
 from services.provider_api import CLIENT_HEADERS
 from services.redact import redact_url, safe_exc
+
+if TYPE_CHECKING:  # the real modules, for annotations only: the lazy ones load later
+    import asyncio as asyncio_types
 
 logger = logging.getLogger(__name__)
 aiohttp = lazy_module("aiohttp")
@@ -60,8 +64,8 @@ class ImageLoader(QThread):
         self.verify_ssl = verify_ssl
         self.refresh_cache = refresh_cache
         self.decode_side = decode_side
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._load_task: asyncio.Task | None = None
+        self._loop: asyncio_types.AbstractEventLoop | None = None
+        self._load_task: asyncio_types.Task | None = None
 
     def cancel(self):
         """Interrupt pending I/O without blocking the GUI thread."""

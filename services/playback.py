@@ -45,13 +45,13 @@ input (`_player_free`): what is asked for meanwhile is set once the next media o
 With hardware decoding (Settings; `hardware`), each tick while a stream plays reads libVLC's
 media statistics: once its picture stood still while its sound played (`FrozenPicture`, which
 has the lab) where pictures can show (`_can_show`: on a window system, or once VLC made a video
-output for one of this player's media), the stream decodes in software from then on (`software_options()`, media options
-that override the instance's decoder), `pictureFroze` follows, and a stream other than a
-time-shift one opens again where it plays (a film at its position, a live stream live). A
-time-shift stream's position is LiveSession's: it reopens it. Each seek, the resume one
-included, gives the decoder a first picture's time again. The same URL opened again in this
-player (a reconnect, a retry) decodes in software too; `play(software=True)` asks for it (a
-channel that froze before).
+output for one of this player's media), the stream decodes in software from then on
+(`software_options()`, media options that override the instance's decoder), `pictureFroze` follows,
+and a stream other than a time-shift one opens again where it plays (a film at its position, a live
+stream live). A time-shift stream's position is LiveSession's: it reopens it. Each seek, the resume
+one included, gives the decoder a first picture's time again. The same URL opened again in this
+player (a reconnect, a retry) decodes in software too; `play(software=True)` asks for it (a channel
+that froze before).
 """
 
 from __future__ import annotations

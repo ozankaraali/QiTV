@@ -25,9 +25,9 @@ play or software decoding still in force last), as `services.channel_store` keep
 once, written in the background, a bad entry left out. The learned target is an optional
 field of version 1, so 2.0.x reads 2.1's file (it ignores the field): one that makes no
 sense, or would not change the next tune (`Learned.informative`), is left out on its own,
-and an entry left with nothing is none. A 2.0.2 `extra` stays as it was: `LearnedTarget` reads it as a prior. Software
-decoding (2.1) is an optional field too, written only when it is so: 2.0.x reads an entry
-with it as without it. A write that fails is logged (without its path or any address).
+and an entry left with nothing is none. A 2.0.2 `extra` stays as it was: `LearnedTarget` reads it as
+a prior. Software decoding (2.1) is an optional field too, written only when it is so: 2.0.x reads
+an entry with it as without it. A write that fails is logged (without its path or any address).
 """
 
 from __future__ import annotations

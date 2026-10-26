@@ -21,9 +21,11 @@ repos:
         exclude: ^.*\b(migrations)\b.*$
         args: [--count, "--select=E9,F63,F7,F82", --show-source, --statistics]
     -   id: flake8
-        name: Flake8 exit-zero treats all errors as warnings, the GitHub editor is 127 chars wide
+        # As black writes (100 columns; E203 is black's slice spacing) and as the tests set their
+        # path before importing (E402): what is left is real, plus complexity notes.
+        name: Flake8 exit-zero treats all errors as warnings
         exclude: ^.*\b(migrations)\b.*$
-        args: [--count, --exit-zero, --max-complexity=10, --max-line-length=127, --statistics]
+        args: [--count, --exit-zero, --max-complexity=10, --max-line-length=100, "--extend-ignore=E203,E402", --statistics]
 -   repo: https://github.com/pre-commit/mirrors-mypy
     rev: 'v2.4.0'
     hooks:

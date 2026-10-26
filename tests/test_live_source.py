@@ -953,7 +953,10 @@ video.m3u8
         encrypted = encrypt(self.video, bytes(16))
         playlist = leaf(
             "encrypted.ts",
-            extra='#EXT-X-KEY:METHOD=AES-128,URI="keys/channel.key",IV=0x00000000000000000000000000000000\n',
+            extra=(
+                '#EXT-X-KEY:METHOD=AES-128,URI="keys/channel.key",'
+                "IV=0x00000000000000000000000000000000\n"
+            ),
         )
         server = self.server(
             {

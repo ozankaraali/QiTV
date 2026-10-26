@@ -11,6 +11,7 @@ menu) all use these helpers.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from services.provider_ids import provider_of
 from services.redact import safe_message
@@ -31,7 +32,10 @@ def _normal(entry) -> dict | None:
     if isinstance(entry, str):
         return {"name": entry, "provider": ANY_PROVIDER} if entry else None
     if isinstance(entry, dict) and entry.get("name"):
-        out = {"name": str(entry["name"]), "provider": str(entry.get("provider") or ANY_PROVIDER)}
+        out: dict[str, Any] = {
+            "name": str(entry["name"]),
+            "provider": str(entry.get("provider") or ANY_PROVIDER),
+        }
         if entry.get("off"):
             out["off"] = True
         return out

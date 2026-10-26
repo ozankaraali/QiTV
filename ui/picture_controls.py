@@ -20,8 +20,8 @@ the GUI thread): it applies whenever a player opens the channel, large or small 
 `prepare_small`), and the player keeps it through each reopen of the same channel. It is kept
 under the channel's key as the channel opened in that player (ui/player_keys.py, shared with
 the sound's sync: the channel list may browse another provider by the time A is pressed). A
-film's stays with its player while it plays; the next title starts on Auto. Fill crops to the shape of
-the player's own surface, which the window reports to the player. Deinterlacing is one setting
+film's stays with its player while it plays; the next title starts on Auto. Fill crops to the shape
+of the player's own surface, which the window reports to the player. Deinterlacing is one setting
 for every player, kept in the config (`deinterlace`, optional: older builds ignore it); libVLC 3
 cannot give a player Auto back once it was set on or off, which a toast says (QiTV's next start
 does).

@@ -978,11 +978,11 @@ class ContinuityJoiner:
     an adaptation-only packet takes the previous value; the first packet with a payload of a
     PID in a segment takes the next one, and the PID's later payload packets in the segment
     the same shift. A well-formed segment then runs on exactly, and a loss or a repeated
-    packet inside one stays as it came. A PID's first counter ever stays; null packets and packets with the transport error flag
-    are left alone. Only the counter nibble changes, but for one flag: after
-    `discontinuity()` (a real HLS discontinuity, whose counters run on too), the first packet
-    carrying a PCR gets the adaptation field's discontinuity_indicator, so VLC takes the new
-    time base. A segment out of packet sync passes through from where it lost sync.
+    packet inside one stays as it came. A PID's first counter ever stays; null packets and packets
+    with the transport error flag are left alone. Only the counter nibble changes, but for one flag:
+    after `discontinuity()` (a real HLS discontinuity, whose counters run on too), the first packet
+    carrying a PCR gets the adaptation field's discontinuity_indicator, so VLC takes the new time
+    base. A segment out of packet sync passes through from where it lost sync.
 
     Per segment: `segment()`, then `feed()` its bytes (whole packets come back; a partial one
     is held), then `end()` (the partial packet held, as it came). `counters` are each PID's
@@ -2005,20 +2005,21 @@ class LoopTrimmer:
     channel…", as for a stalled source) and goes on with no timestamp jump. A loop dropped for
     `_LOOP_GIVE_UP_S` plays again the same way, from a keyframe (a channel that is itself a
     short loop must not freeze for good), and its pictures begin no run any more; another loop
-    is judged as before. From the first loop's end on, what passes on goes through `ContinuityJoiner`, so the counters run on
-    across loops and reconnects (about a microsecond a packet).
+    is judged as before. From the first loop's end on, what passes on goes through
+    `ContinuityJoiner`, so the counters run on across loops and reconnects (about a microsecond a
+    packet).
 
     A picture is judged once the next begins: its bytes wait that long (a picture's delay), or
     until `_LOOP_SOUND_WAIT` other PES began (the video stalled: what is held passes on, and a
-    loop ends there, as it does when that many begin while no picture is read). `feed` takes and returns pieces as `RepeatTrimmer` passes them on (each after the first
-    starts a new run): a run being judged passes on as it came at a new run, and a loop goes on
-    across it (its new run starts where the loop ends). `reconnect()` (a reconnect comes next)
-    and `finish()` pass on what is held as it came, or drop it during a loop, which goes on
-    across a reconnect (the provider's next connection may replay on; `ClockJoiner` re-bases
-    the loop's end onto the last picture before the reconnect). Per packet the cost is reading
-    its header and keeping its payload for its PES's digest; memory is the two windows'
-    digests and at most `_LOOP_HOLD_BYTES` held. Pure logic: the clock (for `loops`) and the
-    program's video PID and type (the segmenter's) are the caller's.
+    loop ends there, as it does when that many begin while no picture is read). `feed` takes and
+    returns pieces as `RepeatTrimmer` passes them on (each after the first starts a new run): a run
+    being judged passes on as it came at a new run, and a loop goes on across it (its new run starts
+    where the loop ends). `reconnect()` (a reconnect comes next) and `finish()` pass on what is held
+    as it came, or drop it during a loop, which goes on across a reconnect (the provider's next
+    connection may replay on; `ClockJoiner` re-bases the loop's end onto the last picture before the
+    reconnect). Per packet the cost is reading its header and keeping its payload for its PES's
+    digest; memory is the two windows' digests and at most `_LOOP_HOLD_BYTES` held. Pure logic: the
+    clock (for `loops`) and the program's video PID and type (the segmenter's) are the caller's.
     """
 
     def __init__(

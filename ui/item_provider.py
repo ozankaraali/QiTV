@@ -8,10 +8,9 @@ item (a local file, a test's channel) belongs to the browsed provider, as before
 from __future__ import annotations
 
 from datetime import tzinfo
-from typing import Optional
+from typing import Optional, cast
 from urllib.parse import urlsplit
 
-from services.catalog import ALL_GROUP_ID
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP
 from services.provider_ids import ALL_PROVIDERS, provider_of
 
@@ -23,13 +22,13 @@ def pick_source(catalog, item: dict, group_key: str) -> str:
     browsed = catalog.source()
     provider = provider_of(item)
     if not provider or browsed == ALL_PROVIDERS or group_key in (FAVORITES_GROUP, RECENT_GROUP):
-        return browsed
+        return cast(str, browsed)
     return provider
 
 
 def provider_name(catalog, item: dict) -> str:
     """The item's provider; the browsed one when the item is not stamped."""
-    return provider_of(item) or catalog.current_provider_name()
+    return provider_of(item) or cast(str, catalog.current_provider_name())
 
 
 def _browsed(catalog, item: dict) -> bool:
@@ -40,10 +39,10 @@ def _browsed(catalog, item: dict) -> bool:
 def provider_dict(catalog, item: dict) -> dict:
     """The item's provider settings; `{"name": ...}` alone when that provider is gone."""
     if _browsed(catalog, item):
-        return catalog.current_provider()
+        return cast(dict, catalog.current_provider())
     name = provider_of(item)
     try:
-        return catalog.provider_entry(name)
+        return cast(dict, catalog.provider_entry(name))
     except KeyError:
         return {"name": name}
 
@@ -51,15 +50,15 @@ def provider_dict(catalog, item: dict) -> dict:
 def provider_type(catalog, item: dict) -> str:
     """The item's provider type (STB, XTREAM, ...), upper case."""
     if _browsed(catalog, item):
-        return catalog.provider_type()
+        return cast(str, catalog.provider_type())
     return str(provider_dict(catalog, item).get("type", "")).upper()
 
 
 def max_connections(catalog, item: dict) -> Optional[int]:
     """What the item's provider reported as its simultaneous streams (None: unknown)."""
     if _browsed(catalog, item):
-        return catalog.max_connections()
-    return catalog.max_connections_of(provider_of(item))
+        return cast(Optional[int], catalog.max_connections())
+    return cast(Optional[int], catalog.max_connections_of(provider_of(item)))
 
 
 def archive_zone(catalog, item: dict) -> Optional[tzinfo]:

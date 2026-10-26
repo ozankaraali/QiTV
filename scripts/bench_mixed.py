@@ -457,7 +457,6 @@ def run(args) -> int:
     res["providers"] = len(names)
     handle = window.controller.handle
     drawer = window.overlays.drawer
-    nav = window.nav
     bench.recording = True
 
     # -- the drawer on All providers: opens on the mixed All (every channel) ------------------

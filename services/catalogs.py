@@ -14,7 +14,7 @@ from datetime import datetime, tzinfo
 import gc
 import itertools
 import logging
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional, cast
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -104,7 +104,7 @@ class Catalogs(QObject):
     def provider(self, name: str) -> dict:
         for provider in self.registry.providers:
             if provider.get("name") == name:
-                return provider
+                return cast(dict, provider)
         raise KeyError(name)
 
     def catalog(self, name: str) -> CatalogService:
