@@ -53,7 +53,8 @@ On a first start QiTV opens with a [publicly available playlist](https://github.
    - **M3U Playlist:** the playlist's web address, or **Load File** for a playlist on your computer;
    - **M3U Stream:** the address of a single stream;
    - **Xtream:** the server address, your username and your password;
-   - **STB:** the portal address and your MAC address (serial number and device ID only if your provider asks for them).
+   - **STB:** the portal address and your MAC address (serial number and device ID only if your provider asks for them);
+   - **Jellyfin** or **Emby:** your media server's address (for example `http://192.168.1.20:8096`), your username and your password. **Verify Provider** signs in; QiTV keeps the sign-in the server gives it, not your password (see [Jellyfin and Emby](#jellyfin-and-emby)).
 
    Got a single link from your provider? Copy it and press **Paste link** beside the address (or paste it into the address): an Xtream link with your username and password in it (`get.php?username=…&password=…` or `player_api.php?…`) fills in Xtream, the server, the username and the password; a playlist address ending in .m3u or .m3u8 fills in an M3U playlist; a portal address with `/c/` or `/stalker_portal/` in it fills in STB (add the MAC address yourself).
 
@@ -261,7 +262,7 @@ Press <kbd>R</kbd>, or the red **●** after the channel's name and ★ at the t
 - **It keeps recording.** The recording keeps the channel's stream for itself and records on through pauses, rewinds, other channels, films and the Library; several channels can record at once, as far as your provider's streams go. While you watch something else, **● REC** with the channel and its time shows at the top left of the picture (bottom left in the Library): click it to go back to the channel or to stop the recording. Back on the channel, it plays live, and you can rewind to the start of the recording while it still records. Picture-in-picture of that channel shows the recording itself, with no new stream.
 - **A stream for what you watch meanwhile.** Another channel, film or episode from the same provider needs another stream. When the provider has none left, QiTV asks whether to stop the recording: **Keep recording** (chosen first, and on the TV what happens when no one answers within a minute) stays where you are; **Stop recording** saves it and goes on. **Play in VLC** or **MPV** and the phone's **Watch** ask the same; the phone's question shows on the phone. A provider that allows one stream without saying so and drops the older one when another opens: QiTV stops the newer stream instead and says so, so the recording goes on.
 - **Until you stop it.** It stops when you press <kbd>R</kbd> or the **●** again, from the **● REC** sign, after 24 hours, or when less than 2 GB is left on the disk. Quitting QiTV while it records asks first. A message then says **Recording saved** with the file's name (and why it stopped, if you did not stop it). **■** (stop) leaves recordings going.
-- **In your Movies folder.** Recordings go to **QiTV** in your Movies folder (macOS) or Videos folder (Windows and Linux). **Settings → Time-shift → Recordings** changes the folder and opens it (so does **File → Open Recordings Folder**).
+- **In your Movies folder, and in the Library.** Recordings go to **QiTV** in your Movies folder (macOS) or Videos folder (Windows and Linux). **Settings → Time-shift → Recordings** changes the folder and opens it (so does **File → Open Recordings Folder**). The Library's **Recordings** shelf (in Movies, after Continue, New and My list) lists them newest first and plays them; right-click one for **Show in Folder** or **Delete Recording…**. Recordings still to come are listed first there, each with its time and channel; right-click one to **Cancel Recording** (see [Scheduled recordings](#scheduled-recordings)).
 - **As the channel sends it.** Each file is named after the channel and the time, for example `My Channel 2026-10-19 21.30.ts`: an MPEG-TS file with the channel's own picture and sound, not re-encoded, which VLC, MPV and most players play.
 - **No new stream to start.** A recording is written from the time-shift buffer of the stream that plays, so starting one never asks your provider for another stream. That is also why a channel that plays without time-shift can't be recorded: its button is dimmed and says so.
 - In the multiview the button records the focused tile. A recording goes on when the focus moves, or when its channel becomes the small picture of picture-in-picture: that tile or small picture says **REC** on its label. Changing or closing a tile that records asks first; leaving the multiview keeps its recordings going.
@@ -303,12 +304,21 @@ Watch several live channels side by side: press <kbd>V</kbd>, choose **View → 
 
 Each tile's label shows LIVE, or how far behind live it plays (−00:42). Tiles without the focus play at normal speed and only jump back to live when they fall far behind (never while paused); each can be paused from its own controls, and rewound like the big picture once it has the focus. Its time-shift buffer is in memory: the focused tile gets the memory per stream (**Settings**), the others a short one of 64 MiB (`"multiview_tile_ram_mib"` in `config.json` changes it; at least 48, enough for a 4K channel). A tile you paused or rewound keeps what it plays until it is back at live.
 
+### Casting to a TV
+
+QiTV can send what plays to a Chromecast, or a TV with Chromecast built in, on your network. The cast button in the player controls (it shows when QiTV can cast) opens a menu of the devices found; QiTV starts looking the first time you open it. Pick one: the channel goes on from where it was in its time-shift buffer, a film from where it is, and a **Playing on …** pill says where the picture went. **Stop casting** (in the menu, or on the pill) brings it back.
+
+- One picture goes to the device: casting leaves the multiview and closes picture-in-picture.
+- The cast stays on for whatever you play next, until you stop it or the device goes away (QiTV then says so and plays here again).
+- Your computer streams to the device and converts the picture or the sound when the device can't play them as they are, so keep QiTV open while you cast.
+- The phone remote's **More → Cast to a TV** does the same.
+
 ### Phone remote
 
 Use your phone as the remote, in its browser: no app to install. Choose **QiTV → Phone Remote…** (it turns the remote on the first time): a code shows on the TV. Scan it with the phone's camera; the browser opens the remote, and the phone is paired from then on (the remote's menu, ⋯, has **Add to Home Screen** to keep it one tap away).
 
-- The arrows, OK and Back work as the keyboard's, wherever you are (the channel list, the Library, the guide); a held button repeats like a held key and stops where you let go. **TV**, **Movies** and **Series** jump to those pages; the volume and channel rockers, ⏪ ⏯ ⏩, Mute, **●** (Record) and **LIVE** (back to live; lit while you are behind) sit below. **More** holds the channel numbers, Picture in picture, Swap, Multiview, Picture, Full screen and **Stop**. While a channel records in the background, a **● REC** line names it, with Go back and Stop recording; when something you start from the phone needs the stream a recording holds, the phone asks whether to stop it. The phone's menu (⋯) switches the arrows for a touchpad: flick for a step, drag and hold to keep moving, tap for OK.
-- The phone also shows what's on, a **Guide** and the **Library**. The Guide opens where the TV's channel list is, on the channel playing; ‹ Groups goes up to the groups (Favorites, Recent and the provider's own). A channel opens its card: its timetable and **Watch** (a past programme plays from the start when the provider keeps an archive); the ▶ at the end of its row tunes at once. The Library lists Movies' and Series' genres, Continue first, then a genre's titles; its find box finds genres and, below them, the section's films or series, as QiTV's search does. Every find box searches the whole list shown, and browsing on the phone leaves the TV where it is until you tap. **Search** types on the phone and shows the TV's results on both.
+- The arrows, OK and Back work as the keyboard's, wherever you are (the channel list, the Library, the guide); a held button repeats like a held key and stops where you let go. **TV**, **Movies** and **Series** jump to those pages; the volume and channel rockers, ⏪ ⏯ ⏩, Mute, **●** (Record) and **LIVE** (back to live; lit while you are behind) sit below. **More** holds the channel numbers, Picture in picture, Swap, Multiview, Picture, Full screen, **Cast to a TV** and **Stop**. While a channel records in the background, a **● REC** line names it, with Go back and Stop recording; when something you start from the phone needs the stream a recording holds, the phone asks whether to stop it. The phone's menu (⋯) switches the arrows for a touchpad: flick for a step, drag and hold to keep moving, tap for OK.
+- The phone also shows what's on, a **Guide** and the **Library**. The Guide opens where the TV's channel list is, on the channel playing; ‹ Groups goes up to the groups (Favorites, Recent and the provider's own). A channel opens its card: its timetable and **Watch** (a past programme plays from the start when the provider keeps an archive); the ▶ at the end of its row tunes at once. A programme on now or still to come has **● Record** and **Series** under it, and **● Cancel recording** once it is scheduled (see [Scheduled recordings](#scheduled-recordings)). The Library lists Movies' and Series' genres, Continue first, then a genre's titles; its find box finds genres and, below them, the section's films or series, as QiTV's search does. Every find box searches the whole list shown, and browsing on the phone leaves the TV where it is until you tap. **Search** types on the phone and shows the TV's results on both.
 - At home the phone talks to QiTV directly over your Wi-Fi. With **Reach QiTV from any network** on (Settings → Phone remote), it also works on mobile data or another network, through the QiTV relay; the relay passes along scrambled messages it can't read (Noise, end to end), and sees only that a phone and a QiTV talk, how much, and from which addresses. When the phone is on the TV's network it switches to the direct connection by itself.
 - The code on the TV changes every minute, pairs one phone, and only works while it shows. **Settings → Phone remote** lists the paired phones; **Remove** cuts one off at once. A phone can pair with several QiTVs and choose between them.
 - The first time the remote is turned on, the system may ask whether QiTV may accept incoming connections (Windows always, macOS when its firewall is on): allow it for your home network. QiTV answers only addresses of a home network.
@@ -321,6 +331,15 @@ Press <kbd>G</kbd> (or the guide button in the player controls) for the programm
 ![The programme guide](docs/screenshots/07-guide.png)
 
 The guide comes from your provider (STB and Xtream), or from a guide file or web address of your own (XMLTV): choose it in Settings → EPG. If a provider's guide is off by whole hours (programmes start an hour before or after the guide says), set its **Guide time offset** in Settings → Providers (−12 to +12 hours, in half hours): the guide, the banner, what is on now and next, and the marks on the time-shift bar all move together.
+
+### Scheduled recordings
+
+Record a programme while you are away: in the guide, pick a programme on now or still to come and choose **Record** at the bottom (or press <kbd>R</kbd>), or **Record series** for every airing of that title on that channel, as the guide lists them. A scheduled programme has a red dot in the guide; **Cancel recording** (or <kbd>R</kbd> again) takes it off. The phone remote's timetable does the same.
+
+- **QiTV records it at its time**, from a minute before the programme starts to three minutes after it ends, in the background: nothing opens on screen, and you can watch something else meanwhile. A message says when one starts. The file goes to your recordings folder like any recording, and the Library's Recordings shelf names it after the programme.
+- **QiTV has to be open.** It keeps the computer from going to sleep by itself while it runs, but a closed lid or a computer put to sleep misses recordings. One whose time passed while QiTV was closed is said the next time QiTV starts.
+- **It needs a stream of its own.** A scheduled recording asks your provider for a stream at its time. When the provider has none to spare (because a channel is playing on an account that allows one stream, for example), the recording is missed and QiTV says so; it never stops what you are watching.
+- The Library's Recordings shelf lists what is to come; right-click one there to cancel it.
 
 ## The Library: movies and series
 
@@ -348,11 +367,31 @@ Opening the Library or the search (**⌕**, <kbd>Ctrl/⌘+F</kbd>) doesn't stop 
 - a film or an episode you play takes the big picture and keeps the channel you were watching in the small one (a small picture that was already open closes: QiTV has two players). If the film's provider has no stream to spare, QiTV closes the small picture from that provider and tells you;
 - a channel you pick in the search plays in the big picture; the small one stays.
 
+### Jellyfin and Emby
+
+Add your Jellyfin or Emby server as a provider (see [Adding a provider](#adding-a-provider)), and its films and series join the Library, next to your other providers' and searched with them. Older Jellyfin servers and Emby work too.
+
+- **Its libraries are the genres:** **All** first, then **Continue watching** (what you started, here or in the server's own apps) and each of the server's libraries by its name, with the server's posters, years, ratings and stories. A series opens on its seasons and episodes as any other.
+- **The file plays as it is.** QiTV plays a title's file straight from the server, without the server converting it, so the server's processor stays free. **Settings → Server conversion (Jellyfin, Emby)** can have the server convert files above a bitrate you pick, for a slow connection; it is **Off** unless you choose it.
+- **4K only on a 4K screen.** When a title has a 4K version and another one, QiTV plays the 4K one only on a 4K screen. **Settings → 4K versions (Jellyfin, Emby)** changes that (**Always** or **Never**); a title that only exists in 4K says so on a smaller screen instead of playing.
+- **The server keeps up.** Where you stop is told to the server, so its own Continue watching and watched marks follow, and a title you started in the server's apps starts here where you left it.
+- **Your password isn't kept.** QiTV keeps the sign-in the server gave it when you pressed Verify Provider, and the server lists QiTV among its devices. If the server ends that sign-in, QiTV asks you to verify again.
+- The phone remote's **Watch on this phone** plays a server's titles from the server itself, at home. A server's live TV, and exporting a server to M3U, are not part of QiTV.
+
 ## Favorites
 
 Press <kbd>Ctrl/⌘+D</kbd> on a channel, right-click it in the channel list, or click the **★** beside its name in the player controls, to add it to or remove it from **★ Favorites** at the top of the channel list. In the Library, <kbd>Ctrl/⌘+D</kbd> and ★ do the same for **My list**.
 
 A star belongs to one provider and is kept by name: starring a channel called "News" at one provider doesn't star a "News" at another, while within one provider two items with the same name share one star. A provider's ★ Favorites and My list show its own stars; All providers shows every provider's, each with its provider's name. Stars from QiTV 2.0 and earlier stay on every provider that has something of that name; un-star one at one provider and the others keep theirs.
+
+## Parental controls
+
+**Settings → Parental controls** sets a PIN (4 digits or more). With a PIN set:
+
+- **Hide what you choose.** Right-click a group or a channel in the channel list and choose **Hide (parental controls)**. **Hide groups that look adult** (in the same Settings tab) hides every group, live or in the Library, whose name says it is for adults (XXX, Adult, 18+ and the like).
+- **Locked, they are gone everywhere:** the channel list, the guide, changing channels, the Library, the search and the phone remote. QiTV is locked unless you unlock it: **Unlock for an hour…** asks for the PIN, **Lock now** locks again.
+- **Never in the history.** What you hid stays out of Recent, Continue and the last channel, also while unlocked.
+- The tab lists what is hidden; **Show again** brings one back. Changing or removing the PIN asks for the current one. QiTV keeps only a salted hash of the PIN, never the PIN itself.
 
 ## Exporting to M3U
 
