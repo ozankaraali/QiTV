@@ -79,6 +79,15 @@ PAGE_STRINGS: dict[str, str] = {
     "channel_number": N_("Channel number"),  # i18n: the phone remote: the numpad's heading
     "previous": N_("Previous"),  # i18n: the phone remote's numpad: the previous channel
     "record": N_("Record"),  # i18n: the phone remote: a button (verb)
+    # 2.8: casting and scheduled recordings
+    "cast_to": N_("Cast to a TV"),  # i18n: the phone remote: a button: QiTV sends it to a TV
+    "stop_casting": N_("Stop casting"),  # i18n: the phone remote: the picture back on QiTV
+    # i18n: the phone remote: no device to cast to was found yet
+    "looking_devices": N_("Looking for devices…"),
+    # i18n: the phone remote's guide: record every airing of this programme (a short chip)
+    "record_series": N_("Series"),
+    # i18n: the phone remote's guide: a scheduled programme's chip: it will not be recorded
+    "cancel_recording": N_("Cancel recording"),
     "pip": N_("Picture in picture"),  # i18n: the phone remote: a button
     # i18n: the phone remote: the same button while the TV shows a small picture
     "close_pip": N_("Close picture in picture"),

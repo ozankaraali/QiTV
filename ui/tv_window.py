@@ -706,8 +706,8 @@ class TVWindow(QMainWindow):
             self.scheduler.changed.connect(self._schedule_changed)
             controller.extra_guides = self.scheduler.providers
         controller.parental = self.parental  # what it protects never enters the history
-        self.overlays.guide.recordRequested.connect(self._schedule_programme)
-        self.overlays.guide.recordCancelled.connect(self._cancel_programme)
+        self.overlays.guide.recordRequested.connect(self.schedule_programme)
+        self.overlays.guide.recordCancelled.connect(self.cancel_programme)
         self.library_controller = self.screens.library_controller
         self.exports = ExportFlow(
             catalog=self.catalog,
@@ -812,7 +812,7 @@ class TVWindow(QMainWindow):
     def _programme_scheduled(self, channel: dict, programme: Programme) -> bool:
         return self.recording_schedule.is_scheduled(channel, programme)
 
-    def _schedule_programme(self, channel: dict, programme: Programme, series: bool) -> None:
+    def schedule_programme(self, channel: dict, programme: Programme, series: bool) -> None:
         """The guide's Record (or Record series, R): QiTV records it at its time."""
         schedule = self.recording_schedule
         name = str(channel.get("name") or "")
@@ -835,7 +835,7 @@ class TVWindow(QMainWindow):
         if self.scheduler is not None:
             self.scheduler.tick()  # one on now starts at once
 
-    def _cancel_programme(self, channel: dict, programme: Programme) -> None:
+    def cancel_programme(self, channel: dict, programme: Programme) -> None:
         item = self.recording_schedule.scheduled_item(channel, programme)
         if item is not None:
             self.cancel_scheduled(str(item.get("id") or ""))

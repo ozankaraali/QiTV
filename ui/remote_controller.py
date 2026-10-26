@@ -28,8 +28,10 @@ from services.remote.net import home_ipv4
 from services.remote.protocol import (
     BUTTON_META,
     MAX_ASK,
+    MAX_DEVICE,
     STORE_VERSION,
     Answered,
+    CastTo,
     Closed,
     Code,
     Get,
@@ -41,6 +43,7 @@ from services.remote.protocol import (
     Press,
     Query,
     RecAct,
+    Schedule,
     Status,
     StoreSaved,
     ToTv,
@@ -160,6 +163,9 @@ class RemoteController(QObject):
         self._ask_number = 0
         window.controller.phoneAsked.connect(self._on_phone_asked)
         window.controller.phoneSettled.connect(self._on_phone_settled)
+        cast_devices = getattr(window, "cast_devices", None)  # 2.8: the phones' Cast to…
+        if cast_devices is not None:
+            cast_devices.changed.connect(self._push_cast)
 
     # ---- lifecycle -------------------------------------------------------------------------
 
@@ -331,6 +337,10 @@ class RemoteController(QObject):
                 controller.go_back_to_recording(event.slot)
             else:
                 controller.stop_background_recording(event.slot)
+        elif isinstance(event, CastTo):
+            self._cast_to(event.to)
+        elif isinstance(event, Schedule):
+            self._schedule_from_phone(event.sid, event.handle, event.do)
         elif isinstance(event, StoreSaved):
             self._persist(event.data)
         elif isinstance(event, Paired):
@@ -394,6 +404,8 @@ class RemoteController(QObject):
                 self._channel_list(sid).channels(event.list, event.page, event.find, event.n)
             elif event.what == "genres":
                 self._library(sid).genres(section, event.page, event.find, event.n)
+            elif event.what == "cast":  # 2.8: the devices QiTV can cast to
+                self._send(sid, self._cast_list())
             else:
                 self._library(sid).titles(section, event.genre, event.page, event.find, event.n)
         except Exception as error:  # a phone's question must never take QiTV down
@@ -734,6 +746,56 @@ class RemoteController(QObject):
             self._window.library_controller.remote_search(text)
         else:
             screens.open_search(text)
+
+    # ---- casting and scheduled recordings (2.8) ---------------------------------------------
+
+    def _cast_list(self) -> dict:
+        """The devices QiTV can cast to (looked for from the first ask), and the one cast to."""
+        controls = self._window.controller.cast_controls()
+        if controls is None:
+            return {"t": "cast", "devices": [], "on": ""}
+        devices = [
+            {"name": name[:MAX_DEVICE], "on": checked}
+            for _text, name, checked in controls.menu_entries()
+            if name
+        ]
+        return {"t": "cast", "devices": devices, "on": controls.device() or ""}
+
+    def _push_cast(self) -> None:
+        if self._phones and self.hub is not None:
+            self.hub.broadcast(self._cast_list())
+
+    def _cast_to(self, to: str) -> None:
+        controls = self._window.controller.cast_controls()
+        if controls is None:
+            return
+        try:
+            if to:
+                controls.cast_to(to)
+            else:
+                controls.stop()
+        except Exception as error:  # a phone's ask must never take QiTV down
+            logger.error("Phone remote: casting failed: %s", safe_message(error))
+        self._push_cast()
+
+    def _schedule_from_phone(self, sid: str, handle: str, do: str) -> None:
+        """A timetable row's chip: its programme recorded at its time, or cancelled; the row
+        shows it at once (the timetable is sent again)."""
+        found = self._find_handle(sid, handle)
+        if found is None or found[0] != "sched":
+            return
+        channel, programme = cast(tuple, found[1])
+        window = self._window
+        try:
+            if do == "cancel":
+                window.cancel_programme(channel, programme)
+            else:
+                window.schedule_programme(channel, programme, do == "series")
+        except Exception as error:
+            logger.error("Phone remote: scheduling failed: %s", safe_message(error))
+        guide = self._guides.get(sid)
+        if guide is not None:
+            guide.refresh_timetable()
 
     def _find_handle(self, sid: str, handle: str) -> Optional[tuple[str, object]]:
         found = self.result_handles.get(handle)

@@ -34,6 +34,7 @@ from services.remote import net  # noqa: E402
 from services.remote.hub import RemoteHub, web_dir  # noqa: E402
 from services.remote.protocol import (  # noqa: E402
     Answered,
+    CastTo,
     Code,
     Get,
     Opened,
@@ -43,6 +44,7 @@ from services.remote.protocol import (  # noqa: E402
     Press,
     Query,
     RecAct,
+    Schedule,
     Status,
     ToTv,
     WatchHere,
@@ -1299,8 +1301,68 @@ def scenario_hello_keeps_now(rig: Rig) -> None:
     assert rig.page.inner_text("#nowName") == "Harbourline News", rig.page.inner_text("#nowName")
 
 
+def scenario_cast(rig: Rig) -> None:
+    """2.8: More's Cast to a TV lists what QiTV found (looking until then); a tap casts there,
+    Stop casting brings the picture back; a list that arrives under another menu leaves it."""
+    sid = paired_sid(rig)
+    rig.page.click("#moreButton")
+    rig.page.wait_for_selector("#moreSheet:not([hidden])")
+    mark = rig.events.mark()
+    rig.page.click("#castTo")
+    rig.events.wait(Get, where=lambda e: e.what == "cast", after=mark)
+    rig.page.locator("#menuList", has_text="Looking for devices").wait_for()
+    rig.hub.send(sid, {"t": "cast", "devices": [{"name": "Den", "on": False}], "on": ""})
+    mark = rig.events.mark()
+    rig.page.locator("#menuList button", has_text="Den").click()
+    rig.events.wait(CastTo, where=lambda e: e.to == "Den", after=mark)
+    rig.page.click("#moreButton")
+    rig.page.click("#castTo")
+    rig.hub.send(sid, {"t": "cast", "devices": [{"name": "Den", "on": True}], "on": "Den"})
+    rig.page.locator("#menuList button.danger").wait_for()
+    rig.shot("cast")
+    mark = rig.events.mark()
+    rig.page.click("#menuList button.danger")
+    rig.events.wait(CastTo, where=lambda e: e.to == "", after=mark)
+    since = int(time.time()) - 60
+    rig.hub.send(sid, {**STATE, "rec": [{"id": "b1", "name": "Quayside Sport", "since": since}]})
+    rig.page.locator("#recLine", has_text="Quayside Sport").wait_for()
+    rig.page.click("#recLine")
+    rig.hub.send(sid, {"t": "cast", "devices": [{"name": "Den", "on": False}], "on": ""})
+    rig.page.wait_for_timeout(300)
+    title = rig.page.inner_text("#menuTitle")
+    assert title == "REC", f"a cast list replaced the REC menu: {title!r}"
+
+
+def scenario_schedule(rig: Rig) -> None:
+    """2.8: a programme to come records at its time from the timetable (once or its series),
+    a scheduled one cancels; the chips' taps never tune the row."""
+    sid = paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark), GUIDE)
+    rig.page.wait_for_selector("#guideRows .row >> nth=2")
+    rig.page.locator("#guideRows .row", has_text="Harbourline News").locator(".row-tap").click()
+    rig.page.wait_for_selector("[data-screen=timetable]:not([hidden])")
+    table = {"t": "timetable", "id": "h1", "name": "Harbourline News", "num": "1"}
+    later = dict(programme("Weather", 25, 55), on=False, sched="s4", rec=False)
+    rig.hub.send(sid, dict(table, rows=[later]))
+    rig.page.wait_for_selector("#timetableRows .slot .chip >> nth=1")
+    rig.shot("schedule")
+    mark = rig.events.mark()
+    rig.page.locator("#timetableRows .chip", has_text="Record").click()
+    rig.events.wait(Schedule, where=lambda e: e.handle == "s4" and e.do == "once", after=mark)
+    rig.page.locator("#timetableRows .chip", has_text="Series").click()
+    rig.events.wait(Schedule, where=lambda e: e.do == "series", after=mark)
+    rig.hub.send(sid, dict(table, rows=[dict(later, sched="s5", rec=True)]))
+    rig.page.locator("#timetableRows .chip", has_text="Cancel recording").click()
+    rig.events.wait(Schedule, where=lambda e: e.handle == "s5" and e.do == "cancel", after=mark)
+    assert not rig.events.of(OpenItem, after=mark), "a chip's tap tuned the row"
+
+
 SCENARIOS.update(
     {
+        "cast": scenario_cast,
+        "schedule": scenario_schedule,
         "forget-clean": scenario_forget_clean,
         "hello-keeps-now": scenario_hello_keeps_now,
         "now-playing": scenario_now_playing,

@@ -57,6 +57,11 @@ const words = {
   recording_kept: "The recording goes on: nothing opened on this phone",
   record: "Record",
   go_live: "Go live",
+  cast_to: "Cast to a TV",
+  stop_casting: "Stop casting",
+  looking_devices: "Looking for devices…",
+  record_series: "Series",
+  cancel_recording: "Cancel recording",
 };
 const w = (key) => (t(key) === key ? words[key] || key : t(key));
 
@@ -515,9 +520,64 @@ function slotRow(slot, nowS) {
     main.append(el("div", "row-next", w("from_start")));
   }
   if (slot.about) main.append(el("div", "about", slot.about));
+  if (slot.sched) main.append(schedChips(slot)); // 2.8: record it at its time, or cancel
   row.append(main);
   if (slot.id) tapRow(row, slot.id);
   return row;
+}
+
+// A programme still to come (or on now): QiTV records it at its time (once, or every airing:
+// series), or cancels a scheduled one. The chips' taps are their own, not the row's.
+function schedChips(slot) {
+  const chips = el("div", "sched");
+  const chip = (text, what, className) => {
+    const button = el("button", `chip ${className}`, text);
+    button.type = "button";
+    for (const type of ["pointerdown", "pointerup", "click"]) {
+      button.addEventListener(type, (event) => event.stopPropagation());
+    }
+    button.addEventListener("click", () => send({ t: "sched", id: slot.sched, do: what }));
+    return button;
+  };
+  if (slot.rec) {
+    chips.append(chip(`● ${w("cancel_recording")}`, "cancel", "on"));
+  } else {
+    chips.append(chip(`● ${w("record")}`, "once", "rec"), chip(w("record_series"), "series", ""));
+  }
+  return chips;
+}
+
+// ---- casting (2.8): QiTV sends what plays to a TV it finds (a Chromecast) ------------------
+
+// The menu sheet shows other menus too: a list that arrives redraws only the cast list in view.
+function onCast(message) {
+  if ($("menuSheet").hidden || $("menuTitle").textContent !== w("cast_to")) return;
+  drawCast(message);
+}
+
+function drawCast(message) {
+  const list = $("menuList");
+  list.replaceChildren();
+  $("menuTitle").textContent = w("cast_to");
+  for (const device of message.devices || []) {
+    list.append(menuItem(device.name, () => send({ t: "cast", to: device.name }), device.on ? "current" : ""));
+  }
+  if (!(message.devices || []).length) {
+    const looking = el("p", "step", w("looking_devices"));
+    list.append(looking);
+  }
+  if (message.on) list.append(menuItem(w("stop_casting"), () => send({ t: "cast", to: "" }), "danger"));
+}
+
+function bindCast() {
+  const button = $("castTo");
+  pressable(button);
+  button.addEventListener("click", () => {
+    closeSheets();
+    drawCast({ devices: [], on: "" });
+    openSheet("menuSheet");
+    send({ t: "get", what: "cast" });
+  });
 }
 
 function onTimetable(message) {
@@ -1077,6 +1137,7 @@ app.handlers.play = onPlay;
 app.handlers.stop = onStop;
 app.handlers.ask = onAsk;
 app.handlers.unask = onUnask;
+app.handlers.cast = onCast;
 app.handlers["tab:guide"] = openGuide;
 app.handlers["tab:library"] = openLibrary;
 app.menuExtras.push(() => {
@@ -1100,6 +1161,7 @@ export function install() {
   bindChannelList();
   bindHere();
   bindRec();
+  bindCast();
   setInterval(() => {
     if (current && !document.hidden) drawNow();
     if (recordings.length && !document.hidden) drawRec();

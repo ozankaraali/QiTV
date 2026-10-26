@@ -111,6 +111,28 @@ class MessageTests(unittest.TestCase):
         ):
             self.assertIsNone(parse_phone_message(bad), bad)
 
+    def test_a_cast_names_its_device_or_none(self):  # 2.8
+        for to in ("Living room TV", ""):
+            self.assertEqual(parse_phone_message({"t": "cast", "to": to}), {"t": "cast", "to": to})
+        self.assertEqual(
+            parse_phone_message({"t": "get", "what": "cast"}), {"t": "get", "what": "cast"}
+        )
+        for bad in ({"t": "cast"}, {"t": "cast", "to": 3}, {"t": "cast", "to": "x" * 201}):
+            self.assertIsNone(parse_phone_message(bad), bad)
+
+    def test_a_programme_is_scheduled_or_cancelled(self):  # 2.8
+        for do in ("once", "series", "cancel"):
+            self.assertEqual(
+                parse_phone_message({"t": "sched", "id": "p4", "do": do}),
+                {"t": "sched", "id": "p4", "do": do},
+            )
+        for bad in (
+            {"t": "sched", "id": "p4", "do": "forget"},
+            {"t": "sched", "id": "", "do": "once"},
+            {"t": "sched", "id": ["p4"], "do": "once"},
+        ):
+            self.assertIsNone(parse_phone_message(bad), bad)
+
     def test_messages_validated(self):
         self.assertEqual(parse_phone_message({"t": "down", "b": "up"}), {"t": "down", "b": "up"})
         self.assertEqual(

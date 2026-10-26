@@ -18,9 +18,10 @@ from services.epg_view import Programme
 from services.find import FoundChannel, FoundGenre
 from services.navigation import NavNode
 from services.provider_ids import ALL_PROVIDERS
-from services.remote.protocol import MAX_MESSAGE, Get, OpenItem
+from services.remote.protocol import MAX_MESSAGE, Get, OpenItem, Schedule
 from tests.fixtures import local_provider
 from tests.fixtures.local_provider import PROVIDER_NAME
+from ui.recording_scheduler import RecordingScheduler
 from ui.remote_guide import GUIDE_PAGE, PhoneGuide
 
 
@@ -222,6 +223,46 @@ class PhoneGuideTests(WindowCase):
             self.guide.timetable(self.last()["rows"][0]["id"])
             [row] = self.last("timetable")["rows"]
         self.assertIn("id", row)
+
+    def test_a_programme_to_come_is_scheduled_and_cancelled_from_the_phone(self):  # 2.8
+        self.start()
+        now = datetime.now(timezone.utc)
+        listed = [
+            programme("Noon", now - timedelta(minutes=10)),
+            programme("Evening", now + timedelta(minutes=20)),
+        ]
+        remote = self.window.remote
+        remote._guides["s1"] = self.guide
+        self.addCleanup(remote._guides.pop, "s1", None)
+        window = self.window
+        window.scheduler = RecordingScheduler(  # without libVLC the window has none
+            schedule=window.recording_schedule,
+            engine=mock.MagicMock(),
+            catalogs=window.catalogs,
+            budget=mock.Mock(),
+            config=window.config_manager,
+            toast=mock.Mock(),
+            parent=window,
+        )
+        with mock.patch.object(self.window.catalog, "programmes", return_value=listed):
+            self.guide.timetable(self.last()["rows"][0]["id"])
+            later = self.last("timetable")["rows"][1]
+            self.assertFalse(later["rec"])
+            remote.bridge.post(Schedule("s1", later["sched"], "once"))
+            self.assertTrue(wait_until(lambda: self.last("timetable")["rows"][1]["rec"]))
+            later = self.last("timetable")["rows"][1]
+            remote.bridge.post(Schedule("s1", later["sched"], "cancel"))
+            self.assertTrue(wait_until(lambda: not self.last("timetable")["rows"][1]["rec"]))
+        self.assertEqual(self.window.recording_schedule.items(), [])
+
+    def test_a_past_programme_is_not_offered_for_recording(self):  # 2.8
+        self.start()
+        now = datetime.now(timezone.utc)
+        past = programme("Morning", now - timedelta(minutes=90))
+        with mock.patch.object(self.window.catalog, "programmes", return_value=[past]):
+            self.guide.timetable(self.last()["rows"][0]["id"])
+        [row] = self.last("timetable")["rows"]
+        self.assertNotIn("sched", row)
 
     def test_a_programme_guide_arriving_pushes_whats_on(self):
         self.start()

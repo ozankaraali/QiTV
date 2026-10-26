@@ -266,6 +266,11 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .slot-time { flex: none; min-width: 48px; padding-top: 1px; white-space: nowrap; font-size: 14px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
 .slot.still { opacity: 0.55; }
 .slot .about { margin-top: 3px; font-size: 13px; line-height: 1.35; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* 2.8: a programme to come records at its time (once, or a series), or a scheduled one cancels */
+.slot .sched { display: flex; gap: 8px; margin-top: 7px; }
+.slot .chip { font: inherit; font-size: 13px; font-weight: 600; min-height: 30px; padding: 0 12px; border-radius: 15px; border: 1px solid var(--line); background: var(--raised); color: var(--text); }
+.slot .chip.rec { background: var(--live); border-color: var(--live); color: #fff; }
+.slot .chip.on { border-color: var(--live); color: var(--live); }
 .again { margin-top: 12px; padding: 8px 16px; border-radius: 16px; font-size: 14px; font-weight: 600; background: var(--accent-fill); color: var(--text); }
 mark { background: none; color: var(--accent); font-weight: 600; }
 

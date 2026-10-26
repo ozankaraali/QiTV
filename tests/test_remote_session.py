@@ -7,6 +7,7 @@ from services.remote.pairing import RemoteStore
 from services.remote.protocol import (
     MAX_MESSAGE,
     Answered,
+    CastTo,
     Closed,
     Forgot,
     Get,
@@ -18,6 +19,7 @@ from services.remote.protocol import (
     Press,
     Query,
     RecAct,
+    Schedule,
     StoreSaved,
     ToTv,
     WatchHere,
@@ -215,6 +217,9 @@ class KkTests(SessionCase):
             {"t": "pos", "ms": 61000, "len": 5400000},
             {"t": "answer", "id": 2, "yes": False},
             {"t": "rec", "id": "b1", "do": "back"},
+            {"t": "cast", "to": "Den"},
+            {"t": "sched", "id": "h7", "do": "series"},
+            {"t": "get", "what": "cast"},
         ):
             got += session.receive(phone.seal(message)).events
         self.assertEqual(
@@ -235,8 +240,17 @@ class KkTests(SessionCase):
                 Position(sid, 61000, 5400000),
                 Answered(sid, 2, False),
                 RecAct(sid, "b1", "back"),
+                CastTo(sid, "Den"),
+                Schedule(sid, "h7", "series"),
+                Get(sid, "cast", "", 0),
             ],
         )
+
+    def test_a_message_without_a_route_never_forgets_the_phone(self):  # 2.8
+        phone, session, _, _ = self.pair()
+        reply = session._act({"t": "later-kind"}, 0.0)
+        self.assertEqual((reply.close, reply.events), (None, []))
+        self.assertTrue(self.store.devices)
 
     def test_kk_with_unknown_key_closes_4401(self):
         _, _, reply = self.kk(Keypair.generate(), "nope")

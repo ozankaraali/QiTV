@@ -14,6 +14,7 @@ from test_tv_window import WindowCase, wait_until
 
 from services.remote.protocol import (
     Answered,
+    CastTo,
     Closed,
     Code,
     Get,
@@ -342,6 +343,43 @@ class PhoneQuestionTests(WindowCase):
             self.assertTrue(wait_until(lambda: stop.called))
         back.assert_called_once_with("b1")
         stop.assert_called_once_with("b2")
+
+    def cast_controls(self):  # 2.8: one device found, nothing cast yet
+        controls = mock.Mock()
+        controls.menu_entries.return_value = [("This computer", "", True), ("Den", "Den", False)]
+        controls.device.return_value = None
+        return controls
+
+    def test_the_phone_lists_the_devices_to_cast_to(self):  # 2.8
+        self.connect()
+        controls = self.cast_controls()
+        with mock.patch.object(self.window.controller, "cast_controls", return_value=controls):
+            self.window.remote.bridge.post(Get("s8", "cast", "", 0))
+            self.assertTrue(wait_until(lambda: self.sent("cast")))
+        self.assertEqual(
+            self.sent("cast"), [{"t": "cast", "devices": [{"name": "Den", "on": False}], "on": ""}]
+        )
+
+    def test_the_phone_casts_and_stops_casting(self):  # 2.8
+        self.connect()
+        controls = self.cast_controls()
+        with mock.patch.object(self.window.controller, "cast_controls", return_value=controls):
+            self.window.remote.bridge.post(CastTo("s8", "Den"))
+            self.window.remote.bridge.post(CastTo("s8", ""))
+            self.assertTrue(wait_until(lambda: controls.stop.called))
+        controls.cast_to.assert_called_once_with("Den")
+        self.assertEqual(self.hub.broadcast.call_count, 2)  # every phone's list follows
+
+    def test_casting_that_fails_leaves_qitv_running(self):  # 2.8
+        self.connect()
+        controls = self.cast_controls()
+        controls.cast_to.side_effect = RuntimeError("no renderer")
+        with (
+            mock.patch.object(self.window.controller, "cast_controls", return_value=controls),
+            self.assertLogs("ui.remote_controller", "ERROR"),
+        ):
+            self.window.remote.bridge.post(CastTo("s8", "Den"))
+            self.assertTrue(wait_until(lambda: self.hub.broadcast.called))
 
     def test_watch_asks_on_that_phone(self):
         self.connect()

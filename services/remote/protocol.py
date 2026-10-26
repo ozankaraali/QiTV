@@ -181,6 +181,15 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         if _short_id(obj.get("id")) and obj.get("do") in ("back", "stop"):
             return {"t": "rec", "id": obj["id"], "do": obj["do"]}
         return None
+    if t == "cast":  # 2.8: cast to the device of that name ("": back to QiTV's own picture)
+        to = obj.get("to")
+        if isinstance(to, str) and len(to) <= MAX_DEVICE:
+            return {"t": "cast", "to": to}
+        return None
+    if t == "sched":  # 2.8: a timetable row's programme recorded at its time, or cancelled
+        if _short_id(obj.get("id")) and obj.get("do") in ("once", "series", "cancel"):
+            return {"t": "sched", "id": obj["id"], "do": obj["do"]}
+        return None
     if t == "watch":  # what the TV plays, or a channel of the phone's list by its handle
         if "id" not in obj:
             return {"t": "watch"}
@@ -206,10 +215,13 @@ def parse_phone_message(obj: object) -> Optional[dict]:
             return _guide_ask(obj)
         if what == "timetable" and _short_id(obj.get("id")):
             return {"t": "get", "what": "timetable", "id": obj["id"]}
+        if what == "cast":  # 2.8: the devices QiTV can cast to
+            return {"t": "get", "what": "cast"}
     return None
 
 
 MAX_ASK = 2**31 - 1  # an ask's number (see _numbered)
+MAX_DEVICE = 200  # 2.8: a cast device's name, as the TV lists it
 MAX_POS = 2 * 24 * 3600 * 1000  # a title's place or length, in ms: two days at most
 
 
@@ -356,6 +368,24 @@ class RecAct:
     sid: str
     slot: str
     act: str
+
+
+@dataclass(frozen=True)
+class CastTo:
+    """2.8: cast what plays to the device `to` ("": back to QiTV's own picture)."""
+
+    sid: str
+    to: str
+
+
+@dataclass(frozen=True)
+class Schedule:
+    """2.8: the timetable row `handle`'s programme recorded at its time ("once"), every airing
+    of it ("series"), or no longer ("cancel")."""
+
+    sid: str
+    handle: str
+    do: str
 
 
 @dataclass(frozen=True)

@@ -143,6 +143,11 @@ class PhoneGuide(QObject):
         self._wanted = key if group is None else None
         self._ask(("guide", group, find), page, n)
 
+    def refresh_timetable(self) -> None:
+        """The timetable shown, sent again (2.8: a programme was scheduled or cancelled)."""
+        if self._timetable:
+            self.timetable(self._timetable)
+
     def timetable(self, handle: str) -> None:
         """`handle`'s channel: its programmes from the one on now (with an archive, from earlier,
         each a tap away), the one on now a tap from live."""
@@ -174,6 +179,11 @@ class PhoneGuide(QObject):
             ):
                 payload = (channel, programme, group_key, channels)
                 row["id"] = self.handles.issue("catchup", payload)
+            scheduled = getattr(self._window, "recording_schedule", None)
+            if programme.stop > now and getattr(self._window, "scheduler", None) is not None:
+                # 2.8: on now or to come: recorded at its time (or cancelled) from the phone
+                row["sched"] = self.handles.issue("sched", (channel, programme))
+                row["rec"] = bool(scheduled and scheduled.is_scheduled(channel, programme))
             rows.append(row)
         self.providers = self.providers | ({provider_of(channel)} - {""})
         message: dict = {
