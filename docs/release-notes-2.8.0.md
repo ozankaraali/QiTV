@@ -21,6 +21,10 @@ others' distributions, which may have malware.**
   to the server, so its own Continue watching and watched marks follow, and a title started
   only in the server's apps starts here where you left it there. QiTV keeps the sign-in the
   server gives it, not your password. Older Jellyfin servers work too.
+- **A channel's picture size.** A channel whose stream comes in several sizes shows the ⚙ in
+  the player controls too: Auto (its best) or a smaller size, for a slow or busy connection.
+  The channel goes on from where it was, its time-shift buffer kept, and keeps that size for
+  next time until you choose Auto.
 - **Cast to a TV.** The new cast button in the player controls sends what plays to a
   Chromecast, or a TV with Chromecast built in, on your network: a channel goes on from where
   it was in its time-shift buffer, a film from where it is. **Playing on …** says where the
