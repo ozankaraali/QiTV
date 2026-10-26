@@ -126,5 +126,12 @@ app = BUNDLE(
         'LSApplicationCategoryType': 'public.app-category.video',
         'NSHighResolutionCapable': True,
         'NSPrincipalClass': 'NSApplication',
+        # 2.8: newer macOS asks before an app reaches the home network (a media server, the
+        # phone remote) or browses Bonjour for the TVs it casts to.
+        'NSLocalNetworkUsageDescription': (
+            'QiTV finds TVs to cast to and reaches your media server and phone remote on your '
+            'home network.'
+        ),
+        'NSBonjourServices': ['_googlecast._tcp'],
     }
 )

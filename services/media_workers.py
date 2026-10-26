@@ -185,21 +185,44 @@ class MediaSignInWorker(QObject):
         self._client = client
 
     def run(self) -> None:
-        client = self._client or ms.MediaServerClient(
+        ok, value = sign_in(
             self.url,
             self.kind,
+            self.username,
+            self.password,
+            self.verify,
             device_id=self.device_id,
-            version=get_app_version(),
-            verify=self.verify,
+            client=self._client,
         )
-        try:
-            token, user_id = client.sign_in(self.username, self.password)
-            self.finished.emit({"token": token, "user_id": user_id, "device_id": self.device_id})
-        except ms.SignInNeeded:
-            # i18n: Settings → Verify: the server refused the user name or the password
-            self.error.emit(translate(N_("The user name or the password is not right.")))
-        except Exception as e:
-            logger.info("A media server's sign-in failed: %s", type(e).__name__)
-            self.error.emit(_failure(e))
-        finally:
-            client.close()
+        if ok:
+            self.finished.emit(value)
+        else:
+            self.error.emit(str(value))
+
+
+def sign_in(
+    url: str,
+    kind: str,
+    username: str,
+    password: str,
+    verify: bool,
+    device_id: str = "",
+    client=None,
+) -> tuple[bool, Any]:
+    """A server's sign-in with the password, on the calling thread (no Qt object: Settings'
+    verification thread calls it): (True, {token, user_id, device_id}) or (False, why)."""
+    device_id = device_id or ms.new_device_id()
+    client = client or ms.MediaServerClient(
+        url, kind, device_id=device_id, version=get_app_version(), verify=verify
+    )
+    try:
+        token, user_id = client.sign_in(username, password)
+        return True, {"token": token, "user_id": user_id, "device_id": device_id}
+    except ms.SignInNeeded:
+        # i18n: Settings → Verify: the server refused the user name or the password
+        return False, translate(N_("The user name or the password is not right."))
+    except Exception as e:
+        logger.info("A media server's sign-in failed: %s", type(e).__name__)
+        return False, _failure(e)
+    finally:
+        client.close()

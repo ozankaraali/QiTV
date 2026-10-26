@@ -7,6 +7,7 @@ import os
 import socket
 import threading
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -69,6 +70,13 @@ class VerifyMediaServerTests(unittest.TestCase):
         _path, header = _Server.seen[-1]
         self.assertIn('Client="QiTV"', header)
         self.assertNotIn(socket.gethostname(), header)
+
+    def test_the_verification_thread_makes_no_qt_object(self):  # 2.8 review M5
+        from services import media_workers
+
+        with mock.patch.object(media_workers, "MediaSignInWorker", side_effect=AssertionError):
+            got = self.verify("pw")
+        self.assertTrue(got["verified"])
 
     def test_a_wrong_password_says_so(self):
         got = self.verify("nope")

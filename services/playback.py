@@ -68,7 +68,7 @@ from typing import Any, Callable, Optional, Protocol
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 
-from services import picture
+from services import casting, picture
 from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.picture_watch import Counters, FrozenPicture
@@ -430,9 +430,14 @@ class PlaybackSession(QObject):
     def cast_to(self, renderer: Any) -> None:
         """Send what plays from the next open on to `renderer` (a libVLC renderer item), or
         back to this player's own picture (None)."""
-        if renderer is not self._renderer:
-            self._renderer = renderer
-            self._renderer_due = True
+        if renderer is self._renderer:
+            return
+        if renderer is not None:
+            casting.hold(renderer)  # its own reference (2.8 review: one found again is released)
+        old, self._renderer = self._renderer, renderer
+        self._renderer_due = True
+        if old is not None:
+            casting.release(old)
 
     def casting(self) -> bool:
         return self._renderer is not None
@@ -907,6 +912,9 @@ class PlaybackSession(QObject):
         if self._released:
             return
         self._released = True
+        if self._renderer is not None:
+            casting.release(self._renderer)
+            self._renderer = None
         self._poll.stop()
         self._shape_timer.stop()
         self._cancel_pending()

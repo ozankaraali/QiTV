@@ -109,6 +109,21 @@ class MainModuleTests(unittest.TestCase):
         self.assertEqual(getattr(calls["BUNDLE"].args[0], "id", ""), "coll")
         self.assertIn("COLLECT", calls)
 
+    def test_the_mac_app_says_why_it_uses_the_home_network(self):  # 2.8 review M12
+        # Newer macOS asks before an app reaches the home network or browses Bonjour for a
+        # service type: casting looks for _googlecast._tcp; a media server and the phone
+        # remote are reached at home.
+        tree = ast.parse((REPO / "qitv-macos.spec").read_text(encoding="utf-8"))
+        bundle = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "BUNDLE"
+        )
+        plist = next(k.value for k in bundle.keywords if k.arg == "info_plist")
+        keys = {ast.literal_eval(key): value for key, value in zip(plist.keys, plist.values)}
+        self.assertTrue(ast.literal_eval(keys["NSLocalNetworkUsageDescription"]))
+        self.assertIn("_googlecast._tcp", ast.literal_eval(keys["NSBonjourServices"]))
+
 
 if __name__ == "__main__":
     unittest.main()

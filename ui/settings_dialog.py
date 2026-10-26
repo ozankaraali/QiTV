@@ -212,9 +212,9 @@ class ProviderVerificationWorker(QObject):
     def sign_in(self, provider) -> tuple[bool, str]:
         """A Jellyfin or Emby server's sign-in (2.8): (signed in, why not). Its access goes out
         through `signed_in`; the password is used here only."""
-        from services.media_workers import MediaSignInWorker
+        from services import media_workers
 
-        worker = MediaSignInWorker(
+        ok, value = media_workers.sign_in(  # this thread's: it blocks only the verification
             str(provider.get("url") or ""),
             str(provider.get("type") or ""),
             str(provider.get("username") or ""),
@@ -222,11 +222,6 @@ class ProviderVerificationWorker(QObject):
             self.ssl_verify,
             device_id=str(provider.get("device_id") or ""),
         )
-        outcome: list[tuple[bool, object]] = []
-        worker.finished.connect(lambda access: outcome.append((True, access)))
-        worker.error.connect(lambda message: outcome.append((False, message)))
-        worker.run()  # this thread's: it blocks only the verification
-        ok, value = outcome[0] if outcome else (False, "")
         if ok:
             self.signed_in.emit(self.request_id, value)
             return True, ""

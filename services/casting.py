@@ -117,12 +117,28 @@ class LibVlcDiscovery:
         self._discoverers = []
 
     def release(self, handle: Any) -> None:
-        import vlc
+        release(handle)
 
-        try:
-            vlc.libvlc_renderer_item_release(handle)
-        except Exception as e:
-            logger.debug("A cast device was not released: %s", type(e).__name__)
+
+def hold(handle: Any) -> Any:
+    """`handle` (a libVLC renderer item) held once more: valid until `release`d, whatever the
+    discovery does with its own reference (a device found again gets a new item)."""
+    import vlc
+
+    try:
+        vlc.libvlc_renderer_item_hold(handle)
+    except Exception as e:
+        logger.debug("A cast device was not held: %s", type(e).__name__)
+    return handle
+
+
+def release(handle: Any) -> None:
+    import vlc
+
+    try:
+        vlc.libvlc_renderer_item_release(handle)
+    except Exception as e:
+        logger.debug("A cast device was not released: %s", type(e).__name__)
 
 
 class CastDevices(QObject):

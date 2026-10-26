@@ -1279,9 +1279,28 @@ class CastTests(unittest.TestCase):
             _FakeInstance(self.player), runner=self.runner, poll_ms=60_000
         )
         self.addCleanup(self.session.release)
+        held = mock.patch("services.casting.hold", side_effect=lambda handle: handle)
+        self.hold = held.start()
+        self.addCleanup(held.stop)
+        released = mock.patch("services.casting.release")
+        self.release = released.start()
+        self.addCleanup(released.stop)
 
     def calls(self, name):
         return [call for call in self.player.calls if call[0] == name]
+
+    def test_the_session_holds_the_device_it_casts_to(self):  # 2.8 review I9
+        # A device found again has a new item and its old one is released: the session's own
+        # hold keeps the one it casts to valid until it casts elsewhere or closes.
+        self.session.cast_to("tv")
+        self.hold.assert_called_once_with("tv")
+        self.session.cast_to("den")
+        self.release.assert_called_once_with("tv")
+        self.session.cast_to(None)
+        self.assertEqual(self.release.call_args.args, ("den",))
+        self.session.cast_to("tv")
+        self.session.release()
+        self.assertEqual(self.release.call_args.args, ("tv",))
 
     def test_the_renderer_is_set_before_each_play_while_casting(self):
         self.session.cast_to("tv")
