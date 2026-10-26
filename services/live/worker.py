@@ -56,10 +56,14 @@ Commands (parent to helper):
   ("shutdown", its owner gone) keeps v2 folders for the next helper; "close" removes them;
 - `("adopt", sid, dir_name, max_bytes)` (2.6): take a kept folder back (a v2 folder a helper
   that went down kept, `services.live.ring.DiskRing.adopt`) as parked session `sid`: its ring,
-  timeline and parts as they were, its segmenter and clock joiner primed with its newest
-  segment so a resume goes on after it. Answered by a state holding every span, then
+  timeline and parts as they were, its segmenter, audio relabeler (2.8) and clock joiner primed
+  with its newest segment so a resume goes on after it, and (2.8) every disk ring fitted into
+  the disk amount at once. Answered by a state holding every span, then
   `("parked", sid)` and `("kept", sid, label, where)`; `("unkept", sid)` when it cannot be
   taken back (gone, in use, unreadable);
+- `("disk_amount", max_bytes)` (2.8): the user's disk amount changed: every disk ring holds it
+  from now on, and what is over it goes at once (not only from the next disk open). Unanswered;
+  the sessions whose rings lost segments say so in their states;
 - `("record_start", sid, rid, path, seq, limits)` (2.2): recording `rid` (the parent's name for
   it) writes the session's ring to a new file at `path` (a unique name next to it when that
   exists) from segment `seq` on, following the live edge, until "record_stop", the session's
@@ -509,6 +513,10 @@ class _Session:
         self._segment = (0, 0.0)  # HLS: the segment being fetched (serial), the edge it began at
         self._measured = (0.0, 0.0)  # HLS: media and EXTINF seconds of the whole segments
         self._pending: list[_Addition] = []
+        # 2.8: one state at a time (the session thread's, and another thread's after it changed
+        # the ring: `notify_soon`), and each span goes once: the newest seq a state carried.
+        self._notify_lock = threading.Lock()
+        self._sent_seq = -1
         self._media_next: int | None = None  # 2.7: an HLS segment began: the next opened
         # (timeline position, seconds left out) of the latest PTS jumps the segmenter dropped
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
@@ -738,6 +746,10 @@ class _Session:
             segmenter.finish()
             joiner.feed(last)
             joiner.finish()
+            # 2.8: the program map VLC saw last, so a new run's map that changed under the same
+            # version is renumbered (`AudioRelabeler`), as after a park in one helper.
+            self._relabeler.feed(last)
+            self._relabeler.flush()
         except Exception as error:  # a resume then starts its clock afresh
             _LOG.info(
                 "A kept buffer's newest segment could not be read (%s).", type(error).__name__
@@ -750,6 +762,7 @@ class _Session:
         self._ring_spec = {"kind": "disk", "dir": directory, "max_bytes": max_bytes}
         self._pending = [_addition(s) for s in spans]
         self._helper.disk_budget(max_bytes).register(ring, parked=True)
+        self._helper.trim_disk(self)  # 2.8: the disk amount holds at once (the state follows)
         try:
             self._adopt(ring)
         except _Cancelled:  # the helper goes down meanwhile: the folder stays
@@ -1017,9 +1030,6 @@ class _Session:
                 timeline.on_opened(
                     event.seq, event.first_pts, event.wall, event.discontinuity, media
                 )
-                if began and timeline.parts() and self._ring is not None:
-                    part = timeline.parts()[-1]
-                    self._ring.note_part(part.first_seq, part.start, part.wall)
                 self._skipping = False
                 seq, header = event.seq, event.header
                 junction, self._open_junction = self._open_junction, False
@@ -1027,6 +1037,11 @@ class _Session:
                     lambda ring: ring.open_segment(seq, header, junction=junction),
                     new_segment=True,
                 )
+                # 2.8: noted once its segment opened (a failed one leaves no part behind), in
+                # the ring that holds it (the RAM fallback's notes nothing).
+                if began and timeline.parts() and self._ring is not None:
+                    part = timeline.parts()[-1]
+                    self._ring.note_part(part.first_seq, part.start, part.wall)
                 if self._resuming:
                     with self.lock:
                         self._resuming = False
@@ -1055,7 +1070,8 @@ class _Session:
                         span.start_quality,
                         span.media_seq,
                     )
-                self._pending.append(_addition(span))
+                with self._notify_lock:
+                    self._pending.append(_addition(span))
                 self._notify(force=True)
         self._take_breaks()
 
@@ -1381,6 +1397,10 @@ class _Session:
             self._notify(force=True)
 
     def _notify(self, force: bool = False) -> None:
+        with self._notify_lock:
+            self._notify_locked(force)
+
+    def _notify_locked(self, force: bool) -> None:
         if self.cancelled:
             return
         now = time.monotonic()
@@ -1469,7 +1489,11 @@ class _Session:
             if getattr(source, "until_dropped", False) is True:
                 snapshot["until_dropped"] = True  # another encoding persisted: no stop
         self._heard_edge = edge
-        additions, self._pending = self._pending, []
+        # 2.8: a span another state carried already is not added twice.
+        additions = [item for item in self._pending if item[0] > self._sent_seq]
+        self._pending = []
+        if additions:
+            self._sent_seq = max(item[0] for item in additions)
         # Only newly completed segments cross IPC (ported from main's `_notify`): the
         # parent drops spans older than `first` and appends the additions, so a long
         # ring still costs a constant-size message.
@@ -1532,10 +1556,14 @@ class _Session:
         if ring is not None and ring.retire_before(before):
             self.notify_soon()
 
-    def notify_soon(self) -> None:
+    def notify_soon(self, wait: bool = True) -> None:
         """Another thread changed the ring (the disk amount, the day's limit): the state says
-        so once the pipeline is free, skipped when it stays busy (its own next state will)."""
-        if self.cancelled or not self._moving.acquire(timeout=_NOTIFY_WAIT_S):
+        so once the pipeline is free, skipped when it stays busy (its own next state will).
+        `wait` False (2.8: a session that reads, from another's pipeline): not waited for at
+        all, so two pipelines never wait for each other."""
+        if self.cancelled:
+            return
+        if not self._moving.acquire(timeout=_NOTIFY_WAIT_S if wait else 0.0):
             return
         try:
             self._notify(force=True)
@@ -1567,14 +1595,31 @@ class _Helper:
 
     # ---- 2.6: the disk amount and the day's limit ----------------------------------------
     def disk_budget(self, max_bytes: int) -> DiskBudget:
-        """The disk rings' shared amount: the newest disk session's (the user's setting)."""
+        """The disk rings' shared amount: the newest disk session's (the user's setting); 2.8:
+        a new one applies to the open rings at once (a session thread's: files may go)."""
         from services.live.ring import DiskBudget
 
         if self._budget is None:
             self._budget = DiskBudget(max_bytes)
-        else:
-            self._budget.max_bytes = max_bytes
+        elif self._budget.max_bytes != max_bytes:
+            self._told(self._budget.set_max_bytes(max_bytes), None)
         return self._budget
+
+    def set_disk_amount(self, max_bytes: int) -> None:
+        """("disk_amount") The user's disk amount changed (2.8): it applies to every disk ring
+        at once, on a thread of its own (files go: never the command loop). Without a disk ring
+        yet, the next disk open brings it."""
+        budget = self._budget
+        if budget is None or budget.max_bytes == max_bytes:
+            return
+
+        def apply() -> None:
+            try:
+                self._told(budget.set_max_bytes(max_bytes), None)
+            except Exception as error:  # the next trim tries again
+                _LOG.warning("The disk amount could not apply (%s).", type(error).__name__)
+
+        threading.Thread(target=apply, name="qitv-live-disk-amount", daemon=True).start()
 
     def ring_parked(self, ring: Ring, parked: bool) -> None:
         if self._budget is not None:
@@ -1585,13 +1630,21 @@ class _Helper:
             self._budget.unregister(ring)
 
     def trim_disk(self, writer: _Session) -> None:
-        """Fit every disk ring into the amount; kept sessions that lost segments say so."""
+        """Fit every disk ring into the amount; the other sessions that lost segments say so
+        (2.8: an active one's too)."""
         if self._budget is None:
             return
-        changed = self._budget.trim()
+        self._told(self._budget.trim(), writer)
+
+    def _told(self, changed: list[Ring], writer: _Session | None) -> None:
+        """The sessions whose rings lost segments (`changed`), but `writer`, say so: a parked
+        one once its pipeline is free, one that reads only when it is free now (a busy one
+        says so itself, and two pipelines never wait for each other)."""
+        if not changed:
+            return
         for session in list(self._sessions.values()):
             if session is not writer and session._ring in changed:
-                session.notify_soon()
+                session.notify_soon(wait=session.released.is_set())
 
     def expire(self) -> None:
         """Segments over a day old go, from every session's ring (2.6)."""
@@ -1672,6 +1725,10 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.note(name, command[2])
+            elif name == "disk_amount":  # 2.8: the user's disk amount changed
+                if len(command) != 2 or type(command[1]) is not int or command[1] <= 0:
+                    raise ValueError("a disk amount needs a positive size")
+                self.set_disk_amount(command[1])
             elif name == "until":  # 2.7: a server part's stop moved
                 if (
                     len(command) != 3
