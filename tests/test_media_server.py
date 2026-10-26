@@ -133,6 +133,77 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(http.asked[0][2]["ParentId"], "L1")
 
 
+class ChangedSinceTests(unittest.TestCase):
+    """2.8: a refresh asks a server only what changed since its last look."""
+
+    def answering(self, *bodies):
+        c, http = client({})
+        pages = list(bodies)
+        http.request = lambda method, url, params=None, **kw: (
+            http.asked.append((method, url, dict(params))) or _Response(200, pages.pop(0))
+        )
+        return c, http
+
+    def test_changed_titles_are_asked_by_when_they_were_saved(self):
+        c, http = self.answering({"Items": [FILM], "TotalRecordCount": 1}, {"Items": []})
+        self.assertEqual(c.items("Movie", "L1", since="2026-10-26T10:00:00Z")[0]["Id"], "f1")
+        c.items("Movie", "L1", since="2026-10-26T10:00:00Z", for_user=True)
+        self.assertEqual(http.asked[0][2]["MinDateLastSaved"], "2026-10-26T10:00:00Z")
+        self.assertEqual(http.asked[1][2]["MinDateLastSavedForUser"], "2026-10-26T10:00:00Z")
+        self.assertNotIn("MinDateLastSaved", http.asked[1][2])
+
+    def test_titles_are_asked_by_their_ids(self):
+        c, http = self.answering({"Items": [FILM], "TotalRecordCount": 1})
+        c.items("Movie", "L1", ids=["f1", "f2"])
+        self.assertEqual(http.asked[0][2]["Ids"], "f1,f2")
+
+    def test_a_library_is_counted_without_its_titles(self):
+        c, http = self.answering({"Items": [], "TotalRecordCount": 55_000})
+        self.assertEqual(c.count("Movie", "L1"), 55_000)
+        self.assertEqual(http.asked[0][2]["Limit"], 0)
+
+    def test_a_library_s_ids_come_in_order_without_their_details(self):
+        c, http = self.answering(
+            {"Items": [{"Id": "b"}, {"Id": "a"}], "TotalRecordCount": 3},
+            {"Items": [{"Id": "c"}], "TotalRecordCount": 3},
+        )
+        self.assertEqual(c.item_ids("Movie", "L1", page=2), ["b", "a", "c"])
+        params = http.asked[0][2]
+        self.assertEqual((params["SortBy"], params["EnableImages"]), ("SortName", "false"))
+        self.assertNotIn("Overview", params.get("Fields", ""))
+
+    def test_what_changed_merges_into_the_saved_list(self):
+        libraries = [{"id": "L1", "name": "Movies", "type": "movies"}]
+        saved = ms.section_payload(libraries, {"L1": [FILM, {"Id": "f2", "Name": "Tide"}]}, BASE)
+        saved["server_since"], saved["server_full"] = "2026-10-20T00:00:00Z", 1000.0
+        self.assertEqual(
+            ms.saved_summary(saved),
+            {"since": "2026-10-20T00:00:00Z", "full": 1000.0, "members": {"L1": ["f1", "f2"]}},
+        )
+        stopped = dict(FILM, UserData={"PlaybackPositionTicks": 0})  # watched to the end
+        delta = {
+            "delta": True,
+            "libraries": libraries,
+            "order": {"L1": ["f3", "f1"]},  # Tide went, Anchor came (sorted first)
+            "changed": {
+                "f1": ms.title_item(stopped, BASE, "L1"),
+                "f3": ms.title_item({"Id": "f3", "Name": "Anchor"}, BASE, "L1"),
+            },
+            "server_since": "2026-10-26T11:50:00Z",
+        }
+        merged = ms.merged_payload(saved, delta)
+        self.assertEqual([i["name"] for i in merged["contents"]], ["Anchor", "Salt Roads"])
+        self.assertEqual(merged["sorted_channels"]["L1"], [0, 1])
+        self.assertNotIn(ms.CONTINUE_ID, merged["sorted_channels"])  # nothing started now
+        self.assertEqual(merged["server_since"], "2026-10-26T11:50:00Z")
+        self.assertEqual(merged["server_full"], 1000.0)
+
+    def test_a_list_without_a_look_s_time_has_no_summary(self):
+        payload = ms.section_payload([], {}, BASE)
+        self.assertIsNone(ms.saved_summary(payload))
+        self.assertIsNone(ms.saved_summary(None))
+
+
 class ItemTests(unittest.TestCase):
     def test_a_film_becomes_a_library_title(self):
         item = ms.title_item(FILM, BASE, "L1")

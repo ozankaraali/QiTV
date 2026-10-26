@@ -485,6 +485,18 @@ class BrowsedCatalog(QObject):
         if catalog is not None:
             catalog.request_section(section, force=force)
 
+    def refresh_sections(self) -> None:
+        """Load the films and series of the providers shown again (2.8: the Library's
+        Refresh; `CatalogService.refresh_section`): every one mixed, else the source's."""
+        names = self.mixed_names() if self.all_providers() else [self.source()]
+        for name in names:
+            if name not in self._catalogs.names():
+                continue
+            catalog = self._catalogs.catalog(name)
+            for section in ("movies", "series"):
+                if section in self._sections_of(name):
+                    catalog.refresh_section(section)
+
     def _settle_all(self, section: str) -> None:
         if self.all_providers():
             self.sectionReady.emit(section)  # the list is what the saved lists hold

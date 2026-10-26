@@ -371,10 +371,10 @@ class WorkerFactory:
         return LinkCreatorWorker(prefer_https=True, **kwargs)
 
     # Jellyfin and Emby (2.8): the server's address as given (it answers where it is).
-    def media_section(self, provider, content_type, verify_ssl) -> QObject:
+    def media_section(self, provider, content_type, verify_ssl, saved=None) -> QObject:
         from services.media_workers import MediaSectionWorker
 
-        return MediaSectionWorker(provider, content_type, verify_ssl)
+        return MediaSectionWorker(provider, content_type, verify_ssl, saved=saved)
 
     def media_series(self, provider, series_id, verify_ssl) -> QObject:
         from services.media_workers import MediaSeriesWorker
@@ -808,6 +808,19 @@ class CatalogService(QObject):
         self._waited_sections.add(section)
         self._request_catalog(("section", section), "section", section, self._section_worker)
 
+    def refresh_section(self, section: str) -> None:
+        """Load the section's list again (2.8: the Library's Refresh). An Xtream panel's and a
+        media server's load behind the saved list, which shows meanwhile (a server's asks only
+        what changed); a portal's genres load again. One load at a time."""
+        if self._closed or self._setup_active() or section not in self.sections():
+            return
+        if self._loads_behind(self.provider_type()) and self._usable(self._content(section)):
+            self._request_catalog(
+                ("section", section), "section_behind", section, self._section_worker
+            )
+        else:
+            self.request_section(section, force=True)
+
     def _expired(self, ct: str) -> bool:
         """The saved content is this provider's as set up now, only past its time."""
         expired = getattr(self.provider_manager, "content_expired", None)
@@ -818,7 +831,11 @@ class CatalogService(QObject):
         ct = SECTION_CONTENT_TYPES[section]
         verify = provider.get("ssl_verify", self.config.ssl_verify)
         if is_media_server(ptype):
-            return self.factory.media_section(provider, ct, verify)
+            from services import media_server  # (it imports this module)
+
+            # 2.8: a list looked at before asks only what changed since (a whole one else).
+            saved = media_server.saved_summary(self._content(section))
+            return self.factory.media_section(provider, ct, verify, saved=saved)
         if ptype == "M3UPLAYLIST":
             return self.factory.m3u(provider.get("url", ""), verify)
         if ptype == "XTREAM":
@@ -835,6 +852,15 @@ class CatalogService(QObject):
 
     def _on_section_loaded(self, job: _Job, payload) -> None:
         section = job.data
+        if isinstance(payload, dict) and payload.get("delta"):
+            from services import media_server  # (it imports this module)
+
+            # 2.8: what a server says changed, merged into the saved list by its ids.
+            merged = media_server.merged_payload(self._content(section), payload)
+            if merged is None:  # the saved list went meanwhile: nothing to merge into
+                logger.info("A refreshed %s list had nothing to go into", section)
+                return
+            payload = merged
         self._waited_sections.discard(section)
         self._store_section(SECTION_CONTENT_TYPES[section], payload)
         self.sectionReady.emit(section)

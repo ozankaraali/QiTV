@@ -82,6 +82,55 @@ class ListsBehindTests(unittest.TestCase):
         self.assertEqual(ready, [("series",)])
         self.assertEqual([c[0] for c in factory.calls], ["media_section"])
 
+    def test_refresh_loads_a_panel_s_lists_again_behind(self):  # 2.8: the Library's
+        service, providers, factory = self.service()
+        providers.current_provider_content["vod"] = FILMS  # fresh: still asked again
+        factory.results["xtream"] = {"result": NEWER}
+        ready = collect(service.sectionReady)
+        service.refresh_section("movies")
+        pump()
+        self.assertEqual([c[0] for c in factory.calls], ["xtream"])
+        self.assertIs(providers.current_provider_content["vod"], FILMS)  # shown meanwhile
+        self.runner.complete(0)
+        self.assertEqual(ready, [("movies",)])
+        self.assertEqual(len(providers.current_provider_content["vod"]["contents"]), 2)
+        service.refresh_section("movies")
+        service.refresh_section("movies")  # asked again while it loads: one load
+        pump()
+        self.assertEqual(len(factory.calls), 2)
+
+    def test_refresh_asks_a_server_what_changed_and_merges_it(self):
+        from services import media_server as ms
+
+        service, providers, factory = self.service("JELLYFIN")
+        libraries = [{"id": "L1", "name": "Movies", "type": "movies"}]
+        saved = ms.section_payload(libraries, {"L1": [{"Id": "f1", "Name": "Salt"}]}, "h:1")
+        saved.update(server_since="2026-10-26T10:00:00Z", server_full=5.0)
+        providers.current_provider_content["vod"] = saved
+        delta = {
+            "delta": True,
+            "libraries": libraries,
+            "order": {"L1": ["f1", "f2"]},
+            "changed": {"f2": ms.title_item({"Id": "f2", "Name": "Tide"}, "h:1", "L1")},
+            "server_since": "2026-10-26T11:50:00Z",
+        }
+        factory.results["media_section"] = {"result": delta}
+        service.refresh_section("movies")
+        pump()
+        _name, _args, kwargs = factory.calls[-1]
+        self.assertEqual(kwargs["saved"]["members"], {"L1": ["f1"]})
+        self.runner.complete(0)
+        content = providers.current_provider_content["vod"]
+        self.assertEqual([i["name"] for i in content["contents"]], ["Salt", "Tide"])
+        self.assertEqual(content["server_since"], "2026-10-26T11:50:00Z")
+
+    def test_refresh_loads_a_portal_s_genres_again(self):
+        service, providers, factory = self.service("STB")
+        providers.current_provider_content["vod"] = FILMS
+        service.refresh_section("movies")
+        pump()
+        self.assertEqual([c[0] for c in factory.calls], ["stb_categories"])
+
     def test_a_portal_s_and_the_live_lists_still_load_first(self):
         for ptype, section, ct in (("STB", "movies", "vod"), ("XTREAM", "live", "itv")):
             with self.subTest(ptype=ptype, section=section):

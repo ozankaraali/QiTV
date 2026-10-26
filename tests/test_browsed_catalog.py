@@ -604,6 +604,22 @@ class MixTests(unittest.TestCase):  # 2.8: the Library mixes the providers ticke
         self.config.library_mix = ["Demo TV", "Gone TV"]  # one deleted in Settings
         self.assertEqual(view.mixed_names(), ["Demo TV", "Harbor IPTV", "Cove TV"])
 
+    def test_refresh_asks_each_provider_shown_for_its_films_and_series(self):  # 2.8
+        view = self.library()
+        view.select_mix(["Demo TV", "Harbor IPTV"])
+        asked = []
+        for name in self.catalogs.names():
+            catalog = self.catalogs.catalog(name)
+            catalog.refresh_section = lambda s, n=name: asked.append((n, s))
+        view.refresh_sections()
+        shown = {n for n, _s in asked}
+        self.assertEqual(shown, {"Harbor IPTV"})  # not Cove TV; Demo TV (a playlist) has none
+        self.assertTrue(all(s in ("movies", "series") for _n, s in asked))
+        asked.clear()
+        view.select_mix(["Harbor IPTV"])  # one alone
+        view.refresh_sections()
+        self.assertEqual({n for n, _s in asked}, {"Harbor IPTV"})
+
     def test_a_page_without_a_mix_mixes_every_provider(self):
         self.config.library_mix = ["Demo TV", "Cove TV"]
         view = self.library(mix_key="")  # the TV page's and the phone's lists

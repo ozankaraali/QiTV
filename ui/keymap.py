@@ -377,6 +377,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+O", N_("Open a file")),
         ("Ctrl+,", N_("Settings")),
         ("Ctrl+R", N_("Refresh channels and guide")),
+        ("Ctrl+Shift+R", N_("Refresh films and series")),
         ("Ctrl+Q", N_("Quit")),  # i18n: what a key does (verb)
     ],
 }

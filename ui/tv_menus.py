@@ -191,6 +191,8 @@ class TVMenus(QObject):
         add(view, tr("Restore Last Multiview"), "", screens.restore_multiview)
         add(view, tr("Search"), "Ctrl+F", screens.open_search)  # i18n: a menu entry (verb)
         add(view, tr("Refresh Channels and Guide"), "Ctrl+R", self.refresh_content)
+        # i18n: a menu entry: the Library's films and series load again (2.8)
+        add(view, tr("Refresh Films and Series"), "Ctrl+Shift+R", self.refresh_library)
         player = self._player_actions  # the player's keys: off while the Library shows
         player.append(add(view, tr("Guide"), "G", self._handler(Action.GUIDE)))
         player.append(add(view, tr("Channel List"), "Return", self._handler(Action.OPEN_DRAWER)))
@@ -370,6 +372,10 @@ class TVMenus(QObject):
             screens.open_library(screens.library_controller.section or "movies")
         elif row == REFRESH_ACTION:
             self.refresh_content()
+
+    def refresh_library(self) -> None:
+        """The Library's films and series load again (2.8), as its ↻."""
+        self._window.screens.library_controller.refresh_lists()
 
     def refresh_content(self) -> None:
         """Load the provider's channels and guide again (the drawer's ↻, Ctrl/⌘+R).

@@ -30,9 +30,25 @@ class FakeClient:
             raise self._fail
         return list(self._libraries)
 
-    def items(self, item_type, parent_id):
-        self.asked.append((item_type, parent_id))
+    def items(self, item_type, parent_id, *, since="", for_user=False, ids=()):
+        asked = (item_type, parent_id)
+        self.asked.append(asked + (since, for_user, tuple(ids)) if since or ids else asked)
+        if ids:
+            return [i for i in self.everything.get(parent_id, []) if i["Id"] in ids]
+        if since:
+            return list(self.changed.get((parent_id, for_user), []))
         return list(self._items.get(parent_id, []))
+
+    everything: dict = {}  # a library's every title now (by id asks and the count)
+    changed: dict = {}  # (library, for_user) -> the titles saved since
+
+    def count(self, item_type, parent_id):
+        self.asked.append(("count", parent_id))
+        return len(self.everything.get(parent_id, []))
+
+    def item_ids(self, item_type, parent_id):
+        self.asked.append(("ids", parent_id))
+        return [i["Id"] for i in self.everything.get(parent_id, [])]
 
     def media_sources(self, item_id):
         if self._fail:
@@ -81,6 +97,93 @@ class SectionWorkerTests(unittest.TestCase):
         self.assertEqual(client.asked, [("Movie", "L1"), ("Movie", "L3")])
         self.assertEqual([i["name"] for i in payload["contents"]], ["Salt", "Tide"])
         self.assertTrue(client.closed)
+
+    def test_a_first_load_is_whole_and_notes_when_it_looked(self):  # 2.8: refresh
+        client = FakeClient(
+            libraries=[{"id": "L1", "name": "Movies", "type": "movies"}],
+            items={"L1": [{"Id": "f1", "Name": "Salt"}]},
+        )
+        worker = MediaSectionWorker(
+            PROVIDER, "vod", True, client=lambda p, v: client, clock=lambda: 1_800_000_000.0
+        )
+        _kind, payload = outcome(worker)
+        self.assertEqual(payload["server_full"], 1_800_000_000.0)
+        self.assertEqual(payload["server_since"], "2027-01-15T07:50:00Z")  # ten minutes back
+        self.assertNotIn("delta", payload)
+
+    def test_a_later_load_asks_only_what_changed(self):
+        lib = {"id": "L1", "name": "Movies", "type": "movies"}
+        client = FakeClient(libraries=[lib])
+        client.everything = {"L1": [{"Id": "f1", "Name": "Salt"}, {"Id": "f2", "Name": "Tide"}]}
+        client.changed = {("L1", True): [{"Id": "f2", "Name": "Tide", "UserData": {}}]}
+        saved = {
+            "since": "2027-01-15T07:50:00Z",
+            "full": 1_800_000_000.0,
+            "members": {"L1": ["f1", "f2"]},
+        }
+        worker = MediaSectionWorker(
+            PROVIDER,
+            "vod",
+            True,
+            client=lambda p, v: client,
+            saved=saved,
+            clock=lambda: 1_800_003_600.0,
+        )
+        _kind, delta = outcome(worker)
+        self.assertTrue(delta["delta"])
+        self.assertEqual(list(delta["changed"]), ["f2"])
+        self.assertEqual(delta["order"], {"L1": ["f1", "f2"]})  # nothing came or went
+        self.assertNotIn(("ids", "L1"), client.asked)  # the count told: no list of ids
+        self.assertEqual(delta["server_since"], "2027-01-15T08:50:00Z")
+
+    def test_a_title_added_or_gone_reads_the_library_s_ids(self):
+        lib = {"id": "L1", "name": "Movies", "type": "movies"}
+        f0, f1, f2 = ({"Id": i, "Name": i} for i in ("f0", "f1", "f2"))
+        saved = {"since": "x", "full": 1_800_000_000.0, "members": {"L1": ["f1", "f2"]}}
+        cases = (
+            ("one went", [f1], {}, ["f1"], []),
+            (
+                "one came, saved since",
+                [f0, f1, f2],
+                {("L1", False): [f0]},
+                ["f0", "f1", "f2"],
+                ["f0"],
+            ),
+            ("one came, the count tells", [f0, f1, f2], {}, ["f0", "f1", "f2"], ["f0"]),
+        )
+        for name, now, changed, order, came in cases:
+            with self.subTest(name):
+                client = FakeClient(libraries=[lib])
+                client.everything, client.changed = {"L1": now}, changed
+                worker = MediaSectionWorker(
+                    PROVIDER,
+                    "vod",
+                    True,
+                    client=lambda p, v: client,
+                    saved=saved,
+                    clock=lambda: 1_800_003_600.0,
+                )
+                _kind, delta = outcome(worker)
+                self.assertEqual(delta["order"], {"L1": order})
+                self.assertEqual(list(delta["changed"]), came)
+
+    def test_after_a_week_or_with_a_new_library_it_loads_whole(self):
+        libs = [{"id": "L1", "name": "Movies", "type": "movies"}]
+        client = FakeClient(libraries=libs, items={"L1": [{"Id": "f1", "Name": "Salt"}]})
+        week_old = {"since": "x", "full": 1_800_000_000.0 - 8 * 86400, "members": {"L1": []}}
+        other = {"since": "x", "full": 1_800_000_000.0, "members": {"L9": []}}
+        for saved in (week_old, other):
+            worker = MediaSectionWorker(
+                PROVIDER,
+                "vod",
+                True,
+                client=lambda p, v: client,
+                saved=saved,
+                clock=lambda: 1_800_000_000.0,
+            )
+            _kind, payload = outcome(worker)
+            self.assertNotIn("delta", payload)
+            self.assertEqual([i["name"] for i in payload["contents"]], ["Salt"])
 
     def test_a_refused_token_asks_to_sign_in_again(self):
         client = FakeClient(fail=ms.SignInNeeded("401"))

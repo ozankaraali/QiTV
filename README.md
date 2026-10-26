@@ -197,6 +197,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Ctrl/⌘+O</kbd> | Open a file |
 | <kbd>Ctrl/⌘+,</kbd> | Settings |
 | <kbd>Ctrl/⌘+R</kbd> | Refresh channels and guide |
+| <kbd>Ctrl/⌘+Shift+R</kbd> | Refresh films and series |
 | <kbd>Ctrl/⌘+Q</kbd> | Quit |
 <!-- keys:end -->
 

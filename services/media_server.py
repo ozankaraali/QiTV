@@ -40,6 +40,13 @@ requests = lazy_module("requests")  # the window shows before the network librar
 TYPES = MEDIA_SERVERS
 TICKS_PER_MS = 10_000
 PAGE = 2_000  # titles a request (a library of 50,000 comes in 25)
+ID_PAGE = 10_000  # ids a request (no details: a library's order and members)
+# A later look asks what was saved since the last one, from this much earlier (the server's
+# clock and this computer's may differ), and loads every title again after a week (what a
+# clock far off missed).
+SINCE_MARGIN_S = 600
+WHOLE_AFTER_S = 7 * 24 * 3600
+IDS_A_REQUEST = 100  # titles asked by their ids at once
 TIMEOUT_S = 30
 # The Library's genre of the titles the user has started (where the server says they stopped).
 CONTINUE_ID = "@server-continue"
@@ -205,25 +212,68 @@ class MediaServerClient:
                 )
         return out
 
-    def items(self, item_type: str, parent_id: str, page: int = PAGE) -> list[dict]:
-        """Every `item_type` ("Movie", "Series") title of the library `parent_id`."""
-        routes = self._user_routes("/Items", f"/Users/{self.user_id}/Items")
+    def items(
+        self,
+        item_type: str,
+        parent_id: str,
+        page: int = PAGE,
+        *,
+        since: str = "",
+        for_user: bool = False,
+        ids: Iterable[str] = (),
+    ) -> list[dict]:
+        """Every `item_type` ("Movie", "Series") title of the library `parent_id`; with
+        `since` (2.8, a refresh), only those saved since (`for_user`: whose user data, a
+        position or a watched mark, was); with `ids`, only those."""
+        params: dict[str, Any] = {
+            "Fields": FIELDS,
+            "EnableImageTypes": "Primary",
+            "ImageTypeLimit": 1,
+        }
+        if since:
+            params["MinDateLastSavedForUser" if for_user else "MinDateLastSaved"] = since
+        wanted = ",".join(ids)
+        if wanted:
+            params["Ids"] = wanted
+        return self._paged(item_type, parent_id, params, page)
+
+    def count(self, item_type: str, parent_id: str) -> int:
+        """How many `item_type` titles the library holds (2.8: a refresh compares it)."""
+        answer = self._request(
+            "GET", self._items_routes(), params=self._query(item_type, parent_id, Limit=0)
+        )
+        return int((answer or {}).get("TotalRecordCount") or 0)
+
+    def item_ids(self, item_type: str, parent_id: str, page: int = ID_PAGE) -> list[str]:
+        """The library's `item_type` titles' ids in its order, without their details (2.8:
+        a refresh learns which came and which went)."""
+        params = {"EnableImages": "false", "EnableUserData": "false", "Fields": ""}
+        found = self._paged(item_type, parent_id, params, page)
+        return [str(raw.get("Id")) for raw in found if raw.get("Id")]
+
+    def _items_routes(self) -> list[str]:
+        return self._user_routes("/Items", f"/Users/{self.user_id}/Items")
+
+    def _query(self, item_type: str, parent_id: str, **more: Any) -> dict[str, Any]:
+        return {
+            "UserId": self.user_id,  # one spelling: Emby fails on both (Jellyfin takes either)
+            "ParentId": parent_id,
+            "IncludeItemTypes": item_type,
+            "Recursive": "true",
+            **more,
+        }
+
+    def _paged(
+        self, item_type: str, parent_id: str, params: dict[str, Any], page: int
+    ) -> list[dict]:
+        routes = self._items_routes()
         found: list[dict] = []
         start = 0
         while True:
-            params = {
-                "UserId": self.user_id,  # one spelling: Emby fails on both (Jellyfin takes either)
-                "ParentId": parent_id,
-                "IncludeItemTypes": item_type,
-                "Recursive": "true",
-                "Fields": FIELDS,
-                "EnableImageTypes": "Primary",
-                "ImageTypeLimit": 1,
-                "SortBy": "SortName",
-                "StartIndex": start,
-                "Limit": page,
-            }
-            answer = self._request("GET", routes, params=params) or {}
+            asked = self._query(
+                item_type, parent_id, SortBy="SortName", StartIndex=start, Limit=page, **params
+            )
+            answer = self._request("GET", routes, params=asked) or {}
             batch = answer.get("Items") or []
             found.extend(batch)
             start += len(batch)
@@ -333,19 +383,34 @@ def title_item(raw: dict, base: str, library_id: str) -> dict:
 def section_payload(libraries: list[dict], titles: dict[str, list[dict]], base: str) -> dict:
     """The Library's section of a server: All, Continue watching (titles started there), then
     each library, every title once (a title in two libraries is listed in both)."""
+    ordered: dict[str, list[dict]] = {}
+    made: dict[str, dict] = {}
+    for library in libraries:
+        listed = ordered.setdefault(library["id"], [])
+        for raw in titles.get(library["id"]) or []:
+            item_id = str(raw.get("Id") or "")
+            if item_id:
+                if item_id not in made:
+                    made[item_id] = title_item(raw, base, library["id"])
+                listed.append(made[item_id])
+    return _payload(libraries, ordered)
+
+
+def _payload(libraries: list[dict], ordered: dict[str, list[dict]]) -> dict:
+    """`section_payload` of Library titles already made, in each library's order."""
     items: list[dict] = []
     sorted_channels: dict[str, list[int]] = {}
     seen: dict[str, int] = {}
     for library in libraries:
-        for raw in titles.get(library["id"]) or []:
-            item_id = str(raw.get("Id") or "")
+        for item in ordered.get(library["id"]) or []:
+            item_id = str(item.get("id") or "")
             if not item_id:
                 continue
             index = seen.get(item_id)
             if index is None:
                 index = seen[item_id] = len(items)
-                items.append(title_item(raw, base, library["id"]))
-                if items[index].get("server_position_ms"):
+                items.append(item)
+                if item.get("server_position_ms"):
                     sorted_channels.setdefault(CONTINUE_ID, []).append(index)
             sorted_channels.setdefault(library["id"], []).append(index)
     categories = [{"id": ALL_GROUP_ID, "title": N_("All")}]
@@ -355,6 +420,47 @@ def section_payload(libraries: list[dict], titles: dict[str, list[dict]], base: 
         {"id": lib["id"], "title": lib["name"]} for lib in libraries if lib["id"] in sorted_channels
     ]
     return {"categories": categories, "contents": items, "sorted_channels": sorted_channels}
+
+
+def server_time(when: float) -> str:
+    """A moment as a server's date filters take it (UTC)."""
+    return datetime.fromtimestamp(when, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def saved_summary(payload: Optional[dict]) -> Optional[dict]:
+    """What a refresh needs of a saved section (2.8): when it was last looked at (`since`, the
+    server's date; `full`, when it was loaded whole) and each library's titles' ids in order.
+    None: it was never looked at so (an older list): it loads whole."""
+    if not isinstance(payload, dict):
+        return None
+    since, full = payload.get("server_since"), payload.get("server_full")
+    if not isinstance(since, str) or not isinstance(full, (int, float)):
+        return None
+    contents = payload.get("contents") or []
+    members: dict[str, list[str]] = {}
+    for key, indices in (payload.get("sorted_channels") or {}).items():
+        if key in (ALL_GROUP_ID, CONTINUE_ID):
+            continue
+        members[key] = [str(contents[i].get("id")) for i in indices if 0 <= i < len(contents)]
+    return {"since": since, "full": float(full), "members": members}
+
+
+def merged_payload(saved: Optional[dict], delta: dict) -> Optional[dict]:
+    """A refresh's answer (`delta`: the libraries, each one's titles' ids in order, the titles
+    that changed or came, and the new look's date) merged into the saved section, by the
+    server's own ids (never by name: two titles alike stay two). None without a saved list."""
+    if not isinstance(saved, dict):
+        return None
+    made = {str(item.get("id")): item for item in saved.get("contents") or []}
+    made.update(delta.get("changed") or {})
+    ordered = {
+        library: [made[i] for i in ids if i in made]
+        for library, ids in (delta.get("order") or {}).items()
+    }
+    payload = _payload(list(delta.get("libraries") or []), ordered)
+    payload["server_since"] = delta.get("server_since")
+    payload["server_full"] = saved.get("server_full")
+    return payload
 
 
 def episode_item(raw: dict, base: str) -> dict:

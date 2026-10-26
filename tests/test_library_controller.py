@@ -173,6 +173,11 @@ class FakeCatalog(QObject):
     def content_version(self):
         return self.version
 
+    refreshed = 0  # refresh_sections() asked (2.8: the Library's Refresh)
+
+    def refresh_sections(self):
+        self.refreshed += 1
+
     def sections(self):
         return list(self.section_list)
 
@@ -1174,8 +1179,10 @@ class LibraryControllerTests(unittest.TestCase):
         menu = ctl._source_menu()
         self.addCleanup(menu.deleteLater)
         actions = [a for a in menu.actions() if not a.isSeparator()]
-        self.assertEqual([a.text() for a in actions], ["P", "Q", "All providers"])
-        self.assertEqual([a.isChecked() for a in actions], [True, False, False])
+        self.assertEqual(
+            [a.text() for a in actions], ["P", "Q", "All providers", "Refresh films and series"]
+        )
+        self.assertEqual([a.isChecked() for a in actions], [True, False, False, False])
         actions[1].trigger()  # 2.8: Q joins P
         self.assertEqual(self.catalog.mixes, [["P", "Q"]])
         self.catalog.providerReady.emit(ALL_PROVIDERS)
@@ -1187,7 +1194,8 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.open_movies()
         menu = ctl._source_menu()
         self.addCleanup(menu.deleteLater)
-        self.assertEqual([a.text() for a in menu.actions()], ["P"])
+        shown = [a.text() for a in menu.actions() if not a.isSeparator()]
+        self.assertEqual(shown, ["P", "Refresh films and series"])  # no All providers
 
     def mix(self):
         """The Library over both providers (All providers), movies of each under its heading."""
@@ -1452,9 +1460,40 @@ class SourceMixTests(unittest.TestCase):  # 2.8: the source menu's ticks mix pro
         self.assertEqual(ctl._source_title(), "All providers")
 
 
+class RefreshTests(unittest.TestCase):  # 2.8: the Library's Refresh
+    build = LibraryControllerTests.build
+
+    def setUp(self):
+        LibraryControllerTests.setUp(self)
+
+    def test_the_source_menu_refreshes_the_films_and_series_shown(self):
+        ctl = self.build()
+        ctl.open("movies")
+        notices = []
+        ctl.notice.connect(notices.append)
+        actions = {a.text(): a for a in ctl._source_menu().actions() if a.text()}
+        actions["Refresh films and series"].trigger()
+        self.assertEqual(self.catalog.refreshed, 1)
+        self.assertEqual(notices, ["Refreshing films and series…"])
+
+    def test_the_top_bar_s_refresh_refreshes_them_too(self):
+        ctl = self.build()
+        ctl.open("series")
+        self.screen.nav.refreshRequested.emit()
+        self.assertEqual(self.catalog.refreshed, 1)
+
+
 class OpenOnProviderTests(unittest.TestCase):  # 2.8: the list's Movies row is its provider's
     setUp = LibraryControllerTests.setUp
     build = LibraryControllerTests.build
+
+    def test_all_providers_opens_on_every_provider_not_a_saved_mix(self):  # review M6
+        self.catalog.names = ["P", "Q", "R"]
+        ctl = self.build()
+        self.catalog.select_mix(["P", "Q"])  # the Library mixed two before
+        ctl.open_on(ALL_PROVIDERS, "movies")
+        self.assertEqual(self.catalog.mixes[-1], [])  # every one
+        self.assertEqual(self.catalog.mixed_names(), ["P", "Q", "R"])
 
     def test_the_library_opens_on_the_provider_asked_for(self):
         ctl = self.build()

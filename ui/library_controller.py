@@ -49,6 +49,7 @@ from ui.keymap import Action
 from ui.library.library_screen import LibraryScreen
 from ui.library.poster_grid import poster_url
 from ui.library.search_session import DEBOUNCE_MS, SearchSession
+from ui.library.top_nav import REFRESH_TEXT
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,7 @@ EMPTY_TEXT = N_("Nothing here")  # i18n: a Library genre without titles
 RETRY_TEXT = N_("Couldn't load — press Enter to retry")
 SERIES_FAILED_NOTICE = N_("Couldn't load that series")
 UNKNOWN_PROVIDER_NOTICE = N_("That title's provider is no longer in your list")
+REFRESHING_TEXT = N_("Refreshing films and series…")  # i18n: a toast (2.8: the Library's ↻)
 _MOVES = {
     Action.NAV_LEFT: (-1, 0),
     Action.NAV_RIGHT: (1, 0),
@@ -200,6 +202,7 @@ class LibraryController(QObject):
         nav.tabRequested.connect(self._on_tab)
         nav.searchRequested.connect(self.open_search)
         nav.sourceRequested.connect(self._show_source_menu)
+        nav.refreshRequested.connect(self.refresh_lists)
         screen.search_field.clicked.connect(lambda: self._focus("search"))
         self._search.changed.connect(self._show_hits)
         self._search.changed.connect(self.searchChanged)
@@ -359,7 +362,9 @@ class LibraryController(QObject):
         empty or unknown one keeps the Library's own source."""
         if self._closed:
             return
-        if provider == ALL_PROVIDERS or provider in self._catalog.provider_names():
+        if provider == ALL_PROVIDERS:
+            self._mix_sources([])  # every provider, not a mix the Library kept (review M6)
+        elif provider in self._catalog.provider_names():
             self._choose_source(provider)
         self.open(section)
 
@@ -620,7 +625,19 @@ class LibraryController(QObject):
             action.setCheckable(True)
             action.setChecked(self._catalog.all_providers() and len(shown) == len(names))
             action.triggered.connect(lambda _checked=False: self._mix_sources([]))
+        menu.addSeparator()
+        refresh = menu.addAction(translate(REFRESH_TEXT))
+        refresh.triggered.connect(lambda _checked=False: self.refresh_lists())
         return menu
+
+    def refresh_lists(self) -> None:
+        """The films and series of the providers shown load again (2.8: ↻, the source menu,
+        Ctrl/⌘+Shift+R): an Xtream panel's and a server's behind the saved lists, which show
+        meanwhile (a server's asks only what changed); a portal's genres anew."""
+        if self._closed:
+            return
+        self._catalog.refresh_sections()
+        self.notice.emit(translate(REFRESHING_TEXT))
 
     def _shown_providers(self) -> list[str]:
         """The providers the Library shows: those it mixes, else its own."""

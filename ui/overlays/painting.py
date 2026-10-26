@@ -230,6 +230,28 @@ def _skip_arrow(forward: bool) -> tuple[QPainterPath, QPainterPath]:
     return arc, head
 
 
+def draw_refresh(p: QPainter, rect: QRectF, color: QColor) -> None:
+    """A circular arrow, drawn like painting.draw_icon's glyphs (a unit box, round caps)."""
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.translate(rect.x(), rect.y())
+    p.scale(rect.width(), rect.height())
+    pen = QPen(color, 0.1)
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    p.drawArc(QRectF(0.16, 0.16, 0.68, 0.68), 70 * 16, 290 * 16)  # open at the top right
+    head = QPainterPath()
+    head.moveTo(0.52, 0.03)
+    head.lineTo(0.74, 0.17)
+    head.lineTo(0.5, 0.3)
+    head.closeSubpath()
+    p.setPen(Qt.NoPen)
+    p.setBrush(color)
+    p.drawPath(head)
+    p.restore()
+
+
 def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
     p.save()
     p.setRenderHint(QPainter.Antialiasing, True)

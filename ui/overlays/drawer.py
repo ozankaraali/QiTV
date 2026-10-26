@@ -99,7 +99,7 @@ from ui.overlays.channel_rows import (
     LazyNumbers,
     column_focused,
 )
-from ui.overlays.painting import Units, draw_icon, elided, fill_round
+from ui.overlays.painting import Units, draw_icon, draw_refresh, elided, fill_round
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -178,28 +178,6 @@ _HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key (see _
 def _hint(what: str, keys: str) -> str:
     """A tooltip naming its key; `what` (English, marked N_) in the active language."""
     return key_hint(translate(what), keys)
-
-
-def _draw_refresh(p: QPainter, rect: QRectF, color: QColor) -> None:
-    """A circular arrow, drawn like painting.draw_icon's glyphs (a unit box, round caps)."""
-    p.save()
-    p.setRenderHint(QPainter.Antialiasing, True)
-    p.translate(rect.x(), rect.y())
-    p.scale(rect.width(), rect.height())
-    pen = QPen(color, 0.1)
-    pen.setCapStyle(Qt.RoundCap)
-    p.setPen(pen)
-    p.setBrush(Qt.NoBrush)
-    p.drawArc(QRectF(0.16, 0.16, 0.68, 0.68), 70 * 16, 290 * 16)  # open at the top right
-    head = QPainterPath()
-    head.moveTo(0.52, 0.03)
-    head.lineTo(0.74, 0.17)
-    head.lineTo(0.5, 0.3)
-    head.closeSubpath()
-    p.setPen(Qt.NoPen)
-    p.setBrush(color)
-    p.drawPath(head)
-    p.restore()
 
 
 def _draw_back(p: QPainter, rect: QRectF, color: QColor) -> None:
@@ -1606,7 +1584,7 @@ class Drawer(Overlay):
             elif key == BACK_BUTTON:
                 _draw_back(p, rect, tone)
             else:
-                _draw_refresh(p, rect, tone)
+                draw_refresh(p, rect, tone)
 
     def _paint_find(self, p: QPainter, units: Units) -> None:
         """The ⌕ Find box: a prompt; once clicked or typed into, the text, a caret and ✕."""

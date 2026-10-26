@@ -305,6 +305,22 @@ class TopNavTests(unittest.TestCase):
         host = self.host.windowHandle()
         QTest.mouseDClick(host, Qt.LeftButton, Qt.NoModifier, self.nav.mapTo(self.host, point))
 
+    def test_a_refresh_button_beside_the_source(self):  # 2.8: the Library's films and series
+        refreshes = []
+        self.nav.refreshRequested.connect(lambda: refreshes.append(True))
+        rects = self.nav._item_rects()
+        button = rects["refresh"]
+        self.assertGreater(button.left(), rects["source"].right())
+        self.assertLess(button.right(), rects["fullscreen"].left())
+        self.assertGreaterEqual(min(button.width(), button.height()), 28)
+        self.assertEqual(
+            self.nav.tooltip_at(button.center()),
+            key_hint("Refresh films and series", "Ctrl+Shift+R"),
+        )
+        QTest.mouseClick(self.nav, Qt.LeftButton, pos=button.center().toPoint())
+        self.assertEqual(refreshes, [True])
+        self.assertEqual((self.tabs, self.sources, self.searches), ([], [], []))
+
     def test_a_quick_second_click_on_fullscreen_asks_once(self):
         # 2.0.1: not into fullscreen and straight out again.
         fullscreens = []

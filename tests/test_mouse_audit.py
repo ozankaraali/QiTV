@@ -154,6 +154,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("menu", "Ctrl+O"): (("drawer", "Open file"),),
     ("menu", "Ctrl+,"): (("drawer", "settings"), ("drawer", "Settings")),
     ("menu", "Ctrl+R"): (("drawer", "refresh"),),
+    ("menu", "Ctrl+Shift+R"): (("library", "refresh"),),  # 2.8: films and series
     # ---- Finding subtitles (the OpenSubtitles search) ----------------------------------------
     # A click on a row; the wheel scrolls a list; a click on the field puts the keys there.
     ("subtitles", "Up, Down"): (

@@ -8,6 +8,7 @@ Each emits plain data (`finished`) or a message to show (`error`), never an addr
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable, Optional
 import uuid
 
@@ -73,19 +74,80 @@ class _ServerWorker(QObject):
 
 
 class MediaSectionWorker(_ServerWorker):
-    """The films ("vod") or series ("series") of every library that holds them."""
+    """The films ("vod") or series ("series") of every library that holds them.
 
-    def __init__(self, provider: dict, content_type: str, verify: bool, client=None) -> None:
+    A first load (or one a week after the last whole one, or with a library new since) asks
+    every title and notes when it looked. A later one (2.8: a refresh, a list past its time)
+    is given the saved list's summary (`media_server.saved_summary`) and asks only what
+    changed: per library, the titles saved since the last look and those whose user data
+    was (a position, a watched mark), and its count; when titles came or went (the count, or
+    a changed title it did not hold, says so), the library's ids in order, and those it did
+    not hold by their ids. Its answer is a delta that the catalog merges into the saved list
+    (`media_server.merged_payload`), on the GUI thread, where that list lives."""
+
+    def __init__(
+        self,
+        provider: dict,
+        content_type: str,
+        verify: bool,
+        client=None,
+        *,
+        saved: Optional[dict] = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
         super().__init__(provider, verify, client)
         self.content_type = content_type
+        self.saved = saved
+        self._clock = clock
 
     def work(self, client: ms.MediaServerClient) -> dict:
         series = self.content_type == "series"
         wanted = SERIES_LIBRARIES if series else MOVIE_LIBRARIES
         libraries = [lib for lib in client.libraries() if lib["type"] in wanted]
         item_type = "Series" if series else "Movie"
-        titles = {lib["id"]: client.items(item_type, lib["id"]) for lib in libraries}
-        return ms.section_payload(libraries, titles, client.base)
+        now = self._clock()
+        since = ms.server_time(now - ms.SINCE_MARGIN_S)
+        saved = self.saved
+        if (
+            saved is None
+            or now - saved["full"] > ms.WHOLE_AFTER_S
+            or any(lib["id"] not in saved["members"] for lib in libraries)
+        ):
+            titles = {lib["id"]: client.items(item_type, lib["id"]) for lib in libraries}
+            payload = ms.section_payload(libraries, titles, client.base)
+            payload.update(server_since=since, server_full=now)
+            return payload
+        changed: dict[str, dict] = {}
+        order: dict[str, list[str]] = {}
+        for library in libraries:
+            lib_id, known = library["id"], saved["members"][library["id"]]
+            fresh: list[str] = []
+            for for_user in (False, True):
+                for raw in client.items(item_type, lib_id, since=saved["since"], for_user=for_user):
+                    item_id = str(raw.get("Id") or "")
+                    if item_id:
+                        changed[item_id] = ms.title_item(raw, client.base, lib_id)
+                        fresh.append(item_id)
+            held = set(known)
+            if any(i not in held for i in fresh) or client.count(item_type, lib_id) != len(known):
+                ids = client.item_ids(item_type, lib_id)
+                missing = [i for i in ids if i not in held and i not in changed]
+                for start in range(0, len(missing), ms.IDS_A_REQUEST):
+                    chunk = missing[start : start + ms.IDS_A_REQUEST]
+                    for raw in client.items(item_type, lib_id, ids=chunk):
+                        item_id = str(raw.get("Id") or "")
+                        if item_id:
+                            changed[item_id] = ms.title_item(raw, client.base, lib_id)
+                order[lib_id] = ids
+            else:
+                order[lib_id] = list(known)
+        return {
+            "delta": True,
+            "libraries": libraries,
+            "order": order,
+            "changed": changed,
+            "server_since": since,
+        }
 
 
 class MediaSeriesWorker(_ServerWorker):
