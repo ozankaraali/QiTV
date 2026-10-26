@@ -73,7 +73,9 @@ jobs:
           python-version: '3.14'
           enable-cache: true
       - name: Install VLC and xcb dependencies
-        timeout-minutes: 6  # a stalled mirror (see the tests job)
+        # A stalled mirror (see the tests job) fails here; a slow one finishes (2.8.1: twice
+        # past 6 minutes, still downloading).
+        timeout-minutes: 20
         run: |
           apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
           sudo apt-get $apt update
