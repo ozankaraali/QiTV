@@ -1,6 +1,6 @@
 import logging
-from typing import Any, Dict, List, Optional
-from urllib.parse import quote, urlencode, urlsplit, urlunsplit
+from typing import Any, Dict, List, Mapping, Optional
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from services.redact import redact_url, safe_exc
 from services.vlc_profile import DEFAULT_USER_AGENT
@@ -56,6 +56,56 @@ def known_http_only(url: str) -> bool:
     """Whether the host of the HTTP address `url` answered only over HTTP this run."""
     host = _http_host(url)
     return bool(host) and host in _http_only
+
+
+def portal_http_only(provider: Mapping[str, Any]) -> bool:
+    """Whether `provider` is an STB portal that answered only over HTTP this run (2.8.1): its
+    links are asked over HTTP too, as an Xtream panel's, whatever host they name."""
+    if str(provider.get("type") or "").upper() != "STB":
+        return False
+    return known_http_only(str(provider.get("url") or ""))
+
+
+_LOCAL_HOSTS = ("localhost", "::1")
+
+
+def stb_link_shape(link: str, portal: str) -> str:
+    """What a portal's stream link is, for the log (2.8.1: why a portal's channels fail to open
+    is read there): its scheme, whether it is on the portal's host, another, or this computer,
+    its port, its path's length and ending, and the names of what it asks for (the empty ones
+    named again). Never a host name, a path's words or a value."""
+    try:
+        parts = urlsplit(link.strip())
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return "no address"
+    if parts.scheme.lower() not in ("http", "https") or not host:
+        return "no address"
+    try:
+        portal_host = (urlsplit(portal).hostname or "").lower()
+    except ValueError:
+        portal_host = ""
+    if host in _LOCAL_HOSTS or host.startswith("127."):
+        where = f"this computer ({host})"
+    elif host == portal_host:
+        where = "the portal's host"
+    else:
+        where = "another host"
+    words = [w for w in parts.path.split("/") if w]
+    ending = words[-1].rsplit(".", 1) if words else []
+    path = f"a path of {len(words)} part{'' if len(words) == 1 else 's'} " + (
+        f"ending in .{ending[1].lower()[:8]}" if len(ending) == 2 else "without an extension"
+    )
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    names = [name[:24] for name, _value in query]
+    empty = [name[:24] for name, value in query if not value]
+    shape = (
+        f"{parts.scheme.lower()}, {where}, "
+        f"{f'port {port}' if port else 'its default port'}, {path}, "
+        f"asking {', '.join(names) if names else 'nothing'}"
+    )
+    return shape + (f" (empty: {', '.join(empty)})" if empty else "")
 
 
 def https_fallback_candidates(url: str, prefer_https: bool) -> List[str]:

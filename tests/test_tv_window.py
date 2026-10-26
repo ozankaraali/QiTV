@@ -2181,6 +2181,30 @@ class LibraryButtonTests(WindowCase):  # 2.8: the Library in one click from the 
         self.assertTrue(screens.library_shown())
 
 
+SERVER = {"type": "JELLYFIN", "name": "Home", "url": "http://127.0.0.1:8096", "user_id": "u1"}
+
+
+class MediaServerWindowTests(WindowCase):  # 2.8.1: a server's title played in the window
+    def make_window(self) -> TVWindow:
+        servers = mock.patch.object(TVWindow, "_media_servers", return_value=[dict(SERVER)])
+        servers.start()
+        self.addCleanup(servers.stop)
+        return super().make_window()
+
+    def test_a_servers_title_is_told_to_it_with_the_settings_certificate_check(self):
+        self.config.ssl_verify = False
+        sent = []
+        url = "http://127.0.0.1:8096/Videos/abc/stream?MediaSourceId=abc&api_key=t"
+        with mock.patch(
+            "services.media_reporter._send_over_http", side_effect=lambda *a: sent.append(a)
+        ):
+            self.window.controller._media.playing(url)  # what opening the title tells first
+            wait_until(lambda: bool(sent))
+        self.assertEqual(
+            [(a[1], a[2].item_id, a[0]["ssl_verify"]) for a in sent], [("start", "abc", False)]
+        )
+
+
 class DrawerSettingsTests(WindowCase):
     def test_the_drawer_reaches_settings_and_add_provider_with_arrows_and_enter(self):
         self.show()

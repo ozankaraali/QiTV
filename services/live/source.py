@@ -25,10 +25,12 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+import http.client
 import logging
 import math
 import os
 import re
+import socket
 import threading
 import time
 from typing import Any, BinaryIO, NamedTuple, Protocol, TypeVar
@@ -140,6 +142,11 @@ _TLS_FAILED = "The channel's TLS certificate could not be verified."
 _TIMED_OUT = "The channel did not respond before the connection timed out."
 _RECEIVE_FAILED = "The channel connection failed while receiving media."
 _STOPPED = "The channel connection was stopped."
+# 2.8.1: how a connection failed, said in the log when a channel's input fails for good.
+_REFUSED = "The channel's server refused the connection."
+_UNANSWERED = "The channel's server closed the connection without answering."
+_BROKEN_OFF = "The channel's server broke the connection off."
+_NO_NAME = "The channel's server name was not found."
 _TOO_LARGE = "The channel's HLS playlist is too large."
 _NO_VIDEO = "The HLS channel has no compatible video quality."
 _INVALID_PLAYLIST = "The channel supplied an invalid HLS playlist."
@@ -296,6 +303,29 @@ class _LimitAnswer(requests.exceptions.HTTPError):
     (the channel plays directly, as before), but the open never asks it again."""
 
 
+def _network_detail(error: BaseException) -> str:
+    """How a connection failed (2.8.1), as one of the fixed texts, found among the errors the
+    failure wraps; "" when none says (the kind's general text stands)."""
+    todo: list[Any] = [error]
+    seen: set[int] = set()
+    while todo:
+        each = todo.pop(0)
+        if not isinstance(each, BaseException) or id(each) in seen:
+            continue
+        seen.add(id(each))
+        if isinstance(each, (NameResolutionError, socket.gaierror)):
+            return _NO_NAME
+        if isinstance(each, ConnectionRefusedError):
+            return _REFUSED
+        if isinstance(each, http.client.RemoteDisconnected):  # a ConnectionResetError too
+            return _UNANSWERED
+        if isinstance(each, ConnectionResetError):
+            return _BROKEN_OFF
+        todo.extend(each.args)
+        todo.extend((getattr(each, "reason", None), each.__cause__, each.__context__))
+    return ""
+
+
 def _dns_failed(error: Exception) -> bool:
     """Whether a connection failed because the host does not resolve: nothing warms up."""
     reason = getattr(error.args[0], "reason", None) if error.args else None
@@ -356,7 +386,7 @@ def _translate(error: BaseException) -> SourceError:
     if isinstance(error, requests.exceptions.HTTPError):
         return SourceError("http", status=_status(error))
     if isinstance(error, requests.exceptions.RequestException):
-        return SourceError("network")
+        return SourceError("network", _network_detail(error))
     log.warning("A live source failed unexpectedly (%s).", type(error).__name__)
     return SourceError("unsupported")
 
@@ -2023,7 +2053,11 @@ def _first_answer(
             delay = next(delays, None) if passing else None
             if delay is None:
                 raise
-            log.info("The channel's first answer failed (%s); asking again.", type(error).__name__)
+            log.info(
+                "The channel's first answer failed (%s%s); asking again.",
+                type(error).__name__,
+                f": {_network_detail(error)}" if _network_detail(error) else "",
+            )
         if http.wait(delay):
             raise _Closed()
 

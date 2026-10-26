@@ -132,7 +132,11 @@ class ScheduleTests(unittest.TestCase):
             written.append(len(data["items"]))
 
         with mock.patch.object(rs, "write_now", write_now):
-            schedule = rs.Schedule(str(self.folder / "other.json"), write=rs.write_later)
+            schedule = rs.Schedule(
+                str(self.folder / "other.json"),
+                write=rs.write_later,
+                clock=lambda: T0.timestamp(),  # the shows have not ended, whatever today is
+            )
             for minutes in range(5):
                 schedule.add_once(CHANNEL, programme(f"Show {minutes}", 60 * minutes))
             rs.flush_writes(5)

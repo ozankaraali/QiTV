@@ -95,7 +95,7 @@ class BrowsedCatalog(QObject):
         # What all mode builds from the providers' lists, kept against their content versions:
         # ("groups"/"all", section) -> (versions, value). 200,000 channels are joined once.
         self._memo: dict[tuple[str, str], tuple[tuple, Any]] = {}
-        self._seen_source = self.source()
+        self._seen_source = self._shown()
         # Why a provider's list of a section last failed to load, by (provider, section): the
         # mixed lists say it under the provider's heading while it has no groups.
         self._section_errors: dict[tuple[str, str], str] = {}
@@ -318,10 +318,17 @@ class BrowsedCatalog(QObject):
         catalog = self._cat()
         return catalog.provider_type() if catalog is not None else ""
 
+    def _shown(self) -> object:
+        """What the page lists: its provider, or the providers it mixes (2.8.1: another mix of
+        as many providers is another list, whatever their versions add up to)."""
+        if self.all_providers():
+            return (ALL_PROVIDERS, *self.mixed_names())
+        return self.source()
+
     def content_version(self) -> int:
-        source = self.source()
-        if source != self._seen_source:
-            self._seen_source = source
+        shown = self._shown()
+        if shown != self._seen_source:
+            self._seen_source = shown
             self._epoch += 1
         guard = self._parental()  # 2.8: hiding or showing what is hidden changes the lists
         hidden = (guard.state_version() << 2 * _EPOCH_SHIFT) if guard is not None else 0

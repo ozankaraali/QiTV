@@ -864,6 +864,40 @@ class FailureReasonTests(unittest.TestCase):
         self.assertEqual(relayed, [failure])
         self.assertIn("network", logs.output[0])
 
+    def test_a_helper_log_line_is_logged_by_the_app(self):  # 2.8.1
+        import logging
+        import queue
+
+        from services.live import engine as engine_module
+
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        line = "The channel did not open over HTTPS (tls); opening it over HTTP."
+        with self.assertLogs("services.live.helper", "INFO") as logs:
+            supervisor._receive(("log", logging.INFO, "services.live.source", line))
+            supervisor._receive(("log", logging.INFO, "urllib3", "http://secret.test/"))
+            supervisor._receive(("log", "INFO", "services.live.source", line))  # malformed
+        self.assertEqual(logs.output, [f"INFO:services.live.helper.source:{line}"])
+
+    def test_a_failure_says_how_it_failed(self):  # 2.8.1: refused, unanswered, broken off
+        import queue
+
+        from services.live import engine as engine_module
+
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        supervisor._relay = lambda message: None
+        command = ("open", "s1", URL_FOR_RING, {}, True, {"kind": "ram", "max_bytes": MIB}, 6.0)
+        supervisor._records["s1"] = engine_module._Record(command=command, sent=True)
+        failure = ("error", "s1", "network", "The channel's server refused the connection.")
+        with self.assertLogs("services.live.engine", "INFO") as logs:
+            supervisor._receive(failure)
+        self.assertEqual(
+            logs.output,
+            [
+                "INFO:services.live.engine:A live session's input failed for good: network "
+                "(The channel's server refused the connection.)."
+            ],
+        )
+
 
 class StalledUpstream:
     """Accepts one HTTP request, sends part of a response header and waits for EOF."""
@@ -1109,6 +1143,23 @@ class LiveEngineTests(unittest.TestCase):
         index = read_index(self.root / name)
         self.assertEqual(index.where, {"position": 2.0, "paused": True})
         self.assertEqual(index.label, {"channel": "k1"})
+
+    def test_the_helpers_own_lines_reach_the_apps_log(self):  # 2.8.1, end to end
+        engine, signals = self.engine()
+        signals.wait_for(lambda event: event == ("available", True), timeout=60)
+        source = self.source()
+        with self.assertLogs("services.live.helper", "INFO") as logs:
+            sid = engine.open_session(
+                source.url + SECRET_PATH,
+                headers={},
+                verify_ssl=True,
+                disk=False,
+                max_bytes=MIB,
+                https_first=True,  # a plain server: the helper says HTTPS did not open
+            )
+            signals.wait_for(lambda event: event == ("ready", sid), timeout=60)
+        self.assertTrue(any("did not open over HTTPS" in line for line in logs.output), logs)
+        self.assertFalse(any(SECRET_PATH in line for line in logs.output))
 
     def test_a_session_opened_before_the_helper_is_up_is_labelled(self):
         # Review B I1, end to end: the startup tune opens before the helper's hello.

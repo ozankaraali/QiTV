@@ -621,6 +621,15 @@ class MixTests(unittest.TestCase):  # 2.8: the Library mixes the providers ticke
         view.refresh_sections()
         self.assertEqual({n for n, _s in asked}, {"Harbor IPTV"})
 
+    def test_another_mix_of_as_many_providers_is_another_content_version(self):  # 2.8.1
+        view = self.library()
+        for name in ("Harbor IPTV", "Cove TV"):  # both ready, at the same version
+            self.catalogs.catalog(name).content_version = lambda: 7
+        view.select_mix(["Demo TV", "Harbor IPTV"])
+        before = view.content_version()
+        view.select_mix(["Demo TV", "Cove TV"])
+        self.assertNotEqual(view.content_version(), before)
+
     def test_a_page_without_a_mix_mixes_every_provider(self):
         self.config.library_mix = ["Demo TV", "Cove TV"]
         view = self.library(mix_key="")  # the TV page's and the phone's lists

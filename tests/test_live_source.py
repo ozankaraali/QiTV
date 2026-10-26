@@ -3229,5 +3229,54 @@ class WindowsInterruptModeTests(SourceTestCase):
     )
 
 
+class NetworkDetailTests(unittest.TestCase):  # 2.8.1: how a connection failed, in the log
+    def failure_of(self, url):
+        try:
+            requests.get(url, timeout=5)
+        except requests.exceptions.RequestException as error:
+            return source_module._translate(error)
+        self.fail("the request did not fail")
+
+    def test_a_refused_connection_says_so(self):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        listener.close()  # nothing listens there now
+        failure = self.failure_of(f"http://127.0.0.1:{port}/channel")
+        self.assertEqual(
+            (failure.kind, str(failure)),
+            ("network", "The channel's server refused the connection."),
+        )
+
+    def test_a_server_that_closes_without_answering_says_so(self):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        self.addCleanup(listener.close)
+
+        def close_one():
+            connection, _address = listener.accept()
+            connection.recv(4096)  # the request, then no answer at all
+            connection.close()
+
+        threading.Thread(target=close_one, daemon=True).start()
+        failure = self.failure_of(f"http://127.0.0.1:{listener.getsockname()[1]}/channel")
+        self.assertEqual(
+            str(failure), "The channel's server closed the connection without answering."
+        )
+
+    def test_a_connection_broken_off_says_so(self):
+        from urllib3.exceptions import ProtocolError
+
+        broken = ProtocolError("Connection aborted.", ConnectionResetError(54, "reset by peer"))
+        failure = source_module._translate(requests.exceptions.ConnectionError(broken))
+        self.assertEqual(str(failure), "The channel's server broke the connection off.")
+
+    def test_another_failure_keeps_the_general_text_and_never_its_own(self):
+        error = requests.exceptions.ConnectionError("http://secret.test/ failed")
+        failure = source_module._translate(error)
+        self.assertEqual(str(failure), "The channel could not be reached over HTTP.")
+
+
 if __name__ == "__main__":
     unittest.main()

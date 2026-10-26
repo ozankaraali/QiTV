@@ -87,6 +87,15 @@ class CreateLinkHttpsTests(_HttpsMemory):
                 url = self._created_url({"url": "http://portal.test/c/", **saved})
                 self.assertTrue(url.startswith("https://portal.test/"), url)
 
+    def test_the_link_made_is_described_in_the_log(self):  # 2.8.1: no host, no value
+        with self.assertLogs("services.workers", "INFO") as logs:
+            self._created_url({"url": "http://portal.test/c/"})
+        self.assertEqual(
+            logs.output[-1],
+            "INFO:services.workers:The portal's link: http, another host, its default port, "
+            "a path of 1 part ending in .ts, asking nothing.",
+        )
+
     def test_a_portal_that_answered_only_over_http_is_asked_over_http(self):
         remember_http_only("http://portal.test/c/")
         url = self._created_url({"url": "http://portal.test/c/"})
