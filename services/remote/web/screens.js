@@ -65,6 +65,8 @@ const words = {
   cast_to: "Cast to a TV",
   stop_casting: "Stop casting",
   looking_devices: "Looking for devices…",
+  refresh: "Refresh",
+  refreshing: "Refreshing films and series…",
   no_casting: "Casting isn't available on this computer",
   record_series: "Series",
   cancel_recording: "Cancel recording",
@@ -871,6 +873,10 @@ function bindLibrary() {
     });
   }
   $("libraryUp").addEventListener("click", () => openLibraryAt("genres"));
+  $("libraryRefresh").addEventListener("click", () => {  // 2.8: as the TV Library's ↻
+    send({ t: "refresh" });
+    banner(w("refreshing"));
+  });
   const find = $("libraryFind");
   find.addEventListener("input", () => {
     clearTimeout(libraryTimer);

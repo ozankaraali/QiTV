@@ -19,6 +19,7 @@ from services.remote.protocol import (
     Press,
     Query,
     RecAct,
+    RefreshLists,
     Schedule,
     StoreSaved,
     ToTv,
@@ -220,6 +221,7 @@ class KkTests(SessionCase):
             {"t": "cast", "to": "Den"},
             {"t": "sched", "id": "h7", "do": "series"},
             {"t": "get", "what": "cast"},
+            {"t": "refresh"},
         ):
             got += session.receive(phone.seal(message)).events
         self.assertEqual(
@@ -243,6 +245,7 @@ class KkTests(SessionCase):
                 CastTo(sid, "Den"),
                 Schedule(sid, "h7", "series"),
                 Get(sid, "cast", "", 0),
+                RefreshLists(sid),
             ],
         )
 

@@ -144,6 +144,8 @@ class MessageTests(unittest.TestCase):
             parse_phone_message({"t": "watch", "id": "h3"}), {"t": "watch", "id": "h3"}
         )
         self.assertEqual(parse_phone_message({"t": "totv"}), {"t": "totv"})
+        # 2.8: the Library's Refresh
+        self.assertEqual(parse_phone_message({"t": "refresh", "x": 1}), {"t": "refresh"})
         self.assertEqual(  # how far the phone got in a film it plays
             parse_phone_message({"t": "pos", "ms": 61000, "len": 5400000}),
             {"t": "pos", "ms": 61000, "len": 5400000},

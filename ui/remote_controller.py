@@ -44,6 +44,7 @@ from services.remote.protocol import (
     Press,
     Query,
     RecAct,
+    RefreshLists,
     Schedule,
     Status,
     StoreSaved,
@@ -337,6 +338,8 @@ class RemoteController(QObject):
             self._watch_here(event.sid, event.handle)
         elif isinstance(event, ToTv):
             self._to_tv(event.sid)
+        elif isinstance(event, RefreshLists):  # 2.8: as the Library's ↻
+            self._window.screens.library_controller.refresh_lists()
         elif isinstance(event, Position):
             self._position(event.sid, event.position_ms, event.length_ms, event.play)
         elif isinstance(event, Answered):

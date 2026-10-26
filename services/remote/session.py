@@ -37,6 +37,7 @@ from services.remote.protocol import (
     Press,
     Query,
     RecAct,
+    RefreshLists,
     Schedule,
     StoreSaved,
     ToTv,
@@ -282,6 +283,8 @@ class Session:
             return Reply(events=[WatchHere(sid, m.get("id", ""))])
         if t == "totv":
             return Reply(events=[ToTv(sid)])
+        if t == "refresh":  # 2.8
+            return Reply(events=[RefreshLists(sid)])
         if t == "pos":
             return Reply(events=[Position(sid, m["ms"], m["len"], m.get("p", -1))])
         if t == "answer":

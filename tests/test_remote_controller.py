@@ -25,6 +25,7 @@ from services.remote.protocol import (
     Press,
     Query,
     RecAct,
+    RefreshLists,
     Status,
     StoreSaved,
     ToTv,
@@ -585,6 +586,13 @@ class WatchHereTests(WindowCase):
         self.window.remote.bridge.post(WatchHere("s8", "nope"))
         self.assertTrue(wait_until(self.plays))
         self.assertEqual(self.plays()[-1], {"t": "play", "failed": True})
+
+    def test_the_phones_refresh_loads_the_librarys_lists_again(self):  # 2.8
+        self.connect()
+        controller = self.window.screens.library_controller
+        with mock.patch.object(controller, "refresh_lists") as refresh:
+            self.window.remote.bridge.post(RefreshLists("s8"))
+            self.assertTrue(wait_until(lambda: refresh.called))
 
     def test_back_to_the_tv_tunes_what_the_phone_played(self):
         row = self.listed_row(1)
