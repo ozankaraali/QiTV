@@ -105,6 +105,10 @@ class KeptBuffers:
         """The channel's kept buffer, no longer kept here (its player takes it back)."""
         return self._rings.pop(channel, None)
 
+    def let_go(self, ring: KeptRing) -> None:
+        """A ring taken that its player could not take back (2.8: its start raised): closed."""
+        self._engine.close_session(ring.sid)
+
     def drop(self, sid: str) -> None:
         """Let session `sid` go (it is closed)."""
         for channel, ring in list(self._rings.items()):

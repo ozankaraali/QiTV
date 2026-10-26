@@ -6,7 +6,8 @@ that order for it (the main stream's `LiveTuner` and the PiP slot's `SessionMana
 own one):
 - `request()` asks for a ticket for the next start; the budget always grants later, and
   `granted` follows for the latest request only;
-- `start()` starts the live session on that ticket; if it raises, the ticket goes back;
+- `start()` starts the live session on that ticket; if it raises, the ticket goes back (and
+  a kept buffer it took from the registry is closed, 2.8);
 - `stop()` stops a running session and gives its ticket back once `LiveSession.released`
   says its upstream is closed (also when that comes inside `stop()`), or after
   `RELEASE_CAP_MS`; `released` follows then. A ticket that never started goes back at once.
@@ -124,11 +125,12 @@ class BudgetedStream(QObject):
         self._running = True
         self.disk = self.asked_disk = bool(kwargs.get("disk"))
         channel = kwargs.get("channel")
+        taken = None
         if self.kept is not None and channel and "kept" not in kwargs:
-            ring = self.kept.take(str(channel))
-            if ring is not None:
-                kwargs["kept"] = ring  # taken back where the user was
-                self.disk = ring.disk  # it stays the kind it is
+            taken = self.kept.take(str(channel))
+            if taken is not None:
+                kwargs["kept"] = taken  # taken back where the user was
+                self.disk = taken.disk  # it stays the kind it is
         try:
             self.live.start(*args, **kwargs)
         except Exception:
@@ -136,6 +138,10 @@ class BudgetedStream(QObject):
             ticket, self.ticket = self.ticket, None
             if ticket is not None:
                 self.budget.release(ticket)
+            if taken is not None and self.kept is not None:
+                # 2.8: out of the registry, perhaps never the session's: closed, not left open
+                # (a session that had it closes it too, which the engine takes once).
+                self.kept.let_go(taken)
             try:
                 self.live.stop()
             except Exception:
