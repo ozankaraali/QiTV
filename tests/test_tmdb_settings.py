@@ -66,16 +66,22 @@ class TmdbSettingsTests(base.WindowCase):
         for name in ("VLC", "Qt", "Python", "OpenSubtitles", "iptv-org", "TMDB"):
             self.assertIn(name, text)
         self.assertIn("THIRD-PARTY-NOTICES.md", text)  # every credit and license
+        # TMDB's notice is in the credits' own small text: the same size, the same left edge
+        self.assertIn(
+            "<small>This product uses the TMDB API but is not endorsed or certified by TMDB."
+            "</small>",
+            text,
+        )
         about = AboutDialog(self.window)
         self.addCleanup(about.deleteLater)
-        self.assertEqual(
-            about.tmdb_notice.text(),
-            "This product uses the TMDB API but is not endorsed or certified by TMDB.",
-        )
         logo = about.tmdb_logo.pixmap()
         self.assertFalse(logo.isNull())
         tall = logo.height() / logo.devicePixelRatio()
         self.assertLessEqual(tall, ABOUT_LOGO_PX / 6)  # far less prominent than QiTV's own
+        about.show()
+        about.layout().activate()
+        self.assertEqual(about.tmdb_logo.x(), about.text.x())  # flush left with the text
+        self.assertEqual(about.tmdb_logo.width(), round(logo.width() / logo.devicePixelRatio()))
 
 
 if __name__ == "__main__":
