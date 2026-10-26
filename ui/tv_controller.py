@@ -137,6 +137,10 @@ logger = logging.getLogger(__name__)
 
 INFO_MS = 3000
 ERROR_MS = 6000
+# i18n: a toast: hiding a channel or a group needs a PIN first (Settings → Parental controls)
+SET_PIN_FIRST = N_("Set a PIN first: Settings → Parental controls.")
+# i18n: a toast: the channel or group is hidden while QiTV is locked; Settings shows it again
+HIDDEN_TEXT = N_("Hidden while locked. Settings → Parental controls shows it again.")
 RECORDING_MS = 5000  # "Recording saved: <name>" (a name to read)
 VOLUME_STEP = 5
 SEEK_STEP_MS = 10_000
@@ -368,6 +372,8 @@ class TVController(QObject):
             open_pip=self._open_pip_node if sessions is not None else None,
             forget_recent=self._forget_recent,
             clear_recents=self._clear_recents,
+            hide=self._hide_from_menu,  # 2.8: parental controls, once their PIN is set
+            may_hide=lambda: self.parental is not None and self.parental.has_pin(),
             parent=self,
         )
         # The volume keys, mute and the wheel, on the mixer (one row per picture).
@@ -445,6 +451,9 @@ class TVController(QObject):
         self._media = media_reporter
         # 2.8: the providers scheduled recordings record from (their guides stay loaded).
         self.extra_guides: Callable[[], set[str]] = set
+        # 2.8: parental controls (services.parental.Parental; None: none): what they hide never
+        # enters the history.
+        self.parental: Optional[Any] = None
         # 2.8: casting the large picture to a Chromecast (none without libVLC's renderers).
         self._cast: Optional[CastControls] = None
         if cast_devices is not None:
@@ -1791,6 +1800,9 @@ class TVController(QObject):
             self._record_watched(target, url)
 
     def _record_watched(self, target: Target, url: str) -> None:
+        guard = self.parental
+        if guard is not None and guard.protects(target.section, target.item):
+            return  # 2.8: what parental controls hide never enters the history (nor Recent)
         try:
             self.watch.record_play(
                 item_provider.provider_name(self.catalog, target.item),
@@ -3381,6 +3393,30 @@ class TVController(QObject):
         node = drawer.highlighted()
         if node is not None and self.nav.is_recent_row(node):
             self._forget_recent(node.payload)
+
+    def parental_changed(self) -> None:
+        """Parental controls changed (2.8): the lists read their catalog again."""
+        if not self._closed:
+            self._repaint()
+            self._guide.invalidate()
+
+    def _hide_from_menu(self, node: NavNode) -> None:
+        """A channel's or a group's "Hide (parental controls)" (2.8): hidden while locked; the
+        PIN comes first (Settings)."""
+        guard = self.parental
+        if guard is None or not guard.has_pin():
+            self._toast(translate(SET_PIN_FIRST), "error", ERROR_MS)
+            return
+        section = self.nav.section_of(node) or "live"
+        if node.layer == "group":
+            name, own = split_group_id(node.key)
+            provider = name or self.catalog.current_provider_name()
+            hidden = guard.hide_group(section, provider, own or node.key, title=node.title)
+        else:
+            hidden = guard.hide_item(section, node.payload)
+        if hidden:
+            self._toast(translate(HIDDEN_TEXT))
+            self._repaint()
 
     def _forget_recent(self, item: dict) -> None:
         """The channel leaves ⟲ Recent: its plays leave the watch history (saved with it)."""

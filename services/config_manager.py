@@ -475,6 +475,11 @@ class ConfigManager:
     media_4k_versions = _config_property(
         "media_4k_versions", "screen", coerce=_one_of(("screen", "always", "never"), "screen")
     )
+    # 2.8, optional: parental controls ({"version": 1, "salt", "pin" (a PBKDF2 hash), "hidden"});
+    # services.parental reads and writes it.
+    parental = _config_property(
+        "parental", None, coerce=lambda value: value if isinstance(value, dict) else None
+    )
     media_max_mbps = _config_property(
         "media_max_mbps",
         0,

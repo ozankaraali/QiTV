@@ -17,7 +17,7 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services import i18n
+from services import i18n, parental
 from services.i18n import N_, tr, tr_n, translate
 from services.library import Details, LibraryModel
 from services.provider_ids import with_provider
@@ -220,6 +220,7 @@ class SearchSession(QObject):
     def _set_hits(self, hits: Optional[list[Hit]], *, failed: bool = False) -> None:
         if hits:  # a hit's title is its provider's, wherever it is played from
             hits = [replace(h, item=with_provider(h.item, h.provider)) for h in hits]
+            hits = parental.visible_hits(hits)  # 2.8: not what parental controls hide
         self._hits = hits
         self._failed = failed
         sections: list[tuple[str, list[dict]]] = []

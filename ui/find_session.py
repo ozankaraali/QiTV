@@ -17,6 +17,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from services import parental
 from services.find import (
     FindIndex,
     FindWorker,
@@ -178,8 +179,14 @@ class FindSession(QObject):
             self._queued = False
             self._start()  # a newer text: these would only flash
         elif generation == self._generation and text == self._query:
+            guard = parental.installed()  # 2.8: not what parental controls hide now
+            if guard is not None and guard.active():
+                genres = [
+                    g for g in genres if not guard.hides_group("live", g.provider, str(g.group_id))
+                ]
             self.genres = list(genres)
-            self.channels = [replace(h, item=with_provider(h.item, h.provider)) for h in hits]
+            stamped = [replace(h, item=with_provider(h.item, h.provider)) for h in hits]
+            self.channels = parental.visible_hits(stamped)
             self.searching = False
             self.changed.emit()
 

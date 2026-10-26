@@ -83,6 +83,7 @@ from services.live.live_session import LiveSession
 from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
 from services.media_reporter import MediaReporter
 from services.navigation import NavModel
+from services.parental import Parental, install as install_parental
 from services.picture import FILE_NAME as PICTURE_FILE, ChannelPictures
 from services.playback import (
     NullSession,
@@ -411,6 +412,10 @@ class TVWindow(QMainWindow):
             config_manager, provider_manager, in_use=self._providers_in_use, parent=self
         )
         self.catalogs.screen_4k = self._screen_is_4k  # 2.8: a media server's 4K versions
+        # 2.8: parental controls: the browsed catalogs and the searches leave out what they hide
+        self.parental = Parental(config_manager)
+        self.catalogs.parental = self.parental
+        install_parental(self.parental)
         self.catalog = BrowsedCatalog(
             self.catalogs,
             config_manager,
@@ -700,6 +705,7 @@ class TVWindow(QMainWindow):
             )
             self.scheduler.changed.connect(self._schedule_changed)
             controller.extra_guides = self.scheduler.providers
+        controller.parental = self.parental  # what it protects never enters the history
         self.overlays.guide.recordRequested.connect(self._schedule_programme)
         self.overlays.guide.recordCancelled.connect(self._cancel_programme)
         self.library_controller = self.screens.library_controller
@@ -852,6 +858,14 @@ class TVWindow(QMainWindow):
         self.screens.recordings.set_scheduled(self.recording_schedule.items())
         self.screens.recordings.refresh()  # a recording that ended is a file now
         self.controller.update_guides()
+
+    def parental_changed(self) -> None:
+        """Parental controls changed (a PIN, locked or not, hidden or shown again; 2.8): the
+        channel list, the guide and the Library show what may show now."""
+        if self._closing:
+            return
+        self.controller.parental_changed()
+        self.screens.library_model.changed.emit()
 
     def _stop_scheduler(self) -> None:
         if self.scheduler is not None:

@@ -14,7 +14,7 @@ from datetime import datetime, tzinfo
 import gc
 import itertools
 import logging
-from typing import Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -92,6 +92,9 @@ class Catalogs(QObject):
         # 2.8: whether a screen shows 4K (the window's check; a media server's 4K version
         # plays only then, by default).
         self.screen_4k: Callable[[], bool] = lambda: False
+        # 2.8: the window's parental controls (services.parental.Parental): the browsed
+        # catalogs leave out what they hide while locked. None: nothing is hidden.
+        self.parental: Optional[Any] = None
 
     # --- providers -------------------------------------------------------------------
     def names(self) -> list[str]:

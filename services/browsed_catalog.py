@@ -294,11 +294,15 @@ class BrowsedCatalog(QObject):
         if source != self._seen_source:
             self._seen_source = source
             self._epoch += 1
+        guard = self._parental()  # 2.8: hiding or showing what is hidden changes the lists
+        hidden = (guard.state_version() << 2 * _EPOCH_SHIFT) if guard is not None else 0
         if self.all_providers():
-            return (self._epoch << _EPOCH_SHIFT) + self._all_version()
+            return hidden + (self._epoch << _EPOCH_SHIFT) + self._all_version()
         catalog = self._cat()
-        return (self._epoch << _EPOCH_SHIFT) + (
-            catalog.content_version() if catalog is not None else 0
+        return (
+            hidden
+            + (self._epoch << _EPOCH_SHIFT)
+            + (catalog.content_version() if catalog is not None else 0)
         )
 
     def _all_version(self) -> int:
@@ -462,15 +466,41 @@ class BrowsedCatalog(QObject):
 
     def groups(self, section: str) -> list[Group]:
         if self.all_providers():
-            return list(self._mixed_groups(section))
-        catalog = self._cat()
-        return catalog.groups(section) if catalog is not None else []
+            found = list(self._mixed_groups(section))
+        else:
+            catalog = self._cat()
+            found = catalog.groups(section) if catalog is not None else []
+        guard = self._parental()
+        if guard is None or not guard.active():
+            return found
+        # 2.8: the groups parental controls hide while locked are not listed.
+        return [
+            g for g in found if g.header or not guard.hides_group(section, *self._group_of(g.id))
+        ]
 
     def items(self, section: str, group_id: str) -> Optional[list[dict]]:
         if self.all_providers():
-            return self._mixed_items(section, group_id)
-        catalog = self._cat()
-        return catalog.items(section, group_id) if catalog is not None else None
+            found = self._mixed_items(section, group_id)
+        else:
+            catalog = self._cat()
+            found = catalog.items(section, group_id) if catalog is not None else None
+        guard = self._parental()
+        if found is None or guard is None or not guard.active():
+            return found
+        if guard.hides_group(section, *self._group_of(group_id)):
+            return []
+        return guard.visible(section, found)  # 2.8: without the channels hidden while locked
+
+    def _parental(self):
+        """The window's parental controls (2.8; None: none)."""
+        return getattr(self._catalogs, "parental", None)
+
+    def _group_of(self, group_id: str) -> tuple[str, str]:
+        """(provider, its own group id) of a group as this catalog lists it."""
+        name, own_id = split_group_id(group_id)
+        if name:
+            return name, own_id
+        return self.current_provider_name(), str(group_id)
 
     def request_group(self, section: str, group_id: str) -> None:
         if self.all_providers():

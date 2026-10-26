@@ -161,6 +161,36 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.assertEqual(view.sections(), catalog.sections())
         self.assertIs(view.provider_manager, catalog.provider_manager)
 
+    def test_a_group_parental_controls_hide_is_left_out_while_locked(self):
+        from services.parental import Parental
+
+        class Kept:  # where Parental keeps its PIN and list
+            parental = None
+
+            def save_config(self):
+                pass
+
+        guard = Parental(Kept())
+        guard.set_pin("1234")
+        self.catalogs.parental = guard
+        view = self.view("Demo TV")
+        view.select_provider()
+        for channel in view.items("live", "Sports"):
+            channel["tv_genre_id"] = "Sports"  # its group, as M3U and Xtream channels name it
+        before = view.content_version()
+        all_count = len(view.items("live", ALL_GROUP_ID))
+        guard.hide_group("live", "Demo TV", "Sports")
+        self.assertNotEqual(view.content_version(), before)  # the lists rebuild
+        self.assertEqual([g.title for g in view.groups("live") if g.id == "Sports"], [])
+        self.assertEqual(view.items("live", "Sports"), [])
+        self.assertEqual(len(view.items("live", ALL_GROUP_ID)), all_count - 12)
+        guard.unlock("1234")
+        self.assertIn("Sports", [g.id for g in view.groups("live")])
+        self.assertEqual(len(view.items("live", ALL_GROUP_ID)), all_count)
+        mixed = self.view(ALL_PROVIDERS)
+        guard.lock()
+        self.assertEqual(len(mixed.items("live", "Demo TV\x1fSports") or []), 0)
+
     def test_a_library_on_a_provider_not_set_up_yet_lists_its_sections_and_sets_it_up(self):
         # The TV page on one provider, the Library on another not set up since QiTV started:
         # its Movies said it "has no movies" (its type is read in its setup) and never set up.

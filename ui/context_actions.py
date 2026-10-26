@@ -29,7 +29,7 @@ from PySide6.QtWidgets import QMenu, QWidget
 
 from services import external_players, favorites, i18n
 from services.i18n import N_, tr, tr_n, translate
-from services.navigation import RECENT_GROUP, NavModel, NavNode
+from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode
 from ui.link_lanes import LinkLanes, Target
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -41,6 +41,8 @@ LINK_COPIED_TEXT = N_("Link copied")  # i18n: a toast: the stream's link is on t
 OPEN_PIP_TEXT = N_("Open in picture-in-picture")  # i18n: a menu entry
 # i18n: a menu entry: the channel leaves the list of channels watched lately ("Recent")
 REMOVE_RECENT_TEXT = N_("Remove from Recents")
+# i18n: a channel's or a group's right-click entry: parental controls hide it (2.8)
+HIDE_TEXT = N_("Hide (parental controls)")
 # i18n: a menu entry opening a submenu that confirms emptying the "Recent" list
 CLEAR_RECENTS_TEXT = N_("Clear Recents")
 PLAYERS = ((N_("Play in VLC"), "vlc"), (N_("Play in MPV"), "mpv"))
@@ -88,6 +90,8 @@ class ContextActions(QObject):
         open_pip: Optional[Callable[[NavNode], None]] = None,
         forget_recent: Optional[Callable[[dict], None]] = None,
         clear_recents: Optional[Callable[[], None]] = None,
+        hide: Optional[Callable[[NavNode], None]] = None,
+        may_hide: Callable[[], bool] = lambda: True,
         parent: Optional[QObject] = None,
     ) -> None:
         """`external` is services.external_players or a stand-in; `notify(text, kind)` toasts.
@@ -97,6 +101,8 @@ class ContextActions(QObject):
         """
         super().__init__(parent)
         self._open_pip = open_pip
+        self._hide = hide  # 2.8: parental controls hide a channel or a group ...
+        self._may_hide = may_hide  # ... once their PIN is set
         self._forget_recent = forget_recent
         self._clear_recents = clear_recents
         self.nav = nav
@@ -139,6 +145,12 @@ class ContextActions(QObject):
         """`node`'s menu; None when it has nothing to offer (a series)."""
         if node.layer == "group" and node.key == RECENT_GROUP:
             return self._recents_menu(parent)
+        hide = self._hide if self._may_hide() else None
+        if node.layer == "group" and hide is not None and node.key != FAVORITES_GROUP:
+            menu = QMenu(parent)  # 2.8: a group's menu: parental controls hide it
+            menu.setStyleSheet(menu_style())
+            menu.addAction(translate(HIDE_TEXT)).triggered.connect(lambda _=False: hide(node))
+            return menu
         channel = is_channel(self.nav, node)
         playable = isinstance(node.payload, dict) and self.nav.is_playable(node)
         if not channel and not playable:
@@ -162,6 +174,8 @@ class ContextActions(QObject):
                     lambda _=False: forget(item)
                 )
                 self._add_clear_recents(menu)
+            if hide is not None:
+                menu.addAction(translate(HIDE_TEXT)).triggered.connect(lambda _=False: hide(node))
         if playable:
             if channel:
                 menu.addSeparator()

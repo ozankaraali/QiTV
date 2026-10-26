@@ -4095,6 +4095,39 @@ class ContextMenuTests(ControllerTestCase):
         self.assertEqual(self.config.favorites, ["One"])
         self.assertEqual(self.texts(self.menu_for(self.channels[0]))[0], "Remove from favorites")
 
+    def guarded(self):
+        from services.parental import Parental
+
+        class Kept:
+            parental = None
+
+            def save_config(self):
+                pass
+
+        guard = Parental(Kept())
+        guard.set_pin("1234")
+        self.controller.parental = guard
+        return guard
+
+    def test_with_a_pin_a_channel_and_a_group_can_be_hidden(self):
+        guard = self.guarded()
+        menu = self.menu_for(self.channels[0])
+        self.assertIn("Hide (parental controls)", self.texts(menu))
+        self.choose(menu, "Hide (parental controls)")
+        self.assertTrue(guard.protects("live", self.channels[0].payload))
+        group = self.nav.path[-1]
+        group_menu = self.menu_for(group)
+        self.assertEqual(self.texts(group_menu), ["Hide (parental controls)"])
+        self.choose(group_menu, "Hide (parental controls)")
+        self.assertEqual(len(guard.hidden()), 2)
+
+    def test_what_parental_controls_protect_never_enters_the_history(self):
+        guard = self.guarded()
+        guard.hide_item("live", self.channels[0].payload)
+        plays = len(self.watch.plays)
+        self.play(0)
+        self.assertEqual(len(self.watch.plays), plays)
+
     def test_copy_stream_link_sets_the_clipboard_once_the_link_is_ready(self):
         self.choose(self.menu_for(self.channels[0]), "Copy stream link")
         self.assertEqual(self.requested(), ["One"])

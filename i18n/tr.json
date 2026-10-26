@@ -9,7 +9,10 @@
     "name": "Türkçe"
   },
   "A Jellyfin or Emby server's titles can't be exported to a playlist.": "Jellyfin veya Emby sunucusunun içerikleri oynatma listesine aktarılamaz.",
+  "A PIN hides channels and groups you choose (right-click them in the channel list) while QiTV is locked, and keeps them out of the history. Unlocking with the PIN lasts an hour.": "PIN, seçtiğiniz kanalları ve grupları (kanal listesinde sağ tıklayın) QiTV kilitliyken gizler ve geçmişe girmelerini engeller. PIN ile açılan kilit bir saat sürer.",
+  "A PIN is 4 digits or more.": "PIN en az 4 rakamdır.",
   "A TV-first IPTV player for STB portals, Xtream and M3U playlists.": "STB portalları, Xtream ve M3U oynatma listeleri için TV odaklı bir IPTV oynatıcısı.",
+  "A new PIN (4 digits or more):": "Yeni PIN (en az 4 rakam):",
   "A new version ({version}) is available!": "Yeni bir sürüm ({version}) mevcut!",
   "A proxy on your network asks for a sign-in (407)": "Ağınızdaki bir proxy oturum açmanızı istiyor (407)",
   "API key": "API anahtarı",
@@ -122,6 +125,7 @@
   "Cast to a TV": "Televizyona yansıt",
   "Ch": "Kanal",
   "Chad": "Çad",
+  "Change PIN…": "PIN'i değiştir…",
   "Change channel": "Kanal değiştir",
   "Change…": "Değiştir…",
   "Channel IDs": "Kanal kimlikleri",
@@ -337,6 +341,10 @@
   "Hardware where VLC can": "Donanım (VLC destekliyorsa)",
   "Hearing impaired": "İşitme engelli",
   "Help": "Yardım",
+  "Hidden while locked. Settings → Parental controls shows it again.": "Kilitliyken gizli. Ayarlar → Ebeveyn denetimi yeniden gösterir.",
+  "Hidden while locked:": "Kilitliyken gizli:",
+  "Hide (parental controls)": "Gizle (ebeveyn denetimi)",
+  "Hide groups that look adult": "Yetişkin içerikli görünen grupları gizle",
   "Home address": "Ev adresi",
   "Honduras": "Honduras",
   "Hong Kong": "Hong Kong",
@@ -404,6 +412,7 @@
   "Loading {name}…": "{name} yükleniyor…",
   "Loading…": "Yükleniyor…",
   "Local File": "Yerel dosya",
+  "Lock now": "Şimdi kilitle",
   "Logo URL": "Logo URL'si",
   "Logo URL:": "Logo URL'si:",
   "Looking for devices…": "Cihazlar aranıyor…",
@@ -522,9 +531,12 @@
   "Now playing on the TV": "Şimdi TV'de oynatılıyor",
   "OK": "Tamam",
   "Off": "Kapalı",
+  "Off: no PIN is set.": "Kapalı: PIN belirlenmedi.",
   "Off: the file as it is": "Kapalı: dosya olduğu gibi",
   "Oman": "Umman",
   "On the computer, open QiTV's menu → Phone Remote…, then scan the code with your phone's camera.": "Bilgisayarda QiTV menüsü → Telefon Kumandası… öğesini açın, ardından kodu telefonunuzun kamerasıyla tarayın.",
+  "On: locked.": "Açık: kilitli.",
+  "On: unlocked for now.": "Açık: şimdilik kilit açık.",
   "Only on a 4K screen": "Yalnızca 4K ekranda",
   "Open File": "Dosya aç",
   "Open File…": "Dosya aç…",
@@ -564,6 +576,7 @@
   "Panama": "Panama",
   "Papua New Guinea": "Papua Yeni Gine",
   "Paraguay": "Paraguay",
+  "Parental controls": "Ebeveyn denetimi",
   "Password": "Parola",
   "Password:": "Parola:",
   "Paste": "Yapıştır",
@@ -658,6 +671,7 @@
   "Relay": "Aktarıcı",
   "Remote": "Kumanda",
   "Remove": "Kaldır",
+  "Remove PIN…": "PIN'i kaldır…",
   "Remove Provider": "Sağlayıcıyı kaldır",
   "Remove from Recents": "Son izlenenlerden kaldır",
   "Remove from favorites": "Favorilerden kaldır",
@@ -710,8 +724,11 @@
   "Series": "Diziler",
   "Server URL:": "Sunucu URL'si:",
   "Server conversion (Jellyfin, Emby)": "Sunucuda dönüştürme (Jellyfin, Emby)",
+  "Set PIN…": "PIN belirle…",
+  "Set a PIN first: Settings → Parental controls.": "Önce bir PIN belirleyin: Ayarlar → Ebeveyn denetimi.",
   "Settings": "Ayarlar",
   "Settings…": "Ayarlar…",
+  "Show again": "Yeniden göster",
   "Show in Folder": "Klasörde göster",
   "Show on TV": "TV'de göster",
   "Show the pairing code on the TV": "Eşleştirme kodunu TV'de göster",
@@ -796,9 +813,11 @@
   "Tap Share (under ⋯ if you don't see it), then Add to Home Screen.": "Paylaş'a (görünmüyorsa ⋯ altında), ardından Ana Ekrana Ekle'ye dokunun.",
   "Tap here to try again.": "Tekrar denemek için buraya dokunun.",
   "Thailand": "Tayland",
+  "That PIN is not right.": "Bu PIN doğru değil.",
   "That subtitle file is no longer on OpenSubtitles. Pick another one.": "Bu altyazı dosyası artık OpenSubtitles'ta yok. Başka birini seçin.",
   "That title's provider is no longer in your list": "Bu başlığın sağlayıcısı artık listenizde yok",
   "That's all that was kept. The channel can't open right now.": "Saklanan kısım bu kadar. Kanal şu an açılamıyor.",
+  "The PINs were not the same.": "PIN'ler aynı değildi.",
   "The background task ended without a result": "Arka plan görevi sonuçsuz bitti",
   "The background task failed": "Arka plan görevi başarısız oldu",
   "The channel's server didn't send that part": "Kanalın sunucusu o kısmı göndermedi",
@@ -836,6 +855,7 @@
   "The provider's server has a problem ({status})": "Sağlayıcının sunucusunda bir sorun var ({status})",
   "The recording goes on: nothing opened on this phone": "Kayıt sürüyor: bu telefonda hiçbir şey açılmadı",
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Aktarıcı film iletemez. Bu filmi telefonda izlemek için evde, QiTV'nin ağında olun (misafir ağı ya da VPN değil).",
+  "The same PIN again:": "Aynı PIN'i tekrar girin:",
   "The server asks to sign in again: Settings → Providers → Verify Provider.": "Sunucu yeniden giriş istiyor: Ayarlar → Sağlayıcılar → Sağlayıcıyı doğrula.",
   "The server could not be reached ({reason}).": "Sunucuya ulaşılamadı ({reason}).",
   "The server has nothing at this address (404)": "Sunucuda bu adreste bir şey yok (404)",
@@ -899,6 +919,7 @@
   "Unknown": "Bilinmiyor",
   "Unknown Category": "Bilinmeyen kategori",
   "Unknown language": "Bilinmeyen dil",
+  "Unlock for an hour…": "Bir saatliğine kilidi aç…",
   "Unmute": "Sesi aç",
   "Unmute the small picture": "Küçük resmin sesini aç",
   "Unmute this tile": "Bu ekranın sesini aç",
@@ -963,6 +984,7 @@
   "You've used today's downloads: without signing in, OpenSubtitles allows {n} a day per connection. They come back within a day. Signing in to OpenSubtitles in Settings → Subtitles raises the limit.": {
     "other": "Bugünkü indirmelerinizi kullandınız: oturum açmadan OpenSubtitles bağlantı başına günde {n} indirmeye izin verir. Bir gün içinde yenilenecek. Ayarlar → Altyazılar bölümünden OpenSubtitles'ta oturum açmak sınırı yükseltir."
   },
+  "Your PIN:": "PIN'iniz:",
   "Your account allows 2 streams; both are in use": "Hesabınız 2 yayına izin veriyor; ikisi de kullanımda",
   "Your account allows {n} stream; all {n} are in use": {
     "other": "Hesabınız {n} yayına izin veriyor; {n} yayının hepsi kullanımda"
@@ -973,6 +995,7 @@
   "Your account allows {n} stream; {active} are in use": {
     "other": "Hesabınız {n} yayına izin veriyor; {active} yayın kullanımda"
   },
+  "Your current PIN:": "Şu anki PIN'iniz:",
   "Your mix stays": "Ses ayarınız korunuyor",
   "Your provider allows no other stream while {channel} records": "{channel} kaydedilirken sağlayıcınız başka yayına izin vermiyor",
   "Your provider allows {n} stream at a time": {
@@ -1030,6 +1053,7 @@
   "{n} download left today, more in {time}": {
     "other": "Bugün {n} indirme kaldı, {time} sonra yenilenecek"
   },
+  "{n} groups hidden.": "{n} grup gizlendi.",
   "{n} hour": {
     "other": "{n} saat"
   },
