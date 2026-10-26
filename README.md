@@ -338,7 +338,9 @@ Record a programme while you are away: in the guide, pick a programme on now or 
 
 - **QiTV records it at its time**, from a minute before the programme starts to three minutes after it ends, in the background: nothing opens on screen, and you can watch something else meanwhile. A message says when one starts. The file goes to your recordings folder like any recording, and the Library's Recordings shelf names it after the programme.
 - **QiTV has to be open.** It keeps the computer from going to sleep by itself while it runs, but a closed lid or a computer put to sleep misses recordings. One whose time passed while QiTV was closed is said the next time QiTV starts.
-- **It needs a stream of its own.** A scheduled recording asks your provider for a stream at its time. When the provider has none to spare (because a channel is playing on an account that allows one stream, for example), the recording is missed and QiTV says so; it never stops what you are watching.
+- **It needs a stream of its own.** A scheduled recording asks your provider for a stream at its time. When the provider has none to spare (because a channel is playing on an account that allows one stream, for example), QiTV tries again every minute while the programme airs and never stops what you are watching for it; it says the recording was missed only once the programme is over. The next programme on a channel that records needs no other stream: half a minute into it the first file ends, and the next one starts a minute before its programme.
+- **Kept when it is cut short.** When the stream or the time-shift helper stops a recording, its file is kept and the rest of the programme goes into another file.
+- **On the REC sign.** While one records, **● REC** with its channel shows at the top left of the picture: **Stop recording** there stops it for this airing (a series records its next airing), **Go back to** plays its channel.
 - The Library's Recordings shelf lists what is to come; right-click one there to cancel it.
 
 ## The Library: movies and series
@@ -374,7 +376,7 @@ Add your Jellyfin or Emby server as a provider (see [Adding a provider](#adding-
 - **Its libraries are the genres:** **All** first, then **Continue watching** (what you started, here or in the server's own apps) and each of the server's libraries by its name, with the server's posters, years, ratings and stories. A series opens on its seasons and episodes as any other.
 - **The file plays as it is.** QiTV plays a title's file straight from the server, without the server converting it, so the server's processor stays free. **Settings → Server conversion (Jellyfin, Emby)** can have the server convert files above a bitrate you pick, for a slow connection; it is **Off** unless you choose it.
 - **4K only on a 4K screen.** When a title has a 4K version and another one, QiTV plays the 4K one only on a 4K screen. **Settings → 4K versions (Jellyfin, Emby)** changes that (**Always** or **Never**); a title that only exists in 4K says so on a smaller screen instead of playing.
-- **The server keeps up.** Where you stop is told to the server, so its own Continue watching and watched marks follow, and a title you started in the server's apps starts here where you left it.
+- **The server keeps up.** Where you stop is told to the server, so its own Continue watching and watched marks follow, and a title you started only in the server's apps starts here where you left it there.
 - **Your password isn't kept.** QiTV keeps the sign-in the server gave it when you pressed Verify Provider, and the server lists QiTV among its devices. If the server ends that sign-in, QiTV asks you to verify again.
 - The phone remote's **Watch on this phone** plays a server's titles from the server itself, at home. A server's live TV, and exporting a server to M3U, are not part of QiTV.
 
@@ -388,10 +390,10 @@ A star belongs to one provider and is kept by name: starring a channel called "N
 
 **Settings → Parental controls** sets a PIN (4 digits or more). With a PIN set:
 
-- **Hide what you choose.** Right-click a group or a channel in the channel list and choose **Hide (parental controls)**. **Hide groups that look adult** (in the same Settings tab) hides every group, live or in the Library, whose name says it is for adults (XXX, Adult, 18+ and the like).
-- **Locked, they are gone everywhere:** the channel list, the guide, changing channels, the Library, the search and the phone remote. QiTV is locked unless you unlock it: **Unlock for an hour…** asks for the PIN, **Lock now** locks again.
-- **Never in the history.** What you hid stays out of Recent, Continue and the last channel, also while unlocked.
-- The tab lists what is hidden; **Show again** brings one back. Changing or removing the PIN asks for the current one. QiTV keeps only a salted hash of the PIN, never the PIN itself.
+- **Hide what you choose.** Right-click a group or a channel in the channel list and choose **Hide (parental controls)**. **Hide groups whose names look adult** (in the same Settings tab) hides every group, live or in the Library, whose name says it is for adults (XXX, Adult, 18+ and the like), also the ones your provider adds later.
+- **Locked, they are gone everywhere:** the channel list, the guide, changing channels, the Library, the search and the phone remote, with the recordings of a hidden channel. QiTV is locked unless you unlock it: **Unlock for an hour…** asks for the PIN, **Lock now** locks again. When QiTV locks (also when the hour runs out), a hidden channel that plays stops.
+- **Never in the history.** What you hid leaves Recent, Continue and the channel QiTV starts on, also what was watched before you hid it, and stays out of them while unlocked too.
+- **Only with the PIN.** The list of what is hidden shows once you unlock with the PIN; **Show again** brings one back, and unticking the adult names needs the PIN too. Changing or removing the PIN asks for the current one. QiTV keeps only a salted hash of the PIN, never the PIN itself.
 
 ## Exporting to M3U
 
