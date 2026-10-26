@@ -7,7 +7,7 @@ from services import tmdb
 from services.config_manager import ConfigManager
 from tests import test_config_tv, test_tv_window as base
 from ui.settings_dialog import OptionsDialog
-from ui.tv_menus import AboutDialog, about_text
+from ui.tv_menus import ABOUT_LOGO_PX, AboutDialog, about_text
 
 
 class TmdbConfigTests(unittest.TestCase):
@@ -61,14 +61,21 @@ class TmdbSettingsTests(base.WindowCase):
             dialog = self.dialog()
         self.assertIn("built", dialog.tmdb_token_input.placeholderText().lower())
 
-    def test_about_credits_tmdb_with_its_logo(self):
+    def test_about_credits_what_qitv_uses_tmdb_among_them(self):
         text = about_text()
-        self.assertIn(
-            "This product uses the TMDB API but is not endorsed or certified by TMDB.", text
-        )
+        for name in ("VLC", "Qt", "Python", "OpenSubtitles", "iptv-org", "TMDB"):
+            self.assertIn(name, text)
+        self.assertIn("THIRD-PARTY-NOTICES.md", text)  # every credit and license
         about = AboutDialog(self.window)
         self.addCleanup(about.deleteLater)
-        self.assertFalse(about.tmdb_logo.pixmap().isNull())
+        self.assertEqual(
+            about.tmdb_notice.text(),
+            "This product uses the TMDB API but is not endorsed or certified by TMDB.",
+        )
+        logo = about.tmdb_logo.pixmap()
+        self.assertFalse(logo.isNull())
+        tall = logo.height() / logo.devicePixelRatio()
+        self.assertLessEqual(tall, ABOUT_LOGO_PX / 6)  # far less prominent than QiTV's own
 
 
 if __name__ == "__main__":

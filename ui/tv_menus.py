@@ -20,7 +20,15 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QVBoxLayout,
+    QWidget,
+)
 
 from services import recording
 from services.config_manager import get_app_version
@@ -44,16 +52,26 @@ HOME_URL = "https://github.com/ozankaraali/QiTV"
 ISSUES_URL = f"{HOME_URL}/issues"
 ABOUT_LOGO_PX = 64
 ABOUT_TEXT_MIN_W = 340  # wide enough for the links on one line each
+NOTICES_URL = f"{HOME_URL}/blob/main/THIRD-PARTY-NOTICES.md"
 ABOUT_TEXT = (
     "<p><b>QiTV {version}</b></p>"
     "<p>{tagline}</p>"
     '<p><a href="{home}">{home}</a><br><a href="{issues}">{report}</a></p>'
-    "<p><small>{tmdb}</small></p>"
+    '<p><small>{credits} <a href="{notices}">{notices_label}</a></small></p>'
 )
-# 2.8: TMDB's terms ask for this notice, in their words, and their logo (assets/tmdb.png).
-TMDB_NOTICE = "This product uses the TMDB API but is not endorsed or certified by TMDB."
+CREDITS_TEXT = N_(
+    # i18n: About QiTV's credits; the names stay as they are
+    "Plays with VLC, built with Qt and Python. Subtitles come from OpenSubtitles, free channels"
+    " from iptv-org, and film and series details from TMDB."
+)
+NOTICES_LABEL = N_("Credits and licenses")  # i18n: a link in About QiTV, after its credits
+# 2.8: TMDB's terms ask for this notice and their logo (assets/tmdb.png) in About, the logo
+# less prominent than QiTV's own; they set no size.
+# i18n: TMDB's terms ask for this sentence: translate it faithfully
+TMDB_NOTICE = N_("This product uses the TMDB API but is not endorsed or certified by TMDB.")
 TMDB_LOGO_FILE = "tmdb.png"
-ABOUT_TMDB_LOGO_PX = 12  # less prominent than QiTV's own logo, as the terms ask
+ABOUT_TMDB_LOGO_PX = 9
+SMALL_TEXT = 0.83  # the credits' size, as rich text's <small>
 NO_PROVIDERS_TEXT = N_("No providers")  # i18n: the Providers menu's only entry, when it is empty
 ADD_PROVIDER_TEXT = N_("Add provider")  # i18n: the Providers menu's entry; opens the provider form
 _SHORTCUT_MODIFIERS = (
@@ -70,14 +88,17 @@ def open_folder(path: str) -> bool:
 
 
 def about_text() -> str:
-    """About's text: the version (pyproject.toml, as packaged) and the project's links."""
+    """About's text: the version (pyproject.toml, as packaged), the project's links, and what
+    QiTV uses, with every credit and license a link away."""
     return ABOUT_TEXT.format(
         version=get_app_version(),
         tagline=tr("A TV-first IPTV player for STB portals, Xtream and M3U playlists."),
         home=HOME_URL,
         issues=ISSUES_URL,
         report=tr("Report an issue"),  # i18n: a link in About QiTV, to the project's issues
-        tmdb=TMDB_NOTICE,
+        credits=translate(CREDITS_TEXT),
+        notices=NOTICES_URL,
+        notices_label=translate(NOTICES_LABEL),
     )
 
 
@@ -101,18 +122,28 @@ class AboutDialog(QDialog):
         self.text.setOpenExternalLinks(True)
         self.text.setMinimumWidth(ABOUT_TEXT_MIN_W)
         self.text.setWordWrap(True)
+        # TMDB's logo and notice, as small as the credits above them.
         self.tmdb_logo = QLabel(self)
         tmdb_logo = scaled_asset(TMDB_LOGO_FILE, ABOUT_TMDB_LOGO_PX, ratio)
         if tmdb_logo is not None:
             self.tmdb_logo.setPixmap(tmdb_logo)
         else:
             self.tmdb_logo.hide()
+        self.tmdb_notice = QLabel(translate(TMDB_NOTICE), self)
+        self.tmdb_notice.setWordWrap(True)
+        font = self.tmdb_notice.font()
+        font.setPointSizeF(font.pointSizeF() * SMALL_TEXT)
+        self.tmdb_notice.setFont(font)
+        tmdb = QHBoxLayout()
+        tmdb.setSpacing(6)
+        tmdb.addWidget(self.tmdb_logo, 0, Qt.AlignmentFlag.AlignVCenter)
+        tmdb.addWidget(self.tmdb_notice, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, self)
         buttons.accepted.connect(self.accept)
         layout = QVBoxLayout(self)
         layout.addWidget(self.logo)
         layout.addWidget(self.text)
-        layout.addWidget(self.tmdb_logo)
+        layout.addLayout(tmdb)
         layout.addWidget(buttons)
 
 
