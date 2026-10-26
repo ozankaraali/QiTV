@@ -35,7 +35,7 @@ def asked_by_menu(active: bool) -> str:
 
 
 def is_system_quit(event: Any) -> bool:
-    return event.type() == QEvent.Type.Quit and event.spontaneous()
+    return bool(event.type() == QEvent.Type.Quit and event.spontaneous())
 
 
 class QiTVApplication(QApplication):

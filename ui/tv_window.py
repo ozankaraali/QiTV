@@ -68,6 +68,7 @@ from PySide6.QtWidgets import (
 from services import favorites, free_channels, thread_cleanup
 from services.account_check import AccountChecks
 from services.browsed_catalog import BrowsedCatalog
+from services.casting import CastDevices, LibVlcDiscovery
 from services.catalogs import Catalogs
 from services.catchup_memory import FILE_NAME as CATCHUP_FILE, CatchupMemory
 from services.connection_budget import ConnectionBudget
@@ -112,6 +113,7 @@ from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
 from ui.overlay_host import OverlayHost
 from ui.overlays.back_notice import BackNotice
+from ui.overlays.cast_notice import CastNotice
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.corner_controls import CornerControls
 from ui.overlays.drawer import Drawer
@@ -511,6 +513,7 @@ class TVWindow(QMainWindow):
         self.question_card = QuestionCard(host)  # 2.6: stop a recording for a stream?
         self.rec_sign = RecSign(host)  # 2.6: recordings in the background
         self.stopped_notice = StoppedNotice(host)  # 2.6: after Stop, Play again
+        self.cast_notice = CastNotice(host)  # 2.8: Playing on <device>, Stop casting
         self.pair_overlay = PairOverlay(host)  # the phone remote's pairing QR
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
@@ -545,6 +548,7 @@ class TVWindow(QMainWindow):
             rec_sign=self.rec_sign,
             library_rec_sign=self.library_rec_sign,
             stopped_notice=self.stopped_notice,
+            cast_notice=self.cast_notice,
             pairing=self.pair_overlay,
             library_toast=self.library_toast,
             layout_row=self.layout_row,
@@ -582,6 +586,7 @@ class TVWindow(QMainWindow):
             self.sleep_notice,
             self.back_notice,
             self.stopped_notice,
+            self.cast_notice,
             self.rec_sign,
             self.question_card,
             self.pair_overlay,
@@ -631,6 +636,10 @@ class TVWindow(QMainWindow):
         # The multiview lays the surfaces out as tiles of the page (no surface moves pages);
         # after the PiP frame's filters, so it sees the tiles' presses first.
         self.grid_frame = GridFrame(self.player_page, self.surfaces, self.grid_tiles)
+        # 2.8: the devices libVLC finds to cast to (looked for once the cast menu opens).
+        self.cast_devices: Optional[CastDevices] = None
+        if self._instance is not None:
+            self.cast_devices = CastDevices(LibVlcDiscovery(self._instance), self)
         controller = TVController(
             config=config_manager,
             catalog=self.catalog,
@@ -656,6 +665,7 @@ class TVWindow(QMainWindow):
             grid_tiles=self.grid_tiles,
             host=self.host,
             make_slot=self._make_slot,
+            cast_devices=self.cast_devices,
             parent=self,
         )
         self.controller = controller

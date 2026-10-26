@@ -41,6 +41,15 @@ class RecordingTests(LiveSessionCase):
         self.assertTrue(self.live.recordable())
         self.assertEqual(self.engine.recordings, [])
 
+    def test_a_cast_opens_vlc_again_from_the_buffer_where_it_played(self):
+        self.assertFalse(self.live.reopen_player())  # nothing plays from the buffer yet
+        self.playing()
+        self.step(1.0)
+        plays = len(self.playback.plays)
+        self.assertTrue(self.live.reopen_player())
+        self.assertEqual(len(self.playback.plays), plays + 1)
+        self.assertIn("/stream/", self.playback.plays[-1][0])  # the loopback, not the provider
+
     def test_a_recording_starts_where_it_plays_with_the_limits(self):
         sid = self.playing()
         self.step(1.0)

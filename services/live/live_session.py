@@ -1206,6 +1206,15 @@ class LiveSession(QObject):
         """It plays from the time-shift buffer: a recording can start."""
         return self._phase is _Phase.PIPELINE and self._sid is not None
 
+    def reopen_player(self) -> bool:
+        """VLC opens the channel again from the buffer where it played (2.8: a cast begins or
+        ends, so the picture goes to its new output); False when it plays without the buffer
+        (the caller reopens the stream itself)."""
+        if not self.recordable():
+            return False
+        self._reopen_at_position()
+        return True
+
     def recording(self) -> bool:
         return self._recording is not None
 

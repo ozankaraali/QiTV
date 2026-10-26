@@ -324,6 +324,10 @@ class PlaybackSession(QObject):
         self._picture_set = False  # libVLC was given a shape or deinterlacing on this player
         self._shape_timer = QTimer(self, singleShot=True, interval=_SHAPE_SETTLE_MS)
         self._shape_timer.timeout.connect(self._apply_shape)
+        # Casting (2.8): a libVLC renderer (a Chromecast) given before each play while casting;
+        # libVLC takes it only before a play, so a change applies at the next open (`reopen`).
+        self._renderer: Any = None
+        self._renderer_due = False  # given at the next open (set, or taken back once)
 
     def _player_free(self) -> bool:
         """The GUI thread may call into libVLC: not released, and no job holds its input lock.
@@ -414,6 +418,25 @@ class PlaybackSession(QObject):
         self._software = software or url == self._froze_url
         self._start_media()
 
+    def reopen(self, start_ms: Optional[int] = None) -> None:
+        """Open what plays again, with its options, from `start_ms` (a cast begins or ends)."""
+        if self._released or self._url is None:
+            return
+        self._cancel_pending()
+        self._start_ms = start_ms if start_ms and start_ms > 0 else None
+        self._stalls, self._restarted = 0, False
+        self._start_media()
+
+    def cast_to(self, renderer: Any) -> None:
+        """Send what plays from the next open on to `renderer` (a libVLC renderer item), or
+        back to this player's own picture (None)."""
+        if renderer is not self._renderer:
+            self._renderer = renderer
+            self._renderer_due = True
+
+    def casting(self) -> bool:
+        return self._renderer is not None
+
     def _start_media(self) -> None:
         """Open self._url now, or once a worker has ended the old input."""
         self._poll.stop()
@@ -448,6 +471,9 @@ class PlaybackSession(QObject):
         self._engaged = True
         self._opened.start()
         self._stall_clock.start()
+        if self._renderer_due or self._renderer is not None:
+            self._player.set_renderer(self._renderer)  # before the play, as libVLC wants it
+            self._renderer_due = False
         if self._player.play() == -1:
             self._fail(tr("VLC could not start playback"))  # i18n: error toast
             return
@@ -1114,6 +1140,12 @@ class Session(Protocol):
 
     def holds_input(self) -> bool: ...
 
+    def reopen(self, start_ms: Optional[int] = None) -> None: ...
+
+    def cast_to(self, renderer: Any) -> None: ...
+
+    def casting(self) -> bool: ...
+
     def decodes_in_software(self) -> bool: ...
 
     def set_window(self, win_id: int) -> None: ...
@@ -1245,6 +1277,15 @@ class NullSession(QObject):
         software: bool = False,
     ) -> None:
         self.errorOccurred.emit(translate(NO_VLC_MESSAGE))
+
+    def reopen(self, start_ms: Optional[int] = None) -> None:
+        pass
+
+    def cast_to(self, renderer: Any) -> None:
+        pass
+
+    def casting(self) -> bool:
+        return False
 
     def stop(self) -> None:
         pass

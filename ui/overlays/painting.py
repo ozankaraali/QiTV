@@ -459,6 +459,23 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             shaft.lineTo(0.76, 0.24)
             line(shaft)
             fill(_poly([(0.86, 0.14), (0.86, 0.44), (0.56, 0.14)]))
+        elif name == "cast":  # cast to a TV (2.8): a screen, waves from its lower-left corner
+            screen = QPainterPath(QPointF(0.1, 0.42))
+            screen.lineTo(0.1, 0.2)
+            screen.lineTo(0.9, 0.2)
+            screen.lineTo(0.9, 0.82)
+            screen.lineTo(0.58, 0.82)
+            line(screen)
+            for radius in (0.24, 0.4):
+                box = QRectF(0.1 - radius, 0.82 - radius, 2 * radius, 2 * radius)
+                wave = QPainterPath()
+                wave.arcMoveTo(box, 0)
+                wave.arcTo(box, 0, 90)
+                line(wave)
+            dot = QPainterPath(QPointF(0.1, 0.82))
+            dot.arcTo(QRectF(0.0, 0.72, 0.2, 0.2), 90, -90)
+            dot.closeSubpath()
+            fill(dot)
         elif name == "guide":  # the programme guide: rows of programmes, staggered as on a grid
             for y, spans in (
                 (0.2, ((0.1, 0.36), (0.46, 0.9))),

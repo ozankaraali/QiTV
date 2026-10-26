@@ -133,6 +133,7 @@ TOOLTIPS = {
     "mini_back": N_("Back to the full window (Alt+P)"),  # i18n: tooltip in the mini player
     "fullscreen_back": N_("Exit fullscreen (F)"),  # i18n: tooltip; F is the key
     "external": N_("Open in external player"),  # i18n: tooltip; VLC or MPV
+    "cast": N_("Cast to a TV"),  # i18n: tooltip (2.8): send the picture to a Chromecast
     "volume": N_("Volume (+/−, M)"),  # i18n: tooltip; +, − and M are its keys
     "slower": N_("Slower"),  # i18n: tooltip of the playback speed's − button
     "speed": N_("Normal speed"),  # i18n: tooltip of the playback speed chip (back to 1x)
@@ -183,6 +184,7 @@ _ICON_BUTTONS = (  # painted as icons
     "audio",
     "volume",
     "external",
+    "cast",
     "pip",
     "grid",
     "mini",
@@ -350,6 +352,8 @@ class Transport(Overlay):
     # "Open in external player": the shell's menu opens from this point (the button's
     # top-left, global coordinates).
     externalRequested = Signal(QPoint)
+    # Cast (2.8): the devices' menu opens from this point (the button's top-left, global).
+    castRequested = Signal(QPoint)
     volumeRequested = Signal()  # the speaker: the mixer, on the large picture's row
     searchRequested = Signal()
     guideRequested = Signal()
@@ -398,6 +402,8 @@ class Transport(Overlay):
         self._muted = False  # the large picture's mute: the speaker shows it
         self._level = 100  # and its volume (libVLC's default until the mixer says)
         self._mini = self._fullscreen = False  # their buttons then show the way back
+        self._cast_available = False  # 2.8: QiTV can cast (its button shows) ...
+        self._casting = False  # ... and casts now (the button is lit)
         self._favorite = False  # the live channel is a favorite: its star is lit
         self._library = False  # the title came from the Library: ‹ Library shows
         self._held = ""  # the button whose panel is open: no fade meanwhile, and it is lit
@@ -515,6 +521,13 @@ class Transport(Overlay):
         A slot of this widget, so a report that comes after it was deleted (the window
         closing) is dropped instead of reaching a deleted object."""
         self.set_pip_rect(rect.translated(-self.pos()))
+
+    def set_cast_state(self, available: bool, casting: bool) -> None:
+        """The cast button (2.8): shown when QiTV can cast, lit while it casts."""
+        if (available, casting) != (self._cast_available, self._casting):
+            self._cast_available, self._casting = available, casting
+            self.update()
+            self._controls_changed()
 
     def set_pip_state(self, available: bool, open_: bool) -> None:
         """The second channel's button: shown on live TV when `available`; lit while open."""
@@ -1280,7 +1293,8 @@ class Transport(Overlay):
         grid = ("grid",) if self._grid_available and self._live else ()
         pip = ("pip",) if self._pip_available and self._live and not self._grid_shown else ()
         tv = ("search", "guide", "previous") if self._live else ("search",)
-        return ("fullscreen", "mini", *pip, *grid, "external", *rest, *tv)
+        cast = ("cast",) if self._cast_available else ()
+        return ("fullscreen", "mini", *pip, *grid, *cast, "external", *rest, *tv)
 
     def seek_rect(self) -> QRectF:
         return self._layout()["seek"]
@@ -1345,7 +1359,11 @@ class Transport(Overlay):
             self._paint_vod(p, un, rects, text)
         for name in _ICON_BUTTONS:
             if name in rects:
-                lit = (name == "pip" and self._pip_open) or name == self._held
+                lit = (
+                    (name == "pip" and self._pip_open)
+                    or (name == "cast" and self._casting)
+                    or name == self._held
+                )
                 draw_icon(p, self.icon(name), rects[name], qcolor(PALETTE.accent) if lit else text)
         chip = rects.get("layout")
         if chip is not None:
@@ -1871,6 +1889,8 @@ class Transport(Overlay):
                 self.miniPlayerRequested.emit()
             elif name == "external":
                 self.externalRequested.emit(self.mapToGlobal(rect.topLeft().toPoint()))
+            elif name == "cast":
+                self.castRequested.emit(self.mapToGlobal(rect.topLeft().toPoint()))
             elif name == "search":
                 self.searchRequested.emit()
             elif name == "guide":

@@ -72,6 +72,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QAbstractScrollArea
 
 from services import external_players, favorites, recording
+from services.casting import CastDevices
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, shown_label
 from services.catchup import archive_of
 from services.catchup_memory import CatchupMemory
@@ -101,6 +102,7 @@ from services.vlc_profile import classify
 from services.zapping import ZapContext
 from ui import item_provider
 from ui.autoplay import FINISHED_TEXT, Autoplay
+from ui.cast_controls import CastControls
 from ui.context_actions import ContextActions, Launcher, is_channel
 from ui.grid_controls import LEAVE_FIRST, GridControls
 from ui.guide_controller import GuideController
@@ -182,6 +184,7 @@ class Overlays:
     rec_sign: Any = None  # 2.6: the REC sign of recordings in the background
     stopped_notice: Any = None  # 2.6: "Stopped", with Play again, after Stop
     library_rec_sign: Any = None  # its twin on the Library page
+    cast_notice: Any = None  # 2.8: "Playing on <device>", with Stop casting
 
 
 class TVController(QObject):
@@ -217,6 +220,7 @@ class TVController(QObject):
         grid_tiles=None,
         host=None,
         make_slot: Optional[Callable[[str], Optional[Slot]]] = None,
+        cast_devices: Optional[CastDevices] = None,
         parent: Optional[QObject] = None,
     ):
         """With `sessions` (picture in picture), its large slot's player, live session and
@@ -434,6 +438,20 @@ class TVController(QObject):
             parent=self,
         )
         # 2.6: before a recording is stopped for a stream, the question.
+        # 2.8: casting the large picture to a Chromecast (none without libVLC's renderers).
+        self._cast: Optional[CastControls] = None
+        if cast_devices is not None:
+            self._cast = CastControls(
+                devices=cast_devices,
+                session=lambda: self.session,
+                live=lambda: self.sessions.large().live if self.sessions is not None else None,
+                current=lambda: self._current,
+                one_picture=self._one_picture_for_cast,
+                transport=overlays.transport,
+                notice=overlays.cast_notice,
+                toast=self._toast,
+                parent=self,
+            )
         self._question = StreamQuestion(
             budget=self.budget,
             recordings=self._recordings,
@@ -611,6 +629,9 @@ class TVController(QObject):
         transport.fullscreenRequested.connect(self.window_actions.toggle_fullscreen)
         transport.miniPlayerRequested.connect(self.window_actions.toggle_mini_player)
         transport.externalRequested.connect(self._on_external_requested)
+        cast_requested = getattr(transport, "castRequested", None)
+        if self._cast is not None and cast_requested is not None:
+            cast_requested.connect(self._on_cast_requested)
         transport.volumeRequested.connect(self._mixer.open_main)
         # The buttons for the player's keys (every key has a control on screen) act as the keys.
         transport.guideRequested.connect(partial(self.handle, Action.GUIDE))
@@ -655,6 +676,8 @@ class TVController(QObject):
             self._online.shutdown()  # a sign-in ends, never holding up the quit
         self._tuning.stop()
         self._picture.shutdown()  # the sleep timer ends unsaid
+        if self._cast is not None:
+            self._cast.shutdown()  # no more looking for devices (2.8)
         self._cancel_external()
         self._flow.shutdown()
         if self._account_checks is not None:
@@ -3375,6 +3398,21 @@ class TVController(QObject):
         target = self._current
         if not self._closed and target is not None:
             self._context.show_players(target, anchor, self.overlays.transport)
+
+    def _on_cast_requested(self, anchor: QPoint) -> None:
+        """The transport's cast button (2.8): the devices to cast to, and Stop casting."""
+        if not self._closed and self._cast is not None:
+            self._cast.show_menu(anchor, self.overlays.transport)
+
+    def cast_controls(self) -> Optional[CastControls]:
+        """Casting (2.8; None without libVLC's renderers): the phone's Cast to… uses it too."""
+        return self._cast
+
+    def _one_picture_for_cast(self) -> None:
+        """One picture goes to the device: the multiview's grid leaves (its focused tile is the
+        large picture) and the picture in picture closes, as for an external player."""
+        self.leave_multiview(keep_pip=False)
+        self._close_pip()
 
     def play_elsewhere(
         self,
