@@ -344,7 +344,7 @@
   "Hidden while locked. Settings → Parental controls shows it again.": "Kilitliyken gizli. Ayarlar → Ebeveyn denetimi yeniden gösterir.",
   "Hidden while locked:": "Kilitliyken gizli:",
   "Hide (parental controls)": "Gizle (ebeveyn denetimi)",
-  "Hide groups that look adult": "Yetişkin içerikli görünen grupları gizle",
+  "Hide groups whose names look adult (XXX, Adult, 18+…)": "Adı yetişkin içeriği andıran grupları gizle (XXX, Adult, 18+…)",
   "Home address": "Ev adresi",
   "Honduras": "Honduras",
   "Hong Kong": "Hong Kong",
@@ -920,6 +920,7 @@
   "Unknown Category": "Bilinmeyen kategori",
   "Unknown language": "Bilinmeyen dil",
   "Unlock for an hour…": "Bir saatliğine kilidi aç…",
+  "Unlock to see or change what is hidden.": "Gizlenenleri görmek veya değiştirmek için kilidi açın.",
   "Unmute": "Sesi aç",
   "Unmute the small picture": "Küçük resmin sesini aç",
   "Unmute this tile": "Bu ekranın sesini aç",
@@ -1053,7 +1054,6 @@
   "{n} download left today, more in {time}": {
     "other": "Bugün {n} indirme kaldı, {time} sonra yenilenecek"
   },
-  "{n} groups hidden.": "{n} grup gizlendi.",
   "{n} hour": {
     "other": "{n} saat"
   },

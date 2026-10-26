@@ -86,13 +86,57 @@ class ParentalTests(unittest.TestCase):
         self.guard.set_pin("1234")
         self.guard.hide_group("live", "P", "66")
         self.assertEqual(len(self.guard.hidden()), 1)
-        self.guard.show_again(self.guard.hidden()[0]["key"])
+        self.guard.unlock("1234")
+        self.assertTrue(self.guard.show_again(self.guard.hidden()[0]["key"]))
         self.assertEqual(self.guard.hidden(), [])
+        self.guard.lock()
         self.guard.hide_group("live", "P", "66")
         self.assertFalse(self.guard.clear_pin("0000"))
         self.assertTrue(self.guard.clear_pin("1234"))
         self.assertFalse(self.guard.has_pin())
         self.assertFalse(self.guard.active())
+
+    def test_showing_again_needs_the_pin(self):  # review C1: a child can't undo it
+        self.guard.set_pin("1234")
+        self.guard.hide_group("live", "P", "66")
+        key = self.guard.hidden()[0]["key"]
+        self.assertFalse(self.guard.show_again(key))  # locked
+        self.assertTrue(self.guard.hides_item("live", ADULT))
+        self.guard.unlock("1234")
+        self.assertTrue(self.guard.show_again(key))
+        self.assertEqual(self.guard.hidden(), [])
+
+    def test_the_adult_rule_hides_groups_as_they_come(self):  # review I8
+        titles = {"66": "XXX Late", "10": "News"}
+        self.guard.group_title = lambda section, provider, gid: titles.get(gid, "")
+        self.assertFalse(self.guard.set_adult_rule(True))  # a PIN comes first
+        self.guard.set_pin("1234")
+        self.assertTrue(self.guard.set_adult_rule(True))
+        self.assertTrue(self.guard.active())
+        self.assertTrue(self.guard.hides_group("live", "P", "66", title="XXX Late"))
+        self.assertFalse(self.guard.hides_group("live", "P", "10", title="News"))
+        self.assertEqual(self.guard.visible("live", [NEWS, ADULT]), [NEWS])
+        titles["77"] = "Adults only"  # a group the provider adds later
+        later = {"id": "3", "name": "Night", "category_id": "77", "_provider": "P"}
+        self.assertTrue(self.guard.hides_item("live", later))
+        self.assertTrue(self.guard.protects("live", ADULT))  # kept out of the history too
+        self.assertFalse(self.guard.set_adult_rule(False))  # locked: only with the PIN
+        again = Parental(self.config, clock=self.clock)
+        self.assertTrue(again.adult_rule())
+        self.guard.unlock("1234")
+        self.assertFalse(self.guard.hides_item("live", ADULT))
+        self.assertTrue(self.guard.set_adult_rule(False))
+        self.assertFalse(self.guard.protects("live", ADULT))
+
+    def test_an_episode_of_a_hidden_series_genre_is_protected(self):  # review I6
+        show = {"series_id": "s1", "name": "Show", "category_id": "5", "_provider": "P"}
+        episode = {"id": "e1", "name": "Episode 1", "_provider": "P"}
+        self.guard.set_pin("1234")
+        self.guard.hide_group("series", "P", "5")
+        self.assertFalse(self.guard.protects("series", episode))
+        self.assertTrue(self.guard.protects_play("series", episode, {"series": show}))
+        self.assertFalse(self.guard.protects_play("series", episode, {"series": NEWS}))
+        self.assertFalse(self.guard.protects_play("live", ADULT, None))  # nothing live hidden
 
     def test_groups_that_look_adult(self):
         for title in ("XXX", "Adult Movies", "18+ Channels", "TR: +18", "Erotic"):

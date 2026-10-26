@@ -27,6 +27,7 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer
 
+from services import parental
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.failure_reasons import shown_message
 from services.i18n import tr, translate
@@ -290,6 +291,9 @@ class ProviderFlow(QObject):
         if last is None:
             return None
         owner, item, group = last
+        guard = parental.installed()
+        if guard is not None and guard.hides_item("live", with_provider(item, owner)):
+            return None  # 2.8: hidden by parental controls while locked
         if provider == ALL_PROVIDERS and owner in self.catalog.provider_names():
             return with_provider(item, owner), ALL_GROUP_ID
         if owner == provider:

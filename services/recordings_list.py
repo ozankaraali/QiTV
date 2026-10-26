@@ -56,6 +56,7 @@ def scheduled_item(entry: dict) -> dict[str, Any]:
         "description": description,
         "_scheduled": True,
         "_item_id": str(entry.get("id") or ""),
+        "_channel": channel,
     }
 
 
@@ -97,6 +98,7 @@ def recording_item(path: Path, size: int, mtime: float, writing: bool = False) -
         "description": translate(DESCRIPTION, when=shown, size=size_text(size)),
         "_recording": True,
         "_writing": writing,
+        "_channel": channel,  # the name may become the programme's (titles)
     }
 
 

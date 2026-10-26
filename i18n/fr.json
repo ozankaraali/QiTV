@@ -348,7 +348,7 @@
   "Hidden while locked. Settings → Parental controls shows it again.": "Masqué tant que verrouillé. Paramètres → Contrôle parental le réaffiche.",
   "Hidden while locked:": "Masqué tant que verrouillé :",
   "Hide (parental controls)": "Masquer (contrôle parental)",
-  "Hide groups that look adult": "Masquer les groupes pour adultes",
+  "Hide groups whose names look adult (XXX, Adult, 18+…)": "Masquer les groupes dont le nom évoque du contenu pour adultes (XXX, Adult, 18+…)",
   "Home address": "Adresse à la maison",
   "Honduras": "Honduras",
   "Hong Kong": "Hong Kong",
@@ -930,6 +930,7 @@
   "Unknown Category": "Catégorie inconnue",
   "Unknown language": "Langue inconnue",
   "Unlock for an hour…": "Déverrouiller une heure…",
+  "Unlock to see or change what is hidden.": "Déverrouillez pour voir ou modifier ce qui est masqué.",
   "Unmute": "Rétablir le son",
   "Unmute the small picture": "Rétablir le son de la petite image",
   "Unmute this tile": "Rétablir le son de cette image",
@@ -1073,7 +1074,6 @@
     "one": "{n} téléchargement restant aujourd’hui, d’autres dans {time}",
     "other": "{n} téléchargements restants aujourd’hui, d’autres dans {time}"
   },
-  "{n} groups hidden.": "{n} groupes masqués.",
   "{n} hour": {
     "one": "{n} heure",
     "other": "{n} heures"

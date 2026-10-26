@@ -127,6 +127,25 @@ class LibraryModelTests(unittest.TestCase):
         self.assertEqual([g.id for g in model.genres()], [MY_LIST, "1", "2"])
         self.assertTrue(model.genres()[0].pinned)
 
+    def test_continue_leaves_out_what_parental_controls_hide_while_locked(self):  # 2.8 review I6
+        from services import parental
+
+        m1, m2 = movie(1), movie(2)
+        cfg = make_config()
+        for m in (m1, m2):
+            history(cfg, m, "movie")
+            resume(cfg, m, "movie")
+        cat = FakeCatalog({"movies": [("1", "G", 2)]}, {("movies", "1"): [m1, m2]})
+        model, _ = build(cat, cfg)
+        kept = SimpleNamespace(parental=None, save_config=lambda: None)
+        guard = parental.Parental(kept)
+        guard.set_pin("1234")
+        guard.hide_item("movies", with_provider(m1, "P"))
+        parental.install(guard)
+        self.addCleanup(parental.install, None)
+        cat.version += 1  # the browsed catalog's version follows the lock
+        self.assertEqual([i["id"] for i in model._pinned_items(CONTINUE)], ["2"])
+
     def test_continue_movies_and_series(self):
         m1, m2, m3 = movie(1), movie(2), movie(3)
         cfg = make_config()

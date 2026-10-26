@@ -476,7 +476,9 @@ class BrowsedCatalog(QObject):
             return found
         # 2.8: the groups parental controls hide while locked are not listed.
         return [
-            g for g in found if g.header or not guard.hides_group(section, *self._group_of(g.id))
+            g
+            for g in found
+            if g.header or not guard.hides_group(section, *self._group_of(g.id), title=g.title)
         ]
 
     def items(self, section: str, group_id: str) -> Optional[list[dict]]:

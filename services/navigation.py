@@ -559,7 +559,11 @@ class NavModel(QObject):
         return cast(list[dict], self._cached(("@favorites",), deps, self._compute_favorites))
 
     def _recent_items(self) -> list[dict]:
-        deps = (self._history_fingerprint(), tuple(self.catalog.provider_names()))
+        from services import parental  # parental reads navigation's item keys
+
+        guard = parental.installed()
+        state = guard.state_version() if guard is not None else 0
+        deps = (self._history_fingerprint(), tuple(self.catalog.provider_names()), state)
         return cast(list[dict], self._cached(("@recent",), deps, self._compute_recent))
 
     def _compute_favorites(self) -> list[dict]:
@@ -571,6 +575,9 @@ class NavModel(QObject):
     def _compute_recent(self) -> list[dict]:
         # What was watched at any provider in the list, newest first (a removed provider's
         # entries can no longer play).
+        from services import parental
+
+        guard = parental.installed()
         known = set(self.catalog.provider_names())
         seen, result = set(), []
         for entry in self.config.watch_history or []:
@@ -578,6 +585,8 @@ class NavModel(QObject):
             if key is None or key[0] not in known:
                 continue
             provider, item = key[0], entry.get("item_data") or {}
+            if guard is not None and guard.hides_item("live", with_provider(item, provider)):
+                continue  # 2.8: hidden by parental controls while locked
             if key not in seen:
                 seen.add(key)
                 # Stamped also with one provider (an entry older than 2.1 has no stamp): the

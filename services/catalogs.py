@@ -78,6 +78,7 @@ class Catalogs(QObject):
         self._in_use = in_use
         self._ids = _LinkIds()
         self._by_name: dict[str, CatalogService] = {}
+        self._group_titles: dict[tuple[str, str], tuple[int, dict[str, str]]] = {}
         self._specs: dict[str, dict] = {}  # the provider each catalog was built for
         self._started: set[str] = set()  # ensure() has begun this catalog's setup
         self._ready: set[str] = set()
@@ -136,6 +137,19 @@ class Catalogs(QObject):
     def created(self) -> list[str]:
         """The providers whose catalogs exist now."""
         return list(self._by_name)
+
+    def group_title(self, section: str, provider: str, group_id: str) -> str:
+        """A group's name as its provider lists it ("" while its list isn't loaded; 2.8: the
+        parental controls' adult rule reads it). Creates no catalog."""
+        catalog = self._by_name.get(provider)
+        if catalog is None:
+            return ""
+        version = catalog.content_version()
+        cached = self._group_titles.get((provider, section))
+        if cached is None or cached[0] != version:
+            titles = {str(g.id): str(g.title) for g in catalog.groups(section) if not g.header}
+            cached = self._group_titles[(provider, section)] = (version, titles)
+        return cached[1].get(str(group_id), "")
 
     def _connect(self, name: str, catalog: CatalogService) -> None:
         catalog.providerReady.connect(lambda *_: self._on_ready(name))

@@ -18,7 +18,7 @@ from typing import Any, Callable, Optional, TypeVar, cast
 
 from PySide6.QtCore import QObject, Signal
 
-from services import favorites
+from services import favorites, parental
 from services.catalog import ALL_GROUP_ID, shown_label
 from services.i18n import N_, tr, translate
 from services.provider_ids import (
@@ -657,6 +657,7 @@ class LibraryModel(QObject):
         return self._memoized(("new", self._section, self._catalog.content_version()), build)
 
     def _continue_items(self) -> list[dict]:
+        guard = parental.installed()
         out: list[dict] = []
         seen: set[str] = set()
         for entry in self._history_entries():
@@ -665,6 +666,10 @@ class LibraryModel(QObject):
                 continue
             seen.add(cid)
             item = entry["item_data"]
+            if guard is not None and guard.hides_item(
+                self._section, with_provider(item, entry["provider_name"])
+            ):
+                continue  # 2.8: hidden by parental controls while locked
             # Stamped with the provider that played it (older history has no stamp), so it
             # plays, stars and asks for its link there, whatever page is on another provider.
             out.append(with_provider(item, entry["provider_name"]))
@@ -681,7 +686,13 @@ class LibraryModel(QObject):
 
     def _pinned_items(self, genre_id: str) -> list[dict]:
         if genre_id == RECORDINGS:
-            return self._recording_items() if self._section == "movies" else []
+            if self._section != "movies":
+                return []
+            guard = parental.installed()  # 2.8: a hidden channel's recordings, while locked
+            items = self._recording_items()
+            if guard is None or not guard.active():
+                return items
+            return [i for i in items if not guard.hides_recording(str(i.get("_channel") or ""))]
         fp = self._fingerprint()
         return self._memoized(
             ("pinned", self._section, genre_id, fp),

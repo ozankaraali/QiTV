@@ -45,6 +45,10 @@ class Window(QWidget):
         self.changes += 1
 
 
+def parental_settings_refresh(dialog):
+    dialog.parental_refresh()
+
+
 class ParentalTabTests(unittest.TestCase):
     def setUp(self):
         self.guard = Parental(Kept())
@@ -80,15 +84,34 @@ class ParentalTabTests(unittest.TestCase):
             self.w["set_pin"].click()
         self.assertFalse(self.guard.has_pin())
 
-    def test_groups_that_look_adult_are_hidden_in_one_go(self):
+    def test_groups_that_look_adult_stay_hidden_as_they_come(self):  # review I8
         self.set_pin()
-        with mock.patch.object(QMessageBox, "information"):
-            self.w["adult"].click()
-        self.assertEqual([h["title"] for h in self.guard.hidden()], ["XXX Adult"])
+        self.w["adult"].click()  # a lasting rule, not this moment's lists
+        self.assertTrue(self.guard.adult_rule())
+        self.assertTrue(self.guard.hides_group("live", "P", "66", title="XXX Adult"))
+        self.assertFalse(self.w["adult"].isEnabled())  # locked: unticking needs the PIN
+        self.unlock()
+        self.assertTrue(self.w["adult"].isEnabled())
+        self.w["adult"].click()
+        self.assertFalse(self.guard.adult_rule())
+
+    def test_showing_again_needs_the_pin(self):  # review C1
+        self.set_pin()
+        self.guard.hide_group("live", "P", "66", title="XXX Adult")
+        self.window.parental_changed()
+        parental_settings_refresh(self.dialog)
+        self.assertFalse(self.w["show_again"].isEnabled())
+        self.assertEqual(self.w["hidden"].count(), 0)  # locked: not even listed
+        self.unlock()
         self.assertEqual(self.w["hidden"].count(), 1)
         self.w["hidden"].setCurrentRow(0)
+        self.assertTrue(self.w["show_again"].isEnabled())
         self.w["show_again"].click()
         self.assertEqual(self.guard.hidden(), [])
+
+    def unlock(self, pin="2468"):
+        with mock.patch.object(parental_settings, "_ask_pin", side_effect=[pin]):
+            self.w["unlock"].click()
 
     def test_unlocking_asks_for_the_pin(self):
         self.set_pin()

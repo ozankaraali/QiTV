@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from services.i18n import N_, tr, translate
-from services.parental import Parental, adult_groups
+from services.parental import Parental
 
 MIN_DIGITS = 4
 # i18n: Settings → Parental controls: what the tab does
@@ -65,16 +66,18 @@ def build_parental_tab(dialog: Any) -> Optional[QWidget]:
     for button in (set_pin, remove_pin, unlock, lock):
         row.addWidget(button)
     layout.addLayout(row)
-    # i18n: Settings → Parental controls: the list of what is hidden
-    layout.addWidget(QLabel(tr("Hidden while locked:"), tab))
+    # i18n: Settings → Parental controls (2.8): a lasting rule; also the groups a provider adds
+    # later ("XXX", "Adult", "18+" as group names say it)
+    adult = QCheckBox(tr("Hide groups whose names look adult (XXX, Adult, 18+…)"), tab)
+    layout.addWidget(adult)
+    hidden_label = QLabel(tab)
+    layout.addWidget(hidden_label)
     hidden = QListWidget(tab)
     layout.addWidget(hidden)
     row2 = QHBoxLayout()
     show_again = QPushButton(tr("Show again"), tab)  # i18n: Settings → Parental controls
-    # i18n: Settings → Parental controls: hides every group named XXX, Adult, 18+…
-    adult = QPushButton(tr("Hide groups that look adult"), tab)
     row2.addWidget(show_again)
-    row2.addWidget(adult)
+    row2.addStretch(1)
     layout.addLayout(row2)
     dialog.parental_widgets = {
         "status": status,
@@ -105,10 +108,22 @@ def build_parental_tab(dialog: Any) -> Optional[QWidget]:
         # i18n: Settings → Parental controls: the button (no PIN yet / one already set)
         set_pin.setText(tr("Change PIN…") if has_pin else tr("Set PIN…"))
         remove_pin.setEnabled(has_pin)
-        unlock.setEnabled(has_pin and guard.locked())
-        lock.setEnabled(has_pin and not guard.locked())
-        adult.setEnabled(has_pin)
+        locked = has_pin and guard.locked()
+        unlock.setEnabled(locked)
+        lock.setEnabled(has_pin and not locked)
+        adult.blockSignals(True)
+        adult.setChecked(guard.adult_rule())
+        adult.blockSignals(False)
+        adult.setEnabled(has_pin and not (locked and guard.adult_rule()))  # off: with the PIN
         hidden.clear()
+        if locked:
+            # i18n: Settings → Parental controls, while locked: the list of what is hidden
+            # shows only once unlocked with the PIN
+            hidden_label.setText(tr("Unlock to see or change what is hidden."))
+            show_again.setEnabled(False)
+            return
+        # i18n: Settings → Parental controls: the list of what is hidden
+        hidden_label.setText(tr("Hidden while locked:"))
         for entry in guard.hidden():
             text = entry.get("title") or entry.get("key", "")
             if entry.get("provider"):
@@ -158,21 +173,11 @@ def build_parental_tab(dialog: Any) -> Optional[QWidget]:
 
     def reveal() -> None:
         current = hidden.currentItem()
-        if current is not None:
-            guard.show_again(str(current.data(Qt.ItemDataRole.UserRole)))
+        if current is not None and guard.show_again(str(current.data(Qt.ItemDataRole.UserRole))):
             changed()
 
-    def hide_adult() -> None:
-        catalogs = getattr(window, "catalogs", None)
-        count = 0
-        for name in catalogs.names() if catalogs is not None else []:
-            catalog = catalogs.catalog(name)
-            for section in catalog.sections():
-                for group in adult_groups(catalog.groups(section)):
-                    if guard.hide_group(section, name, str(group.id), title=str(group.title)):
-                        count += 1
-        # i18n: a message: how many groups that look adult were hidden ({n}: a number)
-        QMessageBox.information(tab, tr("Parental controls"), tr("{n} groups hidden.", n=count))
+    def adult_rule(on: bool) -> None:
+        guard.set_adult_rule(on)  # refused while locked when it would show them
         changed()
 
     set_pin.clicked.connect(new_pin)
@@ -180,7 +185,8 @@ def build_parental_tab(dialog: Any) -> Optional[QWidget]:
     unlock.clicked.connect(open_up)
     lock.clicked.connect(close_up)
     show_again.clicked.connect(reveal)
-    adult.clicked.connect(hide_adult)
+    adult.toggled.connect(adult_rule)
+    dialog.parental_refresh = refresh
     refresh()
     return tab
 
