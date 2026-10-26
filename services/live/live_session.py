@@ -1003,7 +1003,8 @@ class LiveSession(QObject):
     def go_live(self) -> None:
         """The Go live button: back to the live edge at 1x, playing (not paused). While a
         kept buffer plays without its stream (2.6), the channel is tried again first; after
-        its disk failed twice, it starts afresh (the helper's own memory fallback)."""
+        its disk failed twice, it starts afresh (the helper's own memory fallback). One played
+        before its channel came back goes live once the new run comes (2.8)."""
         if self._live_parked and self._sid is not None and self._phase is _Phase.PIPELINE:
             # 2.7: a live upstream parked for a server part opens again; live once its new
             # run comes (as a kept buffer's), not at the parked ring's stale edge.
@@ -1014,6 +1015,17 @@ class LiveSession(QObject):
             self._send_resume(self._sid)
             return
         self._close_part()  # 2.7: the server part goes
+        if (
+            self._resuming
+            and self._from_kept
+            and self._sid is not None
+            and self._phase is _Phase.PIPELINE
+        ):
+            # 2.8: a kept buffer played from where it was (`go_back_to`) before its channel
+            # came back: live once the new run comes, not at the old run's stale edge.
+            self._live_after_resume = True
+            self._late = None
+            return
         if self._kept_only and self._sid is not None and self._phase is _Phase.PIPELINE:
             if self._disk_failures >= 2:
                 self._start_afresh()
@@ -1605,6 +1617,10 @@ class LiveSession(QObject):
 
     def _recover(self) -> None:
         self._phase = _Phase.RECOVERING
+        # 2.8: the helper reopens it afresh (its buffer went with the helper): nothing of a
+        # kept buffer's take-back is pending, and its failures are any session's again.
+        self._from_kept = self._resuming = self._kept_only = self._live_after_resume = False
+        self._late = None
         self._tick_timer.stop()
         self._after_update = self._retry = self._failing_since = None
         self._deferred = None

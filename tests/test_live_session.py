@@ -895,6 +895,32 @@ class KeptTests(LiveSessionCase):
         self.new_run()
         self.assertEqual(len(self.playback.plays), plays)
 
+    def test_go_live_before_the_channel_came_back_waits_for_its_new_run(self):
+        # 2.8 (review of 2.6): played from where it was before the new run came (Resume),
+        # Go live picked within the old run, at its stale edge.
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(20.0, True)))
+        self.live.go_back_to(20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        plays = len(self.playback.plays)
+        self.live.go_live()
+        self.assertEqual(len(self.playback.plays), plays)  # nothing within the old run
+        self.new_run()
+        self.assertGreaterEqual(self.seq_of(self.playback.plays[-1]), 30)
+
+    def test_a_helper_death_after_taking_back_reopens_a_fresh_session(self):
+        # 2.8 (review of 2.6): the reopen is no kept buffer's: a disk failure then goes on in
+        # memory as any session's does, not "playing what was kept".
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", True, Where(None, False)), disk=True)
+        self.new_run()
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionFailed.emit("k", "internal", "The live buffer stopped unexpectedly.")
+        self.engine.buffer("k", segments(0, 10))  # the session reopened afresh
+        self.engine.sessionReady.emit("k")
+        self.engine.sessionFailed.emit("k", "disk", "The disk buffer failed.")
+        self.assertEqual(self.notices[-1], DISK)
+
     def test_the_end_of_what_was_kept_says_so(self):
         self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
         self.resume(KeptRing("k", "k1", False, Where(50.0, False)))
