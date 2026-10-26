@@ -30,7 +30,7 @@ import os
 import platform
 import sys
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import (
     QElapsedTimer,
@@ -95,7 +95,11 @@ from services.playback import (
 )
 from services.provider_link import ProviderLink
 from services.provider_types import is_media_server
-from services.recording_schedule import FILE_NAME as SCHEDULE_FILE, Schedule
+from services.recording_schedule import (
+    FILE_NAME as SCHEDULE_FILE,
+    Schedule,
+    flush_writes as recording_schedule_flush,
+)
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
@@ -415,6 +419,9 @@ class TVWindow(QMainWindow):
         # 2.8: parental controls: the browsed catalogs and the searches leave out what they hide
         self.parental = Parental(config_manager)
         self.catalogs.parental = self.parental
+        self.parental.group_title = self.catalogs.group_title  # the adult rule reads names
+        self._relock = QTimer(self, singleShot=True)
+        self._relock.timeout.connect(self.parental_changed)
         install_parental(self.parental)
         self.catalog = BrowsedCatalog(
             self.catalogs,
@@ -694,17 +701,17 @@ class TVWindow(QMainWindow):
         controller.wire()
         self.screens = TVPages(self, self)  # the Library's controller and the page moves
         if self.engine is not None:  # 2.8: scheduled recordings, by the time-shift helper
-            self.scheduler = RecordingScheduler(
-                schedule=self.recording_schedule,
-                engine=self.engine,
-                catalogs=self.catalogs,
-                budget=self.budget,
-                config=config_manager,
-                toast=lambda text, kind="info", ms=INFO_MS: self.screens.notify(text, kind, ms),
-                parent=self,
+            self.attach_scheduler(
+                RecordingScheduler(
+                    schedule=self.recording_schedule,
+                    engine=self.engine,
+                    catalogs=self.catalogs,
+                    budget=self.budget,
+                    config=config_manager,
+                    toast=lambda text, kind="info", ms=INFO_MS: self.screens.notify(text, kind, ms),
+                    parent=self,
+                )
             )
-            self.scheduler.changed.connect(self._schedule_changed)
-            controller.extra_guides = self.scheduler.providers
         controller.parental = self.parental  # what it protects never enters the history
         self.overlays.guide.recordRequested.connect(self.schedule_programme)
         self.overlays.guide.recordCancelled.connect(self.cancel_programme)
@@ -866,10 +873,28 @@ class TVWindow(QMainWindow):
             return
         self.controller.parental_changed()
         self.screens.library_model.changed.emit()
+        # Unlocked for a while: locked again when it runs out (a hidden channel stops then).
+        remaining = self.parental.unlocked_for()
+        if remaining > 0:
+            self._relock.start(int(remaining * 1000) + 250)
+        else:
+            self._relock.stop()
+
+    def attach_scheduler(self, scheduler: Any) -> None:
+        """The scheduled recordings (2.8): the Library and the guides follow them; what records
+        shows on the REC sign, which stops it."""
+        self.scheduler = scheduler
+        controller = self.controller
+        scheduler.changed.connect(self._schedule_changed)
+        scheduler.changed.connect(controller.scheduled_changed)
+        controller.extra_guides = scheduler.providers
+        controller.scheduled_now = scheduler.recording_now
+        controller.stop_scheduled = scheduler.stop_now
 
     def _stop_scheduler(self) -> None:
         if self.scheduler is not None:
             self.scheduler.shutdown()
+            recording_schedule_flush(2.0)  # what it noted reaches the disk before QiTV goes
 
     @staticmethod
     def _screen_is_4k() -> bool:
@@ -1800,6 +1825,8 @@ class TVWindow(QMainWindow):
                 self.engine.shutdown()
                 for live in self._lives():
                     live.engine_shut_down()  # it signals nothing from now on
+                if self.scheduler is not None:
+                    self.scheduler.engine_gone()  # its streams go back; the rest tried again
 
     def restart_live(self) -> None:
         """A self-update stopped the time-shift helper and could not launch: start a new one.
@@ -1815,6 +1842,8 @@ class TVWindow(QMainWindow):
         if self.kept is not None:
             self.kept.use_engine(self.engine)
             self._take_kept_back()
+        if self.scheduler is not None:
+            self.scheduler.use_engine(self.engine)
         self.engine.start()
         old.deleteLater()
         call_before_update(self.stop_live, self.restart_live)  # each hook runs once

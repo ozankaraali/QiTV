@@ -4,7 +4,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import shutil
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 from services import recording_schedule as rs
 from services.epg_view import Programme
@@ -94,6 +96,21 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(rs.Schedule(str(path), write=rs.write_now).items(), [])
         path.write_text("not json")
         self.assertEqual(rs.Schedule(str(path), write=rs.write_now).items(), [])
+
+    def test_saves_land_in_order_the_newest_last(self):  # 2.8 review M2
+        written = []
+        slow = [0.2]  # the first write takes longest
+
+        def write_now(path, data):
+            time.sleep(slow.pop() if slow else 0)
+            written.append(len(data["items"]))
+
+        with mock.patch.object(rs, "write_now", write_now):
+            schedule = rs.Schedule(str(self.folder / "other.json"), write=rs.write_later)
+            for minutes in range(5):
+                schedule.add_once(CHANNEL, programme(f"Show {minutes}", 60 * minutes))
+            rs.flush_writes(5)
+        self.assertEqual(written[-1], 5)
 
     def test_cancelling_removes_it(self):
         item = self.schedule.add_once(CHANNEL, programme("The News", 30))

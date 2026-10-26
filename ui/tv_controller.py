@@ -96,7 +96,13 @@ from services.navigation import (
 )
 from services.next_episode import play_context
 from services.picture import SOURCE_DIRECT, ChannelPictures
-from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of, split_group_id
+from services.provider_ids import (
+    ALL_PROVIDERS,
+    mixed_group_id,
+    provider_of,
+    split_group_id,
+    with_provider,
+)
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot, records
 from services.sound_sync import SoundSync
@@ -451,6 +457,9 @@ class TVController(QObject):
         self._media = media_reporter
         # 2.8: the providers scheduled recordings record from (their guides stay loaded).
         self.extra_guides: Callable[[], set[str]] = set
+        # 2.8: what records on schedule now (RecordingScheduler.recording_now) and its Stop.
+        self.scheduled_now: Callable[[], list[tuple[str, str, float, dict]]] = list
+        self.stop_scheduled: Callable[[str], None] = lambda name: None
         # 2.8: parental controls (services.parental.Parental; None: none): what they hide never
         # enters the history.
         self.parental: Optional[Any] = None
@@ -1801,7 +1810,7 @@ class TVController(QObject):
 
     def _record_watched(self, target: Target, url: str) -> None:
         guard = self.parental
-        if guard is not None and guard.protects(target.section, target.item):
+        if guard is not None and guard.protects_play(target.section, target.item, target.context):
             return  # 2.8: what parental controls hide never enters the history (nor Recent)
         try:
             self.watch.record_play(
@@ -1960,7 +1969,16 @@ class TVController(QObject):
                 if since is not None:
                     name = str((slot.channel or {}).get("name") or "")
                     recordings.append((slot.name, name, since))
-        return recordings
+        if not self._closed:  # 2.8: what records on schedule (no player of its own)
+            recordings += [
+                (name, channel, since) for name, channel, since, _ in self.scheduled_now()
+            ]
+        return sorted(recordings, key=lambda entry: entry[2])
+
+    def scheduled_changed(self) -> None:
+        """What records on schedule changed (2.8): the REC sign follows."""
+        if not self._closed:
+            self._refresh_rec_sign()
 
     def asks_before_quit(self, then: Callable[[], object]) -> bool:
         """QiTV is to close while channels record: True, asked (Quit stops them, saved, then
@@ -1984,7 +2002,14 @@ class TVController(QObject):
         """The REC sign's Go back (the phone's too): the channel player `name` records in the
         background plays large again, from its group."""
         sessions = self.sessions
-        if sessions is None or self._closed:
+        if self._closed:
+            return
+        scheduled = next((s for s in self.scheduled_now() if s[0] == name), None)
+        if scheduled is not None:  # 2.8: a scheduled recording's channel, live
+            self.leave_multiview()
+            self.tune_live(scheduled[3], ALL_GROUP_ID, self._all_live())
+            return
+        if sessions is None:
             return
         slot = next((s for s in sessions.background() if s.name == name), None)
         if slot is None or slot.channel is None:
@@ -1998,7 +2023,12 @@ class TVController(QObject):
         """The REC sign's Stop recording (the phone's too): saved, and its player leaves the
         channel. Nothing for a player not in the background."""
         sessions = self.sessions
-        if sessions is None or self._closed:
+        if self._closed:
+            return
+        if any(s[0] == name for s in self.scheduled_now()):
+            self.stop_scheduled(name)  # 2.8: a scheduled recording: this airing stops
+            return
+        if sessions is None:
             return
         for slot in sessions.background():
             if slot.name == name:
@@ -3395,10 +3425,64 @@ class TVController(QObject):
             self._forget_recent(node.payload)
 
     def parental_changed(self) -> None:
-        """Parental controls changed (2.8): the lists read their catalog again."""
-        if not self._closed:
-            self._repaint()
-            self._guide.invalidate()
+        """Parental controls changed (2.8): the lists read their catalog again, what they
+        protect leaves the history, and while locked, a hidden channel stops and zapping
+        leaves the hidden ones out."""
+        if self._closed:
+            return
+        guard = self.parental
+        if guard is not None:
+            self._forget_protected(guard)
+            if guard.active():
+                self._lock_out(guard)
+        self._repaint()
+        self._guide.invalidate()
+
+    def _forget_protected(self, guard: Any) -> None:
+        """What parental controls protect leaves the history (Recent, Continue) and is no
+        longer the channel QiTV starts on, also what was watched before it was hidden."""
+        sections = {"channel": "live", "movie": "movies", "episode": "series"}
+
+        def protected(entry: dict) -> bool:
+            item = entry.get("item_data")
+            if not isinstance(item, dict):
+                return False
+            section = sections.get(str(entry.get("item_type") or ""), "live")
+            return guard.protects(section, with_provider(item, entry.get("provider_name")))
+
+        forget = getattr(self.watch, "forget", None)
+        if forget is not None and forget(protected):
+            self._recents_changed()
+        for name in ("last_live_channel", "last_watched"):
+            record = getattr(self.config, name, None)
+            if not isinstance(record, dict):
+                continue
+            item = record.get("item") if name == "last_live_channel" else record.get("item_data")
+            entry = {"item_data": item, "provider_name": record.get("provider_name")}
+            entry["item_type"] = (
+                "channel" if name == "last_live_channel" else record.get("item_type")
+            )
+            if protected(entry):
+                setattr(self.config, name, None)
+
+    def _lock_out(self, guard: Any) -> None:
+        """Locked: zapping skips the hidden channels; a hidden one that plays stops (the small
+        picture closes)."""
+        context = self.zap.context
+        channels = guard.visible("live", context.channels)
+        fallback = guard.visible("live", context.fallback)
+        if len(channels) != len(context.channels) or len(fallback) != len(context.fallback):
+            self.zap.set_context(
+                ZapContext(context.group_key, channels, fallback=fallback, source=context.source)
+            )
+        small = self._beside_target()
+        if small is not None and guard.protects_play(small.section, small.item, small.context):
+            self._close_pip()
+        current = self._current or self._lanes.pending()
+        if current is not None and guard.protects_play(
+            current.section, current.item, current.context
+        ):
+            self.stop()
 
     def _hide_from_menu(self, node: NavNode) -> None:
         """A channel's or a group's "Hide (parental controls)" (2.8): hidden while locked; the
@@ -3416,7 +3500,7 @@ class TVController(QObject):
             hidden = guard.hide_item(section, node.payload)
         if hidden:
             self._toast(translate(HIDDEN_TEXT))
-            self._repaint()
+            self.parental_changed()  # out of the history; locked, it stops if it plays
 
     def _forget_recent(self, item: dict) -> None:
         """The channel leaves ⟲ Recent: its plays leave the watch history (saved with it)."""

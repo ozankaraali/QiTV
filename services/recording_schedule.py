@@ -58,8 +58,39 @@ class Job:
         return f"{self.item_id}@{int(self.start)}"
 
 
+_pending: dict[str, dict] = {}  # the newest data to write, by file
+_writing = threading.Condition()
+_writer: Optional[threading.Thread] = None
+
+
 def write_later(path: str, data: dict) -> None:
-    threading.Thread(target=write_now, args=(path, data), name="schedule-save", daemon=True).start()
+    """`data` written to `path` off the GUI thread, by one writer: saves land in order and
+    only the newest of those waiting is written."""
+    global _writer
+    with _writing:
+        _pending[path] = data
+        if _writer is None:
+            _writer = threading.Thread(target=_write_pending, name="schedule-save", daemon=True)
+            _writer.start()
+
+
+def _write_pending() -> None:
+    global _writer
+    while True:
+        with _writing:
+            if not _pending:
+                _writer = None
+                _writing.notify_all()
+                return
+            path = next(iter(_pending))
+            data = _pending.pop(path)
+        write_now(path, data)
+
+
+def flush_writes(timeout: float = 5.0) -> None:
+    """Waits until the saves under way are written (QiTV closing, tests)."""
+    with _writing:
+        _writing.wait_for(lambda: _writer is None, timeout)
 
 
 def write_now(path: str, data: dict) -> None:
@@ -75,7 +106,7 @@ def _channel_copy(channel: dict) -> dict:
     return {key: channel[key] for key in _CHANNEL_KEYS if channel.get(key) not in (None, "")}
 
 
-def _same_channel(a: dict, b: dict) -> bool:
+def same_channel(a: dict, b: dict) -> bool:
     if a.get("_provider") != b.get("_provider"):
         return False
     if a.get("id") not in (None, "") and b.get("id") not in (None, ""):
@@ -163,7 +194,7 @@ class Schedule:
         for item in self._items:
             if (
                 item.get("kind") == SERIES
-                and _same_channel(item.get("channel") or {}, channel)
+                and same_channel(item.get("channel") or {}, channel)
                 and _fold(item.get("title", "")) == _fold(title)
             ):
                 return dict(item)
@@ -190,7 +221,7 @@ class Schedule:
         for item in self._items:
             if (
                 item.get("kind") == ONCE
-                and _same_channel(item.get("channel") or {}, channel)
+                and same_channel(item.get("channel") or {}, channel)
                 and abs(float(item.get("start") or 0) - start) < 60
             ):
                 return item
@@ -204,7 +235,7 @@ class Schedule:
         for item in self._items:
             if (
                 item.get("kind") == SERIES
-                and _same_channel(item.get("channel") or {}, channel)
+                and same_channel(item.get("channel") or {}, channel)
                 and _fold(item.get("title", "")) == _fold(programme.title)
             ):
                 return dict(item)
@@ -251,8 +282,20 @@ class Schedule:
         return jobs
 
     def started(self, job: Job) -> None:
-        self._done.append(job.key)
-        self._done = self._done[-DONE:]
+        if job.key not in self._done:
+            self._done.append(job.key)
+            self._done = self._done[-DONE:]
+            self._save()
+
+    def unstarted(self, job: Job) -> None:
+        """`job` is due again (its recording was cut short while it airs)."""
+        if job.key in self._done:
+            self._done = [key for key in self._done if key != job.key]
+            self._save()
+
+    def noted(self, job: Job, state: str, *, path: str = "", why: str = "") -> None:
+        """An outcome kept without ending the job (a part recorded, the rest to come)."""
+        self._note(job.title, job.channel, job.start, state, path=path, why=why)
         self._save()
 
     def finished(self, job: Job, state: str, *, path: str = "", why: str = "") -> None:
