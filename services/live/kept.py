@@ -40,7 +40,8 @@ class KeptBuffers:
 
     Every player's stream slot shares one (`BudgetedStream.kept`): a stop parks its channel
     here (`put`), a start of a channel takes its own back (`take`). A memory buffer costs
-    memory as long as it is kept, so one is kept at most: the channel left last. Disk buffers
+    memory as long as it is kept, so one is kept at most: the channel left last (2.8: one
+    whose channel is tuned again at once, a new picture size, leaves the others). Disk buffers
     are all kept: their total is the user's disk amount, which the helper keeps them under.
     Letting one go closes its session at the engine; one the helper emptied (the disk amount,
     the day's limit, its files gone) goes by itself once its state says so. What a later
@@ -76,14 +77,16 @@ class KeptBuffers:
         if snapshot.get("oldest") is None and any(r.sid == sid for r in self._rings.values()):
             self.drop(sid)  # nothing of it is left
 
-    def put(self, ring: KeptRing) -> None:
+    def put(self, ring: KeptRing, *, coming_back: bool = False) -> None:
+        """Keep `ring`; `coming_back`: its channel is tuned again at once (it is taken back
+        next), so the memory ring kept before stays."""
         old = self._rings.pop(ring.channel, None)
         if old is not None and old.sid != ring.sid:
             self._engine.close_session(old.sid)
         if ring.disk and not self._disk:
             self._engine.close_session(ring.sid)  # the disk buffer is off now
             return
-        if not ring.disk:
+        if not ring.disk and not coming_back:
             for other in [r for r in self._rings.values() if not r.disk]:
                 self.drop(other.sid)
         self._rings[ring.channel] = ring

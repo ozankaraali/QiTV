@@ -277,6 +277,25 @@ class LiveTuningTests(unittest.TestCase):
         store.remember("mine", Tuning())  # back to the best: nothing left to remember
         self.assertEqual(store.get("mine"), Tuning())
 
+    def test_the_sizes_seen_round_trip_and_wrong_ones_are_left_out(self):  # review M11
+        store = self.store()
+        store.remember("seen", Tuning(heights=(1080, 720, 360)))
+        store.remember("both", Tuning(extra=1.0, max_height=720, heights=(1080, 720)))
+        store.flush()
+        again = self.store()
+        self.assertEqual(again.get("seen"), Tuning(heights=(1080, 720, 360)))
+        self.assertEqual(again.get("both"), Tuning(extra=1.0, max_height=720, heights=(1080, 720)))
+        channels = {
+            "text": {"extra": 1.0, "heights": ["1080", "720"], "used": self.clock.now},
+            "one": {"extra": 1.0, "heights": [1080], "used": self.clock.now},
+            "huge": {"extra": 1.0, "heights": [99999, 720], "used": self.clock.now},
+            "flag": {"extra": 1.0, "heights": [True, 720], "used": self.clock.now},
+        }
+        self.path.write_text(json.dumps({"version": 1, "channels": channels}))
+        store = self.store()
+        for key in channels:
+            self.assertEqual(store.get(key), Tuning(extra=1.0), key)
+
     def test_a_size_cap_is_not_pushed_out_by_learned_entries(self):
         store = self.store(max_entries=2)
         store.remember("capped", Tuning(max_height=720))
@@ -354,6 +373,7 @@ class LiveTuningTests(unittest.TestCase):
         store.remember("software", Tuning(software=True))
         store.remember("both", Tuning(extra=2.0, software=True))
         store.remember("capped", Tuning(extra=2.5, max_height=720))  # 2.8
+        store.remember("sized", Tuning(extra=2.0, heights=(1080, 720)))
         store.flush()
         old = load_two_zero_eight()
         reader = old.LiveTuning(str(self.path), now=self.clock)
@@ -365,6 +385,7 @@ class LiveTuningTests(unittest.TestCase):
         self.assertEqual(reader.get("software"), old.Tuning())
         self.assertEqual(reader.get("both"), old.Tuning(extra=2.0))
         self.assertEqual(reader.get("capped"), old.Tuning(extra=2.5))
+        self.assertEqual(reader.get("sized"), old.Tuning(extra=2.0))
         reader.remember("other", old.Tuning(extra=1.5))  # 2.0.8 writes back what it knows
         reader.flush()
         again = self.store()

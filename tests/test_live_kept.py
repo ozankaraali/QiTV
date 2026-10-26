@@ -47,6 +47,17 @@ class KeptBuffersTests(unittest.TestCase):
         self.assertIsNone(self.kept.take("k1"))
         self.assertEqual(self.kept.take("k2").sid, "b")
 
+    def test_a_ring_coming_right_back_leaves_the_others(self):  # 2.8
+        # Its channel is tuned again at once (a new picture size): the memory ring kept
+        # before stays; the next ring put as usual keeps only itself again.
+        self.kept.put(KeptRing("a", "k1", False, LIVE))
+        self.kept.put(KeptRing("b", "k2", False, LIVE), coming_back=True)
+        self.assertEqual(self.engine.closed, [])
+        self.assertEqual(self.kept.take("k2").sid, "b")
+        self.assertEqual([r.sid for r in self.kept.rings()], ["a"])
+        self.kept.put(KeptRing("c", "k3", False, LIVE))
+        self.assertEqual(self.engine.closed, ["a"])
+
     def test_disk_rings_are_all_kept(self):
         for sid, channel in (("a", "k1"), ("b", "k2"), ("c", "k3")):
             self.kept.put(KeptRing(sid, channel, True, LIVE))

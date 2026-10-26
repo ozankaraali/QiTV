@@ -271,7 +271,7 @@ class LiveTuner(QObject):
     def tune(self, start: LiveStart, provider: str, limit: Optional[int]) -> None:
         """Stop what plays and start `start` through the pipeline with a budget slot."""
         assert self._stream is not None
-        self.stop()
+        self.stop(next_channel=start.channel)
         self._pending = start
         self._pending_limit = limit
         self._stream.request(provider, limit)
@@ -288,14 +288,15 @@ class LiveTuner(QObject):
             others = [p for p in others if p not in going]
         return limit <= 0 or len(others) >= limit
 
-    def stop(self) -> None:
-        """Stop what plays or waits to; a held slot goes back once its upstream is closed."""
+    def stop(self, next_channel: str = "") -> None:
+        """Stop what plays or waits to; a held slot goes back once its upstream is closed.
+        `next_channel`: the channel a tune opens next (`BudgetedStream.stop`)."""
         self._action = None
         self._pending = None
         self._pause = False
         self.timeline = None
         if self._stream is not None:
-            self._stream.stop()  # released() follows, at once when nothing is left open
+            self._stream.stop(next_channel)  # released() follows, at once when nothing is left open
         if self._direct:
             self._direct = False
             self.session.stop()

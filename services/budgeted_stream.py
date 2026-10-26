@@ -142,8 +142,10 @@ class BudgetedStream(QObject):
                 logger.debug("Stopping the live session after a failed start failed too")
             raise
 
-    def stop(self) -> None:
-        """Stop the stream; a held ticket goes back once its upstream is closed."""
+    def stop(self, next_channel: str = "") -> None:
+        """Stop the stream; a held ticket goes back once its upstream is closed.
+        `next_channel`: the channel the next start tunes (2.8: the same one, tuned again in
+        a new picture size, comes right back and leaves the other kept buffers)."""
         ticket, self.ticket = self.ticket, None
         self._granted = self.disk = self.asked_disk = False
         if self._running:
@@ -157,7 +159,8 @@ class BudgetedStream(QObject):
             else:
                 ring = self.live.park()  # likewise; the channel's buffer is kept
                 if ring is not None:
-                    self.kept.put(ring)
+                    back = bool(next_channel) and ring.channel == next_channel
+                    self.kept.put(ring, coming_back=back)
         elif ticket is not None:
             self.budget.release(ticket)  # never started: nothing upstream to wait for
 

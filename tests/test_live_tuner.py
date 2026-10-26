@@ -265,6 +265,41 @@ class SlotRoleTests(unittest.TestCase):
         QTest.qWait(10)
         self.assertEqual(self.live.kwargs[-1]["kept"], ring)
 
+    def test_a_channel_tuned_again_keeps_the_buffer_left_before(self):  # 2.8 review M3
+        # A new picture size tunes the playing channel again: its buffer is parked and taken
+        # right back, and the memory buffer of the channel left before stays kept.
+        from services.live.kept import KeptBuffers, KeptRing, Where
+
+        class KeepingLive(FakeLive):
+            channel = ""
+
+            def start(self, url, **kwargs):
+                super().start(url, **kwargs)
+                self.channel = kwargs.get("channel", "")
+
+            def park(self):
+                if not self.running:
+                    return None
+                self.running = False
+                self.released.emit()
+                return KeptRing("s-" + self.channel, self.channel, False, Where(None, False))
+
+        closed = []
+        kept = KeptBuffers(SimpleNamespace(close_session=closed.append))
+        live = KeepingLive()
+        tuner = LiveTuner(self.session, self.config, live, self.budget, purpose="pip")
+        tuner.set_kept(kept)
+        kept.put(KeptRing("old", "k0", False, Where(None, False)))  # left before, in memory
+        tuner.tune(LiveStart(URL, "QiTV", True, channel="k1"), PROVIDER, 2)
+        QTest.qWait(10)
+        tuner.tune(LiveStart(URL, "QiTV", True, channel="k1", max_height=720), PROVIDER, 2)
+        QTest.qWait(10)
+        self.assertEqual(live.kwargs[-1]["kept"].sid, "s-k1")
+        self.assertEqual(([r.sid for r in kept.rings()], closed), (["old"], []))
+        tuner.tune(LiveStart(URL, "QiTV", True, channel="k2"), PROVIDER, 2)  # another channel
+        QTest.qWait(10)
+        self.assertEqual(closed, ["old"])  # the channel left last is the one kept, as before
+
     def test_a_kept_disk_buffer_taken_back_leaves_the_disk_to_the_others(self):
         # Final review M3: the small picture takes the channel left before back, on disk: the
         # large picture's tunes still keep theirs on disk (the disk total bounds both).

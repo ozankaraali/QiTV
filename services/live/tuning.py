@@ -29,7 +29,9 @@ and an entry left with nothing is none. A 2.0.2 `extra` stays as it was: `Learne
 a prior. Software decoding (2.1) is an optional field too, written only when it is so: 2.0.x reads
 an entry with it as without it. So is the user's size cap (2.8, the live ⚙: `max_height`, the
 lines of the largest HLS variant to play), written only when there is one; a cap is the
-user's choice, so it outlasts learned entries when the file is full. A write that fails is
+user's choice, so it outlasts learned entries when the file is full. And the channel's picture
+sizes as last seen (`heights`, two or more), so the ⚙ lists them where no helper state names
+them (the channel plays directly). A write that fails is
 logged (without its path or any address).
 """
 
@@ -79,6 +81,7 @@ class Tuning:
     learned: Optional[Learned] = None  # its learned target (2.1), if any
     software: bool = False  # hardware decoding froze its picture: decode it in software
     max_height: int = 0  # 2.8: the user's size cap for its HLS variants (0: the best)
+    heights: tuple[int, ...] = ()  # 2.8: its picture sizes as last seen, largest first
 
 
 def channel_key(provider: str, item: Mapping[str, Any]) -> str:
@@ -134,6 +137,17 @@ def _lines(value: Any) -> int:
     return value if type(value) is int and 0 < value <= MAX_LINES else 0
 
 
+def _heights(value: Any) -> tuple[int, ...]:
+    """Stored picture sizes: two to twelve whole lines up to `MAX_LINES`, largest first;
+    else none."""
+    if not isinstance(value, list) or not 2 <= len(value) <= 12:
+        return ()
+    if not all(_lines(h) for h in value):
+        return ()
+    found = tuple(sorted(set(value), reverse=True))
+    return found if len(found) >= 2 else ()
+
+
 def _entry(value: Any) -> Optional[dict[str, Any]]:
     """A stored entry as written by `remember()`; None when it is not one. A learned target
     that makes no sense is left out on its own."""
@@ -149,7 +163,8 @@ def _entry(value: Any) -> Optional[dict[str, Any]]:
     if not isinstance(software, bool):
         return None
     cap = _lines(value.get("max_height"))  # a wrong one is left out on its own
-    lessons = (extra is not None, locked, direct, learned is not None, software, cap)
+    sizes = _heights(value.get("heights"))  # likewise
+    lessons = (extra is not None, locked, direct, learned is not None, software, cap, sizes)
     if not any(lessons):
         return None
     entry = {"extra": extra, "rate_locked": locked, "direct": direct, "used": used}
@@ -159,6 +174,8 @@ def _entry(value: Any) -> Optional[dict[str, Any]]:
         entry["software"] = True
     if cap:
         entry["max_height"] = cap
+    if sizes:
+        entry["heights"] = list(sizes)
     for flag, at, _lasts in _FLAGS:
         if entry.get(flag):
             when = value.get(at, used)  # without its time: when it was learned
@@ -200,6 +217,7 @@ class LiveTuning(ChannelStore):
             Learned(**learned) if learned else None,
             software=software,
             max_height=entry.get("max_height", 0),
+            heights=tuple(entry.get("heights", ())),
         )
 
     def remember(self, key: str, tuning: Tuning) -> None:
@@ -220,8 +238,9 @@ class LiveTuning(ChannelStore):
                 }
             )
         cap = _lines(tuning.max_height)
+        sizes = _heights(list(tuning.heights))
         lessons = (tuning.extra is not None, tuning.rate_locked, tuning.direct, tuning.software)
-        if not any(lessons) and not learned and not cap:
+        if not any(lessons) and not learned and not cap and not sizes:
             if self._entries.pop(key, None) is None:
                 return
         else:
@@ -238,6 +257,8 @@ class LiveTuning(ChannelStore):
                 entry["software"] = True  # only when it is so (2.0.x reads it as without)
             if cap:
                 entry["max_height"] = cap  # 2.8: only when there is one
+            if sizes:
+                entry["heights"] = list(sizes)
             # A lock (or direct play, or software decoding) still in force keeps its time;
             # else it counts from now.
             for flag, at, lasts in _FLAGS:

@@ -1154,6 +1154,31 @@ class LiveSession(QObject):
         snapshot = self._snapshot()
         return (self._buffer_start(snapshot), self._live_edge(snapshot))
 
+    def _keep_heights(self, snapshot: Mapping[str, Any]) -> None:
+        """The channel's picture sizes (2.8), kept with what it taught when they change: the
+        ⚙ lists them where no helper state names them (`known_sizes`)."""
+        heights = snapshot.get("heights")
+        if not isinstance(heights, list) or len(heights) < 2:
+            return
+        found = tuple(int(h) for h in heights if type(h) is int)
+        if found == self._memory.heights:
+            return
+        self._memory = dataclasses.replace(self._memory, heights=found)
+        if self._tuning is not None and self._channel:
+            self._tuning.remember(self._channel, self._memory)
+
+    def channel_key(self) -> str:
+        """The key of the channel it plays (its tuning store's; "": none)."""
+        return self._channel
+
+    def known_sizes(self) -> Optional[dict]:
+        """The channel's picture sizes as it kept them (2.8: two or more), and the cap its
+        streams open with; the playing one is not known here. None: none kept."""
+        heights = list(self._memory.heights)
+        if len(heights) < 2:
+            return None
+        return {"heights": heights, "height": 0, "max_height": self.max_height()}
+
     def max_height(self) -> int:
         """The size cap the channel's streams open with (2.8, the live ⚙; 0: their best)."""
         return int(self._open_args.get("max_height", 0)) if self._open_args else 0
@@ -1656,6 +1681,7 @@ class LiveSession(QObject):
         if sid != self._sid:
             return
         self._say_scheme(snapshot)
+        self._keep_heights(snapshot)
         if part is not None:
             self._follow_buffer_start(part)
         self._since_edge_moved(snapshot)  # when a burst lands, to the update
@@ -2406,16 +2432,23 @@ class LiveSession(QObject):
                 learned.learned(),
                 software=stored.software,
                 max_height=stored.max_height,
+                heights=stored.heights,
             )
             if self._tuning is not None:
                 self._tuning.remember(self._channel, self._memory)
             return
         locked, direct = self._stay.rate_locked, self._memory.direct or direct
         software = self._memory.software or software
-        cap = self._memory.max_height
+        cap, heights = self._memory.max_height, self._memory.heights
         if learned is not None:
             self._memory = Tuning(
-                None, locked, direct, learned.learned(), software=software, max_height=cap
+                None,
+                locked,
+                direct,
+                learned.learned(),
+                software=software,
+                max_height=cap,
+                heights=heights,
             )
         else:
             self._memory = Tuning(
@@ -2425,6 +2458,7 @@ class LiveSession(QObject):
                 self._memory.learned,
                 software=software,
                 max_height=cap,
+                heights=heights,
             )
         if self._tuning is not None:
             self._tuning.remember(self._channel, self._memory)

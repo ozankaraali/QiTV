@@ -574,6 +574,7 @@ class LiveControls(QObject):
         current = self._current()
         if self._closed() or current is None or not current.live:
             return
+        self._on_sizes()  # 2.8: played directly, the sizes the channel kept show the ⚙
         if self._transport.isVisible():
             self.show_live_transport(current)  # the time-shift bar, or plain live
 
@@ -583,6 +584,9 @@ class LiveControls(QObject):
         "height" (the playing one's, 0: not named), "max_height" (the cap, 0: none)}."""
         key = self.catchup.key(target)
         found = self._sizes.get(key)
+        live = self.live
+        if found is None and live is not None and live.channel_key() == key:
+            found = live.known_sizes()  # what the channel kept (it plays directly, say)
         if found is None or len(found["heights"]) < 2:
             return None
         cap = self._chosen.get(key, found["max_height"])

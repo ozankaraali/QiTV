@@ -6736,6 +6736,28 @@ class SizeCapTests(LiveSessionCase):
         self.assertEqual(len(offers), 1)
         self.assertTrue(self.live.back_paused())
 
+    def test_the_sizes_seen_stay_the_channels(self):  # review M11
+        # Kept with what the channel taught: a later tune that plays it directly (no helper
+        # state names them then) still offers them in the ⚙, with the cap.
+        sid = self.begin()
+        self.engine.buffer(sid, self.SPANS, hls=True, heights=[1080, 720], height=1080)
+        self.assertEqual(self.store.get("c").heights, (1080, 720))
+        self.live.stop()
+        self.engine.answer()
+        self.begin(max_height=720)
+        self.assertEqual(self.live.channel_key(), "c")
+        self.assertEqual(
+            self.live.known_sizes(), {"heights": [1080, 720], "height": 0, "max_height": 720}
+        )
+
+    def test_what_the_channel_teaches_keeps_its_sizes(self):
+        self.begin(latency="auto")
+        sid = self.engine.last_sid
+        self.engine.buffer(sid, self.SPANS, hls=True, heights=[1080, 720], height=1080)
+        self.live.stop()  # Auto keeps what the tune learned
+        self.engine.answer()
+        self.assertEqual(self.store.get("c").heights, (1080, 720))
+
     def test_a_channel_played_directly_keeps_its_cap_in_vlc(self):  # Stage 3
         sid = self.begin(max_height=720)
         self.engine.sessionFailed.emit(sid, "unsupported", "This stream format isn't supported.")

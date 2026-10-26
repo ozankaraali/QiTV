@@ -749,6 +749,14 @@ class FakeLiveSession(QObject):
         self.calls.append(("go_back_to", t))
 
     paused_back = False  # back_paused(): where it offers was left paused (2.8)
+    key = ""  # channel_key(): the channel it plays (2.8)
+    known = None  # known_sizes(): the sizes its channel kept (2.8)
+
+    def channel_key(self):
+        return self.key
+
+    def known_sizes(self):
+        return self.known
 
     def back_paused(self):
         return self.paused_back
@@ -3119,6 +3127,18 @@ class LiveQualityTests(PipelineCase):
         self.live.paused_back = True  # where it was left, it was paused
         self.live.backOffered.emit(3000.0, NOW.timestamp())
         self.assertEqual(self.live.calls[-2:], [("go_back_to", 3000.0), ("toggle_pause",)])
+
+    def test_a_channel_played_directly_offers_the_sizes_it_had(self):  # review M11
+        # No helper state names them in direct play: the sizes the channel kept do.
+        self.start_channel(0)
+        self.live.key = self.controller._live_controls.catchup.key(self.controller._current)
+        self.live.known = {"heights": [1080, 720], "height": 0, "max_height": 720}
+        self.live.play_direct()
+        self.assertEqual(self.transport.quality_states[-1], True)
+        self.assertEqual(self.controller.live_menu()["heights"], [1080, 720])
+        self.controller.change_live_quality(0)  # Auto
+        self.ready("http://stream/1")
+        self.assertEqual(self.live.calls[-1], ("stop",))
 
     def test_auto_tunes_again_without_a_cap_and_the_same_size_changes_nothing(self):
         self.start_pipeline(0)
