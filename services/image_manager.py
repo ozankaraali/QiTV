@@ -93,14 +93,14 @@ class ImageManager:
                         self._manage_cache_size(protect=url_hash)
                         return cache_path
                     except OSError as e:
-                        logger.warning(f"Error writing image to cache: {e}")
+                        logger.warning("Error writing image to cache: %s", safe_exc(e))
                         return None
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 logger.info("Error fetching image: %s", safe_exc(e))  # e names the URL
                 if attempt == max_retries - 1:
                     break
                 wait_time = (2**attempt) + random.uniform(0, 1)
-                logger.debug(f"Retrying in {wait_time:.2f} seconds...")
+                logger.debug("Retrying in %.2f seconds...", wait_time)
                 await asyncio.sleep(wait_time)
         return None
 
@@ -122,7 +122,7 @@ class ImageManager:
             self._manage_cache_size(protect=image_hash)
             return cache_path
         except Exception as e:
-            logger.warning(f"Error decoding/saving base64 image: {e}")
+            logger.warning("Error decoding/saving base64 image: %s", safe_exc(e))
             return None
 
     def _touch_cache_entry(self, key_hash, cache_path) -> bool:
@@ -195,7 +195,7 @@ class ImageManager:
                         data = json.loads(f.read())
                         self.cache = OrderedDict(data) if data else OrderedDict()
                     except (json.JSONDecodeError, IOError) as e:
-                        logger.warning(f"Error loading index file: {e}")
+                        logger.warning("Error loading index file: %s", safe_exc(e))
 
             # Index files that exist on disk but not in the index (metadata only)
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

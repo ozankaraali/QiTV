@@ -227,7 +227,7 @@ def normalize_seasons(series_name: str, items: list[dict]) -> list[dict]:
                 item["added"] = item.get("air_date", "")
 
         except Exception as e:
-            logger.error(f"Error processing season {i}: {e}", exc_info=True)
+            logger.error("Error processing season %s: %s", i, safe_message(e))
             # Set defaults if processing fails
             item["o_name"] = item.get("name", f"Season {i + 1}")
             item["number"] = str(i + 1)

@@ -113,7 +113,7 @@ class ContentLoader(QThread):
                 raise asyncio.CancelledError()
             try:
                 if attempt:
-                    logger.debug(f"Retrying page {page}...")
+                    logger.debug("Retrying page %s...", page)
                 params = self.get_params(page)
                 # For EPG debugging: a copy-paste-friendly curl with headers when enabled
                 mode = os.getenv("QITV_DEBUG_CURL")
@@ -128,12 +128,12 @@ class ContentLoader(QThread):
                 ) as response:
                     content = await response.read()
                     if response.status == 503 or not content:
-                        logger.warning(f"Received error or empty response fetching page {page}")
+                        logger.warning("Received error or empty response fetching page %s", page)
                         if attempt == max_retries - 1:
                             self.counter_page_not_fetched += 1
                             return [], 0, 0
                         wait_time = (2**attempt) + random.uniform(0, 1)
-                        logger.debug(f"Retrying in {wait_time:.2f} seconds...")
+                        logger.debug("Retrying in %.2f seconds...", wait_time)
                         await asyncio.sleep(wait_time)
                         continue
                     response.raise_for_status()
@@ -160,7 +160,7 @@ class ContentLoader(QThread):
                     self.counter_page_not_fetched += 1
                     return [], 0, 0
                 wait_time = (2**attempt) + random.uniform(0, 1)
-                logger.debug(f"Retrying in {wait_time:.2f} seconds...")
+                logger.debug("Retrying in %.2f seconds...", wait_time)
                 await asyncio.sleep(wait_time)
         return [], 0, 0
 

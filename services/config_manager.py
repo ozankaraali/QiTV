@@ -111,7 +111,7 @@ def get_app_version() -> str:
                     _APP_VERSION = v
                     return v
         except Exception as e:
-            logger.debug(f"Unable to read version from {p}: {e}")
+            logger.debug("Unable to read version from %s: %s", p, safe_message(e))
 
     # 4) Fallback
     _APP_VERSION = "0.0.0"
