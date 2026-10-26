@@ -934,9 +934,10 @@ class LibraryControllerTests(unittest.TestCase):
     def test_choosing_the_librarys_source_keeps_a_waiting_title(self):
         ctl = self.search_salt()
         self.activate_name(ctl, "Salt Lake")  # waits for Q
-        actions = ctl._source_menu().actions()
-        self.addCleanup(actions[0].parent().deleteLater)
-        actions[1].trigger()  # Q joins what the Library shows (2.8: the ticks mix)
+        menu = ctl._source_menu()
+        self.addCleanup(menu.deleteLater)
+        menu.actions()[1].trigger()  # Q joins what the Library shows (2.8: the ticks mix)
+        menu.aboutToHide.emit()
         self.assertEqual(self.catalog.selected, [ALL_PROVIDERS])
         self.make_ready("Q")
         self.assertEqual(self.played_names(), ["Salt Lake"])  # still played, once
@@ -1186,7 +1187,8 @@ class LibraryControllerTests(unittest.TestCase):
         )
         self.assertEqual([a.isChecked() for a in actions], [True, False, False, False])
         actions[1].trigger()  # 2.8: Q joins P
-        self.assertEqual(self.catalog.mixes, [["P", "Q"]])
+        menu.aboutToHide.emit()  # 2.8.1: as the menu closes
+        self.assertEqual(self.catalog.mixes, [[]])  # P and Q: every provider
         self.catalog.providerReady.emit(ALL_PROVIDERS)
         self.assertEqual(self.catalog.requests[-1], ("section", "movies"))  # re-opened
         self.assertEqual(self.screen.nav._source, "All providers")  # P and Q: every one
@@ -1284,6 +1286,7 @@ class LibraryControllerTests(unittest.TestCase):
         menu = ctl._source_menu()
         self.addCleanup(menu.deleteLater)
         [a for a in menu.actions() if a.text() == "All providers"][0].trigger()
+        menu.aboutToHide.emit()
         self.assertEqual(self.catalog.selected, [ALL_PROVIDERS])
 
     # 7 -----------------------------------------------------------------------------------
@@ -1428,38 +1431,86 @@ class SourceMixTests(unittest.TestCase):  # 2.8: the source menu's ticks mix pro
         self.catalog.names = ["P", "Q", "R"]
 
     def menu(self, ctl):
-        return {a.text(): a for a in ctl._source_menu().actions() if a.text()}
+        menu = ctl._source_menu()
+        self.addCleanup(menu.deleteLater)
+        self.closing = menu.aboutToHide.emit  # 2.8.1: the ticks apply as it closes
+        return {a.text(): a for a in menu.actions() if a.text()}
+
+    def ticked(self, actions):
+        return [n for n in "PQR" if actions[n].isChecked()]
 
     def test_the_ticks_say_what_the_library_shows_and_a_tick_adds_a_provider(self):
         ctl = self.build()
         ctl.open("movies")  # P alone
         actions = self.menu(ctl)
-        self.assertEqual([n for n in "PQR" if actions[n].isChecked()], ["P"])
+        self.assertEqual(self.ticked(actions), ["P"])
         self.assertFalse(actions["All providers"].isChecked())
         actions["Q"].trigger()
+        self.assertEqual(self.catalog.mixes, [])  # the menu is still open: nothing yet
+        self.closing()
         self.assertEqual(self.catalog.mixes, [["P", "Q"]])
-        actions = self.menu(ctl)
-        self.assertEqual([n for n in "PQR" if actions[n].isChecked()], ["P", "Q"])
+        self.assertEqual(self.ticked(self.menu(ctl)), ["P", "Q"])
         self.assertEqual(ctl._source_title(), "P, Q")
 
     def test_untick_one_of_a_mix_and_the_others_stay(self):
         ctl = self.build()
         self.catalog.select_mix(["P", "Q"])
         self.menu(ctl)["Q"].trigger()
+        self.closing()
         self.assertEqual(self.catalog.mixes[-1], ["P"])
         self.assertEqual(self.catalog.current_provider_name(), "P")
-        self.menu(ctl)["P"].trigger()  # the last one stays ticked: something is shown
-        self.assertEqual(self.catalog.mixes[-1], ["P"])
+
+    def test_closing_with_nothing_ticked_keeps_what_was_shown(self):  # 2.8.1
+        ctl = self.build()
+        ctl.open("movies")  # P alone
+        self.menu(ctl)["P"].trigger()
+        self.closing()
+        self.assertEqual(self.catalog.mixes, [])
+        self.assertEqual(self.catalog.current_provider_name(), "P")
+
+    def test_closing_unchanged_asks_nothing(self):  # 2.8.1
+        ctl = self.build()
+        self.catalog.select_mix(["P", "R"])
+        actions = self.menu(ctl)
+        actions["Q"].trigger()
+        actions["Q"].trigger()  # ticked and unticked again
+        self.closing()
+        self.assertEqual(self.catalog.mixes, [["P", "R"]])  # only the mix made above
 
     def test_all_providers_ticks_every_one(self):
         ctl = self.build()
         actions = self.menu(ctl)
         actions["All providers"].trigger()
+        self.assertEqual(self.ticked(actions), ["P", "Q", "R"])
+        self.closing()
         self.assertEqual(self.catalog.mixes[-1], [])
         actions = self.menu(ctl)
         self.assertTrue(all(actions[n].isChecked() for n in "PQR"))
         self.assertTrue(actions["All providers"].isChecked())
         self.assertEqual(ctl._source_title(), "All providers")
+
+    def test_all_providers_when_all_are_ticked_clears_them_to_pick_one(self):  # 2.8.1
+        ctl = self.build()
+        self.catalog.select_mix([])  # every provider
+        actions = self.menu(ctl)
+        self.assertTrue(actions["All providers"].isChecked())
+        actions["All providers"].trigger()
+        self.assertEqual(self.ticked(actions), [])
+        actions["R"].trigger()
+        self.assertEqual(self.ticked(actions), ["R"])
+        self.assertFalse(actions["All providers"].isChecked())
+        self.closing()
+        self.assertEqual(self.catalog.mixes[-1], ["R"])
+        self.assertEqual(self.catalog.current_provider_name(), "R")
+
+    def test_ticking_every_provider_ticks_all_providers_too(self):  # 2.8.1
+        ctl = self.build()
+        ctl.open("movies")  # P alone
+        actions = self.menu(ctl)
+        actions["Q"].trigger()
+        self.assertFalse(actions["All providers"].isChecked())
+        actions["R"].trigger()
+        self.assertTrue(actions["All providers"].isChecked())
 
 
 class GenreHideTests(unittest.TestCase):  # 2.8: parental controls hide a Library genre

@@ -704,7 +704,7 @@ class TVWindow(QMainWindow):
             make_slot=self._make_slot,
             cast_devices=self.cast_devices,
             media_reporter=MediaReporter(  # 2.8: Jellyfin, Emby
-                self._media_servers, verify=lambda: bool(self.config.ssl_verify)
+                self._media_servers, verify=lambda: bool(config_manager.ssl_verify)
             ),
             parent=self,
         )

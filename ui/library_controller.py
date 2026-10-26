@@ -56,6 +56,7 @@ from ui.library.library_screen import LibraryScreen
 from ui.library.poster_grid import poster_url
 from ui.library.search_session import DEBOUNCE_MS, SearchSession
 from ui.library.top_nav import REFRESH_TEXT
+from ui.tick_menu import TickMenu
 
 logger = logging.getLogger(__name__)
 
@@ -620,21 +621,42 @@ class LibraryController(QObject):
         menu.popup(pos)
 
     def _source_menu(self) -> QMenu:
-        """A tick for each provider the Library shows (2.8: several mix), and All providers."""
-        menu = QMenu(self._screen)
+        """A tick for each provider the Library shows (2.8: several mix), and All providers,
+        which ticks every one or, with every one ticked, none (2.8.1: to pick one). The menu
+        stays open while ticks change; what is ticked shows once it closes (nothing ticked:
+        what showed stays)."""
+        menu = TickMenu(self._screen)
         names = self._catalog.provider_names()
         shown = self._shown_providers()
+        ticks = []
         for name in names:
             action = menu.addAction(name)
             action.setCheckable(True)
             action.setChecked(name in shown)
-            action.triggered.connect(lambda _checked=False, n=name: self._tick_source(n))
+            ticks.append(action)
         if len(names) > 1:  # with one provider there is nothing to mix
             menu.addSeparator()
-            action = menu.addAction(translate(ALL_PROVIDERS_TITLE))
-            action.setCheckable(True)
-            action.setChecked(self._catalog.all_providers() and len(shown) == len(names))
-            action.triggered.connect(lambda _checked=False: self._mix_sources([]))
+            every = menu.addAction(translate(ALL_PROVIDERS_TITLE))
+            every.setCheckable(True)
+
+            def tick_all(checked: bool) -> None:
+                for action in ticks:
+                    action.setChecked(checked)
+
+            def follow() -> None:
+                every.setChecked(all(action.isChecked() for action in ticks))
+
+            follow()
+            every.triggered.connect(tick_all)
+            for action in ticks:
+                action.triggered.connect(follow)
+
+        def apply() -> None:
+            chosen = [action.text() for action in ticks if action.isChecked()]
+            if chosen and set(chosen) != set(shown):
+                self._mix_sources([] if len(chosen) == len(names) else chosen)
+
+        menu.aboutToHide.connect(apply)
         menu.addSeparator()
         refresh = menu.addAction(translate(REFRESH_TEXT))
         refresh.triggered.connect(lambda _checked=False: self.refresh_lists())
@@ -688,17 +710,6 @@ class LibraryController(QObject):
         if self._catalog.all_providers():
             return list(self._catalog.mixed_names())
         return [self._catalog.current_provider_name()]
-
-    def _tick_source(self, name: str) -> None:
-        """A provider ticked joins what the Library shows, one unticked leaves it; the last one
-        stays (something is shown)."""
-        shown = self._shown_providers()
-        if name in shown:
-            if len(shown) == 1:
-                return
-            self._mix_sources([n for n in shown if n != name])
-        else:
-            self._mix_sources(shown + [name])
 
     def _mix_sources(self, names: list[str]) -> None:
         """Show these providers (one alone, several mixed; none: every one). The TV page and

@@ -47,6 +47,7 @@ class FakeCatalog(QObject):
         self.name = "P"
         self.names = ["P", "Q"]
         self.mixed = False  # All providers
+        self.mix = None  # 2.8: the providers ticked (None: every one)
         self.headers = set()  # ids of the provider headings among the groups
         self.version = 1
         self.section_list = ["live", "movies", "series"]
@@ -56,6 +57,9 @@ class FakeCatalog(QObject):
 
     def provider_names(self):
         return list(self.names)
+
+    def mixed_names(self):
+        return list(self.mix or self.names)
 
     def sections(self):
         return list(self.section_list)
@@ -748,6 +752,18 @@ class MixedProvidersTests(unittest.TestCase):
         # the same id at two providers keeps two resume points
         self.assertAlmostEqual(model.progress(items[0]), 300_000 / 6_000_000)
         self.assertAlmostEqual(model.progress(items[1]), 600_000 / 6_000_000)
+
+    def test_continue_lists_only_the_providers_ticked(self):  # 2.8.1
+        cat, *_ = mixed_catalog()
+        cat.names = [DEMO_TV, HARBOR_IPTV, "Cove TV"]
+        cat.mix = [DEMO_TV, HARBOR_IPTV]  # Cove TV is not ticked
+        cfg = make_config()
+        for name, provider in (("Ledger Nights", DEMO_TV), ("Cove Film", "Cove TV")):
+            history(cfg, movie(1, name), "movie", provider=provider)
+            resume(cfg, movie(1, name), "movie", provider=provider)
+        model, _ = build(cat, cfg)
+        self.assertEqual(model.genre_id, CONTINUE)
+        self.assertEqual([i["name"] for i in model.items()], ["Ledger Nights"])
 
     def test_one_provider_continue_is_stamped_with_its_provider(self):
         cat = FakeCatalog({"movies": [("1", "G", 1)]}, {("movies", "1"): [movie(1)]})

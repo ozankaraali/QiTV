@@ -717,8 +717,8 @@ class LibraryModel(QObject):
 
     def _history_entries(self) -> list[dict]:
         wanted = "episode" if self._section == "series" else "movie"
-        if self._mixed():  # every provider still in the list, newest first
-            names = set(self._catalog.provider_names())
+        if self._mixed():  # the providers mixed (2.8.1: those ticked), newest first
+            names = set(self._catalog.mixed_names())
         else:
             names = {self._catalog.current_provider_name()}
         return [
@@ -829,7 +829,7 @@ class LibraryModel(QObject):
 
     # --- content ids / kinds ----------------------------------------------------------
     def _mixed(self) -> bool:
-        """Whether the Library shows every provider (All providers)."""
+        """Whether the Library mixes providers (All providers, or those ticked)."""
         return bool(self._catalog.all_providers())
 
     def _content_id(self, item: dict, item_type=None) -> str:
