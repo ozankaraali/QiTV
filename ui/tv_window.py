@@ -99,7 +99,9 @@ from services.recording_schedule import (
     FILE_NAME as SCHEDULE_FILE,
     Schedule,
     flush_writes as recording_schedule_flush,
+    slot_text,
 )
+from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
@@ -148,6 +150,7 @@ from ui.overlays.zap_banner import ZapBanner
 from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
+from ui.record_timer_dialog import RecordTimerDialog, TimerChoice
 from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
 from ui.settings_dialog import OptionsDialog
@@ -545,6 +548,7 @@ class TVWindow(QMainWindow):
             os.path.join(config_manager.get_config_dir(), SCHEDULE_FILE)
         )
         self.scheduler: Optional[RecordingScheduler] = None
+        self._timer_dialog: Optional[RecordTimerDialog] = None  # "Record at a time", last open
         self.overlays = Overlays(
             banner=ZapBanner(host),
             column=ChannelColumn(self.logos, now_provider, parent=host),
@@ -724,6 +728,7 @@ class TVWindow(QMainWindow):
         controller.parental = self.parental  # what it protects never enters the history
         self.overlays.guide.recordRequested.connect(self.schedule_programme)
         self.overlays.guide.recordCancelled.connect(self.cancel_programme)
+        self.overlays.guide.timerRequested.connect(self.record_at)
         self.library_controller = self.screens.library_controller
         self.exports = ExportFlow(
             catalog=self.catalog,
@@ -835,8 +840,9 @@ class TVWindow(QMainWindow):
         except KeyError:
             return None
 
-    def schedule_programme(self, channel: dict, programme: Programme, series: bool) -> None:
-        """The guide's Record (or Record series, R): QiTV records it at its time."""
+    def schedule_programme(self, channel: dict, programme: Programme, series: bool) -> str:
+        """The guide's Record (or Record series, R): QiTV records it at its time. What the
+        toast said ("" when the programme had ended)."""
         schedule = self.recording_schedule
         name = str(channel.get("name") or "")
         if series:
@@ -851,7 +857,7 @@ class TVWindow(QMainWindow):
             if schedule.add_once(channel, programme, account=self._account_of(channel)) is None:
                 # i18n: a toast: a programme asked to be recorded ended already
                 self.screens.notify(tr("“{title}” has ended.", title=programme.title))
-                return
+                return ""
             when = fmt_clock(programme.start.astimezone())
             # i18n: a toast: the programme will be recorded at its time ({time}: its start)
             text = tr("“{title}” will be recorded at {time}.", title=programme.title, time=when)
@@ -860,6 +866,49 @@ class TVWindow(QMainWindow):
         self._schedule_changed()
         if self.scheduler is not None:
             self.scheduler.tick()  # one on now starts at once
+        return text
+
+    def record_at(self, channel: dict, programme: Optional[Programme] = None) -> None:
+        """2.8: "Record at a time" for `channel` (its right-click, the guide's footer), on the
+        programme's time when one is given; what it is given is scheduled."""
+        dialog = RecordTimerDialog(
+            str(channel.get("name") or ""),
+            start=programme.start if programme is not None else None,
+            stop=programme.stop if programme is not None else None,
+            parent=self,
+        )
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+        def chosen() -> None:
+            choice = dialog.choice()
+            if choice is not None:
+                self.schedule_timer(channel, choice)
+
+        dialog.accepted.connect(chosen)
+        self._timer_dialog = dialog
+        dialog.open()
+
+    def schedule_timer(self, channel: dict, choice: TimerChoice) -> str:
+        """Once: a programme of its own at that time; else a timer on its days. What the toast
+        said ("" when its time was over)."""
+        if not choice.days:
+            title = choice.title or slot_text(choice.begin, choice.minutes)
+            programme = Programme(title, choice.start(), choice.stop())
+            return self.schedule_programme(channel, programme, False)
+        item = self.recording_schedule.add_timer(
+            channel,
+            begin=choice.begin,
+            minutes=choice.minutes,
+            days=choice.days,
+            title=choice.title,
+            account=self._account_of(channel),
+        )
+        text = timer_text(item)
+        self.screens.notify(text)
+        self._schedule_changed()
+        if self.scheduler is not None:
+            self.scheduler.tick()  # one on now starts at once
+        return text
 
     def cancel_programme(self, channel: dict, programme: Programme) -> None:
         item = self.recording_schedule.scheduled_item(channel, programme)
@@ -909,6 +958,7 @@ class TVWindow(QMainWindow):
         controller.extra_guides = scheduler.providers
         controller.scheduled_now = scheduler.recording_now
         controller.stop_scheduled = scheduler.stop_now
+        controller.record_at = self.record_at  # a channel's right-click: Record at a time
 
     def _stop_scheduler(self) -> None:
         if self.scheduler is not None:

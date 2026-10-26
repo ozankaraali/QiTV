@@ -173,6 +173,32 @@ class RecordingsListTests(unittest.TestCase):
         self.assertEqual(shelf.items()[1]["_item_id"], "b2")
         self.assertEqual(names[2], "News")
 
+    def test_a_timer_says_its_time_and_days(self):  # 2.8 (owner): recorded at a time
+        from PySide6.QtCore import QLocale
+
+        from services.i18n import app_locale
+
+        shelf = RecordingsList(self.config)
+        base = {"kind": "timer", "title": "", "begin": 21 * 60, "minutes": 90}
+        base["channel"] = {"name": "Two"}
+        shelf.set_scheduled(
+            [
+                dict(base, id="t1", days=list(range(7))),
+                dict(base, id="t2", days=[0, 1, 2, 3, 4], title="Late film"),
+                dict(base, id="t3", days=[5, 6]),
+                dict(base, id="t4", days=[0, 2]),
+            ]
+        )
+        items = {i["_item_id"]: i for i in shelf.items()}
+        self.assertEqual(items["t1"]["name"], "21:00–22:30")  # no name: its time
+        self.assertEqual(items["t2"]["name"], "Late film")
+        self.assertEqual(items["t1"]["description"], "Records Two 21:00–22:30, every day")
+        self.assertEqual(items["t2"]["description"], "Records Two 21:00–22:30, Monday to Friday")
+        self.assertEqual(items["t3"]["description"], "Records Two 21:00–22:30, Saturday and Sunday")
+        mon, wed = (app_locale().dayName(d, QLocale.FormatType.ShortFormat) for d in (1, 3))
+        self.assertEqual(items["t4"]["description"], f"Records Two 21:00–22:30, {mon}, {wed}")
+        self.assertEqual(items["t4"]["genre"], "Scheduled")
+
     def test_a_recording_being_written_is_marked(self):
         path = touch(self.folder, "News 2026-10-19 21.30.ts")
         shelf = RecordingsList(self.config, writing=lambda: {str(path)})

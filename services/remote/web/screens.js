@@ -70,6 +70,11 @@ const words = {
   no_casting: "Casting isn't available on this computer",
   record_series: "Series",
   cancel_recording: "Cancel recording",
+  next_day: "Ends the next day.",
+  passed: "That time has passed.",
+  no_day: "Choose at least one day.",
+  no_length: "From and To are the same.",
+  timer_failed: "Couldn't schedule that recording",
 };
 const w = (key) => (t(key) === key ? words[key] || key : t(key));
 
@@ -500,8 +505,13 @@ function timetableTitle(num, name) {
   title.append(name || "");
 }
 
+let timerOffered = false; // the timetable shown says QiTV records (with its time-shift helper)
+
 function openTimetable(id, num, name) {
   timetableFor = id;
+  timerOffered = false;
+  closeTimer();
+  $("timerNote").textContent = "";
   timetableTitle(num, name);
   $("timetableRows").replaceChildren(el("div", "empty", w("loading")));
   show("timetable");
@@ -555,6 +565,121 @@ function schedChips(slot) {
   return chips;
 }
 
+// ---- Record at a time (2.8): the timetable's channel from one time to another, once on a day
+// or on chosen weekdays, guide or not. Times are the TV's clock's; an end before the start is
+// the next day's. QiTV says what it scheduled (or why not) on the line by the button.
+
+const pad2 = (n) => String(n).padStart(2, "0");
+const isoDay = (date) => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+const hhmm = (date) => `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+
+function minutesOf(value) {
+  const [hours, minutes] = (value || "").split(":").map(Number);
+  return hours * 60 + minutes; // NaN while empty
+}
+
+function bindTimer() {
+  const days = $("timerDays");
+  for (let day = 0; day < 7; day += 1) {
+    // 2024-01-01 was a Monday: the phone's own short day names, Monday first
+    const name = new Date(2024, 0, 1 + day).toLocaleDateString([], { weekday: "short" });
+    const button = el("button", "chip", name);
+    button.type = "button";
+    button.dataset.day = String(day);
+    button.addEventListener("click", () => {
+      button.classList.toggle("on");
+      checkTimer();
+    });
+    days.append(button);
+  }
+  $("timerOpen").addEventListener("click", openTimer);
+  $("timerCancel").addEventListener("click", closeTimer);
+  for (const id of ["timerRepeat", "timerDay", "timerFrom", "timerTo"]) {
+    $(id).addEventListener("input", checkTimer);
+    $(id).addEventListener("change", checkTimer);
+  }
+  $("timerForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    sendTimer();
+  });
+}
+
+function openTimer() {
+  const now = new Date();
+  const start = new Date(now.getTime());
+  start.setSeconds(0, 0);
+  start.setMinutes(start.getMinutes() + ((5 - (start.getMinutes() % 5)) % 5)); // the next five
+  const stop = new Date(start.getTime() + 3600 * 1000);
+  $("timerName").value = "";
+  $("timerRepeat").value = "once";
+  $("timerDay").min = isoDay(now);
+  $("timerDay").value = isoDay(start);
+  $("timerFrom").value = hhmm(start);
+  $("timerTo").value = hhmm(stop);
+  for (const button of $("timerDays").children) button.classList.remove("on");
+  $("timerNote").textContent = "";
+  $("timerBar").hidden = true; // the form in its place
+  $("timerForm").hidden = false;
+  checkTimer();
+}
+
+function closeTimer() {
+  $("timerForm").hidden = true;
+  $("timerBar").hidden = !timerOffered;
+}
+
+function timerDays() {
+  const kind = $("timerRepeat").value;
+  if (kind === "daily") return [0, 1, 2, 3, 4, 5, 6];
+  if (kind === "weekdays") return [0, 1, 2, 3, 4];
+  if (kind !== "days") return [];
+  return [...$("timerDays").children].filter((b) => b.classList.contains("on")).map((b) => Number(b.dataset.day));
+}
+
+// The message the form asks for, or none; `why`: the hint's word.
+function timerChoice() {
+  const begin = minutesOf($("timerFrom").value);
+  const end = minutesOf($("timerTo").value);
+  if (Number.isNaN(begin) || Number.isNaN(end)) return { why: "" };
+  const minutes = (((end - begin) % 1440) + 1440) % 1440;
+  if (!minutes) return { why: "no_length" };
+  const once = $("timerRepeat").value === "once";
+  const days = timerDays();
+  if (!once && !days.length) return { why: "no_day" };
+  const day = once ? $("timerDay").value : "";
+  if (once) {
+    const [year, month, date] = day.split("-").map(Number);
+    const start = new Date(year, month - 1, date, Math.floor(begin / 60), begin % 60);
+    if (Number.isNaN(start.getTime())) return { why: "" };
+    if (start.getTime() + minutes * 60000 <= Date.now()) return { why: "passed" };
+  }
+  const title = $("timerName").value.trim();
+  const message = { t: "timer", id: timetableFor, title, begin, minutes, days, day };
+  return { message, why: end <= begin ? "next_day" : "" };
+}
+
+function checkTimer() {
+  const once = $("timerRepeat").value === "once";
+  $("timerDays").hidden = $("timerRepeat").value !== "days";
+  $("timerDayLine").hidden = !once;
+  const choice = timerChoice();
+  $("timerHint").textContent = choice.why ? w(choice.why) : "";
+  $("timerSchedule").disabled = !choice.message;
+}
+
+function sendTimer() {
+  const choice = timerChoice();
+  if (!choice.message || !timetableFor) return;
+  if (navigator.vibrate) navigator.vibrate(8);
+  send(choice.message);
+  closeTimer();
+}
+
+function onTimer(message) {
+  if (message.id !== timetableFor) return;
+  $("timerNote").textContent = message.text || w(message.failed === "passed" ? "passed" : "timer_failed");
+}
+
 // ---- casting (2.8): QiTV sends what plays to a TV it finds (a Chromecast) ------------------
 
 // The menu sheet shows other menus too: a list that arrives redraws only the cast list in view.
@@ -591,6 +716,8 @@ function bindCast() {
 function onTimetable(message) {
   if (message.id !== timetableFor) return;
   timetableTitle(message.num, message.name);
+  timerOffered = Boolean(message.timer);
+  if ($("timerForm").hidden) $("timerBar").hidden = !timerOffered;
   const nowS = Date.now() / 1000;
   const rows = [];
   let day = new Date().toDateString();
@@ -1157,6 +1284,7 @@ function onHello() {
 app.handlers.hello = onHello;
 app.handlers.state = onState;
 app.handlers.timetable = onTimetable;
+app.handlers.timer = onTimer;
 app.handlers.results = onResults;
 app.handlers.genres = onGenres;
 app.handlers.library = onLibrary;
@@ -1181,6 +1309,7 @@ app.menuExtras.push(() => {
 
 export function install() {
   bindGuide();
+  bindTimer();
   bindLibrary();
   bindSearch();
   bindTouchpad();

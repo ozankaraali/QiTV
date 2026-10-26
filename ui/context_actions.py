@@ -7,6 +7,8 @@ on a Library title or episode offers the players and its link (`show_target`).
 - "Add to favorites" / "Remove from favorites" (channels only);
 - "Open in picture-in-picture" (channels, when the shell offers picture in picture): the
   channel plays small beside the one playing (Ctrl/⌘+P on the highlighted row does the same);
+- "Record at a time…" (channels, when QiTV records, 2.8): the channel recorded from one time to
+  another, once or on chosen days, with no guide needed (`ui.record_timer_dialog`);
 - "Remove from Recents" (a channel of ⟲ Recent, while the list shows it): it leaves the list
   (Delete on the highlighted row does the same); "Clear Recents ›" there, and on the ⟲ Recent
   row itself, opens one entry that clears the whole list: the submenu is the confirmation;
@@ -43,6 +45,8 @@ OPEN_PIP_TEXT = N_("Open in picture-in-picture")  # i18n: a menu entry
 REMOVE_RECENT_TEXT = N_("Remove from Recents")
 # i18n: a channel's or a group's right-click entry: parental controls hide it (2.8)
 HIDE_TEXT = N_("Hide (parental controls)")
+# i18n: a channel's right-click entry: record it from one time to another (no guide needed)
+RECORD_AT_TEXT = N_("Record at a time…")
 # i18n: a menu entry opening a submenu that confirms emptying the "Recent" list
 CLEAR_RECENTS_TEXT = N_("Clear Recents")
 PLAYERS = ((N_("Play in VLC"), "vlc"), (N_("Play in MPV"), "mpv"))
@@ -92,17 +96,20 @@ class ContextActions(QObject):
         clear_recents: Optional[Callable[[], None]] = None,
         hide: Optional[Callable[[NavNode], None]] = None,
         may_hide: Callable[[], bool] = lambda: True,
+        record_at: Optional[Callable[[], Optional[Callable[[dict], None]]]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`external` is services.external_players or a stand-in; `notify(text, kind)` toasts.
 
         `open_pip(node)` opens a channel row in picture in picture, `forget_recent(item)` takes
         a channel out of ⟲ Recent and `clear_recents()` empties it (None: no such entry).
+        `record_at()` is what records a channel at a time (2.8; None while QiTV cannot).
         """
         super().__init__(parent)
         self._open_pip = open_pip
         self._hide = hide  # 2.8: parental controls hide a channel or a group ...
         self._may_hide = may_hide  # ... once their PIN is set
+        self._record_at = record_at
         self._forget_recent = forget_recent
         self._clear_recents = clear_recents
         self.nav = nav
@@ -166,6 +173,11 @@ class ContextActions(QObject):
             if open_pip is not None:
                 menu.addAction(translate(OPEN_PIP_TEXT)).triggered.connect(
                     lambda _=False: open_pip(node)
+                )
+            record_at = self._record_at() if self._record_at is not None else None
+            if record_at is not None:
+                menu.addAction(translate(RECORD_AT_TEXT)).triggered.connect(
+                    lambda _=False: record_at(item)
                 )
             forget = self._forget_recent
             if forget is not None and self.nav.is_recent_row(node):

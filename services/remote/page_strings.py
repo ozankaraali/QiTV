@@ -111,6 +111,31 @@ PAGE_STRINGS: dict[str, str] = {
     "record_series": N_("Series"),
     # i18n: the phone remote's guide: a scheduled programme's chip: it will not be recorded
     "cancel_recording": N_("Cancel recording"),
+    # i18n: the phone remote's timetable: record the channel at a time of one's choosing (no
+    # guide needed), once or on chosen days
+    "record_at": N_("Record at a time"),
+    # i18n: the phone remote's "Record at a time": its name field's placeholder
+    "timer_name": N_("Name (optional)"),
+    "once": N_("Once"),  # i18n: a timer recording's repeat: one time, on the day chosen
+    "daily": N_("Every day"),  # i18n: a timer recording's repeat
+    "weekdays": N_("Monday to Friday"),  # i18n: a timer recording's repeat
+    "on_days": N_("On these days"),  # i18n: a timer recording's repeat: the days ticked
+    "day": N_("Day"),  # i18n: a field's label: the date it records on
+    "from": N_("From"),  # i18n: a field's label: the time it starts
+    "to": N_("To"),  # i18n: a field's label: the time it stops
+    "cancel": N_("Cancel"),  # i18n: a button
+    # i18n: the button of "Record at a time" that adds the recording to the schedule
+    "schedule": N_("Schedule"),
+    # i18n: a hint in "Record at a time": the end time is earlier than the start
+    "next_day": N_("Ends the next day."),
+    # i18n: a hint in "Record at a time": a one-time recording whose time is over
+    "passed": N_("That time has passed."),
+    # i18n: a hint in "Record at a time": "On these days" with no day ticked
+    "no_day": N_("Choose at least one day."),
+    # i18n: a hint in "Record at a time": the start and end times are the same
+    "no_length": N_("From and To are the same."),
+    # i18n: the phone remote: QiTV could not add the recording at a time
+    "timer_failed": N_("Couldn't schedule that recording"),
     "pip": N_("Picture in picture"),  # i18n: the phone remote: a button
     # i18n: the phone remote: the same button while the TV shows a small picture
     "close_pip": N_("Close picture in picture"),

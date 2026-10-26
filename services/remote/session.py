@@ -40,6 +40,7 @@ from services.remote.protocol import (
     RefreshLists,
     Schedule,
     StoreSaved,
+    Timer,
     ToTv,
     WatchHere,
     b64d,
@@ -295,6 +296,10 @@ class Session:
             return Reply(events=[CastTo(sid, m["to"])])
         if t == "sched":  # 2.8
             return Reply(events=[Schedule(sid, m["id"], m["do"])])
+        if t == "timer":  # 2.8: Record at a time
+            days = tuple(m["days"])
+            event = Timer(sid, m["id"], m["title"], m["begin"], m["minutes"], days, m["day"])
+            return Reply(events=[event])
         if t != "forget":
             return Reply()  # never a "forget" by mistake: only its own message forgets
         # "forget": the phone leaves for good.

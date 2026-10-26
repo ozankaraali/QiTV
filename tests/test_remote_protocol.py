@@ -133,6 +133,30 @@ class MessageTests(unittest.TestCase):
         ):
             self.assertIsNone(parse_phone_message(bad), bad)
 
+    def test_a_channel_is_recorded_at_a_time(self):  # 2.8 (owner)
+        every = {"t": "timer", "id": "h2", "title": "Late", "begin": 1260, "minutes": 60}
+        self.assertEqual(
+            parse_phone_message(dict(every, days=[2, 0, 2])),
+            dict(every, days=[0, 2], day=""),
+        )
+        once = dict(every, days=[], day="2026-10-27")
+        self.assertEqual(parse_phone_message(once), once)
+        self.assertEqual(parse_phone_message(dict(once, title="x" * 300))["title"], "x" * 80)
+        for bad in (
+            dict(every, days=[]),  # once, but on no day
+            dict(once, day="27/10/2026"),
+            dict(once, day="2026-02-30"),
+            dict(every, days=[7]),
+            dict(every, days=[True]),
+            dict(every, days="0"),
+            dict(every, days=[0], begin=1440),
+            dict(every, days=[0], minutes=0),
+            dict(every, days=[0], minutes=1441),
+            dict(every, days=[0], title=3),
+            dict(every, days=[0], id=""),
+        ):
+            self.assertIsNone(parse_phone_message(bad), bad)
+
     def test_messages_validated(self):
         self.assertEqual(parse_phone_message({"t": "down", "b": "up"}), {"t": "down", "b": "up"})
         self.assertEqual(

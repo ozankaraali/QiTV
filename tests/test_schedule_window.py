@@ -27,6 +27,9 @@ class StandInScheduler(QObject):
     def recording_now(self):
         return list(self.now)
 
+    def tick(self):
+        pass
+
     def stop_now(self, name):
         self.stopped.append(name)
 
@@ -62,6 +65,37 @@ class ScheduleWindowTests(WindowCase):
         with mock.patch.object(controller, "tune_live") as tune:
             controller.go_back_to_recording("sched:a@1")
         self.assertEqual(tune.call_args.args[0]["name"], "Channel 2")
+
+    def test_record_at_a_time_schedules_a_timer_or_one_slot(self):  # 2.8 (owner)
+        from datetime import date, timedelta
+
+        from PySide6.QtCore import QTime
+
+        from ui.record_timer_dialog import DAILY, TimerChoice
+
+        self.attach()
+        window = self.window
+        self.assertIsNotNone(window.controller.record_at)  # the channel's right-click
+        window.overlays.guide.timerRequested.emit(CHANNEL, None)  # the guide's footer
+        dialog = window._timer_dialog
+        self.assertEqual(dialog.channel.text(), "Channel 2")
+        dialog.repeat.setCurrentIndex(dialog.repeat.findData(DAILY))
+        dialog.begin.setTime(QTime(21, 0))
+        dialog.end.setTime(QTime(22, 0))
+        with mock.patch.object(window.screens, "notify") as notify:
+            dialog.schedule_button.click()
+        timers = [i for i in window.recording_schedule.items() if i["kind"] == "timer"]
+        self.assertEqual(
+            [(i["begin"], i["minutes"], i["days"]) for i in timers], [(1260, 60, list(range(7)))]
+        )
+        self.assertEqual(notify.call_args[0][0], "Records Channel 2 21:00–22:00, every day")
+        tomorrow = date.today() + timedelta(days=1)
+        choice = TimerChoice("", tomorrow, 21 * 60, 60, ())
+        window.schedule_timer(CHANNEL, choice)
+        once = [i for i in window.recording_schedule.items() if i["kind"] == "once"]
+        self.assertEqual(
+            [(i["title"], i["start"]) for i in once], [("21:00–22:00", choice.start().timestamp())]
+        )
 
     def test_the_helper_stopped_or_replaced_reaches_the_scheduler(self):
         scheduler = self.attach()

@@ -41,6 +41,9 @@ others' distributions, which may have malware.**
   programmes on one channel share the stream, and a recording cut short goes on in another
   file. The REC sign shows what records and stops it. The phone remote's timetable has the
   same Record and Series.
+- **Record at a time.** A channel without a guide records too: right-click it (or use the
+  guide's **Record at a time…**) and choose from when to when, once, every day, Monday to
+  Friday or on the days you tick. The phone remote's timetable offers the same.
 - **Recordings in the Library.** A **Recordings** shelf in Movies lists your recordings, newest
   first, named after their programme when they were scheduled, with the recordings still to
   come above them. A recording plays from where you stopped and seeks like a film; right-click

@@ -22,6 +22,7 @@ from services.remote.protocol import (
     RefreshLists,
     Schedule,
     StoreSaved,
+    Timer,
     ToTv,
     WatchHere,
 )
@@ -220,6 +221,7 @@ class KkTests(SessionCase):
             {"t": "rec", "id": "b1", "do": "back"},
             {"t": "cast", "to": "Den"},
             {"t": "sched", "id": "h7", "do": "series"},
+            {"t": "timer", "id": "h7", "title": "", "begin": 60, "minutes": 30, "days": [1]},
             {"t": "get", "what": "cast"},
             {"t": "refresh"},
         ):
@@ -244,6 +246,7 @@ class KkTests(SessionCase):
                 RecAct(sid, "b1", "back"),
                 CastTo(sid, "Den"),
                 Schedule(sid, "h7", "series"),
+                Timer(sid, "h7", "", 60, 30, (1,), ""),
                 Get(sid, "cast", "", 0),
                 RefreshLists(sid),
             ],

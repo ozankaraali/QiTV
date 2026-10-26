@@ -18,7 +18,7 @@ from services.epg_view import Programme
 from services.find import FoundChannel, FoundGenre
 from services.navigation import NavNode
 from services.provider_ids import ALL_PROVIDERS
-from services.remote.protocol import MAX_MESSAGE, Get, OpenItem, Schedule
+from services.remote.protocol import MAX_MESSAGE, Get, OpenItem, Schedule, Timer
 from tests.fixtures import local_provider
 from tests.fixtures.local_provider import PROVIDER_NAME
 from ui.recording_scheduler import RecordingScheduler
@@ -254,6 +254,38 @@ class PhoneGuideTests(WindowCase):
             remote.bridge.post(Schedule("s1", later["sched"], "cancel"))
             self.assertTrue(wait_until(lambda: not self.last("timetable")["rows"][1]["rec"]))
         self.assertEqual(self.window.recording_schedule.items(), [])
+
+    def test_a_channel_is_recorded_at_a_time_from_the_phone(self):  # 2.8 (owner)
+        # A channel with no guide at all: its timetable still offers "Record at a time".
+        self.start()
+        remote, window = self.window.remote, self.window
+        remote._guides["s1"] = self.guide
+        self.addCleanup(remote._guides.pop, "s1", None)
+        window.scheduler = RecordingScheduler(  # without libVLC the window has none
+            schedule=window.recording_schedule,
+            engine=mock.MagicMock(),
+            catalogs=window.catalogs,
+            budget=mock.Mock(),
+            config=window.config_manager,
+            toast=mock.Mock(),
+            parent=window,
+        )
+        replies = []
+        send = mock.patch.object(remote, "_send", side_effect=lambda sid, m: replies.append(m))
+        with mock.patch.object(window.catalog, "programmes", return_value=[]), send:
+            handle = self.last()["rows"][0]["id"]
+            self.guide.timetable(handle)
+            self.assertTrue(self.last("timetable")["timer"])
+            remote.bridge.post(Timer("s1", handle, "", 21 * 60, 60, (0, 1, 2, 3, 4), ""))
+            self.assertTrue(wait_until(lambda: replies))
+            self.assertEqual(replies[-1]["t"], "timer")
+            self.assertEqual(replies[-1]["id"], handle)
+            self.assertIn("Monday to Friday", replies[-1]["text"])
+            remote.bridge.post(Timer("s1", handle, "", 60, 30, (), "2020-01-01"))  # over
+            self.assertTrue(wait_until(lambda: len(replies) == 2))
+            self.assertEqual(replies[-1].get("failed"), "passed")
+        kinds = [i["kind"] for i in window.recording_schedule.items()]
+        self.assertEqual(kinds, ["timer"])
 
     def test_a_past_programme_is_not_offered_for_recording(self):  # 2.8
         self.start()

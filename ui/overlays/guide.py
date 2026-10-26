@@ -78,6 +78,9 @@ RECORD_TEXT = N_("Record")
 SERIES_TEXT = N_("Record series")
 # i18n: the guide's footer button: the programme is scheduled; this cancels its recording
 CANCEL_TEXT = N_("Cancel recording")
+# i18n: the guide's footer button: record the channel at a time of one's choosing (no guide
+# needed), once or on chosen days
+TIMER_TEXT = N_("Record at a time")
 RECORD_KEY = "R"
 BUTTON_U = 2.2  # the header's buttons: 28 px at the default 1280 px window
 BUTTON_GAP_U = 0.6
@@ -224,6 +227,8 @@ class Guide(Overlay):
     # 2.8: (channel dict, Programme, series): record it at its time (every airing: series)
     recordRequested = Signal(object, object, bool)
     recordCancelled = Signal(object, object)  # (channel dict, Programme): no longer
+    # 2.8: (channel dict, Programme or None): "Record at a time…", on the programme's time
+    timerRequested = Signal(object, object)
 
     def __init__(
         self,
@@ -367,6 +372,8 @@ class Guide(Overlay):
                 return key_hint(what, "Return") if self.chosen() is not None else what
             if name == "series":
                 return translate(SERIES_TEXT)
+            if name == "timer":
+                return translate(TIMER_TEXT)
             return key_hint(translate(RECORD_TEXT if name == "record" else CANCEL_TEXT), RECORD_KEY)
         return ""
 
@@ -448,7 +455,8 @@ class Guide(Overlay):
 
     def footer_buttons(self) -> dict[str, QRectF]:
         """The footer's buttons, right to left: Record and Record series (or Cancel recording
-        for a scheduled one, 2.8), then "▶ Watch from the start"; only those that show."""
+        for a scheduled one, 2.8), "Record at a time…" (whatever the guide lists, none too),
+        then "▶ Watch from the start"; only those that show."""
         if self.isHidden() or self.current_channel() is None:
             return {}
         layout = self._layout()
@@ -458,6 +466,8 @@ class Guide(Overlay):
         target = self.record_target()
         if target is not None:
             names += ["cancel"] if self._target_scheduled(target) else ["record", "series"]
+        if self._scheduled is not None:
+            names.append("timer")
         if self._footer_choice()[1]:
             names.append("watch")
         fm = QFontMetrics(units.font(1.05, QFont.Weight.DemiBold))
@@ -477,6 +487,7 @@ class Guide(Overlay):
             "record": "●  " + translate(RECORD_TEXT),
             "series": translate(SERIES_TEXT),
             "cancel": translate(CANCEL_TEXT),
+            "timer": translate(TIMER_TEXT) + "…",
         }[name]
 
     def watch_button(self) -> QRectF:
@@ -500,6 +511,9 @@ class Guide(Overlay):
         channel, programme = self.current_channel(), self.record_target()
         if name == "watch":
             self._watch_chosen()
+        elif name == "timer":
+            if channel is not None:
+                self.timerRequested.emit(channel, programme)
         elif channel is not None and programme is not None:
             if name == "cancel":
                 self.recordCancelled.emit(channel, programme)

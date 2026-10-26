@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+from datetime import date
 import json
 import re
 from typing import Literal, Optional
@@ -193,6 +194,8 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         if _short_id(obj.get("id")) and obj.get("do") in ("once", "series", "cancel"):
             return {"t": "sched", "id": obj["id"], "do": obj["do"]}
         return None
+    if t == "timer":  # 2.8: a timetable's channel recorded at a time (no guide needed)
+        return _timer(obj)
     if t == "watch":  # what the TV plays, or a channel of the phone's list by its handle
         if "id" not in obj:
             return {"t": "watch"}
@@ -226,6 +229,41 @@ def parse_phone_message(obj: object) -> Optional[dict]:
 MAX_ASK = 2**31 - 1  # an ask's number (see _numbered)
 MAX_DEVICE = 200  # 2.8: a cast device's name, as the TV lists it
 MAX_POS = 2 * 24 * 3600 * 1000  # a title's place or length, in ms: two days at most
+MAX_TIMER_TITLE = 80  # 2.8: a timer's name, as the phone typed it (cut there)
+DAY_MINUTES = 24 * 60
+_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _timer(obj: dict) -> Optional[dict]:
+    """2.8: "Record at a time" (`ui.record_timer_dialog`): a timetable's channel (`id`) from
+    `begin` (minutes after midnight) for `minutes`, on the weekdays `days` (Monday 0), or once
+    on `day` ("YYYY-MM-DD") when `days` is empty."""
+    title, begin, minutes = obj.get("title", ""), _int(obj.get("begin")), _int(obj.get("minutes"))
+    days, day = obj.get("days"), obj.get("day", "")
+    if not _short_id(obj.get("id")) or not isinstance(title, str) or not isinstance(days, list):
+        return None
+    if begin is None or minutes is None or not 0 <= begin < DAY_MINUTES:
+        return None
+    if not 0 < minutes <= DAY_MINUTES or not all(_int(d) is not None and 0 <= d <= 6 for d in days):
+        return None
+    if not days:
+        if not isinstance(day, str) or not _DAY.match(day):
+            return None
+        try:
+            date.fromisoformat(day)
+        except ValueError:
+            return None
+    else:
+        day = ""
+    return {
+        "t": "timer",
+        "id": obj["id"],
+        "title": title[:MAX_TIMER_TITLE],
+        "begin": begin,
+        "minutes": minutes,
+        "days": sorted(set(days)),
+        "day": day,
+    }
 
 
 def _page_and_find(obj: dict) -> Optional[tuple[int, str]]:
@@ -398,6 +436,20 @@ class Schedule:
     sid: str
     handle: str
     do: str
+
+
+@dataclass(frozen=True)
+class Timer:
+    """2.8: the timetable `handle`'s channel recorded from `begin` (minutes after midnight) for
+    `minutes`, on the weekdays `days` (Monday 0), or once on `day` (ISO) when there are none."""
+
+    sid: str
+    handle: str
+    title: str
+    begin: int
+    minutes: int
+    days: tuple[int, ...]
+    day: str
 
 
 @dataclass(frozen=True)

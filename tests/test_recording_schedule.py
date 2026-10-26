@@ -20,6 +20,16 @@ CHANNEL = {
 }
 
 
+def local(day, hour, minute=0):
+    """A moment of this computer's clock (timers keep its times), in Unix seconds."""
+    return datetime(2026, 10, day, hour, minute).astimezone().timestamp()
+
+
+def at(when):
+    """`when` (local Unix seconds) as a clock that returns it."""
+    return lambda: when
+
+
 def programme(title, start_min, length_min=30):
     start = T0 + timedelta(minutes=start_min)
     return Programme(title, start, start + timedelta(minutes=length_min), "", None)
@@ -179,6 +189,88 @@ class ScheduleTests(unittest.TestCase):
         self.assertFalse(self.schedule.is_scheduled(CHANNEL, programme("Weather", 60)))
         self.schedule.add_series(CHANNEL, "Weather")
         self.assertTrue(self.schedule.is_scheduled(CHANNEL, programme("weather", 600)))
+
+
+class TimerTests(unittest.TestCase):  # 2.8 (owner): a time on chosen days, no guide needed
+    # 2026-10-26 is a Monday (weekday 0).
+    def setUp(self):
+        self.folder = Path(tempfile.mkdtemp(prefix="qitv-timers-"))
+        self.addCleanup(shutil.rmtree, self.folder, True)
+        self.path = str(self.folder / rs.FILE_NAME)
+        self.schedule = rs.Schedule(self.path, write=rs.write_now, clock=at(local(26, 12)))
+
+    def due(self, when):
+        return self.schedule.due(when, lambda channel, since: [])  # no guide at all
+
+    def test_a_timer_records_its_time_on_its_days(self):
+        self.schedule.add_timer(CHANNEL, begin=21 * 60, minutes=90, days=[0, 2])  # Mon, Wed
+        (job,) = self.due(local(26, 21, 30))
+        self.assertEqual((job.start, job.stop), (local(26, 21), local(26, 22, 30)))
+        self.assertEqual(job.title, "21:00–22:30")  # no name: its time
+        self.assertEqual(job.channel["name"], "News One")
+        self.assertEqual(self.due(local(27, 21, 30)), [])  # Tuesday
+        (wednesday,) = self.due(local(28, 21, 0))
+        self.assertEqual(wednesday.start, local(28, 21))
+        self.assertEqual(self.due(local(28, 20, 50)), [])  # not yet (a minute early only)
+
+    def test_a_timer_past_midnight_is_its_first_day_s(self):
+        self.schedule.add_timer(CHANNEL, begin=23 * 60 + 30, minutes=90, days=[0])
+        (job,) = self.due(local(27, 0, 30))  # Tuesday night, the Monday slot
+        self.assertEqual((job.start, job.stop), (local(26, 23, 30), local(27, 1)))
+
+    def test_a_timer_stays_after_it_records_and_records_each_time_once(self):
+        item = self.schedule.add_timer(
+            CHANNEL, begin=21 * 60, minutes=60, days=range(7), title="Late film"
+        )
+        (job,) = self.due(local(26, 21, 5))
+        self.assertEqual(job.title, "Late film")
+        self.schedule.started(job)
+        self.assertEqual(self.due(local(26, 21, 6)), [])
+        self.schedule.finished(job, rs.RECORDED, path="/r/a.ts")
+        self.assertEqual([i["id"] for i in self.schedule.items()], [item["id"]])
+        (tomorrow,) = self.due(local(27, 21, 5))
+        self.assertEqual(tomorrow.start, local(27, 21))
+
+    def test_the_same_timer_twice_is_one(self):
+        first = self.schedule.add_timer(CHANNEL, begin=60, minutes=30, days=[4, 1])
+        again = self.schedule.add_timer(CHANNEL, begin=60, minutes=30, days=[1, 4, 4])
+        self.assertEqual(first["id"], again["id"])
+        self.assertEqual(first["days"], [1, 4])
+
+    def test_a_timer_is_kept_in_the_file_and_a_wrong_one_left_out(self):
+        self.schedule.add_timer(CHANNEL, begin=21 * 60, minutes=90, days=[0])
+        good = rs.Schedule(self.path).items()
+        self.assertEqual(
+            [(i["kind"], i["begin"], i["minutes"], i["days"]) for i in good],
+            [("timer", 1260, 90, [0])],
+        )
+        import json
+
+        base = {"kind": "timer", "channel": CHANNEL, "title": "", "begin": 60, "minutes": 30}
+        bad = [
+            dict(base, id="b1", days=[]),
+            dict(base, id="b2", days=[7]),
+            dict(base, id="b3", days=[0], begin=24 * 60),
+            dict(base, id="b4", days=[0], minutes=0),
+            dict(base, id="b5", days=[0], minutes=24 * 60 + 1),
+            dict(base, id="b6", days=[True]),
+            dict(base, id="b7", days="0"),
+        ]
+        data = json.loads(Path(self.path).read_text())
+        data["items"] += bad
+        Path(self.path).write_text(json.dumps(data))
+        self.assertEqual(len(rs.Schedule(self.path).items()), 1)
+
+    def test_a_timer_is_never_noted_missed(self):
+        # QiTV was closed through Monday's slot: the next one records as usual.
+        self.schedule.add_timer(CHANNEL, begin=21 * 60, minutes=60, days=[0])
+        self.assertEqual(self.schedule.missed_before(local(27, 9)), [])
+        self.assertEqual(len(self.schedule.items()), 1)
+
+    def test_the_time_of_a_slot(self):
+        self.assertEqual(rs.slot_text(21 * 60, 90), "21:00–22:30")
+        self.assertEqual(rs.slot_text(23 * 60 + 30, 90), "23:30–01:00")
+        self.assertEqual(rs.slot_text(5, 24 * 60), "00:05–00:05")
 
 
 if __name__ == "__main__":

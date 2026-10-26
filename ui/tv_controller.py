@@ -390,6 +390,7 @@ class TVController(QObject):
             clear_recents=self._clear_recents,
             hide=self._hide_from_menu,  # 2.8: parental controls, once their PIN is set
             may_hide=lambda: self.parental is not None and self.parental.has_pin(),
+            record_at=lambda: self.record_at,
             parent=self,
         )
         # The volume keys, mute and the wheel, on the mixer (one row per picture).
@@ -484,6 +485,8 @@ class TVController(QObject):
         # 2.8: what records on schedule now (RecordingScheduler.recording_now) and its Stop.
         self.scheduled_now: Callable[[], list[tuple[str, str, float, dict]]] = list
         self.stop_scheduled: Callable[[str], None] = lambda name: None
+        # 2.8: "Record at a time…" for a channel (the window's, once QiTV records)
+        self.record_at: Optional[Callable[[dict], None]] = None
         # 2.8: parental controls (services.parental.Parental; None: none): what they hide never
         # enters the history.
         self.parental: Optional[Any] = None

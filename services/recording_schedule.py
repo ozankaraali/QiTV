@@ -2,7 +2,9 @@
 
 A recording is scheduled from the guide: one programme (`add_once`: its channel, title, start
 and stop) or a series (`add_series`: every airing of a title on a channel, as the channel's
-guide lists them). Each records from PRE_S before its start to POST_S after its stop
+guide lists them); or at a time, which needs no guide (`add_timer`: a channel from one time of
+this computer's clock to another on chosen weekdays; once at a time is a one-time programme
+`add_once` is given). Each records from PRE_S before its start to POST_S after its stop
 (`window`). The scheduler (`ui.recording_scheduler`) asks `due(now, guide)` every few seconds;
 a job it starts is marked (`started`) and its end noted (`finished`: recorded, missed or failed,
 with why), the last OUTCOMES of them kept: the Library names a recording by its programme
@@ -17,12 +19,13 @@ broken one, reads as empty (an older QiTV ignores the file).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime, time as clock_time, timedelta
 import json
 import logging
 import os
 import threading
 import time
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 from urllib.parse import quote
 import uuid
 
@@ -37,7 +40,8 @@ PRE_S = 60  # recording starts a minute early
 POST_S = 180  # and goes on three minutes late (guides run late)
 OUTCOMES = 50  # the last outcomes kept
 DONE = 400  # the series airings already taken, kept to never record one twice
-ONCE, SERIES = "once", "series"
+ONCE, SERIES, TIMER = "once", "series", "timer"
+DAY_MINUTES = 24 * 60  # a timer's longest, and its start's bound (minutes after midnight)
 RECORDED, MISSED, FAILED = "recorded", "missed", "failed"
 _CHANNEL_KEYS = ("id", "name", "number", "cmd", "xmltv_id", "_provider", "user_agent", "referrer")
 
@@ -143,6 +147,10 @@ def _number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _whole(value: Any, low: int, high: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
 def _valid(item: Any) -> bool:
     """An item as the schedule writes it (a hand-edited file's others are left out, 2.8)."""
     if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
@@ -151,7 +159,40 @@ def _valid(item: Any) -> bool:
         return False
     if item.get("kind") == SERIES:
         return True
+    if item.get("kind") == TIMER:
+        days = item.get("days")
+        return (
+            _whole(item.get("begin"), 0, DAY_MINUTES - 1)
+            and _whole(item.get("minutes"), 1, DAY_MINUTES)
+            and isinstance(days, list)
+            and bool(days)
+            and all(_whole(day, 0, 6) for day in days)
+        )
     return item.get("kind") == ONCE and _number(item.get("start")) and _number(item.get("stop"))
+
+
+def slot_text(begin: int, minutes: int) -> str:
+    """A timer's time, as "21:00–22:30" (`begin`: minutes after midnight)."""
+    end = (begin + minutes) % DAY_MINUTES
+    return f"{begin // 60:02d}:{begin % 60:02d}–{end // 60:02d}:{end % 60:02d}"
+
+
+def _local(day: date, minutes: int) -> float:
+    """`minutes` after `day`'s midnight on this computer's clock, in Unix seconds."""
+    hour, minute = divmod(minutes, 60)
+    return datetime.combine(day, clock_time(hour, minute)).astimezone().timestamp()
+
+
+def _timer_starts(item: dict, now: float) -> list[float]:
+    """The starts of a timer's slots that may run at `now`: yesterday's (one past midnight)
+    and today's, on its days."""
+    today = datetime.fromtimestamp(now).date()
+    days = set(item["days"])
+    return [
+        _local(day, item["begin"])
+        for day in (today - timedelta(days=1), today)
+        if day.weekday() in days
+    ]
 
 
 def same_channel(a: dict, b: dict) -> bool:
@@ -272,6 +313,45 @@ class Schedule:
         self._save()
         return dict(item)
 
+    def add_timer(
+        self,
+        channel: dict,
+        *,
+        begin: int,
+        minutes: int,
+        days: Iterable[int],
+        title: str = "",
+        account: Optional[Mapping] = None,
+    ) -> dict:
+        """Record `channel` on the weekdays `days` (Monday 0) from `begin` (minutes after
+        midnight, this computer's clock) for `minutes`, until cancelled: no guide needed.
+        `title` names it (its time when empty); the same timer again is the one kept."""
+        chosen = sorted({int(day) for day in days})
+        for item in self._items:
+            if (
+                item.get("kind") == TIMER
+                and same_channel(item.get("channel") or {}, channel)
+                and (item.get("begin"), item.get("minutes"), item.get("days"))
+                == (begin, minutes, chosen)
+            ):
+                return dict(item)
+        item = {
+            "id": uuid.uuid4().hex[:12],
+            "kind": TIMER,
+            "provider": str(channel.get("_provider") or ""),
+            "channel": _channel_copy(channel, account),
+            "title": title.strip(),
+            "begin": int(begin),
+            "minutes": int(minutes),
+            "days": chosen,
+            "created": time.time(),
+        }
+        if not _valid(item):
+            raise ValueError("a timer needs a time of day, a length up to a day, and a weekday")
+        self._items.append(item)
+        self._save()
+        return dict(item)
+
     def cancel(self, item_id: str) -> None:
         before = len(self._items)
         self._items = [i for i in self._items if i.get("id") != item_id]
@@ -324,6 +404,13 @@ class Schedule:
                     float(item.get("stop") or 0),
                 )
                 candidates = [job]
+            elif item.get("kind") == TIMER:
+                title = str(item.get("title") or "") or slot_text(item["begin"], item["minutes"])
+                provider = str(item.get("provider") or "")
+                candidates = [
+                    Job(item["id"], title, channel, provider, start, start + item["minutes"] * 60)
+                    for start in _timer_starts(item, now)
+                ]
             else:
                 candidates = [
                     Job(

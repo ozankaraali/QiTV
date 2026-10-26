@@ -55,6 +55,10 @@ class GuideRecordingTests(unittest.TestCase):
             lambda c, p, series: self.asked.append((p.title, series))
         )
         self.guide.recordCancelled.connect(lambda c, p: self.cancelled.append(p.title))
+        self.timers = []
+        self.guide.timerRequested.connect(
+            lambda c, p: self.timers.append((c["name"], p.title if p else None))
+        )
         self.guide.open_guide(CHANNELS, 0)
 
     def point(self, moment):
@@ -68,7 +72,7 @@ class GuideRecordingTests(unittest.TestCase):
 
     def test_the_programme_on_now_can_be_recorded_from_the_footer(self):
         buttons = self.guide.footer_buttons()
-        self.assertEqual(list(buttons), ["record", "series"])
+        self.assertEqual(list(buttons), ["record", "series", "timer"])
         self.click(buttons["record"])
         self.assertEqual(self.asked, [("Show 2", False)])  # 19:30–20:00, on at 19:42
 
@@ -82,7 +86,7 @@ class GuideRecordingTests(unittest.TestCase):
     def test_a_scheduled_programme_offers_its_cancel_only(self):
         self.scheduled.add("Show 2")
         buttons = self.guide.footer_buttons()
-        self.assertEqual(list(buttons), ["cancel"])
+        self.assertEqual(list(buttons), ["cancel", "timer"])
         self.click(buttons["cancel"])
         self.assertEqual(self.cancelled, ["Show 2"])
 
@@ -99,6 +103,31 @@ class GuideRecordingTests(unittest.TestCase):
         guide.open_guide(CHANNELS, 0)
         self.assertEqual(guide.footer_buttons(), {})
         self.assertFalse(guide.record_key())
+
+    def test_record_at_a_time_opens_on_the_footers_programme(self):  # 2.8 (owner)
+        later = slot_start(NOW) + timedelta(minutes=45)
+        QTest.mouseClick(self.guide, Qt.MouseButton.LeftButton, pos=self.point(later))
+        self.click(self.guide.footer_buttons()["timer"])
+        self.assertEqual(self.timers, [("Harbour News", "Show 3")])
+        self.assertEqual(
+            self.guide.tooltip_at(self.guide.footer_buttons()["timer"].center()),
+            "Record at a time",
+        )
+
+    def test_a_channel_without_a_guide_can_be_recorded_at_a_time(self):
+        guide = Guide(
+            None, lambda c, s, _hours: [], lambda: NOW, self.host, scheduled=lambda c, p: False
+        )
+        timers = []
+        guide.timerRequested.connect(lambda c, p: timers.append((c["name"], p)))
+        guide.open_guide(CHANNELS, 0)
+        buttons = guide.footer_buttons()
+        self.assertEqual(list(buttons), ["timer"])
+        self.click_on(guide, buttons["timer"])
+        self.assertEqual(timers, [("Harbour News", None)])
+
+    def click_on(self, guide, rect):
+        QTest.mouseClick(guide, Qt.MouseButton.LeftButton, pos=rect.center().toPoint())
 
     def test_the_record_buttons_name_their_key(self):
         buttons = self.guide.footer_buttons()

@@ -4431,6 +4431,14 @@ class ContextMenuTests(ControllerTestCase):
         self.assertEqual(self.config.favorites, ["One"])
         self.assertEqual(self.texts(self.menu_for(self.channels[0]))[0], "Remove from favorites")
 
+    def test_with_recordings_a_channel_can_be_recorded_at_a_time(self):  # 2.8 (owner)
+        asked = []
+        self.controller.record_at = lambda channel: asked.append(channel["name"])
+        menu = self.menu_for(self.channels[0])
+        self.assertIn("Record at a time…", self.texts(menu))
+        self.choose(menu, "Record at a time…")
+        self.assertEqual(asked, ["One"])
+
     def guarded(self):
         from services.parental import Parental
 

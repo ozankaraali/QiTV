@@ -46,6 +46,7 @@ from services.remote.protocol import (  # noqa: E402
     RecAct,
     Schedule,
     Status,
+    Timer,
     ToTv,
     WatchHere,
 )
@@ -1362,10 +1363,58 @@ def scenario_schedule(rig: Rig) -> None:
     assert not rig.events.of(OpenItem, after=mark), "a chip's tap tuned the row"
 
 
+def scenario_timer(rig: Rig) -> None:
+    """2.8: a channel with no guide records at a time from its timetable: on chosen days, or
+    once; a time gone by cannot be sent; QiTV's answer shows by the button."""
+    sid = paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark), GUIDE)
+    rig.page.wait_for_selector("#guideRows .row >> nth=2")
+    rig.page.locator("#guideRows .row", has_text="Harbourline News").locator(".row-tap").click()
+    rig.page.wait_for_selector("[data-screen=timetable]:not([hidden])")
+    table = {"t": "timetable", "id": "h1", "name": "Harbourline News", "num": "1", "rows": []}
+    rig.hub.send(sid, dict(table, timer=True))
+    rig.page.wait_for_selector("#timerOpen:visible")
+    rig.page.click("#timerOpen")
+    rig.page.wait_for_selector("#timerForm:not([hidden])")
+    assert rig.page.is_enabled("#timerSchedule"), "the next hour can be scheduled at once"
+    rig.page.select_option("#timerRepeat", "days")
+    assert not rig.page.is_enabled("#timerSchedule"), "no day ticked"
+    rig.page.locator("#timerDays .chip >> nth=0").click()
+    rig.page.locator("#timerDays .chip >> nth=2").click()
+    rig.page.fill("#timerFrom", "23:30")
+    rig.page.fill("#timerTo", "01:00")
+    rig.page.fill("#timerName", "Late film")
+    hint = rig.page.inner_text("#timerHint")
+    assert hint == "Ends the next day.", hint
+    rig.shot("timer-form")
+    mark = rig.events.mark()
+    rig.page.click("#timerSchedule")
+    asked = rig.events.wait(Timer, where=lambda e: e.handle == "h1", after=mark)
+    assert (asked.title, asked.begin, asked.minutes, asked.days, asked.day) == (
+        "Late film",
+        23 * 60 + 30,
+        90,
+        (0, 2),
+        "",
+    ), asked
+    assert rig.page.locator("#timerForm").is_hidden()
+    rig.hub.send(sid, {"t": "timer", "id": "h1", "text": "Records Harbourline News 23:30–01:00"})
+    rig.page.locator("#timerNote", has_text="Records Harbourline News").wait_for()
+    rig.shot("timer-sent")
+    rig.page.click("#timerOpen")  # once, today, at a time already over
+    rig.page.fill("#timerFrom", "00:00")
+    rig.page.fill("#timerTo", "00:01")
+    assert not rig.page.is_enabled("#timerSchedule"), "a time gone by was offered"
+    assert rig.page.inner_text("#timerHint") == "That time has passed."
+
+
 SCENARIOS.update(
     {
         "cast": scenario_cast,
         "schedule": scenario_schedule,
+        "timer": scenario_timer,
         "forget-clean": scenario_forget_clean,
         "hello-keeps-now": scenario_hello_keeps_now,
         "now-playing": scenario_now_playing,

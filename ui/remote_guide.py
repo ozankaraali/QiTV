@@ -194,6 +194,8 @@ class PhoneGuide(QObject):
             "num": controller.channel_number(channel),
             "rows": rows,
         }
+        if getattr(self._window, "scheduler", None) is not None:
+            message["timer"] = True  # 2.8: Record at a time, guide or not
         if not rows and controller.guide_loading(channel):
             message["loading"] = True  # sent again once the guide is in
         self._send(message)

@@ -19,7 +19,8 @@ from typing import Any, Callable, Optional
 from PySide6.QtCore import QObject, Signal
 
 from services import recording
-from services.i18n import N_, translate
+from services.i18n import N_, app_locale, translate
+from services.recording_schedule import slot_text
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,37 @@ SCHEDULED_GENRE = N_("Scheduled")
 SCHEDULED_ONCE = N_("Records {when} on {channel}")
 # i18n: a series recording's details in the Library: every airing of it on the channel
 SCHEDULED_SERIES = N_("Records every airing on {channel}")
+# i18n: a timer recording's details in the Library: the channel at a time ({time}: 21:00–22:30)
+TIMER_DAILY = N_("Records {channel} {time}, every day")
+# i18n: a timer recording's details in the Library, on working days
+TIMER_WEEKDAYS = N_("Records {channel} {time}, Monday to Friday")
+# i18n: a timer recording's details in the Library, at weekends
+TIMER_WEEKENDS = N_("Records {channel} {time}, Saturday and Sunday")
+# i18n: a timer recording's details in the Library ({days}: short day names, as "Mon, Wed")
+TIMER_DAYS = N_("Records {channel} {time}, {days}")
 SCHEDULED_PREFIX = "scheduled:"
+
+
+def day_names(days: list[int]) -> str:
+    """Weekdays (Monday 0) by their short names in the app's language, as "Mon, Wed"."""
+    from PySide6.QtCore import QLocale
+
+    locale = app_locale()
+    return ", ".join(locale.dayName(day + 1, QLocale.FormatType.ShortFormat) for day in days)
+
+
+def timer_text(entry: dict) -> str:
+    """What a timer records, as the Library and its toast say it."""
+    channel = str((entry.get("channel") or {}).get("name") or "")
+    when = slot_text(int(entry.get("begin") or 0), int(entry.get("minutes") or 0))
+    days = sorted(entry.get("days") or [])
+    if days == list(range(7)):
+        return translate(TIMER_DAILY, channel=channel, time=when)
+    if days == list(range(5)):
+        return translate(TIMER_WEEKDAYS, channel=channel, time=when)
+    if days == [5, 6]:
+        return translate(TIMER_WEEKENDS, channel=channel, time=when)
+    return translate(TIMER_DAYS, channel=channel, time=when, days=day_names(days))
 
 
 def scheduled_item(entry: dict) -> dict[str, Any]:
@@ -43,14 +74,18 @@ def scheduled_item(entry: dict) -> dict[str, Any]:
     first, not playable (its right-click cancels it)."""
     channel = str((entry.get("channel") or {}).get("name") or "")
     start = float(entry.get("start") or entry.get("created") or 0)
+    name = str(entry.get("title") or "")
     if entry.get("kind") == "series":
         description = translate(SCHEDULED_SERIES, channel=channel)
+    elif entry.get("kind") == "timer":
+        description = timer_text(entry)
+        name = name or slot_text(int(entry.get("begin") or 0), int(entry.get("minutes") or 0))
     else:
         when = datetime.fromtimestamp(start).strftime("%Y-%m-%d %H:%M") if start else ""
         description = translate(SCHEDULED_ONCE, when=when, channel=channel)
     return {
         "id": SCHEDULED_PREFIX + str(entry.get("id") or ""),
-        "name": str(entry.get("title") or ""),
+        "name": name,
         "added": str(int(start)),
         "genre": translate(SCHEDULED_GENRE),
         "description": description,
@@ -170,7 +205,7 @@ class RecordingsList(QObject):
         ordered = sorted(
             entries,
             key=lambda e: (
-                e.get("kind") == "series",
+                e.get("kind") != "once",  # those that repeat after the ones to come once
                 float(e.get("start") or e.get("created") or 0),
             ),
         )
