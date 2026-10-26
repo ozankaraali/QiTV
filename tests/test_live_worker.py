@@ -6,6 +6,7 @@ and owner death closes the upstream socket) to one long-lived helper with many s
 """
 
 import json
+import logging
 import multiprocessing
 import os
 from pathlib import Path
@@ -2701,6 +2702,47 @@ class HeardEdgeTests(unittest.TestCase):
         self.assertTrue(seen["after"])  # still held: its tick failed
         self.assertIn("unsupported", [m[2] for m in sent if m[0] == "error"])
         self.assertTrue(any("could not be passed on" in line for line in logs.output))
+
+
+class LogForwardTests(unittest.TestCase):  # 2.8.1: the helper's own lines reach qitv.log
+    def forward(self, clock=None):
+        package = logging.getLogger("services.live")
+        level = package.level
+        sent = []
+        handler = worker._forward_logs(sent.append, **({"clock": clock} if clock else {}))
+        self.addCleanup(package.setLevel, level)
+        self.addCleanup(package.removeHandler, handler)
+        return sent
+
+    def test_the_helpers_own_lines_go_to_the_app_and_nothing_else(self):
+        sent = self.forward()
+        source_log = logging.getLogger("services.live.source")
+        source_log.info("The channel's first answer failed (%s); asking again.", "ConnectionError")
+        source_log.debug("a debug line stays")
+        logging.getLogger("urllib3.connectionpool").warning("http://secret.test/ retrying")
+        self.assertEqual(
+            sent,
+            [
+                (
+                    "log",
+                    logging.INFO,
+                    "services.live.source",
+                    "The channel's first answer failed (ConnectionError); asking again.",
+                )
+            ],
+        )
+
+    def test_a_flood_is_cut_with_one_note_until_the_next_minute(self):
+        now = [0.0]
+        sent = self.forward(clock=lambda: now[0])
+        source_log = logging.getLogger("services.live.source")
+        for each in range(worker._LOG_LINES + 5):
+            source_log.info("Live source retry %d failed.", each)
+        self.assertEqual(len(sent), worker._LOG_LINES + 1)
+        self.assertEqual(sent[-1][3], "More of the helper's lines this minute were left out.")
+        now[0] = 61.0
+        source_log.info("again")
+        self.assertEqual(sent[-1][3], "again")
 
 
 if __name__ == "__main__":

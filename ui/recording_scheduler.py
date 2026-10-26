@@ -39,7 +39,7 @@ from services import recording, recording_schedule as rs
 from services.connection_budget import DENIED
 from services.i18n import N_, translate
 from services.live.recorder import FAILED, LIMIT, MAX_SECONDS, MIN_FREE_BYTES, STOPPED
-from services.provider_api import known_http_only
+from services.provider_api import known_http_only, portal_http_only
 from services.vlc_profile import user_agent_for
 
 logger = logging.getLogger(__name__)
@@ -406,7 +406,8 @@ class RecordingScheduler(QObject):
         if channel.get("referrer"):
             headers["Referer"] = str(channel["referrer"])
         xtream = str(entry.get("type") or "").upper() == "XTREAM"
-        https = url.startswith("http://") and not known_http_only(url) and not xtream
+        plain = xtream or portal_http_only(entry)  # its sign-in found no HTTPS (2.8.1)
+        https = url.startswith("http://") and not known_http_only(url) and not plain
         run.sid = self._engine.open_session(
             url,
             headers=headers,

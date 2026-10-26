@@ -16,6 +16,14 @@ others' distributions, which may have malware.**
   Continue listed titles from every provider. It now lists only those of the providers shown.
 - **Another mix shows its own titles.** Ticking a different set of the same number of
   providers could keep showing the titles of the set before.
+- **A set-top-box portal without HTTPS has its channels asked over HTTP.** When a portal
+  answers only over HTTP, its channels are no longer tried over HTTPS first, also when their
+  links name another server than the portal's. Xtream panels already worked this way.
+- **The log says why a channel doesn't open.** When a channel fails, QiTV's log now says
+  whether its server refused the connection, closed it without answering, or broke it off.
+  For a set-top-box portal it also describes the link the portal gave: whether it is on the
+  portal's own server and what it asks for, never its address or values. The time-shift
+  buffer's own notes, which used to be lost in a downloaded QiTV, are in the log too.
 
 ## Changed
 

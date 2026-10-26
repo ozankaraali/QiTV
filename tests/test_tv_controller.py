@@ -2984,6 +2984,22 @@ class HttpsFirstTuneTests(PipelineCase):
                 self.assertTrue(wait_until(lambda: len(self.starts()) > count))
                 self.assertEqual(self.starts()[-1][1].get("https_first"), https_first)
 
+    def test_a_portal_that_answered_only_over_http_has_its_links_asked_over_http(self):  # 2.8.1
+        # Its links may name another host than the portal's, which its sign-in never asked.
+        self.catalog.specs["Portal B"]["url"] = "http://portal.test/c/"
+        for http_only, https_first in ((False, True), (True, None)):
+            with self.subTest(http_only=http_only):
+                if http_only:
+                    provider_api.remember_http_only("http://portal.test/c/")
+                count = len(self.starts())
+                if self.live.running:
+                    self.controller.stop()
+                    self.live.released.emit()
+                self.controller.tune(PORTAL_ONE, group_key="10", channels=[PORTAL_ONE])
+                self.ready("http://cdn.test/play/live.php?stream=1")
+                self.assertTrue(wait_until(lambda: len(self.starts()) > count))
+                self.assertEqual(self.starts()[-1][1].get("https_first"), https_first)
+
 
 class BackNoticeTests(PipelineCase):
     """2.6: coming back to a channel plays it live and offers where it was left, a minute."""

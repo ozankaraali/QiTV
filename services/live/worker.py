@@ -97,8 +97,9 @@ the recording reach the live edge meanwhile. A recording outlives its session's 
 these messages are never dropped for it;
 `("parked", sid)` and `("resumed", sid)` (2.6, see "park" and "resume");
 `("error", sid, kind, message[, status])`, an HTTP failure's status last (2.1: the parent
-logs why a channel played directly); `("ended", sid)`; `("closed", sid)`. Error messages are
-fixed strings. `kind`, one meaning each:
+logs why a channel played directly); `("ended", sid)`; `("closed", sid)`;
+`("log", level, logger name, text)` (2.8.1), one of the helper's own log lines for the app's
+log (`_LogForwarder`). Error messages are fixed strings. `kind`, one meaning each:
 - a `SourceError` kind ("unsupported", "network", "tls", "timeout", "http"; "unsupported"
   also for input the segmenter or the RAM ring cannot take): the input ended for good;
 - "crashed": this session failed unexpectedly while the helper stays up (also the reply to
@@ -360,6 +361,46 @@ def _merge(older: tuple[Any, ...], newer: tuple[Any, ...]) -> tuple[Any, ...]:
             if item[0] >= first:
                 kept[item[0]] = item
     return ("state", sid, snapshot, first, list(kept.values()))
+
+
+_LOG_LINES = 120  # 2.8.1: the most of the helper's own log lines sent in a minute
+_LOG_CUT = "More of the helper's lines this minute were left out."
+
+
+class _LogForwarder(logging.Handler):
+    """The helper's own log lines (services.live, INFO and up) as ("log", level, logger name,
+    text) messages: the app writes them to its log, where a packaged QiTV keeps it (its
+    helper's output goes nowhere). They name no URL, as every line of QiTV's own; the app's
+    file masks addresses all the same. At most `_LOG_LINES` a minute, then one note."""
+
+    def __init__(self, send: Callable[[tuple[Any, ...]], None], clock: Callable[[], float]):
+        super().__init__(logging.INFO)
+        self._send, self._clock = send, clock
+        self._minute, self._count = -1, 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            minute = int(self._clock() // 60)
+            if minute != self._minute:
+                self._minute, self._count = minute, 0
+            self._count += 1
+            if self._count <= _LOG_LINES:
+                self._send(("log", record.levelno, record.name, record.getMessage()[:500]))
+            elif self._count == _LOG_LINES + 1:
+                self._send(("log", logging.INFO, record.name, _LOG_CUT))
+        except Exception:  # a log line must never break what logged it
+            pass
+
+
+def _forward_logs(
+    send: Callable[[tuple[Any, ...]], None], clock: Callable[[], float] = time.monotonic
+) -> logging.Handler:
+    """Send the helper's own log lines to the app (`_LogForwarder`); returns the handler."""
+    handler = _LogForwarder(send, clock)
+    package = logging.getLogger("services.live")
+    package.setLevel(logging.INFO)
+    package.addHandler(handler)
+    return handler
 
 
 def _sid_of(message: tuple[Any, ...]) -> str | None:
@@ -1924,6 +1965,7 @@ def helper_main(conn: Connection, root: str) -> None:
         ).start()
         _raise_open_files()
         helper = _Helper(conn, root, owner_gone)
+        _forward_logs(helper.send)  # 2.8.1: into the app's log
         helper.run()
     except BaseException:
         # No traceback crosses IPC: it could disclose provider URLs.

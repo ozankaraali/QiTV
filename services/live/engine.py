@@ -375,6 +375,19 @@ class _Supervisor(QThread):
                     self._send_open(self._conn, waiting)
             self._relay(("hello", message[1]))
             return
+        if name == "log":  # 2.8.1: the helper's own line, into the app's log
+            if (
+                len(message) == 4
+                and type(message[1]) is int
+                and isinstance(message[2], str)
+                and message[2].startswith("services.live.")
+                and isinstance(message[3], str)
+            ):
+                short = message[2].rsplit(".", 1)[-1]
+                logging.getLogger(f"services.live.helper.{short}").log(
+                    message[1], "%s", message[3][:500]
+                )
+            return
         sid = message[1]
         if name in ("recorded", "recording"):
             # A recording outlives its session's close: relayed whatever the record says.
@@ -404,12 +417,15 @@ class _Supervisor(QThread):
             else:
                 # Final, "crashed" included: a reopen would only retry what failed.
                 record.failed = record.over = True
-                # Why the channel will play directly: its kind and HTTP status, never a URL.
+                # Why the channel will play directly: its kind and HTTP status, never a URL;
+                # 2.8.1: and how it failed (the helper's fixed texts: refused, unanswered, …).
                 status = message[4] if len(message) == 5 else None
+                text = message[3] if isinstance(message[3], str) and message[2] != "http" else ""
                 _LOG.info(
-                    "A live session's input failed for good: %s%s.",
+                    "A live session's input failed for good: %s%s%s.",
                     message[2],
                     f", HTTP {status}" if isinstance(status, int) else "",
+                    f" ({text[:200].rstrip('.')}.)" if text else "",
                 )
         elif name == "ended":
             record.over = True

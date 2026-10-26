@@ -30,6 +30,7 @@ from services.provider_api import (
     remember_xtream_root,
     stb_archive_link_url,
     stb_create_link_url,
+    stb_link_shape,
     stb_portal_base,
     stb_request_url,
     xtream_base,
@@ -687,6 +688,8 @@ class LinkCreatorWorker(QObject):
                 link = stb_archive_link(result)  # "": no recording (EMPTY_LINK_MESSAGE)
             else:
                 link = result["js"]["cmd"].split(" ")[-1]
+            if link:  # 2.8.1: what kind of link a portal gives, should its streams fail
+                logger.info("The portal's link: %s.", stb_link_shape(link, self.base_url))
             self.finished.emit({"link": link})
         except Exception as e:
             self.error.emit(str(e))

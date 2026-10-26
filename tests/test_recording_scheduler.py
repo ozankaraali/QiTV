@@ -9,13 +9,14 @@ import shutil
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QObject, Signal
 from PySide6.QtWidgets import QApplication
 
-from services import recording_schedule as rs
+from services import provider_api, recording_schedule as rs
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.live.recorder import ENDED, LIMIT
@@ -155,6 +156,15 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(os.path.basename(path).startswith("News One "))
         self.assertEqual(max_s, 24 * 3600)  # the scheduler stops it at its window's end
         self.assertTrue(any("The News" in text for text, _ in self.toasts))
+
+    def test_a_portal_that_answered_only_over_http_records_over_http(self):  # 2.8.1
+        memory = mock.patch.object(provider_api, "_http_only", set())
+        memory.start()
+        self.addCleanup(memory.stop)
+        self.catalogs.entry = {"name": "P", "type": "STB", "url": "http://portal.test/c/"}
+        provider_api.remember_http_only("http://portal.test/c/")  # its sign-in found no HTTPS
+        self.scheduled_now()
+        self.assertFalse(self.engine.opened[0][2]["https_first"])
 
     def test_at_its_end_it_stops_saves_and_gives_everything_back(self):
         self.scheduled_now()
