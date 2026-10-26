@@ -349,6 +349,15 @@ class ConfigManager:
     tv_all_providers = _config_property("tv_all_providers", False, coerce=bool)
     library_provider_name = _config_property("library_provider_name", "", coerce=str)
     library_all_providers = _config_property("library_all_providers", False, coerce=bool)
+    # 2.8, optional (older builds ignore it and mix every provider): the providers the
+    # Library mixes, by name; empty: every one.
+    library_mix = _config_property(
+        "library_mix",
+        [],
+        coerce=lambda value: (
+            [n for n in value if isinstance(n, str)] if isinstance(value, list) else []
+        ),
+    )
     channel_epg = _config_property("channel_epg", DEFAULT_OPTION_CHANNEL_EPG)
     channel_logos = _config_property("channel_logos", DEFAULT_OPTION_CHANNEL_LOGO)
     max_cache_image_size = _config_property(

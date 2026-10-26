@@ -129,6 +129,8 @@ class FakeCatalog(QObject):
         self.selected = []
         self.loading = False  # a provider setup is running (CatalogService.is_loading)
         self.mixed = False  # All providers
+        self.mix = []  # 2.8: the providers mixed, when not every one
+        self.mixes = []  # each select_mix asked
         self.headers = set()  # ids of the provider headings among the groups
         self.catalogs = FakeCatalogs(self)
         self.providerReady.connect(self._settled)
@@ -150,6 +152,20 @@ class FakeCatalog(QObject):
 
     def all_providers(self):
         return self.mixed
+
+    def mixed_names(self):
+        return list(self.mix or self.names) if self.mixed else [self.name]
+
+    def select_mix(self, names):  # 2.8: as BrowsedCatalog's: one is that provider alone
+        self.mixes.append(list(names))
+        chosen = [n for n in self.names if n in names]
+        if len(chosen) == 1:
+            self.mixed, self.mix = False, []
+            self.select_provider(chosen[0])
+            return
+        everyone = not chosen or len(chosen) == len(self.names)
+        self.select_provider(ALL_PROVIDERS)
+        self.mixed, self.name, self.mix = True, ALL_PROVIDERS, [] if everyone else chosen
 
     def provider_names(self):
         return list(self.names)
@@ -913,10 +929,8 @@ class LibraryControllerTests(unittest.TestCase):
         self.activate_name(ctl, "Salt Lake")  # waits for Q
         actions = ctl._source_menu().actions()
         self.addCleanup(actions[0].parent().deleteLater)
-        actions[1].trigger()  # the Library goes to Q
-        self.assertEqual(self.catalog.selected, ["Q"])
-        actions[1].trigger()  # already there: no second setup
-        self.assertEqual(self.catalog.selected, ["Q"])
+        actions[1].trigger()  # Q joins what the Library shows (2.8: the ticks mix)
+        self.assertEqual(self.catalog.selected, [ALL_PROVIDERS])
         self.make_ready("Q")
         self.assertEqual(self.played_names(), ["Salt Lake"])  # still played, once
 
@@ -1155,19 +1169,18 @@ class LibraryControllerTests(unittest.TestCase):
         ctl.handle(Action.NAV_ACTIVATE)
         self.assertEqual(provider_of(self.played[-1][0]), "P")
 
-    def test_source_menu_lists_providers_and_all_providers_and_switches(self):
+    def test_source_menu_lists_providers_and_all_providers_and_mixes(self):
         ctl = self.open_movies()
         menu = ctl._source_menu()
         self.addCleanup(menu.deleteLater)
         actions = [a for a in menu.actions() if not a.isSeparator()]
         self.assertEqual([a.text() for a in actions], ["P", "Q", "All providers"])
         self.assertEqual([a.isChecked() for a in actions], [True, False, False])
-        actions[1].trigger()
-        self.assertEqual(self.catalog.selected, ["Q"])
-        self.catalog.name = "Q"
-        self.catalog.providerReady.emit("Q")
+        actions[1].trigger()  # 2.8: Q joins P
+        self.assertEqual(self.catalog.mixes, [["P", "Q"]])
+        self.catalog.providerReady.emit(ALL_PROVIDERS)
         self.assertEqual(self.catalog.requests[-1], ("section", "movies"))  # re-opened
-        self.assertEqual(self.screen.nav._source, "Q")
+        self.assertEqual(self.screen.nav._source, "All providers")  # P and Q: every one
 
     def test_one_provider_has_no_all_providers_entry(self):
         self.catalog.names = ["P"]
@@ -1395,6 +1408,48 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertNotIn(("section", "movies"), self.catalog.requests)
         self.assertEqual(self.screen.grid._message, "P has no movies")
         self.assertEqual(self.screen.genres.rows(), [])
+
+
+class SourceMixTests(unittest.TestCase):  # 2.8: the source menu's ticks mix providers
+    build = LibraryControllerTests.build
+
+    def setUp(self):
+        LibraryControllerTests.setUp(self)
+        self.catalog.names = ["P", "Q", "R"]
+
+    def menu(self, ctl):
+        return {a.text(): a for a in ctl._source_menu().actions() if a.text()}
+
+    def test_the_ticks_say_what_the_library_shows_and_a_tick_adds_a_provider(self):
+        ctl = self.build()
+        ctl.open("movies")  # P alone
+        actions = self.menu(ctl)
+        self.assertEqual([n for n in "PQR" if actions[n].isChecked()], ["P"])
+        self.assertFalse(actions["All providers"].isChecked())
+        actions["Q"].trigger()
+        self.assertEqual(self.catalog.mixes, [["P", "Q"]])
+        actions = self.menu(ctl)
+        self.assertEqual([n for n in "PQR" if actions[n].isChecked()], ["P", "Q"])
+        self.assertEqual(ctl._source_title(), "P, Q")
+
+    def test_untick_one_of_a_mix_and_the_others_stay(self):
+        ctl = self.build()
+        self.catalog.select_mix(["P", "Q"])
+        self.menu(ctl)["Q"].trigger()
+        self.assertEqual(self.catalog.mixes[-1], ["P"])
+        self.assertEqual(self.catalog.current_provider_name(), "P")
+        self.menu(ctl)["P"].trigger()  # the last one stays ticked: something is shown
+        self.assertEqual(self.catalog.mixes[-1], ["P"])
+
+    def test_all_providers_ticks_every_one(self):
+        ctl = self.build()
+        actions = self.menu(ctl)
+        actions["All providers"].trigger()
+        self.assertEqual(self.catalog.mixes[-1], [])
+        actions = self.menu(ctl)
+        self.assertTrue(all(actions[n].isChecked() for n in "PQR"))
+        self.assertTrue(actions["All providers"].isChecked())
+        self.assertEqual(ctl._source_title(), "All providers")
 
 
 class OpenOnProviderTests(unittest.TestCase):  # 2.8: the list's Movies row is its provider's

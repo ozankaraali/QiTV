@@ -314,9 +314,15 @@ class LibraryController(QObject):
         nav.set_active(active)
 
     def _source_title(self) -> str:
-        """The Library's source as the user reads it: a provider's name, or All providers."""
-        name = self._catalog.current_provider_name()
-        return translate(ALL_PROVIDERS_TITLE) if name == ALL_PROVIDERS else name
+        """The Library's source as the user reads it: a provider's name, the names it mixes
+        (2.8), or All providers."""
+        name = str(self._catalog.current_provider_name())
+        if name != ALL_PROVIDERS:
+            return name
+        mixed = self._catalog.mixed_names()
+        if len(mixed) < len(self._catalog.provider_names()):
+            return ", ".join(mixed)
+        return translate(ALL_PROVIDERS_TITLE)
 
     def _series_owner(self) -> str:
         """The provider of the series open (the one shown while none is)."""
@@ -599,21 +605,45 @@ class LibraryController(QObject):
         menu.popup(pos)
 
     def _source_menu(self) -> QMenu:
+        """A tick for each provider the Library shows (2.8: several mix), and All providers."""
         menu = QMenu(self._screen)
-        current = self._catalog.current_provider_name()
         names = self._catalog.provider_names()
+        shown = self._shown_providers()
         for name in names:
             action = menu.addAction(name)
             action.setCheckable(True)
-            action.setChecked(name == current)
-            action.triggered.connect(lambda _checked=False, n=name: self._choose_source(n))
+            action.setChecked(name in shown)
+            action.triggered.connect(lambda _checked=False, n=name: self._tick_source(n))
         if len(names) > 1:  # with one provider there is nothing to mix
             menu.addSeparator()
             action = menu.addAction(translate(ALL_PROVIDERS_TITLE))
             action.setCheckable(True)
-            action.setChecked(current == ALL_PROVIDERS)
-            action.triggered.connect(lambda _checked=False: self._choose_source(ALL_PROVIDERS))
+            action.setChecked(self._catalog.all_providers() and len(shown) == len(names))
+            action.triggered.connect(lambda _checked=False: self._mix_sources([]))
         return menu
+
+    def _shown_providers(self) -> list[str]:
+        """The providers the Library shows: those it mixes, else its own."""
+        if self._catalog.all_providers():
+            return list(self._catalog.mixed_names())
+        return [self._catalog.current_provider_name()]
+
+    def _tick_source(self, name: str) -> None:
+        """A provider ticked joins what the Library shows, one unticked leaves it; the last one
+        stays (something is shown)."""
+        shown = self._shown_providers()
+        if name in shown:
+            if len(shown) == 1:
+                return
+            self._mix_sources([n for n in shown if n != name])
+        else:
+            self._mix_sources(shown + [name])
+
+    def _mix_sources(self, names: list[str]) -> None:
+        """Show these providers (one alone, several mixed; none: every one). The TV page and
+        what plays are not touched; the model re-opens its section when they are ready."""
+        if not self._closed:
+            self._catalog.select_mix(names)
 
     def _choose_source(self, name: str) -> None:
         if self._closed:

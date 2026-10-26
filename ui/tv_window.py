@@ -435,6 +435,7 @@ class TVWindow(QMainWindow):
             config_manager,
             source_key="library_provider_name",
             all_key="library_all_providers",
+            mix_key="library_mix",  # 2.8: the providers ticked in its menu
             parent=self,
         )
         self.nav = NavModel(self.catalog, config_manager, self)

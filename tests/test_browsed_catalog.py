@@ -532,6 +532,85 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.assertEqual(spy.count(), 1)
 
 
+COVE = {"type": "M3UPLAYLIST", "name": "Cove TV", "url": "http://127.0.0.1:9/cove.m3u"}
+
+
+class MixTests(unittest.TestCase):  # 2.8: the Library mixes the providers ticked
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="qitv-mix-")
+        self.addCleanup(directory.cleanup)
+        self.config, self.registry = mixed_config(
+            directory.name,
+            [DEMO, HARBOR, COVE],
+            {
+                "Demo TV": demo_content(),
+                "Harbor IPTV": harbor_content(),
+                "Cove TV": live_content(["Cove 1", "Cove 2"], {"Bay": [0, 1]}),
+            },
+        )
+        self.addCleanup(self.registry._cache_writer.shutdown, wait=True)
+        self.catalogs = Catalogs(
+            self.config,
+            self.registry,
+            runner=ImmediateRunner(),
+            factory=ScriptedFactory(),
+            make_epg=lambda manager: FakeEpg(manager._pinned_provider),
+        )
+        self.addCleanup(shut_hub, self.catalogs)
+
+    def library(self, mix_key="library_mix"):
+        return BrowsedCatalog(
+            self.catalogs,
+            self.config,
+            source_key="library_provider_name",
+            all_key="library_all_providers",
+            mix_key=mix_key,
+        )
+
+    def test_a_mix_of_some_providers_lists_only_theirs(self):
+        view = self.library()
+        view.select_mix(["Cove TV", "Demo TV"])
+        self.assertEqual(view.source(), ALL_PROVIDERS)
+        self.assertEqual(view.mixed_names(), ["Demo TV", "Cove TV"])  # in Settings order
+        shown = {provider_of(i) for i in view.items("live", ALL_GROUP_ID)}
+        self.assertEqual(shown, {"Demo TV", "Cove TV"})
+        self.assertEqual([g.title for g in view.groups("live") if g.header], ["Demo TV", "Cove TV"])
+        self.assertEqual(view.shown_providers(), {"Demo TV", "Cove TV"})
+        self.assertEqual(self.library().mixed_names(), ["Demo TV", "Cove TV"])  # kept
+
+    def test_one_provider_ticked_is_that_provider(self):
+        view = self.library()
+        view.select_mix(["Harbor IPTV"])
+        self.assertFalse(view.all_providers())
+        self.assertEqual(view.source(), "Harbor IPTV")
+
+    def test_every_provider_or_none_is_all_of_them(self):
+        view = self.library()
+        for names in (["Demo TV", "Harbor IPTV", "Cove TV"], []):
+            with self.subTest(names=names):
+                view.select_mix(["Demo TV", "Cove TV"])
+                view.select_mix(names)
+                self.assertEqual(view.source(), ALL_PROVIDERS)
+                self.assertEqual(view.mixed_names(), ["Demo TV", "Harbor IPTV", "Cove TV"])
+                self.assertFalse(self.config.library_mix)
+
+    def test_a_mix_left_with_one_provider_is_every_provider(self):
+        view = self.library()
+        view.select_mix(["Demo TV", "Cove TV"])
+        self.config.library_mix = ["Demo TV", "Gone TV"]  # one deleted in Settings
+        self.assertEqual(view.mixed_names(), ["Demo TV", "Harbor IPTV", "Cove TV"])
+
+    def test_a_page_without_a_mix_mixes_every_provider(self):
+        self.config.library_mix = ["Demo TV", "Cove TV"]
+        view = self.library(mix_key="")  # the TV page's and the phone's lists
+        view.select_provider(ALL_PROVIDERS)
+        self.assertEqual(view.mixed_names(), ["Demo TV", "Harbor IPTV", "Cove TV"])
+
+
 class PinnedManagerTests(unittest.TestCase):
     def test_a_pinned_manager_fails_for_a_provider_that_is_gone(self):
         with tempfile.TemporaryDirectory(prefix="qitv-pinned-") as directory:
