@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from timer_fixtures import wait_until
 
 from ui.keymap import Action
 from ui.overlays.question_card import QuestionCard
@@ -92,8 +93,8 @@ class QuestionCardTests(unittest.TestCase):
 
     def test_left_unanswered_it_keeps_the_recording(self):
         self.card.ask(QUESTION, "Stop recording", "Keep recording", ms=20)
-        QTest.qWait(80)
-        self.assertEqual(self.answers, [False])
+        # On its answer, not a set wait: a runner's macOS may hold a background timer back.
+        self.assertTrue(wait_until(lambda: self.answers == [False]))
         self.assertTrue(self.card.isHidden())
 
     def test_a_new_question_replaces_the_one_shown(self):
