@@ -494,7 +494,7 @@ class BrowsedCatalog(QObject):
     def refresh_sections(self) -> int:
         """Load the films and series of the providers shown again (2.8: the Library's
         Refresh; `CatalogService.refresh_section`): every one mixed, else the source's. How
-        many lists load (or load already)."""
+        many lists load (or load already, or will once their provider is set up)."""
         names = self.mixed_names() if self.all_providers() else [self.source()]
         loading = 0
         for name in names:

@@ -99,6 +99,31 @@ class ListsBehindTests(unittest.TestCase):
         pump()
         self.assertEqual(len(factory.calls), 2)
 
+    def test_a_refresh_during_a_setup_loads_once_it_is_ready(self):  # 2.8 (owner)
+        # Refresh pressed while the provider sets up waits for the setup, then loads.
+        service, providers, factory = self.service()
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
+        providers.current_provider_content["vod"] = FILMS  # fresh: only Refresh loads it
+        service.select_provider()
+        self.assertTrue(service.refresh_section("movies"))  # it will load: "Refreshing…"
+        pump()
+        self.assertEqual([c[0] for c in factory.calls], ["provider_setup"])
+        self.runner.complete(0)  # the setup
+        pump()
+        loads = [c[1][3] for c in factory.calls if c[0] == "xtream"]
+        self.assertIn("vod", loads)  # the films
+
+    def test_a_refresh_waiting_for_a_setup_that_fails_loads_nothing(self):
+        service, providers, factory = self.service()
+        factory.results["provider_setup"] = {"fail": "HTTPConnectionPool: Max retries exceeded"}
+        providers.current_provider_content["vod"] = FILMS
+        service.select_provider()
+        service.refresh_section("movies")
+        with self.assertLogs("services.catalog", "INFO"):
+            self.runner.complete(0)
+        pump()
+        self.assertEqual([c[0] for c in factory.calls], ["provider_setup"])
+
     def test_refresh_says_whether_anything_loads(self):  # 2.8 review M7
         service, _providers, factory = self.service("M3UPLAYLIST")
         self.assertFalse(service.refresh_section("movies"))  # a playlist has no films

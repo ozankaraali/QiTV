@@ -465,6 +465,9 @@ class CatalogService(QObject):
         self._link_ids = link_ids if link_ids is not None else itertools.count(1)
         self._closed = False  # shutdown(): nothing starts or reports any more
         self._waited_sections: set[str] = set()  # asked for with nothing saved to show (2.8)
+        # 2.8: Refresh pressed while a provider set up, as (provider, section): those load
+        # once that provider is ready.
+        self._refresh_after: set[tuple[str, str]] = set()
         # 2.8: a media server's link requests (request id -> item id) and what each title's
         # quality menu offers (item id -> {"versions", "quality"}).
         self._media_links: dict[int, str] = {}
@@ -547,6 +550,7 @@ class CatalogService(QObject):
         self._catalog_queue.clear()
         self._pending_setup = None
         self._pending_epg = None
+        self._refresh_after.clear()
 
     def _setup_active(self) -> bool:
         """True while a provider setup is running or waiting to run."""
@@ -602,6 +606,10 @@ class CatalogService(QObject):
         self.providerReady.emit(self._ready_provider)
         self._request_epg(job.data[1])
         self._pump_catalog()
+        waiting, self._refresh_after = self._refresh_after, set()
+        for name, section in sorted(waiting):
+            if name == self._ready_provider:  # (one pressed for a provider left goes)
+                self.refresh_section(section)
         if self._loads_behind(self.provider_type()):
             generation = self._generation
             QTimer.singleShot(LOAD_AHEAD_MS, self, lambda: self._load_ahead(generation))
@@ -632,6 +640,7 @@ class CatalogService(QObject):
     def _on_provider_error(self, job: _Job, message: str) -> None:
         if self._next_state_job() or job.generation != self._generation:
             return
+        self._refresh_after.clear()  # the setup failed: what it says shows instead
         self._fail(self.providerFailed, job.data[0] or self.current_provider_name(), message)
         self._pump_catalog()
 
@@ -813,9 +822,13 @@ class CatalogService(QObject):
         """Load the section's list again (2.8: the Library's Refresh). An Xtream panel's and a
         media server's load behind the saved list, which shows meanwhile (a server's asks only
         what changed); a portal's genres load again. One load at a time. Whether it loads (or
-        loads already): not while the provider sets up, nor a section it has not."""
-        if self._closed or self._setup_active() or section not in self.sections():
+        loads already, or will once the provider being set up is ready): not a section it has
+        not."""
+        if self._closed or section not in self.sections():
             return False
+        if self._setup_active():
+            self._refresh_after.add((self.current_provider_name(), section))
+            return True
         if self._loads_behind(self.provider_type()) and self._usable(self._content(section)):
             self._request_catalog(
                 ("section", section), "section_behind", section, self._section_worker
