@@ -1776,6 +1776,40 @@ class ParkResumeTests(unittest.TestCase):
         media = [b for b in counter_breaks(body) if b[1] in (VIDEO_PID, AUDIO_PID)]
         self.assertEqual(media, [])
 
+    def test_a_rewound_viewers_resume_goes_on_after_the_old_run(self):  # 2.8 review I1
+        # The old run fetched s13..s15 (6 s back); taken back for a rewound viewer ("join"),
+        # the new run starts at s16, not 6 s back again (s15): nothing plays twice.
+        def segments(numbers):
+            return {
+                f"/s{k}.ts": (200, {}, make_stream(2, pts_start=900_000 + k * 2 * CLOCK))
+                for k in numbers
+            }
+
+        def live(first, last):
+            text = f"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:{first}\n"
+            text += "".join(f"#EXTINF:2,\ns{k}.ts\n" for k in range(first, last + 1))
+            return text.encode()
+
+        for join, expected in ((True, "/s16.ts"), (False, "/s15.ts")):
+            with self.subTest(join=join):
+                old = self.source(
+                    {"/live.m3u8": (200, {}, live(10, 15)), **segments(range(10, 16))}
+                )
+                new = self.source(
+                    {"/live.m3u8": (200, {}, live(11, 17)), **segments(range(11, 18))}
+                )
+                helper = InProcessHelper(self)
+                helper.parent.send(("open", "j", old.url + "/live.m3u8", {}, True, RAM, 6.0))
+                helper.wait_for(lambda m: m[:2] == ("state", "j") and m[2].get("caught_up"))
+                helper.parent.send(("park", "j"))
+                helper.wait_for(lambda m: m == ("parked", "j"))
+                start = {"join": True} if join else None
+                command = ("resume", "j", new.url + "/live.m3u8", {}, True, 6.0)
+                helper.parent.send(command if start is None else (*command, start))
+                helper.wait_for(lambda m: m == ("resumed", "j"))
+                fetched = [path for path, _headers in new.requests if path.endswith(".ts")]
+                self.assertEqual(fetched[0], expected)
+
     def test_resume_that_fails_stays_parked_and_served(self):
         first = self.source({SECRET_PATH: (200, {}, make_stream(6))})
         refused = self.source({SECRET_PATH: (403, {}, b"")})

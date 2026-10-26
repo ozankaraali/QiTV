@@ -408,6 +408,15 @@ class ParkResumeTests(unittest.TestCase):
         )
         self.assertEqual(len(commands.get_nowait()), 7)  # no cap: as before
 
+    def test_a_resume_that_joins_says_so(self):  # 2.8 review I1: a rewound viewer's
+        engine, commands = self.engine()
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB
+        )
+        commands.get_nowait()
+        engine.resume_session(sid, URL_FOR_RING, headers={}, verify_ssl=True, join=True)
+        self.assertEqual(commands.get_nowait()[5:], (6.0, {"join": True}))
+
     def test_parked_and_resumed_keep_the_view(self):
         engine, _ = self.engine()
         engine._sessions["s"] = engine_module._View()

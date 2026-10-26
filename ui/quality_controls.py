@@ -118,7 +118,8 @@ class QualityControls(QObject):
         self._live_menu = live_menu
         self._choose_live = choose_live
         self._warned: set[str] = set()  # servers whose question was answered yes
-        self._pending: Optional[tuple[str, ms.Quality]] = None  # the conversion asked about
+        # The conversion asked about: its server, the choice, and the title it was for.
+        self._pending: Optional[tuple[str, ms.Quality, Any]] = None
 
     def wire(self) -> None:
         self._transport.qualityRequested.connect(self.open_panel)
@@ -254,17 +255,25 @@ class QualityControls(QObject):
             return
         server = provider_of(target.item) or ""
         if key.converted and server not in self._warned:
-            self._pending = (server, key)
+            self._pending = (server, key, target)
             self._card.ask(
                 translate(CONVERT_QUESTION), translate(CONVERT_YES), translate(CONVERT_NO)
             )
             return
         self._choose(key)
 
+    def drop_question(self) -> None:
+        """Another title plays: a conversion question about the one before goes unanswered."""
+        if self._pending is not None:
+            self._pending = None
+            self._card.escape()
+
     def _on_answer(self, yes: bool) -> None:
         pending, self._pending = self._pending, None
         if pending is None or not yes:
             return
-        server, quality = pending
+        server, quality, target = pending
+        if self._current() is not target:
+            return  # asked about a title no longer playing (another server, maybe)
         self._warned.add(server)
         self._choose(quality)

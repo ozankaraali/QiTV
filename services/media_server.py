@@ -474,6 +474,17 @@ CONVERSIONS = (
 )
 
 
+def within(source: dict, quality: Quality) -> bool:
+    """A version already as small as a conversion would make it (2.8: one carried to a
+    server's next titles): its size known and no taller, and its rate no higher (when both
+    are known). Converting it would use the server's processor for nothing."""
+    height = int(_video(source).get("Height") or 0)
+    if height <= 0 or (quality.height and height > quality.height):
+        return False
+    rate = int(source.get("Bitrate") or 0)
+    return not (quality.bitrate and rate and rate > quality.bitrate)
+
+
 def version_of(source: dict) -> dict:
     """A version as the quality menu lists it: its id, height, bitrate, whether it is 4K, and
     the server's name for it."""

@@ -1955,6 +1955,26 @@ video.m3u8
         self.assertIsInstance(parts[1], CaughtUp)  # right after a.ts and b.ts
         self.assertIsInstance(parts[-1], CaughtUp)  # and after c.ts
 
+    def test_a_resumed_run_goes_on_after_the_run_it_joins(self):  # 2.8: no replay
+        # A rewound viewer's kept buffer taken back (a new picture size, a quick zap back):
+        # the new run starts after the old run's last whole segment when its playlist still
+        # lists the one after it and that is no further back than its usual start; else as
+        # any start.
+        names = [f"s{k}.ts" for k in range(10, 21)]
+        copies = [hls(10, names[:10]), hls(11, names[1:], ended=True)]
+        cases = ((17, "s18.ts"), (19, "s20.ts"), (12, "s17.ts"), (40, "s17.ts"), (None, "s17.ts"))
+        for after, first in cases:
+            with self.subTest(after=after):
+
+                def playlist(_request, count, copies=copies):
+                    return 200, {}, copies[min(count, len(copies)) - 1]
+
+                routes = {f"/{name}": (200, {}, self.video) for name in names}
+                routes["/live.m3u8"] = playlist
+                server = self.server(routes)
+                media(server.url + "/live.m3u8", live_delay=3.0, after_seq=after)
+                self.assertEqual(requested_segments(server)[0], first)
+
     def test_a_media_sequence_restart_resumes_at_the_new_live_start(self):
         # New names numbered back: believed once its copies persist as long as a stale copy is
         # waited out (2.6.1: another origin group's copy looks alike, and a reload soon answers

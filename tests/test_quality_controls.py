@@ -92,6 +92,13 @@ class FakeCard(QObject):
     def isHidden(self):
         return self.hidden
 
+    def escape(self):
+        if self.hidden:
+            return False
+        self.hidden = True
+        self.answered.emit(False)
+        return True
+
     def handle(self, action):
         self.keys.append(action)
         return True
@@ -169,6 +176,23 @@ class QualityControlsTests(unittest.TestCase):
         self.panel.rowChosen.emit(ms.CONVERSIONS[2])  # that server again: no question
         self.assertEqual(self.chosen, [converted, ms.CONVERSIONS[2]])
         self.assertEqual(len(self.card.asked), 1)
+
+    def test_an_answer_for_a_title_no_longer_playing_changes_nothing(self):  # review M10
+        # The card asked about one title; another (on another server) plays when "Convert"
+        # comes: that server was never asked, nothing converts.
+        self.transport.qualityRequested.emit()
+        self.panel.rowChosen.emit(ms.CONVERSIONS[1])
+        self.target = SimpleNamespace(item={"id": "f9", "_provider": "Their server"}, live=False)
+        self.card.answered.emit(True)
+        self.assertEqual(self.chosen, [])
+
+    def test_a_new_title_drops_the_question(self):
+        self.transport.qualityRequested.emit()
+        self.panel.rowChosen.emit(ms.CONVERSIONS[1])
+        self.controls.drop_question()
+        self.assertTrue(self.card.isHidden())
+        self.assertEqual(self.chosen, [])
+        self.controls.drop_question()  # nothing asked: nothing to do
 
     def test_no_to_the_question_changes_nothing(self):
         self.transport.qualityRequested.emit()

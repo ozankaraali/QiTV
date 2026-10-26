@@ -6699,6 +6699,43 @@ class SizeCapTests(LiveSessionCase):
         self.assertEqual(self.engine.resumes[-1][2]["max_height"], 720)
         self.assertEqual(len(self.engine.opened), 1)
 
+    def test_a_rewound_viewers_buffer_resumes_after_its_old_run(self):  # review I1
+        # Taken back for a viewer who was rewound, the new run goes on after the old one
+        # (nothing plays twice where they join); at live it starts as any tune (no flag).
+        for rewound in (True, False):
+            with self.subTest(rewound=rewound):
+                sid = self.begin()
+                self.engine.buffer(sid, segments(0, 30), hls=True)
+                self.engine.sessionReady.emit(sid)
+                self.playback.set_state(PlaybackState.PLAYING)
+                if rewound:
+                    self.live.seek_to(20.0)
+                    self.playback.set_state(PlaybackState.PLAYING)
+                kept = self.live.park()
+                self.engine.sessionParked.emit(sid)
+                self.begin(kept=kept)
+                self.assertEqual(self.engine.resumes[-1][2].get("join", False), rewound)
+                self.live.stop()
+                self.engine.answer()
+
+    def test_a_paused_viewers_place_offered_says_it_was_paused(self):  # review M5
+        sid = self.begin()
+        self.engine.buffer(sid, segments(0, 30), hls=True)
+        self.engine.sessionReady.emit(sid)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.toggle_pause()
+        kept = self.live.park()
+        self.engine.sessionParked.emit(sid)
+        offers = []
+        self.live.backOffered.connect(lambda t, wall: offers.append(t))
+        self.begin(kept=kept)
+        self.engine.buffer(sid, segments(0, 40), hls=True, parts=[[0, 0.0, 1_000.0]])
+        self.engine.sessionResumed.emit(sid)
+        self.assertEqual(len(offers), 1)
+        self.assertTrue(self.live.back_paused())
+
     def test_a_channel_played_directly_keeps_its_cap_in_vlc(self):  # Stage 3
         sid = self.begin(max_height=720)
         self.engine.sessionFailed.emit(sid, "unsupported", "This stream format isn't supported.")

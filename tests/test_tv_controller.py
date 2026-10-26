@@ -748,6 +748,11 @@ class FakeLiveSession(QObject):
     def go_back_to(self, t):
         self.calls.append(("go_back_to", t))
 
+    paused_back = False  # back_paused(): where it offers was left paused (2.8)
+
+    def back_paused(self):
+        return self.paused_back
+
     def set_aside(self):  # 2.6: its recording goes on while its channel was left
         self.calls.append(("set_aside",))
 
@@ -1920,6 +1925,21 @@ class VodTests(ControllerTestCase):
         self.assertEqual((url, kwargs["start_ms"]), ("http://vod/heat-uhd.mkv", 600_000))
         self.assertNotIn(("Resumed at 10:00", "info"), self.toast.messages())
 
+    def test_after_a_quality_change_the_film_resumes_where_it_was_saved(self):  # review I2
+        # The quality change's start is asked once: a later reopen (a self-update that could
+        # not launch) goes to the watch state's position, as for any film.
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.session.now_ms = 300_000
+        self.controller.change_quality(ms.Quality(source="uhd"))
+        self.catalog.linkReady.emit(2, "http://vod/heat-uhd.mkv")
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 300_000)
+        self.watch.resume["Home:movie:m7"] = 900_000  # where it was saved since
+        self.controller.stop_live()
+        self.controller.resume_stopped()
+        self.catalog.linkReady.emit(3, "http://vod/heat-uhd.mkv")
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 900_000)
+
     def test_a_conversion_goes_on_for_that_servers_next_titles_until_qitv_closes(self):
         self.play_movie()
         self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
@@ -3056,6 +3076,49 @@ class LiveQualityTests(PipelineCase):
         self.live.backOffered.emit(3000.0, NOW.timestamp())  # where the user was
         self.assertEqual(self.live.calls[-1], ("go_back_to", 3000.0))  # no Resume pill
         self.assertIsNone(self.controller.back_label())
+
+    def test_a_later_tune_of_the_channel_asks_no_size_and_offers_where_it_was(self):
+        # review I2: the size choice is asked once; the channel keeps its cap itself. A later
+        # tune of it (here a self-update that could not launch) is any tune: live first, and
+        # where the user was is offered (the Resume pill), not played at once.
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.controller.change_live_quality(720)
+        self.ready("http://stream/1")
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: self.starts()[-1][1].get("max_height") == 720))
+        self.live.play_pipeline()
+        self.controller.stop_live()
+        self.live.released.emit()
+        count = len(self.starts())
+        self.controller.resume_stopped()
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(lambda: len(self.starts()) == count + 1))
+        self.assertNotIn("max_height", self.starts()[-1][1])
+        self.live.backOffered.emit(3000.0, NOW.timestamp())
+        self.assertNotIn(("go_back_to", 3000.0), self.live.calls)
+        self.assertIsNotNone(self.controller.back_label())
+
+    def test_a_size_chosen_counts_at_once_so_auto_undoes_it_while_it_opens(self):  # M4
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.controller.change_live_quality(720)
+        self.ready("http://stream/1")
+        self.assertEqual(self.controller.live_menu()["max_height"], 720)  # ticked at once
+        links = len(self.catalog.links)
+        self.controller.change_live_quality(0)  # changed their mind before 720p came
+        self.assertEqual(len(self.catalog.links), links + 1)
+
+    def test_a_paused_viewer_stays_paused_in_the_new_size(self):  # M5
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.controller.change_live_quality(720)
+        self.ready("http://stream/1")
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: self.starts()[-1][1].get("max_height") == 720))
+        self.live.paused_back = True  # where it was left, it was paused
+        self.live.backOffered.emit(3000.0, NOW.timestamp())
+        self.assertEqual(self.live.calls[-2:], [("go_back_to", 3000.0), ("toggle_pause",)])
 
     def test_auto_tunes_again_without_a_cap_and_the_same_size_changes_nothing(self):
         self.start_pipeline(0)

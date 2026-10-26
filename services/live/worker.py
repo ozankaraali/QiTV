@@ -27,6 +27,9 @@ Commands (parent to helper):
   raw TS or HLS from its start, ends its input once its media reaches `until_s` (where the
   live buffer begins, by time of day); 2.8 adds `"max_height": lines`, the user's cap for an
   HLS master's variants (the best within it plays, `open_source`), which a "resume" takes too;
+  a "resume" may add `"join": true` (2.8, a rewound viewer's): an HLS run goes on after the
+  last segment the session's earlier run brought whole, when its playlist lists what follows
+  (`HlsSource._start`), so nothing plays twice where the runs join;
 - `("close", sid)`, always answered by `("closed", sid)`, once the session's upstream
   connection is closed but at most 0.5 s later;
 - `("resize", sid, max_bytes)` (2.2, the multiview): a RAM session holds up to `max_bytes`
@@ -485,6 +488,9 @@ class _Session:
         self._segmenter = Segmenter()
         # Renames an audio stream the PMT misnames, on the bytes' way to the segmenter.
         self._relabeler = AudioRelabeler()
+        # 2.8: a resumed run joins the earlier one after this HLS media sequence (its first
+        # open only).
+        self._join_after: int | None = None
         # Raw TS only (`_ingest`): drops what a reconnect sends again in the old timebase.
         self._rejoiner: ReconnectTrimmer | None = None
         # Raw TS only: drops what a restart inside the connection sends twice.
@@ -795,7 +801,10 @@ class _Session:
         self._url, self._headers, self._verify_ssl = url, headers, verify_ssl
         self._live_delay, self._start = live_delay, start
         with self.lock:
-            self._source = None
+            earlier, self._source = self._source, None
+        # 2.8: the earlier run's last whole HLS segment, for a run that joins it ("join").
+        whole = getattr(earlier, "whole_seq", None)
+        self._join_after = whole if start.get("join") is True and type(whole) is int else None
         ring = self._ring
         if ring is not None:
             ring.clear_failure()  # its disk is tried anew
@@ -832,6 +841,7 @@ class _Session:
                 hold=self._hold if isinstance(window, dict) and "ahead_s" in window else None,
                 https_first=self._start.get("https") is True,
                 max_height=_lines(self._start.get("max_height")),
+                after_seq=self._join_after,
             )
         except SourceError as error:
             if not self._parking:  # a park interrupted the open: nothing to say

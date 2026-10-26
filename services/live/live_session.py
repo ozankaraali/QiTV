@@ -534,6 +534,7 @@ class LiveSession(QObject):
         self._user_agent: Optional[str] = None
         self._referrer: Optional[str] = None
         self._open_args: dict[str, Any] = {}
+        self._back_paused = False  # the place offered last was left paused (2.8)
         self._stay = StayLive()
         self._background = False  # a multiview tile without the focus (set_background)
         self._shrink_to: Optional[int] = None  # a smaller buffer, once it is back at live
@@ -1340,7 +1341,8 @@ class LiveSession(QObject):
         self._from_kept = self._resuming = True
         self._on_disk = kept.disk  # it stays the kind it is, whatever this tune asked for
         self._back = kept.where if kept.where.position is not None else None
-        self._send_resume(kept.sid)
+        # 2.8: a rewound viewer plays on into the new run: it goes on after the old one.
+        self._send_resume(kept.sid, join=self._back is not None)
         self._phase = _Phase.WAITING
         self._ready_seen = self._loading = self._held_said = False
         self._edges = []
@@ -1361,7 +1363,7 @@ class LiveSession(QObject):
         aside, self._aside = self._aside, None
         self.go_live()
         if aside is not None and aside.position is not None and self._sid is not None:
-            self._offer_back(aside.position)
+            self._offer_back(aside.position, aside.paused)
 
     def go_back_to(self, t: float) -> None:
         """Play on from timeline second `t` (2.6: where the user was before leaving), also
@@ -1379,7 +1381,7 @@ class LiveSession(QObject):
         if self._phase is _Phase.PIPELINE:
             self._seek(t)
 
-    def _send_resume(self, sid: str) -> None:
+    def _send_resume(self, sid: str, *, join: bool = False) -> None:
         learned = self._learned
         self._engine.resume_session(
             sid,
@@ -1391,6 +1393,7 @@ class LiveSession(QObject):
             extra=0.0,
             https_first=bool(self._open_args.get("https_first")),
             max_height=int(self._open_args.get("max_height", 0)),
+            **({"join": True} if join else {}),
         )
 
     def _on_resumed(self, sid: str) -> None:
@@ -1406,7 +1409,7 @@ class LiveSession(QObject):
             self._on_ready(sid)  # a tune's start, on the new run
             back, self._back = self._back, None
             if back is not None and back.position is not None:
-                self._offer_back(back.position)
+                self._offer_back(back.position, back.paused)
         elif self._phase is _Phase.PIPELINE and self._live_after_resume:
             self._live_after_resume = False
             self._go_live(unpause=True, merge=False)
@@ -1414,10 +1417,16 @@ class LiveSession(QObject):
             # It came after "can't open", the user still where that put them: as in time.
             self._go_live(unpause=True, merge=False)
             if late.position is not None:
-                self._offer_back(late.position)
+                self._offer_back(late.position, late.paused)
 
-    def _offer_back(self, position: float) -> None:
+    def back_paused(self) -> bool:
+        """Where the place offered last was left, playback was paused (2.8: a new size of
+        the channel plays on there at once, paused as it was)."""
+        return self._back_paused
+
+    def _offer_back(self, position: float, paused: bool = False) -> None:
         """Offer timeline second `position`, where the user was, with its time of day."""
+        self._back_paused = paused
         snapshot = self._snapshot()
         parts = live_parts.from_state(snapshot.get("parts"))
         edge = self._live_edge(snapshot)

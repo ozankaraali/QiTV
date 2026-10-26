@@ -190,6 +190,7 @@ class LiveControls(QObject):
         # 2.8: each channel's picture sizes as last seen this run (by its key), and whether the
         # next place offered is played on at once (a size chosen in the ⚙).
         self._sizes: dict[str, dict] = {}
+        self._chosen: dict[str, int] = {}  # the cap chosen per channel this run (it counts)
         self._back_at_once = False
         self._back_notice = back_notice  # 2.6: the Resume pill (None: none)
         self._back: Optional[float] = None  # where the user was, while it is offered
@@ -286,7 +287,9 @@ class LiveControls(QObject):
         if self._back_at_once:  # 2.8: a new size of the channel goes on where the user was
             self._back_at_once = False
             self._back = t
-            self.go_back()
+            live = self.live
+            if self.go_back() and live is not None and live.back_paused():
+                live.toggle_pause()  # as it was left: paused
             return
         self._back = t
         self._back_label = fmt_clock(datetime.fromtimestamp(wall, timezone.utc).astimezone())
@@ -578,10 +581,17 @@ class LiveControls(QObject):
     def sizes(self, target: Target) -> Optional[dict]:
         """The channel's picture sizes when it has two or more: {"heights" (largest first),
         "height" (the playing one's, 0: not named), "max_height" (the cap, 0: none)}."""
-        found = self._sizes.get(self.catchup.key(target))
+        key = self.catchup.key(target)
+        found = self._sizes.get(key)
         if found is None or len(found["heights"]) < 2:
             return None
-        return dict(found, heights=list(found["heights"]))
+        cap = self._chosen.get(key, found["max_height"])
+        return dict(found, heights=list(found["heights"]), max_height=cap)
+
+    def choose_size(self, target: Target, max_height: int) -> None:
+        """The cap chosen for the channel: what its ⚙ ticks from now on, while its old stream
+        still reports the one before (until it is parked)."""
+        self._chosen[self.catchup.key(target)] = max_height
 
     def go_back_when_offered(self) -> None:
         """The channel opens again in another size: where the user was is played on at once."""

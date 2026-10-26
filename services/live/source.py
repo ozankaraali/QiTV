@@ -1137,15 +1137,20 @@ class HlsSource:
         heights: tuple[int, ...] = (),
         height: int = 0,
         max_height: int = 0,
+        after_seq: int | None = None,
     ) -> None:
         """`window` (2.7): a server part, `{"back_s": seconds, "until_seq": sequence}`: it
         starts that far back from the playlist's end and its input ends before that media
         sequence (the live buffer's first), placed in time by `part_wall`; a provider
         archive's, `{"until_s": seconds}`, starts at its first segment (the helper ends it
         at that much media). `heights` and `height` (2.8): its master's picture sizes and the
-        variant's; `max_height`: the cap it was chosen under, which a reload's keeps."""
+        variant's; `max_height`: the cap it was chosen under, which a reload's keeps.
+        `after_seq` (2.8): a resumed run's start goes on after that media sequence (the run it
+        joins, `_start`)."""
         self.user_agent = http.user_agent
         self.heights, self.height, self._max_height = heights, height, max_height
+        self._after = after_seq if window is None else None
+        self._whole_seq: int | None = None  # the last segment that arrived whole's sequence
         back = window.get("back_s") if window is not None else None
         if window is not None and back is None and _archive_window(window):
             back = math.inf  # 2.7: a provider archive's playlist begins at the moment asked
@@ -1317,9 +1322,18 @@ class HlsSource:
         # A break before the first segment needs no marker.
         self._pending = self._pending or self._started
 
+    @property
+    def whole_seq(self) -> int | None:
+        """The media sequence of the last segment that arrived whole (2.8: a resume of the
+        session goes on after it)."""
+        return self._whole_seq
+
     def _start(self, playlist: Any) -> int:
         """The first segment to fetch: `_depth` seconds from a live playlist's end; a server
-        part's `back_s` from it (2.7)."""
+        part's `back_s` from it (2.7). A resumed run that joins an earlier one (`after_seq`,
+        2.8) starts after that run's last segment when its playlist still lists the one after
+        it (or lists up to it) and that is no further back than its depth: what the earlier
+        run brought is not brought twice. Only its first start: a later one is any start's."""
         if self._back is not None:
             segments, first = playlist.segments, playlist.media_sequence or 0
             until = self._until
@@ -1332,7 +1346,13 @@ class HlsSource:
             return _back_from_end(segments, self._back)
         if playlist.is_endlist:
             return 0
-        return _back_from_end(playlist.segments, self._depth(playlist))
+        start = _back_from_end(playlist.segments, self._depth(playlist))
+        after, self._after = self._after, None
+        if after is not None:
+            following = after + 1 - (playlist.media_sequence or 0)
+            if start <= following <= len(playlist.segments):
+                return following
+        return start
 
     def _depth(self, playlist: Any) -> float:
         """How far back from a live playlist's end the start goes (2.1).
@@ -1565,6 +1585,7 @@ class HlsSource:
             self._failures = 0
             self._delivered = True
             self._last_whole = (self._serial, float(segment.duration or 0))
+            self._whole_seq = sequence
         else:
             self._skip(failure, content)
 
@@ -2006,6 +2027,7 @@ def _open_http(
     window: Mapping[str, Any] | None = None,
     hold: Callable[[], bool] | None = None,
     max_height: int = 0,
+    after_seq: int | None = None,
 ) -> Source:
     response, prefix, content = _first_answer(http, url, on_answer)
     if content is None:
@@ -2034,6 +2056,7 @@ def _open_http(
         heights=media.heights,
         height=media.height,
         max_height=max_height,
+        after_seq=after_seq,
     )
 
 
@@ -2052,6 +2075,7 @@ def open_source(
     hold: Callable[[], bool] | None = None,
     https_first: bool = False,
     max_height: int = 0,
+    after_seq: int | None = None,
 ) -> Source:
     """Open ``url``, sniff it, and return a TS or HLS source (``window``: a server part of
     the HLS playlist, 2.7, `HlsSource`; raw TS then is unsupported, but for a provider
@@ -2093,6 +2117,8 @@ def open_source(
 
     ``max_height`` (2.8, the live ⚙): an HLS master plays its best variant of at most that
     many lines (`_within`); 0 its best. The source's ``heights`` are the master's sizes.
+    ``after_seq`` (2.8): a live HLS playlist's run starts after that media sequence, the last
+    of the run it joins, when it lists what follows (`HlsSource._start`).
     """
     try:
         scheme = _scheme(url)
@@ -2115,6 +2141,7 @@ def open_source(
         window=window,
         hold=hold,
         max_height=max_height,
+        after_seq=after_seq,
     )
     host = _host_key(url)
     if https_first and scheme == "http" and host not in _HTTPS_FAILED:
@@ -2162,6 +2189,7 @@ def _open_url(
     window: Mapping[str, Any] | None,
     hold: Callable[[], bool] | None,
     max_height: int = 0,
+    after_seq: int | None = None,
     connect_timeout: float = _TIMEOUT,
 ) -> Source:
     """`open_source`'s open of one address (its connect timeout `connect_timeout`)."""
@@ -2170,7 +2198,17 @@ def _open_url(
     capture = _Capture.from_environment(url)
     try:
         source = _open_http(
-            http, url, live_delay, target, extra, on_answer, capture, window, hold, max_height
+            http,
+            url,
+            live_delay,
+            target,
+            extra,
+            on_answer,
+            capture,
+            window,
+            hold,
+            max_height,
+            after_seq,
         )
     except Exception as error:
         failure = SourceError("network", _STOPPED) if http.closed else _translate(error)

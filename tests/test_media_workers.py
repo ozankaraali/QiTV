@@ -133,6 +133,18 @@ class LinkWorkerTests(unittest.TestCase):
         self.assertIn("MediaSourceId=hd", payload["link"])
         self.assertEqual(payload["quality"], ms.Quality("hd", 720, 4_000_000))  # of "hd"
 
+    def test_a_conversion_a_file_already_fits_plays_it_as_it_is(self):  # review M9
+        # A conversion carried to a server's next titles: a 480p file within 720p and 4 Mbit/s
+        # gains nothing from it (the server's processor would work for nothing).
+        chosen = ms.Quality(height=720, bitrate=4_000_000)
+        kind, payload = self.link([source("sd", 854, 480, 1_500_000)], quality=chosen)
+        self.assertIn("/stream.mkv?static=true&MediaSourceId=sd", payload["link"])
+        self.assertEqual(payload["quality"], ms.Quality(source="sd"))
+        # Larger than the rate (or of a size not known): converted.
+        for big in (source("sd", 854, 480, 9_000_000), source("x", 0, 0, 1_000_000)):
+            kind, payload = self.link([big], quality=chosen)
+            self.assertIn("/master.m3u8?", payload["link"])
+
     def test_only_4k_plays_as_it_is_below_a_4k_screen(self):
         kind, payload = self.link([source("uhd", 3840, 2160)])
         self.assertEqual(kind, "ok")

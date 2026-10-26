@@ -1564,6 +1564,7 @@ class TVController(QObject):
             self._toast(SIZE_WHILE_RECORDING)
             return
         self._request(replace(target, max_height=cap, zapped=False, retried=False))
+        self._live_controls.choose_size(target, cap)
 
     def _title_beside_channel(self) -> bool:
         """A movie or an episode is the large picture's (playing, ended or failed) while the
@@ -1809,6 +1810,9 @@ class TVController(QObject):
                     return  # over the provider's stream limit: nothing opens
                 if target.max_height is not None:
                     self._live_controls.go_back_when_offered()  # 2.8: a new size, on from there
+                    # Asked once: the channel keeps its cap, and a later tune of this target
+                    # (Live after an archive, a retry, a resume) is any tune.
+                    target = replace(target, max_height=None)
                 # The old stream is stopped: the channel's sync waits for its player's open.
                 self._prepare(self.session, target, previous)
                 self._current, self._cid = target, None
@@ -1816,6 +1820,7 @@ class TVController(QObject):
             else:
                 if self._live_controls.refuse_over_limit(target, direct=True):
                     return  # over the provider's stream limit: nothing opens
+                target = replace(target, max_height=None)  # 2.8: asked once (see above)
                 self._current, self._cid = target, None
                 session = self.session  # the large picture's, whatever swaps before it opens
 
@@ -1841,8 +1846,12 @@ class TVController(QObject):
                 start = target.start_ms
             else:
                 start = 0 if target.start_over else self.watch.resume_position(cid)
-            if not target.start_over and not start and target.start_ms is None:
+            changed = target.start_ms is not None
+            if not target.start_over and not start and not changed:
                 start = server_resume(item)  # 2.8: where a media server says it stopped
+            # 2.8: a quality change's start is asked once: a later reopen of this target goes
+            # where the watch state saved it, as any title's.
+            target = replace(target, start_ms=None)
             self._current, self._cid = target, cid
             session = self.session
 
@@ -1860,7 +1869,7 @@ class TVController(QObject):
             self._tuner.open(self._guarded(target, open_vod), direct=True, provider=provider_name)
             if self._current is not None and self._current is not target:
                 return  # its open failed at once: the channel kept small took the picture back
-            if start and target.start_ms is None:
+            if start and not changed:
                 # i18n: a toast; {time} is where the film resumes, e.g. 1:02:05
                 self._toast(tr("Resumed at {time}", time=fmt_duration(start)))
             self.overlays.banner.dismiss()  # the transport takes the bottom of the video
@@ -1919,6 +1928,8 @@ class TVController(QObject):
         else:
             offered = not target.local and bool(self._media_menu(target.item))
         self.overlays.transport.set_quality_available(offered)
+        if self._quality is not None:
+            self._quality.drop_question()  # one asked about what played before
         if self.sessions is not None:  # what the large picture shows (a zap onto it stays)
             large = self.sessions.large()
             large.channel = target.item if target.live else None

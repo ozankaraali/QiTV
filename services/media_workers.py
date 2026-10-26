@@ -131,7 +131,7 @@ class MediaLinkWorker(_ServerWorker):
                 text = ms.ONLY_4K_TEXT if why == ms.ONLY_4K else NO_VERSION_TEXT
                 raise _Shown(translate(text))
         session = uuid.uuid4().hex
-        if wanted.converted:
+        if wanted.converted and not ms.within(source, wanted):
             link = ms.converted_url(
                 client.base,
                 self.item_id,

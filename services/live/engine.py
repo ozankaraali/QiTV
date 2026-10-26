@@ -834,10 +834,12 @@ class LiveEngine(QObject):
         extra: float = 0.0,
         https_first: bool = False,
         max_height: int = 0,
+        join: bool = False,
     ) -> None:
         """A new upstream for a parked session (2.6): `sessionResumed` once its first
         segment came, else `sessionFailed` (it stays parked). The arguments as for
-        `open_session`."""
+        `open_session`; `join` (2.8): an HLS run goes on after the earlier run's last segment
+        (a rewound viewer's: nothing plays twice where they join)."""
         view = self._sessions.get(sid)
         if view is None or view.closing or self._shut:
             return
@@ -849,6 +851,8 @@ class LiveEngine(QObject):
             start["https"] = True
         if max_height > 0:
             start["max_height"] = int(max_height)
+        if join:
+            start["join"] = True
         if start:
             command = (*command, start)
         self._commands.put(command)
