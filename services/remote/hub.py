@@ -42,6 +42,7 @@ from services.remote.protocol import (
     StoreSaved,
     b64e,
 )
+from services.remote.recorded import Recorded
 from services.remote.session import MessageTooBig, Reply, Session
 
 logger = logging.getLogger(__name__)
@@ -215,6 +216,34 @@ class HubCore:
             return
         token = self.films.put(device, film)
         self.send(sid, {**message, "url": f"{home}film/{token}/index.m3u8"})
+
+    def open_recording(self, sid: str, device: str, path: str, message: dict) -> None:
+        """2.8: open the recording at `path` for phone `sid` as a film opens (open_film): its
+        HLS address from the home door, or a failed play saying why ("rec_format",
+        "rec_sound", "rec_open")."""
+        self.forget_film(device)
+        task = asyncio.ensure_future(self._open_recording(sid, device, path, message))
+        self._openings[device] = task
+        task.add_done_callback(partial(self._opened, device))
+
+    async def _open_recording(self, sid: str, device: str, path: str, message: dict) -> None:
+        home = self.home_url()
+        recorded = Recorded(path, start_s=float(message.get("start") or 0))
+        try:
+            if not home:
+                raise FilmRefused(PROVIDER, "no home address")
+            await asyncio.wait_for(recorded.open(), OPEN_S)
+        except FilmRefused as refused:
+            logger.info("Phone remote: a recording can't play on the phone: %s", refused)
+            why = "rec_open" if refused.reason == PROVIDER else f"rec_{refused.reason}"
+            self.send(sid, {"t": "play", "failed": True, "why": why})
+            return
+        except Exception as error:  # the disk's: the file went, can't be read; or too slow
+            logger.info("Phone remote: a recording couldn't open: %s", type(error).__name__)
+            self.send(sid, {"t": "play", "failed": True, "why": "rec_open"})
+            return
+        token = self.films.put(device, recorded)
+        self.send(sid, {**message, "url": f"{home}rec/{token}/index.m3u8"})
 
     def forget_film(self, device: str) -> None:
         """Phone `device` plays something else (or hands its film to the TV): its film, playing
@@ -561,6 +590,9 @@ class RemoteHub:
         self, sid: str, device: str, url: str, headers: dict, verify: bool, message: dict
     ) -> None:
         self._call(self._core.open_film, sid, device, url, dict(headers), verify, dict(message))
+
+    def open_recording(self, sid: str, device: str, path: str, message: dict) -> None:
+        self._call(self._core.open_recording, sid, device, path, dict(message))
 
     def forget_film(self, device: str) -> None:
         self._call(self._core.forget_film, device)

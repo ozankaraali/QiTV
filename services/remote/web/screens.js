@@ -50,6 +50,10 @@ const words = {
   film_sound: "This film's sound doesn't play on a phone. Tap TV to watch it there.",
   film_relay: "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).",
   film_provider: "The film didn't open. Tap TV to watch it there.",
+  rec_format: "This recording doesn't play on a phone. Tap TV to watch it there.",
+  rec_sound: "This recording's sound doesn't play on a phone. Tap TV to watch it there.",
+  rec_relay: "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).",
+  rec_open: "The recording didn't open. Tap TV to watch it there.",
   back_to: "Resume · {time}",
   rec: "REC",
   go_back: "Go back to {channel}",
@@ -1033,8 +1037,19 @@ function startHere() {
   send({ t: "watch" }); // what the TV plays, if anything
 }
 
-// Why a film doesn't play here (QiTV's films.py and remote_controller.py say).
-const FILM_WHY = { format: "film_format", sound: "film_sound", relay: "film_relay", provider: "film_provider", recording: "recording_kept" };
+// Why a film (or a recording) doesn't play here (QiTV's films.py, recorded.py and
+// remote_controller.py say).
+const FILM_WHY = {
+  format: "film_format",
+  sound: "film_sound",
+  relay: "film_relay",
+  provider: "film_provider",
+  recording: "recording_kept",
+  rec_format: "rec_format",
+  rec_sound: "rec_sound",
+  rec_relay: "rec_relay",
+  rec_open: "rec_open",
+};
 
 function onPlay(message) {
   const url = typeof message.url === "string" ? message.url : "";

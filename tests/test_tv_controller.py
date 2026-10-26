@@ -1138,6 +1138,50 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(key, self.watch.content_id("Home", VodTests.MOVIE, item_type="movie"))
         self.assertIsNone(self.controller.resume_key(Target(CHANNELS[0], "live", "One")))
 
+    def test_play_elsewhere_a_recording_for_a_phone(self):
+        """2.8: a recording (a file QiTV recorded) goes to a phone too, as its file: no link is
+        asked for. A file opened from the disk (File → Open) stays here."""
+        self.play(0)
+        recording = {
+            "id": "recording:Harbour News 2026-10-26 20.00.ts",
+            "name": "Harbour News",
+            "path": "/r/Harbour News 2026-10-26 20.00.ts",
+            "_recording": True,
+        }
+        chosen = Target(recording, "movies", "Harbour News", local=True)
+        handed = []
+
+        def launch(target, url):
+            handed.append((target.item["id"], url))
+            return True, ""
+
+        self.assertFalse(self.controller.play_elsewhere(launch, chosen))
+        self.assertTrue(self.controller.play_elsewhere(launch, chosen, recordings=True))
+        self.assertTrue(wait_until(lambda: handed))
+        self.assertEqual(handed, [(recording["id"], Path(recording["path"]).as_uri())])
+        self.assertEqual(self.session.stops, 1)  # one screen at a time
+        self.assertEqual(self.watch.plays[-1:], self.watch.plays[:1])  # no history for a file
+        opened = Target({"name": "a.ts", "cmd": "file:///r/a.ts"}, "movies", "a.ts", local=True)
+        self.assertFalse(self.controller.play_elsewhere(launch, opened, recordings=True))
+
+    def test_the_recording_the_tv_plays_goes_to_a_phone(self):
+        recording = {
+            "id": "recording:Harbour News 2026-10-26 20.00.ts",
+            "name": "Harbour News",
+            "path": "/r/Harbour News 2026-10-26 20.00.ts",
+            "_recording": True,
+        }
+        self.controller.play_recording(recording)
+        handed = []
+
+        def launch(target, url):
+            handed.append((target.item["id"], target.item["path"]))
+            return True, ""
+
+        self.assertTrue(self.controller.play_elsewhere(launch, recordings=True))
+        self.assertTrue(wait_until(lambda: handed))
+        self.assertEqual(handed, [(recording["id"], recording["path"])])
+
     def test_play_elsewhere_with_nothing_current(self):
         self.assertFalse(self.controller.play_elsewhere(lambda target, url: (True, "")))
         self.assertEqual(self.catalog.links, [])

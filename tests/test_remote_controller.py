@@ -385,8 +385,9 @@ class PhoneQuestionTests(WindowCase):
         self.connect()
         asked_on = []
 
-        def play_elsewhere(launch, chosen=None, *, ask_on=None):
+        def play_elsewhere(launch, chosen=None, *, ask_on=None, recordings=False):
             asked_on.append(ask_on)
+            self.assertTrue(recordings)  # 2.8: the TV's recording goes to the phone too
             return True
 
         with mock.patch.object(
@@ -626,6 +627,59 @@ class WatchHereTests(WindowCase):
         self.hand_off("http://p.test/movie/u/p/7.mkv", handle=handle)
         self.hub.open_film.assert_not_called()
         self.assertEqual(self.plays()[-1], {"t": "play", "failed": True, "why": "relay"})
+
+    RECORDING = {
+        "id": "recording:Harbour News 2026-10-26 20.00.ts",
+        "name": "Harbour News",
+        "path": "/r/Harbour News 2026-10-26 20.00.ts",
+        "_recording": True,
+    }
+
+    def hand_recording(self):
+        remote = self.window.remote
+        item = dict(self.RECORDING)
+        handle = remote._library("s8").handles.issue("title", (item, "recording", None))
+        self.hand_off(Path(item["path"]).as_uri(), handle=handle)
+        return item
+
+    def test_a_recording_goes_through_qitvs_home_door(self):
+        """2.8: Safari plays a recording's MPEG-TS as HLS: QiTV's home door hands it to the
+        phone from the disk (services/remote/recorded.py), from where it stopped."""
+        self.connect()
+        watch = self.window.watch
+        with mock.patch.object(watch, "resume_position", return_value=61_000) as resume:
+            item = self.hand_recording()
+        resume.assert_called_with(item["id"])
+        self.assertEqual(self.plays(), [])
+        self.hub.open_recording.assert_called_once_with(
+            "s8", "s8", item["path"], {"t": "play", "name": "Harbour News", "start": 61}
+        )
+
+    def test_a_recording_for_a_phone_through_the_relay(self):
+        self.connect()
+        remote = self.window.remote
+        remote.bridge.post(Opened("s8", "d1", "relay"))
+        self.assertTrue(wait_until(lambda: "s8" in remote._relayed))
+        self.hand_recording()
+        self.hub.open_recording.assert_not_called()
+        self.assertEqual(self.plays()[-1], {"t": "play", "failed": True, "why": "rec_relay"})
+
+    def test_how_far_the_phone_got_in_a_recording_is_kept_for_the_tv(self):
+        self.connect()
+        item = self.hand_recording()
+        with mock.patch.object(self.window.watch, "update_position") as update:
+            self.window.remote.bridge.post(Position("s8", 61000, 5400000))
+            self.assertTrue(wait_until(lambda: update.called))
+        update.assert_called_once_with(item["id"], 61000, 5400000)
+
+    def test_a_recording_handed_back_plays_on_the_tv(self):
+        self.connect()
+        item = self.hand_recording()
+        with mock.patch.object(self.window.controller, "play_recording") as play_recording:
+            self.window.remote.bridge.post(ToTv("s8"))
+            self.assertTrue(wait_until(lambda: play_recording.called))
+        play_recording.assert_called_once_with(item)
+        self.hub.forget_film.assert_called_with("s8")
 
     def test_a_phone_at_the_home_door_gets_its_films_there(self):
         self.connect()

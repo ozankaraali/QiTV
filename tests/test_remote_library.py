@@ -276,6 +276,14 @@ class PhoneLibraryTests(unittest.TestCase):
         [found] = self.last("genres")["titles"]
         self.assertNotIn("plays", found)
 
+    def test_a_recording_plays_on_the_phone_one_to_come_not(self):
+        """2.8: a recording plays where the phone watches (from QiTV's home door); a scheduled
+        one is still to come."""
+        recording = {"id": "recording:a.ts", "name": "News", "_recording": True}
+        scheduled = {"id": "scheduled:1", "name": "News", "_scheduled": True}
+        self.assertTrue(self.library._title_row(recording, None)["plays"])
+        self.assertNotIn("plays", self.library._title_row(scheduled, None))
+
     def with_searcher(self):
         searcher = FakeSearcher()
         made = PhoneLibrary(

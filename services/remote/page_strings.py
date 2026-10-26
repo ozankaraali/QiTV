@@ -75,6 +75,19 @@ PAGE_STRINGS: dict[str, str] = {
     ),
     # i18n: the phone remote: the provider didn't hand QiTV the film for the phone
     "film_provider": N_("The film didn't open. Tap TV to watch it there."),
+    # i18n: the phone remote, where a recording (of a TV channel, by QiTV) would play on the
+    # phone; TV: the TV | Phone switch
+    "rec_format": N_("This recording doesn't play on a phone. Tap TV to watch it there."),
+    # i18n: the phone remote, where a recording would play on the phone (its sound: MPEG audio)
+    "rec_sound": N_("This recording's sound doesn't play on a phone. Tap TV to watch it there."),
+    # i18n: the phone remote through the relay (QiTV's server on the internet): recordings come
+    # from QiTV itself, at home; a guest network or a VPN can't reach it
+    "rec_relay": N_(
+        "The relay can't carry recordings. To watch this one on the phone, be at home on "
+        "QiTV's network (not a guest network or a VPN)."
+    ),
+    # i18n: the phone remote: QiTV couldn't read the recording for the phone (deleted, say)
+    "rec_open": N_("The recording didn't open. Tap TV to watch it there."),
     "remote": N_("Remote"),  # i18n: the phone remote: the tab with the buttons
     "channel_number": N_("Channel number"),  # i18n: the phone remote: the numpad's heading
     "previous": N_("Previous"),  # i18n: the phone remote's numpad: the previous channel

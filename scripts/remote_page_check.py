@@ -874,6 +874,9 @@ def scenario_watch_here(rig: Rig) -> None:
     assert rig.page.locator(".player-cap.why").count() == 1
     assert rig.page.evaluate("document.getElementById('video').getAttribute('src')") is None
     rig.shot("watch-here-why")
+    # A recording (2.8) asked for through the relay: QiTV says it plays from home.
+    rig.hub.send(sid, {"t": "play", "failed": True, "why": "rec_relay"})
+    rig.page.locator("#playerName", has_text="recordings").wait_for(timeout=5000)
     mark = rig.events.mark()
     rig.page.locator("#libraryRows .row", has_text="Harbour Watch").click()
     assert rig.events.wait(OpenItem, after=mark).handle == "s1"

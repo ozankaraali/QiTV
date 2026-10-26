@@ -19,6 +19,7 @@ from services.browsed_catalog import BrowsedCatalog
 from services.find import Preferences, preferences_for
 from services.i18n import N_, translate
 from services.media_server import phone_reachable, server_resume
+from services.navigation import item_title
 from services.provider_api import xtream_hls
 from services.provider_ids import ALL_PROVIDERS, provider_of
 from services.provider_types import is_media_server
@@ -580,6 +581,9 @@ class RemoteController(QObject):
             elif kind == "title" and cast(tuple, payload)[1] in ("movie", "episode"):
                 item, item_kind, _genre_items = cast(tuple, payload)
                 chosen = controller.title_target(item, item_kind)
+            elif kind == "title" and cast(tuple, payload)[1] == "recording":
+                item = cast(tuple, payload)[0]  # 2.8: from QiTV's home door
+                chosen = Target(item, "movies", item_title(item), local=True)
             elif kind == "hit" and cast(Hit, payload).section in ("live", "movies"):
                 hit = cast(Hit, payload)  # a search result: a channel, or a film
                 if hit.section == "live":
@@ -598,15 +602,17 @@ class RemoteController(QObject):
             message: dict = {"t": "play", "name": target.title[:TITLE_CHARS]}
             if target.live:
                 message["num"] = str(controller.channel_number(target.item) or "")
-            else:  # a film or an episode goes on where it stopped (as on the TV)
-                key = controller.resume_key(target)
+            else:  # a film, an episode or a recording goes on where it stopped (as on the TV)
+                key = self._resume_key(target)
                 watch = self._window.watch
                 start = None if target.start_over or not key else watch.resume_position(key)
-                if not start and not target.start_over:
+                if not start and not target.start_over and not target.local:
                     start = server_resume(target.item)  # 2.8: a media server's own
                 if start:
                     message["start"] = start // 1000
-            if not target.live and is_matroska(target.item, url):
+            if target.local:
+                self._recording_to(sid, str(target.item.get("path") or ""), message)
+            elif not target.live and is_matroska(target.item, url):
                 self._film_to(sid, target.item, url, message)
             else:
                 if self.hub is not None:
@@ -619,7 +625,7 @@ class RemoteController(QObject):
             return True, ""
 
         try:
-            handed = controller.play_elsewhere(launch, chosen, ask_on=sid)
+            handed = controller.play_elsewhere(launch, chosen, ask_on=sid, recordings=True)
         except Exception as error:  # a phone's ask must never take QiTV down
             logger.error("Phone remote: playing on the phone failed: %s", safe_message(error))
             handed = False
@@ -666,13 +672,28 @@ class RemoteController(QObject):
         headers = {"User-Agent": str(item.get("user_agent") or DEFAULT_USER_AGENT)}
         self.hub.open_film(sid, self._device(sid), url, headers, verify, message)
 
+    def _recording_to(self, sid: str, path: str, message: dict) -> None:
+        """2.8: a recording goes to the phone as HLS from QiTV's home door, read from the disk
+        (services/remote/recorded.py); as a film, never through the relay."""
+        if sid in self._relayed or self.hub is None:
+            self._send(sid, {"t": "play", "failed": True, "why": "rec_relay"})
+            return
+        self.hub.open_recording(sid, self._device(sid), path, message)
+
+    def _resume_key(self, target: Target) -> Optional[str]:
+        """Where the position of what a phone plays is kept, as on the TV: a recording's id
+        (2.8), a title's content id; None for a channel."""
+        if target.local:
+            return str(target.item.get("id") or "") or None
+        return cast(Optional[str], self._window.controller.resume_key(target))
+
     def _position(self, sid: str, position_ms: int, length_ms: int) -> None:
         """How far a phone got in the film or episode it plays: kept as the TV keeps its own,
         so the TV (and the Library's Continue) goes on from there."""
         watched = self._watching.get(self._device(sid))
         if watched is None:
             return
-        key = self._window.controller.resume_key(watched[0])
+        key = self._resume_key(watched[0])
         if key:
             self._window.watch.update_position(key, position_ms, length_ms)
 
@@ -690,6 +711,9 @@ class RemoteController(QObject):
             return
         if window.screens.library_shown():
             window.screens.back_to_tv()
+        if target.local:  # a recording (2.8)
+            window.controller.play_recording(target.item)
+            return
         window.controller.play_vod(target.item, target.item_type, target.context)
 
     def _stop_phones(self) -> None:

@@ -37,7 +37,7 @@ others' distributions, which may have malware.**
   first, named after their programme when they were scheduled, with the recordings still to
   come above them. A recording plays from where you stopped and seeks like a film; right-click
   shows its folder, deletes it, or cancels one to come. The phone remote lists them too and
-  plays them on the TV.
+  plays them on the TV, or at home on the phone itself, from QiTV, with nothing re-encoded.
 - **Parental controls.** Settings → Parental controls sets a PIN. Then right-click a group or
   a channel to hide it, or hide every group whose name looks adult, also the ones a provider
   adds later. While QiTV is locked, what you hid is gone from the channel list, the guide,

@@ -910,17 +910,28 @@ class TVController(QObject):
         path = str(item.get("path") or "")
         if path:
             self._play_local(
-                path, item_title(item), resume_key=str(item.get("id") or ""), start_over=start_over
+                path,
+                item_title(item),
+                resume_key=str(item.get("id") or ""),
+                start_over=start_over,
+                item=item,
             )
 
     def _play_local(
-        self, path: str, title: str, resume_key: Optional[str] = None, start_over: bool = False
+        self,
+        path: str,
+        title: str,
+        resume_key: Optional[str] = None,
+        start_over: bool = False,
+        item: Optional[dict] = None,
     ) -> None:
+        """`item`: the Library's recording (2.8), kept on what plays so that a phone can
+        take it over (play_elsewhere)."""
         if self._closed:
             return
         self._flow.leave_library()
         url = Path(path).absolute().as_uri()
-        target = Target({"name": title, "cmd": url}, "movies", title, local=True)
+        target = Target({**(item or {}), "name": title, "cmd": url}, "movies", title, local=True)
         self._forget_stopped()  # 2.6: a newer choice than what Stop stopped
         self.leave_multiview(keep_pip=False)  # the multiview is for live TV
         self._close_pip()  # picture in picture is for live TV
@@ -3566,15 +3577,25 @@ class TVController(QObject):
         target: Optional[Target] = None,
         *,
         ask_on: Optional[str] = None,
+        recordings: bool = False,
     ) -> bool:
         """What plays now, or `target`, handed to `launch` with its link (a phone's player) as
         Play in VLC hands it: the in-app stream is released first, so the provider counts one.
         False when nothing from a provider is current (a file opened from the disk stays here).
-        2.6: with no stream free while a recording holds one, phone `ask_on` is asked."""
+        2.6: with no stream free while a recording holds one, phone `ask_on` is asked.
+        2.8: with `recordings`, a recording of the Library goes too, its file's URI as its
+        link (a phone gets it from QiTV's home door)."""
         target = target or self._current
-        if self._closed or target is None or target.local:
+        if self._closed or target is None:
             return False
         chosen = target
+        if target.local:
+            path = str(target.item.get("path") or "")
+            if not (recordings and target.item.get("_recording") and path):
+                return False
+            uri = Path(path).absolute().as_uri()
+            self._play_external(chosen, uri, lambda link: launch(chosen, link), ask_on=ask_on)
+            return True
 
         def play(url: str) -> None:
             self._play_external(chosen, url, lambda link: launch(chosen, link), ask_on=ask_on)
