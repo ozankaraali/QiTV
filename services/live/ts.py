@@ -2851,16 +2851,19 @@ class ClockJoiner:
             self._note_packet(pkt)
 
     def _resume(self, out: list[bytes | None]) -> None:
-        """The first picture after a discontinuity came while jumps had moved the clock: within
-        `_REJOIN_WINDOW_TICKS` of the last picture before it (as both came), the source's clock
-        goes on and so does what the jumps added; else what follows passes on as it comes."""
+        """The first picture after a discontinuity came while jumps had moved the clock: ahead of
+        the last picture before it (as both came) and within `_REJOIN_WINDOW_TICKS`, the
+        source's clock goes on and so does what the jumps added; else what follows passes on as
+        it comes, or, behind it, follows it (2.8: kept, the jumps' offset stepped the pictures
+        back by as much as the clock was behind)."""
         pending, marked = self._pending, self._marked
         assert pending is not None and marked is not None
         self._marked = None
         jumped, before = marked
         pts, dts = _pes_times(pending[-1], 0)
         now = pts if dts is None else dts
-        if now is None or abs(pts_delta(before, now)) > _REJOIN_WINDOW_TICKS:
+        ahead = None if now is None else pts_delta(before, now)
+        if ahead is None or ahead <= 0 or ahead > _REJOIN_WINDOW_TICKS:
             self._rejoin = self._before is not None  # another clock: behind, it follows on
             self._decide(out)
             return
