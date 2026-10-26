@@ -141,7 +141,7 @@ class TVMenus(QObject):
             window.open_phone_remote,
             role.ApplicationSpecificRole,  # a Mac's app menu, beside Settings
         )
-        add(app_menu, tr("Quit"), "Ctrl+Q", window.close, role.QuitRole)  # i18n: a menu entry
+        add(app_menu, tr("Quit"), "Ctrl+Q", window.quit_chosen, role.QuitRole)  # i18n: a menu entry
         file_menu = bar.addMenu(tr("File"))  # i18n: the menu bar's File menu
         add(file_menu, tr("Open File…"), "Ctrl+O", screens.open_file)
         export = file_menu.addMenu(tr("Export"))  # i18n: a submenu of File (verb)

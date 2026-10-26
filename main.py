@@ -95,7 +95,6 @@ def _migrate_favorites(config_manager) -> None:
 def main() -> int:
     from PySide6 import QtGui
     from PySide6.QtCore import QLocale, QLoggingCategory, qInstallMessageHandler
-    from PySide6.QtWidgets import QApplication
     import qdarktheme
 
     from services import i18n, log_file
@@ -106,6 +105,7 @@ def main() -> int:
     from services.image_manager import ImageManager
     from services.provider_manager import ProviderManager
     from services.sleep_manager import allow_sleep, prevent_sleep
+    from ui.quit_reason import QiTVApplication
     from ui.tv_window import TVWindow
     from ui.update_dialogs import check_for_updates
 
@@ -134,7 +134,7 @@ def main() -> int:
     # thread waiting up to 5 ms at every callback it makes: a 0.5 ms switch interval keeps
     # the window responsive while it works.
     sys.setswitchinterval(0.0005)
-    app = QApplication(sys.argv)
+    app = QiTVApplication(sys.argv)  # notes a quit request the system sends (2.8)
     # Why QiTV ended, in its log: the window closed (tv_window says how), or its last one.
     app.lastWindowClosed.connect(lambda: log.info("The last window closed."))
     app.aboutToQuit.connect(lambda: log.info("QiTV quits."))

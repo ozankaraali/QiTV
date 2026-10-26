@@ -98,7 +98,7 @@ from services.thread_cleanup import has_pending_threads
 from services.update_checker import call_before_update, set_quit_note
 from services.watch_state import WatchState
 from services.zapping import ZapController
-from ui import macos_window, provider_drop
+from ui import macos_window, provider_drop, quit_reason
 from ui.bottom_band import BottomBand
 from ui.desktop_pip import DesktopPip, corner_rect
 from ui.export_flow import ExportFlow
@@ -329,6 +329,7 @@ class TVWindow(QMainWindow):
         self._close_retries = 0
         self._video_released = False
         self._closed = False
+        self._quit_asked: Optional[str] = None  # how QiTV's Quit action was reached (2.8)
         self._threads_abandoned = False
         self._thread_wait = QElapsedTimer()
         # The close advances only on this timer: restarted, never stacked.
@@ -1562,6 +1563,13 @@ class TVWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def quit_chosen(self) -> None:
+        """QiTV's Quit action (menu, ⌘Q, Ctrl+Q): noted for the log, then the window closes."""
+        if self._quit_asked is None:
+            active = self.app.applicationState() == Qt.ApplicationState.ApplicationActive
+            self._quit_asked = quit_reason.asked_by_menu(active)
+        self.close()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """Close in steps, each after the event loop ran again (`close_retry`).
 
@@ -1587,9 +1595,10 @@ class TVWindow(QMainWindow):
             self._come_forward()  # the question shows where it can be answered
             return
         if not self._closing:
-            # Why QiTV ends (its log is kept in a file since 2.7.2): from the system or the
-            # window's own button, or from QiTV's Quit.
-            how = "the system or the window" if event.spontaneous() else "QiTV's Quit"
+            # Why QiTV ends (its log is kept in a file since 2.7.2; 2.8 tells a request from
+            # outside, which macOS sends the way QiTV's own Quit closes, apart from the Quit).
+            asked = getattr(self.app, "quit_asked", None) or self._quit_asked
+            how = quit_reason.describe(event.spontaneous(), asked)
             logger.info("The window closes (%s).", how)
             self._closing = True
             self._mini_waiting = False
