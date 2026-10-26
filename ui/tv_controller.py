@@ -1904,7 +1904,12 @@ class TVController(QObject):
         if launcher is None:  # the setting changed meanwhile: play it here
             self._play_link(replace(target, zapped=False), url)
             return
-        ok, message = launcher(url)
+        http: dict[str, str] = {}
+        if not target.local:  # 2.8: asked as QiTV asks it (an STB portal's box's agent)
+            agent = item_provider.stream_agent(self.catalog, target.item)
+            referrer = str(target.item.get("referrer") or "")
+            http = {k: v for k, v in (("user_agent", agent), ("referrer", referrer)) if v}
+        ok, message = launcher(url, **http)
         if not ok:
             first, _, rest = (message or "").strip().partition("\n")
             if rest.strip():
@@ -3726,11 +3731,15 @@ class TVController(QObject):
             if not (recordings and target.item.get("_recording") and path):
                 return False
             uri = Path(path).absolute().as_uri()
-            self._play_external(chosen, uri, lambda link: launch(chosen, link), ask_on=ask_on)
+            self._play_external(
+                chosen, uri, lambda link, **_http: launch(chosen, link), ask_on=ask_on
+            )
             return True
 
         def play(url: str) -> None:
-            self._play_external(chosen, url, lambda link: launch(chosen, link), ask_on=ask_on)
+            self._play_external(
+                chosen, url, lambda link, **_http: launch(chosen, link), ask_on=ask_on
+            )
 
         self._lanes.request_side(target, play, play=True)
         return True

@@ -914,6 +914,7 @@ class FakeExternal:
         self.calls = []
         self.result = result
         self.missing = set()  # players find_vlc/find_mpv do not find
+        self.http = []
 
     def find_vlc(self):
         return None if "vlc" in self.missing else "/Applications/VLC.app"
@@ -921,12 +922,14 @@ class FakeExternal:
     def find_mpv(self):
         return None if "mpv" in self.missing else "/usr/local/bin/mpv"
 
-    def launch_vlc(self, url):
+    def launch_vlc(self, url, **http):
         self.calls.append(("vlc", url))
+        self.http.append(http)  # 2.8: the stream's agent and referrer, when it has its own
         return self.result
 
-    def launch_mpv(self, url):
+    def launch_mpv(self, url, **http):
         self.calls.append(("mpv", url))
+        self.http.append(http)
         return self.result
 
 
@@ -3969,6 +3972,23 @@ class DirectReconnectTests(ControllerTestCase):
         QTest.qWait(200)
         self.assertEqual(len(self.session.plays), 1)
         self.assertNotIn(("Reconnecting…", "info"), self.toast.messages())
+
+
+class ExternalAgentTests(ControllerTestCase):  # 2.8 review M7
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+
+    def test_an_external_player_asks_an_stb_stream_as_the_box_does(self):
+        self.config.play_in_vlc = True
+        self.play(0)  # the fake catalog is an STB portal's
+        self.assertEqual(self.external.http[-1], {"user_agent": STB_USER_AGENT})
+
+    def test_another_providers_stream_goes_as_before(self):
+        self.config.play_in_mpv = True
+        self.catalog.ptype = "XTREAM"
+        self.play(0)
+        self.assertEqual(self.external.http[-1], {})
 
 
 class ExternalZapTests(ControllerTestCase):

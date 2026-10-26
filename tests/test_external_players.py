@@ -72,6 +72,76 @@ class ExternalPlayersTest(unittest.TestCase):
         self.assertIn("MPV Media Player is not installed", msg)
         popen.assert_not_called()
 
+    def test_vlc_asks_as_the_channel_does_in_a_window_of_its_own(self):  # 2.8
+        http = {"user_agent": "MAG200 stbapp", "referrer": "http://site.test/"}
+        with (
+            mock.patch("platform.system", return_value="Linux"),
+            mock.patch("shutil.which", return_value="/usr/bin/vlc"),
+            mock.patch("subprocess.Popen") as popen,
+        ):
+            self.assertEqual(external_players.launch_vlc("http://x/s", **http), (True, ""))
+        popen.assert_called_once_with(
+            [
+                "/usr/bin/vlc",
+                "--no-one-instance",  # a running VLC would drop the options
+                "--http-user-agent=MAG200 stbapp",
+                "--http-referrer=http://site.test/",
+                "--",
+                "http://x/s",
+            ],
+            env=mock.ANY,
+        )
+
+        def exists(path):
+            return path == "/Applications/VLC.app"
+
+        with (
+            mock.patch("platform.system", return_value="Darwin"),
+            mock.patch("os.path.exists", side_effect=exists),
+            mock.patch("subprocess.Popen") as popen,
+        ):
+            external_players.launch_vlc("http://x/s", user_agent="MAG200 stbapp")
+        popen.assert_called_once_with(
+            [
+                "/Applications/VLC.app/Contents/MacOS/VLC",  # `open` passes no options
+                "--http-user-agent=MAG200 stbapp",
+                "--",
+                "http://x/s",
+            ],
+            env=mock.ANY,
+        )
+
+    def test_mpv_asks_as_the_channel_does(self):
+        with (
+            mock.patch.dict(sys.modules, {"mpv": None}),
+            mock.patch("platform.system", return_value="Linux"),
+            mock.patch("shutil.which", return_value="/usr/bin/mpv"),
+            mock.patch("subprocess.Popen") as popen,
+        ):
+            external_players.launch_mpv("http://x/s", user_agent="MAG200 stbapp", referrer="r")
+        popen.assert_called_once_with(
+            ["/usr/bin/mpv", "--user-agent=MAG200 stbapp", "--referrer=r", "--", "http://x/s"],
+            env=mock.ANY,
+        )
+
+    def test_python_mpv_is_told_each_streams_agent(self):
+        played = []
+
+        class Player(dict):
+            def __init__(self, **_options):
+                super().__init__({"user-agent": "libmpv", "referrer": ""})
+
+            def play(self, url):
+                played.append((url, self["user-agent"], self["referrer"]))
+
+        fake = mock.Mock(MPV=Player)
+        with mock.patch.dict(sys.modules, {"mpv": fake}):
+            external_players.launch_mpv("http://x/1", user_agent="MAG200 stbapp", referrer="r")
+            external_players.launch_mpv("http://x/2")  # another stream: its own (none)
+        self.assertEqual(
+            played, [("http://x/1", "MAG200 stbapp", "r"), ("http://x/2", "libmpv", "")]
+        )
+
     def test_mpv_subprocess_fallback(self):
         with (
             mock.patch.dict(sys.modules, {"mpv": None}),
