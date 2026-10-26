@@ -6,7 +6,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QWidget
-from test_multiview import MultiviewCase
+from test_multiview import MIB, MultiviewCase
 from test_tv_controller import (
     BACKUP_TWO,
     CHANNELS,
@@ -148,6 +148,23 @@ class RecordingAsideTests(_RecordCase):
         self.assertEqual(recording.calls[-1], ("bring_back",))
         self.assertIn(("set_roles", "b1", "main"), self.frame.calls)
         self.assertEqual(self.sessions.background(), [])
+
+    def test_a_stop_for_an_update_ends_the_recordings_before_their_players_stop(self):
+        # 2.8 (review of 2.6): a self-update closed a recording's buffer; ended first (saved),
+        # its player parks as any other and its disk buffer is kept, as Quit's question does.
+        recording = self.record_large(0)
+        self.leave_for(1)
+        seen = []
+        stop_background = self.sessions.stop_background
+
+        def stopping():
+            seen.append(recording.recording())
+            stop_background()
+
+        self.sessions.stop_background = stopping
+        self.controller.stop_live()
+        self.assertEqual(seen, [False])
+        self.assertIn(("stop_recording",), self.since_recording(recording))
 
     def test_quitting_stops_the_recordings_in_the_background(self):
         recording = self.record_large(0)
@@ -517,6 +534,20 @@ class RecordingTileTests(MultiviewCase):
         )
         self.assertEqual([s.name for s in self.sessions.background()], ["t2"])
         self.assertTrue(self.sessions.muted("t2"))
+
+    def test_a_recording_tile_left_in_the_background_takes_the_full_buffer(self):
+        # 2.8 (review of 2.6): it kept its small tile buffer, also once brought back large.
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.pick_in("t3", CHANNELS[3], "http://stream/4")
+        self.assertTrue(t2.live.start_recording("/tmp/x.ts"))
+        self.grid_frame.focusRequested.emit("main")
+        self.assertEqual(t2.live.resizes[-1], 64 * MIB)
+        self.v()
+        self.assertEqual([s.name for s in self.sessions.background()], ["t2"])
+        self.assertEqual(t2.live.resizes[-1], 256 * MIB)
 
     def with_question(self):
         self.host = QWidget()

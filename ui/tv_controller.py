@@ -756,7 +756,17 @@ class TVController(QObject):
         self._flow.select_provider(name, force_refresh=force_refresh)
 
     def stop_live(self) -> None:
-        """Stop what plays (window close, self-update): its slot goes back once released."""
+        """Stop what plays (window close, self-update): its slot goes back once released.
+
+        2.8: every recording ends first (its file saved), as Quit's question ends them, so its
+        player parks as any other and its disk buffer is kept for the next helper (a
+        self-update closed it)."""
+        recording = [slot.live for slot in self._recordings()]
+        large = self.live
+        if self.sessions is None and large is not None and self._large_records():
+            recording.append(large)
+        for live in recording:
+            live.stop_recording()
         self._resume = self._current if self._has_media() else None
         self.leave_multiview(keep_pip=False)
         if self._pip is not None:

@@ -492,6 +492,10 @@ class SessionManager(QObject):
         self._aside.append(name)
         self._set_background(slot, True)
         self._set_mute(slot, True)
+        if self._sizes is not None:
+            # 2.8: the memory per stream again, as a PiP kept from the grid: it may come back
+            # large (`bring_back`), and a tile's small buffer would stay with it.
+            self._resize(slot, self._sizes[0])
         self.backgroundChanged.emit()
         return True
 
