@@ -81,13 +81,15 @@ class TmdbSettingsTests(base.WindowCase):
 
     def test_about_credits_what_qitv_uses_tmdb_among_them(self):
         text = about_text()
-        for name in ("VLC", "Qt", "Python", "OpenSubtitles", "iptv-org", "TMDB"):
+        names = ("VLC", "Qt", "Python", "OpenSubtitles", "iptv-org", "TMDB")
+        for name in (*names, "Jellyfin", "Emby", "Chromecast"):  # 2.8: what it works with
             self.assertIn(name, text)
         self.assertIn("THIRD-PARTY-NOTICES.md", text)  # every credit and license
         # TMDB's notice is in the credits' own small text: the same size, the same left edge
         self.assertIn(
-            "<small>This product uses the TMDB API but is not endorsed or certified by TMDB."
-            "</small>",
+            # TMDB's terms' own template (2.8)
+            "<small>QiTV uses TMDB and the TMDB APIs but is not endorsed, certified, or"
+            " otherwise approved by TMDB.</small>",
             text,
         )
         about = AboutDialog(self.window)

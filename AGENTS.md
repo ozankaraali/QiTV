@@ -25,8 +25,9 @@ A PySide6 IPTV player on libVLC (VLC 3.0.20 ships inside the app). What each rel
 - Keep older 2.x builds able to read the config, favorites and `live_tuning.json` (versioned
   formats; new fields are optional).
 - Never commit credentials. Never name real providers, channels, brands or other IPTV projects in
-  code, tests, docs or commit messages (iptv-org, the bundled free playlist, may be named). Credit
-  what QiTV actually uses in `THIRD-PARTY-NOTICES.md`.
+  code, tests, docs or commit messages (iptv-org, the bundled free playlist, may be named, and so
+  may what QiTV works with: Jellyfin, Emby, Chromecast, TMDB, OpenSubtitles). Credit what QiTV
+  actually uses in `THIRD-PARTY-NOTICES.md`, trademarks included.
 - Anything that plays real streams on a developer's machine runs muted (`QITV_SMOKE_MUTE=1`) and briefly.
 - Releases publish only from `main`: a push to `main` runs the release job.
 - The phone page (`services/remote/web/`) is also served by the private relay at remote.qitv.app,

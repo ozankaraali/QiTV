@@ -54,15 +54,20 @@ ABOUT_TEXT = (
 )
 CREDITS_TEXT = N_(
     # i18n: About QiTV's credits; the names stay as they are
-    "Plays with VLC, built with Qt and Python. Subtitles come from OpenSubtitles, free channels"
-    " from iptv-org, and film and series details from TMDB."
+    "Plays and casts with VLC, built with Qt and Python. Subtitles come from OpenSubtitles,"
+    " free channels from iptv-org, and film and series details from TMDB. Works with Jellyfin"
+    " and Emby servers and with Chromecast; Chromecast is a trademark of Google LLC, and QiTV"
+    " is not affiliated with Jellyfin, Emby or Google."
 )
 NOTICES_LABEL = N_("Credits and licenses")  # i18n: a link in About QiTV, after its credits
-# 2.8: TMDB's terms ask for this notice and their logo (assets/tmdb.png) in About, the logo
-# less prominent than QiTV's own; they set no size. The notice is in the credits' small text,
-# the logo on its own line under it, flush left.
+# 2.8: TMDB's terms ask for this notice (their template, with the product's name) and their
+# logo (assets/tmdb.png) in About, the logo less prominent than QiTV's own; they set no size.
+# The notice is in the credits' small text, the logo on its own line under it, flush left.
 # i18n: TMDB's terms ask for this sentence: translate it faithfully
-TMDB_NOTICE = N_("This product uses the TMDB API but is not endorsed or certified by TMDB.")
+TMDB_NOTICE = N_(
+    "QiTV uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by"
+    " TMDB."
+)
 TMDB_LOGO_FILE = "tmdb.png"
 ABOUT_TMDB_LOGO_PX = 9
 NO_PROVIDERS_TEXT = N_("No providers")  # i18n: the Providers menu's only entry, when it is empty

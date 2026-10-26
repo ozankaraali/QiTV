@@ -14,6 +14,9 @@ and the `licenses/` folder are inside every packaged app.
 - Source code: <https://www.videolan.org/vlc/> and <https://code.videolan.org/videolan/vlc>.
 - License texts: `licenses/vlc/COPYING` (GPL-2.0) and `licenses/vlc/COPYING.LIB` (LGPL-2.1),
   VLC's own copies from its 3.0.20 source.
+- Casting to a Chromecast, and finding the devices on the network, are VLC's own (its
+  renderer and service-discovery modules, part of the build above); QiTV uses no Google Cast
+  SDK.
 
 ## Qt and Qt for Python (PySide6, shiboken6)
 
@@ -118,7 +121,7 @@ The libraries they need (as `uv.lock` resolves them):
 QiTV 1.14.x bundled MPV (GPLv3); 2.0 does not. The `mpv` library above only lets QiTV hand a
 stream to an MPV player you installed yourself ("Play in MPV").
 
-## Online services
+## Online services and media servers
 
 - **OpenSubtitles.com** finds and serves the subtitles of the Subtitles panel's "Search
   OpenSubtitles…" (<https://www.opensubtitles.com>). QiTV talks to its public REST API
@@ -128,5 +131,18 @@ stream to an MPV player you installed yourself ("Play in MPV").
 - **TMDB** (The Movie Database, <https://www.themoviedb.org>) gives the Library the posters,
   stories, years, running times, genres, ratings and casts a provider leaves out. QiTV talks
   to its API (<https://api.themoviedb.org/3>) with an API Read Access Token; no TMDB code is
-  part of QiTV, and About shows TMDB's logo (`assets/tmdb.png`, TMDB's own). This product uses
-  the TMDB API but is not endorsed or certified by TMDB.
+  part of QiTV, and About shows TMDB's logo (`assets/tmdb.png`, TMDB's own). QiTV uses TMDB
+  and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB.
+- **Jellyfin** (<https://jellyfin.org>) is free software (GPL-2.0). QiTV talks to your own
+  Jellyfin server over its HTTP API; no Jellyfin code or logo is part of QiTV. QiTV is not
+  affiliated with or endorsed by the Jellyfin project; "Jellyfin" is that project's name.
+- **Emby** (<https://emby.media>) is a product of Emby LLC. QiTV talks to your own Emby server
+  over its HTTP API; no Emby code or logo is part of QiTV, and QiTV is not affiliated with or
+  endorsed by Emby. "Emby" is a trademark of its owner.
+
+## Trademarks
+
+Chromecast, Chromecast built-in and Google Cast are trademarks of Google LLC. QiTV casts through
+VLC's own Chromecast support (see VLC above) and is not affiliated with or endorsed by Google.
+Emby is a trademark of its owner; Jellyfin is the name of the Jellyfin project; TMDB is The
+Movie Database's. Each is named only to say what QiTV works with.

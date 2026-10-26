@@ -513,3 +513,6 @@ QiTV is licensed under [MIT](LICENSE). The release downloads also contain other 
 | urllib3 | MIT |
 
 QiTV 1.14.x bundled MPV (GPLv3); 2.0 does not.
+
+- **Online services and media servers:** subtitles from [OpenSubtitles](https://www.opensubtitles.com), film and series details from [TMDB](https://www.themoviedb.org) (QiTV uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB), and your own [Jellyfin](https://jellyfin.org) or [Emby](https://emby.media) server's titles, each over its own API; none of their code is part of QiTV.
+- **Trademarks:** Chromecast, Chromecast built-in and Google Cast are trademarks of Google LLC; QiTV casts through VLC's own Chromecast support. Emby is a trademark of its owner, and Jellyfin is the name of the Jellyfin project. QiTV is not affiliated with or endorsed by Google, Emby, the Jellyfin project or TMDB; each is named only to say what QiTV works with.
