@@ -74,6 +74,17 @@ def new_device_id() -> str:
     return uuid.uuid4().hex
 
 
+def device_id_of(provider: dict) -> str:
+    """A server provider's device id: its own (Verify kept one), else one made from its
+    address and user that stays the same request after request (2.8: a new one each time
+    listed QiTV as a new device on the server every time)."""
+    own = str(provider.get("device_id") or "")
+    if own:
+        return own
+    seed = f"{normalized_base(str(provider.get('url') or ''))}|{provider.get('user_id') or ''}"
+    return uuid.uuid5(uuid.NAMESPACE_URL, "qitv:" + seed).hex
+
+
 def _system(system: Optional[str] = None) -> str:
     name = system or platform.system()
     return {"Darwin": "macOS", "Windows": "Windows"}.get(name, "Linux")

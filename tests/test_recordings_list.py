@@ -125,6 +125,18 @@ class RecordingsListTests(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertEqual(shelf.items(), [])
 
+    def test_a_recording_still_being_written_is_not_deleted(self):  # 2.8 review M10
+        path = touch(self.folder, "News 2026-10-19 21.30.ts")
+        shelf = RecordingsList(self.config, writing=lambda: {str(path)})
+        shelf.refresh()
+        self.wait_for(shelf, 0)
+        self.assertTrue(shelf.items()[0]["_writing"])
+        shelf.delete(str(path))
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            app.processEvents()
+        self.assertTrue(path.exists())
+
     def test_a_scheduled_recording_is_named_by_its_programme(self):
         path = touch(self.folder, "News 2026-10-19 21.30.ts")
         titles = {str(path): "The Evening News"}

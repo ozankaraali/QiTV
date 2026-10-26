@@ -32,7 +32,7 @@ def _send_over_http(
     client = ms.MediaServerClient(
         ref.base,
         str(server.get("type") or ms.JELLYFIN),
-        device_id=str(server.get("device_id") or ""),
+        device_id=ms.device_id_of(server),
         version=get_app_version(),
         token=ref.token,
         user_id=str(server.get("user_id") or ""),
@@ -53,8 +53,11 @@ class MediaReporter:
         servers: Callable[[], list[dict]],
         send: Optional[Send] = None,
         clock: Callable[[], float] = time.monotonic,
+        verify: Callable[[], bool] = lambda: True,
     ) -> None:
+        """`verify()`: Settings' certificate check, for a server without its own."""
         self._servers = servers
+        self._verify = verify
         self._clock = clock
         self._send_now = send  # tests: synchronous; else the reporting thread
         self._queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
@@ -70,6 +73,8 @@ class MediaReporter:
         if ref is None:
             return None
         server = next(s for s in servers if ms.normalized_base(str(s.get("url") or "")) == ref.base)
+        if "ssl_verify" not in server:
+            server = dict(server, ssl_verify=self._verify())  # Settings' check (2.8)
         return server, ref
 
     def playing(self, url: str) -> None:

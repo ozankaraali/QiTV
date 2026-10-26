@@ -34,7 +34,7 @@ def client_for(provider: dict, verify: bool) -> ms.MediaServerClient:
     return ms.MediaServerClient(
         str(provider.get("url") or ""),
         str(provider.get("type") or ms.JELLYFIN),
-        device_id=str(provider.get("device_id") or "") or ms.new_device_id(),
+        device_id=ms.device_id_of(provider),
         version=get_app_version(),
         token=str(provider.get("token") or ""),
         user_id=str(provider.get("user_id") or ""),

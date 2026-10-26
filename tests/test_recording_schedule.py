@@ -29,7 +29,9 @@ class ScheduleTests(unittest.TestCase):
     def setUp(self):
         self.folder = Path(tempfile.mkdtemp(prefix="qitv-schedule-"))
         self.addCleanup(shutil.rmtree, self.folder, True)
-        self.schedule = rs.Schedule(str(self.folder / rs.FILE_NAME), write=rs.write_now)
+        self.schedule = rs.Schedule(
+            str(self.folder / rs.FILE_NAME), write=rs.write_now, clock=lambda: T0.timestamp()
+        )
 
     def test_a_programme_is_recorded_from_a_minute_before_to_three_after(self):
         item = self.schedule.add_once(CHANNEL, programme("The News", 30))
@@ -111,6 +113,46 @@ class ScheduleTests(unittest.TestCase):
                 schedule.add_once(CHANNEL, programme(f"Show {minutes}", 60 * minutes))
             rs.flush_writes(5)
         self.assertEqual(written[-1], 5)
+
+    def test_a_programme_that_ended_is_not_scheduled(self):  # 2.8 review M7
+        ended = programme("Old News", -60)  # an hour before T0, half an hour long
+        self.assertIsNone(self.schedule.add_once(CHANNEL, ended))
+        self.assertEqual(self.schedule.items(), [])
+
+    def test_the_file_keeps_no_xtream_account(self):  # 2.8 review M15
+        account = {"username": "u", "password": "p"}
+        self.schedule.add_once(CHANNEL, programme("The News", 30), account=account)
+        self.schedule.add_series(CHANNEL, "Weather", account=account)
+        text = (self.folder / rs.FILE_NAME).read_text()
+        self.assertNotIn("/u/p/", text)
+        for item in rs.Schedule(str(self.folder / rs.FILE_NAME)).items():
+            self.assertEqual(rs.with_account(item["channel"], account)["cmd"], CHANNEL["cmd"])
+        # a new password since: the address uses the one the provider has now
+        changed = rs.with_account(item["channel"], {"username": "u", "password": "q"})
+        self.assertEqual(changed["cmd"], "http://panel.test/live/u/q/7.ts")
+
+    def test_hand_edited_items_of_a_wrong_shape_are_left_out(self):  # 2.8 review M8
+        path = self.folder / rs.FILE_NAME
+        good = {
+            "id": "a1",
+            "kind": "once",
+            "channel": CHANNEL,
+            "title": "T",
+            "start": 1.0,
+            "stop": 2.0,
+        }
+        bad = [
+            {"id": "b1", "kind": "once", "channel": CHANNEL, "title": "T", "start": "x"},
+            {"id": "b2", "kind": "series", "channel": "not a channel", "title": "T"},
+            {"id": "b3", "kind": "sometimes", "channel": CHANNEL, "title": "T"},
+            {"kind": "series", "channel": CHANNEL, "title": "T"},
+        ]
+        import json
+
+        path.write_text(json.dumps({"version": 1, "items": [good, *bad], "done": 5, "outcomes": 3}))
+        schedule = rs.Schedule(str(path))
+        self.assertEqual([i["id"] for i in schedule.items()], ["a1"])
+        self.assertEqual(schedule.outcomes(), [])
 
     def test_cancelling_removes_it(self):
         item = self.schedule.add_once(CHANNEL, programme("The News", 30))

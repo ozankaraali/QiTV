@@ -81,11 +81,15 @@ class Parental:
         return {"version": VERSION, "hidden": []}
 
     def _load(self) -> None:
-        hidden = self._data().get("hidden") or []
-        self._groups = {
-            h["key"] for h in hidden if isinstance(h, dict) and h.get("kind") == "group"
-        }
-        self._items = {h["key"] for h in hidden if isinstance(h, dict) and h.get("kind") == "item"}
+        hidden = self._data().get("hidden")
+        # A hand-edited file of another shape is left out where it is wrong (2.8).
+        rules = [
+            h
+            for h in (hidden if isinstance(hidden, list) else [])
+            if isinstance(h, dict) and isinstance(h.get("key"), str)
+        ]
+        self._groups = {h["key"] for h in rules if h.get("kind") == "group"}
+        self._items = {h["key"] for h in rules if h.get("kind") == "item"}
         self._adult = self._data().get("adult") is True
         self._adult_seen.clear()
 

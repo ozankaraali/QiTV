@@ -34,6 +34,25 @@ class MediaReporterTests(unittest.TestCase):
             clock=self.clock,
         )
 
+    def test_a_server_without_its_own_check_follows_the_settings(self):  # 2.8
+        servers = []
+        reporter = MediaReporter(
+            lambda: [dict(SERVER)],
+            send=lambda server, *_rest: servers.append(server),
+            clock=self.clock,
+            verify=lambda: False,  # Settings: no certificate check
+        )
+        reporter.playing(url())
+        self.assertIs(servers[-1]["ssl_verify"], False)
+        reporter = MediaReporter(
+            lambda: [dict(SERVER, ssl_verify=True)],
+            send=lambda server, *_rest: servers.append(server),
+            clock=self.clock,
+            verify=lambda: False,
+        )
+        reporter.playing(url())
+        self.assertIs(servers[-1]["ssl_verify"], True)  # its own
+
     def test_a_server_title_says_it_started_and_where_it_is_every_ten_seconds(self):
         self.reporter.playing(url())
         self.reporter.position(1_000)

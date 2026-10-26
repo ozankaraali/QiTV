@@ -27,6 +27,16 @@ NEWS = {"id": "1", "name": "News", "tv_genre_id": "10", "_provider": "P"}
 ADULT = {"id": "2", "name": "Late", "tv_genre_id": "66", "_provider": "P"}
 
 
+class HandEditedTests(unittest.TestCase):  # 2.8 review M8
+    def test_wrong_shapes_in_the_settings_are_left_out(self):
+        for hidden in (5, "text", [{"kind": "group"}, {"kind": "item", "key": 7}, "x", None]):
+            with self.subTest(hidden=hidden):
+                config = FakeConfig()
+                config.parental = {"version": 1, "hidden": hidden}
+                guard = Parental(config)  # no error
+                self.assertFalse(guard.protects("live", NEWS))
+
+
 class ParentalTests(unittest.TestCase):
     def setUp(self):
         self.config, self.clock = FakeConfig(), FakeClock()

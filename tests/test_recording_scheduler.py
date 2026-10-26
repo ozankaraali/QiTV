@@ -84,11 +84,15 @@ class FakeCatalogs(QObject):
         super().__init__()
         self.asked = []
         self.entry = entry or {"name": "P", "type": "XTREAM", "url": "http://panel.test"}
+        self.items = []
         self.max = 1
 
     def request_link(self, item, *, section):
         self.asked.append((item["name"], section))
+        self.items.append(dict(item))
         return len(self.asked)
+
+    items: list = []  # each item asked for (its address)
 
     def provider(self, name):
         return self.entry
@@ -104,10 +108,12 @@ class SchedulerTests(unittest.TestCase):
     def setUp(self):
         self.folder = Path(tempfile.mkdtemp(prefix="qitv-scheduler-"))
         self.addCleanup(shutil.rmtree, self.folder, True)
-        self.schedule = rs.Schedule(str(self.folder / rs.FILE_NAME), write=rs.write_now)
+        self.now = (T0 + timedelta(minutes=29)).timestamp()
+        self.schedule = rs.Schedule(
+            str(self.folder / rs.FILE_NAME), write=rs.write_now, clock=lambda: self.now
+        )
         self.engine, self.catalogs = FakeEngine(), FakeCatalogs()
         self.budget = ConnectionBudget()
-        self.now = (T0 + timedelta(minutes=29)).timestamp()
         self.toasts = []
         config = SimpleNamespace(recordings_dir=str(self.folder), ssl_verify=True)
         self.scheduler = RecordingScheduler(
@@ -160,6 +166,26 @@ class SchedulerTests(unittest.TestCase):
         (outcome,) = self.schedule.outcomes()
         self.assertEqual((outcome["state"], outcome["path"]), (rs.RECORDED, path))
         self.assertEqual(self.schedule.items(), [])
+
+    def test_quitting_while_it_records_notes_the_file_and_the_rest_may_follow(self):
+        # 2.8 review M1: the helper's end may come after QiTV is gone: the file is noted now
+        # (the Library names it), and QiTV opened again while it airs records the rest.
+        self.scheduled_now()
+        sid = self.engine.opened[0][0]
+        self.engine.sessionReady.emit(sid)
+        _rid, _sid, path, *_ = self.engine.recordings[0]
+        self.scheduler.shutdown()
+        (outcome,) = self.schedule.outcomes()
+        self.assertEqual((outcome["state"], outcome["path"]), (rs.RECORDED, path))
+        self.assertEqual(len(self.schedule.items()), 1)  # still to record while it airs
+        self.assertEqual(len(self.schedule.due(self.now, lambda c, since: [])), 1)
+
+    def test_a_link_asked_uses_the_providers_account_now(self):  # 2.8 review M15
+        self.catalogs.entry = dict(self.catalogs.entry, username="u", password="p")
+        account = {"username": "u", "password": "p"}
+        self.schedule.add_once(CHANNEL, programme("The News", 30), account=account)
+        self.scheduler.tick()
+        self.assertEqual(self.catalogs.items[-1]["cmd"], CHANNEL["cmd"])
 
     def test_its_own_time_limit_is_a_normal_end(self):
         self.scheduled_now()
@@ -318,7 +344,9 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(len(self.catalogs.asked), 1)
 
     def test_what_was_missed_while_closed_is_said_at_start(self):
+        now, self.now = self.now, (T0 - timedelta(hours=6)).timestamp()  # scheduled back then
         self.schedule.add_once(CHANNEL, programme("Old News", -300))
+        self.now = now
         self.scheduler.start()
         self.assertTrue(any("Old News" in text for text, _ in self.toasts))
 

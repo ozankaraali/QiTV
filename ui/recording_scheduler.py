@@ -262,12 +262,19 @@ class RecordingScheduler(QObject):
         self.changed.emit()
 
     def shutdown(self) -> None:
-        """QiTV closes: the recordings stop and keep what they have."""
+        """QiTV closes: the recordings stop and keep what they have. One recording now is
+        noted at once (its end may come after QiTV is gone: the Library still names it), and
+        stays to record the rest should QiTV open again while it airs."""
         self._timer.stop()
         for run in list(self._runs):
             run.user_stopped = True
+            recording = bool(run.rid and run.path and not run.ended)
             if not run.stopping:
                 self._stop(run)
+            if recording and not run.ended:  # its end did not come at once
+                run.ended = True
+                self.schedule.noted(run.job, rs.RECORDED, path=run.path)
+                self.schedule.unstarted(run.job)
         self._closed = True
 
     # ---- one recording ----------------------------------------------------------------------
@@ -309,7 +316,9 @@ class RecordingScheduler(QObject):
         if run.ticket == DENIED:
             self._retry(run, rs.MISSED, "stream")
             return
-        run.link_id = self._catalogs.request_link(dict(job.channel), section="live")
+        # The provider's account back in the channel's address (the file keeps it out).
+        channel = rs.with_account(job.channel, entry)
+        run.link_id = self._catalogs.request_link(channel, section="live")
 
     def _hand_over_when_due(self, run: _Run, now: float) -> None:
         earlier = run.waiting_for

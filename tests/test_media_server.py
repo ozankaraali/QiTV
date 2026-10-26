@@ -133,6 +133,17 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(http.asked[0][2]["ParentId"], "L1")
 
 
+class DeviceIdTests(unittest.TestCase):
+    def test_a_server_without_a_device_id_gets_one_that_stays(self):  # 2.8
+        # A server saved without Verify: each request was a new device on the server.
+        one = {"type": "JELLYFIN", "url": BASE, "user_id": "u1"}
+        first, again = ms.device_id_of(one), ms.device_id_of(dict(one))
+        self.assertEqual(first, again)
+        self.assertNotEqual(first, ms.device_id_of(dict(one, user_id="u2")))
+        self.assertEqual(ms.device_id_of(dict(one, device_id="mine")), "mine")
+        self.assertNotIn(BASE, first)  # nothing of the address shows
+
+
 class ChangedSinceTests(unittest.TestCase):
     """2.8: a refresh asks a server only what changed since its last look."""
 

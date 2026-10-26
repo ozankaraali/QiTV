@@ -180,8 +180,11 @@ class RecordingsList(QObject):
 
     def delete(self, path: str) -> None:
         """Delete the recording at `path` (on a thread of its own), then read the folder again.
-        Only a file of the Recordings folder that this list shows goes."""
+        Only a file of the Recordings folder that this list shows goes, and never one a
+        recording still writes."""
         if not any(item.get("path") == path for item in self._items):
+            return
+        if path in self._writing():
             return
         threading.Thread(
             target=self._remove, args=(path,), name="recording-delete", daemon=True

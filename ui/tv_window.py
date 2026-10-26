@@ -699,7 +699,9 @@ class TVWindow(QMainWindow):
             host=self.host,
             make_slot=self._make_slot,
             cast_devices=self.cast_devices,
-            media_reporter=MediaReporter(self._media_servers),  # 2.8: Jellyfin, Emby
+            media_reporter=MediaReporter(  # 2.8: Jellyfin, Emby
+                self._media_servers, verify=lambda: bool(self.config.ssl_verify)
+            ),
             parent=self,
         )
         self.controller = controller
@@ -826,12 +828,19 @@ class TVWindow(QMainWindow):
     def _programme_scheduled(self, channel: dict, programme: Programme) -> bool:
         return self.recording_schedule.is_scheduled(channel, programme)
 
+    def _account_of(self, channel: dict) -> Optional[dict]:
+        """The channel's provider's account, kept out of the recording schedule (2.8)."""
+        try:
+            return self.catalogs.provider(str(channel.get("_provider") or ""))
+        except KeyError:
+            return None
+
     def schedule_programme(self, channel: dict, programme: Programme, series: bool) -> None:
         """The guide's Record (or Record series, R): QiTV records it at its time."""
         schedule = self.recording_schedule
         name = str(channel.get("name") or "")
         if series:
-            schedule.add_series(channel, programme.title)
+            schedule.add_series(channel, programme.title, account=self._account_of(channel))
             # i18n: a toast: every airing of the programme on the channel will be recorded
             text = tr(
                 "Every “{title}” on {channel} will be recorded.",
@@ -839,7 +848,10 @@ class TVWindow(QMainWindow):
                 channel=name,
             )
         else:
-            schedule.add_once(channel, programme)
+            if schedule.add_once(channel, programme, account=self._account_of(channel)) is None:
+                # i18n: a toast: a programme asked to be recorded ended already
+                self.screens.notify(tr("“{title}” has ended.", title=programme.title))
+                return
             when = fmt_clock(programme.start.astimezone())
             # i18n: a toast: the programme will be recorded at its time ({time}: its start)
             text = tr("“{title}” will be recorded at {time}.", title=programme.title, time=when)

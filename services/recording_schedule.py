@@ -22,7 +22,8 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
+from urllib.parse import quote
 import uuid
 
 from services.atomic_write import atomic_write
@@ -102,8 +103,55 @@ def write_now(path: str, data: dict) -> None:
         logger.warning("The recording schedule could not be saved: %s", type(e).__name__)
 
 
-def _channel_copy(channel: dict) -> dict:
-    return {key: channel[key] for key in _CHANNEL_KEYS if channel.get(key) not in (None, "")}
+# An Xtream channel's address holds its account; the file keeps these in its place (2.8).
+_USER, _PASSWORD = "{username}", "{password}"
+_USER_Q, _PASSWORD_Q = "{username:q}", "{password:q}"
+
+
+def _account(account: Optional[Mapping[str, Any]]) -> tuple[str, str]:
+    if not account:
+        return "", ""
+    return str(account.get("username") or ""), str(account.get("password") or "")
+
+
+def _channel_copy(channel: dict, account: Optional[Mapping[str, Any]] = None) -> dict:
+    """What the file keeps of a channel; an address that holds the provider's account
+    (`account`: its username and password, an Xtream panel's) keeps it out (`with_account`
+    puts the provider's own back when it records)."""
+    copy = {key: channel[key] for key in _CHANNEL_KEYS if channel.get(key) not in (None, "")}
+    user, password = _account(account)
+    cmd = copy.get("cmd")
+    if user and password and isinstance(cmd, str):
+        cmd = cmd.replace(f"/{user}/{password}/", f"/{_USER}/{_PASSWORD}/")
+        quoted = f"/{quote(user, safe='')}/{quote(password, safe='')}/"
+        copy["cmd"] = cmd.replace(quoted, f"/{_USER_Q}/{_PASSWORD_Q}/")
+    return copy
+
+
+def with_account(channel: dict, account: Optional[Mapping[str, Any]]) -> dict:
+    """A kept channel with its provider's account (as the provider has it now) back in its
+    address (2.8; `_channel_copy`)."""
+    cmd = channel.get("cmd")
+    if not isinstance(cmd, str) or "{" not in cmd:
+        return dict(channel)
+    user, password = _account(account)
+    cmd = cmd.replace(_USER_Q, quote(user, safe="")).replace(_PASSWORD_Q, quote(password, safe=""))
+    return dict(channel, cmd=cmd.replace(_USER, user).replace(_PASSWORD, password))
+
+
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _valid(item: Any) -> bool:
+    """An item as the schedule writes it (a hand-edited file's others are left out, 2.8)."""
+    if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
+        return False
+    if not isinstance(item.get("channel"), dict) or not isinstance(item.get("title"), str):
+        return False
+    if item.get("kind") == SERIES:
+        return True
+    return item.get("kind") == ONCE and _number(item.get("start")) and _number(item.get("stop"))
 
 
 def same_channel(a: dict, b: dict) -> bool:
@@ -126,9 +174,15 @@ def window(item_or_job: Any) -> tuple[float, float]:
 
 
 class Schedule:
-    def __init__(self, path: str, write: Callable[[str, dict], None] = write_later) -> None:
+    def __init__(
+        self,
+        path: str,
+        write: Callable[[str, dict], None] = write_later,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
         self._path = path
         self._write = write
+        self._clock = clock  # now, in Unix seconds (a programme that ended is not added)
         self._items: list[dict] = []
         self._done: list[str] = []  # job keys started (series airings never twice)
         self._outcomes: list[dict] = []
@@ -147,9 +201,11 @@ class Schedule:
             return
         if not isinstance(data, dict) or data.get("version") != VERSION:
             return
-        self._items = [i for i in data.get("items") or [] if isinstance(i, dict) and i.get("id")]
-        self._done = [str(k) for k in data.get("done") or []][-DONE:]
-        self._outcomes = [o for o in data.get("outcomes") or [] if isinstance(o, dict)][-OUTCOMES:]
+        items, done, outcomes = data.get("items"), data.get("done"), data.get("outcomes")
+        self._items = [i for i in (items if isinstance(items, list) else []) if _valid(i)]
+        self._done = [str(k) for k in (done if isinstance(done, list) else [])][-DONE:]
+        kept = outcomes if isinstance(outcomes, list) else []
+        self._outcomes = [o for o in kept if isinstance(o, dict)][-OUTCOMES:]
 
     def _save(self) -> None:
         data = {
@@ -172,7 +228,13 @@ class Schedule:
     def providers(self) -> set[str]:
         return {str(item.get("provider") or "") for item in self._items} - {""}
 
-    def add_once(self, channel: dict, programme: Programme) -> dict:
+    def add_once(
+        self, channel: dict, programme: Programme, *, account: Optional[Mapping] = None
+    ) -> Optional[dict]:
+        """Record `programme` at its time; None when it ended already (2.8: a phone's stale
+        timetable). `account`: the provider's (an Xtream panel's), kept out of the file."""
+        if programme.stop.timestamp() <= self._clock():
+            return None
         existing = self._once_of(channel, programme)
         if existing is not None:
             return dict(existing)
@@ -180,7 +242,7 @@ class Schedule:
             "id": uuid.uuid4().hex[:12],
             "kind": ONCE,
             "provider": str(channel.get("_provider") or ""),
-            "channel": _channel_copy(channel),
+            "channel": _channel_copy(channel, account),
             "title": programme.title,
             "start": programme.start.timestamp(),
             "stop": programme.stop.timestamp(),
@@ -190,7 +252,7 @@ class Schedule:
         self._save()
         return dict(item)
 
-    def add_series(self, channel: dict, title: str) -> dict:
+    def add_series(self, channel: dict, title: str, *, account: Optional[Mapping] = None) -> dict:
         for item in self._items:
             if (
                 item.get("kind") == SERIES
@@ -202,7 +264,7 @@ class Schedule:
             "id": uuid.uuid4().hex[:12],
             "kind": SERIES,
             "provider": str(channel.get("_provider") or ""),
-            "channel": _channel_copy(channel),
+            "channel": _channel_copy(channel, account),
             "title": title,
             "created": time.time(),
         }

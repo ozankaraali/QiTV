@@ -369,7 +369,8 @@ class TVPages(QObject):
         # i18n: a recording's right-click menu entry: opens the folder that holds its file
         menu.addAction(tr("Show in Folder"), lambda: self._show_in_folder(path))
         # i18n: a recording's right-click menu entry: deletes its file (asks first)
-        menu.addAction(tr("Delete Recording…"), lambda: self._delete_recording(item))
+        delete = menu.addAction(tr("Delete Recording…"), lambda: self._delete_recording(item))
+        delete.setEnabled(not item.get("_writing"))  # one still being written stays
         menu.popup(global_pos)
 
     def _show_in_folder(self, path: str) -> None:
