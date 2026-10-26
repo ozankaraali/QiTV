@@ -36,11 +36,13 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 CONTINUE, NEW, MY_LIST = "@continue", "@new", "@mylist"
+RECORDINGS = "@recordings"  # 2.8: the Recordings folder's files, in Movies whatever the provider
 # The shelves' names, shown with translate() (the genres carry them translated).
 PINNED_TITLES = {
     CONTINUE: N_("Continue"),  # i18n: Library shelf (genre column): titles to continue watching
     NEW: N_("New"),  # i18n: Library shelf (genre column): the newest titles
     MY_LIST: N_("My list"),  # i18n: Library shelf (genre column): the titles starred with ★
+    RECORDINGS: N_("Recordings"),  # i18n: Library shelf (genre column): what QiTV recorded
 }
 # Provider groups that are no genre: every title ("All"), and the loaders' group for titles
 # without a category ("Unknown Category").
@@ -305,10 +307,19 @@ class LibraryModel(QObject):
     notice = Signal(str)
 
     def __init__(
-        self, catalog, config, watch: WatchState, parent=None, cache: Optional[LibraryCache] = None
+        self,
+        catalog,
+        config,
+        watch: WatchState,
+        parent=None,
+        cache: Optional[LibraryCache] = None,
+        recordings=None,
     ):
         super().__init__(parent)
         self._catalog = catalog
+        # 2.8: the Recordings folder's titles (services.recordings_list.RecordingsList), the
+        # Recordings shelf of Movies whatever the provider (one without films too).
+        self._recordings = recordings
         self._config = config
         self._watch = watch
         self._section = "movies"
@@ -325,6 +336,8 @@ class LibraryModel(QObject):
         catalog.groupReady.connect(self._on_group_ready)
         catalog.groupFailed.connect(self._on_group_failed)
         catalog.providerReady.connect(self._on_provider_ready)
+        if recordings is not None:
+            recordings.changed.connect(self._on_recordings_changed)
 
     # --- state ------------------------------------------------------------------------
     @property
@@ -338,6 +351,12 @@ class LibraryModel(QObject):
     @property
     def genre_id(self) -> Optional[str]:
         return self._genre
+
+    @property
+    def available(self) -> bool:
+        """Whether the section has anything to show: the provider offers it, or (Movies) there
+        are recordings."""
+        return self._available
 
     @property
     def ready(self) -> bool:
@@ -363,10 +382,13 @@ class LibraryModel(QObject):
         self._genre = None
         # The cache stays: its entries name their provider, section and content version.
         # A section the provider lacks (an M3U playlist's movies) is ready and empty.
-        self._available = section in self._catalog.sections()
-        self._ready = not self._available
-        if self._available:
+        offered = section in self._catalog.sections()
+        self._available = offered or self._has_recordings(section)
+        self._ready = not offered
+        if offered:
             self._catalog.request_section(section)
+        elif self._available:
+            self._genre = RECORDINGS  # only recordings: nothing to wait for
         self.changed.emit()
 
     def _current(self, section: str) -> bool:
@@ -417,6 +439,26 @@ class LibraryModel(QObject):
         else:
             self._genre = None
         self._pinned_sig = self._pinned_signature()
+        self.changed.emit()
+
+    def lists_recordings(self) -> bool:
+        """Whether the Recordings folder has titles (Movies then shows whatever the provider)."""
+        return bool(self._recording_items())
+
+    def _has_recordings(self, section: str) -> bool:
+        return section == "movies" and bool(self._recording_items())
+
+    def _on_recordings_changed(self) -> None:
+        """The Recordings folder changed: its shelf follows (and, on a provider without films,
+        whether Movies has anything at all)."""
+        if not self._requested:
+            return
+        if self._section not in self._catalog.sections():
+            self._available = self._has_recordings(self._section)
+            self._ready = True
+            self._genre = RECORDINGS if self._available else None
+        else:
+            self._ensure_selection()
         self.changed.emit()
 
     def _on_section_failed(self, section: str, message: str) -> None:
@@ -489,7 +531,8 @@ class LibraryModel(QObject):
         for entry in self._history_entries():
             cid = self._entry_content_id(entry)
             hist.append((cid, (positions.get(cid) or {}).get("position")))
-        return (self._catalog.content_version(), self._favorites(), tuple(hist))
+        shelf = self._recordings.version if self._recordings is not None else 0
+        return (self._catalog.content_version(), self._favorites(), tuple(hist), shelf)
 
     def _key(self, key: tuple) -> tuple:
         """A cache entry's key: `key` at the provider shown (a shared cache serves several)."""
@@ -533,12 +576,16 @@ class LibraryModel(QObject):
         return WatchState.content_id(provider, item, item_type=item_type)
 
     def item_kind(self, item: dict) -> str:
+        if item.get("_recording"):
+            return "recording"
         if self._section == "series":
             return "episode" if self._genre == CONTINUE else "series"
         return "movie"
 
     def _item_cid(self, item: dict) -> str:
         kind = self.item_kind(item)
+        if kind == "recording":
+            return str(item.get("id") or "")  # "recording:<file name>": no provider's
         return self._content_id(item, {"episode": "episode", "series": "serie"}.get(kind, "movie"))
 
     def identity(self, item: dict) -> str:
@@ -627,7 +674,12 @@ class LibraryModel(QObject):
             return []
         return [i for i in self._loaded_items() if is_kept(i)]
 
+    def _recording_items(self) -> list[dict]:
+        return self._recordings.items() if self._recordings is not None else []
+
     def _pinned_items(self, genre_id: str) -> list[dict]:
+        if genre_id == RECORDINGS:
+            return self._recording_items() if self._section == "movies" else []
         fp = self._fingerprint()
         return self._memoized(
             ("pinned", self._section, genre_id, fp),
@@ -640,7 +692,7 @@ class LibraryModel(QObject):
 
     def _pinned_genres(self) -> list[Genre]:
         out = []
-        for gid in (CONTINUE, NEW, MY_LIST):
+        for gid in (CONTINUE, NEW, MY_LIST, RECORDINGS):
             items = self._pinned_items(gid)
             if items:
                 out.append(Genre(gid, translate(PINNED_TITLES[gid]), len(items), True))
@@ -803,6 +855,8 @@ class LibraryModel(QObject):
         )
 
     def is_favorite(self, item: dict) -> bool:
+        if item.get("_recording"):
+            return False  # a file of the disk: no provider's title to star
         return favorites.is_favorite(self._config, item)
 
     def toggle_favorite(self, item: dict) -> bool:

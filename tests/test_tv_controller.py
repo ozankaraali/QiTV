@@ -4831,6 +4831,35 @@ class LibraryTests(AutoplayCase):
         self.play(1)  # the next channel takes it again
         self.assertEqual(budget.holders("Home"), ["main"])
 
+    def recording_title(self):
+        return {
+            "id": "recording:News 2026-10-19 21.30.ts",
+            "name": "News",
+            "path": "/rec/News 2026-10-19 21.30.ts",
+            "_recording": True,
+        }
+
+    def test_a_recording_plays_from_where_it_stopped_and_keeps_its_place(self):
+        self.play(0)
+        plays = len(self.watch.plays)
+        item = self.recording_title()
+        self.watch.resume[item["id"]] = 90_000
+        self.controller.play_recording(item)
+        url, kwargs = self.session.plays[-1]
+        self.assertEqual(url, Path(item["path"]).absolute().as_uri())
+        self.assertEqual(kwargs["kind"], PlayKind.VOD_FILE)  # a local .ts seeks like a film
+        self.assertEqual(kwargs["start_ms"], 90_000)
+        self.assertEqual(len(self.watch.plays), plays)  # in no provider's history
+        self.assertEqual(self.transport.named("show_vod")[-1], ("News", ""))
+        self.session.positionChanged.emit(120_000, 3_600_000)
+        self.assertEqual(self.watch.positions[-1], (item["id"], 120_000, 3_600_000))
+
+    def test_a_recording_can_start_over(self):
+        item = self.recording_title()
+        self.watch.resume[item["id"]] = 90_000
+        self.controller.play_recording(item, start_over=True)
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 0)
+
     def test_overlay_open_names_what_esc_would_close_first(self):
         self.controller.play_vod(movie(1), "movie", play_context())
         self.ready("http://vod/m1.mkv")

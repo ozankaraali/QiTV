@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 from timer_fixtures import elapse
 
-from services.library import LibraryModel
+from services.library import RECORDINGS, LibraryModel
 from services.provider_ids import (
     ALL_PROVIDERS,
     ALL_PROVIDERS_TITLE,
@@ -201,6 +201,26 @@ class FakeCatalog(QObject):
             self.name = name
 
 
+RECORDING = {
+    "id": "recording:News 2026-10-19 21.30.ts",
+    "name": "News",
+    "path": "/rec/News 2026-10-19 21.30.ts",
+    "added": "1761000000",
+    "_recording": True,
+}
+
+
+class FakeRecordings(QObject):
+    changed = Signal()
+
+    def __init__(self, items=()):
+        super().__init__()
+        self.list, self.version = list(items), 1
+
+    def items(self):
+        return list(self.list)
+
+
 class FakeProviderManager:
     def __init__(self, caches):
         self.caches = caches
@@ -345,6 +365,38 @@ class LibraryControllerTests(unittest.TestCase):
 
     def tearDown(self):
         self.assertFalse(has_pending_threads())
+
+    # Recordings (2.8) ---------------------------------------------------------------------
+    def with_recordings(self):
+        self.recordings = FakeRecordings([RECORDING])
+        self.model = LibraryModel(self.catalog, self.config, self.watch, recordings=self.recordings)
+
+    def test_a_recording_plays_from_its_shelf_without_asking_a_provider(self):
+        self.with_recordings()
+        self.open_movies()
+        self.model.select_genre(RECORDINGS)
+        self.assertEqual(self.grid_names(), ["News"])
+        self.screen.grid.activated.emit(0)
+        item, kind, context = self.played[-1]
+        self.assertEqual((item["id"], kind), (RECORDING["id"], "recording"))
+        self.assertFalse(context["start_over"])
+        self.assertEqual(self.catalog.selected, [])
+
+    def test_a_recordings_right_click_is_its_own(self):
+        self.with_recordings()
+        self.open_movies()
+        self.model.select_genre(RECORDINGS)
+        self.screen.grid.contextRequested.emit(0, QPoint(3, 4))
+        item, section, _pos = self.menus[-1]
+        self.assertEqual((item["id"], section), (RECORDING["id"], "recording"))
+
+    def test_a_provider_without_films_gets_movies_for_its_recordings(self):
+        self.catalog.section_list = ["live"]
+        self.with_recordings()
+        self.build().open("movies")
+        self.assertIn("movies", self.screen.nav._tabs)
+        self.assertEqual(self.grid_names(), ["News"])
+        self.assertNotIn(("section", "movies"), self.catalog.requests)
 
     # 1 -----------------------------------------------------------------------------------
     def test_open_shows_genres_and_grid_and_moves_between_them(self):

@@ -21,8 +21,12 @@ class PlayKind(str, Enum):
 
 
 def classify(url: str, is_live: Optional[bool]) -> PlayKind:
-    if urlsplit(url).path.lower().endswith(_VOD_CONTAINERS):
+    parts = urlsplit(url)
+    path = parts.path.lower()
+    if path.endswith(_VOD_CONTAINERS):
         return PlayKind.VOD_FILE
+    if parts.scheme == "file" and path.endswith(".ts"):
+        return PlayKind.VOD_FILE  # 2.8: a recording on the disk seeks like a film
     if is_live is True:
         return PlayKind.LIVE
     if is_live is False:

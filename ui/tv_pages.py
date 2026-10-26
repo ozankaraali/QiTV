@@ -16,15 +16,18 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import logging
+import os
 from typing import Any, Iterator, Optional
 
-from PySide6.QtCore import QObject, QPoint, QThread
-from PySide6.QtWidgets import QFileDialog, QWidget
+from PySide6.QtCore import QObject, QPoint, QThread, QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QWidget
 
 from services.exporter import ExportKind
 from services.failure_reasons import shown_message
 from services.i18n import tr
 from services.library import LibraryModel
+from services.recordings_list import RecordingsList
 from ui.keymap import Action
 from ui.library_controller import LibraryController
 from ui.page_stack import PageStack
@@ -63,8 +66,14 @@ class TVPages(QObject):
         self._second_click = SecondClickGuard(self)
         # The event loop level a key or a menu item moves the pages at, else None: from_keys.
         self._keys_level: Optional[int] = None
+        # 2.8: the Recordings folder's files, the Library's Recordings shelf (and the phone's).
+        self.recordings = RecordingsList(window.config_manager, parent=self)
         self.library_model = LibraryModel(
-            window.library_catalog, window.config_manager, window.watch, self
+            window.library_catalog,
+            window.config_manager,
+            window.watch,
+            self,
+            recordings=self.recordings,
         )
         self.library_controller = LibraryController(
             config=window.config_manager,
@@ -170,6 +179,7 @@ class TVPages(QObject):
         """
         if self._window.closing():
             return
+        self.recordings.refresh()  # read again: a recording made meanwhile shows (2.8)
         self._enter_library()
         self.library_controller.open(section)
         self._guard_second_click()
@@ -208,6 +218,9 @@ class TVPages(QObject):
         from_library = self.library_shown()  # the page switch ends the controller's Library state
         self._show_page(window.player_page)
         self._set_return_to_library(True)
+        if kind == "recording":  # a file of the Recordings folder (2.8)
+            window.controller.play_recording(item, bool((context or {}).get("start_over")))
+            return
         window.controller.play_vod(item, kind, context, from_library=from_library)
 
     def tune_live(self, channel: dict, group: Optional[tuple[str, list]] = None) -> None:
@@ -309,8 +322,41 @@ class TVPages(QObject):
     def context_menu(self, item: dict, section: str, global_pos: QPoint) -> None:
         """A right-click on a Library film or episode: Play in VLC/MPV or Copy stream link."""
         window = self._window
-        if not window.closing():
-            window.controller.show_library_menu(item, section, global_pos, window.library_page)
+        if window.closing():
+            return
+        if section == "recording":
+            self._recording_menu(item, global_pos)
+            return
+        window.controller.show_library_menu(item, section, global_pos, window.library_page)
+
+    def _recording_menu(self, item: dict, global_pos: QPoint) -> None:
+        """A recording's right-click (2.8): its folder, or deleting its file (asked first)."""
+        path = str(item.get("path") or "")
+        if not path:
+            return
+        menu = QMenu(self._window.library_page)
+        # i18n: a recording's right-click menu entry: opens the folder that holds its file
+        menu.addAction(tr("Show in Folder"), lambda: self._show_in_folder(path))
+        # i18n: a recording's right-click menu entry: deletes its file (asks first)
+        menu.addAction(tr("Delete Recording…"), lambda: self._delete_recording(item))
+        menu.popup(global_pos)
+
+    def _show_in_folder(self, path: str) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
+
+    def _delete_recording(self, item: dict) -> None:
+        window = self._window
+        name = os.path.basename(str(item.get("path") or ""))
+        answer = QMessageBox.question(
+            window,
+            tr("Delete Recording"),  # i18n: the title of the question before a recording goes
+            # i18n: the question before deleting a recording's file ({name}: the file's name)
+            tr("Delete “{name}”? Its file is removed from the disk.", name=name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes and not window.closing():
+            self.recordings.delete(str(item.get("path") or ""))
 
     def open_file(self) -> None:
         """File → Open File…: a local media file plays as a movie."""

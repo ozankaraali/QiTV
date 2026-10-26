@@ -543,6 +543,7 @@ class RemoteController(QObject):
                 self,
                 cache=window.screens.library_model.cache,  # the TV's: a sorted list serves both
                 searcher=self._searcher(),
+                recordings=window.screens.recordings,  # the TV's Recordings shelf (2.8)
             )
             self._libraries[sid] = library
         return library

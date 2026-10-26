@@ -850,11 +850,24 @@ class TVController(QObject):
 
         It is no provider's: nothing records it, and no position is saved for it.
         """
+        self._play_local(path, Path(path).name)
+
+    def play_recording(self, item: dict, start_over: bool = False) -> None:
+        """A recording from the Library (2.8): its file plays as a movie from where it stopped
+        (its id is its resume key), in no provider's history."""
+        path = str(item.get("path") or "")
+        if path:
+            self._play_local(
+                path, item_title(item), resume_key=str(item.get("id") or ""), start_over=start_over
+            )
+
+    def _play_local(
+        self, path: str, title: str, resume_key: Optional[str] = None, start_over: bool = False
+    ) -> None:
         if self._closed:
             return
         self._flow.leave_library()
         url = Path(path).absolute().as_uri()
-        title = Path(path).name
         target = Target({"name": title, "cmd": url}, "movies", title, local=True)
         self._forget_stopped()  # 2.6: a newer choice than what Stop stopped
         self.leave_multiview(keep_pip=False)  # the multiview is for live TV
@@ -865,13 +878,14 @@ class TVController(QObject):
         self._lanes.drop_tune()  # a channel or movie still on its way never opens over it
         self._autoplay.drop()
         self._live_controls.new_target()
-        previous, self._current, self._cid = self._current, target, None
+        previous, self._current, self._cid = self._current, target, resume_key or None
+        start = 0 if start_over or not resume_key else self.watch.resume_position(resume_key) or 0
 
         session = self.session  # the large picture's, whatever swaps before it opens
 
         def open_file() -> None:
             self._prepare(session, target, previous)
-            session.play(url, kind=classify(url, False), start_ms=0)
+            session.play(url, kind=classify(url, False), start_ms=start)
             self._reset_speed(session)
 
         self._tuner.open(self._guarded(target, open_file), local=True)  # no provider slot

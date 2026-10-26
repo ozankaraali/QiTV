@@ -13,6 +13,7 @@ from services.library import (
     CONTINUE,
     MY_LIST,
     NEW,
+    RECORDINGS,
     LibraryModel,
     Sort,
     history_episode,
@@ -903,3 +904,103 @@ class SharedCacheTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeRecordings(QObject):
+    """A RecordingsList: its titles, its version and its change signal."""
+
+    changed = Signal()
+
+    def __init__(self, items=()):
+        super().__init__()
+        self.list = list(items)
+        self.version = 1
+
+    def items(self):
+        return list(self.list)
+
+    def set(self, items):
+        self.list, self.version = list(items), self.version + 1
+        self.changed.emit()
+
+
+def recording_title(name="News", when="1761000000"):
+    return {
+        "id": f"recording:{name} 2026-10-19 21.30.ts",
+        "name": name,
+        "cmd": "file:///rec/x.ts",
+        "added": when,
+        "genre": "Recording",
+        "description": "Recorded 2026-10-19 21:30 · 1.5 GB",
+        "_recording": True,
+    }
+
+
+class RecordingsShelfTests(unittest.TestCase):
+    """Recordings in the Library (2.8): a Recordings shelf in Movies, whatever the provider."""
+
+    def model(self, catalog, recordings, section="movies"):
+        cfg = make_config()
+        model = LibraryModel(catalog, cfg, WatchState(cfg), recordings=recordings)
+        model.set_section(section)
+        if section in catalog.sections():
+            catalog.sectionReady.emit(section)
+        return model
+
+    def test_movies_list_the_recordings_after_the_other_shelves(self):
+        cat = FakeCatalog({"movies": [("1", "Drama", 1)]}, {("movies", "1"): [movie(1)]})
+        model = self.model(cat, FakeRecordings([recording_title()]))
+        genres = model.genres()
+        self.assertEqual([g.id for g in genres], [RECORDINGS, "1"])
+        self.assertTrue(genres[0].pinned)
+        self.assertEqual(genres[0].title, "Recordings")
+        model.select_genre(RECORDINGS)
+        self.assertEqual([i["name"] for i in model.items()], ["News"])
+
+    def test_series_have_no_recordings_shelf(self):
+        cat = FakeCatalog({"series": [("1", "Drama", 0)]})
+        model = self.model(cat, FakeRecordings([recording_title()]), section="series")
+        self.assertNotIn(RECORDINGS, [g.id for g in model.genres()])
+
+    def test_a_provider_without_movies_still_shows_its_recordings(self):
+        cat = FakeCatalog()
+        cat.section_list = ["live"]  # an M3U playlist
+        model = self.model(cat, FakeRecordings([recording_title()]))
+        self.assertTrue(model.available)
+        self.assertTrue(model.ready)
+        self.assertEqual(model.genre_id, RECORDINGS)
+        self.assertEqual([i["name"] for i in model.items()], ["News"])
+        self.assertNotIn(("section", "movies"), cat.requests)
+
+    def test_without_recordings_such_a_provider_has_no_movies(self):
+        cat = FakeCatalog()
+        cat.section_list = ["live"]
+        recordings = FakeRecordings()
+        model = self.model(cat, recordings)
+        self.assertFalse(model.available)
+        changes = []
+        model.changed.connect(lambda: changes.append(True))
+        recordings.set([recording_title()])  # the first recording ends
+        self.assertTrue(changes)
+        self.assertTrue(model.available)
+        self.assertEqual(model.genre_id, RECORDINGS)
+
+    def test_a_recording_is_its_own_kind_with_its_own_details(self):
+        cat = FakeCatalog({"movies": [("1", "Drama", 1)]}, {("movies", "1"): [movie(1)]})
+        model = self.model(cat, FakeRecordings([recording_title()]))
+        item = recording_title()
+        self.assertEqual(model.item_kind(item), "recording")
+        self.assertEqual(model.identity(item), item["id"])
+        details = model.details(item)
+        self.assertEqual(details.kind, "recording")
+        self.assertEqual(details.genre, "Recording")
+        self.assertIn("1.5 GB", details.plot)
+        self.assertFalse(details.favorite)
+        cfg = model._config
+        cfg.playback_positions[item["id"]] = {"position": 60000, "duration": 600000}
+        self.assertEqual(model.details(item).resume_ms, 60000)
+
+    def test_a_shelf_without_recordings_is_not_listed(self):
+        cat = FakeCatalog({"movies": [("1", "Drama", 1)]}, {("movies", "1"): [movie(1)]})
+        model = self.model(cat, FakeRecordings())
+        self.assertEqual([g.id for g in model.genres()], ["1"])

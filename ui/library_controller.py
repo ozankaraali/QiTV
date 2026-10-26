@@ -243,9 +243,16 @@ class LibraryController(QObject):
         self._mode = mode
         self._screen.set_mode(mode)
 
+    def _tabs(self) -> list[str]:
+        """The provider's sections, and Movies for the recordings when it has no films (2.8)."""
+        tabs = list(self._catalog.sections())
+        if "movies" not in tabs and self._model.lists_recordings():
+            tabs.append("movies")
+        return tabs
+
     def _sync_nav(self, active: str) -> None:
         nav = self._screen.nav
-        nav.set_tabs(self._catalog.sections())
+        nav.set_tabs(self._tabs())
         nav.set_source_name(self._source_title())
         nav.set_active(active)
 
@@ -551,11 +558,12 @@ class LibraryController(QObject):
     # ---- model --------------------------------------------------------------------------------
 
     def _section_available(self) -> bool:
-        return self._model.section in self._catalog.sections()
+        return self._model.available  # the provider's section, or (Movies) recordings
 
     def _on_model_changed(self) -> None:
         if self._closed:
             return
+        self._screen.nav.set_tabs(self._tabs())  # a first recording brings Movies (2.8)
         genres = self._screen.genres
         available = self._section_available()
         genres.set_genres(self._model.genres(genres.filter_text) if available else [])
@@ -716,7 +724,9 @@ class LibraryController(QObject):
     def _activate_item(
         self, item: dict, provider: str, kind: str, start_over: bool, genre_items
     ) -> None:
-        if kind == "series":
+        if kind == "recording":  # a file of the disk: no provider to wait for (2.8)
+            self._play(item, "recording", _context(start_over=start_over))
+        elif kind == "series":
             self._request(provider, lambda: self._open_series(item, provider, back="browse"))
         elif kind == "episode":  # Continue in Series: no series dict, so no autoplay
             context = _context(start_over=start_over)
@@ -751,7 +761,10 @@ class LibraryController(QObject):
         if item is None:
             return
         kind = self._model.item_kind(item)
-        if kind != "series":  # a series plays nothing: its episodes have the menu
+        if kind == "recording":  # its own menu (Show in folder, Delete), no provider's (2.8)
+            if self._context_menu is not None:
+                self._context_menu(item, "recording", global_pos)
+        elif kind != "series":  # a series plays nothing: its episodes have the menu
             section = "series" if kind == "episode" else "movies"
             self._menu(item, section, provider_of(item) or self._browse_provider(), global_pos)
 

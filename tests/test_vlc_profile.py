@@ -22,6 +22,12 @@ class ClassifyTests(unittest.TestCase):
         self.assertIs(classify("http://h/series/1.m3u8", False), PlayKind.VOD_STREAM)
         self.assertIs(classify("http://h/stream", None), PlayKind.UNKNOWN)
 
+    def test_a_recording_on_the_disk_seeks_like_a_film(self):
+        self.assertIs(
+            classify("file:///rec/News%202026-10-19%2021.30.ts", False), PlayKind.VOD_FILE
+        )
+        self.assertIs(classify("http://h/movie/u/p/1.ts", False), PlayKind.VOD_STREAM)
+
 
 class PipelineProfileTests(unittest.TestCase):
     def test_loopback_pipeline_options(self):

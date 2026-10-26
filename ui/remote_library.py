@@ -46,9 +46,11 @@ class PhoneLibrary(QObject):
         parent=None,
         cache: Optional[LibraryCache] = None,
         searcher: Any = None,
+        recordings: Any = None,
     ) -> None:
         super().__init__(parent)
-        self.model = LibraryModel(catalog, config, watch, self, cache=cache)
+        self.model = LibraryModel(catalog, config, watch, self, cache=cache, recordings=recordings)
+        self._recordings = recordings
         self._catalog = catalog
         # The desktop Library's search, shared: what a find reaches past the level shown.
         self._searcher = searcher
@@ -74,6 +76,8 @@ class PhoneLibrary(QObject):
     # ---- the phone's asks ------------------------------------------------------------------
 
     def genres(self, section: str, page: int, find: str, n: int = -1) -> None:
+        if section == "movies" and self._recordings is not None:
+            self._recordings.refresh()  # the folder read again (2.8): a new recording shows
         self._section(section, page)
         self._wanted = None
         self._answer_page(("genres", section, find), page, n)
@@ -199,15 +203,16 @@ class PhoneLibrary(QObject):
     ) -> dict:
         model = self.model
         kind = kind or model.item_kind(item)
+        recorded = item.get("description") if kind == "recording" else ""  # when, how big (2.8)
         row: dict[str, Any] = {
             "id": self.handles.issue("title", (item, kind, genre_items)),
             "title": title_of(item)[:TITLE_CHARS],
-            "sub": str(item.get("year") or item.get("series_name") or "")[:TITLE_CHARS],
+            "sub": str(item.get("year") or item.get("series_name") or recorded or "")[:TITLE_CHARS],
         }
         progress = model.progress(item) if kind == model.item_kind(item) else None
         if progress is not None:  # (a series found on Continue has none of its own)
             row["progress"] = round(progress, 3)
-        if kind != "series":  # a film or an episode: it can play on the phone
+        if kind in ("movie", "episode"):  # it can play on the phone (a recording: on the TV)
             row["plays"] = True
         return row
 
