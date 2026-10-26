@@ -464,6 +464,25 @@ class GuideFindTests(WindowCase):
         kind, (channel, group, channels) = guide.handles.get(message["rows"][0]["id"])
         self.assertTrue(group and channels)  # the group's own: tuned within it
 
+    def test_the_find_widens_from_the_provider_shown(self):
+        """As the desktop's find: the provider these lists show first, then every
+        provider's, each in the find's ranking."""
+        self.open_first_channel()
+        finder = FakeFinder()
+        guide = PhoneGuide(self.window, self.sent.append, bare=True, finder=finder)
+        self.lists.append(guide)
+        mine = {"name": "Channel 8 Mine", "id": 8, "cmd": "file:///8", "_provider": PROVIDER_NAME}
+        other = {"name": "Channel 9 Other", "id": 9, "cmd": "file:///9", "_provider": "Other"}
+        guide.groups(0, "zz")
+        finder.searching = False
+        finder.channels = [  # the other's ranks first (the whole word, say)
+            FoundChannel("Other", other["name"], other, ""),
+            FoundChannel(PROVIDER_NAME, mine["name"], mine, ""),
+        ]
+        guide.groups(0, "zz")
+        names = [c["name"] for c in self.last("chgroups")["channels"]]
+        self.assertEqual(names, ["Channel 8 Mine", "Channel 9 Other"])
+
     def test_the_group_s_own_are_not_listed_twice(self):
         self.open_first_channel()
         guide = self.make(bare=True)

@@ -26,6 +26,7 @@ from PySide6.QtCore import QObject, QTimer
 
 from services.catalog import shown_label
 from services.catchup import programme_in_archive
+from services.find import by_scope
 from services.i18n import translate
 from services.navigation import NavModel, NavNode, item_key, section_title
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, mixed_group_id, provider_of
@@ -349,7 +350,8 @@ class PhoneGuide(QObject):
 
     def _everywhere(self, find: str) -> tuple[list, list, bool]:
         """The desktop find's genres and channels at every provider for `find`, ranked as
-        there, and whether they are still on their way (a push follows when they land)."""
+        there (the provider these lists show, then every provider's, each in the find's
+        ranking), and whether they are still on their way (a push follows when they land)."""
         finder = self._finder
         if finder is None or not find.strip():
             return [], [], False
@@ -359,7 +361,8 @@ class PhoneGuide(QObject):
             if self._prefer is not None:
                 self._prefer(self._catalog.source())  # ranked first: what these lists show
             finder.set_query(find)
-        return list(finder.genres), list(finder.channels), bool(finder.searching)
+        channels = by_scope(finder.channels, self._catalog.source())
+        return list(finder.genres), channels, bool(finder.searching)
 
     def finding(self) -> bool:
         """Whether what this list shows is a find (the shared find stays while one is)."""

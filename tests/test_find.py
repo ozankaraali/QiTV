@@ -16,16 +16,18 @@ from timer_fixtures import elapse
 from services.find import (
     GENRE_LIMIT,
     FindWorker,
+    FoundChannel,
     FoundGenre,
     Preferences,
     build_find_index,
+    by_scope,
     find_channels,
     find_genres,
     live_genres,
     preferences_for,
     words,
 )
-from services.provider_ids import provider_of
+from services.provider_ids import ALL_PROVIDERS, provider_of
 from ui.find_session import DEBOUNCE_MS, FindSession
 
 APP = QApplication.instance() or QApplication([])
@@ -210,6 +212,40 @@ class RankingTests(unittest.TestCase):
         every = preferences_for(names, "@all", history)  # "All providers": none is browsed
         self.assertEqual(every.providers, ("Home TV", "Other"))
         self.assertEqual(preferences_for(names, "@all", []).providers, ())
+
+
+class ScopeTests(unittest.TestCase):
+    """A find widens as the lists do: the open group's channels, then the provider's, then
+    every provider's; each keeps its rank."""
+
+    HITS = [
+        FoundChannel("Other", "Harbor 1", {"id": 1}, ""),
+        FoundChannel("Home TV", "North 2", {"id": 2}, ""),
+        FoundChannel("Home TV", "North 3", {"id": 3}, ""),
+        FoundChannel("Other", "Harbor 4", {"id": 4}, ""),
+        FoundChannel("Home TV", "North 5", {"id": 5}, ""),
+    ]
+
+    def titles(self, found):
+        return [hit.title for hit in found]
+
+    def test_the_open_group_then_the_provider_then_every_provider(self):
+        own = {("Home TV", "3"), ("Home TV", "5")}
+        found = by_scope(self.HITS, "Home TV", own)
+        self.assertEqual(
+            self.titles(found), ["North 3", "North 5", "North 2", "Harbor 1", "Harbor 4"]
+        )
+
+    def test_every_provider_shown_widens_from_the_open_group_alone(self):
+        found = by_scope(self.HITS, ALL_PROVIDERS, {("Other", "4")})
+        self.assertEqual(
+            self.titles(found), ["Harbor 4", "Harbor 1", "North 2", "North 3", "North 5"]
+        )
+
+    def test_genres_the_providers_first(self):
+        genres = [FoundGenre("Other", "7", "TR: Spor", 1), FoundGenre("Home TV", "3", "Sports", 3)]
+        self.assertEqual(self.titles(by_scope(genres, "Home TV")), ["Sports", "TR: Spor"])
+        self.assertEqual(self.titles(by_scope(genres, "")), ["TR: Spor", "Sports"])
 
 
 class WorkerTests(unittest.TestCase):

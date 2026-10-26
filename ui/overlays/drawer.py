@@ -18,7 +18,9 @@ pick another. A head cut short ("…") goes a layer up. ⌕ (Search, as Ctrl/⌘
 The find: typing (or a click on the ⌕ Find box above the right column) finds genres and
 channels at every provider, whichever column had the focus. The right column then lists the
 genres found (each with its provider's name when there are two or more, and its channel
-count), the channels found, and a last row that looks for films and series in the Library. A
+count), the channels found, and a last row that looks for films and series in the Library;
+as the phone's finds, it widens from the group open (its channels first) to its provider and
+then to every provider, each in the find's ranking (services.find.by_scope). A
 genre opens as if walked to (`NavModel.open_found_group`), a channel plays (`channelFound`),
 the last row asks for the Library's search (`libraryFindRequested`). Esc, ✕ or ← end the find:
 the right column is back where it was, its highlight and its scroll position too.
@@ -71,7 +73,7 @@ from PySide6.QtWidgets import (
 
 from services import i18n
 from services.catalog import shown_label
-from services.find import FoundChannel, FoundGenre
+from services.find import FoundChannel, FoundGenre, by_scope
 from services.i18n import N_, tr, tr_n, translate
 from services.navigation import (
     ADD_PROVIDER_ROW,
@@ -228,6 +230,12 @@ def _crumb_key(index: int | None) -> str:
 def _leaves_drawer(node: NavNode) -> bool:
     """An action row, or a section the Library shows: chosen, it is handed to the shell."""
     return node.layer == "action" or (node.layer == "section" and node.key in LIBRARY_SECTIONS)
+
+
+def _shown_provider(catalog) -> str:
+    """The provider the list shows (ALL_PROVIDERS for every one)."""
+    source = getattr(catalog, "source", None)
+    return str(source() if callable(source) else catalog.current_provider_name())
 
 
 def _is_focus_key(node: NavNode, wanted: "str | tuple[str, str]") -> bool:
@@ -646,6 +654,9 @@ class Drawer(Overlay):
         self._find_moved = False  # ↑/↓ in the find: its highlight no longer follows the results
         self._finder: FindSession | None = None  # (set_finder) without one nothing is found
         self._before_find: tuple[_Place, str] | None = None  # the right column, the focus
+        # The open group's channels (provider, item key), which the find lists first: worked
+        # out once per list (its identity and length).
+        self._own: tuple[int, int, frozenset[tuple[str, str]]] = (0, -1, frozenset())
         self._restore: _Place | None = None  # where the right column goes back to (_refresh)
         self._pending_key: str | tuple[str, str] | None = None
         self._left_choice: NavNode | None = None  # the left highlight, which may lead the path
@@ -1041,7 +1052,7 @@ class Drawer(Overlay):
         back = restore if restore is not None and restore.parent == right_parent else None
         self._fill(left, left_parent, left_children, was["right"], reveal)
         if self.finding():
-            self._fill_found(right)
+            self._fill_found(right, right_parent, right_children)
         else:
             # A layer up the left list comes right with the path's node highlighted: the one
             # whose list the right column showed, not a genre only highlighted (previewed) on
@@ -1161,11 +1172,19 @@ class Drawer(Overlay):
         else:
             col.current = None
 
-    def _fill_found(self, col: _Column) -> None:
-        """The right column lists what the find found: genres, channels, the Library row."""
+    def _fill_found(
+        self, col: _Column, group: NavNode | None, listed: Sequence[NavNode] | None
+    ) -> None:
+        """The right column lists what the find found: genres, channels, the Library row.
+        It widens as the phone's finds do: the channels of the group open (`group`, whose
+        rows were `listed`) first, then its provider's, then every provider's; the provider's
+        genres before the others'; each in the find's ranking."""
         finder = self._finder
         genres: list[FoundGenre] = finder.genres if finder is not None else []
         channels: list[FoundChannel] = finder.channels if finder is not None else []
+        provider = _shown_provider(self._nav.catalog)
+        genres = by_scope(genres, provider)
+        channels = by_scope(channels, provider, self._own_channels(group, listed, provider))
         searching = finder is not None and finder.searching
         text = self.find_text.strip()
         labels = len(self._nav.catalog.provider_names()) >= 2  # with one provider, as in 2.0
@@ -1211,6 +1230,20 @@ class Drawer(Overlay):
         if not self._find_moved or col.current not in col.rows:
             col.current = next((n for n in nodes if _selectable(n)), None)  # the best match
         self._show_current(col)
+
+    def _own_channels(
+        self, group: NavNode | None, listed: Sequence[NavNode] | None, shown: str
+    ) -> frozenset[tuple[str, str]]:
+        """The open group's channels as (provider, item key); none when no group is open."""
+        if group is None or group.layer != "group" or not listed:
+            return frozenset()
+        items = getattr(listed, "items", None)  # a long list's dicts, without making its rows
+        if not isinstance(items, list):
+            items = [n.payload for n in listed if isinstance(n.payload, dict)]
+        if self._own[:2] != (id(listed), len(items)):
+            own = frozenset((provider_of(c) or shown, item_key(c)) for c in items)
+            self._own = (id(listed), len(items), own)
+        return self._own[2]
 
     # ---- mouse: consumed here, so it never reaches the video behind -------------------------
 
