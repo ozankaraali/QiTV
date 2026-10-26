@@ -67,7 +67,13 @@ others' distributions, which may have malware.**
   and as Ctrl/⌘+Shift+R) loads the films and series of the providers it shows again, while
   the saved lists stay on screen. A Jellyfin or Emby server is asked only for what changed
   since the last look (titles added, removed, changed, or watched elsewhere), not its whole
-  library again.
+  library again. The phone remote's Library has **Refresh** too.
+- **The channel list's find starts where you are.** Typing in the channel list finds the open
+  group's channels first, then the provider's, then every provider's, as the phone's find
+  does.
+- **A large Library without waits.** With a provider of tens of thousands of films, the
+  shelves, a genre's sorting and a find are worked out in the background: the window no longer
+  stops for them.
 - **Film and series details from TMDB.** Where your provider leaves a film or a series without
   a poster (or with one that doesn't load), a story, a year, a running time, a genre, a rating
   or a cast, the Library shows TMDB's, in QiTV's language; the strip now names the cast too.
@@ -93,6 +99,14 @@ others' distributions, which may have malware.**
   addresses.
 - **Time-shift.** After a stream's clock leapt ahead, a reconnect onto a clock a little behind
   no longer steps the picture back; a long server window's playlist is not parsed again when
-  it hasn't changed.
+  it hasn't changed. Kept buffers on disk keep what is whole after a crash (a damaged last
+  segment no longer loses the whole run), a lowered disk amount applies at once, Go live
+  pressed while a kept channel comes back goes live on its new stream, and updating QiTV while
+  a channel records keeps its buffer.
+- **Phone remote.** Behind a VPN on the computer, the phone finds QiTV at home on the Wi-Fi
+  (not the VPN's address); a find with more than a hundred groups or genres pages on; two
+  phones searching at once each get their own results; where a phone stopped a film is never
+  credited to the next title; and a recording question answered on the TV or another phone
+  goes from both screens.
 - **QiTV's log says why it quit.** It now tells QiTV's own Quit from a quit asked from outside
   (the Dock, another app, logging out), to explain quits that looked like crashes.
