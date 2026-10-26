@@ -74,14 +74,25 @@ def sweep_stale_temporaries(
     return removed
 
 
-def sweep_in_background(directories: Iterable[str]) -> threading.Thread:
+def sweep_in_background(directories: Iterable[str], nested: Iterable[str] = ()) -> threading.Thread:
     """sweep_stale_temporaries on a thread of its own (at start-up: the GUI thread never
-    waits for the disk)."""
+    waits for the disk): `directories`, and each folder inside `nested` (2.8: a downloaded
+    subtitle's own folder), listed on that thread."""
     thread = threading.Thread(
-        target=sweep_stale_temporaries,
-        args=(list(directories),),
+        target=_sweep,
+        args=(list(directories), list(nested)),
         name="temporary-sweep",
         daemon=True,
     )
     thread.start()
     return thread
+
+
+def _sweep(directories: list[str], nested: list[str]) -> None:
+    for parent in nested:
+        try:
+            with os.scandir(parent) as entries:
+                directories += [entry.path for entry in entries if entry.is_dir()]
+        except OSError:
+            continue
+    sweep_stale_temporaries(directories)

@@ -267,6 +267,17 @@ class LogoCacheTest(unittest.TestCase):
                 cache._on_cleanup(None)
             self.assertEqual("bad" in cache._seen, attempt >= 2)
 
+    def test_a_url_that_failed_once_is_told_until_it_loads(self):  # 2.8: TMDB's poster then
+        cache = self.make()
+        self.assertFalse(cache.failed("bad"))
+        cache._seen.add("bad")
+        cache._batch = ["bad"]
+        with mock.patch("ui.logos.ImageLoader"), mock.patch("ui.logos.ThreadCleanup"):
+            cache._on_cleanup(None)
+        self.assertTrue(cache.failed("bad"))
+        cache._store("bad", QPixmap(4, 4))
+        self.assertFalse(cache.failed("bad"))
+
     def test_pixmap_none_before_load(self):
         self.assertIsNone(self.make().pixmap("http://x/a.png"))
 

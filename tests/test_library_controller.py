@@ -1,4 +1,5 @@
 import os
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -12,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 from timer_fixtures import elapse
 
-from services.library import LibraryModel
+from services.library import RECORDINGS, LibraryModel
 from services.provider_ids import (
     ALL_PROVIDERS,
     ALL_PROVIDERS_TITLE,
@@ -128,6 +129,8 @@ class FakeCatalog(QObject):
         self.selected = []
         self.loading = False  # a provider setup is running (CatalogService.is_loading)
         self.mixed = False  # All providers
+        self.mix = []  # 2.8: the providers mixed, when not every one
+        self.mixes = []  # each select_mix asked
         self.headers = set()  # ids of the provider headings among the groups
         self.catalogs = FakeCatalogs(self)
         self.providerReady.connect(self._settled)
@@ -150,11 +153,32 @@ class FakeCatalog(QObject):
     def all_providers(self):
         return self.mixed
 
+    def mixed_names(self):
+        return list(self.mix or self.names) if self.mixed else [self.name]
+
+    def select_mix(self, names):  # 2.8: as BrowsedCatalog's: one is that provider alone
+        self.mixes.append(list(names))
+        chosen = [n for n in self.names if n in names]
+        if len(chosen) == 1:
+            self.mixed, self.mix = False, []
+            self.select_provider(chosen[0])
+            return
+        everyone = not chosen or len(chosen) == len(self.names)
+        self.select_provider(ALL_PROVIDERS)
+        self.mixed, self.name, self.mix = True, ALL_PROVIDERS, [] if everyone else chosen
+
     def provider_names(self):
         return list(self.names)
 
     def content_version(self):
         return self.version
+
+    refreshed = 0  # refresh_sections() asked (2.8: the Library's Refresh)
+    refreshing = 2  # the lists it loads again (or that load already)
+
+    def refresh_sections(self):
+        self.refreshed += 1
+        return self.refreshing
 
     def sections(self):
         return list(self.section_list)
@@ -199,6 +223,26 @@ class FakeCatalog(QObject):
         self.loading = True
         if name in self.names:  # the shown provider changes at once, as BrowsedCatalog's does
             self.name = name
+
+
+RECORDING = {
+    "id": "recording:News 2026-10-19 21.30.ts",
+    "name": "News",
+    "path": "/rec/News 2026-10-19 21.30.ts",
+    "added": "1761000000",
+    "_recording": True,
+}
+
+
+class FakeRecordings(QObject):
+    changed = Signal()
+
+    def __init__(self, items=()):
+        super().__init__()
+        self.list, self.version = list(items), 1
+
+    def items(self):
+        return list(self.list)
 
 
 class FakeProviderManager:
@@ -301,7 +345,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.menus = []  # (item, section, global position) of each right-click menu
         self.model = LibraryModel(self.catalog, self.config, self.watch)
 
-    def build(self, jobs=None, logos=None):
+    def build(self, jobs=None, logos=None, tmdb=None):
         self.screen = LibraryScreen(self.posters, logos)
         self.addCleanup(self.screen.deleteLater)
         self.addCleanup(self.screen.close)
@@ -320,6 +364,7 @@ class LibraryControllerTests(unittest.TestCase):
             tune_live=self.tuned.append,
             back_to_tv=lambda: self.backs.append(True),
             context_menu=lambda item, section, pos: self.menus.append((item, section, pos)),
+            tmdb=tmdb,
         )
         self.addCleanup(self.ctl.shutdown)
         return self.ctl
@@ -345,6 +390,38 @@ class LibraryControllerTests(unittest.TestCase):
 
     def tearDown(self):
         self.assertFalse(has_pending_threads())
+
+    # Recordings (2.8) ---------------------------------------------------------------------
+    def with_recordings(self):
+        self.recordings = FakeRecordings([RECORDING])
+        self.model = LibraryModel(self.catalog, self.config, self.watch, recordings=self.recordings)
+
+    def test_a_recording_plays_from_its_shelf_without_asking_a_provider(self):
+        self.with_recordings()
+        self.open_movies()
+        self.model.select_genre(RECORDINGS)
+        self.assertEqual(self.grid_names(), ["News"])
+        self.screen.grid.activated.emit(0)
+        item, kind, context = self.played[-1]
+        self.assertEqual((item["id"], kind), (RECORDING["id"], "recording"))
+        self.assertFalse(context["start_over"])
+        self.assertEqual(self.catalog.selected, [])
+
+    def test_a_recordings_right_click_is_its_own(self):
+        self.with_recordings()
+        self.open_movies()
+        self.model.select_genre(RECORDINGS)
+        self.screen.grid.contextRequested.emit(0, QPoint(3, 4))
+        item, section, _pos = self.menus[-1]
+        self.assertEqual((item["id"], section), (RECORDING["id"], "recording"))
+
+    def test_a_provider_without_films_gets_movies_for_its_recordings(self):
+        self.catalog.section_list = ["live"]
+        self.with_recordings()
+        self.build().open("movies")
+        self.assertIn("movies", self.screen.nav._tabs)
+        self.assertEqual(self.grid_names(), ["News"])
+        self.assertNotIn(("section", "movies"), self.catalog.requests)
 
     # 1 -----------------------------------------------------------------------------------
     def test_open_shows_genres_and_grid_and_moves_between_them(self):
@@ -859,10 +936,8 @@ class LibraryControllerTests(unittest.TestCase):
         self.activate_name(ctl, "Salt Lake")  # waits for Q
         actions = ctl._source_menu().actions()
         self.addCleanup(actions[0].parent().deleteLater)
-        actions[1].trigger()  # the Library goes to Q
-        self.assertEqual(self.catalog.selected, ["Q"])
-        actions[1].trigger()  # already there: no second setup
-        self.assertEqual(self.catalog.selected, ["Q"])
+        actions[1].trigger()  # Q joins what the Library shows (2.8: the ticks mix)
+        self.assertEqual(self.catalog.selected, [ALL_PROVIDERS])
         self.make_ready("Q")
         self.assertEqual(self.played_names(), ["Salt Lake"])  # still played, once
 
@@ -1101,26 +1176,28 @@ class LibraryControllerTests(unittest.TestCase):
         ctl.handle(Action.NAV_ACTIVATE)
         self.assertEqual(provider_of(self.played[-1][0]), "P")
 
-    def test_source_menu_lists_providers_and_all_providers_and_switches(self):
+    def test_source_menu_lists_providers_and_all_providers_and_mixes(self):
         ctl = self.open_movies()
         menu = ctl._source_menu()
         self.addCleanup(menu.deleteLater)
         actions = [a for a in menu.actions() if not a.isSeparator()]
-        self.assertEqual([a.text() for a in actions], ["P", "Q", "All providers"])
-        self.assertEqual([a.isChecked() for a in actions], [True, False, False])
-        actions[1].trigger()
-        self.assertEqual(self.catalog.selected, ["Q"])
-        self.catalog.name = "Q"
-        self.catalog.providerReady.emit("Q")
+        self.assertEqual(
+            [a.text() for a in actions], ["P", "Q", "All providers", "Refresh films and series"]
+        )
+        self.assertEqual([a.isChecked() for a in actions], [True, False, False, False])
+        actions[1].trigger()  # 2.8: Q joins P
+        self.assertEqual(self.catalog.mixes, [["P", "Q"]])
+        self.catalog.providerReady.emit(ALL_PROVIDERS)
         self.assertEqual(self.catalog.requests[-1], ("section", "movies"))  # re-opened
-        self.assertEqual(self.screen.nav._source, "Q")
+        self.assertEqual(self.screen.nav._source, "All providers")  # P and Q: every one
 
     def test_one_provider_has_no_all_providers_entry(self):
         self.catalog.names = ["P"]
         ctl = self.open_movies()
         menu = ctl._source_menu()
         self.addCleanup(menu.deleteLater)
-        self.assertEqual([a.text() for a in menu.actions()], ["P"])
+        shown = [a.text() for a in menu.actions() if not a.isSeparator()]
+        self.assertEqual(shown, ["P", "Refresh films and series"])  # no All providers
 
     def mix(self):
         """The Library over both providers (All providers), movies of each under its heading."""
@@ -1343,6 +1420,313 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.screen.genres.rows(), [])
 
 
+class SourceMixTests(unittest.TestCase):  # 2.8: the source menu's ticks mix providers
+    build = LibraryControllerTests.build
+
+    def setUp(self):
+        LibraryControllerTests.setUp(self)
+        self.catalog.names = ["P", "Q", "R"]
+
+    def menu(self, ctl):
+        return {a.text(): a for a in ctl._source_menu().actions() if a.text()}
+
+    def test_the_ticks_say_what_the_library_shows_and_a_tick_adds_a_provider(self):
+        ctl = self.build()
+        ctl.open("movies")  # P alone
+        actions = self.menu(ctl)
+        self.assertEqual([n for n in "PQR" if actions[n].isChecked()], ["P"])
+        self.assertFalse(actions["All providers"].isChecked())
+        actions["Q"].trigger()
+        self.assertEqual(self.catalog.mixes, [["P", "Q"]])
+        actions = self.menu(ctl)
+        self.assertEqual([n for n in "PQR" if actions[n].isChecked()], ["P", "Q"])
+        self.assertEqual(ctl._source_title(), "P, Q")
+
+    def test_untick_one_of_a_mix_and_the_others_stay(self):
+        ctl = self.build()
+        self.catalog.select_mix(["P", "Q"])
+        self.menu(ctl)["Q"].trigger()
+        self.assertEqual(self.catalog.mixes[-1], ["P"])
+        self.assertEqual(self.catalog.current_provider_name(), "P")
+        self.menu(ctl)["P"].trigger()  # the last one stays ticked: something is shown
+        self.assertEqual(self.catalog.mixes[-1], ["P"])
+
+    def test_all_providers_ticks_every_one(self):
+        ctl = self.build()
+        actions = self.menu(ctl)
+        actions["All providers"].trigger()
+        self.assertEqual(self.catalog.mixes[-1], [])
+        actions = self.menu(ctl)
+        self.assertTrue(all(actions[n].isChecked() for n in "PQR"))
+        self.assertTrue(actions["All providers"].isChecked())
+        self.assertEqual(ctl._source_title(), "All providers")
+
+
+class GenreHideTests(unittest.TestCase):  # 2.8: parental controls hide a Library genre
+    build = LibraryControllerTests.build
+
+    def setUp(self):
+        LibraryControllerTests.setUp(self)
+        self.hidden, self.may = [], True
+
+    def built(self):
+        ctl = self.build()
+        ctl.set_hiding(lambda *args: self.hidden.append(args), lambda: self.may)
+        ctl.open("movies")
+        self.catalog.sectionReady.emit("movies")
+        return ctl
+
+    def test_a_genre_hides_once_a_pin_is_set(self):
+        ctl = self.built()
+        menu = ctl.genre_menu("c")
+        self.addCleanup(menu.deleteLater)
+        (action,) = menu.actions()
+        self.assertEqual(action.text(), "Hide (parental controls)")
+        action.trigger()
+        self.assertEqual(self.hidden, [("movies", "P", "c", "Comedy")])
+
+    def test_without_a_pin_or_for_another_row_there_is_no_menu(self):
+        ctl = self.built()
+        self.assertIsNotNone(ctl.genre_menu("c"))
+        self.assertIsNone(ctl.genre_menu("@nowhere"))  # not one of the genres shown
+        self.may = False
+        self.assertIsNone(ctl.genre_menu("c"))
+
+    def test_a_right_click_on_a_genre_asks_for_its_menu(self):
+        ctl = self.built()
+        shown = []
+        ctl.genre_menu = lambda gid: shown.append(gid)  # the menu itself is asked for
+        self.screen.genres.genreMenuRequested.emit("c", QPoint(10, 10))
+        self.assertEqual(shown, ["c"])
+
+
+class RefreshTests(unittest.TestCase):  # 2.8: the Library's Refresh
+    build = LibraryControllerTests.build
+
+    def setUp(self):
+        LibraryControllerTests.setUp(self)
+
+    def test_the_source_menu_refreshes_the_films_and_series_shown(self):
+        ctl = self.build()
+        ctl.open("movies")
+        notices = []
+        ctl.notice.connect(notices.append)
+        actions = {a.text(): a for a in ctl._source_menu().actions() if a.text()}
+        actions["Refresh films and series"].trigger()
+        self.assertEqual(self.catalog.refreshed, 1)
+        self.assertEqual(notices, ["Refreshing films and series…"])
+
+    def test_the_top_bar_s_refresh_refreshes_them_too(self):
+        ctl = self.build()
+        ctl.open("series")
+        self.screen.nav.refreshRequested.emit()
+        self.assertEqual(self.catalog.refreshed, 1)
+
+    def test_nothing_to_load_says_nothing(self):  # 2.8 review M7
+        # A provider setting up (or one without films or series): nothing loads, no notice.
+        ctl = self.build()
+        ctl.open("movies")
+        notices = []
+        ctl.notice.connect(notices.append)
+        self.catalog.refreshing = 0
+        ctl.refresh_lists()
+        self.assertEqual(self.catalog.refreshed, 1)
+        self.assertEqual(notices, [])
+
+
+class OpenOnProviderTests(unittest.TestCase):  # 2.8: the list's Movies row is its provider's
+    setUp = LibraryControllerTests.setUp
+    build = LibraryControllerTests.build
+
+    def test_all_providers_opens_on_every_provider_not_a_saved_mix(self):  # review M6
+        self.catalog.names = ["P", "Q", "R"]
+        ctl = self.build()
+        self.catalog.select_mix(["P", "Q"])  # the Library mixed two before
+        ctl.open_on(ALL_PROVIDERS, "movies")
+        self.assertEqual(self.catalog.mixes[-1], [])  # every one
+        self.assertEqual(self.catalog.mixed_names(), ["P", "Q", "R"])
+
+    def test_the_library_opens_on_the_provider_asked_for(self):
+        ctl = self.build()
+        ctl.open("movies")  # on P, its own source
+        ctl.open_on("Q", "series")
+        self.assertEqual(self.catalog.selected, ["Q"])
+        self.assertEqual(ctl.section, "series")
+        ctl.open_on("Q", "movies")  # already there: not asked again
+        self.assertEqual(self.catalog.selected, ["Q"])
+        self.assertEqual(ctl.section, "movies")
+
+    def test_an_unknown_or_no_provider_keeps_the_library_s_own(self):
+        ctl = self.build()
+        ctl.open_on("", "movies")
+        ctl.open_on("Gone", "movies")
+        self.assertEqual(self.catalog.selected, [])
+        self.assertEqual(ctl.section, "movies")
+
+
+class FakeTmdb(QObject):
+    """Stands in for ui.tmdb_fill.TmdbFill: what it was asked for, and what it "knows" by
+    title name ({"fields": {...}, "poster": url})."""
+
+    changed = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.known = {}
+        self.focused = []  # (name, kind)
+        self.wanted = []  # [(name, kind)] per call
+        self.closed = False
+
+    def fill(self, item, kind):
+        known = self.known.get(item.get("name"))
+        return {**item, **known.get("fields", {})} if known else item
+
+    def poster_url(self, item, kind):
+        known = self.known.get(item.get("name"))
+        return known.get("poster", "") if known else ""
+
+    def focus(self, item, kind):
+        self.focused.append((item.get("name") if item else None, kind))
+
+    def want_posters(self, titles):
+        self.wanted.append([(item.get("name"), kind) for item, kind in titles])
+
+    def shutdown(self):
+        self.closed = True
+
+
+class TmdbInTheLibraryTests(unittest.TestCase):  # 2.8
+    setUp = LibraryControllerTests.setUp
+    build = LibraryControllerTests.build
+    type_text = LibraryControllerTests.type_text
+    grid_names = LibraryControllerTests.grid_names
+
+    def open_movies(self):
+        self.tmdb = FakeTmdb()
+        ctl = self.build(tmdb=self.tmdb)
+        ctl.open("movies")
+        self.catalog.sectionReady.emit("movies")
+        return ctl
+
+    def at(self, name):
+        """The grid index of the title called `name` (the grid sorts them)."""
+        return self.grid_names().index(name)
+
+    def test_the_title_in_focus_is_asked_of_tmdb(self):
+        self.open_movies()
+        self.screen.grid.set_current_index(self.at("Tide Lines"))
+        self.assertEqual(self.tmdb.focused[-1], ("Tide Lines", "movie"))
+
+    def test_what_tmdb_knows_fills_the_strip(self):
+        self.open_movies()
+        grid = self.screen.grid
+        grid.set_current_index(self.at("Tide Lines"))
+        self.assertEqual(grid._details().plot, "")
+        self.tmdb.known["Tide Lines"] = {"fields": {"plot": "Waves.", "cast": "Ana, Bo"}}
+        self.tmdb.changed.emit()
+        self.assertEqual((grid._details().plot, grid._details().cast), ("Waves.", "Ana, Bo"))
+
+    def test_posterless_titles_on_screen_go_to_tmdb_and_take_its_poster(self):
+        self.catalog.item_map[("movies", "d")] = [SALT, {"id": "5", "name": "Bare Film"}]
+        self.open_movies()
+        grid = self.screen.grid
+        grid._request_posters()
+        self.assertEqual(self.tmdb.wanted[-1], [("Bare Film", "movie")])
+        self.tmdb.known["Bare Film"] = {"poster": "https://image.invalid/b.jpg"}
+        bare, salt = grid.item(self.at("Bare Film")), grid.item(self.at("Salt Roads"))
+        self.assertEqual(grid._poster_url(bare), "https://image.invalid/b.jpg")
+        self.assertEqual(grid._poster_url(salt), SALT["logo"])  # the provider's stays
+
+    def test_a_provider_poster_that_failed_gives_way_to_tmdb_s(self):
+        self.posters.failed = lambda url: url == SALT["logo"]
+        self.open_movies()
+        grid = self.screen.grid
+        grid._request_posters()
+        self.assertIn(("Salt Roads", "movie"), self.tmdb.wanted[-1])
+        self.tmdb.known["Salt Roads"] = {"poster": "https://image.invalid/s.jpg"}
+        salt = grid.item(self.at("Salt Roads"))
+        self.assertEqual(grid._poster_url(salt), "https://image.invalid/s.jpg")
+
+    def test_a_series_opened_is_asked_for_and_its_details_follow(self):
+        self.tmdb = FakeTmdb()
+        ctl = self.build(tmdb=self.tmdb)
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(ctl.mode, "series")
+        self.assertIn(("Harbour Lights", "series"), self.tmdb.focused)
+        self.tmdb.known["Harbour Lights"] = {"fields": {"plot": "Lighthouses."}}
+        self.tmdb.changed.emit()
+        self.assertEqual(self.screen.series._details.plot, "Lighthouses.")
+
+    def test_retrying_a_series_keeps_tmdb_s_poster(self):  # review #5
+        self.tmdb = FakeTmdb()
+        self.tmdb.known["Harbour Lights"] = {"poster": "https://image.invalid/h.jpg"}
+        ctl = self.build(tmdb=self.tmdb)
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.screen.series._poster_url, "https://image.invalid/h.jpg")
+        self.screen.series.retryRequested.emit()
+        self.assertEqual(self.screen.series._poster_url, "https://image.invalid/h.jpg")
+
+    def test_search_hits_are_filled_by_their_own_kind_and_channels_never(self):
+        self.tmdb = FakeTmdb()
+        ctl = self.build(tmdb=self.tmdb)
+        ctl.open_search()
+        self.type_text("sal")
+        elapse(WAIT_MS)
+        self.assertEqual(self.grid_names(), ["Salt TV", "Salt Roads", "Salt Lake"])
+        grid = self.screen.grid
+        self.tmdb.known["Salt Lake"] = {"fields": {"plot": "A lake.", "genre": "Drama"}}
+        grid.set_current_index(2)
+        self.assertEqual((grid._details().plot, grid._details().genre), ("A lake.", "Drama"))
+        self.assertEqual(self.tmdb.focused[-1], ("Salt Lake", "movie"))
+        grid.set_current_index(0)
+        self.assertEqual(self.tmdb.focused[-1], ("Salt TV", "live"))
+        grid._request_posters()
+        self.assertNotIn("Salt TV", [name for name, _kind in self.tmdb.wanted[-1]])
+
+    def test_with_the_real_lookups_a_posterless_film_takes_tmdb_s_poster_and_story(self):
+        from opensubtitles_fixtures import FakeHttp, FakeResponse
+        from test_tmdb import details
+
+        from services.tmdb import API_URL
+        from ui.tmdb_fill import TmdbFill
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        http = FakeHttp()
+        answer = details(5, "Bare Film", "2019-01-01", overview="Story.", poster="/b.jpg")
+        http.answer("GET", f"{API_URL}/movie/5", FakeResponse(200, answer))
+        fill = TmdbFill(
+            config=SimpleNamespace(tmdb_details=True, tmdb_token="tok"),
+            jobs=ImmediateRunner(),
+            cache_path=os.path.join(directory.name, "tmdb.json"),
+            language="en",
+            http=http,
+        )
+        self.catalog.item_map[("movies", "d")] = [
+            SALT,
+            {"id": "5", "name": "Bare Film", "tmdb": "5"},
+        ]
+        ctl = self.build(tmdb=fill)
+        ctl.open("movies")
+        self.catalog.sectionReady.emit("movies")
+        grid = self.screen.grid
+        grid._request_posters()  # the view settled: the posterless one is asked for
+        bare = grid.item(self.grid_names().index("Bare Film"))
+        self.assertEqual(grid._poster_url(bare), "https://image.tmdb.org/t/p/w342/b.jpg")
+        grid.set_current_index(self.grid_names().index("Bare Film"))
+        self.assertEqual((grid._details().plot, grid._details().year), ("Story.", "2019"))
+        self.assertEqual(len(http.calls), 1)  # SALT has its own poster: never asked
+
+    def test_shutdown_stops_tmdb(self):
+        ctl = self.open_movies()
+        ctl.shutdown()
+        self.assertTrue(self.tmdb.closed)
+
+
 class GridPostersTests(unittest.TestCase):
     def setUp(self):
         self.posters = FakePosters()
@@ -1374,6 +1758,13 @@ class GridPostersTests(unittest.TestCase):
         self.logos.logoReady.emit("http://l/1")
         self.assertEqual(ready, [LIVE_TILE + "http://l/1"])
         self.assertIs(self.shim.pixmap(LIVE_TILE + "http://l/1"), logo)
+
+    def test_a_poster_that_failed_is_told_a_logo_never(self):  # 2.8: TMDB's poster then
+        self.posters.failed = lambda url: url == "http://p/1"
+        self.assertTrue(self.shim.failed("http://p/1"))
+        self.assertFalse(self.shim.failed("http://p/2"))
+        self.assertFalse(self.shim.failed(LIVE_TILE + "http://l/1"))
+        self.assertFalse(GridPosters(FakePosters()).failed("http://p/1"))  # it can't tell
 
     def test_posters_pass_through(self):
         pixmap = QPixmap(10, 15)

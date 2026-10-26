@@ -28,8 +28,8 @@ def _write_export_file(content_data, file_path, url_formatter, extinf_formatter)
                     extinf = extinf_formatter(item)
                     file.write(f"{extinf}\n{url}\n")
                     count += 1
-            logger.info(f"Items exported: {count}")
-            logger.info(f"Content list has been saved to {file_path}")
+            logger.info("Items exported: %s", count)
+            logger.info("Content list has been saved to %s", file_path)
         return count
     except OSError as e:
         logger.warning("Error saving content list: %s", type(e).__name__)

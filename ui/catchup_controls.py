@@ -94,7 +94,7 @@ from services.i18n import N_, translate
 from services.jobs import JobRunner
 from services.live import parts as live_parts
 from services.live.tuning import channel_key
-from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
+from services.vlc_profile import PlayKind
 from services.workers import ArchiveProbeWorker
 from ui import item_provider
 from ui.link_lanes import Target
@@ -541,7 +541,7 @@ class CatchUp(QObject):
         return True
 
     def _headers(self, target: Target) -> dict[str, str]:
-        headers = {"User-Agent": target.item.get("user_agent") or DEFAULT_USER_AGENT}
+        headers = {"User-Agent": item_provider.user_agent(self.catalog, target.item)}
         if target.item.get("referrer"):
             headers["Referer"] = str(target.item["referrer"])
         return headers
@@ -662,7 +662,7 @@ class CatchUp(QObject):
                 url,
                 kind=PlayKind.VOD_STREAM,
                 start_ms=offset_ms or None,
-                user_agent=item.get("user_agent") or DEFAULT_USER_AGENT,
+                user_agent=item_provider.user_agent(self.catalog, item),
                 referrer=item.get("referrer") or None,
             )
             session.set_rate(1.0)

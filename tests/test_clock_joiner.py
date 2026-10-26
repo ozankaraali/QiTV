@@ -564,6 +564,17 @@ class ForwardJumpTests(unittest.TestCase):
         self.assert_runs_on(out)
         self.assertEqual(len(joiner.jumps), 1)
 
+    def test_a_discontinuity_onto_a_clock_a_little_behind_follows_the_last_picture(self):
+        # 2.8 (a 2.4.2 review note): after a jump, a discontinuity whose clock is 20 s behind
+        # the last picture (inside the window a clock that goes on keeps the jump's offset):
+        # keeping the offset stepped the pictures back 20 s; it follows the last one instead.
+        first = make_stream(20, pts_start=900000 + 30 * CLOCK, jumps=((12.0, 13.0),))
+        other = make_stream(4, pts_start=900000 + 43 * CLOCK)  # 20 s behind its last picture
+        segments = [*at_seconds(first, 4.0, 8.0, 12.0, 16.0), other]
+        out, joiner, _ = watched(segments, extinf=[4.0] * 6, marks=(5,))
+        self.assert_runs_on(out)
+        self.assertEqual(len(joiner.jumps), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

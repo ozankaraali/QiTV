@@ -124,6 +124,28 @@ class StbHandshakeTests(unittest.TestCase):
             self.assertTrue(StbHandshake(prefer_https=True).run(url, "00:1A:79:00:00:01"))
         self.assertEqual(set(calls), {"http"})
 
+    def test_a_large_live_list_gets_time_and_a_second_try(self):  # 2.8
+        # A portal's whole live list (tens of thousands of channels) can take longer than 10 s.
+        asked = []
+
+        def fake_get(url, **kwargs):
+            if "action=get_genres" in url:
+                return _Response({"js": [{"id": "1", "title": "News"}]})
+            if "action=get_all_channels" in url:
+                asked.append(kwargs.get("timeout"))
+                if len(asked) == 1:
+                    raise requests.Timeout("read timed out")
+                return _Response({"js": {"data": [{"id": "7", "tv_genre_id": "1"}]}})
+            return _accepting(url)
+
+        with patch("services.workers.requests.get", side_effect=fake_get):
+            worker = STBCategoriesWorker("http://portal.test/c/", {}, "itv")
+            done = []
+            worker.finished.connect(done.append)
+            worker.run()
+        self.assertEqual(asked, [30, 30])
+        self.assertEqual(len(done[0]["contents"]), 1)
+
     def test_prefer_https_failing_everywhere_warns_once(self):
         calls = []
 

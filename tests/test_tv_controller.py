@@ -18,7 +18,7 @@ from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config,
 from test_browsed_catalog import FakeEpg, ScriptedFactory
 from timer_fixtures import elapse, wait_until
 
-from services import provider_api
+from services import media_server as ms, provider_api
 from services.browsed_catalog import BrowsedCatalog
 from services.catalog import PROVIDER_LOADING_MESSAGE, UNREACHABLE_MESSAGE
 from services.catalogs import Catalogs
@@ -29,7 +29,7 @@ from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode, item_key
 from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of
-from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
+from services.vlc_profile import DEFAULT_USER_AGENT, STB_USER_AGENT, PlayKind
 from services.watch_state import WatchState
 from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
@@ -133,6 +133,8 @@ class FakeCatalog(NavCatalog):
         self.live = {"10": list(CHANNELS)}
         self.names = ["Home", "Backup"]
         self.links = []  # (request_id, item, section, is_episode)
+        self.qualities = []  # each link request's quality (2.8)
+        self.menus = {}  # item id -> what its quality menu offers (2.8)
         self.epg = {}
         self.loading = False
         self.epg_refreshes = 0
@@ -177,9 +179,13 @@ class FakeCatalog(NavCatalog):
     def use_guides(self, names):
         self.guides_used.append(set(names))
 
-    def request_link(self, item, *, section, is_episode=False):
+    def media_menu(self, item):  # 2.8: a media server's versions for the quality menu
+        return self.menus.get(item.get("id"))
+
+    def request_link(self, item, *, section, is_episode=False, quality=None):
         request_id = len(self.links) + 1
         self.links.append((request_id, item, section, is_episode))
+        self.qualities.append(quality)  # 2.8: the quality menu's choice
         return request_id
 
     def programmes(self, channel, now, limit=8):
@@ -248,16 +254,26 @@ class FakeSession(QObject):
         self.deinterlacing = "auto"
         self.stats = {}  # what video_stats() reads
         self.software = False  # decodes_in_software(): asked for, or the picture froze
+        self.cap = 0  # max_height(): the size cap its open asked VLC for (2.8)
+
+    now_ms = 0  # time_ms(): where what plays is (2.8: a quality change goes on from there)
+
+    def time_ms(self):
+        return self.now_ms
 
     def play(self, url, **kwargs):
         self.plays.append((url, kwargs))
         self.play_delays.append(self.delay)
         self.url, self.kind = url, kwargs.get("kind")
         self.software = bool(kwargs.get("software"))
+        self.cap = int(kwargs.get("max_height") or 0)
         self.stateChanged.emit("opening")
 
     def decodes_in_software(self):
         return self.software
+
+    def max_height(self):
+        return self.cap
 
     def stop(self):
         self.stops += 1
@@ -506,8 +522,14 @@ class FakeTransport(FakeOverlay):
     infoRequested = Signal()
     favoriteRequested = Signal()
     recordRequested = Signal()  # 2.3
+    qualityRequested = Signal()  # 2.8: the ⚙ quality menu
     bandChanged = Signal()
     recording_since = None
+
+    quality_states = ()  # each set_quality_available (kept apart from `calls`)
+
+    def set_quality_available(self, available):
+        self.quality_states = (*self.quality_states, available)
 
     def set_muted(self, muted):
         self.record("set_muted", muted)
@@ -726,6 +748,19 @@ class FakeLiveSession(QObject):
     def go_back_to(self, t):
         self.calls.append(("go_back_to", t))
 
+    paused_back = False  # back_paused(): where it offers was left paused (2.8)
+    key = ""  # channel_key(): the channel it plays (2.8)
+    known = None  # known_sizes(): the sizes its channel kept (2.8)
+
+    def channel_key(self):
+        return self.key
+
+    def known_sizes(self):
+        return self.known
+
+    def back_paused(self):
+        return self.paused_back
+
     def set_aside(self):  # 2.6: its recording goes on while its channel was left
         self.calls.append(("set_aside",))
 
@@ -879,6 +914,7 @@ class FakeExternal:
         self.calls = []
         self.result = result
         self.missing = set()  # players find_vlc/find_mpv do not find
+        self.http = []
 
     def find_vlc(self):
         return None if "vlc" in self.missing else "/Applications/VLC.app"
@@ -886,12 +922,14 @@ class FakeExternal:
     def find_mpv(self):
         return None if "mpv" in self.missing else "/usr/local/bin/mpv"
 
-    def launch_vlc(self, url):
+    def launch_vlc(self, url, **http):
         self.calls.append(("vlc", url))
+        self.http.append(http)  # 2.8: the stream's agent and referrer, when it has its own
         return self.result
 
-    def launch_mpv(self, url):
+    def launch_mpv(self, url, **http):
         self.calls.append(("mpv", url))
+        self.http.append(http)
         return self.result
 
 
@@ -1137,6 +1175,50 @@ class LinkPipelineTests(ControllerTestCase):
         key = self.controller.resume_key(film)
         self.assertEqual(key, self.watch.content_id("Home", VodTests.MOVIE, item_type="movie"))
         self.assertIsNone(self.controller.resume_key(Target(CHANNELS[0], "live", "One")))
+
+    def test_play_elsewhere_a_recording_for_a_phone(self):
+        """2.8: a recording (a file QiTV recorded) goes to a phone too, as its file: no link is
+        asked for. A file opened from the disk (File → Open) stays here."""
+        self.play(0)
+        recording = {
+            "id": "recording:Harbour News 2026-10-26 20.00.ts",
+            "name": "Harbour News",
+            "path": "/r/Harbour News 2026-10-26 20.00.ts",
+            "_recording": True,
+        }
+        chosen = Target(recording, "movies", "Harbour News", local=True)
+        handed = []
+
+        def launch(target, url):
+            handed.append((target.item["id"], url))
+            return True, ""
+
+        self.assertFalse(self.controller.play_elsewhere(launch, chosen))
+        self.assertTrue(self.controller.play_elsewhere(launch, chosen, recordings=True))
+        self.assertTrue(wait_until(lambda: handed))
+        self.assertEqual(handed, [(recording["id"], Path(recording["path"]).as_uri())])
+        self.assertEqual(self.session.stops, 1)  # one screen at a time
+        self.assertEqual(self.watch.plays[-1:], self.watch.plays[:1])  # no history for a file
+        opened = Target({"name": "a.ts", "cmd": "file:///r/a.ts"}, "movies", "a.ts", local=True)
+        self.assertFalse(self.controller.play_elsewhere(launch, opened, recordings=True))
+
+    def test_the_recording_the_tv_plays_goes_to_a_phone(self):
+        recording = {
+            "id": "recording:Harbour News 2026-10-26 20.00.ts",
+            "name": "Harbour News",
+            "path": "/r/Harbour News 2026-10-26 20.00.ts",
+            "_recording": True,
+        }
+        self.controller.play_recording(recording)
+        handed = []
+
+        def launch(target, url):
+            handed.append((target.item["id"], target.item["path"]))
+            return True, ""
+
+        self.assertTrue(self.controller.play_elsewhere(launch, recordings=True))
+        self.assertTrue(wait_until(lambda: handed))
+        self.assertEqual(handed, [(recording["id"], recording["path"])])
 
     def test_play_elsewhere_with_nothing_current(self):
         self.assertFalse(self.controller.play_elsewhere(lambda target, url: (True, "")))
@@ -1609,6 +1691,20 @@ class StartupTests(ControllerTestCase):
         self.assertEqual(self.drawer.named("open_drawer"), [(None, "left")])
         self.assertEqual([(n.layer, n.key) for n in self.nav.path], [("source", "Home")])
 
+    def test_a_provider_without_live_channels_lists_its_sections_without_an_error(self):  # 2.8
+        # A Jellyfin or Emby server chosen for the TV: its Movies and Series rows, no Live TV.
+        self.catalog.sections = lambda: ["movies", "series"]
+        self.controller.start()
+        self.catalog.hub_ready("Home")
+        self.assertEqual([(n.layer, n.key) for n in self.nav.path], [("source", "Home")])
+        self.assertNotIn(("section", "live"), self.catalog.requests)
+        self.assertEqual(self.toast.messages(), [])
+        self.assertIsNone(self.toast.hint)  # "Loading Home…" ends with its setup
+        self.assertEqual(len(self.drawer.named("open_drawer")), 1)  # nothing plays: the list
+        self.controller.handle(Action.OPEN_DRAWER)  # the list opened again: still there
+        self.assertEqual([(n.layer, n.key) for n in self.nav.path], [("source", "Home")])
+        self.assertNotIn(("section", "live"), self.catalog.requests)
+
     def test_live_section_failure_opens_the_drawer_with_a_hint(self):
         self.controller.start()
         self.catalog.loaded = False  # nothing saved to fall back on
@@ -1813,7 +1909,10 @@ class VodTests(ControllerTestCase):
         self.assertEqual(self.catalog.links[0][2:], ("movies", False))
         self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
         url, kwargs = self.session.plays[0]
-        self.assertEqual(kwargs, {"kind": PlayKind.VOD_FILE, "start_ms": 125_000})
+        self.assertEqual(
+            kwargs,
+            {"kind": PlayKind.VOD_FILE, "start_ms": 125_000, "user_agent": STB_USER_AGENT},
+        )
         self.assertEqual(self.toast.messages(), [("Resumed at 2:05", "info")])
         self.assertEqual(self.watch.plays, [("Home", self.MOVIE, "movie", url, None)])
         self.assertEqual(self.transport.named("show_vod"), [("Heat", "")])
@@ -1823,6 +1922,75 @@ class VodTests(ControllerTestCase):
         self.session.ended.emit()
         self.assertEqual(self.toast.messages()[-1], ("Finished", "info"))
         self.assertEqual(self.watch.flushes, 1)
+
+    def test_a_new_quality_opens_the_film_again_where_it_is(self):  # 2.8: the ⚙ menu
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.session.now_ms = 600_000
+        chosen = ms.Quality(source="uhd")
+        self.controller.change_quality(chosen)
+        self.assertEqual(len(self.catalog.links), 2)
+        self.assertIs(self.catalog.qualities[-1], chosen)
+        self.catalog.linkReady.emit(2, "http://vod/heat-uhd.mkv")
+        url, kwargs = self.session.plays[-1]
+        self.assertEqual((url, kwargs["start_ms"]), ("http://vod/heat-uhd.mkv", 600_000))
+        self.assertNotIn(("Resumed at 10:00", "info"), self.toast.messages())
+
+    def test_after_a_quality_change_the_film_resumes_where_it_was_saved(self):  # review I2
+        # The quality change's start is asked once: a later reopen (a self-update that could
+        # not launch) goes to the watch state's position, as for any film.
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.session.now_ms = 300_000
+        self.controller.change_quality(ms.Quality(source="uhd"))
+        self.catalog.linkReady.emit(2, "http://vod/heat-uhd.mkv")
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 300_000)
+        self.watch.resume["Home:movie:m7"] = 900_000  # where it was saved since
+        self.controller.stop_live()
+        self.controller.resume_stopped()
+        self.catalog.linkReady.emit(3, "http://vod/heat-uhd.mkv")
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 900_000)
+
+    def test_a_conversion_goes_on_for_that_servers_next_titles_until_qitv_closes(self):
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        converted = ms.Quality(height=720, bitrate=4_000_000)
+        self.controller.change_quality(converted)
+        self.catalog.linkReady.emit(2, "http://vod/heat.m3u8")
+        self.controller.play_vod({"id": "m8", "name": "Ronin", "cmd": "x"}, "movie", play_context())
+        self.assertIs(self.catalog.qualities[-1], converted)
+        self.catalog.linkReady.emit(3, "http://vod/ronin.m3u8")
+        self.controller.change_quality(ms.Quality(source="hd"))  # a version: back as it is
+        self.catalog.linkReady.emit(4, "http://vod/ronin.mkv")
+        self.controller.play_vod({"id": "m9", "name": "Tron", "cmd": "y"}, "movie", play_context())
+        self.assertIsNone(self.catalog.qualities[-1])
+
+    def test_the_quality_button_shows_for_a_title_its_server_offers_choices_for(self):
+        self.catalog.menus["m7"] = {"versions": [{"id": "hd"}], "quality": ms.Quality("hd")}
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.assertEqual(self.transport.quality_states[-1], True)
+        self.controller.tune(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.catalog.linkReady.emit(2, "http://x/1.ts")
+        self.assertEqual(self.transport.quality_states[-1], False)
+
+    def test_live_tv_has_no_quality_to_change(self):
+        self.controller.tune(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.catalog.linkReady.emit(1, "http://x/1.ts")
+        links = len(self.catalog.links)
+        self.controller.change_quality(ms.Quality(height=720, bitrate=4_000_000))
+        self.assertEqual(len(self.catalog.links), links)
+
+    def test_an_stb_portals_film_streams_as_its_box(self):  # 2.8
+        self.play_movie()  # the fake catalog is an STB portal's
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.assertEqual(self.session.plays[0][1]["user_agent"], STB_USER_AGENT)
+
+    def test_another_providers_film_streams_as_vlc(self):
+        self.catalog.ptype = "XTREAM"
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.assertIsNone(self.session.plays[0][1].get("user_agent"))  # VLC's own
 
     def test_episode_requests_a_series_link(self):
         episode = {"id": "s", "cmd": "x", "series": 2}
@@ -2871,6 +3039,137 @@ class BackNoticeTests(PipelineCase):
         self.assertFalse(self.notice.isVisible())
 
 
+class LiveQualityTests(PipelineCase):
+    """2.8, the live ⚙: a channel whose HLS master names several picture sizes offers them; a
+    size tunes the channel again with that cap (its buffer kept: the tuner parks it and takes
+    it back) and plays on from where the user was."""
+
+    STATE = {
+        "start": 0.0,
+        "end": 3600.0,
+        "position": 3000.0,
+        "live_edge": 3600.0,
+        "lag": 600.0,
+        "mode": "shifted",
+        "rate": 1.0,
+        "paused": False,
+        "ended": False,
+        "target": 2.5,
+        "heights": [1080, 720, 360],
+        "height": 1080,
+        "max_height": 0,
+    }
+
+    def test_several_sizes_show_the_quality_button(self):
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE, heights=[1080]))
+        self.assertFalse(any(self.transport.quality_states))  # one size: nothing to choose
+        self.assertIsNone(self.controller.live_menu())
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.assertEqual(self.transport.quality_states[-1], True)
+        self.assertEqual(
+            self.controller.live_menu(),
+            {"heights": [1080, 720, 360], "height": 1080, "max_height": 0},
+        )
+        self.start_channel(1)  # another channel: its own sizes, once known
+        self.assertEqual(self.transport.quality_states[-1], False)
+        self.assertIsNone(self.controller.live_menu())
+
+    def test_a_size_tunes_the_channel_again_and_goes_on_from_where_it_was(self):
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.controller.change_live_quality(720)
+        self.ready("http://stream/1")  # its link, as a tune asks for it
+        self.assertEqual(self.live.calls[-1], ("stop",))  # parked (its buffer is kept)
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: self.starts()[-1][1].get("max_height") == 720))
+        self.assertEqual(self.transport.quality_states[-1], True)  # its sizes stay known
+        self.live.backOffered.emit(3000.0, NOW.timestamp())  # where the user was
+        self.assertEqual(self.live.calls[-1], ("go_back_to", 3000.0))  # no Resume pill
+        self.assertIsNone(self.controller.back_label())
+
+    def test_a_later_tune_of_the_channel_asks_no_size_and_offers_where_it_was(self):
+        # review I2: the size choice is asked once; the channel keeps its cap itself. A later
+        # tune of it (here a self-update that could not launch) is any tune: live first, and
+        # where the user was is offered (the Resume pill), not played at once.
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.controller.change_live_quality(720)
+        self.ready("http://stream/1")
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: self.starts()[-1][1].get("max_height") == 720))
+        self.live.play_pipeline()
+        self.controller.stop_live()
+        self.live.released.emit()
+        count = len(self.starts())
+        self.controller.resume_stopped()
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(lambda: len(self.starts()) == count + 1))
+        self.assertNotIn("max_height", self.starts()[-1][1])
+        self.live.backOffered.emit(3000.0, NOW.timestamp())
+        self.assertNotIn(("go_back_to", 3000.0), self.live.calls)
+        self.assertIsNotNone(self.controller.back_label())
+
+    def test_a_size_chosen_counts_at_once_so_auto_undoes_it_while_it_opens(self):  # M4
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.controller.change_live_quality(720)
+        self.ready("http://stream/1")
+        self.assertEqual(self.controller.live_menu()["max_height"], 720)  # ticked at once
+        links = len(self.catalog.links)
+        self.controller.change_live_quality(0)  # changed their mind before 720p came
+        self.assertEqual(len(self.catalog.links), links + 1)
+
+    def test_a_paused_viewer_stays_paused_in_the_new_size(self):  # M5
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.controller.change_live_quality(720)
+        self.ready("http://stream/1")
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: self.starts()[-1][1].get("max_height") == 720))
+        self.live.paused_back = True  # where it was left, it was paused
+        self.live.backOffered.emit(3000.0, NOW.timestamp())
+        self.assertEqual(self.live.calls[-2:], [("go_back_to", 3000.0), ("toggle_pause",)])
+
+    def test_a_channel_played_directly_offers_the_sizes_it_had(self):  # review M11
+        # No helper state names them in direct play: the sizes the channel kept do.
+        self.start_channel(0)
+        self.live.key = self.controller._live_controls.catchup.key(self.controller._current)
+        self.live.known = {"heights": [1080, 720], "height": 0, "max_height": 720}
+        self.live.play_direct()
+        self.assertEqual(self.transport.quality_states[-1], True)
+        self.assertEqual(self.controller.live_menu()["heights"], [1080, 720])
+        self.controller.change_live_quality(0)  # Auto
+        self.ready("http://stream/1")
+        self.assertEqual(self.live.calls[-1], ("stop",))
+
+    def test_auto_tunes_again_without_a_cap_and_the_same_size_changes_nothing(self):
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE, max_height=720, height=720))
+        links = len(self.catalog.links)
+        self.controller.change_live_quality(720)
+        self.assertEqual(len(self.catalog.links), links)
+        self.controller.change_live_quality(0)
+        self.ready("http://stream/1")
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: self.starts()[-1][1].get("max_height") == 0))
+
+    def test_a_tune_of_the_channel_otherwise_keeps_its_cap_as_kept(self):
+        self.start_pipeline(0)
+        self.assertNotIn("max_height", self.starts()[-1][1])  # the session's own (remembered)
+
+    def test_while_the_channel_records_its_size_stays(self):
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.live.recorded_since = 100.0
+        links = len(self.catalog.links)
+        self.controller.change_live_quality(720)
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertEqual(
+            self.toast.messages()[-1], ("Stop the recording to change the picture size", "info")
+        )
+
+
 class PipelineTuneTests(PipelineCase):
     def test_a_tune_takes_a_budget_slot_and_starts_the_live_session_on_grant(self):
         self.play(0)
@@ -2882,10 +3181,10 @@ class PipelineTuneTests(PipelineCase):
         self.assertEqual(
             kwargs,
             {
-                "headers": {"User-Agent": DEFAULT_USER_AGENT},
+                "headers": {"User-Agent": STB_USER_AGENT},  # an STB portal's box's (2.8)
                 "verify_ssl": True,
                 "latency": "low",
-                "user_agent": DEFAULT_USER_AGENT,
+                "user_agent": STB_USER_AGENT,
                 "disk": False,
                 "max_bytes": 256 * MIB,  # without consent, the memory per stream: 256 MiB
                 "channel": channel_key("Home", CHANNELS[0]),  # what it taught is kept (2.0.2)
@@ -2912,6 +3211,19 @@ class PipelineTuneTests(PipelineCase):
         self.assertNotIn("referrer", kwargs)
         self.assertFalse(kwargs["verify_ssl"])
         self.assertEqual((kwargs["disk"], kwargs["max_bytes"]), (True, 4096 * MIB))
+
+    def test_an_stb_portals_channel_streams_as_its_box(self):  # 2.8: a box's own agent
+        self.play(0)  # the fake catalog is an STB portal's
+        self.assertTrue(wait_until(lambda: self.starts()))
+        kwargs = self.starts()[0][1]
+        self.assertEqual(kwargs["headers"], {"User-Agent": STB_USER_AGENT})
+        self.assertEqual(kwargs["user_agent"], STB_USER_AGENT)
+
+    def test_another_providers_channel_streams_as_vlc(self):
+        self.catalog.ptype = "XTREAM"
+        self.play(0)
+        self.assertTrue(wait_until(lambda: self.starts()))
+        self.assertEqual(self.starts()[0][1]["user_agent"], DEFAULT_USER_AGENT)
 
     def test_a_second_tune_stops_the_first_and_starts_only_after_released(self):
         self.start_pipeline(0)
@@ -3579,6 +3891,13 @@ class ReconnectTests(PipelineCase):
         self.end_and_reopen(plays)
         self.assertIs(self.session.plays[-1][1]["software"], True)
 
+    def test_a_reopen_keeps_the_size_cap_the_stream_had(self):  # 2.8, the live ⚙
+        plays = self.fall_back()
+        self.assertNotIn("max_height", self.session.plays[-1][1])
+        self.session.cap = 720  # the channel's cap, as LiveSession opened it directly
+        self.end_and_reopen(plays)
+        self.assertEqual(self.session.plays[-1][1]["max_height"], 720)
+
     def test_each_tune_may_reconnect_twice(self):
         plays = self.fall_back(0)
         self.end_and_reopen(plays)
@@ -3653,6 +3972,23 @@ class DirectReconnectTests(ControllerTestCase):
         QTest.qWait(200)
         self.assertEqual(len(self.session.plays), 1)
         self.assertNotIn(("Reconnecting…", "info"), self.toast.messages())
+
+
+class ExternalAgentTests(ControllerTestCase):  # 2.8 review M7
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+
+    def test_an_external_player_asks_an_stb_stream_as_the_box_does(self):
+        self.config.play_in_vlc = True
+        self.play(0)  # the fake catalog is an STB portal's
+        self.assertEqual(self.external.http[-1], {"user_agent": STB_USER_AGENT})
+
+    def test_another_providers_stream_goes_as_before(self):
+        self.config.play_in_mpv = True
+        self.catalog.ptype = "XTREAM"
+        self.play(0)
+        self.assertEqual(self.external.http[-1], {})
 
 
 class ExternalZapTests(ControllerTestCase):
@@ -4094,6 +4430,47 @@ class ContextMenuTests(ControllerTestCase):
         self.choose(menu, "Add to favorites")
         self.assertEqual(self.config.favorites, ["One"])
         self.assertEqual(self.texts(self.menu_for(self.channels[0]))[0], "Remove from favorites")
+
+    def test_with_recordings_a_channel_can_be_recorded_at_a_time(self):  # 2.8 (owner)
+        asked = []
+        self.controller.record_at = lambda channel: asked.append(channel["name"])
+        menu = self.menu_for(self.channels[0])
+        self.assertIn("Record at a time…", self.texts(menu))
+        self.choose(menu, "Record at a time…")
+        self.assertEqual(asked, ["One"])
+
+    def guarded(self):
+        from services.parental import Parental
+
+        class Kept:
+            parental = None
+
+            def save_config(self):
+                pass
+
+        guard = Parental(Kept())
+        guard.set_pin("1234")
+        self.controller.parental = guard
+        return guard
+
+    def test_with_a_pin_a_channel_and_a_group_can_be_hidden(self):
+        guard = self.guarded()
+        menu = self.menu_for(self.channels[0])
+        self.assertIn("Hide (parental controls)", self.texts(menu))
+        self.choose(menu, "Hide (parental controls)")
+        self.assertTrue(guard.protects("live", self.channels[0].payload))
+        group = self.nav.path[-1]
+        group_menu = self.menu_for(group)
+        self.assertEqual(self.texts(group_menu), ["Hide (parental controls)"])
+        self.choose(group_menu, "Hide (parental controls)")
+        self.assertEqual(len(guard.hidden()), 2)
+
+    def test_what_parental_controls_protect_never_enters_the_history(self):
+        guard = self.guarded()
+        guard.hide_item("live", self.channels[0].payload)
+        plays = len(self.watch.plays)
+        self.play(0)
+        self.assertEqual(len(self.watch.plays), plays)
 
     def test_copy_stream_link_sets_the_clipboard_once_the_link_is_ready(self):
         self.choose(self.menu_for(self.channels[0]), "Copy stream link")
@@ -4830,6 +5207,35 @@ class LibraryTests(AutoplayCase):
         self.assertEqual(budget.holders("Home"), [])  # no provider stream: a PiP may use it
         self.play(1)  # the next channel takes it again
         self.assertEqual(budget.holders("Home"), ["main"])
+
+    def recording_title(self):
+        return {
+            "id": "recording:News 2026-10-19 21.30.ts",
+            "name": "News",
+            "path": "/rec/News 2026-10-19 21.30.ts",
+            "_recording": True,
+        }
+
+    def test_a_recording_plays_from_where_it_stopped_and_keeps_its_place(self):
+        self.play(0)
+        plays = len(self.watch.plays)
+        item = self.recording_title()
+        self.watch.resume[item["id"]] = 90_000
+        self.controller.play_recording(item)
+        url, kwargs = self.session.plays[-1]
+        self.assertEqual(url, Path(item["path"]).absolute().as_uri())
+        self.assertEqual(kwargs["kind"], PlayKind.VOD_FILE)  # a local .ts seeks like a film
+        self.assertEqual(kwargs["start_ms"], 90_000)
+        self.assertEqual(len(self.watch.plays), plays)  # in no provider's history
+        self.assertEqual(self.transport.named("show_vod")[-1], ("News", ""))
+        self.session.positionChanged.emit(120_000, 3_600_000)
+        self.assertEqual(self.watch.positions[-1], (item["id"], 120_000, 3_600_000))
+
+    def test_a_recording_can_start_over(self):
+        item = self.recording_title()
+        self.watch.resume[item["id"]] = 90_000
+        self.controller.play_recording(item, start_over=True)
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 0)
 
     def test_overlay_open_names_what_esc_would_close_first(self):
         self.controller.play_vod(movie(1), "movie", play_context())

@@ -394,6 +394,47 @@ class ParkResumeTests(unittest.TestCase):
         engine.open_session(URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB)
         self.assertEqual(len(commands.get_nowait()), 7)  # without it, as before
 
+    def test_a_size_cap_reaches_the_helper_on_an_open_and_a_resume(self):
+        # 2.8, the live ⚙: the user's cap for an HLS master's variants.
+        engine, commands = self.engine()
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB, max_height=720
+        )
+        self.assertEqual(commands.get_nowait()[7], {"max_height": 720})
+        engine.resume_session(sid, URL_FOR_RING, headers={}, verify_ssl=True, max_height=720)
+        self.assertEqual(commands.get_nowait()[5:], (6.0, {"max_height": 720}))
+        engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB, max_height=0
+        )
+        self.assertEqual(len(commands.get_nowait()), 7)  # no cap: as before
+
+    def test_a_resume_that_joins_says_so(self):  # 2.8 review I1: a rewound viewer's
+        engine, commands = self.engine()
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB
+        )
+        commands.get_nowait()
+        engine.resume_session(sid, URL_FOR_RING, headers={}, verify_ssl=True, join=True)
+        self.assertEqual(commands.get_nowait()[5:], (6.0, {"join": True}))
+
+    def test_it_says_which_files_its_recordings_write(self):  # 2.8 final review 8
+        # The Library keeps a file being written from deletion; the phone reads one on as it
+        # grows. Read from other threads: a set that is replaced, never changed.
+        engine, _ = self.engine()
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB
+        )
+        self.assertEqual(engine.writing, frozenset())
+        rid = engine.start_recording(sid, "/rec/a.ts", 0, max_s=60.0, min_free=0)
+        before = engine.writing
+        self.assertEqual(before, frozenset({"/rec/a.ts"}))
+        engine._on_message(("recorded", sid, rid, "stopped", "/rec/a.ts", 1000))
+        self.assertEqual(engine.writing, frozenset())
+        self.assertEqual(before, frozenset({"/rec/a.ts"}))  # what a reader had stays whole
+        rid = engine.start_recording(sid, "/rec/b.ts", 0, max_s=60.0, min_free=0)
+        engine._lose_recordings()  # the helper died
+        self.assertEqual(engine.writing, frozenset())
+
     def test_parked_and_resumed_keep_the_view(self):
         engine, _ = self.engine()
         engine._sessions["s"] = engine_module._View()
@@ -442,6 +483,64 @@ class ParkResumeTests(unittest.TestCase):
             record.command,
             ("open", "s1", "http://other.test/1.ts", {"A": "b"}, False, ring, 4.0, start),
         )
+
+    def test_a_resumed_buffers_disk_failure_keeps_its_folder_for_a_new_helper(self):
+        # 2.8 (review of 2.6): the helper parks a buffer with kept history with its disk ring
+        # as it stands; rewritten to memory, a helper's death left it orphaned ("unkept").
+        import queue
+
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-engine-test-")
+        self.addCleanup(temporary.cleanup)
+        commands: queue.Queue = queue.Queue()
+        supervisor = engine_module._Supervisor(Path(temporary.name), commands)
+        ring = {"kind": "disk", "dir": engine_module._session_dir(), "max_bytes": 64 * MIB}
+        (Path(temporary.name) / ring["dir"]).mkdir()
+        command = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        record = engine_module._Record(command, sent=True, over=True, parked=True)
+        supervisor._records["s1"] = record
+        supervisor._relay = lambda message: None
+        commands.put(("resume", "s1", URL_FOR_RING, {}, True, 6.0))
+        supervisor._send_next(SimpleNamespace(send=lambda command: None))
+        supervisor._receive(("error", "s1", "disk", "The disk buffer failed."))
+        supervisor._receive(("parked", "s1"))
+        self.assertEqual(record.command[5], ring)
+        record.sent = False  # the helper died
+        sent = []
+        supervisor._send_open(SimpleNamespace(send=sent.append), record)
+        self.assertEqual(sent, [("adopt", "s1", ring["dir"], 64 * MIB)])
+
+    def test_a_fresh_sessions_disk_failure_goes_on_in_memory(self):
+        import queue
+
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        ring = {"kind": "disk", "dir": engine_module._session_dir(), "max_bytes": 64 * MIB}
+        command = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        record = supervisor._records["s1"] = engine_module._Record(command, sent=True)
+        supervisor._relay = lambda message: None
+        supervisor._receive(("error", "s1", "disk", "The disk buffer failed."))
+        self.assertEqual(record.command[5]["kind"], "ram")
+
+    def test_a_new_disk_amount_reaches_the_helper_and_a_reopen(self):
+        # 2.8: it applies at once, not only at the next disk open.
+        engine, commands = self.engine()
+        engine.set_disk_amount(512 * MIB)
+        self.assertEqual(commands.get_nowait(), ("disk_amount", 512 * MIB))
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), commands)
+        disk = {"kind": "disk", "dir": engine_module._session_dir(), "max_bytes": 1024 * MIB}
+        ram = {"kind": "ram", "max_bytes": 64 * MIB}
+        for sid, ring in (("d", disk), ("r", ram)):
+            command = ("open", sid, URL_FOR_RING, {}, True, ring, 6.0)
+            supervisor._records[sid] = engine_module._Record(command, sent=True)
+        sent = []
+        commands.put(("disk_amount", 512 * MIB))
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent, [])  # no helper is up: its next disk open brings it
+        supervisor._up = True
+        commands.put(("disk_amount", 512 * MIB))
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent, [("disk_amount", 512 * MIB)])
+        self.assertEqual(supervisor._records["d"].command[5]["max_bytes"], 512 * MIB)
+        self.assertEqual(supervisor._records["r"].command[5], ram)
 
     def test_a_resume_without_a_helper_fails(self):
         import queue
@@ -578,6 +677,45 @@ class AdoptKeptTests(unittest.TestCase):
         self.assertEqual(relayed, [])
         self.assertTrue((self.root / kept / "segment-0.ts").exists())
 
+    def test_the_scan_never_takes_a_folder_another_qitv_is_making(self):
+        # 2.8 (review of 2.6): its maker holds the manager lock until the folder is locked
+        # and indexed; the scan holds it too, so it never sweeps a folder half made.
+        from test_ring import hold_session_lock
+
+        name = engine_module._session_dir()
+        (self.root / name).mkdir()
+        (self.root / name / "owner").write_text("QiTV time-shift buffer v2\n", encoding="ascii")
+        context = multiprocessing.get_context("spawn")
+        ready, release = context.Event(), context.Event()
+        manager = str(self.root / ".qitv-timeshift-manager.lock")
+        holder = context.Process(target=hold_session_lock, args=(manager, ready, release))
+        holder.start()
+        self.addCleanup(holder.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(ready.wait(20))
+        supervisor, relayed = self.supervisor()
+        with patch.object(engine_module, "_MANAGER_WAIT_S", 0.2, create=True):
+            supervisor._adopt_kept(64 * MIB)
+            supervisor._drop_kept()
+        self.assertTrue((self.root / name / "owner").exists())
+        self.assertEqual(relayed, [])
+        release.set()
+        holder.join(10)
+        supervisor._drop_kept()  # once it is free, as before
+        self.assertFalse((self.root / name).exists())
+
+    def test_kept_buffers_after_time_shift_went_off(self):
+        # 2.8 (review of 2.6): the supervisor without a helper failed on them; the disk
+        # buffer turned off still sweeps what no helper holds (it needs none).
+        kept = self.folder()
+        supervisor, relayed = self.supervisor()
+        supervisor._dead = True
+        for command in (("adopt_kept", 64 * MIB), ("drop_kept",), ("disk_amount", MIB)):
+            supervisor._commands.put(command)
+            supervisor._serve_without_helper()
+        self.assertEqual(relayed, [])
+        self.assertFalse((self.root / kept).exists())
+
     def test_disk_buffer_off_sweeps_every_kept_folder(self):
         kept = self.folder()
         supervisor, _ = self.supervisor()
@@ -616,6 +754,18 @@ class AdoptKeptTests(unittest.TestCase):
         engine._on_message(("unkept", "z"))
         self.assertEqual(engine.spans("z"), [])
         self.assertFalse(engine.holds("z"))
+
+    def test_a_buffer_that_cannot_be_taken_back_is_told_lost(self):
+        # 2.8 (review of 2.6): the kept buffers' registry lets it go ("unkept").
+        engine = LiveEngine.__new__(LiveEngine)
+        LiveEngine.__init__(engine, tempfile.gettempdir())
+        lost, failed = [], []
+        engine.keptLost.connect(lost.append)
+        engine.sessionFailed.connect(lambda sid, kind, message: failed.append((sid, kind)))
+        engine._on_message(("adopting", "z", {"channel": "k1"}, {}))
+        engine._on_message(("unkept", "z"))
+        self.assertEqual(lost, ["z"])
+        self.assertEqual(failed, [("z", "crashed")])
 
     def test_keep_and_where_before_the_helper_is_up_follow_its_open(self):
         # Review B I1: a startup tune opens before the helper's hello.

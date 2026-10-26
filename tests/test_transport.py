@@ -614,6 +614,51 @@ class OnScreenKeysTests(unittest.TestCase):
         lefts = [t.button_rect(n).left() for n in ("previous", "guide", "search", "volume")]
         self.assertEqual(lefts, sorted(lefts))
 
+    def test_a_title_with_choices_has_the_quality_button(self):  # 2.8: the ⚙ menu
+        t = self.make()
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        self.assertNotIn("quality", t._layout())
+        t.set_quality_available(True)
+        rect = t.button_rect("quality")
+        self.assert_big_enough(rect, "quality")
+        self.assertEqual(t.tooltip_at(rect.center()), "Quality")
+        self.assertLess(rect.right(), t.button_rect("subtitles").left())
+        self.assertGreater(rect.left(), t.button_rect("search").right())
+        self.assertTrue(t.hole_claims().contains(rect.center().toPoint()))
+        spy = QSignalSpy(t.qualityRequested)
+        self.click(t, rect.center())
+        self.assertEqual(spy.count(), 1)
+        t.set_quality_available(False)
+        self.assertNotIn("quality", t._layout())
+
+    def test_a_channel_with_several_sizes_has_the_quality_button(self):  # 2.8, the live ⚙
+        t = self.make()
+        t.show_live("One", "")
+        self.assertNotIn("quality", t._layout())
+        t.set_quality_available(True)
+        rect = t.button_rect("quality")
+        self.assert_big_enough(rect, "quality")
+        self.assertGreater(rect.left(), t.button_rect("search").right())  # ⌕ ⚙ then the sound
+        self.assertLess(rect.right(), t.button_rect("volume").left())
+        spy = QSignalSpy(t.qualityRequested)
+        self.click(t, rect.center())
+        self.assertEqual(spy.count(), 1)
+
+    def test_the_quality_button_never_crowds_out_the_speed(self):
+        t = Transport(idle_ms=3000)
+        self.addCleanup(t.close)
+        t.show()
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        t.set_quality_available(True)
+        for width in range(380, 1300, 20):
+            with self.subTest(width=width):
+                t.setGeometry(0, 0, width, round(width * 9 / 16))
+                rects = t._layout()
+                if "quality" in rects:
+                    self.assertIn("slower", rects)  # −, the speed and + kept their room
+
     def test_a_movie_has_search_but_not_the_channel_buttons(self):
         t = self.make()
         t.show_vod("Film", "")

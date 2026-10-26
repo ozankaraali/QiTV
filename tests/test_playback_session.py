@@ -1259,6 +1259,85 @@ def _on(system):
     return mock.patch("services.playback.platform.system", return_value=system)
 
 
+class _CastPlayer(_FakePlayer):
+    def set_renderer(self, renderer):
+        self._call("set_renderer", renderer)
+        return 0
+
+
+class CastTests(unittest.TestCase):
+    """Casting (2.8): libVLC sends what plays to a renderer given before the play."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.player = _CastPlayer()
+        self.runner = _HeldRunner(self.player)
+        self.session = PlaybackSession(
+            _FakeInstance(self.player), runner=self.runner, poll_ms=60_000
+        )
+        self.addCleanup(self.session.release)
+        held = mock.patch("services.casting.hold", side_effect=lambda handle: handle)
+        self.hold = held.start()
+        self.addCleanup(held.stop)
+        released = mock.patch("services.casting.release")
+        self.release = released.start()
+        self.addCleanup(released.stop)
+
+    def calls(self, name):
+        return [call for call in self.player.calls if call[0] == name]
+
+    def test_the_session_holds_the_device_it_casts_to(self):  # 2.8 review I9
+        # A device found again has a new item and its old one is released: the session's own
+        # hold keeps the one it casts to valid until it casts elsewhere or closes.
+        self.session.cast_to("tv")
+        self.hold.assert_called_once_with("tv")
+        self.session.cast_to("den")
+        self.release.assert_called_once_with("tv")
+        self.session.cast_to(None)
+        self.assertEqual(self.release.call_args.args, ("den",))
+        self.session.cast_to("tv")
+        self.session.release()
+        self.assertEqual(self.release.call_args.args, ("tv",))
+
+    def test_the_renderer_is_set_before_each_play_while_casting(self):
+        self.session.cast_to("tv")
+        self.session.play(A, kind=PlayKind.VOD_FILE)
+        names = [call[0] for call in self.player.calls if call[0] in ("set_renderer", "play")]
+        self.assertEqual(names, ["set_renderer", "play"])
+        self.assertEqual(self.calls("set_renderer")[-1], ("set_renderer", "tv"))
+        self.assertTrue(self.session.casting())
+
+    def test_stopping_the_cast_gives_the_picture_back_on_the_next_play(self):
+        self.session.cast_to("tv")
+        self.session.play(A, kind=PlayKind.VOD_FILE)
+        self.runner.jobs.clear()
+        self.player.joining = False
+        self.session.cast_to(None)
+        self.assertFalse(self.session.casting())
+        self.session.play(B, kind=PlayKind.VOD_FILE)
+        if self.runner.jobs:  # the old input ends first
+            self.runner.finish()
+        self.assertEqual(self.calls("set_renderer")[-1], ("set_renderer", None))
+
+    def test_never_casting_never_touches_the_renderer(self):
+        self.session.play(A, kind=PlayKind.VOD_FILE)
+        self.assertEqual(self.calls("set_renderer"), [])
+
+    def test_a_reopen_plays_the_same_media_again_from_a_point(self):
+        self.session.play(A, kind=PlayKind.VOD_FILE, user_agent="QiTV-test")
+        self.runner.jobs.clear()
+        self.player.joining = False
+        self.session.reopen(42_000)
+        if self.runner.jobs:
+            self.runner.finish()
+        opened = [call[1] for call in self.player.calls if call[0] == "set_media" and call[1]]
+        self.assertEqual(opened, [A, A])
+        self.assertEqual(self.session._start_ms, 42_000)
+
+
 class DefaultArgsTests(unittest.TestCase):
     def test_quiet_unless_a_log_file_is_named(self):
         with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on("Darwin"):

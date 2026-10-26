@@ -113,6 +113,10 @@ class GuideController(QObject):
             self._digit(payload)
         elif action is Action.NAV_ACTIVATE:
             guide.activate()
+        elif action is Action.RECORD:
+            # 2.8: the footer's programme recorded at its time (or cancelled); with none to
+            # record, R does what it does on the player.
+            return bool(getattr(guide, "record_key", lambda: False)())
         elif action is Action.ESCAPE:
             guide.escape()
         elif action is Action.GUIDE:

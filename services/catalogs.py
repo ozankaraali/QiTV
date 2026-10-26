@@ -14,7 +14,7 @@ from datetime import datetime, tzinfo
 import gc
 import itertools
 import logging
-from typing import Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional, cast
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -78,6 +78,7 @@ class Catalogs(QObject):
         self._in_use = in_use
         self._ids = _LinkIds()
         self._by_name: dict[str, CatalogService] = {}
+        self._group_titles: dict[tuple[str, str], tuple[int, dict[str, str]]] = {}
         self._specs: dict[str, dict] = {}  # the provider each catalog was built for
         self._started: set[str] = set()  # ensure() has begun this catalog's setup
         self._ready: set[str] = set()
@@ -89,6 +90,12 @@ class Catalogs(QObject):
         # The providers whose guides are in use (None: nobody said yet, every guide loads).
         self._guides: Optional[set[str]] = None
         self._closed = False
+        # 2.8: whether a screen shows 4K (the window's check; a media server's 4K version
+        # plays only then, by default).
+        self.screen_4k: Callable[[], bool] = lambda: False
+        # 2.8: the window's parental controls (services.parental.Parental): the browsed
+        # catalogs leave out what they hide while locked. None: nothing is hidden.
+        self.parental: Optional[Any] = None
 
     # --- providers -------------------------------------------------------------------
     def names(self) -> list[str]:
@@ -97,7 +104,7 @@ class Catalogs(QObject):
     def provider(self, name: str) -> dict:
         for provider in self.registry.providers:
             if provider.get("name") == name:
-                return provider
+                return cast(dict, provider)
         raise KeyError(name)
 
     def catalog(self, name: str) -> CatalogService:
@@ -120,6 +127,7 @@ class Catalogs(QObject):
             link_ids=self._ids,
         )
         catalog.epg_enabled = self._guides is None or name in self._guides
+        catalog.screen_4k = lambda: self.screen_4k()  # 2.8: asked at each media server play
         self._connect(name, catalog)
         self._by_name[name] = catalog
         self._specs[name] = spec
@@ -129,6 +137,19 @@ class Catalogs(QObject):
     def created(self) -> list[str]:
         """The providers whose catalogs exist now."""
         return list(self._by_name)
+
+    def group_title(self, section: str, provider: str, group_id: str) -> str:
+        """A group's name as its provider lists it ("" while its list isn't loaded; 2.8: the
+        parental controls' adult rule reads it). Creates no catalog."""
+        catalog = self._by_name.get(provider)
+        if catalog is None:
+            return ""
+        version = catalog.content_version()
+        cached = self._group_titles.get((provider, section))
+        if cached is None or cached[0] != version:
+            titles = {str(g.id): str(g.title) for g in catalog.groups(section) if not g.header}
+            cached = self._group_titles[(provider, section)] = (version, titles)
+        return cached[1].get(str(group_id), "")
 
     def _connect(self, name: str, catalog: CatalogService) -> None:
         catalog.providerReady.connect(lambda *_: self._on_ready(name))
@@ -249,9 +270,16 @@ class Catalogs(QObject):
             logger.debug("An unstamped item goes to the selected provider")
         return name
 
-    def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
+    def request_link(
+        self, item: dict, *, section: str, is_episode: bool = False, quality: Any = None
+    ) -> int:
+        """A playable URL of the item's provider; `quality`: the quality menu's (2.8)."""
+        extra = {"quality": quality} if quality is not None else {}
         return self._link(
-            item, lambda catalog: catalog.request_link(item, section=section, is_episode=is_episode)
+            item,
+            lambda catalog: catalog.request_link(
+                item, section=section, is_episode=is_episode, **extra
+            ),
         )
 
     def request_archive_link(self, item: dict, programme: str) -> int:

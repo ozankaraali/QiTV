@@ -472,6 +472,20 @@ class XtreamItemTests(unittest.TestCase):
         self.assertEqual((item["plot"], item["rating"], item["year"]), ("P", "", "2025"))
         self.assertIsNone(self.item({"name": "No id"}, "itv"))
 
+    def test_when_a_title_was_added_is_kept_for_the_librarys_new_shelf(self):
+        film = {"stream_id": 8, "name": "Film", "added": "1761400000"}
+        self.assertEqual(self.item(film, "vod")["added"], "1761400000")
+        show = {"series_id": 9, "name": "Show", "last_modified": "1761300000"}
+        self.assertEqual(self.item(show, "series")["added"], "1761300000")
+        for stream, kind in (
+            ({"stream_id": 8, "name": "Film"}, "vod"),
+            ({"stream_id": 8, "name": "Film", "added": "0"}, "vod"),
+            ({"stream_id": 8, "name": "Film", "added": "soon"}, "vod"),
+            ({"stream_id": 7, "name": "News", "added": "1761400000"}, "itv"),  # a channel: none
+        ):
+            with self.subTest(stream=stream):
+                self.assertNotIn("added", self.item(stream, kind))
+
     def test_a_titles_tmdb_id_is_kept_for_its_subtitles(self):
         film = {"stream_id": 8, "name": "Film", "tmdb": "4242"}
         self.assertEqual(self.item(film, "vod")["tmdb"], "4242")

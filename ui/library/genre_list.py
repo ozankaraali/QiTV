@@ -4,6 +4,7 @@ from PySide6.QtCore import (
     QAbstractListModel,
     QEvent,
     QModelIndex,
+    QPoint,
     QRectF,
     QSize,
     Qt,
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QW
 
 from services import i18n
 from services.i18n import tr
-from services.library import CONTINUE, MY_LIST, NEW, Genre
+from services.library import CONTINUE, MY_LIST, NEW, RECORDINGS, Genre
 from ui.overlays.channel_rows import ChannelListView
 from ui.overlays.painting import Units, draw_icon, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
@@ -31,7 +32,7 @@ DEFAULT_HOST_WIDTH = 1280
 KindRole = Qt.UserRole + 20
 CountRole = Qt.UserRole + 21
 IdRole = Qt.UserRole + 22
-PINNED_ICONS = {CONTINUE: "clock", NEW: "sparkle", MY_LIST: "star"}
+PINNED_ICONS = {CONTINUE: "clock", NEW: "sparkle", MY_LIST: "star", RECORDINGS: "record"}
 ICON_SCALE = 1.2  # icon box / cap height: the glyphs sit inside a padded unit box
 ICON_GAP_U = 0.7
 HEADER = "header"
@@ -168,6 +169,7 @@ class GenreList(QWidget):
     genreSelected = Signal(str)  # debounced highlight change (preview)
     genreActivated = Signal(str)  # Enter / → / click: move focus to the grid
     filterChanged = Signal(str)
+    genreMenuRequested = Signal(str, QPoint)  # 2.8: a right-click on a genre (global point)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -183,6 +185,8 @@ class GenreList(QWidget):
         self._view.setModel(self._model)
         self._view.setItemDelegate(_GenreDelegate(self._view))
         self._view.rowClicked.connect(self._on_row_clicked)
+        self._view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._view.customContextMenuRequested.connect(self._on_menu_asked)
         self._view.setProperty("columnFocused", False)
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -191,6 +195,13 @@ class GenreList(QWidget):
         if parent is not None:
             parent.installEventFilter(self)
         self._relayout()
+
+    def _on_menu_asked(self, pos: QPoint) -> None:
+        """A right-click on a genre (never a heading): its menu (2.8: parental controls)."""
+        index = self._view.indexAt(pos)
+        if index.isValid() and index.data(KindRole) == GENRE:
+            gid = str(index.data(IdRole))
+            self.genreMenuRequested.emit(gid, self._view.viewport().mapToGlobal(pos))
 
     # ---- public API -------------------------------------------------------------------------
 

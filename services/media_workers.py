@@ -1,0 +1,311 @@
+"""The workers that ask a Jellyfin or Emby server (2.8), run off the GUI thread as the other
+providers' workers are (`services.catalog.WorkerFactory`): a section's titles, a series' seasons
+and episodes, a title's stream, and a sign-in (Settings → Verify).
+
+Each emits plain data (`finished`) or a message to show (`error`), never an address or a token.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any, Callable, Optional
+import uuid
+
+from PySide6.QtCore import QObject, Signal
+
+from services import media_server as ms
+from services.config_manager import get_app_version
+from services.i18n import N_, translate
+
+logger = logging.getLogger(__name__)
+
+# i18n: a Jellyfin or Emby title had no file to play
+NO_VERSION_TEXT = N_("This title has no file to play.")
+# i18n: a Jellyfin or Emby server could not be reached or answered with an error
+SERVER_FAILED = N_("The server could not be reached ({reason}).")
+
+MOVIE_LIBRARIES = ("movies", "mixed", "homevideos", "")
+SERIES_LIBRARIES = ("tvshows", "mixed", "")
+
+
+def client_for(provider: dict, verify: bool) -> ms.MediaServerClient:
+    """The client of a server provider (its kept token and user)."""
+    return ms.MediaServerClient(
+        str(provider.get("url") or ""),
+        str(provider.get("type") or ms.JELLYFIN),
+        device_id=ms.device_id_of(provider),
+        version=get_app_version(),
+        token=str(provider.get("token") or ""),
+        user_id=str(provider.get("user_id") or ""),
+        verify=verify,
+    )
+
+
+def _failure(error: Exception) -> str:
+    if isinstance(error, ms.SignInNeeded):
+        return translate(ms.SIGN_IN_AGAIN)
+    reason = str(error) if isinstance(error, ms.MediaServerError) else type(error).__name__
+    return translate(SERVER_FAILED, reason=reason)
+
+
+class _ServerWorker(QObject):
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, provider: dict, verify: bool, client: Optional[Callable] = None) -> None:
+        super().__init__()
+        self.provider = dict(provider)
+        self.verify = verify
+        self._client = client or client_for
+
+    def run(self) -> None:
+        client = self._client(self.provider, self.verify)
+        try:
+            self.finished.emit(self.work(client))
+        except Exception as e:
+            logger.warning("A media server's request failed: %s", type(e).__name__)
+            self.error.emit(_failure(e))
+        finally:
+            client.close()
+
+    def work(self, client: ms.MediaServerClient) -> Any:
+        raise NotImplementedError
+
+
+class MediaSectionWorker(_ServerWorker):
+    """The films ("vod") or series ("series") of every library that holds them.
+
+    A first load (or one a week after the last whole one, or with a library new since) asks
+    every title and notes when it looked. A later one (2.8: a refresh, a list past its time)
+    is given the saved list's summary (`media_server.saved_summary`) and asks only what
+    changed: per library, the titles saved since the last look, its resume list (where each
+    title started stops now, set in any of the server's apps: review I1) and its count; when
+    titles came or went (the count, or a changed title it did not hold, says so), the
+    library's ids in order, and those it did not hold by their ids. A title in two libraries
+    is the first one's, as in a whole load. A look is dated by the server's clock (this
+    computer's when it tells none). Its answer is a delta that the catalog merges into the
+    saved list (`media_server.merged_payload`), on the GUI thread, where that list lives."""
+
+    def __init__(
+        self,
+        provider: dict,
+        content_type: str,
+        verify: bool,
+        client=None,
+        *,
+        saved: Optional[dict] = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        super().__init__(provider, verify, client)
+        self.content_type = content_type
+        self.saved = saved
+        self._clock = clock
+
+    def work(self, client: ms.MediaServerClient) -> dict:
+        series = self.content_type == "series"
+        wanted = SERIES_LIBRARIES if series else MOVIE_LIBRARIES
+        libraries = [lib for lib in client.libraries() if lib["type"] in wanted]
+        item_type = "Series" if series else "Movie"
+        now = self._clock()
+        looked = client.server_time if client.server_time is not None else now
+        since = ms.server_time(looked - ms.SINCE_MARGIN_S)
+        saved = self.saved
+        if (
+            saved is None
+            or now - saved["full"] > ms.WHOLE_AFTER_S
+            or any(lib["id"] not in saved["members"] for lib in libraries)
+        ):
+            titles = {lib["id"]: client.items(item_type, lib["id"]) for lib in libraries}
+            payload = ms.section_payload(libraries, titles, client.base)
+            payload.update(
+                server_since=since,
+                server_full=now,
+                server_libraries=[lib["id"] for lib in libraries],
+            )
+            return payload
+        changed: dict[str, dict] = {}
+        order: dict[str, list[str]] = {}
+        positions: dict[str, int] = {}
+        for library in libraries:
+            lib_id, known = library["id"], saved["members"][library["id"]]
+            fresh: list[str] = []
+            for raw in client.items(item_type, lib_id, since=saved["since"]):
+                item_id = str(raw.get("Id") or "")
+                if item_id:
+                    if item_id not in changed:  # a title in two libraries is the first's
+                        changed[item_id] = ms.title_item(raw, client.base, lib_id)
+                    fresh.append(item_id)
+            for raw in client.items(item_type, lib_id, resumable=True):
+                item_id = str(raw.get("Id") or "")
+                ticks = int((raw.get("UserData") or {}).get("PlaybackPositionTicks") or 0)
+                if item_id and ticks > 0:
+                    positions.setdefault(item_id, ticks // ms.TICKS_PER_MS)
+            held = set(known)
+            if any(i not in held for i in fresh) or client.count(item_type, lib_id) != len(known):
+                ids = client.item_ids(item_type, lib_id)
+                missing = [i for i in ids if i not in held and i not in changed]
+                for start in range(0, len(missing), ms.IDS_A_REQUEST):
+                    chunk = missing[start : start + ms.IDS_A_REQUEST]
+                    for raw in client.items(item_type, lib_id, ids=chunk):
+                        item_id = str(raw.get("Id") or "")
+                        if item_id and item_id not in changed:
+                            changed[item_id] = ms.title_item(raw, client.base, lib_id)
+                order[lib_id] = ids
+            else:
+                order[lib_id] = list(known)
+        return {
+            "delta": True,
+            "libraries": libraries,
+            "order": order,
+            "changed": changed,
+            "positions": positions,
+            "server_since": since,
+        }
+
+
+class MediaSeriesWorker(_ServerWorker):
+    """A series' seasons, each with its episodes."""
+
+    def __init__(self, provider: dict, series_id: str, verify: bool, client=None) -> None:
+        super().__init__(provider, verify, client)
+        self.series_id = series_id
+
+    def work(self, client: ms.MediaServerClient) -> dict:
+        seasons, episodes = client.seasons_and_episodes(self.series_id)
+        return ms.seasons_payload(seasons, episodes, client.base)
+
+
+class MediaLinkWorker(_ServerWorker):
+    """A title's stream: the version the settings pick (or the quality menu's, 2.8), as its file
+    is, or the server's conversion when the menu chose one. Its answer lists the versions."""
+
+    def __init__(
+        self,
+        provider: dict,
+        item_id: str,
+        verify: bool,
+        *,
+        screen_4k: bool,
+        four_k: str,
+        quality: Optional[ms.Quality] = None,
+        client=None,
+    ) -> None:
+        super().__init__(provider, verify, client)
+        self.item_id = item_id
+        self.screen_4k = screen_4k
+        self.four_k = four_k
+        self.quality = quality or ms.Quality()
+
+    def work(self, client: ms.MediaServerClient) -> dict:
+        sources = client.media_sources(self.item_id)
+        wanted = self.quality
+        source = next((s for s in sources if wanted.source and s.get("Id") == wanted.source), None)
+        if source is None:  # the settings' pick (a version chosen before may be gone)
+            source, why = ms.choose_source(sources, screen_4k=self.screen_4k, setting=self.four_k)
+            if source is None:
+                text = ms.ONLY_4K_TEXT if why == ms.ONLY_4K else NO_VERSION_TEXT
+                raise _Shown(translate(text))
+        session = uuid.uuid4().hex
+        if wanted.converted and not ms.within(source, wanted):
+            link = ms.converted_url(
+                client.base,
+                self.item_id,
+                source,
+                client.token,
+                session,
+                wanted.bitrate,
+                client.device_id,
+                max_height=wanted.height,
+            )
+            # The conversion, of the version it converts (the menu offers those below it).
+            playing = ms.Quality(str(source.get("Id") or ""), wanted.height, wanted.bitrate)
+        else:
+            link = ms.stream_url(client.base, self.item_id, source, client.token, session)
+            playing = ms.Quality(source=str(source.get("Id") or ""))
+        versions = [ms.version_of(s) for s in sources if s.get("Id")]
+        return {"link": link, "versions": versions, "quality": playing}
+
+    def run(self) -> None:
+        client = self._client(self.provider, self.verify)
+        try:
+            self.finished.emit(self.work(client))
+        except _Shown as shown:
+            self.error.emit(str(shown))
+        except Exception as e:
+            logger.warning("A media server's stream failed: %s", type(e).__name__)
+            self.error.emit(_failure(e))
+        finally:
+            client.close()
+
+
+class _Shown(Exception):
+    """A message for the user as it is."""
+
+
+class MediaSignInWorker(QObject):
+    """Settings → Verify: sign in with the password; `finished` gives {token, user_id,
+    device_id, server, version} for the provider (the password is not kept)."""
+
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        url: str,
+        kind: str,
+        username: str,
+        password: str,
+        verify: bool,
+        device_id: str = "",
+        client=None,
+    ) -> None:
+        super().__init__()
+        self.url, self.kind = url, kind
+        self.username, self.password = username, password
+        self.verify = verify
+        self.device_id = device_id or ms.new_device_id()
+        self._client = client
+
+    def run(self) -> None:
+        ok, value = sign_in(
+            self.url,
+            self.kind,
+            self.username,
+            self.password,
+            self.verify,
+            device_id=self.device_id,
+            client=self._client,
+        )
+        if ok:
+            self.finished.emit(value)
+        else:
+            self.error.emit(str(value))
+
+
+def sign_in(
+    url: str,
+    kind: str,
+    username: str,
+    password: str,
+    verify: bool,
+    device_id: str = "",
+    client=None,
+) -> tuple[bool, Any]:
+    """A server's sign-in with the password, on the calling thread (no Qt object: Settings'
+    verification thread calls it): (True, {token, user_id, device_id}) or (False, why)."""
+    device_id = device_id or ms.new_device_id()
+    client = client or ms.MediaServerClient(
+        url, kind, device_id=device_id, version=get_app_version(), verify=verify
+    )
+    try:
+        token, user_id = client.sign_in(username, password)
+        return True, {"token": token, "user_id": user_id, "device_id": device_id}
+    except ms.SignInNeeded:
+        # i18n: Settings → Verify: the server refused the user name or the password
+        return False, translate(N_("The user name or the password is not right."))
+    except Exception as e:
+        logger.info("A media server's sign-in failed: %s", type(e).__name__)
+        return False, _failure(e)
+    finally:
+        client.close()

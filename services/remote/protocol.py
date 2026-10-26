@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+from datetime import date
 import json
 import re
 from typing import Literal, Optional
@@ -165,11 +166,14 @@ def parse_phone_message(obj: object) -> Optional[dict]:
     if not isinstance(obj, dict):
         return None
     t = obj.get("t")
-    if t in ("held", "where", "forget", "totv"):
+    if t in ("held", "where", "forget", "totv", "refresh"):  # 2.8: the Library's Refresh
         return {"t": t}
     if t == "pos":  # how far the phone got in a film or an episode it plays
         ms, length = _int(obj.get("ms")), _int(obj.get("len"))
         if ms is not None and length is not None and 0 <= ms <= MAX_POS and 0 < length <= MAX_POS:
+            play = _int(obj.get("p"))  # the number of the play it reports on (its "play")
+            if play is not None and 0 <= play <= MAX_ASK:
+                return {"t": "pos", "ms": ms, "len": length, "p": play}
             return {"t": "pos", "ms": ms, "len": length}
         return None
     if t == "answer":  # 2.6: the phone's answer to QiTV's question (its number, yes or no)
@@ -181,6 +185,17 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         if _short_id(obj.get("id")) and obj.get("do") in ("back", "stop"):
             return {"t": "rec", "id": obj["id"], "do": obj["do"]}
         return None
+    if t == "cast":  # 2.8: cast to the device of that name ("": back to QiTV's own picture)
+        to = obj.get("to")
+        if isinstance(to, str) and len(to) <= MAX_DEVICE:
+            return {"t": "cast", "to": to}
+        return None
+    if t == "sched":  # 2.8: a timetable row's programme recorded at its time, or cancelled
+        if _short_id(obj.get("id")) and obj.get("do") in ("once", "series", "cancel"):
+            return {"t": "sched", "id": obj["id"], "do": obj["do"]}
+        return None
+    if t == "timer":  # 2.8: a timetable's channel recorded at a time (no guide needed)
+        return _timer(obj)
     if t == "watch":  # what the TV plays, or a channel of the phone's list by its handle
         if "id" not in obj:
             return {"t": "watch"}
@@ -206,11 +221,51 @@ def parse_phone_message(obj: object) -> Optional[dict]:
             return _guide_ask(obj)
         if what == "timetable" and _short_id(obj.get("id")):
             return {"t": "get", "what": "timetable", "id": obj["id"]}
+        if what == "cast":  # 2.8: the devices QiTV can cast to
+            return {"t": "get", "what": "cast"}
     return None
 
 
 MAX_ASK = 2**31 - 1  # an ask's number (see _numbered)
+MAX_DEVICE = 200  # 2.8: a cast device's name, as the TV lists it
 MAX_POS = 2 * 24 * 3600 * 1000  # a title's place or length, in ms: two days at most
+MAX_TIMER_TITLE = 80  # 2.8: a timer's name, as the phone typed it (cut there)
+DAY_MINUTES = 24 * 60
+_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _timer(obj: dict) -> Optional[dict]:
+    """2.8: "Record at a time" (`ui.record_timer_dialog`): a timetable's channel (`id`) from
+    `begin` (minutes after midnight) for `minutes`, on the weekdays `days` (Monday 0), or once
+    on `day` ("YYYY-MM-DD") when `days` is empty."""
+    title, begin, minutes = obj.get("title", ""), _int(obj.get("begin")), _int(obj.get("minutes"))
+    days, day = obj.get("days"), obj.get("day", "")
+    if not _short_id(obj.get("id")) or not isinstance(title, str) or not isinstance(days, list):
+        return None
+    if begin is None or minutes is None or not 0 <= begin < DAY_MINUTES:
+        return None
+    if not 0 < minutes <= DAY_MINUTES or not all(_int(d) is not None and 0 <= d <= 6 for d in days):
+        return None
+    if not days:
+        if not isinstance(day, str) or not _DAY.match(day):
+            return None
+        try:
+            on = date.fromisoformat(day)
+        except ValueError:
+            return None
+        if not 2000 <= on.year <= 2999:  # a clock says no time past these (review 7)
+            return None
+    else:
+        day = ""
+    return {
+        "t": "timer",
+        "id": obj["id"],
+        "title": title[:MAX_TIMER_TITLE],
+        "begin": begin,
+        "minutes": minutes,
+        "days": sorted(set(days)),
+        "day": day,
+    }
 
 
 def _page_and_find(obj: dict) -> Optional[tuple[int, str]]:
@@ -325,11 +380,13 @@ class WatchHere:
 
 @dataclass(frozen=True)
 class Position:
-    """How far the phone got in the film or episode it plays, of how long (ms)."""
+    """How far the phone got in the film or episode it plays, of how long (ms); `play` is the
+    number of the "play" message it reports on (-1: none said)."""
 
     sid: str
     position_ms: int
     length_ms: int
+    play: int = -1
 
 
 @dataclass(frozen=True)
@@ -356,6 +413,45 @@ class RecAct:
     sid: str
     slot: str
     act: str
+
+
+@dataclass(frozen=True)
+class RefreshLists:
+    """2.8: the Library's Refresh: the films and series of the providers it shows load again."""
+
+    sid: str
+
+
+@dataclass(frozen=True)
+class CastTo:
+    """2.8: cast what plays to the device `to` ("": back to QiTV's own picture)."""
+
+    sid: str
+    to: str
+
+
+@dataclass(frozen=True)
+class Schedule:
+    """2.8: the timetable row `handle`'s programme recorded at its time ("once"), every airing
+    of it ("series"), or no longer ("cancel")."""
+
+    sid: str
+    handle: str
+    do: str
+
+
+@dataclass(frozen=True)
+class Timer:
+    """2.8: the timetable `handle`'s channel recorded from `begin` (minutes after midnight) for
+    `minutes`, on the weekdays `days` (Monday 0), or once on `day` (ISO) when there are none."""
+
+    sid: str
+    handle: str
+    title: str
+    begin: int
+    minutes: int
+    days: tuple[int, ...]
+    day: str
 
 
 @dataclass(frozen=True)

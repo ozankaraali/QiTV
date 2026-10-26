@@ -128,6 +128,20 @@ def plain(data):
     return bytes(out)
 
 
+LADDER = b"""#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080
+hd.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720
+mid.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720
+mid-low.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
+low.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=3840x2160,CODECS="av01.0.04M.08,mp4a.40.2"
+unsupported.m3u8
+"""
+
+
 def media(
     url, *, headers=None, verify_ssl=True, stop=None, caught_up=False, reconnecting=False, **options
 ):
@@ -539,6 +553,79 @@ unsupported.m3u8
         self.assertEqual(server.counts["/media/high.m3u8"], 1)
         self.assertEqual(server.counts["/media/low.m3u8"], 0)
         self.assertEqual(server.counts["/media/unsupported.m3u8"], 0)
+
+    def test_a_cap_plays_the_best_variant_within_it(self):  # 2.8: the live ⚙
+        # Its sizes are the playable variants' (an unplayable 4K one is none), largest first;
+        # under a cap the best within it plays, below every size the smallest. Only the
+        # chosen variant's playlist is asked for.
+        playlists = ("hd", "mid", "mid-low", "low", "unsupported")
+        for cap, chosen in ((0, "hd"), (1080, "hd"), (720, "mid"), (480, "low"), (240, "low")):
+            routes = {"/master.m3u8": (200, {}, LADDER), "/video.ts": (200, {}, self.video)}
+            routes.update({f"/{name}.m3u8": (200, {}, leaf("video.ts")) for name in playlists})
+            server = self.server(routes)
+            with self.subTest(cap=cap):
+                source = open_source(
+                    server.url + "/master.m3u8",
+                    headers={},
+                    verify_ssl=True,
+                    stop=threading.Event(),
+                    max_height=cap,
+                )
+                try:
+                    self.assertEqual(source.heights, (1080, 720, 360))
+                    self.assertEqual(source.height, {"hd": 1080, "mid": 720, "low": 360}[chosen])
+                    self.assertEqual(drain(source), [self.video])
+                finally:
+                    source.close()
+                asked = [name for name in playlists if server.counts[f"/{name}.m3u8"]]
+                self.assertEqual(asked, [chosen])
+
+    def test_a_cap_is_moot_without_sizes(self):
+        # A master that names no RESOLUTION (many IPTV ones) plays its best as before; a
+        # variant without one is left out under a cap while others name theirs; a media
+        # playlist has no sizes.
+        bare = (
+            b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000\nlow.m3u8\n"
+            b"#EXT-X-STREAM-INF:BANDWIDTH=200000\nhigh.m3u8\n"
+        )
+        mixed = (
+            b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=900000\nunknown.m3u8\n"
+            b"#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=640x360\nlow.m3u8\n"
+            b"#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=1280x720\nhigh.m3u8\n"
+        )
+        cases = (
+            ("/bare.m3u8", 360, "high", (), 0),
+            ("/mixed.m3u8", 720, "high", (720, 360), 720),
+            ("/mixed.m3u8", 0, "unknown", (720, 360), 0),
+            ("/high.m3u8", 360, "high", (), 0),
+        )
+        for path, cap, chosen, heights, height in cases:
+            server = self.server(
+                {
+                    "/bare.m3u8": (200, {}, bare),
+                    "/mixed.m3u8": (200, {}, mixed),
+                    "/unknown.m3u8": (200, {}, leaf("video.ts")),
+                    "/low.m3u8": (200, {}, leaf("video.ts")),
+                    "/high.m3u8": (200, {}, leaf("video.ts")),
+                    "/video.ts": (200, {}, self.video),
+                }
+            )
+            with self.subTest(path=path, cap=cap):
+                source = open_source(
+                    server.url + path,
+                    headers={},
+                    verify_ssl=True,
+                    stop=threading.Event(),
+                    max_height=cap,
+                )
+                try:
+                    self.assertEqual((source.heights, source.height), (heights, height))
+                    drain(source)
+                finally:
+                    source.close()
+                self.assertGreater(server.counts[f"/{chosen}.m3u8"], 0)
+                others = {"unknown", "low", "high"} - {chosen, path[1:-5]}
+                self.assertEqual([n for n in others if server.counts[f"/{n}.m3u8"]], [])
 
     def test_an_external_audio_group_is_woven_in_unless_the_variant_carries_audio(self):
         # Some multi-track restream servers name each track's playlist and still mux the first
@@ -953,7 +1040,10 @@ video.m3u8
         encrypted = encrypt(self.video, bytes(16))
         playlist = leaf(
             "encrypted.ts",
-            extra='#EXT-X-KEY:METHOD=AES-128,URI="keys/channel.key",IV=0x00000000000000000000000000000000\n',
+            extra=(
+                '#EXT-X-KEY:METHOD=AES-128,URI="keys/channel.key",'
+                "IV=0x00000000000000000000000000000000\n"
+            ),
         )
         server = self.server(
             {
@@ -1864,6 +1954,49 @@ video.m3u8
         self.assertEqual(markers, ["CaughtUp", "CaughtUp"])
         self.assertIsInstance(parts[1], CaughtUp)  # right after a.ts and b.ts
         self.assertIsInstance(parts[-1], CaughtUp)  # and after c.ts
+
+    def test_a_reload_that_brings_the_same_copy_is_not_parsed_again(self):  # 2.8
+        # A long DVR window's parse takes tens of ms; about half the reloads bring nothing new.
+        same = hls(0, ["a.ts", "b.ts"])
+        copies = [same, same, same, hls(0, ["a.ts", "b.ts", "c.ts"], ended=True)]
+
+        def playlist(_request, count):
+            return 200, {}, copies[min(count, len(copies)) - 1]
+
+        routes = {f"/{n}": (200, {}, self.video) for n in ("a.ts", "b.ts", "c.ts")}
+        routes["/live.m3u8"] = playlist
+        server = self.server(routes)
+        loads = []
+        real = source_module.m3u8.loads
+
+        def counted(text, *args, **kwargs):
+            loads.append(1)
+            return real(text, *args, **kwargs)
+
+        with patch.object(source_module.m3u8, "loads", side_effect=counted):
+            media(server.url + "/live.m3u8", live_delay=2.0)
+        self.assertEqual(server.counts["/live.m3u8"], 4)
+        self.assertEqual(len(loads), 2)  # the first copy and the new one
+
+    def test_a_resumed_run_goes_on_after_the_run_it_joins(self):  # 2.8: no replay
+        # A rewound viewer's kept buffer taken back (a new picture size, a quick zap back):
+        # the new run starts after the old run's last whole segment when its playlist still
+        # lists the one after it and that is no further back than its usual start; else as
+        # any start.
+        names = [f"s{k}.ts" for k in range(10, 21)]
+        copies = [hls(10, names[:10]), hls(11, names[1:], ended=True)]
+        cases = ((17, "s18.ts"), (19, "s20.ts"), (12, "s17.ts"), (40, "s17.ts"), (None, "s17.ts"))
+        for after, first in cases:
+            with self.subTest(after=after):
+
+                def playlist(_request, count, copies=copies):
+                    return 200, {}, copies[min(count, len(copies)) - 1]
+
+                routes = {f"/{name}": (200, {}, self.video) for name in names}
+                routes["/live.m3u8"] = playlist
+                server = self.server(routes)
+                media(server.url + "/live.m3u8", live_delay=3.0, after_seq=after)
+                self.assertEqual(requested_segments(server)[0], first)
 
     def test_a_media_sequence_restart_resumes_at_the_new_live_start(self):
         # New names numbered back: believed once its copies persist as long as a stale copy is

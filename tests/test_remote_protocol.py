@@ -111,6 +111,54 @@ class MessageTests(unittest.TestCase):
         ):
             self.assertIsNone(parse_phone_message(bad), bad)
 
+    def test_a_cast_names_its_device_or_none(self):  # 2.8
+        for to in ("Living room TV", ""):
+            self.assertEqual(parse_phone_message({"t": "cast", "to": to}), {"t": "cast", "to": to})
+        self.assertEqual(
+            parse_phone_message({"t": "get", "what": "cast"}), {"t": "get", "what": "cast"}
+        )
+        for bad in ({"t": "cast"}, {"t": "cast", "to": 3}, {"t": "cast", "to": "x" * 201}):
+            self.assertIsNone(parse_phone_message(bad), bad)
+
+    def test_a_programme_is_scheduled_or_cancelled(self):  # 2.8
+        for do in ("once", "series", "cancel"):
+            self.assertEqual(
+                parse_phone_message({"t": "sched", "id": "p4", "do": do}),
+                {"t": "sched", "id": "p4", "do": do},
+            )
+        for bad in (
+            {"t": "sched", "id": "p4", "do": "forget"},
+            {"t": "sched", "id": "", "do": "once"},
+            {"t": "sched", "id": ["p4"], "do": "once"},
+        ):
+            self.assertIsNone(parse_phone_message(bad), bad)
+
+    def test_a_channel_is_recorded_at_a_time(self):  # 2.8 (owner)
+        every = {"t": "timer", "id": "h2", "title": "Late", "begin": 1260, "minutes": 60}
+        self.assertEqual(
+            parse_phone_message(dict(every, days=[2, 0, 2])),
+            dict(every, days=[0, 2], day=""),
+        )
+        once = dict(every, days=[], day="2026-10-27")
+        self.assertEqual(parse_phone_message(once), once)
+        self.assertEqual(parse_phone_message(dict(once, title="x" * 300))["title"], "x" * 80)
+        for bad in (
+            dict(every, days=[]),  # once, but on no day
+            dict(once, day="27/10/2026"),
+            dict(once, day="2026-02-30"),
+            dict(once, day="0001-01-01"),  # review 7: past what a clock can say
+            dict(once, day="9999-12-31"),
+            dict(every, days=[7]),
+            dict(every, days=[True]),
+            dict(every, days="0"),
+            dict(every, days=[0], begin=1440),
+            dict(every, days=[0], minutes=0),
+            dict(every, days=[0], minutes=1441),
+            dict(every, days=[0], title=3),
+            dict(every, days=[0], id=""),
+        ):
+            self.assertIsNone(parse_phone_message(bad), bad)
+
     def test_messages_validated(self):
         self.assertEqual(parse_phone_message({"t": "down", "b": "up"}), {"t": "down", "b": "up"})
         self.assertEqual(
@@ -122,10 +170,18 @@ class MessageTests(unittest.TestCase):
             parse_phone_message({"t": "watch", "id": "h3"}), {"t": "watch", "id": "h3"}
         )
         self.assertEqual(parse_phone_message({"t": "totv"}), {"t": "totv"})
+        # 2.8: the Library's Refresh
+        self.assertEqual(parse_phone_message({"t": "refresh", "x": 1}), {"t": "refresh"})
         self.assertEqual(  # how far the phone got in a film it plays
             parse_phone_message({"t": "pos", "ms": 61000, "len": 5400000}),
             {"t": "pos", "ms": 61000, "len": 5400000},
         )
+        self.assertEqual(  # and the number of the play it is a report of
+            parse_phone_message({"t": "pos", "ms": 61000, "len": 5400000, "p": 3}),
+            {"t": "pos", "ms": 61000, "len": 5400000, "p": 3},
+        )
+        for bad in ("3", -1, True, 2**40):
+            self.assertNotIn("p", parse_phone_message({"t": "pos", "ms": 1, "len": 2, "p": bad}))
         q = parse_phone_message({"t": "query", "s": "h" * 150})
         self.assertEqual(len(q["s"]), 100)
         self.assertFalse(q["tv"])  # the phone's own search: the TV's picture stays

@@ -241,6 +241,19 @@ def pid_of(packet):
     return ((packet[1] & 0x1F) << 8) | packet[2]
 
 
+def pmt_versions(body):
+    """The version_number of each PMT section that begins in `body`, in order."""
+    versions = []
+    for off in range(0, len(body) - 187, 188):
+        packet = body[off : off + 188]
+        if pid_of(packet) != PMT_PID or not packet[1] & 0x40:
+            continue
+        start = 5 + packet[4] if packet[3] & 0x20 else 4
+        section = packet[start + 1 + packet[start] :]
+        versions.append((section[5] >> 1) & 0x1F)
+    return versions
+
+
 def split_header(body):
     """The PAT/PMT copies a stream starts with, and the source bytes after them."""
     header = 0
@@ -600,6 +613,35 @@ class LiveWorkerTests(unittest.TestCase):
         for state in helper.of(raw, "state"):
             self.assertNotIn("window_s", state[2])
             self.assertNotIn("edge_seq", state[2])
+
+    def test_the_state_reports_the_channels_sizes_and_takes_a_cap(self):
+        # 2.8: the live ⚙ lists an HLS channel's picture sizes; "open" (and "resume") take
+        # the user's cap. Raw TS reports none.
+        master = (
+            b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080\nhd.m3u8\n"
+            b"#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nlow.m3u8\n"
+        )
+        source = self.source(
+            {
+                SECRET_PATH: (200, {}, make_stream(9)),
+                "/user/secret/master.m3u8": (200, {}, master),
+                "/user/secret/hd.m3u8": (200, {}, leaf("a.ts")),
+                "/user/secret/low.m3u8": (200, {}, leaf("a.ts")),
+                "/user/secret/a.ts": (200, {}, make_stream(4)),
+            }
+        )
+        helper = self.helper()
+        url = source.url + "/user/secret/master.m3u8"
+        for start, height in ((None, 1080), ({"max_height": 480}, 360)):
+            sid = helper.open(url, start=start)
+            state = helper.wait_for(lambda m: m[:2] == ("state", sid) and "heights" in m[2])
+            self.assertEqual((state[2]["heights"], state[2]["height"]), ([1080, 360], height))
+            helper.wait_for(lambda message: message == ("ended", sid))
+        self.assertEqual(source.counts["/user/secret/low.m3u8"], 1)
+        raw = helper.open(source.url + SECRET_PATH)
+        helper.wait_for(lambda message: message == ("ended", raw))
+        for state in helper.of(raw, "state"):
+            self.assertNotIn("heights", state[2])
 
     def test_an_hls_batch_reports_its_live_edge_once_delivered(self):
         # 2.1: states are throttled to four a second, so the end of a batch that
@@ -1747,6 +1789,40 @@ class ParkResumeTests(unittest.TestCase):
         media = [b for b in counter_breaks(body) if b[1] in (VIDEO_PID, AUDIO_PID)]
         self.assertEqual(media, [])
 
+    def test_a_rewound_viewers_resume_goes_on_after_the_old_run(self):  # 2.8 review I1
+        # The old run fetched s13..s15 (6 s back); taken back for a rewound viewer ("join"),
+        # the new run starts at s16, not 6 s back again (s15): nothing plays twice.
+        def segments(numbers):
+            return {
+                f"/s{k}.ts": (200, {}, make_stream(2, pts_start=900_000 + k * 2 * CLOCK))
+                for k in numbers
+            }
+
+        def live(first, last):
+            text = f"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:{first}\n"
+            text += "".join(f"#EXTINF:2,\ns{k}.ts\n" for k in range(first, last + 1))
+            return text.encode()
+
+        for join, expected in ((True, "/s16.ts"), (False, "/s15.ts")):
+            with self.subTest(join=join):
+                old = self.source(
+                    {"/live.m3u8": (200, {}, live(10, 15)), **segments(range(10, 16))}
+                )
+                new = self.source(
+                    {"/live.m3u8": (200, {}, live(11, 17)), **segments(range(11, 18))}
+                )
+                helper = InProcessHelper(self)
+                helper.parent.send(("open", "j", old.url + "/live.m3u8", {}, True, RAM, 6.0))
+                helper.wait_for(lambda m: m[:2] == ("state", "j") and m[2].get("caught_up"))
+                helper.parent.send(("park", "j"))
+                helper.wait_for(lambda m: m == ("parked", "j"))
+                start = {"join": True} if join else None
+                command = ("resume", "j", new.url + "/live.m3u8", {}, True, 6.0)
+                helper.parent.send(command if start is None else (*command, start))
+                helper.wait_for(lambda m: m == ("resumed", "j"))
+                fetched = [path for path, _headers in new.requests if path.endswith(".ts")]
+                self.assertEqual(fetched[0], expected)
+
     def test_resume_that_fails_stays_parked_and_served(self):
         first = self.source({SECRET_PATH: (200, {}, make_stream(6))})
         refused = self.source({SECRET_PATH: (403, {}, b"")})
@@ -1860,6 +1936,28 @@ class ParkResumeTests(unittest.TestCase):
         self.assertTrue((root / directory / f"segment-{kept[0][0]}.ts").exists())
         self.assertGreater(len(self.read(helper, "d", kept[0][0])), 0)
 
+    def test_a_resumed_run_whose_first_segment_fails_notes_no_part(self):
+        # 2.8 (review of 2.6): the part's line was written before its segment opened.
+        from services.live.ring import DiskRing
+
+        first = self.source({SECRET_PATH: (200, {}, make_stream(6))})
+        second = self.source({SECRET_PATH: (200, {}, make_stream(6, pts_start=AHEAD))})
+        helper = InProcessHelper(self)
+        root = Path(helper.helper.root)
+        directory = ".qitv-buffer-" + secrets.token_hex(16)
+        ring = {"kind": "disk", "root": str(root), "dir": directory, "max_bytes": 1 << 30}
+        helper.parent.send(("open", "n", first.url + SECRET_PATH, {}, True, ring, 6.0))
+        helper.wait_for(lambda m: m == ("ended", "n"))
+        helper.parent.send(("park", "n"))
+        helper.wait_for(lambda m: m == ("parked", "n"))
+        with patch.object(DiskRing, "_create", side_effect=OSError("the disk failed")):
+            helper.parent.send(("resume", "n", second.url + SECRET_PATH, {}, True, 6.0))
+            helper.wait_for(lambda m: m[:3] == ("error", "n", "disk"))
+            helper.wait_for(lambda m: m == ("parked", "n"))
+        index = (root / directory / "index.jsonl").read_text().splitlines()
+        parts = [json.loads(line).get("part") for line in index]
+        self.assertEqual([part for part in parts if part is not None], [0])
+
 
 class KeptSpaceTests(unittest.TestCase):
     """2.6: disk buffers share the user's disk amount, a kept one giving way first; a day-old
@@ -1928,6 +2026,43 @@ class KeptSpaceTests(unittest.TestCase):
 
         if not any(emptied(m) for m in helper.messages):
             helper.wait_for(emptied)
+
+    def test_a_new_disk_amount_applies_to_the_buffers_at_once(self):
+        # 2.8: not only at the next fresh disk open.
+        helper = InProcessHelper(self)
+        root = Path(helper.helper.root)
+        helper.parent.send(
+            ("open", "a", self.source(make_stream(8)), {}, True, self.disk(root, 1 << 30), 6.0)
+        )
+        helper.wait_for(lambda m: m == ("ended", "a"))
+        helper.parent.send(("park", "a"))
+        helper.wait_for(lambda m: m == ("parked", "a"))
+        kept = self.oldest(helper, "a")
+        ring = helper.helper._sessions["a"]._ring
+        amount = ring.charged // 2
+        helper.parent.send(("disk_amount", amount))
+        helper.wait_for(lambda m: m[:2] == ("state", "a") and m[2]["oldest"] != kept, timeout=5)
+        self.assertLessEqual(ring.charged, amount)
+        self.assertEqual(ring.max_bytes, amount)
+
+    def test_a_trim_tells_every_other_session_that_lost_segments(self):
+        # 2.8: an active one's spans' oldest moved too; a busy pipeline is never waited for
+        # (it reports by itself), a parked one's is.
+        helper = worker._Helper.__new__(worker._Helper)
+        told = []
+
+        def session(name, parked):
+            one = SimpleNamespace(_ring=name, released=threading.Event())
+            if parked:
+                one.released.set()
+            one.notify_soon = lambda wait=True: told.append((name, wait))
+            return one
+
+        writer, active, parked = session("a", False), session("b", False), session("c", True)
+        helper._sessions = {"a": writer, "b": active, "c": parked}
+        helper._budget = SimpleNamespace(trim=lambda: ["a", "b", "c"])
+        helper.trim_disk(writer)
+        self.assertEqual(told, [("b", False), ("c", True)])
 
     def test_a_day_old_segment_goes(self):
         from services.live import ring as ring_module
@@ -2060,6 +2195,31 @@ class AdoptTests(unittest.TestCase):
             steps = video_steps(response.read())
         self.assertTrue(all(0 < step <= 2 * (CLOCK // 25) for step in steps), sorted(set(steps)))
 
+    def test_a_taken_back_buffer_knows_its_program_map(self):
+        # 2.8: the audio relabeler is primed as the segmenter is: a new run whose map changed
+        # under the same version is renumbered, so VLC does not ignore it.
+        directory, before, _, body = self.kept_folder()
+        self.assertEqual(pmt_versions(body)[:1], [0])
+        second = self.adopted(directory)
+        other = self.source(make_stream(6, pts_start=AHEAD, audio=False))  # another map, v0
+        second.parent.send(("resume", "z", other, {}, True, 6.0))
+        second.wait_for(lambda m: m == ("resumed", "z"))
+        second.wait_for(lambda m: m == ("ended", "z"))
+        junction = before[-1][0] + 1
+        with urlopen(f"{second.base_url}/z/stream/{junction}.ts", timeout=5) as response:
+            self.assertEqual(pmt_versions(response.read())[:1], [1])
+
+    def test_a_taken_back_buffer_fits_the_disk_amount_at_once(self):
+        # 2.8: not only once a disk segment completes.
+        directory, before, _, _ = self.kept_folder()
+        held = sum(p.stat().st_size for p in (self.root / directory).glob("segment-*.ts"))
+        second = InProcessHelper(self, self.root)
+        second.helper._dispatch(("adopt", "z", directory, held // 2))
+        second.wait_for(lambda m: m[:2] == ("kept", "z"))
+        state = [m for m in second.messages if m[:2] == ("state", "z")][-1]
+        self.assertGreater(state[2]["oldest"], before[0][0])
+        self.assertGreater(state[3], before[0][0])
+
     def test_a_resume_right_after_the_adopt_follows_it(self):
         # Review B I2: the take-back is still reading when the resume comes.
         directory, before, _, _ = self.kept_folder()
@@ -2077,6 +2237,7 @@ class AdoptTests(unittest.TestCase):
             send=lambda message, session=None: None,
             server=SimpleNamespace(add_session=lambda *a: None),
             disk_budget=lambda max_bytes: SimpleNamespace(register=lambda ring, parked=False: None),
+            trim_disk=lambda session: None,
             forget_ring=lambda ring: None,
             unkept=lambda session: None,
         )
@@ -2544,6 +2705,20 @@ class HeardEdgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NotifyTests(unittest.TestCase):
+    def test_a_span_is_sent_once_whichever_thread_sends_it(self):
+        # 2.8 (review of 2.6): two threads' states could both take the same additions.
+        sent = []
+        helper = SimpleNamespace(send=lambda message, session=None: sent.append(message))
+        session = worker._Session(helper, "s", "", {}, True, RAM, 6.0)
+        five, six = (5, 10.0, 12.0, False, "key", None), (6, 12.0, 14.0, False, "key", None)
+        session._pending = [five]
+        session._notify(force=True)
+        session._pending = [five, six]  # five again: another thread took the same list
+        session._notify(force=True)
+        self.assertEqual([message[4] for message in sent], [[five], [six]])
 
 
 class OpenFilesTests(unittest.TestCase):

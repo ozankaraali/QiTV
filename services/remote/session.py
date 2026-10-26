@@ -25,6 +25,7 @@ from services.remote.protocol import (
     MAX_RATE,
     PROTO,
     Answered,
+    CastTo,
     Closed,
     Forgot,
     Get,
@@ -36,7 +37,10 @@ from services.remote.protocol import (
     Press,
     Query,
     RecAct,
+    RefreshLists,
+    Schedule,
     StoreSaved,
+    Timer,
     ToTv,
     WatchHere,
     b64d,
@@ -280,12 +284,24 @@ class Session:
             return Reply(events=[WatchHere(sid, m.get("id", ""))])
         if t == "totv":
             return Reply(events=[ToTv(sid)])
+        if t == "refresh":  # 2.8
+            return Reply(events=[RefreshLists(sid)])
         if t == "pos":
-            return Reply(events=[Position(sid, m["ms"], m["len"])])
+            return Reply(events=[Position(sid, m["ms"], m["len"], m.get("p", -1))])
         if t == "answer":
             return Reply(events=[Answered(sid, m["id"], m["yes"])])
         if t == "rec":
             return Reply(events=[RecAct(sid, m["id"], m["do"])])
+        if t == "cast":  # 2.8
+            return Reply(events=[CastTo(sid, m["to"])])
+        if t == "sched":  # 2.8
+            return Reply(events=[Schedule(sid, m["id"], m["do"])])
+        if t == "timer":  # 2.8: Record at a time
+            days = tuple(m["days"])
+            event = Timer(sid, m["id"], m["title"], m["begin"], m["minutes"], days, m["day"])
+            return Reply(events=[event])
+        if t != "forget":
+            return Reply()  # never a "forget" by mistake: only its own message forgets
         # "forget": the phone leaves for good.
         device_id = self._device_id or ""
         self._store.remove_device(device_id)

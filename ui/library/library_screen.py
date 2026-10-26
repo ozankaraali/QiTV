@@ -61,6 +61,11 @@ class GridPosters(QObject):
             return logos.pixmap(url[len(LIVE_TILE) :]) if logos is not None else None
         return self._posters.pixmap(url) if self._posters is not None else None
 
+    def failed(self, url: str) -> bool:
+        """Whether a poster could not be loaded (a channel logo never counts: TMDB has none)."""
+        failed = getattr(self._posters, "failed", None)
+        return not url.startswith(LIVE_TILE) and callable(failed) and bool(failed(url))
+
     def request(self, urls: list[str], replace_pending: bool = False) -> None:
         if self._shared:
             both = [u[len(LIVE_TILE) :] if u.startswith(LIVE_TILE) else u for u in urls]

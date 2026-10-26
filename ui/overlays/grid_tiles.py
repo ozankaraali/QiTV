@@ -533,13 +533,13 @@ class GridTiles(Overlay):
             if name in controls:
                 parts[name] = QRectF(x - side, bar.top(), side, side)
                 x -= side + gap
-        pills = []
+        pill_rects = []
         for group in (("play", "speaker", "live"), ("big", "close")):
             shown = [parts[name] for name in group if name in parts]
             if shown:
                 left, right = min(r.left() for r in shown), max(r.right() for r in shown)
-                pills.append(QRectF(left - pad, bar.top(), right - left + 2 * pad, side))
-        return _Strip(bar, tuple(pills), parts, over_label)
+                pill_rects.append(QRectF(left - pad, bar.top(), right - left + 2 * pad, side))
+        return _Strip(bar, tuple(pill_rects), parts, over_label)
 
     def _strip_bottom(
         self, un: Units, tile: TileView, bar: QRectF, inset: float

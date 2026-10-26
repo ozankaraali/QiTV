@@ -353,6 +353,18 @@ class RecorderTests(RecorderCase):
             recorder = self.record(0, open_new=lambda path: Broken(path, 0))
             self.assertEqual(self.finish(recorder), (WRITE, "", 0))  # the empty file went
 
+    def test_a_failed_write_notes_nothing_to_read_back(self):
+        # 2.8 (review of 2.6): a segment was noted in the file before its write succeeded.
+        class Broken(FullDisk):
+            def write(self, data):
+                raise OSError(5, "Input/output error")
+
+        self.segments(1)
+        with self.assertLogs("services.live.recorder", "WARNING"):
+            recorder = self.record(0, open_new=lambda path: Broken(path, 0))
+            self.finish(recorder)
+        self.assertIsNone(recorder.first_written())
+
     def test_its_file_and_size_are_told_as_it_grows(self):
         told = []
         self.segments(2)

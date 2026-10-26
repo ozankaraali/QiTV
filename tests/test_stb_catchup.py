@@ -67,6 +67,15 @@ def run(worker):
     return result
 
 
+class PagePatienceTests(unittest.TestCase):  # 2.8: a slow portal's pages
+    def test_pages_are_asked_four_at_a_time_with_time_and_three_tries(self):
+        from services import content_loader
+
+        loader = content_loader.ContentLoader("http://portal.test/c/", {}, "vod")
+        self.assertEqual((loader.timeout, loader.max_retries), (15, 3))
+        self.assertEqual(content_loader.PAGES_AT_ONCE, 4)
+
+
 class ArchiveFieldsTests(unittest.TestCase):
     def test_a_channel_the_portal_marks_archived_has_an_archive(self):
         for mark in ({"tv_archive": "1"}, {"tv_archive": 1}, {"enable_tv_archive": "1"}):

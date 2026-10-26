@@ -293,6 +293,11 @@ def _xtream_item(
         tmdb = _tmdb_of(stream)  # finds its subtitles on OpenSubtitles
         if tmdb:
             item["tmdb"] = tmdb
+        # When the panel added it (a series: last changed), a unix time: the Library's New
+        # shelf and its "Recently added" order, as STB portals' titles have them (2.8).
+        added = str(stream.get("added" if content_type == "vod" else "last_modified") or "")
+        if added.strip().isdigit() and int(added) > 0:
+            item["added"] = added.strip()
     return item
 
 
@@ -560,11 +565,7 @@ class STBCategoriesWorker(QObject):
             # Live channels come as one list; VOD/series are fetched per category later.
             if self.content_type == "itv":
                 fetchurl = stb_request_url(base, "itv", "get_all_channels")
-                resp = requests.get(
-                    fetchurl, headers=self.headers, timeout=10, verify=self.verify_ssl
-                )
-                resp.raise_for_status()
-                all_channels = resp.json()["js"]["data"]
+                all_channels = self._all_channels(fetchurl)
                 mark_stb_archives(all_channels)  # catch-up: the channels marked archived
                 sorted_channels: Dict[str, List[int]] = {}
                 for index, channel in enumerate(all_channels):
@@ -578,6 +579,29 @@ class STBCategoriesWorker(QObject):
         except Exception as e:
             self.error.emit(str(e))
 
+    def _all_channels(self, fetchurl: str) -> list:
+        """The portal's whole live list: one answer that can be large (tens of thousands of
+        channels), so it gets `ALL_CHANNELS_TIMEOUT_S` and, after a timeout, a second try
+        (2.8: a slow portal's list failed at 10 s)."""
+        for attempt in (1, 2):
+            try:
+                resp = requests.get(
+                    fetchurl,
+                    headers=self.headers,
+                    timeout=ALL_CHANNELS_TIMEOUT_S,
+                    verify=self.verify_ssl,
+                )
+            except requests.Timeout:
+                if attempt == 2:
+                    raise
+                logger.info("The portal's live list timed out; asking again.")
+                continue
+            resp.raise_for_status()
+            return list(resp.json()["js"]["data"])
+        return []
+
+
+ALL_CHANNELS_TIMEOUT_S = 30
 
 # The `js.error` a portal answers a tv_archive create_link with when the programme has no
 # recording; any other ("limit", "link_fault", …) is the portal's own trouble.

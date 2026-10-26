@@ -19,7 +19,7 @@ from services.live.refusals import STREAM_LIMIT
 from services.live.tuning import channel_key
 from services.provider_ids import with_provider
 from services.sessions import PIP_FAILED, SessionManager, Slot
-from services.vlc_profile import DEFAULT_USER_AGENT
+from services.vlc_profile import STB_USER_AGENT
 from tests.test_tv_controller import (
     CHANNELS,
     HARBOR_ONE,
@@ -266,10 +266,10 @@ class PipTests(PipCase):
         self.assertEqual(  # a main tune's start arguments
             kwargs,
             {
-                "headers": {"User-Agent": DEFAULT_USER_AGENT},
+                "headers": {"User-Agent": STB_USER_AGENT},  # an STB portal's box's
                 "verify_ssl": True,
                 "latency": "low",
-                "user_agent": DEFAULT_USER_AGENT,
+                "user_agent": STB_USER_AGENT,
                 "disk": False,
                 "max_bytes": 256 * MIB,  # the memory per stream
                 "channel": channel_key("Home", CHANNELS[0]),
@@ -358,6 +358,21 @@ class PipTests(PipCase):
         self.assertFalse(self.pip_session.muted)
         self.assertIs(self.controller.session, self.pip_session)
         self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
+
+    def test_a_swap_while_casting_tells_the_cast(self):  # 2.8 review M13
+        from unittest import mock
+
+        self.start_large(0)
+        self.open_small(GROUP_B[0], "20", GROUP_B)
+        cast = mock.Mock()
+        cast.casting.return_value = True
+        self.controller._cast = cast
+        large, live = self.session, self.sessions.large().live
+        self.controller.handle(Action.SWAP)
+        (session, small_live, target), _kw = cast.swapped.call_args
+        self.assertIs(session, large)
+        self.assertIs(small_live, live)
+        self.assertEqual(target.item["name"], "One")
 
     def test_a_swap_records_the_channel_now_watched(self):
         # Recent and "start with the last channel" follow the large picture.

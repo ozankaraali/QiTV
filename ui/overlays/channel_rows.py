@@ -3,6 +3,7 @@
 from collections.abc import Callable, Sequence
 import logging
 import math
+from typing import cast
 
 from PySide6.QtCore import (
     QAbstractListModel,
@@ -35,7 +36,7 @@ def number_column_width(units, digits: int) -> float:
     if digits > 3:
         advance = QFontMetrics(units.font(1.5)).horizontalAdvance("0" * digits)
         width = max(width, advance + 0.2 * units.u)
-    return width
+    return cast(float, width)
 
 
 LogoRole = Qt.UserRole + 2
@@ -46,7 +47,7 @@ ProviderRole = Qt.UserRole + 5  # the provider's name, in the lists that mix pro
 
 def tag_font(units) -> QFont:
     """The provider tag's font: the transport chips' (1.2u, demi-bold)."""
-    return units.font(1.2, QFont.Weight.DemiBold)
+    return cast(QFont, units.font(1.2, QFont.Weight.DemiBold))
 
 
 def tag_layout(

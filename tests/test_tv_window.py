@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 from typing import Optional
 import unittest
 from unittest import mock
@@ -65,7 +66,7 @@ from tests.ts_fixtures import make_stream
 from ui.brand import logo_aspect
 from ui.keymap import SHORTCUTS, shortcut_keys
 from ui.overlay_host import OverlayHost
-from ui.overlays.drawer import ERROR_TEXT
+from ui.overlays.drawer import ERROR_TEXT, LIBRARY_ACTION
 from ui.overlays.zap_banner import BannerInfo
 from ui.page_stack import PageStack
 from ui.settings_dialog import OptionsDialog
@@ -507,6 +508,7 @@ class TVWindowTests(WindowCase):
                 ("Restore Last Multiview", ""),
                 ("Search", "Ctrl+F"),
                 ("Refresh Channels and Guide", "Ctrl+R"),
+                ("Refresh Films and Series", "Ctrl+Shift+R"),  # 2.8: the Library's
                 ("Guide", "G"),
                 ("Channel List", "Return"),
                 ("Fullscreen", "F"),
@@ -539,6 +541,7 @@ class TVWindowTests(WindowCase):
             "Multiview",
             "Search",
             "Refresh Channels and Guide",
+            "Refresh Films and Series",
             "Mini Player",
         }
         for text, action in actions.items():
@@ -1043,7 +1046,8 @@ provider = write_local_provider(os.environ["QITV_CONFIG_DIR"])
 config = ConfigManager()
 providers = ProviderManager(config)
 seed_channels(providers, provider)
-window = tw.TVWindow(app, config, providers, ImageManager(config, 1 << 20), EpgManager(config, providers))
+images = ImageManager(config, 1 << 20)
+window = tw.TVWindow(app, config, providers, images, EpgManager(config, providers))
 
 
 class StuckWorker(QObject):
@@ -1054,7 +1058,8 @@ class StuckWorker(QObject):
         time.sleep(30)
 
 
-window.catalogs.catalog(window.catalog.source()).runner.run_worker(StuckWorker(), lambda *a: None, lambda *a: None)
+runner = window.catalogs.catalog(window.catalog.source()).runner
+runner.run_worker(StuckWorker(), lambda *a: None, lambda *a: None)
 window.show()
 QTimer.singleShot(300, window.close)
 print("exec returned", app.exec(), flush=True)
@@ -1641,7 +1646,8 @@ def click_library_button(case, window):
     QTest.mouseClick(host.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
     case.library_click_state = (
         f"hit={hit} titles={titles} under={type(under).__name__ if under else None} "
-        f"can_return={window.screens._can_return()} page={type(window.pages.currentWidget()).__name__}"
+        f"can_return={window.screens._can_return()} "
+        f"page={type(window.pages.currentWidget()).__name__}"
     )
     return host.mapToGlobal(point)
 
@@ -2112,7 +2118,7 @@ class LibraryReturnTests(WindowCase):
         self.assertTrue(self.window.screens.library_shown())
 
     def test_a_live_channel_chosen_after_the_movie_keeps_esc(self):
-        ids = self.held_links()
+        self.held_links()
         self.play_from_the_library()
         channel = self.window.catalog.items("live", "*")[0]
         self.window.controller.tune(channel, group_key="*", channels=[channel])
@@ -2148,6 +2154,31 @@ class LibraryReturnTests(WindowCase):
         self.assertTrue(self.window.screens.library_shown())
         self.assertFalse(self.window.mini_player_active())
         self.assertFalse(self.window.windowFlags() & Qt.WindowType.FramelessWindowHint)
+
+
+class LibraryButtonTests(WindowCase):  # 2.8: the Library in one click from the TV
+    def test_the_channel_list_opens_the_library_at_the_section_used_last(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        screens = self.window.screens
+        drawer.actionRequested.emit(LIBRARY_ACTION)  # its header's Library button
+        self.assertTrue(screens.library_shown())
+        self.assertEqual(screens.library_controller.section, "movies")
+        screens.open_library("series")
+        screens.back_to_tv()
+        self.assertFalse(screens.library_shown())
+        drawer.actionRequested.emit(LIBRARY_ACTION)
+        self.assertTrue(screens.library_shown())
+        self.assertEqual(screens.library_controller.section, "series")
+
+    def test_the_channel_lists_movies_row_opens_the_library_on_its_provider(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        screens = self.window.screens
+        with mock.patch.object(screens.library_controller, "open_on") as open_on:
+            drawer.libraryRequested.emit("movies")
+        open_on.assert_called_once_with(self.window.catalog.source(), "movies")
+        self.assertTrue(screens.library_shown())
 
 
 class DrawerSettingsTests(WindowCase):
@@ -2563,6 +2594,33 @@ class OptionsDialogTests(WindowCase):
             dialog.save_settings()
         refresh_epg.assert_called_once_with(force=True)
         set_current_epg.assert_not_called()  # never on the GUI thread
+
+
+class DiskAmountSettingTests(unittest.TestCase):
+    def window(self, enabled):
+        self.amounts, self.dropped = [], []
+        config = SimpleNamespace(
+            save_config=lambda: None, timeshift_enabled=enabled, timeshift_max_mib=512
+        )
+        engine = SimpleNamespace(
+            set_disk_amount=self.amounts.append, drop_kept=lambda: self.dropped.append(True)
+        )
+        return SimpleNamespace(
+            config_manager=config,
+            controller=SimpleNamespace(settings_saved=lambda: None),
+            kept=None,
+            engine=engine,
+            remote=SimpleNamespace(apply_config=lambda: None),
+        )
+
+    def test_a_saved_disk_amount_reaches_the_helper_at_once(self):
+        # 2.8 (review of 2.6): a lowered amount applied only at the next disk open.
+        TVWindow.save_config(self.window(enabled=True))
+        self.assertEqual(self.amounts, [512 * 1024 * 1024])
+
+    def test_with_the_disk_buffer_off_no_amount_is_sent(self):
+        TVWindow.save_config(self.window(enabled=False))
+        self.assertEqual(self.amounts, [])
 
 
 class QtPlatformTests(unittest.TestCase):

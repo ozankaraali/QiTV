@@ -1,0 +1,419 @@
+"""Jellyfin and Emby (2.8): sign-in, the libraries' films and series as Library titles, the
+version a title plays in (never converted, no 4K unless asked) and its stream's address."""
+
+import json
+import unittest
+
+from services import media_server as ms
+from services.catalog import ALL_GROUP_ID
+
+BASE = "http://server.test:8096"
+
+
+class _Response:
+    def __init__(self, status, body=None):
+        self.status_code = status
+        self._body = body
+        self.content = b"" if body is None else json.dumps(body).encode()
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class FakeHttp:
+    """requests.Session as the client uses it: answers by (method, path), records the asks."""
+
+    def __init__(self, answers):
+        self.answers = answers  # (method, path) -> (status, body)
+        self.asked = []
+        self.headers = {}
+
+    def request(self, method, url, params=None, json=None, timeout=None, verify=True):
+        path = url[len(BASE) :]
+        self.asked.append((method, path, dict(params or {}), json))
+        status, body = self.answers.get((method, path), (404, None))
+        return _Response(status, body)
+
+    def close(self):
+        pass
+
+
+def client(answers, kind=ms.JELLYFIN, **kwargs):
+    http = FakeHttp(answers)
+    defaults = {"device_id": "dev-1", "version": "2.8.0", "token": "tok", "user_id": "u1"}
+    defaults.update(kwargs)
+    return ms.MediaServerClient(BASE, kind, session=http, **defaults), http
+
+
+FILM = {
+    "Id": "f1",
+    "Name": "Salt Roads",
+    "Type": "Movie",
+    "ProductionYear": 2021,
+    "CommunityRating": 7.4,
+    "Overview": "A long road.",
+    "Genres": ["Drama", "Road"],
+    "RunTimeTicks": 72_000_000_000,
+    "ProviderIds": {"Tmdb": "4242", "Imdb": "tt1"},
+    "DateCreated": "2026-10-20T08:00:00.0000000Z",
+    "ImageTags": {"Primary": "tag1"},
+    "UserData": {"PlaybackPositionTicks": 6_000_000_000, "Played": False},
+    "Container": "mkv",
+}
+
+
+class HeaderTests(unittest.TestCase):
+    def test_the_client_names_qitv_and_no_computer(self):
+        header = ms.auth_header("dev-1", "2.8.0", token="tok", system="Darwin")
+        self.assertEqual(
+            header,
+            'MediaBrowser Client="QiTV", Device="QiTV (macOS)", DeviceId="dev-1", '
+            'Version="2.8.0", Token="tok"',
+        )
+        self.assertNotIn("Token", ms.auth_header("dev-1", "2.8.0", system="Linux"))
+
+
+class SignInTests(unittest.TestCase):
+    def test_a_sign_in_keeps_the_token_and_the_user(self):
+        answers = {
+            ("POST", "/Users/AuthenticateByName"): (
+                200,
+                {"AccessToken": "T", "User": {"Id": "U", "Name": "me"}},
+            )
+        }
+        c, http = client(answers, token="", user_id="")
+        self.assertEqual(c.sign_in("me", "pw"), ("T", "U"))
+        method, path, _params, body = http.asked[-1]
+        self.assertEqual(body, {"Username": "me", "Pw": "pw"})
+
+    def test_a_refused_sign_in_says_so(self):
+        c, _http = client({("POST", "/Users/AuthenticateByName"): (401, None)})
+        with self.assertRaises(ms.SignInNeeded):
+            c.sign_in("me", "wrong")
+
+
+class RouteTests(unittest.TestCase):
+    def test_jellyfin_asks_the_new_routes_first_and_old_ones_when_missing(self):
+        views = {"Items": [{"Id": "L1", "Name": "Movies", "CollectionType": "movies"}]}
+        c, http = client({("GET", "/Users/u1/Views"): (200, views)})  # an older Jellyfin
+        self.assertEqual(c.libraries(), [{"id": "L1", "name": "Movies", "type": "movies"}])
+        self.assertEqual([a[1] for a in http.asked], ["/UserViews", "/Users/u1/Views"])
+
+    def test_emby_asks_the_classic_routes(self):
+        views = {"Items": [{"Id": "L1", "Name": "TV", "CollectionType": "tvshows"}]}
+        c, http = client({("GET", "/Users/u1/Views"): (200, views)}, kind=ms.EMBY)
+        self.assertEqual(c.libraries()[0]["type"], "tvshows")
+        self.assertEqual([a[1] for a in http.asked], ["/Users/u1/Views"])
+
+    def test_libraries_without_films_or_series_are_left_out(self):
+        views = {
+            "Items": [
+                {"Id": "L1", "Name": "Music", "CollectionType": "music"},
+                {"Id": "L2", "Name": "Films", "CollectionType": "movies"},
+                {"Id": "L3", "Name": "Mixed"},
+            ]
+        }
+        c, _http = client({("GET", "/UserViews"): (200, views)})
+        self.assertEqual([lib["id"] for lib in c.libraries()], ["L2", "L3"])
+
+    def test_items_come_page_by_page(self):
+        first = {"Items": [{"Id": str(i)} for i in range(3)], "TotalRecordCount": 5}
+        c, http = client({})
+        pages = [first, {"Items": [{"Id": "3"}, {"Id": "4"}], "TotalRecordCount": 5}]
+        http.request = lambda method, url, params=None, **kw: (
+            http.asked.append((method, url, dict(params))) or _Response(200, pages.pop(0))
+        )
+        got = c.items("Movie", "L1", page=3)
+        self.assertEqual([i["Id"] for i in got], ["0", "1", "2", "3", "4"])
+        self.assertEqual([a[2]["StartIndex"] for a in http.asked], [0, 3])
+        self.assertEqual(http.asked[0][2]["ParentId"], "L1")
+
+
+class DeviceIdTests(unittest.TestCase):
+    def test_a_server_without_a_device_id_gets_one_that_stays(self):  # 2.8
+        # A server saved without Verify: each request was a new device on the server.
+        one = {"type": "JELLYFIN", "url": BASE, "user_id": "u1"}
+        first, again = ms.device_id_of(one), ms.device_id_of(dict(one))
+        self.assertEqual(first, again)
+        self.assertNotEqual(first, ms.device_id_of(dict(one, user_id="u2")))
+        self.assertEqual(ms.device_id_of(dict(one, device_id="mine")), "mine")
+        self.assertNotIn(BASE, first)  # nothing of the address shows
+
+
+class ChangedSinceTests(unittest.TestCase):
+    """2.8: a refresh asks a server only what changed since its last look."""
+
+    def answering(self, *bodies):
+        c, http = client({})
+        pages = list(bodies)
+        http.request = lambda method, url, params=None, **kw: (
+            http.asked.append((method, url, dict(params))) or _Response(200, pages.pop(0))
+        )
+        return c, http
+
+    def test_changed_titles_are_asked_by_when_they_were_saved(self):
+        c, http = self.answering({"Items": [FILM], "TotalRecordCount": 1}, {"Items": []})
+        self.assertEqual(c.items("Movie", "L1", since="2026-10-26T10:00:00Z")[0]["Id"], "f1")
+        c.items("Movie", "L1", resumable=True)  # review I1: the server's resume list
+        self.assertEqual(http.asked[0][2]["MinDateLastSaved"], "2026-10-26T10:00:00Z")
+        self.assertEqual(http.asked[1][2]["Filters"], "IsResumable")
+        self.assertNotIn("MinDateLastSaved", http.asked[1][2])
+
+    def test_the_servers_clock_is_noted_from_its_answers(self):
+        c, http = client({})
+
+        class Dated(_Response):
+            headers = {"Date": "Fri, 15 Jan 2027 08:00:00 GMT"}
+
+        http.request = lambda *a, **kw: Dated(200, {"Items": [], "TotalRecordCount": 0})
+        self.assertIsNone(c.server_time)
+        c.count("Movie", "L1")
+        self.assertEqual(c.server_time, 1_800_000_000.0)
+
+    def test_titles_are_asked_by_their_ids(self):
+        c, http = self.answering({"Items": [FILM], "TotalRecordCount": 1})
+        c.items("Movie", "L1", ids=["f1", "f2"])
+        self.assertEqual(http.asked[0][2]["Ids"], "f1,f2")
+
+    def test_a_library_is_counted_without_its_titles(self):
+        c, http = self.answering({"Items": [], "TotalRecordCount": 55_000})
+        self.assertEqual(c.count("Movie", "L1"), 55_000)
+        self.assertEqual(http.asked[0][2]["Limit"], 0)
+
+    def test_a_library_s_ids_come_in_order_without_their_details(self):
+        c, http = self.answering(
+            {"Items": [{"Id": "b"}, {"Id": "a"}], "TotalRecordCount": 3},
+            {"Items": [{"Id": "c"}], "TotalRecordCount": 3},
+        )
+        self.assertEqual(c.item_ids("Movie", "L1", page=2), ["b", "a", "c"])
+        params = http.asked[0][2]
+        self.assertEqual((params["SortBy"], params["EnableImages"]), ("SortName", "false"))
+        self.assertNotIn("Overview", params.get("Fields", ""))
+
+    def test_what_changed_merges_into_the_saved_list(self):
+        libraries = [{"id": "L1", "name": "Movies", "type": "movies"}]
+        saved = ms.section_payload(libraries, {"L1": [FILM, {"Id": "f2", "Name": "Tide"}]}, BASE)
+        saved["server_since"], saved["server_full"] = "2026-10-20T00:00:00Z", 1000.0
+        self.assertEqual(
+            ms.saved_summary(saved),
+            {"since": "2026-10-20T00:00:00Z", "full": 1000.0, "members": {"L1": ["f1", "f2"]}},
+        )
+        stopped = dict(FILM, UserData={"PlaybackPositionTicks": 0})  # watched to the end
+        delta = {
+            "delta": True,
+            "libraries": libraries,
+            "order": {"L1": ["f3", "f1"]},  # Tide went, Anchor came (sorted first)
+            "changed": {
+                "f1": ms.title_item(stopped, BASE, "L1"),
+                "f3": ms.title_item({"Id": "f3", "Name": "Anchor"}, BASE, "L1"),
+            },
+            "server_since": "2026-10-26T11:50:00Z",
+        }
+        merged = ms.merged_payload(saved, delta)
+        self.assertEqual([i["name"] for i in merged["contents"]], ["Anchor", "Salt Roads"])
+        self.assertEqual(merged["sorted_channels"]["L1"], [0, 1])
+        self.assertNotIn(ms.CONTINUE_ID, merged["sorted_channels"])  # nothing started now
+        self.assertEqual(merged["server_since"], "2026-10-26T11:50:00Z")
+        self.assertEqual(merged["server_full"], 1000.0)
+
+    def test_positions_and_an_empty_library_merge_in(self):  # review I1, I2
+        libraries = [
+            {"id": "L1", "name": "Movies", "type": "movies"},
+            {"id": "L2", "name": "Home videos", "type": "homevideos"},  # no films: empty
+        ]
+        saved = ms.section_payload(
+            libraries, {"L1": [FILM, {"Id": "f2", "Name": "Tide"}], "L2": []}, BASE
+        )
+        saved.update(server_since="x", server_full=1.0, server_libraries=["L1", "L2"])
+        summary = ms.saved_summary(saved)
+        self.assertEqual(summary["members"], {"L1": ["f1", "f2"], "L2": []})
+        delta = {
+            "delta": True,
+            "libraries": libraries,
+            "order": {"L1": ["f1", "f2"], "L2": []},
+            "changed": {},
+            "positions": {"f2": 120_000},  # f1 was watched to the end since; f2 started
+            "server_since": "y",
+        }
+        merged = ms.merged_payload(saved, delta)
+        by_id = {i["id"]: i for i in merged["contents"]}
+        self.assertNotIn("server_position_ms", by_id["f1"])
+        self.assertEqual(by_id["f2"]["server_position_ms"], 120_000)
+        self.assertEqual(merged["sorted_channels"][ms.CONTINUE_ID], [1])
+        self.assertEqual(merged["server_libraries"], ["L1", "L2"])
+        self.assertEqual(saved["contents"][0]["server_position_ms"], 600_000)  # not changed
+
+    def test_a_list_without_a_look_s_time_has_no_summary(self):
+        payload = ms.section_payload([], {}, BASE)
+        self.assertIsNone(ms.saved_summary(payload))
+        self.assertIsNone(ms.saved_summary(None))
+
+
+class ItemTests(unittest.TestCase):
+    def test_a_film_becomes_a_library_title(self):
+        item = ms.title_item(FILM, BASE, "L1")
+        self.assertEqual(item["id"], "f1")
+        self.assertEqual(item["name"], "Salt Roads")
+        self.assertEqual(item["tv_genre_id"], "L1")
+        self.assertEqual(item["year"], "2021")
+        self.assertEqual(item["rating"], "7.4")
+        self.assertEqual(item["description"], "A long road.")
+        self.assertEqual(item["genre"], "Drama, Road")
+        self.assertEqual(item["duration_secs"], 7200)
+        self.assertEqual(item["tmdb"], "4242")
+        self.assertEqual(item["added"], "1792483200")
+        self.assertEqual(item["server_position_ms"], 600_000)
+        self.assertEqual(item["container_extension"], "mkv")
+        self.assertEqual(item["cmd"], "")
+        self.assertEqual(item["logo"], f"{BASE}/Items/f1/Images/Primary?maxHeight=360&tag=tag1")
+
+    def test_a_long_description_is_kept_short(self):
+        long = {"Id": "x", "Name": "Long", "Overview": "word " * 200}
+        text = ms.title_item(long, BASE, "L1")["description"]
+        self.assertLessEqual(len(text), ms.OVERVIEW_CHARS + 1)
+        self.assertTrue(text.endswith("word…"))
+
+    def test_an_error_never_names_the_address(self):
+        c, _http = client(
+            {("GET", "/UserViews"): (500, None), ("GET", "/Users/u1/Views"): (500, None)}
+        )
+        with self.assertRaises(ms.MediaServerError) as caught:
+            c.libraries()
+        self.assertEqual(str(caught.exception), "The server answered 500")
+
+    def test_a_title_without_a_picture_or_a_date_has_none(self):
+        item = ms.title_item({"Id": "x", "Name": "Bare"}, BASE, "L1")
+        self.assertEqual((item["logo"], item.get("added")), ("", None))
+        self.assertNotIn("server_position_ms", item)
+
+    def test_the_section_lists_libraries_with_all_and_continue_first(self):
+        payload = ms.section_payload(
+            [{"id": "L1", "name": "Movies", "type": "movies"}],
+            {"L1": [FILM, {"Id": "f2", "Name": "Tide"}]},
+            BASE,
+        )
+        ids = [c["id"] for c in payload["categories"]]
+        self.assertEqual(ids, [ALL_GROUP_ID, ms.CONTINUE_ID, "L1"])
+        self.assertEqual(payload["sorted_channels"][ms.CONTINUE_ID], [0])  # it has a place
+        self.assertEqual(payload["sorted_channels"]["L1"], [0, 1])
+
+    def test_a_series_episodes_are_grouped_into_its_seasons(self):
+        seasons = [{"Id": "s1", "Name": "Season 1", "IndexNumber": 1}]
+        episodes = [
+            {"Id": "e2", "Name": "Two", "IndexNumber": 2, "SeasonId": "s1", "SeriesId": "show"},
+            {"Id": "e1", "Name": "One", "IndexNumber": 1, "SeasonId": "s1", "SeriesId": "show"},
+        ]
+        (season,) = ms.seasons_payload(seasons, episodes, BASE)["seasons"]
+        self.assertEqual((season["id"], season["season_number"]), ("s1", "1"))
+        self.assertEqual([e["ename"] for e in season["episodes"]], ["One", "Two"])
+        first = season["episodes"][0]
+        self.assertEqual(
+            (first["series_id"], first["season_id"], first["season"]), ("show", "s1", "1")
+        )
+
+
+class SourceTests(unittest.TestCase):
+    def source(self, sid, width, height, bitrate=10_000_000):
+        video = {"Type": "Video", "Width": width, "Height": height}
+        return {"Id": sid, "Container": "mkv", "Bitrate": bitrate, "MediaStreams": [video]}
+
+    def test_below_a_4k_screen_the_best_version_that_is_not_4k_plays(self):
+        sources = [self.source("uhd", 3840, 2160), self.source("hd", 1920, 1080)]
+        source, why = ms.choose_source(sources, screen_4k=False, setting=ms.FOUR_K_SCREEN)
+        self.assertEqual((source["Id"], why), ("hd", None))
+
+    def test_a_4k_screen_gets_the_4k_version(self):
+        sources = [self.source("uhd", 3840, 2160), self.source("hd", 1920, 1080)]
+        source, _ = ms.choose_source(sources, screen_4k=True, setting=ms.FOUR_K_SCREEN)
+        self.assertEqual(source["Id"], "uhd")
+
+    def test_a_title_only_in_4k_plays_as_it_is_below_a_4k_screen(self):
+        # Nothing is converted: the computer scales the picture down (the owner, 2.8).
+        sources = [self.source("uhd", 3840, 2160)]
+        source, why = ms.choose_source(sources, screen_4k=False, setting=ms.FOUR_K_SCREEN)
+        self.assertEqual((source["Id"], why), ("uhd", None))
+
+    def test_always_takes_the_4k_version_below_a_4k_screen(self):
+        sources = [self.source("uhd", 3840, 2160), self.source("hd", 1920, 1080)]
+        source, _ = ms.choose_source(sources, screen_4k=False, setting=ms.FOUR_K_ALWAYS)
+        self.assertEqual(source["Id"], "uhd")
+
+    def test_never_refuses_a_title_only_in_4k(self):
+        sources = [self.source("uhd", 3840, 2160)]
+        self.assertEqual(
+            ms.choose_source(sources, screen_4k=True, setting=ms.FOUR_K_NEVER), (None, ms.ONLY_4K)
+        )
+
+
+class StreamUrlTests(unittest.TestCase):
+    def test_the_file_plays_as_it_is_with_the_token(self):
+        url = ms.stream_url(BASE, "f1", {"Id": "ms1", "Container": "mkv,webm"}, "tok", "ps1")
+        self.assertEqual(
+            url,
+            f"{BASE}/Videos/f1/stream.mkv?static=true&MediaSourceId=ms1&PlaySessionId=ps1"
+            "&api_key=tok",
+        )
+
+    def test_a_stream_address_tells_what_it_plays(self):
+        url = ms.stream_url(BASE, "f1", {"Id": "ms1", "Container": "mp4"}, "tok", "ps1")
+        ref = ms.parse_stream_url(url, [BASE])
+        self.assertEqual(
+            (ref.base, ref.item_id, ref.source_id, ref.token, ref.play_session),
+            (BASE, "f1", "ms1", "tok", "ps1"),
+        )
+        self.assertIsNone(ms.parse_stream_url("http://other.test/Videos/f1/stream.mkv", [BASE]))
+
+    def test_a_server_on_this_computer_is_reached_by_its_home_address_from_a_phone(self):
+        url = "http://localhost:8096/Videos/f1/stream.mkv?static=true&api_key=t"
+        self.assertEqual(
+            ms.phone_reachable(url, "192.168.1.20"),
+            "http://192.168.1.20:8096/Videos/f1/stream.mkv?static=true&api_key=t",
+        )
+        other = "https://media.example.test/Videos/f1/stream.mkv"
+        self.assertEqual(ms.phone_reachable(other, "192.168.1.20"), other)
+        self.assertEqual(ms.phone_reachable(url, None), url)
+
+    def test_a_converted_stream_is_capped_and_still_known(self):
+        url = ms.converted_url(BASE, "f1", {"Id": "ms1"}, "tok", "ps1", 8_000_000, "dev-1")
+        self.assertIn("/Videos/f1/master.m3u8?", url)
+        self.assertIn("MaxStreamingBitrate=8000000", url)
+        self.assertIn("VideoCodec=h264", url)
+        self.assertEqual(ms.parse_stream_url(url, [BASE]).item_id, "f1")
+
+    def test_a_conversion_asks_for_its_height_too(self):  # 2.8: the quality menu
+        url = ms.converted_url(
+            BASE, "f1", {"Id": "ms1"}, "tok", "ps1", 4_000_000, "dev-1", max_height=720
+        )
+        self.assertIn("MaxStreamingBitrate=4000000", url)
+        self.assertIn("MaxHeight=720", url)
+        self.assertNotIn("MaxHeight", ms.converted_url(BASE, "f1", {}, "t", "p", 1, "d"))
+
+
+class QualityTests(unittest.TestCase):  # 2.8: the quality menu's choices
+    def test_a_version_is_known_by_its_size_and_rate(self):
+        uhd = SourceTests.source(None, "uhd", 3840, 2160, 25_000_000)
+        hd = SourceTests.source(None, "hd", 1920, 1080, 8_200_000)
+        self.assertEqual(
+            [ms.version_of(s) for s in (uhd, hd)],
+            [
+                {"id": "uhd", "height": 2160, "bitrate": 25_000_000, "uhd": True, "name": ""},
+                {"id": "hd", "height": 1080, "bitrate": 8_200_000, "uhd": False, "name": ""},
+            ],
+        )
+
+    def test_the_conversions_offered_step_down(self):
+        self.assertEqual(
+            [(q.height, q.bitrate) for q in ms.CONVERSIONS],
+            [(1080, 8_000_000), (720, 4_000_000), (480, 2_000_000)],
+        )
+        self.assertTrue(all(q.converted for q in ms.CONVERSIONS))
+        self.assertFalse(ms.Quality(source="hd").converted)
+        self.assertFalse(ms.Quality().converted)
+
+
+if __name__ == "__main__":
+    unittest.main()

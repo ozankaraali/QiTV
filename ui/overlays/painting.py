@@ -230,6 +230,28 @@ def _skip_arrow(forward: bool) -> tuple[QPainterPath, QPainterPath]:
     return arc, head
 
 
+def draw_refresh(p: QPainter, rect: QRectF, color: QColor) -> None:
+    """A circular arrow, drawn like painting.draw_icon's glyphs (a unit box, round caps)."""
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.translate(rect.x(), rect.y())
+    p.scale(rect.width(), rect.height())
+    pen = QPen(color, 0.1)
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    p.drawArc(QRectF(0.16, 0.16, 0.68, 0.68), 70 * 16, 290 * 16)  # open at the top right
+    head = QPainterPath()
+    head.moveTo(0.52, 0.03)
+    head.lineTo(0.74, 0.17)
+    head.lineTo(0.5, 0.3)
+    head.closeSubpath()
+    p.setPen(Qt.NoPen)
+    p.setBrush(color)
+    p.drawPath(head)
+    p.restore()
+
+
 def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
     p.save()
     p.setRenderHint(QPainter.Antialiasing, True)
@@ -459,6 +481,23 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             shaft.lineTo(0.76, 0.24)
             line(shaft)
             fill(_poly([(0.86, 0.14), (0.86, 0.44), (0.56, 0.14)]))
+        elif name == "cast":  # cast to a TV (2.8): a screen, waves from its lower-left corner
+            screen = QPainterPath(QPointF(0.1, 0.42))
+            screen.lineTo(0.1, 0.2)
+            screen.lineTo(0.9, 0.2)
+            screen.lineTo(0.9, 0.82)
+            screen.lineTo(0.58, 0.82)
+            line(screen)
+            for radius in (0.24, 0.4):
+                corner = QRectF(0.1 - radius, 0.82 - radius, 2 * radius, 2 * radius)
+                wave = QPainterPath()
+                wave.arcMoveTo(corner, 0)
+                wave.arcTo(corner, 0, 90)
+                line(wave)
+            dot = QPainterPath(QPointF(0.1, 0.82))
+            dot.arcTo(QRectF(0.0, 0.72, 0.2, 0.2), 90, -90)
+            dot.closeSubpath()
+            fill(dot)
         elif name == "guide":  # the programme guide: rows of programmes, staggered as on a grid
             for y, spans in (
                 (0.2, ((0.1, 0.36), (0.46, 0.9))),
@@ -467,6 +506,23 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             ):
                 for x0, x1 in spans:
                     fill(_rrect(x0, y, x1 - x0, 0.14, 0.04))
+        elif name == "clapper":  # the Library (2.8): a clapperboard, its striped arm raised
+            line(_rrect(0.12, 0.44, 0.76, 0.42, 0.06))
+
+            def arm(t: float, dy: float = 0.0) -> tuple[float, float]:
+                return (0.12 + 0.74 * t, 0.36 - 0.22 * t + dy)
+
+            for t0, t1 in ((0.0, 0.26), (0.37, 0.63), (0.74, 1.0)):
+                fill(
+                    _poly(
+                        [
+                            arm(t0 + 0.08),
+                            arm(t1 + 0.08 if t1 < 1 else t1),
+                            arm(t1, 0.11)[:2],
+                            arm(t0, 0.11),
+                        ]
+                    )
+                )
         elif name == "file":  # Open file: a page with a folded corner and a play mark
             page = QPainterPath(QPointF(0.22, 0.1))
             page.lineTo(0.58, 0.1)

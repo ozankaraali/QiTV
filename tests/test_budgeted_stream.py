@@ -239,6 +239,17 @@ class KeptStreamTests(_Fixture):
         self.assertEqual(self.live.calls[-1][2]["kept"], ring)
         self.assertEqual(self.kept.rings(), [])
 
+    def test_a_kept_buffer_taken_by_a_start_that_raises_is_closed(self):
+        # 2.8 (review of 2.6): out of the registry and never the session's, it was left open.
+        self.kept.put(KeptRing("s1", "k1", True, Where(30.0, True)))
+        self.live.fail_start = True
+        self.stream.request(P, 2)
+        self.pump()
+        with self.assertRaises(RuntimeError):
+            self.stream.start("http://provider.test/1.ts", channel="k1")
+        self.assertEqual(self.closed, ["s1"])
+        self.assertEqual(self.kept.rings(), [])
+
     def test_another_channel_starts_afresh(self):
         self.kept.put(KeptRing("s1", "k1", True, Where(None, False)))
         self.stream.request(P, 2)

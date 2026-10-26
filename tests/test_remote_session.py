@@ -7,6 +7,7 @@ from services.remote.pairing import RemoteStore
 from services.remote.protocol import (
     MAX_MESSAGE,
     Answered,
+    CastTo,
     Closed,
     Forgot,
     Get,
@@ -18,7 +19,10 @@ from services.remote.protocol import (
     Press,
     Query,
     RecAct,
+    RefreshLists,
+    Schedule,
     StoreSaved,
+    Timer,
     ToTv,
     WatchHere,
 )
@@ -212,9 +216,14 @@ class KkTests(SessionCase):
             {"t": "totv"},
             {"t": "get", "what": "sources", "n": 2},
             {"t": "get", "what": "chgroups", "source": "g1a", "n": 3},
-            {"t": "pos", "ms": 61000, "len": 5400000},
+            {"t": "pos", "ms": 61000, "len": 5400000, "p": 4},
             {"t": "answer", "id": 2, "yes": False},
             {"t": "rec", "id": "b1", "do": "back"},
+            {"t": "cast", "to": "Den"},
+            {"t": "sched", "id": "h7", "do": "series"},
+            {"t": "timer", "id": "h7", "title": "", "begin": 60, "minutes": 30, "days": [1]},
+            {"t": "get", "what": "cast"},
+            {"t": "refresh"},
         ):
             got += session.receive(phone.seal(message)).events
         self.assertEqual(
@@ -232,11 +241,22 @@ class KkTests(SessionCase):
                 ToTv(sid),
                 Get(sid, "sources", "", 0, n=2),
                 Get(sid, "chgroups", "", 0, n=3, source="g1a"),
-                Position(sid, 61000, 5400000),
+                Position(sid, 61000, 5400000, 4),
                 Answered(sid, 2, False),
                 RecAct(sid, "b1", "back"),
+                CastTo(sid, "Den"),
+                Schedule(sid, "h7", "series"),
+                Timer(sid, "h7", "", 60, 30, (1,), ""),
+                Get(sid, "cast", "", 0),
+                RefreshLists(sid),
             ],
         )
+
+    def test_a_message_without_a_route_never_forgets_the_phone(self):  # 2.8
+        phone, session, _, _ = self.pair()
+        reply = session._act({"t": "later-kind"}, 0.0)
+        self.assertEqual((reply.close, reply.events), (None, []))
+        self.assertTrue(self.store.devices)
 
     def test_kk_with_unknown_key_closes_4401(self):
         _, _, reply = self.kk(Keypair.generate(), "nope")

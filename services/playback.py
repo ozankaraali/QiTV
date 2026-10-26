@@ -45,13 +45,13 @@ input (`_player_free`): what is asked for meanwhile is set once the next media o
 With hardware decoding (Settings; `hardware`), each tick while a stream plays reads libVLC's
 media statistics: once its picture stood still while its sound played (`FrozenPicture`, which
 has the lab) where pictures can show (`_can_show`: on a window system, or once VLC made a video
-output for one of this player's media), the stream decodes in software from then on (`software_options()`, media options
-that override the instance's decoder), `pictureFroze` follows, and a stream other than a
-time-shift one opens again where it plays (a film at its position, a live stream live). A
-time-shift stream's position is LiveSession's: it reopens it. Each seek, the resume one
-included, gives the decoder a first picture's time again. The same URL opened again in this
-player (a reconnect, a retry) decodes in software too; `play(software=True)` asks for it (a
-channel that froze before).
+output for one of this player's media), the stream decodes in software from then on
+(`software_options()`, media options that override the instance's decoder), `pictureFroze` follows,
+and a stream other than a time-shift one opens again where it plays (a film at its position, a live
+stream live). A time-shift stream's position is LiveSession's: it reopens it. Each seek, the resume
+one included, gives the decoder a first picture's time again. The same URL opened again in this
+player (a reconnect, a retry) decodes in software too; `play(software=True)` asks for it (a channel
+that froze before).
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ from typing import Any, Callable, Optional, Protocol
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 
-from services import picture
+from services import casting, picture
 from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.picture_watch import Counters, FrozenPicture
@@ -253,6 +253,7 @@ class PlaybackSession(QObject):
         self._hardware = hardware
         self._clock = clock
         self._software = False  # this media decodes in software
+        self._max_height = 0  # 2.8: the size cap its open asked VLC for
         self._froze_url: Optional[str] = None  # the stream whose picture froze here
         self._frozen = FrozenPicture()
         self._had_vout = False  # VLC made a video output for one of this player's media
@@ -324,6 +325,10 @@ class PlaybackSession(QObject):
         self._picture_set = False  # libVLC was given a shape or deinterlacing on this player
         self._shape_timer = QTimer(self, singleShot=True, interval=_SHAPE_SETTLE_MS)
         self._shape_timer.timeout.connect(self._apply_shape)
+        # Casting (2.8): a libVLC renderer (a Chromecast) given before each play while casting;
+        # libVLC takes it only before a play, so a change applies at the next open (`reopen`).
+        self._renderer: Any = None
+        self._renderer_due = False  # given at the next open (set, or taken back once)
 
     def _player_free(self) -> bool:
         """The GUI thread may call into libVLC: not released, and no job holds its input lock.
@@ -375,6 +380,11 @@ class PlaybackSession(QObject):
         it, or its picture froze (a reopen of the stream passes it on)."""
         return self._software
 
+    def max_height(self) -> int:
+        """The size cap the media playing (or the last one opened) asked VLC for (2.8; 0:
+        none): a reopen of the stream passes it on."""
+        return self._max_height
+
     # --- output -----------------------------------------------------------------------
     def set_window(self, win_id: int) -> None:
         # Sets a variable on the player, without its input lock: allowed during a job.
@@ -399,20 +409,51 @@ class PlaybackSession(QObject):
         start_ms: Optional[int] = None,
         referrer: Optional[str] = None,
         software: bool = False,
+        max_height: int = 0,
     ) -> None:
         """`software`: decode this stream in software (with hardware decoding; a channel
-        whose picture froze before)."""
+        whose picture froze before). `max_height` (2.8): VLC's own HLS plays no variant
+        taller (`max_height()` tells a reopen)."""
         if self._released:
             return
         self._cancel_pending()
         self._url, self._kind = url, kind
+        self._max_height = max(0, int(max_height))
         self._options = media_options(
-            kind, latency=latency, user_agent=user_agent, referrer=referrer
+            kind,
+            latency=latency,
+            user_agent=user_agent,
+            referrer=referrer,
+            max_height=self._max_height,
         )
         self._start_ms = start_ms if start_ms and start_ms > 0 else None
         self._stalls, self._restarted = 0, False
         self._software = software or url == self._froze_url
         self._start_media()
+
+    def reopen(self, start_ms: Optional[int] = None) -> None:
+        """Open what plays again, with its options, from `start_ms` (a cast begins or ends)."""
+        if self._released or self._url is None:
+            return
+        self._cancel_pending()
+        self._start_ms = start_ms if start_ms and start_ms > 0 else None
+        self._stalls, self._restarted = 0, False
+        self._start_media()
+
+    def cast_to(self, renderer: Any) -> None:
+        """Send what plays from the next open on to `renderer` (a libVLC renderer item), or
+        back to this player's own picture (None)."""
+        if renderer is self._renderer:
+            return
+        if renderer is not None:
+            casting.hold(renderer)  # its own reference (2.8 review: one found again is released)
+        old, self._renderer = self._renderer, renderer
+        self._renderer_due = True
+        if old is not None:
+            casting.release(old)
+
+    def casting(self) -> bool:
+        return self._renderer is not None
 
     def _start_media(self) -> None:
         """Open self._url now, or once a worker has ended the old input."""
@@ -448,6 +489,9 @@ class PlaybackSession(QObject):
         self._engaged = True
         self._opened.start()
         self._stall_clock.start()
+        if self._renderer_due or self._renderer is not None:
+            self._player.set_renderer(self._renderer)  # before the play, as libVLC wants it
+            self._renderer_due = False
         if self._player.play() == -1:
             self._fail(tr("VLC could not start playback"))  # i18n: error toast
             return
@@ -881,6 +925,9 @@ class PlaybackSession(QObject):
         if self._released:
             return
         self._released = True
+        if self._renderer is not None:
+            casting.release(self._renderer)
+            self._renderer = None
         self._poll.stop()
         self._shape_timer.stop()
         self._cancel_pending()
@@ -1114,7 +1161,15 @@ class Session(Protocol):
 
     def holds_input(self) -> bool: ...
 
+    def reopen(self, start_ms: Optional[int] = None) -> None: ...
+
+    def cast_to(self, renderer: Any) -> None: ...
+
+    def casting(self) -> bool: ...
+
     def decodes_in_software(self) -> bool: ...
+
+    def max_height(self) -> int: ...
 
     def set_window(self, win_id: int) -> None: ...
 
@@ -1128,6 +1183,7 @@ class Session(Protocol):
         start_ms: Optional[int] = None,
         referrer: Optional[str] = None,
         software: bool = False,
+        max_height: int = 0,
     ) -> None: ...
 
     def stop(self) -> None: ...
@@ -1230,6 +1286,9 @@ class NullSession(QObject):
     def decodes_in_software(self) -> bool:
         return False
 
+    def max_height(self) -> int:
+        return 0
+
     def set_window(self, win_id: int) -> None:
         pass
 
@@ -1243,8 +1302,18 @@ class NullSession(QObject):
         start_ms: Optional[int] = None,
         referrer: Optional[str] = None,
         software: bool = False,
+        max_height: int = 0,
     ) -> None:
         self.errorOccurred.emit(translate(NO_VLC_MESSAGE))
+
+    def reopen(self, start_ms: Optional[int] = None) -> None:
+        pass
+
+    def cast_to(self, renderer: Any) -> None:
+        pass
+
+    def casting(self) -> bool:
+        return False
 
     def stop(self) -> None:
         pass

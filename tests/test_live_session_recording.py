@@ -6,6 +6,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from services.live.recorder import LIMIT, MAX_SECONDS, MIN_FREE_BYTES, STOPPED
+from services.live.source import STREAM_LIMIT
 from services.playback import PlaybackState
 from tests.test_live_session import LiveSessionCase, segments
 
@@ -40,6 +41,15 @@ class RecordingTests(LiveSessionCase):
         self.engine.sessionReady.emit(sid)
         self.assertTrue(self.live.recordable())
         self.assertEqual(self.engine.recordings, [])
+
+    def test_a_cast_opens_vlc_again_from_the_buffer_where_it_played(self):
+        self.assertFalse(self.live.reopen_player())  # nothing plays from the buffer yet
+        self.playing()
+        self.step(1.0)
+        plays = len(self.playback.plays)
+        self.assertTrue(self.live.reopen_player())
+        self.assertEqual(len(self.playback.plays), plays + 1)
+        self.assertIn("/stream/", self.playback.plays[-1][0])  # the loopback, not the provider
 
     def test_a_recording_starts_where_it_plays_with_the_limits(self):
         sid = self.playing()
@@ -114,6 +124,17 @@ class RecordingTests(LiveSessionCase):
         self.assertEqual(self.engine.record_stops, [sid])
         self.assertEqual(self.changes, [True, False])
         self.assertFalse(self.live.recordable())
+
+    def test_failed_comes_only_once_the_recording_ended(self):
+        # 2.8 (review of 2.6): a refusal ends the recording before `failed` (and a direct
+        # play, the other `failed`, records nothing): RecordGuard can only watch a reconnect.
+        sid = self.playing()
+        self.live.start_recording(PATH)
+        recording = []
+        self.live.failed.connect(lambda _message: recording.append(self.live.recording()))
+        self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
+        self.assertEqual(recording, [False])
+        self.assertEqual(self.changes, [True, False])
 
     def test_an_engine_shut_down_ends_it_unannounced(self):
         self.playing()

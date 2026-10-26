@@ -65,6 +65,10 @@ class ImageCache(QObject):
             self._pixmaps.move_to_end(url)
         return pixmap
 
+    def failed(self, url: str) -> bool:
+        """Whether `url` could not be loaded (once at least) and has not loaded since."""
+        return self._retries.get(url, 0) > 0 and url not in self._pixmaps
+
     def size_bytes(self) -> int:
         """The bytes the stored pixmaps hold (at most MAX_BYTES, but for one larger image)."""
         return self._bytes

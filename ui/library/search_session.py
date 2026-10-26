@@ -17,7 +17,7 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services import i18n
+from services import i18n, parental
 from services.i18n import N_, tr, tr_n, translate
 from services.library import Details, LibraryModel
 from services.provider_ids import with_provider
@@ -220,6 +220,7 @@ class SearchSession(QObject):
     def _set_hits(self, hits: Optional[list[Hit]], *, failed: bool = False) -> None:
         if hits:  # a hit's title is its provider's, wherever it is played from
             hits = [replace(h, item=with_provider(h.item, h.provider)) for h in hits]
+            hits = parental.visible_hits(hits)  # 2.8: not what parental controls hide
         self._hits = hits
         self._failed = failed
         sections: list[tuple[str, list[dict]]] = []
@@ -260,10 +261,18 @@ class SearchSession(QObject):
         if hit is not None and section == "movies":
             cid = WatchState.content_id(hit.provider, item, item_type="movie")
             resume = self._watch.resume_position(cid)
+        kind = self.kind_of(item)
+        filled = self._model.filled(item, kind)  # 2.8: TMDB's details where the provider's lack
         return replace(
-            self._model.details(item),
-            genre=str(item.get("genre") or item.get("genres_str") or ""),
+            self._model.details(item, kind=kind),
+            genre=str(filled.get("genre") or filled.get("genres_str") or ""),
             kind="series" if section == "series" else "movie",
             resume_ms=resume,
             progress=None,
         )
+
+    def kind_of(self, item: dict) -> str:
+        """A hit's kind as the Library names it: "live", "series" or "movie"."""
+        hit = self.hit_for(item)
+        section = hit.section if hit is not None else "movies"
+        return {"live": "live", "series": "series"}.get(section, "movie")

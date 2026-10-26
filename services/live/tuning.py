@@ -20,14 +20,20 @@ day later the next tune tries the pipeline again, and so is decoding in software
 counts as expired.
 
 `LiveTuning` keeps the entries in memory and in `live_tuning.json` beside the config, at
-most `MAX_ENTRIES` (beyond it the least recently learned go first, a locked rate, direct
-play or software decoding still in force last), as `services.channel_store` keeps them: read
-once, written in the background, a bad entry left out. The learned target is an optional
+most `MAX_ENTRIES` (beyond it a channel's sizes alone go first, then the least recently
+learned, a locked rate, direct play or software decoding still in force last), as
+`services.channel_store` keeps them: read once, written in the background, a bad entry left
+out. The learned target is an optional
 field of version 1, so 2.0.x reads 2.1's file (it ignores the field): one that makes no
 sense, or would not change the next tune (`Learned.informative`), is left out on its own,
-and an entry left with nothing is none. A 2.0.2 `extra` stays as it was: `LearnedTarget` reads it as a prior. Software
-decoding (2.1) is an optional field too, written only when it is so: 2.0.x reads an entry
-with it as without it. A write that fails is logged (without its path or any address).
+and an entry left with nothing is none. A 2.0.2 `extra` stays as it was: `LearnedTarget` reads it as
+a prior. Software decoding (2.1) is an optional field too, written only when it is so: 2.0.x reads
+an entry with it as without it. So is the user's size cap (2.8, the live ⚙: `max_height`, the
+lines of the largest HLS variant to play), written only when there is one; a cap is the
+user's choice, so it outlasts learned entries when the file is full. And the channel's picture
+sizes as last seen (`heights`, two or more), so the ⚙ lists them where no helper state names
+them (the channel plays directly). A write that fails is
+logged (without its path or any address).
 """
 
 from __future__ import annotations
@@ -56,6 +62,7 @@ RATE_LOCK_S = 24 * 60 * 60  # a lock older than this is tried again
 DIRECT_S = 24 * 60 * 60  # so is a channel played directly
 SOFTWARE_S = 24 * 60 * 60  # and one decoded in software
 _VERSION = 1  # 2.1's learned target is an optional field: 2.0.x still reads the file
+MAX_LINES = 4320  # the largest size cap kept (8K's lines)
 _MIN_HOURS = 1e-6  # a learned target's hours of playing are more than nothing
 # What lasts a while, with when it was set and for how long: (flag, its time's key, seconds).
 _FLAGS = (
@@ -74,6 +81,8 @@ class Tuning:
     direct: bool = False  # it crawled through the pipeline even at 1x: play it directly
     learned: Optional[Learned] = None  # its learned target (2.1), if any
     software: bool = False  # hardware decoding froze its picture: decode it in software
+    max_height: int = 0  # 2.8: the user's size cap for its HLS variants (0: the best)
+    heights: tuple[int, ...] = ()  # 2.8: its picture sizes as last seen, largest first
 
 
 def channel_key(provider: str, item: Mapping[str, Any]) -> str:
@@ -124,6 +133,22 @@ def _learned(value: Any) -> Optional[dict[str, Any]]:
     return fields
 
 
+def _lines(value: Any) -> int:
+    """A stored size cap: whole lines up to `MAX_LINES`, else 0 (none)."""
+    return value if type(value) is int and 0 < value <= MAX_LINES else 0
+
+
+def _heights(value: Any) -> tuple[int, ...]:
+    """Stored picture sizes: two to twelve whole lines up to `MAX_LINES`, largest first;
+    else none."""
+    if not isinstance(value, list) or not 2 <= len(value) <= 12:
+        return ()
+    if not all(_lines(h) for h in value):
+        return ()
+    found = tuple(sorted(set(value), reverse=True))
+    return found if len(found) >= 2 else ()
+
+
 def _entry(value: Any) -> Optional[dict[str, Any]]:
     """A stored entry as written by `remember()`; None when it is not one. A learned target
     that makes no sense is left out on its own."""
@@ -138,13 +163,20 @@ def _entry(value: Any) -> Optional[dict[str, Any]]:
         return None
     if not isinstance(software, bool):
         return None
-    if extra is None and not locked and not direct and learned is None and not software:
+    cap = _lines(value.get("max_height"))  # a wrong one is left out on its own
+    sizes = _heights(value.get("heights"))  # likewise
+    lessons = (extra is not None, locked, direct, learned is not None, software, cap, sizes)
+    if not any(lessons):
         return None
     entry = {"extra": extra, "rate_locked": locked, "direct": direct, "used": used}
     if learned is not None:
         entry["learned"] = learned
     if software:
         entry["software"] = True
+    if cap:
+        entry["max_height"] = cap
+    if sizes:
+        entry["heights"] = list(sizes)
     for flag, at, _lasts in _FLAGS:
         if entry.get(flag):
             when = value.get(at, used)  # without its time: when it was learned
@@ -185,6 +217,8 @@ class LiveTuning(ChannelStore):
             direct,
             Learned(**learned) if learned else None,
             software=software,
+            max_height=entry.get("max_height", 0),
+            heights=tuple(entry.get("heights", ())),
         )
 
     def remember(self, key: str, tuning: Tuning) -> None:
@@ -204,8 +238,10 @@ class LiveTuning(ChannelStore):
                     "hold": what.hold,
                 }
             )
+        cap = _lines(tuning.max_height)
+        sizes = _heights(list(tuning.heights))
         lessons = (tuning.extra is not None, tuning.rate_locked, tuning.direct, tuning.software)
-        if not any(lessons) and not learned:
+        if not any(lessons) and not learned and not cap and not sizes:
             if self._entries.pop(key, None) is None:
                 return
         else:
@@ -220,6 +256,10 @@ class LiveTuning(ChannelStore):
                 entry["learned"] = learned
             if tuning.software:
                 entry["software"] = True  # only when it is so (2.0.x reads it as without)
+            if cap:
+                entry["max_height"] = cap  # 2.8: only when there is one
+            if sizes:
+                entry["heights"] = list(sizes)
             # A lock (or direct play, or software decoding) still in force keeps its time;
             # else it counts from now.
             for flag, at, lasts in _FLAGS:
@@ -232,15 +272,18 @@ class LiveTuning(ChannelStore):
         self._save()
 
     def _trim(self, now: Optional[float] = None) -> None:
-        """Drop the entries beyond the cap: the least recently learned first, those with a
-        locked rate, direct play or software decoding still in force last."""
+        """Drop the entries beyond the cap: those with only a channel's sizes first (2.8: they
+        only list the ⚙'s choices again), then the least recently learned, those with a
+        locked rate, direct play or software decoding still in force, or a size cap, last."""
         excess = len(self._entries) - self._max
         if excess > 0:
             when = self._now() if now is None else now
 
-            def worth(key: str) -> tuple[bool, float]:
+            def worth(key: str) -> tuple[bool, bool, float]:
                 entry = self._entries[key]
-                return any(_in_force(entry, when)), entry["used"]
+                kept = any(_in_force(entry, when)) or "max_height" in entry
+                lesson = any(v for k, v in entry.items() if k not in ("used", "heights"))
+                return kept, lesson, entry["used"]
 
             for key in sorted(self._entries, key=worth)[:excess]:
                 del self._entries[key]

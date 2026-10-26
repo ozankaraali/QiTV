@@ -51,6 +51,20 @@ def stable_key(list_id: str) -> str:
     return "g" + hashlib.sha256(list_id.encode("utf-8")).hexdigest()[:12]
 
 
+def find_page(
+    page: int, groups: int, found: int, group_size: int, found_size: int
+) -> tuple[slice, slice, int]:
+    """A find's `page`: the groups it matched `group_size` a page, then what it found
+    `found_size` a page, the page where the groups end beginning them (the first, with a page
+    of groups or fewer). The groups' slice, the found's slice, and how many pages."""
+    group_pages = -(-groups // group_size)
+    first = max(0, group_pages - 1)  # the page the found begin on
+    pages = max(1, group_pages, first + -(-found // found_size))
+    at = page - first
+    hits = slice(at * found_size, (at + 1) * found_size) if at >= 0 else slice(0, 0)
+    return slice(page * group_size, (page + 1) * group_size), hits, pages
+
+
 def programme_dict(programme: Optional[Programme]) -> Optional[dict]:
     if programme is None:
         return None

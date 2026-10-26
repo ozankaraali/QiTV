@@ -177,7 +177,7 @@ def check_for_updates(
         _update_jobs.remove((thread, worker))
         app = QCoreApplication.instance()
         if update_error is not None:
-            logger.warning(f"Error checking for updates: {update_error}")
+            logger.warning("Error checking for updates: %s", safe_message(update_error))
             if manual and app and ui is not None:
                 QTimer.singleShot(0, app, lambda: ui.check_failed(update_error))
             return
@@ -246,7 +246,7 @@ def extract_version_from_tag(tag):
     if match:
         return match.group(0)
     else:
-        logger.info(f"Unexpected version format found: '{tag}'")
+        logger.info("Unexpected version format found: '%s'", tag)
         return None
 
 
@@ -348,7 +348,8 @@ class UpdateDownloader(QObject):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
-                        # Throttle progress updates to every 500KB to avoid overwhelming Qt event loop
+                        # Throttle progress updates to every 500KB to avoid overwhelming the Qt
+                        # event loop
                         if (
                             downloaded - last_progress_update >= 512 * 1024
                             or downloaded >= total_size
@@ -512,7 +513,7 @@ def _perform_windows_update(downloaded_path: str, release_url: str, ui: Optional
         _close_all_windows(app)
 
     except OSError as e:
-        logger.error(f"Failed to launch update: {e}")
+        logger.error("Failed to launch update: %s", safe_message(e))
         _launch_failed(downloaded_path, release_url, ui)
 
 

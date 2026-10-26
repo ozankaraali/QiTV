@@ -111,7 +111,7 @@ def get_app_version() -> str:
                     _APP_VERSION = v
                     return v
         except Exception as e:
-            logger.debug(f"Unable to read version from {p}: {e}")
+            logger.debug("Unable to read version from %s: %s", p, safe_message(e))
 
     # 4) Fallback
     _APP_VERSION = "0.0.0"
@@ -349,6 +349,15 @@ class ConfigManager:
     tv_all_providers = _config_property("tv_all_providers", False, coerce=bool)
     library_provider_name = _config_property("library_provider_name", "", coerce=str)
     library_all_providers = _config_property("library_all_providers", False, coerce=bool)
+    # 2.8, optional (older builds ignore it and mix every provider): the providers the
+    # Library mixes, by name; empty: every one.
+    library_mix = _config_property(
+        "library_mix",
+        [],
+        coerce=lambda value: (
+            [n for n in value if isinstance(n, str)] if isinstance(value, list) else []
+        ),
+    )
     channel_epg = _config_property("channel_epg", DEFAULT_OPTION_CHANNEL_EPG)
     channel_logos = _config_property("channel_logos", DEFAULT_OPTION_CHANNEL_LOGO)
     max_cache_image_size = _config_property(
@@ -469,6 +478,17 @@ class ConfigManager:
     recordings_dir = _config_property(
         "recordings_dir", "", coerce=lambda value: value if isinstance(value, str) else ""
     )
+    # 2.8, optional (older builds ignore it): Jellyfin and Emby. Which version of a title plays
+    # ("screen": the 4K one on a 4K screen, or when it's the only one; "always", "never"); the
+    # file plays as it is (the player's ⚙ quality menu asks the server to convert).
+    media_4k_versions = _config_property(
+        "media_4k_versions", "screen", coerce=_one_of(("screen", "always", "never"), "screen")
+    )
+    # 2.8, optional: parental controls ({"version": 1, "salt", "pin" (a PBKDF2 hash), "hidden"});
+    # services.parental reads and writes it.
+    parental = _config_property(
+        "parental", None, coerce=lambda value: value if isinstance(value, dict) else None
+    )
     # 2.2: OpenSubtitles. Optional keys (older builds ignore them); the key and the password
     # are never logged. The language is the one downloaded last; "hearing impaired" whether
     # that file was for the hearing impaired (such files then rank first).
@@ -479,6 +499,11 @@ class ConfigManager:
     opensubtitles_hearing_impaired = _config_property(
         "opensubtitles_hearing_impaired", False, coerce=lambda value: value is True
     )
+    # 2.8, optional (older builds ignore them): TMDB fills in what the Library's titles lack
+    # (services/tmdb.py); the token is the user's own (a source build has none built in) and is
+    # never logged.
+    tmdb_details = _config_property("tmdb_details", True, coerce=lambda value: value is not False)
+    tmdb_token = _config_property("tmdb_token", "", coerce=str)
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, tzinfo
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -21,12 +21,14 @@ from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, CatalogServ
 from services.catalogs import Catalogs
 from services.epg_view import Programme
 from services.i18n import N_
+from services.parental import Parental
 from services.provider_ids import (
     ALL_PROVIDERS,
     mixed_group_id,
     provider_of,
     split_group_id,
 )
+from services.provider_types import is_media_server
 from services.redact import safe_message
 
 logger = logging.getLogger(__name__)
@@ -74,16 +76,20 @@ class BrowsedCatalog(QObject):
         *,
         source_key: str,
         all_key: str,
+        mix_key: str = "",
         parent: Optional[QObject] = None,
     ):
         """`source_key` names the config setting that holds this page's provider and
         `all_key` the one that says it shows every provider (not used before 2.1's mixed
-        pages). An empty `library_provider_name` means the selected provider."""
+        pages). An empty `library_provider_name` means the selected provider. `mix_key` (2.8,
+        the Library's) names the one that lists the providers its all mode mixes (empty:
+        every one); without it all mode mixes every provider."""
         super().__init__(parent)
         self._catalogs = catalogs
         self.config = config
         self._source_key = source_key
         self._all_key = all_key
+        self._mix_key = mix_key
         self._attached: dict[str, CatalogService] = {}
         self._epoch = 0
         # What all mode builds from the providers' lists, kept against their content versions:
@@ -125,11 +131,35 @@ class BrowsedCatalog(QObject):
         """Whether the page mixes every provider."""
         return bool(getattr(self.config, self._all_key, False))
 
+    def mixed_names(self) -> list[str]:
+        """The providers all mode mixes, in Settings order: the ones the mix lists (2.8), or
+        every one (a mix of fewer than two that are still in the list is every one)."""
+        names = self._catalogs.names()
+        chosen = getattr(self.config, self._mix_key, None) if self._mix_key else None
+        wanted = set(chosen) if isinstance(chosen, list) else set()
+        mixed = [name for name in names if name in wanted]
+        return mixed if len(mixed) >= 2 else names
+
+    def select_mix(self, names: list[str]) -> None:
+        """Show these providers mixed (2.8, the Library's ticks): one is that provider alone,
+        all of them (or none) is every provider."""
+        wanted = set(names)
+        chosen = [name for name in self._catalogs.names() if name in wanted]
+        if len(chosen) == 1:
+            self.select_provider(chosen[0])
+            return
+        everyone = len(chosen) == len(self._catalogs.names()) or not chosen
+        if self._mix_key:
+            setattr(self.config, self._mix_key, [] if everyone else chosen)
+            self._save_choice()
+        self._memo.clear()
+        self._select_all(False)
+
     def shown_providers(self) -> set[str]:
-        """The providers this page lists (Settings must not drop their catalogs): every one in
-        all mode, else its own."""
+        """The providers this page lists (Settings must not drop their catalogs): those it
+        mixes in all mode, else its own."""
         if self.all_providers():
-            return set(self._catalogs.names())
+            return set(self.mixed_names())
         source = self._single_source()
         return {source} if source else set()
 
@@ -142,7 +172,7 @@ class BrowsedCatalog(QObject):
             del self._attached[name]
         self._memo.clear()
         if self.all_providers():
-            for name in self._catalogs.names():
+            for name in self.mixed_names():
                 self._catalogs.ensure(name)
 
     def catalog_for(self, item: dict) -> CatalogService:
@@ -293,16 +323,26 @@ class BrowsedCatalog(QObject):
         if source != self._seen_source:
             self._seen_source = source
             self._epoch += 1
+        guard = self._parental()  # 2.8: hiding or showing what is hidden changes the lists
+        hidden = (guard.state_version() << 2 * _EPOCH_SHIFT) if guard is not None else 0
         if self.all_providers():
-            return (self._epoch << _EPOCH_SHIFT) + self._all_version()
+            return hidden + (self._epoch << _EPOCH_SHIFT) + self._all_version()
         catalog = self._cat()
-        return (self._epoch << _EPOCH_SHIFT) + (
-            catalog.content_version() if catalog is not None else 0
+        return (
+            hidden
+            + (self._epoch << _EPOCH_SHIFT)
+            + (catalog.content_version() if catalog is not None else 0)
         )
+
+    def parental_state(self) -> int:
+        """What parental controls hide now (changes as content_version() does with them): a
+        Library list worked out under another state is never shown meanwhile."""
+        guard = self._parental()
+        return guard.state_version() if guard is not None else 0
 
     def _all_version(self) -> int:
         """Changes whenever the content of any provider (or the provider list) does."""
-        names = self._catalogs.names()
+        names = self.mixed_names()
         total = len(names) * 1_000_003
         for name in names:
             total += self._catalogs.catalog(name).content_version()
@@ -355,7 +395,7 @@ class BrowsedCatalog(QObject):
             setattr(self.config, self._all_key, True)
             self._save_choice()
         self._failed.clear()  # All chosen (or refreshed): every provider is tried
-        for name in self._catalogs.names():
+        for name in self.mixed_names():
             if force_refresh:
                 self._catalogs.select(name, force_refresh=True)
             else:
@@ -365,7 +405,7 @@ class BrowsedCatalog(QObject):
     def loading_provider(self) -> Optional[str]:
         if self.all_providers():
             for name in self._catalogs.created():
-                if name in self._catalogs.names() and self._catalogs.catalog(name).is_loading():
+                if name in self.mixed_names() and self._catalogs.catalog(name).is_loading():
                     return name
             return None
         catalog = self._cat()
@@ -388,11 +428,13 @@ class BrowsedCatalog(QObject):
             kind = str(self._catalogs.provider(name).get("type", "")).upper()
         except KeyError:
             return []
+        if is_media_server(kind):
+            return ["movies", "series"]  # 2.8: a Jellyfin or Emby server
         return ["live", "movies", "series"] if kind in _TYPED_PROVIDERS else ["live"]
 
     def sections(self) -> list[str]:
         if self.all_providers():
-            names = self._catalogs.names()
+            names = self.mixed_names()
             if not names:
                 return []
             return (
@@ -414,7 +456,7 @@ class BrowsedCatalog(QObject):
             if section != "live":
                 return False
             # A playlist's entries may be live or on demand: undecided while one is mixed in.
-            typed = all(len(self._sections_of(n)) > 1 for n in self._catalogs.names())
+            typed = all(len(self._sections_of(n)) > 1 for n in self.mixed_names())
             return True if typed else None
         catalog = self._cat()
         return catalog.is_live(section) if catalog is not None else None
@@ -449,6 +491,21 @@ class BrowsedCatalog(QObject):
         if catalog is not None:
             catalog.request_section(section, force=force)
 
+    def refresh_sections(self) -> int:
+        """Load the films and series of the providers shown again (2.8: the Library's
+        Refresh; `CatalogService.refresh_section`): every one mixed, else the source's. How
+        many lists load (or load already, or will once their provider is set up)."""
+        names = self.mixed_names() if self.all_providers() else [self.source()]
+        loading = 0
+        for name in names:
+            if name not in self._catalogs.names():
+                continue
+            catalog = self._catalogs.catalog(name)
+            for section in ("movies", "series"):
+                if section in self._sections_of(name) and catalog.refresh_section(section):
+                    loading += 1
+        return loading
+
     def _settle_all(self, section: str) -> None:
         if self.all_providers():
             self.sectionReady.emit(section)  # the list is what the saved lists hold
@@ -459,15 +516,43 @@ class BrowsedCatalog(QObject):
 
     def groups(self, section: str) -> list[Group]:
         if self.all_providers():
-            return list(self._mixed_groups(section))
-        catalog = self._cat()
-        return catalog.groups(section) if catalog is not None else []
+            found = list(self._mixed_groups(section))
+        else:
+            catalog = self._cat()
+            found = catalog.groups(section) if catalog is not None else []
+        guard = self._parental()
+        if guard is None or not guard.active():
+            return found
+        # 2.8: the groups parental controls hide while locked are not listed.
+        return [
+            g
+            for g in found
+            if g.header or not guard.hides_group(section, *self._group_of(g.id), title=g.title)
+        ]
 
     def items(self, section: str, group_id: str) -> Optional[list[dict]]:
         if self.all_providers():
-            return self._mixed_items(section, group_id)
-        catalog = self._cat()
-        return catalog.items(section, group_id) if catalog is not None else None
+            found = self._mixed_items(section, group_id)
+        else:
+            catalog = self._cat()
+            found = catalog.items(section, group_id) if catalog is not None else None
+        guard = self._parental()
+        if found is None or guard is None or not guard.active():
+            return found
+        if guard.hides_group(section, *self._group_of(group_id)):
+            return []
+        return guard.visible(section, found)  # 2.8: without the channels hidden while locked
+
+    def _parental(self) -> Optional[Parental]:
+        """The window's parental controls (2.8; None: none)."""
+        return getattr(self._catalogs, "parental", None)
+
+    def _group_of(self, group_id: str) -> tuple[str, str]:
+        """(provider, its own group id) of a group as this catalog lists it."""
+        name, own_id = split_group_id(group_id)
+        if name:
+            return name, own_id
+        return self.current_provider_name(), str(group_id)
 
     def request_group(self, section: str, group_id: str) -> None:
         if self.all_providers():
@@ -493,12 +578,11 @@ class BrowsedCatalog(QObject):
     # --- all providers -------------------------------------------------------------------
     def _having(self, section: str) -> list[str]:
         """The providers (in Settings order) that have this section."""
-        return [name for name in self._catalogs.names() if section in self._sections_of(name)]
+        return [name for name in self.mixed_names() if section in self._sections_of(name)]
 
     def _versions(self) -> tuple:
         return tuple(
-            (name, self._catalogs.catalog(name).content_version())
-            for name in self._catalogs.names()
+            (name, self._catalogs.catalog(name).content_version()) for name in self.mixed_names()
         )
 
     def _mixed_groups(self, section: str) -> list[Group]:
@@ -507,7 +591,7 @@ class BrowsedCatalog(QObject):
         versions = self._versions()
         hit = self._memo.get(("groups", section))
         if hit is not None and hit[0] == versions:
-            return hit[1]
+            return cast(list[Group], hit[1])
         rows: list[Group] = []
         total, any_all = 0, False
         for name in self._having(section):
@@ -541,7 +625,7 @@ class BrowsedCatalog(QObject):
         versions = self._versions()
         hit = self._memo.get(("all", section))
         if hit is not None and hit[0] == versions:
-            return hit[1]
+            return cast(list[dict], hit[1])
         joined: list[dict] = []
         loaded = False
         for provider in self._having(section):
@@ -576,8 +660,18 @@ class BrowsedCatalog(QObject):
             catalog.request_episodes(series, season)
 
     # --- links and guide -------------------------------------------------------------------
-    def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
-        return self._catalogs.request_link(item, section=section, is_episode=is_episode)
+    def request_link(
+        self, item: dict, *, section: str, is_episode: bool = False, quality: Any = None
+    ) -> int:
+        extra = {"quality": quality} if quality is not None else {}
+        return self._catalogs.request_link(item, section=section, is_episode=is_episode, **extra)
+
+    def media_menu(self, item: dict) -> Optional[dict]:
+        """What the quality menu offers for a media server's title (2.8: its catalog's
+        `media_menu`); None for any other."""
+        catalog = self._for(item)
+        menu = getattr(catalog, "media_menu", None) if catalog is not None else None
+        return menu(item) if callable(menu) else None
 
     def request_archive_link(self, item: dict, programme: str) -> int:
         """The link of a programme's recording in the item's STB portal's archive (catch-up;

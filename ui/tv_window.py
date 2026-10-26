@@ -30,7 +30,7 @@ import os
 import platform
 import sys
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import (
     QElapsedTimer,
@@ -68,9 +68,11 @@ from PySide6.QtWidgets import (
 from services import favorites, free_channels, thread_cleanup
 from services.account_check import AccountChecks
 from services.browsed_catalog import BrowsedCatalog
+from services.casting import CastDevices, LibVlcDiscovery
 from services.catalogs import Catalogs
 from services.catchup_memory import FILE_NAME as CATCHUP_FILE, CatchupMemory
 from services.connection_budget import ConnectionBudget
+from services.epg_view import Programme
 from services.find import Preferences, preferences_for
 from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
@@ -79,7 +81,9 @@ from services.live.engine import LiveEngine
 from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
 from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
+from services.media_reporter import MediaReporter
 from services.navigation import NavModel
+from services.parental import Parental, install as install_parental
 from services.picture import FILE_NAME as PICTURE_FILE, ChannelPictures
 from services.playback import (
     NullSession,
@@ -90,6 +94,14 @@ from services.playback import (
     default_args,
 )
 from services.provider_link import ProviderLink
+from services.provider_types import is_media_server
+from services.recording_schedule import (
+    FILE_NAME as SCHEDULE_FILE,
+    Schedule,
+    flush_writes as recording_schedule_flush,
+    slot_text,
+)
+from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
@@ -98,7 +110,7 @@ from services.thread_cleanup import has_pending_threads
 from services.update_checker import call_before_update, set_quit_note
 from services.watch_state import WatchState
 from services.zapping import ZapController
-from ui import macos_window, provider_drop
+from ui import macos_window, provider_drop, quit_reason
 from ui.bottom_band import BottomBand
 from ui.desktop_pip import DesktopPip, corner_rect
 from ui.export_flow import ExportFlow
@@ -112,6 +124,7 @@ from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
 from ui.overlay_host import OverlayHost
 from ui.overlays.back_notice import BackNotice
+from ui.overlays.cast_notice import CastNotice
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.corner_controls import CornerControls
 from ui.overlays.drawer import Drawer
@@ -120,6 +133,7 @@ from ui.overlays.guide import Guide
 from ui.overlays.layout_row import LayoutRow
 from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
+from ui.overlays.painting import fmt_clock
 from ui.overlays.pip_label import PipLabel
 from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import RecSign
@@ -136,11 +150,13 @@ from ui.overlays.zap_banner import ZapBanner
 from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
+from ui.record_timer_dialog import RecordTimerDialog, TimerChoice
+from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
 from ui.settings_dialog import OptionsDialog
 from ui.subtitle_search import OnlineSetup
 from ui.track_controls import SUBTITLE_FILTER
-from ui.tv_controller import ERROR_MS, Overlays, TVController
+from ui.tv_controller import ERROR_MS, INFO_MS, Overlays, TVController
 from ui.tv_menus import TVMenus
 from ui.tv_pages import TVPages
 from ui.video_surface import VideoSurface
@@ -329,6 +345,7 @@ class TVWindow(QMainWindow):
         self._close_retries = 0
         self._video_released = False
         self._closed = False
+        self._quit_asked: Optional[str] = None  # how QiTV's Quit action was reached (2.8)
         self._threads_abandoned = False
         self._thread_wait = QElapsedTimer()
         # The close advances only on this timer: restarted, never stacked.
@@ -401,6 +418,14 @@ class TVWindow(QMainWindow):
         self.catalogs = catalogs or Catalogs(
             config_manager, provider_manager, in_use=self._providers_in_use, parent=self
         )
+        self.catalogs.screen_4k = self._screen_is_4k  # 2.8: a media server's 4K versions
+        # 2.8: parental controls: the browsed catalogs and the searches leave out what they hide
+        self.parental = Parental(config_manager)
+        self.catalogs.parental = self.parental
+        self.parental.group_title = self.catalogs.group_title  # the adult rule reads names
+        self._relock = QTimer(self, singleShot=True)
+        self._relock.timeout.connect(self.parental_changed)
+        install_parental(self.parental)
         self.catalog = BrowsedCatalog(
             self.catalogs,
             config_manager,
@@ -413,6 +438,7 @@ class TVWindow(QMainWindow):
             config_manager,
             source_key="library_provider_name",
             all_key="library_all_providers",
+            mix_key="library_mix",  # 2.8: the providers ticked in its menu
             parent=self,
         )
         self.nav = NavModel(self.catalog, config_manager, self)
@@ -504,16 +530,25 @@ class TVWindow(QMainWindow):
         self.sound_panel = TrackPanel(host)
         self.subtitle_panel = TrackPanel(host)
         self.picture_panel = TrackPanel(host)
+        self.quality_panel = TrackPanel(host)  # 2.8: the ⚙ quality menu
         self.stats_overlay = StatsOverlay(host)
         self.sleep_notice = SleepNotice(host)
         self.back_notice = BackNotice(host)  # 2.6: Resume, where a channel was left
         self.question_card = QuestionCard(host)  # 2.6: stop a recording for a stream?
+        self.quality_card = QuestionCard(host)  # 2.8: convert on the server?
         self.rec_sign = RecSign(host)  # 2.6: recordings in the background
         self.stopped_notice = StoppedNotice(host)  # 2.6: after Stop, Play again
+        self.cast_notice = CastNotice(host)  # 2.8: Playing on <device>, Stop casting
         self.pair_overlay = PairOverlay(host)  # the phone remote's pairing QR
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
         self.corner_controls = CornerControls(host)
+        # 2.8: the recordings scheduled from the guide (a small file beside the config).
+        self.recording_schedule = Schedule(
+            os.path.join(config_manager.get_config_dir(), SCHEDULE_FILE)
+        )
+        self.scheduler: Optional[RecordingScheduler] = None
+        self._timer_dialog: Optional[RecordTimerDialog] = None  # "Record at a time", last open
         self.overlays = Overlays(
             banner=ZapBanner(host),
             column=ChannelColumn(self.logos, now_provider, parent=host),
@@ -527,6 +562,8 @@ class TVWindow(QMainWindow):
                 parent=host,
                 archive_days=archive_days,
                 archive_reach=archive_reach,
+                # 2.8: QiTV records programmes at their time (with the time-shift helper)
+                scheduled=self._programme_scheduled if self._instance is not None else None,
             ),
             next_card=NextCard(host),
             welcome=WelcomeCard(host),
@@ -536,6 +573,8 @@ class TVWindow(QMainWindow):
             subtitle_panel=self.subtitle_panel,
             subtitle_search=self.subtitle_search,
             picture_panel=self.picture_panel,
+            quality_panel=self.quality_panel,
+            quality_question=self.quality_card,
             stats=self.stats_overlay,
             sleep_notice=self.sleep_notice,
             back_notice=self.back_notice,
@@ -544,6 +583,7 @@ class TVWindow(QMainWindow):
             rec_sign=self.rec_sign,
             library_rec_sign=self.library_rec_sign,
             stopped_notice=self.stopped_notice,
+            cast_notice=self.cast_notice,
             pairing=self.pair_overlay,
             library_toast=self.library_toast,
             layout_row=self.layout_row,
@@ -571,6 +611,7 @@ class TVWindow(QMainWindow):
             self.sound_panel,
             self.subtitle_panel,
             self.picture_panel,
+            self.quality_panel,
             self.layout_row,
             self.overlays.drawer,
             self.overlays.guide,
@@ -581,8 +622,10 @@ class TVWindow(QMainWindow):
             self.sleep_notice,
             self.back_notice,
             self.stopped_notice,
+            self.cast_notice,
             self.rec_sign,
             self.question_card,
+            self.quality_card,
             self.pair_overlay,
             self.overlays.toast,
         ):
@@ -630,6 +673,10 @@ class TVWindow(QMainWindow):
         # The multiview lays the surfaces out as tiles of the page (no surface moves pages);
         # after the PiP frame's filters, so it sees the tiles' presses first.
         self.grid_frame = GridFrame(self.player_page, self.surfaces, self.grid_tiles)
+        # 2.8: the devices libVLC finds to cast to (looked for once the cast menu opens).
+        self.cast_devices: Optional[CastDevices] = None
+        if self._instance is not None:
+            self.cast_devices = CastDevices(LibVlcDiscovery(self._instance), self)
         controller = TVController(
             config=config_manager,
             catalog=self.catalog,
@@ -655,6 +702,10 @@ class TVWindow(QMainWindow):
             grid_tiles=self.grid_tiles,
             host=self.host,
             make_slot=self._make_slot,
+            cast_devices=self.cast_devices,
+            media_reporter=MediaReporter(  # 2.8: Jellyfin, Emby
+                self._media_servers, verify=lambda: bool(self.config.ssl_verify)
+            ),
             parent=self,
         )
         self.controller = controller
@@ -662,6 +713,22 @@ class TVWindow(QMainWindow):
         # settles the provider change before a Library play waiting for it runs.
         controller.wire()
         self.screens = TVPages(self, self)  # the Library's controller and the page moves
+        if self.engine is not None:  # 2.8: scheduled recordings, by the time-shift helper
+            self.attach_scheduler(
+                RecordingScheduler(
+                    schedule=self.recording_schedule,
+                    engine=self.engine,
+                    catalogs=self.catalogs,
+                    budget=self.budget,
+                    config=config_manager,
+                    toast=lambda text, kind="info", ms=INFO_MS: self.screens.notify(text, kind, ms),
+                    parent=self,
+                )
+            )
+        controller.parental = self.parental  # what it protects never enters the history
+        self.overlays.guide.recordRequested.connect(self.schedule_programme)
+        self.overlays.guide.recordCancelled.connect(self.cancel_programme)
+        self.overlays.guide.timerRequested.connect(self.record_at)
         self.library_controller = self.screens.library_controller
         self.exports = ExportFlow(
             catalog=self.catalog,
@@ -760,6 +827,171 @@ class TVWindow(QMainWindow):
         source.wheelSteps.connect(controller.wheel)
         source.backPressed.connect(controller.mouse_back)
         source.forwardPressed.connect(controller.mouse_forward)
+
+    # ---- scheduled recordings (2.8) -----------------------------------------------------------
+
+    def _programme_scheduled(self, channel: dict, programme: Programme) -> bool:
+        return self.recording_schedule.is_scheduled(channel, programme)
+
+    def writing_paths(self) -> frozenset[str]:
+        """The files recordings write now (the REC button's and the schedule's), as the
+        engine running now says; safe from other threads (a reference read)."""
+        engine = self.engine
+        return engine.writing if engine is not None else frozenset()
+
+    def _account_of(self, channel: dict) -> Optional[dict]:
+        """The channel's provider's account, kept out of the recording schedule (2.8)."""
+        try:
+            return self.catalogs.provider(str(channel.get("_provider") or ""))
+        except KeyError:
+            return None
+
+    def schedule_programme(self, channel: dict, programme: Programme, series: bool) -> str:
+        """The guide's Record (or Record series, R): QiTV records it at its time. What the
+        toast said ("" when the programme had ended)."""
+        schedule = self.recording_schedule
+        name = str(channel.get("name") or "")
+        if series:
+            schedule.add_series(channel, programme.title, account=self._account_of(channel))
+            # i18n: a toast: every airing of the programme on the channel will be recorded
+            text = tr(
+                "Every “{title}” on {channel} will be recorded.",
+                title=programme.title,
+                channel=name,
+            )
+        else:
+            if schedule.add_once(channel, programme, account=self._account_of(channel)) is None:
+                # i18n: a toast: a programme asked to be recorded ended already
+                self.screens.notify(tr("“{title}” has ended.", title=programme.title))
+                return ""
+            when = fmt_clock(programme.start.astimezone())
+            # i18n: a toast: the programme will be recorded at its time ({time}: its start)
+            text = tr("“{title}” will be recorded at {time}.", title=programme.title, time=when)
+        self.screens.notify(text)
+        self.controller.update_guides()
+        self._schedule_changed()
+        if self.scheduler is not None:
+            self.scheduler.tick()  # one on now starts at once
+        return text
+
+    def record_at(self, channel: dict, programme: Optional[Programme] = None) -> None:
+        """2.8: "Record at a time" for `channel` (its right-click, the guide's footer), on the
+        programme's time when one is given; what it is given is scheduled."""
+        dialog = RecordTimerDialog(
+            str(channel.get("name") or ""),
+            start=programme.start if programme is not None else None,
+            stop=programme.stop if programme is not None else None,
+            parent=self,
+        )
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+        def chosen() -> None:
+            choice = dialog.choice()
+            if choice is not None:
+                self.schedule_timer(channel, choice)
+
+        dialog.accepted.connect(chosen)
+        self._timer_dialog = dialog
+        dialog.open()
+
+    def schedule_timer(self, channel: dict, choice: TimerChoice) -> str:
+        """Once: a programme of its own at that time; else a timer on its days. What the toast
+        said ("" when its time was over)."""
+        if not choice.days:
+            title = choice.title or slot_text(choice.begin, choice.minutes)
+            programme = Programme(title, choice.start(), choice.stop())
+            return self.schedule_programme(channel, programme, False)
+        item = self.recording_schedule.add_timer(
+            channel,
+            begin=choice.begin,
+            minutes=choice.minutes,
+            days=choice.days,
+            title=choice.title,
+            account=self._account_of(channel),
+        )
+        text = timer_text(item)
+        self.screens.notify(text)
+        self._schedule_changed()
+        if self.scheduler is not None:
+            self.scheduler.tick()  # one on now starts at once
+        return text
+
+    def cancel_programme(self, channel: dict, programme: Programme) -> None:
+        item = self.recording_schedule.scheduled_item(channel, programme)
+        if item is not None:
+            self.cancel_scheduled(str(item.get("id") or ""))
+
+    def cancel_scheduled(self, item_id: str) -> None:
+        """A scheduled recording is cancelled (the guide's, the Library's right-click)."""
+        if self.scheduler is not None:
+            self.scheduler.cancel(item_id)
+        else:
+            self.recording_schedule.cancel(item_id)
+        # i18n: a toast: a scheduled recording was cancelled
+        self.screens.notify(tr("Recording cancelled."))
+        self._schedule_changed()
+
+    def _schedule_changed(self) -> None:
+        """The guide's dots, the Library's Recordings shelf and the guides in use follow."""
+        if self._closing:
+            return
+        self.overlays.guide.update()
+        self.screens.recordings.set_scheduled(self.recording_schedule.items())
+        self.screens.recordings.refresh()  # a recording that ended is a file now
+        self.controller.update_guides()
+
+    def parental_changed(self) -> None:
+        """Parental controls changed (a PIN, locked or not, hidden or shown again; 2.8): the
+        channel list, the guide and the Library show what may show now."""
+        if self._closing:
+            return
+        self.controller.parental_changed()
+        self.screens.library_model.changed.emit()
+        # Unlocked for a while: locked again when it runs out (a hidden channel stops then).
+        remaining = self.parental.unlocked_for()
+        if remaining > 0:
+            self._relock.start(int(remaining * 1000) + 250)
+        else:
+            self._relock.stop()
+
+    def attach_scheduler(self, scheduler: Any) -> None:
+        """The scheduled recordings (2.8): the Library and the guides follow them; what records
+        shows on the REC sign, which stops it."""
+        self.scheduler = scheduler
+        controller = self.controller
+        scheduler.changed.connect(self._schedule_changed)
+        scheduler.changed.connect(controller.scheduled_changed)
+        controller.extra_guides = scheduler.providers
+        controller.scheduled_now = scheduler.recording_now
+        controller.stop_scheduled = scheduler.stop_now
+        controller.record_at = self.record_at  # a channel's right-click: Record at a time
+
+    def _stop_scheduler(self) -> None:
+        if self.scheduler is not None:
+            self.scheduler.shutdown()
+            recording_schedule_flush(2.0)  # what it noted reaches the disk before QiTV goes
+
+    @staticmethod
+    def _screen_is_4k() -> bool:
+        """Whether a screen shows 4K (its pixels, at least 3,800 across): a Jellyfin or Emby
+        title's 4K version plays then, by default (2.8)."""
+        for screen in QGuiApplication.screens():
+            size = screen.size()
+            if max(size.width(), size.height()) * screen.devicePixelRatio() >= 3800:
+                return True
+        return False
+
+    def _media_servers(self) -> list[dict]:
+        """The Jellyfin and Emby providers' entries (2.8: the reporter tells them)."""
+        servers = []
+        for name in self.catalogs.names():
+            try:
+                entry = self.catalogs.provider(name)
+            except KeyError:
+                continue
+            if is_media_server(entry.get("type")):
+                servers.append(entry)
+        return servers
 
     def _make_slot(self, name: str) -> Optional[Slot]:
         """A multiview tile's player: a surface on the player page (hidden until the grid lays
@@ -1269,7 +1501,8 @@ class TVWindow(QMainWindow):
         return self.geometry()
 
     def _update_menu_bar(self) -> None:
-        """After fullscreen or the mini player changed: the menu bar and the transport's way back."""
+        """After fullscreen or the mini player changed: the menu bar and the transport's way
+        back."""
         mini = self._mini_restore is not None
         bar = self.menuBar()
         if not bar.isNativeMenuBar():  # the macOS menu bar is outside the window
@@ -1353,6 +1586,7 @@ class TVWindow(QMainWindow):
                 dialog.options_tab.setCurrentWidget(dialog.remote_tab)
             dialog.exec()
             self.menus.rebuild_providers()
+            self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on
 
     def open_phone_remote(self) -> None:
         """The menu's Phone Remote…: turns the remote on if it is off, then the pairing QR."""
@@ -1378,6 +1612,7 @@ class TVWindow(QMainWindow):
             dialog.fill_from_link(link)
         dialog.exec()
         self.menus.rebuild_providers()
+        self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on
 
     def add_dropped_providers(self, files: list[str], links: list[ProviderLink]) -> None:
         """Playlist files and provider links dropped on the window (2.2) become providers, as
@@ -1474,6 +1709,11 @@ class TVWindow(QMainWindow):
             self.kept.set_disk(self.config_manager.timeshift_enabled)
             if self.engine is not None and not self.config_manager.timeshift_enabled:
                 self.engine.drop_kept()
+        if self.engine is not None and self.config_manager.timeshift_enabled:
+            # 2.8: the disk amount applies to the disk buffers at once (a kept one gives way
+            # first), not only from the next disk open.
+            mib = int(self.config_manager.timeshift_max_mib)
+            self.engine.set_disk_amount(mib * 1024 * 1024)
         self.remote.apply_config()
 
     def set_provider(self, force_update: bool = False) -> None:
@@ -1500,6 +1740,9 @@ class TVWindow(QMainWindow):
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         self.controller.start()
         self.epg_refresh.start()
+        if self.scheduler is not None:
+            self.scheduler.start()  # what was missed meanwhile is said; then the schedule
+            self._schedule_changed()
         if self.config_manager.save_failed():  # e.g. the defaults patched in at start
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
 
@@ -1562,6 +1805,13 @@ class TVWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def quit_chosen(self) -> None:
+        """QiTV's Quit action (menu, ⌘Q, Ctrl+Q): noted for the log, then the window closes."""
+        if self._quit_asked is None:
+            active = self.app.applicationState() == Qt.ApplicationState.ApplicationActive
+            self._quit_asked = quit_reason.asked_by_menu(active)
+        self.close()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """Close in steps, each after the event loop ran again (`close_retry`).
 
@@ -1587,9 +1837,10 @@ class TVWindow(QMainWindow):
             self._come_forward()  # the question shows where it can be answered
             return
         if not self._closing:
-            # Why QiTV ends (its log is kept in a file since 2.7.2): from the system or the
-            # window's own button, or from QiTV's Quit.
-            how = "the system or the window" if event.spontaneous() else "QiTV's Quit"
+            # Why QiTV ends (its log is kept in a file since 2.7.2; 2.8 tells a request from
+            # outside, which macOS sends the way QiTV's own Quit closes, apart from the Quit).
+            asked = getattr(self.app, "quit_asked", None) or self._quit_asked
+            how = quit_reason.describe(event.spontaneous(), asked)
             logger.info("The window closes (%s).", how)
             self._closing = True
             self._mini_waiting = False
@@ -1657,6 +1908,8 @@ class TVWindow(QMainWindow):
                 self.engine.shutdown()
                 for live in self._lives():
                     live.engine_shut_down()  # it signals nothing from now on
+                if self.scheduler is not None:
+                    self.scheduler.engine_gone()  # its streams go back; the rest tried again
 
     def restart_live(self) -> None:
         """A self-update stopped the time-shift helper and could not launch: start a new one.
@@ -1672,6 +1925,8 @@ class TVWindow(QMainWindow):
         if self.kept is not None:
             self.kept.use_engine(self.engine)
             self._take_kept_back()
+        if self.scheduler is not None:
+            self.scheduler.use_engine(self.engine)
         self.engine.start()
         old.deleteLater()
         call_before_update(self.stop_live, self.restart_live)  # each hook runs once
@@ -1716,6 +1971,8 @@ class TVWindow(QMainWindow):
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
             ("stop the channel list's find", self.finder.shutdown),
+            # 2.8: before the helper goes, so they keep what they recorded
+            ("stop the scheduled recordings", self._stop_scheduler),
             ("stop the live pipeline", self.stop_live),
             ("stop the catalogs", self.catalogs.shutdown),  # and cancel their running jobs
             ("cancel the Library's jobs", self.jobs.cancel_all),  # its searches

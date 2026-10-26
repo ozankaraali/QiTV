@@ -18,6 +18,7 @@ LIVE = Where(None, False)
 class FakeEngine(QObject):
     sessionUpdated = Signal(str, dict)
     keptFound = Signal(str, dict, dict)  # 2.6: a later helper took a kept folder back
+    keptLost = Signal(str)  # 2.8: one could not be taken back
 
     def __init__(self):
         super().__init__()
@@ -31,6 +32,14 @@ class KeptBuffersTests(unittest.TestCase):
     def setUp(self):
         self.engine = FakeEngine()
         self.kept = KeptBuffers(self.engine)
+
+    def test_a_buffer_that_could_not_be_taken_back_goes(self):
+        # 2.8 (review of 2.6): after a helper's death its session is gone ("unkept").
+        self.kept.put(KeptRing("a", "k1", True, LIVE))
+        self.kept.put(KeptRing("b", "k2", True, LIVE))
+        self.engine.keptLost.emit("a")
+        self.assertEqual([r.sid for r in self.kept.rings()], ["b"])
+        self.assertIsNone(self.kept.take("k1"))
 
     def test_take_hands_it_back_once(self):
         ring = KeptRing("a", "k1", True, Where(12.0, True))
@@ -46,6 +55,27 @@ class KeptBuffersTests(unittest.TestCase):
         self.assertEqual(self.engine.closed, ["a"])
         self.assertIsNone(self.kept.take("k1"))
         self.assertEqual(self.kept.take("k2").sid, "b")
+
+    def test_a_ring_coming_right_back_leaves_the_others(self):  # 2.8
+        # Its channel is tuned again at once (a new picture size): the memory ring kept
+        # before stays; the next ring put as usual keeps only itself again.
+        self.kept.put(KeptRing("a", "k1", False, LIVE))
+        self.kept.put(KeptRing("b", "k2", False, LIVE), coming_back=True)
+        self.assertEqual(self.engine.closed, [])
+        self.assertEqual(self.kept.take("k2").sid, "b")
+        self.assertEqual([r.sid for r in self.kept.rings()], ["a"])
+        self.kept.put(KeptRing("c", "k3", False, LIVE))
+        self.assertEqual(self.engine.closed, ["a"])
+
+    def test_a_ring_that_did_not_come_back_leaves_one_memory_ring(self):  # 2.8 review M4
+        # Put to come right back, but another channel was tuned instead: once that one is
+        # taken, one memory ring is kept again, the channel left last.
+        self.kept.put(KeptRing("a", "k1", False, LIVE))
+        self.kept.put(KeptRing("b", "k2", False, LIVE), coming_back=True)
+        self.kept.put(KeptRing("d", "k4", True, LIVE))  # a disk ring stays whatever
+        self.assertIsNone(self.kept.take("k3"))
+        self.assertEqual(self.engine.closed, ["a"])
+        self.assertEqual([r.sid for r in self.kept.rings()], ["b", "d"])
 
     def test_disk_rings_are_all_kept(self):
         for sid, channel in (("a", "k1"), ("b", "k2"), ("c", "k3")):

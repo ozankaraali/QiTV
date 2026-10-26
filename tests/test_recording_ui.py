@@ -217,11 +217,12 @@ class TransportRecordTests(unittest.TestCase):
 
 
 class KeyTests(unittest.TestCase):
-    def test_r_records_on_the_player_and_types_in_the_lists(self):
+    def test_r_records_on_the_player_and_in_the_guide_and_types_in_the_lists(self):
         none = Qt.KeyboardModifier.NoModifier
         self.assertEqual(resolve(Qt.Key.Key_R, none, "r", context="player"), (Action.RECORD, ""))
         self.assertEqual(resolve(Qt.Key.Key_R, none, "r", context="drawer"), (Action.NAV_TEXT, "r"))
-        self.assertIsNone(resolve(Qt.Key.Key_R, none, "r", context="guide"))
+        guide = resolve(Qt.Key.Key_R, none, "r", context="guide")
+        self.assertEqual(guide, (Action.RECORD, ""))  # 2.8: the footer's programme
         ctrl = Qt.KeyboardModifier.ControlModifier
         self.assertNotEqual(resolve(Qt.Key.Key_R, ctrl, "r", context="player"), (Action.RECORD, ""))
 

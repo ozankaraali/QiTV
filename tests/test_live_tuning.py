@@ -253,6 +253,68 @@ class LiveTuningTests(unittest.TestCase):
         self.assertNotIn("software", written["plain"])  # only when it is so
         self.assertEqual(written["soft"]["software_at"], written["soft"]["used"])
 
+    def test_a_size_cap_alone_is_kept_and_a_wrong_one_is_left_out(self):  # 2.8
+        channels = {
+            "capped": {"max_height": 720, "used": self.clock.now},
+            "both": {"extra": 2.0, "max_height": 480, "used": self.clock.now},
+            "text": {"max_height": "720", "used": self.clock.now},
+            "zero": {"extra": 1.0, "max_height": 0, "used": self.clock.now},
+            "flag": {"max_height": True, "used": self.clock.now},
+        }
+        self.path.write_text(json.dumps({"version": 1, "channels": channels}))
+        store = self.store()
+        self.assertEqual(store.get("capped"), Tuning(max_height=720))
+        self.assertEqual(store.get("both"), Tuning(extra=2.0, max_height=480))
+        self.assertEqual(store.get("text"), Tuning())
+        self.assertEqual(store.get("zero"), Tuning(extra=1.0))
+        self.assertEqual(store.get("flag"), Tuning())
+        store.remember("plain", Tuning(extra=1.5))
+        store.remember("mine", Tuning(max_height=360))
+        store.flush()
+        written = json.loads(self.path.read_text())["channels"]
+        self.assertNotIn("max_height", written["plain"])  # only when there is one
+        self.assertEqual(self.store().get("mine"), Tuning(max_height=360))
+        store.remember("mine", Tuning())  # back to the best: nothing left to remember
+        self.assertEqual(store.get("mine"), Tuning())
+
+    def test_the_sizes_seen_round_trip_and_wrong_ones_are_left_out(self):  # review M11
+        store = self.store()
+        store.remember("seen", Tuning(heights=(1080, 720, 360)))
+        store.remember("both", Tuning(extra=1.0, max_height=720, heights=(1080, 720)))
+        store.flush()
+        again = self.store()
+        self.assertEqual(again.get("seen"), Tuning(heights=(1080, 720, 360)))
+        self.assertEqual(again.get("both"), Tuning(extra=1.0, max_height=720, heights=(1080, 720)))
+        channels = {
+            "text": {"extra": 1.0, "heights": ["1080", "720"], "used": self.clock.now},
+            "one": {"extra": 1.0, "heights": [1080], "used": self.clock.now},
+            "huge": {"extra": 1.0, "heights": [99999, 720], "used": self.clock.now},
+            "flag": {"extra": 1.0, "heights": [True, 720], "used": self.clock.now},
+        }
+        self.path.write_text(json.dumps({"version": 1, "channels": channels}))
+        store = self.store()
+        for key in channels:
+            self.assertEqual(store.get(key), Tuning(extra=1.0), key)
+
+    def test_a_size_cap_is_not_pushed_out_by_learned_entries(self):
+        store = self.store(max_entries=2)
+        store.remember("capped", Tuning(max_height=720))
+        for key in ("a", "b"):
+            store.remember(key, Tuning(learned=Learned(need=8.0)))
+        self.assertEqual(store.get("capped"), Tuning(max_height=720))
+
+    def test_sizes_alone_go_before_what_was_learned(self):  # 2.8 review M5
+        # A channel's sizes only list the ⚙'s choices again: a full file lets them go first,
+        # though they were seen after the lesson.
+        store = self.store(max_entries=2)
+        store.remember("learned", Tuning(learned=Learned(need=8.0)))
+        self.clock.now += 1
+        store.remember("seen", Tuning(heights=(1080, 720)))
+        self.clock.now += 1
+        store.remember("new", Tuning(extra=1.0))
+        self.assertEqual(store.get("seen"), Tuning())
+        self.assertEqual(store.get("learned").learned, Learned(need=8.0))
+
     def test_software_decoding_is_not_pushed_out_by_learned_entries(self):
         store = self.store(max_entries=2)
         store.remember("soft", Tuning(software=True))
@@ -322,6 +384,8 @@ class LiveTuningTests(unittest.TestCase):
         store.remember("learned", Tuning(learned=Learned(need=13.0)))
         store.remember("software", Tuning(software=True))
         store.remember("both", Tuning(extra=2.0, software=True))
+        store.remember("capped", Tuning(extra=2.5, max_height=720))  # 2.8
+        store.remember("sized", Tuning(extra=2.0, heights=(1080, 720)))
         store.flush()
         old = load_two_zero_eight()
         reader = old.LiveTuning(str(self.path), now=self.clock)
@@ -332,6 +396,8 @@ class LiveTuningTests(unittest.TestCase):
         self.assertEqual(reader.get("learned"), old.Tuning())  # what it can't hold: nothing
         self.assertEqual(reader.get("software"), old.Tuning())
         self.assertEqual(reader.get("both"), old.Tuning(extra=2.0))
+        self.assertEqual(reader.get("capped"), old.Tuning(extra=2.5))
+        self.assertEqual(reader.get("sized"), old.Tuning(extra=2.0))
         reader.remember("other", old.Tuning(extra=1.5))  # 2.0.8 writes back what it knows
         reader.flush()
         again = self.store()
@@ -762,7 +828,7 @@ class LiveTuning:
                     os.remove(temporary)
                 except OSError:
                     pass
-'''
+'''  # noqa: E501 (verbatim copy of the released file)
 
 
 if __name__ == "__main__":

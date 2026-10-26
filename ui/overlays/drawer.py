@@ -18,7 +18,9 @@ pick another. A head cut short ("…") goes a layer up. ⌕ (Search, as Ctrl/⌘
 The find: typing (or a click on the ⌕ Find box above the right column) finds genres and
 channels at every provider, whichever column had the focus. The right column then lists the
 genres found (each with its provider's name when there are two or more, and its channel
-count), the channels found, and a last row that looks for films and series in the Library. A
+count), the channels found, and a last row that looks for films and series in the Library;
+as the phone's finds, it widens from the group open (its channels first) to its provider and
+then to every provider, each in the find's ranking (services.find.by_scope). A
 genre opens as if walked to (`NavModel.open_found_group`), a channel plays (`channelFound`),
 the last row asks for the Library's search (`libraryFindRequested`). Esc, ✕ or ← end the find:
 the right column is back where it was, its highlight and its scroll position too.
@@ -35,6 +37,7 @@ behind the list instead of the one the list was opened for.
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 import logging
+from typing import cast
 
 from PySide6.QtCore import (
     QEvent,
@@ -70,7 +73,7 @@ from PySide6.QtWidgets import (
 
 from services import i18n
 from services.catalog import shown_label
-from services.find import FoundChannel, FoundGenre
+from services.find import FoundChannel, FoundGenre, by_scope
 from services.i18n import N_, tr, tr_n, translate
 from services.navigation import (
     ADD_PROVIDER_ROW,
@@ -98,7 +101,7 @@ from ui.overlays.channel_rows import (
     LazyNumbers,
     column_focused,
 )
-from ui.overlays.painting import Units, draw_icon, elided, fill_round
+from ui.overlays.painting import Units, draw_icon, draw_refresh, elided, fill_round
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -123,6 +126,7 @@ GEAR_GAP_U = 0.7
 MIN_HIT_PX = 28  # the header's buttons take clicks over this square at least
 REFRESH_ACTION = "refresh"  # the header's refresh button: the provider's channels and guide
 SEARCH_ACTION = "search"  # the header's ⌕: the Library's search
+LIBRARY_ACTION = "library"  # 2.8: the header's Library button (Movies, or the section last open)
 BACK_BUTTON = "back"  # the header's ‹: a layer up
 _CRUMB = "crumb:"  # a name in the header, by its path index ("crumb:up": the elided head)
 SEPARATOR = " › "
@@ -166,6 +170,8 @@ _ACTION_ICONS = {
 }
 _HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key (see _hint)
     SEARCH_ACTION: (N_("Search"), "Ctrl+F"),  # i18n: a button's tooltip (verb)
+    # i18n: a button's tooltip: it opens the Library (2.8)
+    LIBRARY_ACTION: (N_("Movies and series"), "Ctrl+2"),
     REFRESH_ACTION: (N_("Refresh channels and guide"), "Ctrl+R"),
     SETTINGS_ROW: (N_("Settings"), "Ctrl+,"),
 }
@@ -174,28 +180,6 @@ _HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key (see _
 def _hint(what: str, keys: str) -> str:
     """A tooltip naming its key; `what` (English, marked N_) in the active language."""
     return key_hint(translate(what), keys)
-
-
-def _draw_refresh(p: QPainter, rect: QRectF, color: QColor) -> None:
-    """A circular arrow, drawn like painting.draw_icon's glyphs (a unit box, round caps)."""
-    p.save()
-    p.setRenderHint(QPainter.Antialiasing, True)
-    p.translate(rect.x(), rect.y())
-    p.scale(rect.width(), rect.height())
-    pen = QPen(color, 0.1)
-    pen.setCapStyle(Qt.RoundCap)
-    p.setPen(pen)
-    p.setBrush(Qt.NoBrush)
-    p.drawArc(QRectF(0.16, 0.16, 0.68, 0.68), 70 * 16, 290 * 16)  # open at the top right
-    head = QPainterPath()
-    head.moveTo(0.52, 0.03)
-    head.lineTo(0.74, 0.17)
-    head.lineTo(0.5, 0.3)
-    head.closeSubpath()
-    p.setPen(Qt.NoPen)
-    p.setBrush(color)
-    p.drawPath(head)
-    p.restore()
 
 
 def _draw_back(p: QPainter, rect: QRectF, color: QColor) -> None:
@@ -226,6 +210,7 @@ class _Header:
     search: QRectF
     refresh: QRectF
     gear: QRectF
+    library: QRectF  # 2.8: left of Search
 
 
 @dataclass(frozen=True)
@@ -245,6 +230,12 @@ def _crumb_key(index: int | None) -> str:
 def _leaves_drawer(node: NavNode) -> bool:
     """An action row, or a section the Library shows: chosen, it is handed to the shell."""
     return node.layer == "action" or (node.layer == "section" and node.key in LIBRARY_SECTIONS)
+
+
+def _shown_provider(catalog) -> str:
+    """The provider the list shows (ALL_PROVIDERS for every one)."""
+    source = getattr(catalog, "source", None)
+    return str(source() if callable(source) else catalog.current_provider_name())
 
 
 def _is_focus_key(node: NavNode, wanted: "str | tuple[str, str]") -> bool:
@@ -583,7 +574,7 @@ class _RowIndex:
     def get(self, node, default=None):
         if node is None:
             return default
-        row = self._seq.row_of(node) if self._seq is not None else self._map.get(node)  # type: ignore[union-attr]
+        row = self._seq.row_of(node) if self._seq is not None else self._map.get(node)
         return default if row is None else row
 
     def __contains__(self, node) -> bool:
@@ -593,7 +584,7 @@ class _RowIndex:
         row = self.get(node)
         if row is None:
             raise KeyError(node)
-        return row
+        return cast(int, row)
 
 
 class _Column:
@@ -634,7 +625,7 @@ class Drawer(Overlay):
     playRequested = Signal(object, object, object)
     contextRequested = Signal(object, QPoint)  # node, global position
     # An action row (SETTINGS_ROW, ADD_PROVIDER_ROW, OPEN_FILE_ROW) or a header button
-    # (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION).
+    # (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION).
     actionRequested = Signal(str)
     libraryRequested = Signal(str)  # "movies" or "series", for the Library
     # A channel the find found (stamped with its provider), and the genre it is first listed in.
@@ -663,6 +654,9 @@ class Drawer(Overlay):
         self._find_moved = False  # ↑/↓ in the find: its highlight no longer follows the results
         self._finder: FindSession | None = None  # (set_finder) without one nothing is found
         self._before_find: tuple[_Place, str] | None = None  # the right column, the focus
+        # The open group's channels (provider, item key), which the find lists first: worked
+        # out once per list (its identity and length).
+        self._own: tuple[int, int, frozenset[tuple[str, str]]] = (0, -1, frozenset())
         self._restore: _Place | None = None  # where the right column goes back to (_refresh)
         self._pending_key: str | tuple[str, str] | None = None
         self._left_choice: NavNode | None = None  # the left highlight, which may lead the path
@@ -729,7 +723,7 @@ class Drawer(Overlay):
             return
         self._pending_key = None
         self._find_moved = self.finding()
-        row = col.rows.get(col.current, -1 if delta > 0 else len(col.nodes))  # type: ignore[arg-type]
+        row = col.rows.get(col.current, -1 if delta > 0 else len(col.nodes))
         target = self._selectable_row(col, min(len(col.nodes) - 1, max(0, row + delta)), delta)
         if target is not None:
             self._select(col, target)
@@ -1058,7 +1052,7 @@ class Drawer(Overlay):
         back = restore if restore is not None and restore.parent == right_parent else None
         self._fill(left, left_parent, left_children, was["right"], reveal)
         if self.finding():
-            self._fill_found(right)
+            self._fill_found(right, right_parent, right_children)
         else:
             # A layer up the left list comes right with the path's node highlighted: the one
             # whose list the right column showed, not a genre only highlighted (previewed) on
@@ -1178,11 +1172,19 @@ class Drawer(Overlay):
         else:
             col.current = None
 
-    def _fill_found(self, col: _Column) -> None:
-        """The right column lists what the find found: genres, channels, the Library row."""
+    def _fill_found(
+        self, col: _Column, group: NavNode | None, listed: Sequence[NavNode] | None
+    ) -> None:
+        """The right column lists what the find found: genres, channels, the Library row.
+        It widens as the phone's finds do: the channels of the group open (`group`, whose
+        rows were `listed`) first, then its provider's, then every provider's; the provider's
+        genres before the others'; each in the find's ranking."""
         finder = self._finder
         genres: list[FoundGenre] = finder.genres if finder is not None else []
         channels: list[FoundChannel] = finder.channels if finder is not None else []
+        provider = _shown_provider(self._nav.catalog)
+        genres = by_scope(genres, provider)
+        channels = by_scope(channels, provider, self._own_channels(group, listed, provider))
         searching = finder is not None and finder.searching
         text = self.find_text.strip()
         labels = len(self._nav.catalog.provider_names()) >= 2  # with one provider, as in 2.0
@@ -1229,6 +1231,20 @@ class Drawer(Overlay):
             col.current = next((n for n in nodes if _selectable(n)), None)  # the best match
         self._show_current(col)
 
+    def _own_channels(
+        self, group: NavNode | None, listed: Sequence[NavNode] | None, shown: str
+    ) -> frozenset[tuple[str, str]]:
+        """The open group's channels as (provider, item key); none when no group is open."""
+        if group is None or group.layer != "group" or not listed:
+            return frozenset()
+        items = getattr(listed, "items", None)  # a long list's dicts, without making its rows
+        if not isinstance(items, list):
+            items = [n.payload for n in listed if isinstance(n.payload, dict)]
+        if self._own[:2] != (id(listed), len(items)):
+            own = frozenset((provider_of(c) or shown, item_key(c)) for c in items)
+            self._own = (id(listed), len(items), own)
+        return self._own[2]
+
     # ---- mouse: consumed here, so it never reaches the video behind -------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -1238,7 +1254,7 @@ class Drawer(Overlay):
         event.accept()
         button = self._header_button_at(event.position())
         if event.button() == Qt.LeftButton and button is not None:
-            if button in (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION):
+            if button in (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION):
                 self.actionRequested.emit(button)
             elif button == FIND_ACTION:
                 self.start_find()
@@ -1325,6 +1341,8 @@ class Drawer(Overlay):
             return REFRESH_ACTION
         if hit(header.search).contains(point):
             return SEARCH_ACTION
+        if hit(header.library).contains(point):
+            return LIBRARY_ACTION
         if hit(header.back).contains(point):
             return BACK_BUTTON
         for index, _text, rect in header.names:
@@ -1480,9 +1498,10 @@ class Drawer(Overlay):
 
     def _header(self) -> _Header:
         """The left column's top row: ‹ at its left (but on the sources), then the names of
-        the left column's path, then Search, the refresh button and the Settings gear at its
-        right end. The names elide before they reach the buttons: the last one at its end, the
-        others ("the head") from their start, into one name that goes a layer up."""
+        the left column's path, then the Library (2.8), Search, the refresh button and the
+        Settings gear at its right end. The names elide before they reach the buttons: the
+        last one at its end, the others ("the head") from their start, into one name that goes
+        a layer up."""
         units = self._units
         col = self._columns["left"]
         side = units.px(PAD_SIDE_U)
@@ -1497,10 +1516,11 @@ class Drawer(Overlay):
         gear = QRectF(row.right() - size, top, size, size)
         refresh = QRectF(gear.left() - gap - size, top, size, size)
         search = QRectF(refresh.left() - gap - size, top, size, size)
+        library = QRectF(search.left() - gap - size, top, size, size)
         path = self._nav.path
         back = QRectF(row.x(), top, size, size) if len(path) > 1 else QRectF()
         x = back.right() + gap if not back.isEmpty() else row.x()
-        room = max(0.0, search.left() - gap - x)  # never under the buttons
+        room = max(0.0, library.left() - gap - x)  # never under the buttons
         fm = QFontMetrics(units.font(CRUMB_FONT_U))
         titles = [n.title for n in path[:-1]]
         names: list[tuple[int | None, str, QRectF]] = []
@@ -1526,7 +1546,7 @@ class Drawer(Overlay):
             names.append((len(titles) - 1, last, QRectF(x, row.y(), last_w, row.height())))
             x += last_w
         text = QRectF(start, row.y(), x - start, row.height())
-        return _Header(back, names, text, search, refresh, gear)
+        return _Header(back, names, text, search, refresh, gear, library)
 
     def breadcrumb_text_rect(self) -> QRectF:
         """Where the header's names are (drawer coordinates)."""
@@ -1544,6 +1564,10 @@ class Drawer(Overlay):
     def search_rect(self) -> QRectF:
         """⌕ (the Library's search), left of the refresh button (drawer coordinates)."""
         return self._header().search
+
+    def library_rect(self) -> QRectF:
+        """The Library button (2.8), left of ⌕ (drawer coordinates)."""
+        return self._header().library
 
     def refresh_rect(self) -> QRectF:
         """The refresh button (the provider's channels and guide), left of the gear."""
@@ -1575,6 +1599,7 @@ class Drawer(Overlay):
                 p.drawText(QRectF(rect.right(), rect.y(), after, rect.height()), align, SEPARATOR)
         buttons = (
             (BACK_BUTTON, header.back),
+            (LIBRARY_ACTION, header.library),
             (SEARCH_ACTION, header.search),
             (REFRESH_ACTION, header.refresh),
             (SETTINGS_ROW, header.gear),
@@ -1587,10 +1612,12 @@ class Drawer(Overlay):
                 draw_icon(p, "gear", rect, tone)
             elif key == SEARCH_ACTION:
                 draw_icon(p, "search", rect, tone)
+            elif key == LIBRARY_ACTION:
+                draw_icon(p, "clapper", rect, tone)
             elif key == BACK_BUTTON:
                 _draw_back(p, rect, tone)
             else:
-                _draw_refresh(p, rect, tone)
+                draw_refresh(p, rect, tone)
 
     def _paint_find(self, p: QPainter, units: Units) -> None:
         """The ⌕ Find box: a prompt; once clicked or typed into, the text, a caret and ✕."""

@@ -37,6 +37,7 @@ from services.provider_api import (
     xtream_stream_url,
 )
 from services.provider_ids import stamp
+from services.provider_types import is_media_server
 from services.redact import safe_message
 from services.workers import NO_PORTAL_DATA_MESSAGE, STB_DEVICE_REJECTED_MESSAGE, find_roman_token
 
@@ -55,6 +56,9 @@ EMPTY_LINK_MESSAGE = N_("The portal returned an empty link")
 # Catalog network jobs (sections, groups, seasons, episodes) running at once per service:
 # portals rate-limit, and some ban a MAC that opens many connections.
 MAX_CATALOG_JOBS = 2
+# 2.8: a ready provider's film and series lists load this long after it, ahead of the Library
+# (its channels and guide go first).
+LOAD_AHEAD_MS = 5_000
 
 # --- failure messages shown to the user ---------------------------------------------------
 # Worker errors are exception texts that can carry URLs, query strings and credentials
@@ -223,7 +227,7 @@ def normalize_seasons(series_name: str, items: list[dict]) -> list[dict]:
                 item["added"] = item.get("air_date", "")
 
         except Exception as e:
-            logger.error(f"Error processing season {i}: {e}", exc_info=True)
+            logger.error("Error processing season %s: %s", i, safe_message(e))
             # Set defaults if processing fails
             item["o_name"] = item.get("name", f"Season {i + 1}")
             item["number"] = str(i + 1)
@@ -366,6 +370,22 @@ class WorkerFactory:
 
         return LinkCreatorWorker(prefer_https=True, **kwargs)
 
+    # Jellyfin and Emby (2.8): the server's address as given (it answers where it is).
+    def media_section(self, provider, content_type, verify_ssl, saved=None) -> QObject:
+        from services.media_workers import MediaSectionWorker
+
+        return MediaSectionWorker(provider, content_type, verify_ssl, saved=saved)
+
+    def media_series(self, provider, series_id, verify_ssl) -> QObject:
+        from services.media_workers import MediaSeriesWorker
+
+        return MediaSeriesWorker(provider, series_id, verify_ssl)
+
+    def media_link(self, provider, item_id, verify_ssl, **choices) -> QObject:
+        from services.media_workers import MediaLinkWorker
+
+        return MediaLinkWorker(provider, item_id, verify_ssl, **choices)
+
 
 class CatalogService(QObject):
     """The TV shell's view of the current provider.
@@ -414,6 +434,9 @@ class CatalogService(QObject):
         self.epg_manager = epg_manager
         self.runner = runner if runner is not None else JobRunner(self)
         self.factory = factory or WorkerFactory()
+        # 2.8: whether a screen shows 4K (a media server's 4K version plays only then, by
+        # default); the window's check, set by Catalogs (none: no 4K screen).
+        self.screen_4k: Callable[[], bool] = lambda: False
         self._generation = 0
         self._content_version = 0  # bumped whenever the catalog content may have changed
         self._epg_ready = False
@@ -433,12 +456,22 @@ class CatalogService(QObject):
         self._catalog_inflight: dict[tuple, str] = {}
         self._catalog_handlers: dict[str, tuple[Callable, Callable]] = {
             "section": (self._on_section_loaded, self._on_section_error),
+            # 2.8: a list loading behind a saved one, or ahead of the Library
+            "section_behind": (self._on_section_loaded, self._on_section_behind_error),
             "group": (self._on_group_loaded, self._on_group_error),
             "seasons": (self._on_seasons_loaded, self._on_seasons_error),
             "episodes": (self._on_episodes_loaded, self._on_episodes_error),
         }
         self._link_ids = link_ids if link_ids is not None else itertools.count(1)
         self._closed = False  # shutdown(): nothing starts or reports any more
+        self._waited_sections: set[str] = set()  # asked for with nothing saved to show (2.8)
+        # 2.8: Refresh pressed while a provider set up, as (provider, section): those load
+        # once that provider is ready.
+        self._refresh_after: set[tuple[str, str]] = set()
+        # 2.8: a media server's link requests (request id -> item id) and what each title's
+        # quality menu offers (item id -> {"versions", "quality"}).
+        self._media_links: dict[int, str] = {}
+        self._media_menus: dict[str, dict] = {}
 
     # --- providers -------------------------------------------------------------------
     def provider_names(self) -> list[str]:
@@ -467,6 +500,7 @@ class CatalogService(QObject):
         # issued for the previous provider are ignored, and queued catalog requests and a
         # queued EPG load (both for the previous provider) are dropped.
         self._generation += 1
+        self._waited_sections.clear()  # their loads are dropped: nobody waits for them now
         self._content_version += 1  # the setup replaces the provider's content
         self._epg_ready = False
         self._ready_provider = None
@@ -516,6 +550,7 @@ class CatalogService(QObject):
         self._catalog_queue.clear()
         self._pending_setup = None
         self._pending_epg = None
+        self._refresh_after.clear()
 
     def _setup_active(self) -> bool:
         """True while a provider setup is running or waiting to run."""
@@ -571,10 +606,41 @@ class CatalogService(QObject):
         self.providerReady.emit(self._ready_provider)
         self._request_epg(job.data[1])
         self._pump_catalog()
+        waiting, self._refresh_after = self._refresh_after, set()
+        for name, section in sorted(waiting):
+            if name == self._ready_provider:  # (one pressed for a provider left goes)
+                self.refresh_section(section)
+        if self._loads_behind(self.provider_type()):
+            generation = self._generation
+            QTimer.singleShot(LOAD_AHEAD_MS, self, lambda: self._load_ahead(generation))
+
+    @staticmethod
+    def _loads_behind(ptype: str) -> bool:
+        """Whether a provider's film and series lists load behind what shows (2.8): an Xtream
+        panel's and a media server's, each a whole list (a portal loads its genres one by
+        one; a playlist has none)."""
+        return ptype == "XTREAM" or is_media_server(ptype)
+
+    def _load_ahead(self, generation: int) -> None:
+        """Load the ready provider's film and series lists that are missing or past their
+        time, before the Library asks: it opens on them at once."""
+        if self._closed or generation != self._generation or self._setup_active():
+            return
+        for section in ("movies", "series"):
+            if section not in self.sections():
+                continue
+            content = self._content(section)
+            ct = SECTION_CONTENT_TYPES[section]
+            if self._usable(content) and not self.provider_manager.is_content_stale(ct):
+                continue
+            self._request_catalog(
+                ("section", section), "section_behind", section, self._section_worker
+            )
 
     def _on_provider_error(self, job: _Job, message: str) -> None:
         if self._next_state_job() or job.generation != self._generation:
             return
+        self._refresh_after.clear()  # the setup failed: what it says shows instead
         self._fail(self.providerFailed, job.data[0] or self.current_provider_name(), message)
         self._pump_catalog()
 
@@ -691,10 +757,12 @@ class CatalogService(QObject):
     def sections(self) -> list[str]:
         if self.provider_type() in ("STB", "XTREAM"):
             return ["live", "movies", "series"]
+        if is_media_server(self.provider_type()):
+            return ["movies", "series"]  # 2.8: a Jellyfin or Emby server's films and series
         return ["live"]
 
     def is_live(self, section: str) -> Optional[bool]:
-        if self.provider_type() in ("STB", "XTREAM"):
+        if self.provider_type() in ("STB", "XTREAM") or is_media_server(self.provider_type()):
             return section == "live"
         return None  # M3U entries may be live or on demand
 
@@ -715,6 +783,19 @@ class CatalogService(QObject):
             self._emit_later(self.sectionReady, section)
             return
         provider, ptype = self.current_provider(), self.provider_type()
+        if (
+            not force
+            and section != "live"
+            and self._loads_behind(ptype)
+            and self._usable(content)
+            and self._expired(ct)
+        ):
+            # 2.8: the saved list shows now; the new one takes its place once loaded.
+            self._emit_later(self.sectionReady, section)
+            self._request_catalog(
+                ("section", section), "section_behind", section, self._section_worker
+            )
+            return
         if ptype == "M3USTREAM":
             item = {
                 "id": 1,
@@ -731,15 +812,46 @@ class CatalogService(QObject):
             )
             self._emit_later(self.sectionReady, section)
             return
-        if ptype not in ("M3UPLAYLIST", "XTREAM", "STB"):
+        if ptype not in ("M3UPLAYLIST", "XTREAM", "STB") and not is_media_server(ptype):
             self._fail_later(self.sectionFailed, section, f"Unsupported provider: {ptype}")
             return
+        self._waited_sections.add(section)
         self._request_catalog(("section", section), "section", section, self._section_worker)
+
+    def refresh_section(self, section: str) -> bool:
+        """Load the section's list again (2.8: the Library's Refresh). An Xtream panel's and a
+        media server's load behind the saved list, which shows meanwhile (a server's asks only
+        what changed); a portal's genres load again. One load at a time. Whether it loads (or
+        loads already, or will once the provider being set up is ready): not a section it has
+        not."""
+        if self._closed or section not in self.sections():
+            return False
+        if self._setup_active():
+            self._refresh_after.add((self.current_provider_name(), section))
+            return True
+        if self._loads_behind(self.provider_type()) and self._usable(self._content(section)):
+            self._request_catalog(
+                ("section", section), "section_behind", section, self._section_worker
+            )
+        else:
+            self.request_section(section, force=True)
+        return True
+
+    def _expired(self, ct: str) -> bool:
+        """The saved content is this provider's as set up now, only past its time."""
+        expired = getattr(self.provider_manager, "content_expired", None)
+        return bool(expired(ct)) if callable(expired) else False
 
     def _section_worker(self, section: str) -> QObject:
         provider, ptype = self.current_provider(), self.provider_type()
         ct = SECTION_CONTENT_TYPES[section]
         verify = provider.get("ssl_verify", self.config.ssl_verify)
+        if is_media_server(ptype):
+            from services import media_server  # (it imports this module)
+
+            # 2.8: a list looked at before asks only what changed since (a whole one else).
+            saved = media_server.saved_summary(self._content(section))
+            return self.factory.media_section(provider, ct, verify, saved=saved)
         if ptype == "M3UPLAYLIST":
             return self.factory.m3u(provider.get("url", ""), verify)
         if ptype == "XTREAM":
@@ -756,11 +868,29 @@ class CatalogService(QObject):
 
     def _on_section_loaded(self, job: _Job, payload) -> None:
         section = job.data
+        if isinstance(payload, dict) and payload.get("delta"):
+            from services import media_server  # (it imports this module)
+
+            # 2.8: what a server says changed, merged into the saved list by its ids.
+            merged = media_server.merged_payload(self._content(section), payload)
+            if merged is None:  # the saved list went meanwhile: nothing to merge into
+                logger.info("A refreshed %s list had nothing to go into", section)
+                return
+            payload = merged
+        self._waited_sections.discard(section)
         self._store_section(SECTION_CONTENT_TYPES[section], payload)
         self.sectionReady.emit(section)
 
     def _on_section_error(self, job: _Job, message: str) -> None:
+        self._waited_sections.discard(job.data)
         self._fail(self.sectionFailed, job.data, message)
+
+    def _on_section_behind_error(self, job: _Job, message: str) -> None:
+        """A list loading behind failed: the saved one stays, quietly; told only when the
+        Library asked for it meanwhile with nothing saved to show."""
+        logger.info("A %s list couldn't load in the background", job.data)
+        if job.data in self._waited_sections:
+            self._on_section_error(job, message)
 
     def _store_section(self, ct: str, payload) -> None:
         self._stamp_content(payload)
@@ -935,7 +1065,9 @@ class CatalogService(QObject):
         if self.seasons(series) is not None:
             self._emit_later(self.seasonsReady, series_id)
             return
-        if self.provider_type() not in ("XTREAM", "STB"):
+        if self.provider_type() not in ("XTREAM", "STB") and not is_media_server(
+            self.provider_type()
+        ):
             self._fail_later(self.seasonsFailed, series_id, NO_SERIES_MESSAGE)
             return
         self._request_catalog(("seasons", series_id), "seasons", series, self._seasons_worker)
@@ -943,6 +1075,8 @@ class CatalogService(QObject):
     def _seasons_worker(self, series: dict) -> QObject:
         provider = self.current_provider()
         verify = provider.get("ssl_verify", self.config.ssl_verify)
+        if is_media_server(self.provider_type()):
+            return self.factory.media_series(provider, str(series.get("id")), verify)
         if self.provider_type() == "XTREAM":
             return self.factory.xtream_series(
                 base_url=provider.get("url", ""),
@@ -992,6 +1126,10 @@ class CatalogService(QObject):
             )
             stamp(formatted, self.current_provider_name())  # made on the fly, never stored
             return formatted
+        if is_media_server(self.provider_type()):  # 2.8: they came with their season
+            episodes = [e for e in season.get("episodes") or [] if isinstance(e, dict)]
+            stamp(episodes, self.current_provider_name())
+            return episodes
         cached = (
             self._series_cache()
             .get("episodes", {})
@@ -1069,8 +1207,12 @@ class CatalogService(QObject):
         self._fail(self.episodesFailed, str(series.get("id")), str(season.get("id")), message)
 
     # --- links ------------------------------------------------------------------------
-    def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
-        """Resolve a playable URL. STB portals mint a fresh link; others play `cmd` directly."""
+    def request_link(
+        self, item: dict, *, section: str, is_episode: bool = False, quality: Any = None
+    ) -> int:
+        """Resolve a playable URL. STB portals mint a fresh link; others play `cmd` directly.
+        `quality` (2.8, a media server's title: media_server.Quality) is the player's quality
+        menu's choice; the versions the server answers with are kept for it (`media_menu`)."""
         request_id = next(self._link_ids)
         if self._closed:
             return request_id
@@ -1079,6 +1221,22 @@ class CatalogService(QObject):
             return request_id
         if section not in SECTION_CONTENT_TYPES:
             self._fail_later(self.linkFailed, request_id, f"Unknown section: {section}")
+            return request_id
+        if is_media_server(self.provider_type()):
+            # 2.8: the version the settings pick, as its file is (asked of the server now), or
+            # the quality menu's choice.
+            provider = self.current_provider()
+            item_id = str(item.get("id") or "")
+            worker = self.factory.media_link(
+                provider,
+                item_id,
+                provider.get("ssl_verify", self.config.ssl_verify),
+                screen_4k=self.screen_4k(),
+                four_k=getattr(self.config, "media_4k_versions", "screen"),
+                quality=quality,
+            )
+            self._media_links[request_id] = item_id
+            self._start(worker, "link", request_id, self._on_link_ready, self._on_link_error)
             return request_id
         if self.provider_type() != "STB":
             url = str(item.get("cmd") or "").strip()
@@ -1127,15 +1285,27 @@ class CatalogService(QObject):
         return request_id
 
     def _on_link_ready(self, job: _Job, payload) -> None:
+        item_id = self._media_links.pop(job.data, None)
         if not self._current(job):
             return
+        if item_id and isinstance(payload.get("versions"), list):
+            self._media_menus[item_id] = {
+                "versions": payload["versions"],
+                "quality": payload.get("quality"),
+            }
         url = str(payload.get("link") or "").strip()
         if url:
             self.linkReady.emit(job.data, url)
         else:
             self._fail(self.linkFailed, job.data, EMPTY_LINK_MESSAGE)
 
+    def media_menu(self, item: dict) -> Optional[dict]:
+        """What the quality menu offers for a media server's title its link was asked for:
+        {"versions": [media_server.version_of …], "quality": the Quality playing}; else None."""
+        return self._media_menus.get(str(item.get("id") or ""))
+
     def _on_link_error(self, job: _Job, message: str) -> None:
+        self._media_links.pop(job.data, None)
         if self._current(job):
             self._fail(self.linkFailed, job.data, message)
 

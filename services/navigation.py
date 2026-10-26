@@ -178,7 +178,7 @@ class NodeSeq(Sequence):
     def __len__(self) -> int:
         return len(self.items)
 
-    def __getitem__(self, row):  # type: ignore[override]
+    def __getitem__(self, row):
         if isinstance(row, slice):
             return [self[i] for i in range(*row.indices(len(self.items)))]
         if row < 0:
@@ -213,7 +213,7 @@ class NodeSeq(Sequence):
         provider, key = wanted if isinstance(wanted, tuple) else ("", wanted)
         for row, item in enumerate(self.items):
             if item_key(item) == key and (not provider or provider_of(item) == provider):
-                return self[row]
+                return cast(NavNode, self[row])
         return None
 
     def numbered(self) -> bool:
@@ -312,7 +312,7 @@ class NavModel(QObject):
 
     def all_mode(self) -> bool:
         """Whether the channel list shows every provider (the "All providers" source)."""
-        return self.catalog.current_provider_name() == ALL_PROVIDERS
+        return bool(self.catalog.current_provider_name() == ALL_PROVIDERS)
 
     def section_of(self, node: Optional[NavNode] = None) -> Optional[str]:
         chain = self._path if node is None else self._path + [node]
@@ -415,7 +415,7 @@ class NavModel(QObject):
             if key and key[0] == "group":
                 return self._load(key, lambda: self.catalog.request_group(section, group.key))
             return self._load(("section", section), lambda: self.catalog.request_section(section))
-        return _item_nodes(items)
+        return cast(list[NavNode], _item_nodes(items))  # (read like the list of its nodes)
 
     # --- memoization -------------------------------------------------------------------
     def _data_version(self) -> object:
@@ -445,7 +445,10 @@ class NavModel(QObject):
         entry = self._memo.get(key)
         if entry is not None and entry[0] == deps:
             self._memo.move_to_end(key)
-            return entry[1] if isinstance(entry[1], NodeSeq) else MemoList(entry[1], entry[2])
+            return cast(
+                list,
+                entry[1] if isinstance(entry[1], NodeSeq) else MemoList(entry[1], entry[2]),
+            )
         value = compute()
         if value is None:
             self._memo.pop(key, None)
@@ -488,12 +491,12 @@ class NavModel(QObject):
         """Whether a group's items are fetched on their own (an STB provider's), not with
         the whole section; in "All providers" the group's id names its provider."""
         if self.catalog.provider_type() != "ALL":
-            return self.catalog.provider_type() == "STB"
+            return bool(self.catalog.provider_type() == "STB")
         name, own_id = split_group_id(group_id)
         if not name or not own_id:
             return False  # the mixed All, or a provider's heading: the sections as a whole
         try:
-            return self.catalog.provider_entry(name).get("type") == "STB"
+            return bool(self.catalog.provider_entry(name).get("type") == "STB")
         except KeyError:
             return False
 
@@ -559,7 +562,11 @@ class NavModel(QObject):
         return cast(list[dict], self._cached(("@favorites",), deps, self._compute_favorites))
 
     def _recent_items(self) -> list[dict]:
-        deps = (self._history_fingerprint(), tuple(self.catalog.provider_names()))
+        from services import parental  # parental reads navigation's item keys
+
+        guard = parental.installed()
+        state = guard.state_version() if guard is not None else 0
+        deps = (self._history_fingerprint(), tuple(self.catalog.provider_names()), state)
         return cast(list[dict], self._cached(("@recent",), deps, self._compute_recent))
 
     def _compute_favorites(self) -> list[dict]:
@@ -571,6 +578,9 @@ class NavModel(QObject):
     def _compute_recent(self) -> list[dict]:
         # What was watched at any provider in the list, newest first (a removed provider's
         # entries can no longer play).
+        from services import parental
+
+        guard = parental.installed()
         known = set(self.catalog.provider_names())
         seen, result = set(), []
         for entry in self.config.watch_history or []:
@@ -578,6 +588,8 @@ class NavModel(QObject):
             if key is None or key[0] not in known:
                 continue
             provider, item = key[0], entry.get("item_data") or {}
+            if guard is not None and guard.hides_item("live", with_provider(item, provider)):
+                continue  # 2.8: hidden by parental controls while locked
             if key not in seen:
                 seen.add(key)
                 # Stamped also with one provider (an entry older than 2.1 has no stamp): the

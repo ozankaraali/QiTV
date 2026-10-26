@@ -25,7 +25,11 @@ Commands (parent to helper):
   no further while what it holds runs `ahead_s` past the segment the player reads (which,
   and what follows, its ring never evicts); a provider archive's, `{"until_s", "ahead_s"}`,
   raw TS or HLS from its start, ends its input once its media reaches `until_s` (where the
-  live buffer begins, by time of day);
+  live buffer begins, by time of day); 2.8 adds `"max_height": lines`, the user's cap for an
+  HLS master's variants (the best within it plays, `open_source`), which a "resume" takes too;
+  a "resume" may add `"join": true` (2.8, a rewound viewer's): an HLS run goes on after the
+  last segment the session's earlier run brought whole, when its playlist lists what follows
+  (`HlsSource._start`), so nothing plays twice where the runs join;
 - `("close", sid)`, always answered by `("closed", sid)`, once the session's upstream
   connection is closed but at most 0.5 s later;
 - `("resize", sid, max_bytes)` (2.2, the multiview): a RAM session holds up to `max_bytes`
@@ -52,10 +56,14 @@ Commands (parent to helper):
   ("shutdown", its owner gone) keeps v2 folders for the next helper; "close" removes them;
 - `("adopt", sid, dir_name, max_bytes)` (2.6): take a kept folder back (a v2 folder a helper
   that went down kept, `services.live.ring.DiskRing.adopt`) as parked session `sid`: its ring,
-  timeline and parts as they were, its segmenter and clock joiner primed with its newest
-  segment so a resume goes on after it. Answered by a state holding every span, then
+  timeline and parts as they were, its segmenter, audio relabeler (2.8) and clock joiner primed
+  with its newest segment so a resume goes on after it, and (2.8) every disk ring fitted into
+  the disk amount at once. Answered by a state holding every span, then
   `("parked", sid)` and `("kept", sid, label, where)`; `("unkept", sid)` when it cannot be
   taken back (gone, in use, unreadable);
+- `("disk_amount", max_bytes)` (2.8): the user's disk amount changed: every disk ring holds it
+  from now on, and what is over it goes at once (not only from the next disk open). Unanswered;
+  the sessions whose rings lost segments say so in their states;
 - `("record_start", sid, rid, path, seq, limits)` (2.2): recording `rid` (the parent's name for
   it) writes the session's ring to a new file at `path` (a unique name next to it when that
   exists) from segment `seq` on, following the live edge, until "record_stop", the session's
@@ -73,7 +81,8 @@ Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, fi
 additions)`, also before ready while bytes arrive (`received`) and nothing is playable yet,
 and once a raw-TS source answered (`answered`, 2.1: its headers came, before its first byte;
 taken back once its body failed or turned out a playlist); once a source opened, `secure`
-(2.7.1) says whether its address is HTTPS,
+(2.7.1) says whether its address is HTTPS, and an HLS master's (2.8) `heights` its picture
+sizes, largest first, and `height` the playing variant's (0: not named),
 each addition a newly closed segment's `(seq, start, end, discontinuity, start_quality,
 media_seq)` (`Span`'s fields; 2.7 added the HLS media sequence the segment begins, None when
 it begins none; the helper and the engine always ship in one build, and the engine still
@@ -148,7 +157,6 @@ from services.live.ts import (
 if TYPE_CHECKING:
     from services.live.recorder import Recorder
     from services.live.ring import DiskBudget, Ring
-    from services.live.server import StreamServer
     from services.live.source import Source
 
 _LOG = logging.getLogger(__name__)
@@ -242,18 +250,18 @@ class BurstMeter:
     though at most `_CONNECT_PERIOD_RATIO` times the media and `_CONNECT_PERIOD_MAX_S`, since
     a steady source that paused after connect (an on-demand restream starting up) looks the
     same; for such a source the bounds keep the slow-down that builds a burst's room short.
-    It holds only until bursts are alike: the run counts the media, as for any burst. Once two bursts in a row
-    are alike (within `_BURST_SPREAD`), the estimate is the largest of the last `_BURST_RUN`
-    alike ones: a burst larger than the estimate would starve the player before the next one
-    lands (and count as a stall), one smaller costs nothing. A burst unlike the one before
-    starts a new run and leaves the estimate as it was until two are alike again, which
-    corrects a first burst that was not typical. Once `_STEADY_BURSTS` estimates' worth of
-    seconds pass without a gap, the source is steady again (0.0); for an estimate from a single
-    burst that no second one has confirmed yet, once `_STEADY_UNCONFIRMED` estimate's worth has.
-    A bursty source shows its next gap within half a period of a burst's first byte, inside an
-    estimate of about its period (a measured channel: 2-4 s at connect, then 10 s every 10 s),
-    while a steady source that paused after connect (4 s, then 12 s without a byte, then real
-    time) is taken for 10 s bursts for 10 s (before 2.0.1: for 12 s ones for 36 s).
+    It holds only until bursts are alike: the run counts the media, as for any burst. Once two
+    bursts in a row are alike (within `_BURST_SPREAD`), the estimate is the largest of the last
+    `_BURST_RUN` alike ones: a burst larger than the estimate would starve the player before the
+    next one lands (and count as a stall), one smaller costs nothing. A burst unlike the one before
+    starts a new run and leaves the estimate as it was until two are alike again, which corrects a
+    first burst that was not typical. Once `_STEADY_BURSTS` estimates' worth of seconds pass without
+    a gap, the source is steady again (0.0); for an estimate from a single burst that no second one
+    has confirmed yet, once `_STEADY_UNCONFIRMED` estimate's worth has. A bursty source shows its
+    next gap within half a period of a burst's first byte, inside an estimate of about its period (a
+    measured channel: 2-4 s at connect, then 10 s every 10 s), while a steady source that paused
+    after connect (4 s, then 12 s without a byte, then real time) is taken for 10 s bursts for 10 s
+    (before 2.0.1: for 12 s ones for 36 s).
 
     Pure logic: no clock of its own.
     """
@@ -434,6 +442,11 @@ class _Outbox:
                 _LOG.warning("A live helper message was dropped (%s).", type(error).__name__)
 
 
+def _lines(value: Any) -> int:
+    """A start's `max_height` (2.8): a positive whole number of lines, else 0 (no cap)."""
+    return value if type(value) is int and value > 0 else 0
+
+
 class _Session:
     """One live session: source -> segmenter -> ring and timeline, on its own thread."""
 
@@ -479,6 +492,9 @@ class _Session:
         self._segmenter = Segmenter()
         # Renames an audio stream the PMT misnames, on the bytes' way to the segmenter.
         self._relabeler = AudioRelabeler()
+        # 2.8: a resumed run joins the earlier one after this HLS media sequence (its first
+        # open only).
+        self._join_after: int | None = None
         # Raw TS only (`_ingest`): drops what a reconnect sends again in the old timebase.
         self._rejoiner: ReconnectTrimmer | None = None
         # Raw TS only: drops what a restart inside the connection sends twice.
@@ -497,6 +513,10 @@ class _Session:
         self._segment = (0, 0.0)  # HLS: the segment being fetched (serial), the edge it began at
         self._measured = (0.0, 0.0)  # HLS: media and EXTINF seconds of the whole segments
         self._pending: list[_Addition] = []
+        # 2.8: one state at a time (the session thread's, and another thread's after it changed
+        # the ring: `notify_soon`), and each span goes once: the newest seq a state carried.
+        self._notify_lock = threading.Lock()
+        self._sent_seq = -1
         self._media_next: int | None = None  # 2.7: an HLS segment began: the next opened
         # (timeline position, seconds left out) of the latest PTS jumps the segmenter dropped
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
@@ -726,6 +746,10 @@ class _Session:
             segmenter.finish()
             joiner.feed(last)
             joiner.finish()
+            # 2.8: the program map VLC saw last, so a new run's map that changed under the same
+            # version is renumbered (`AudioRelabeler`), as after a park in one helper.
+            self._relabeler.feed(last)
+            self._relabeler.flush()
         except Exception as error:  # a resume then starts its clock afresh
             _LOG.info(
                 "A kept buffer's newest segment could not be read (%s).", type(error).__name__
@@ -738,6 +762,7 @@ class _Session:
         self._ring_spec = {"kind": "disk", "dir": directory, "max_bytes": max_bytes}
         self._pending = [_addition(s) for s in spans]
         self._helper.disk_budget(max_bytes).register(ring, parked=True)
+        self._helper.trim_disk(self)  # 2.8: the disk amount holds at once (the state follows)
         try:
             self._adopt(ring)
         except _Cancelled:  # the helper goes down meanwhile: the folder stays
@@ -789,7 +814,10 @@ class _Session:
         self._url, self._headers, self._verify_ssl = url, headers, verify_ssl
         self._live_delay, self._start = live_delay, start
         with self.lock:
-            self._source = None
+            earlier, self._source = self._source, None
+        # 2.8: the earlier run's last whole HLS segment, for a run that joins it ("join").
+        whole = getattr(earlier, "whole_seq", None)
+        self._join_after = whole if start.get("join") is True and type(whole) is int else None
         ring = self._ring
         if ring is not None:
             ring.clear_failure()  # its disk is tried anew
@@ -825,6 +853,8 @@ class _Session:
                 window=window if isinstance(window, dict) else None,
                 hold=self._hold if isinstance(window, dict) and "ahead_s" in window else None,
                 https_first=self._start.get("https") is True,
+                max_height=_lines(self._start.get("max_height")),
+                after_seq=self._join_after,
             )
         except SourceError as error:
             if not self._parking:  # a park interrupted the open: nothing to say
@@ -1000,9 +1030,6 @@ class _Session:
                 timeline.on_opened(
                     event.seq, event.first_pts, event.wall, event.discontinuity, media
                 )
-                if began and timeline.parts() and self._ring is not None:
-                    part = timeline.parts()[-1]
-                    self._ring.note_part(part.first_seq, part.start, part.wall)
                 self._skipping = False
                 seq, header = event.seq, event.header
                 junction, self._open_junction = self._open_junction, False
@@ -1010,6 +1037,11 @@ class _Session:
                     lambda ring: ring.open_segment(seq, header, junction=junction),
                     new_segment=True,
                 )
+                # 2.8: noted once its segment opened (a failed one leaves no part behind), in
+                # the ring that holds it (the RAM fallback's notes nothing).
+                if began and timeline.parts() and self._ring is not None:
+                    part = timeline.parts()[-1]
+                    self._ring.note_part(part.first_seq, part.start, part.wall)
                 if self._resuming:
                     with self.lock:
                         self._resuming = False
@@ -1038,7 +1070,8 @@ class _Session:
                         span.start_quality,
                         span.media_seq,
                     )
-                self._pending.append(_addition(span))
+                with self._notify_lock:
+                    self._pending.append(_addition(span))
                 self._notify(force=True)
         self._take_breaks()
 
@@ -1364,6 +1397,10 @@ class _Session:
             self._notify(force=True)
 
     def _notify(self, force: bool = False) -> None:
+        with self._notify_lock:
+            self._notify_locked(force)
+
+    def _notify_locked(self, force: bool) -> None:
         if self.cancelled:
             return
         now = time.monotonic()
@@ -1434,6 +1471,10 @@ class _Session:
         }
         if source is not None:
             snapshot["secure"] = bool(getattr(source, "secure", False))  # 2.7.1: over HTTPS
+        heights = getattr(source, "heights", ())
+        if heights:  # 2.8: an HLS master's picture sizes (the live ⚙), and the playing one's
+            snapshot["heights"] = list(heights)
+            snapshot["height"] = int(getattr(source, "height", 0) or 0)
         if source is not None and source.hls:
             # 2.7: how long the server keeps the channel, and its newest media sequence;
             # a server part's first segment's time of day.
@@ -1448,7 +1489,11 @@ class _Session:
             if getattr(source, "until_dropped", False) is True:
                 snapshot["until_dropped"] = True  # another encoding persisted: no stop
         self._heard_edge = edge
-        additions, self._pending = self._pending, []
+        # 2.8: a span another state carried already is not added twice.
+        additions = [item for item in self._pending if item[0] > self._sent_seq]
+        self._pending = []
+        if additions:
+            self._sent_seq = max(item[0] for item in additions)
         # Only newly completed segments cross IPC (ported from main's `_notify`): the
         # parent drops spans older than `first` and appends the additions, so a long
         # ring still costs a constant-size message.
@@ -1511,10 +1556,14 @@ class _Session:
         if ring is not None and ring.retire_before(before):
             self.notify_soon()
 
-    def notify_soon(self) -> None:
+    def notify_soon(self, wait: bool = True) -> None:
         """Another thread changed the ring (the disk amount, the day's limit): the state says
-        so once the pipeline is free, skipped when it stays busy (its own next state will)."""
-        if self.cancelled or not self._moving.acquire(timeout=_NOTIFY_WAIT_S):
+        so once the pipeline is free, skipped when it stays busy (its own next state will).
+        `wait` False (2.8: a session that reads, from another's pipeline): not waited for at
+        all, so two pipelines never wait for each other."""
+        if self.cancelled:
+            return
+        if not self._moving.acquire(timeout=_NOTIFY_WAIT_S if wait else 0.0):
             return
         try:
             self._notify(force=True)
@@ -1546,14 +1595,31 @@ class _Helper:
 
     # ---- 2.6: the disk amount and the day's limit ----------------------------------------
     def disk_budget(self, max_bytes: int) -> DiskBudget:
-        """The disk rings' shared amount: the newest disk session's (the user's setting)."""
+        """The disk rings' shared amount: the newest disk session's (the user's setting); 2.8:
+        a new one applies to the open rings at once (a session thread's: files may go)."""
         from services.live.ring import DiskBudget
 
         if self._budget is None:
             self._budget = DiskBudget(max_bytes)
-        else:
-            self._budget.max_bytes = max_bytes
+        elif self._budget.max_bytes != max_bytes:
+            self._told(self._budget.set_max_bytes(max_bytes), None)
         return self._budget
+
+    def set_disk_amount(self, max_bytes: int) -> None:
+        """("disk_amount") The user's disk amount changed (2.8): it applies to every disk ring
+        at once, on a thread of its own (files go: never the command loop). Without a disk ring
+        yet, the next disk open brings it."""
+        budget = self._budget
+        if budget is None or budget.max_bytes == max_bytes:
+            return
+
+        def apply() -> None:
+            try:
+                self._told(budget.set_max_bytes(max_bytes), None)
+            except Exception as error:  # the next trim tries again
+                _LOG.warning("The disk amount could not apply (%s).", type(error).__name__)
+
+        threading.Thread(target=apply, name="qitv-live-disk-amount", daemon=True).start()
 
     def ring_parked(self, ring: Ring, parked: bool) -> None:
         if self._budget is not None:
@@ -1564,13 +1630,21 @@ class _Helper:
             self._budget.unregister(ring)
 
     def trim_disk(self, writer: _Session) -> None:
-        """Fit every disk ring into the amount; kept sessions that lost segments say so."""
+        """Fit every disk ring into the amount; the other sessions that lost segments say so
+        (2.8: an active one's too)."""
         if self._budget is None:
             return
-        changed = self._budget.trim()
+        self._told(self._budget.trim(), writer)
+
+    def _told(self, changed: list[Ring], writer: _Session | None) -> None:
+        """The sessions whose rings lost segments (`changed`), but `writer`, say so: a parked
+        one once its pipeline is free, one that reads only when it is free now (a busy one
+        says so itself, and two pipelines never wait for each other)."""
+        if not changed:
+            return
         for session in list(self._sessions.values()):
             if session is not writer and session._ring in changed:
-                session.notify_soon()
+                session.notify_soon(wait=session.released.is_set())
 
     def expire(self) -> None:
         """Segments over a day old go, from every session's ring (2.6)."""
@@ -1651,6 +1725,10 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.note(name, command[2])
+            elif name == "disk_amount":  # 2.8: the user's disk amount changed
+                if len(command) != 2 or type(command[1]) is not int or command[1] <= 0:
+                    raise ValueError("a disk amount needs a positive size")
+                self.set_disk_amount(command[1])
             elif name == "until":  # 2.7: a server part's stop moved
                 if (
                     len(command) != 3

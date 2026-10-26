@@ -655,20 +655,28 @@ class HttpFetcher:
                 yield chunk
 
 
+class Shelved(Protocol):
+    """What a phone plays from the home door: a film here, a recording (2.8,
+    services/remote/recorded.py)."""
+
+    def close(self) -> None: ...
+
+
 @dataclass
 class _Shelved:
-    film: Film
+    film: Shelved
     device: str
     used: float
 
 
 class FilmShelf:
-    """The films phones play now, by token (one per phone: its next replaces it)."""
+    """The films (and recordings) phones play now, by token (one per phone: its next replaces
+    it)."""
 
     def __init__(self) -> None:
         self._films: OrderedDict[str, _Shelved] = OrderedDict()
 
-    def put(self, device: str, film: Film) -> str:
+    def put(self, device: str, film: Shelved) -> str:
         self.drop(device)
         token = secrets.token_urlsafe(16)
         self._films[token] = _Shelved(film, device, time.monotonic())
@@ -681,7 +689,7 @@ class FilmShelf:
         for token in [t for t, kept in self._films.items() if kept.device == device]:
             self._films.pop(token).film.close()
 
-    def get(self, token: str) -> Optional[Film]:
+    def get(self, token: str) -> Optional[Shelved]:
         kept = self._films.get(token)
         if kept is None:
             return None
@@ -705,7 +713,7 @@ def add_routes(app: Any, shelf: FilmShelf) -> None:
 
     def film_of(request: web.Request) -> Film:
         film = shelf.get(request.match_info["token"])
-        if film is None:
+        if not isinstance(film, Film):  # none, or a recording (its own routes)
             raise web.HTTPNotFound(text="404: Not Found")
         return film
 

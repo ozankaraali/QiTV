@@ -240,6 +240,7 @@ class PosterGrid(QAbstractScrollArea):
         self._progress_provider: Callable[[dict], float | None] | None = None
         self._tile_provider: Callable[[dict], bool] | None = None
         self._key_provider: Callable[[dict], object] | None = None
+        self._settled: Callable[[list[dict]], None] | None = None  # see set_settled_handler
         self._focused = True
         self._details_cache: tuple[int, dict, Details | None] | None = None
         self._progress_cache: dict[int, float | None] = {}
@@ -365,10 +366,20 @@ class PosterGrid(QAbstractScrollArea):
         self._details_cache = None
         self.viewport().update()
 
+    def refresh_details(self) -> None:
+        """The details provider knows more now: the strip asks it again."""
+        self._details_cache = None
+        self.viewport().update()
+
     def set_poster_url_provider(self, fn: Callable[[dict], str]) -> None:
         """How a title's poster URL is found; `poster_url` by default."""
         self._poster_url = fn
         self.viewport().update()
+
+    def set_settled_handler(self, fn: Callable[[list[dict]], None] | None) -> None:
+        """`fn(items)` is told the titles on screen (and a row ahead) each time the view
+        settles, as their posters are asked for (2.8: TMDB looks up the posterless ones)."""
+        self._settled = fn
 
     def set_progress_provider(self, fn: Callable[[dict], float | None]) -> None:
         self._progress_provider = fn
@@ -752,12 +763,21 @@ class PosterGrid(QAbstractScrollArea):
         last += 1
         while last < len(self._lines) and self._lines[last].start < 0:
             last += 1
+        shown = [
+            self._items[i]
+            for line in self._lines[first : last + 1]
+            for i in range(line.start, line.start + line.size)
+        ]
+        if self._settled is not None:
+            try:
+                self._settled(shown)
+            except Exception:
+                logger.exception("settled handler failed")
         wanted: dict[str, None] = {}  # ordered and de-duplicated
-        for line in self._lines[first : last + 1]:
-            for i in range(line.start, line.start + line.size):
-                url = self._poster_url(self._items[i])
-                if url and url not in wanted and self._posters.pixmap(url) is None:
-                    wanted[url] = None
+        for item in shown:
+            url = self._poster_url(item)
+            if url and url not in wanted and self._posters.pixmap(url) is None:
+                wanted[url] = None
         if wanted:
             self._posters.request(list(wanted), replace_pending=True)
 
@@ -1165,11 +1185,15 @@ class PosterGrid(QAbstractScrollArea):
         plot_fm = QFontMetricsF(plot_font)
         meta, watched = self._meta_parts(details)
         plot = _wrap(plot_fm, details.plot, width, PLOT_LINES) if details and details.plot else []
+        # i18n: on the Library's detail strip: a title's leading actors ("Cast: Ana, Bo")
+        cast = tr("Cast: {names}", names=details.cast) if details and details.cast else ""
         block = title_h
         if meta or watched:
             block += 0.3 * u + meta_h
         if plot:
             block += 0.6 * u + plot_fm.lineSpacing() * len(plot)
+        if cast:
+            block += 0.4 * u + meta_h
         y = rect.top() + (rect.height() - block) / 2
         p.setFont(title_font)
         p.setPen(qcolor(PALETTE.text))
@@ -1192,6 +1216,15 @@ class PosterGrid(QAbstractScrollArea):
                     text,
                 )
                 y += plot_fm.lineSpacing()
+        if cast:
+            y += 0.4 * u
+            p.setFont(meta_font)
+            p.setPen(qcolor(PALETTE.text, STRIP_META_ALPHA))
+            p.drawText(
+                QRectF(left, y, width, meta_h),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                elided(p, cast, width),
+            )
 
     @staticmethod
     def _meta_parts(details: Details | None) -> tuple[str, str]:

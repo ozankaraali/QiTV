@@ -51,9 +51,12 @@ from services.provider_api import (
     remember_http_only,
 )
 from services.provider_link import parse_provider_link
+from services.provider_types import EMBY, JELLYFIN, is_media_server
 from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
+from services.tmdb import built_in_token as tmdb_built_in_token
 from ui.free_channels_menu import show_menu as show_free_channels_menu
+from ui.parental_settings import build_parental_tab
 from ui.provider_drop import unique_name
 from ui.remote_settings import build_remote_tab, save_remote_settings
 from ui.update_dialogs import check_for_updates
@@ -165,6 +168,8 @@ class ProviderVerificationWorker(QObject):
     result = Signal(int, object, bool)
     reason = Signal(int, str)  # the plain reason a verification failed ("" when none)
     http_only = Signal(int)  # the verified provider answered only over HTTP
+    # 2.8: a media server's sign-in: {token, user_id, device_id} to keep (before `result`)
+    signed_in = Signal(int, object)
     finished = Signal()
 
     def __init__(self, request_id, provider, ssl_verify):
@@ -188,7 +193,13 @@ class ProviderVerificationWorker(QObject):
                     why = found.text  # why it failed, or (DATED) the warning
             elif provider["type"] in ("M3UPLAYLIST", "M3USTREAM"):
                 verified = self.verify_url(provider["url"], verify_ssl=self.ssl_verify)
-            http_only = verified and self.answered_only_over_http(provider)
+            elif is_media_server(provider["type"]):
+                verified, why = self.sign_in(provider)
+            http_only = (
+                verified
+                and not is_media_server(provider["type"])
+                and self.answered_only_over_http(provider)
+            )
         except Exception as e:
             # requests exceptions name the URL, credentials and all: the type and host only.
             logging.getLogger(__name__).warning("Provider verification failed: %s", safe_exc(e))
@@ -198,6 +209,24 @@ class ProviderVerificationWorker(QObject):
                 self.http_only.emit(self.request_id)
             self.result.emit(self.request_id, self.provider, verified)
             self.finished.emit()
+
+    def sign_in(self, provider) -> tuple[bool, str]:
+        """A Jellyfin or Emby server's sign-in (2.8): (signed in, why not). Its access goes out
+        through `signed_in`; the password is used here only."""
+        from services import media_workers
+
+        ok, value = media_workers.sign_in(  # this thread's: it blocks only the verification
+            str(provider.get("url") or ""),
+            str(provider.get("type") or ""),
+            str(provider.get("username") or ""),
+            str(provider.get("password") or ""),
+            self.ssl_verify,
+            device_id=str(provider.get("device_id") or ""),
+        )
+        if ok:
+            self.signed_in.emit(self.request_id, value)
+            return True, ""
+        return False, str(value)
 
     def answered_only_over_http(self, provider) -> bool:
         """Whether the verified `provider`, asked over HTTPS first, answered only over HTTP:
@@ -323,6 +352,7 @@ class OptionsDialog(QDialog):
         self._verification_request = 0
         self._verification_why = ""  # the plain reason the verification on its way failed
         self._verification_insecure = False  # the provider it verifies answered only over HTTP
+        self._media_access: dict = {}  # 2.8: a media server's sign-in on its way gave this
         self._verification_closed = False
         self.selected_provider_name = self.config_manager.selected_provider_name
         self.selected_provider_index = 0
@@ -356,6 +386,7 @@ class OptionsDialog(QDialog):
         self.create_timeshift_ui()
         self.create_subtitles_ui()
         build_remote_tab(self)
+        build_parental_tab(self)  # 2.8
 
         # Add tab with providers
         self.create_providers_ui()
@@ -454,6 +485,54 @@ class OptionsDialog(QDialog):
         )
         self.hardware_decoding_checkbox.setChecked(self.config_manager.hardware_decoding)
         self.settings_layout.addRow(self.hardware_decoding_checkbox)
+
+        # 2.8: Jellyfin and Emby servers: which version of a title plays, and when the server
+        # converts it (never, by default: the file plays as it is).
+        self.media_4k_combo = QComboBox(self.settings_tab)
+        for text, value in (
+            # i18n: a choice for a Jellyfin or Emby title's 4K version: it plays (rather than the
+            # title's other version) on a 4K screen
+            (tr("On a 4K screen"), "screen"),
+            (tr("Always"), "always"),  # i18n: a choice: always play a title's 4K version
+            (tr("Never"), "never"),  # i18n: a choice: never play a title's 4K version
+        ):
+            self.media_4k_combo.addItem(text, value)
+        self.media_4k_combo.setCurrentIndex(
+            max(0, self.media_4k_combo.findData(self.config_manager.media_4k_versions))
+        )
+        self.media_4k_combo.setToolTip(
+            tr(
+                "Jellyfin and Emby: when a title has a 4K version and another one, which plays."
+                " Either plays as it is: below a 4K screen your computer scales 4K down, sharper"
+                " but with more data. A title only in 4K plays unless you choose Never."
+            )
+        )
+        # i18n: a setting (Jellyfin and Emby): when a title's 4K version plays
+        self.settings_layout.addRow(tr("4K versions (Jellyfin, Emby)"), self.media_4k_combo)
+
+        # 2.8: TMDB fills in what the Library's titles lack (services/tmdb.py).
+        self.tmdb_checkbox = QCheckBox(tr("Film and series details from TMDB"), self.settings_tab)
+        self.tmdb_checkbox.setToolTip(
+            tr(
+                "Where your provider gives a film or series no poster, story, year, running time,"
+                " genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and"
+                " its year, nothing about you."
+            )
+        )
+        self.tmdb_checkbox.setChecked(bool(self.config_manager.tmdb_details))
+        self.settings_layout.addRow(self.tmdb_checkbox)
+        self.tmdb_token_input = QLineEdit(self.settings_tab)
+        self.tmdb_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.tmdb_token_input.setPlaceholderText(
+            # i18n: the TMDB token field's hint in a build that carries one
+            tr("Built in; or paste your own")
+            if tmdb_built_in_token()
+            # i18n: the TMDB token field's hint in a build without one (from the source code)
+            else tr("Your TMDB API Read Access Token")
+        )
+        self.tmdb_token_input.setText(self.config_manager.tmdb_token)
+        # i18n: a setting: the token QiTV uses with TMDB (an API Read Access Token)
+        self.settings_layout.addRow(tr("TMDB token"), self.tmdb_token_input)
 
         # macOS only: another desktop than the fullscreen player's floats its picture.
         self.desktop_pip_checkbox = QCheckBox(
@@ -909,21 +988,26 @@ class OptionsDialog(QDialog):
         self.type_M3UPLAYLIST = QRadioButton(tr("M3U Playlist"), self)
         self.type_M3USTREAM = QRadioButton(tr("M3U Stream"), self)
         self.type_XTREAM = QRadioButton("Xtream", self)
-        self.type_group.addButton(self.type_STB)
-        self.type_group.addButton(self.type_M3UPLAYLIST)
-        self.type_group.addButton(self.type_M3USTREAM)
-        self.type_group.addButton(self.type_XTREAM)
-
-        self.type_STB.toggled.connect(self.update_inputs)
-        self.type_M3UPLAYLIST.toggled.connect(self.update_inputs)
-        self.type_M3USTREAM.toggled.connect(self.update_inputs)
-        self.type_XTREAM.toggled.connect(self.update_inputs)
+        self.type_JELLYFIN = QRadioButton("Jellyfin", self)  # 2.8: media servers
+        self.type_EMBY = QRadioButton("Emby", self)
+        for button in (
+            self.type_STB,
+            self.type_M3UPLAYLIST,
+            self.type_M3USTREAM,
+            self.type_XTREAM,
+            self.type_JELLYFIN,
+            self.type_EMBY,
+        ):
+            self.type_group.addButton(button)
+            button.toggled.connect(self.update_inputs)
 
         grid_layout = QGridLayout()
         grid_layout.addWidget(self.type_STB, 0, 0)
         grid_layout.addWidget(self.type_M3UPLAYLIST, 0, 1)
         grid_layout.addWidget(self.type_M3USTREAM, 1, 0)
         grid_layout.addWidget(self.type_XTREAM, 1, 1)
+        grid_layout.addWidget(self.type_JELLYFIN, 2, 0)
+        grid_layout.addWidget(self.type_EMBY, 2, 1)
         self.providers_layout.addRow(self.type_label, grid_layout)
 
     def create_epg_ui(self):
@@ -1160,6 +1244,14 @@ class OptionsDialog(QDialog):
         self.type_M3UPLAYLIST.setChecked(provider_type == "M3UPLAYLIST")
         self.type_M3USTREAM.setChecked(provider_type == "M3USTREAM")
         self.type_XTREAM.setChecked(provider_type == "XTREAM")
+        self.type_JELLYFIN.setChecked(provider_type == JELLYFIN)
+        self.type_EMBY.setChecked(provider_type == EMBY)
+
+    def _media_server_checked(self) -> str:
+        """JELLYFIN or EMBY when one of them is the type chosen, else "" (2.8)."""
+        if self.type_JELLYFIN.isChecked():
+            return JELLYFIN
+        return EMBY if self.type_EMBY.isChecked() else ""
 
     def update_inputs(self):
         self.mac_label.setVisible(self.type_STB.isChecked())
@@ -1174,10 +1266,12 @@ class OptionsDialog(QDialog):
 
         self.url_input.setEnabled(True)
 
-        self.username_label.setVisible(self.type_XTREAM.isChecked())
-        self.username_input.setVisible(self.type_XTREAM.isChecked())
-        self.password_label.setVisible(self.type_XTREAM.isChecked())
-        self.password_input.setVisible(self.type_XTREAM.isChecked())
+        # A media server signs in with them (Verify); its password is not kept (2.8).
+        signs_in = self.type_XTREAM.isChecked() or bool(self._media_server_checked())
+        self.username_label.setVisible(signs_in)
+        self.username_input.setVisible(signs_in)
+        self.password_label.setVisible(signs_in)
+        self.password_input.setVisible(signs_in)
 
     def add_new_provider(self):
         self._store_provider_edits()
@@ -1279,6 +1373,9 @@ class OptionsDialog(QDialog):
         self.config_manager.ssl_verify = self.ssl_verify_checkbox.isChecked()
         self.config_manager.live_latency = self.live_latency_combo.currentData()
         self.config_manager.hardware_decoding = self.hardware_decoding_checkbox.isChecked()
+        self.config_manager.media_4k_versions = self.media_4k_combo.currentData() or "screen"
+        self.config_manager.tmdb_details = self.tmdb_checkbox.isChecked()
+        self.config_manager.tmdb_token = "".join(self.tmdb_token_input.text().split())
         if sys.platform == "darwin":
             self.config_manager.desktop_pip = self.desktop_pip_checkbox.isChecked()
         self.config_manager.mouse_wheel_action = self.mouse_wheel_combo.currentData()
@@ -1442,6 +1539,7 @@ class OptionsDialog(QDialog):
         thread.started.connect(worker.run)
         worker.reason.connect(self._verification_reason, Qt.QueuedConnection)
         worker.http_only.connect(self._verification_http_only, Qt.QueuedConnection)
+        worker.signed_in.connect(self._media_signed_in, Qt.QueuedConnection)
         worker.result.connect(self._provider_verified, Qt.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.DirectConnection)
         ThreadCleanup(thread, worker).finished.connect(
@@ -1456,6 +1554,12 @@ class OptionsDialog(QDialog):
         if request_id == self._verification_request:
             self._verification_why = reason
 
+    @Slot(int, object)
+    def _media_signed_in(self, request_id, access):
+        """A media server's sign-in on its way gave its access: `_provider_verified` keeps it."""
+        if request_id == self._verification_request:
+            self._media_access = dict(access or {})
+
     @Slot(int)
     def _verification_http_only(self, request_id):
         """The provider on its way answered only over HTTP: `_provider_verified` notes it."""
@@ -1468,12 +1572,18 @@ class OptionsDialog(QDialog):
             return
         why, self._verification_why = self._verification_why, ""
         insecure, self._verification_insecure = self._verification_insecure, False
+        access, self._media_access = self._media_access, {}
         self.verify_button.setEnabled(True)
         if provider != self._verification_provider():
             self.verify_result.clear()
             return
         # `why` is the account check's reason, already in the language.
         if verified:
+            if access and self.edited_provider is not None:
+                # 2.8: a media server's access is kept; its password goes from the field.
+                self.edited_provider.update(access)
+                self.edited_provider.pop("password", None)
+                self.password_input.clear()
             self._refresh_provider_ids.add(id(self.edited_provider))
             if why:
                 # i18n: why is a warning, as "The portal says your subscription ended on 3 Oct 2026"
@@ -1520,6 +1630,11 @@ class OptionsDialog(QDialog):
             provider["type"] = "XTREAM"
             provider["username"] = self.username_input.text()
             provider["password"] = self.password_input.text()
+        elif self._media_server_checked():
+            # 2.8: the password signs in (Verify) and is never stored: the token is.
+            provider["type"] = self._media_server_checked()
+            provider["username"] = self.username_input.text()
+            provider["password"] = self.password_input.text()
         # Automatic is the absence of the key; an existing key keeps its explicit 0.
         if "max_streams" in provider or self.max_streams_input.value() != self._loaded_max_streams:
             provider["max_streams"] = self.max_streams_input.value()
@@ -1540,6 +1655,8 @@ class OptionsDialog(QDialog):
         if self.edited_provider is None:
             return
         provider = self._provider_from_inputs()
+        if is_media_server(provider.get("type")):
+            provider.pop("password", None)  # its sign-in's token is kept instead (2.8)
         self.edited_provider.clear()
         self.edited_provider.update(provider)
         self.selected_provider_name = provider["name"]

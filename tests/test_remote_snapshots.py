@@ -190,10 +190,8 @@ class PushTests(WindowCase):
         remote.bridge.post(Opened("s1", "d1", "home"))
         remote.bridge.post(Query("s1", "Channel"))
 
-        def results():
-            found = [
-                c.args[0] for c in self.hub.broadcast.call_args_list if c.args[0]["t"] == "results"
-            ]
+        def results():  # to that phone alone: another one's Search is its own
+            found = [m for m in self.sent("s1") if m["t"] == "results"]
             return found[-1] if found and found[-1]["groups"] else None
 
         self.assertTrue(wait_until(lambda: results() is not None, timeout_ms=10000))

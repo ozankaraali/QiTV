@@ -129,7 +129,6 @@ class NextEpisodeEdgeTests(unittest.TestCase):
         a, b, c = {"cmd": ""}, {"cmd": ""}, {"cmd": ""}
         for s in (a, b, c):
             s["name"] = ""
-        loaded = {}
         eps = {
             id(a): stb_episodes(show, {"id": "1", "cmd": "A"}, [1]),
             id(b): stb_episodes(show, {"id": "2", "cmd": "B"}, [1]),

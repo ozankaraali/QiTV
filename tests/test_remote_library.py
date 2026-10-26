@@ -12,10 +12,11 @@ from unittest import mock
 
 from PySide6.QtCore import QCoreApplication, QObject, Signal
 from PySide6.QtTest import QTest
-from test_library_model import FakeCatalog, history, make_config, movie, resume
+from test_library_model import FakeCatalog, OnThreads, history, make_config, movie, resume
 from timer_fixtures import wait_until
 
 from services import library
+from services.jobs import JobRunner
 from services.library import LibraryCache, LibraryModel
 from services.remote.protocol import MAX_MESSAGE
 from services.search import Hit
@@ -276,6 +277,14 @@ class PhoneLibraryTests(unittest.TestCase):
         [found] = self.last("genres")["titles"]
         self.assertNotIn("plays", found)
 
+    def test_a_recording_plays_on_the_phone_one_to_come_not(self):
+        """2.8: a recording plays where the phone watches (from QiTV's home door); a scheduled
+        one is still to come."""
+        recording = {"id": "recording:a.ts", "name": "News", "_recording": True}
+        scheduled = {"id": "scheduled:1", "name": "News", "_scheduled": True}
+        self.assertTrue(self.library._title_row(recording, None)["plays"])
+        self.assertNotIn("plays", self.library._title_row(scheduled, None))
+
     def with_searcher(self):
         searcher = FakeSearcher()
         made = PhoneLibrary(
@@ -359,17 +368,40 @@ class PhoneLibraryTests(unittest.TestCase):
     def test_the_largest_pages_fit_a_frame_in_any_script(self):
         long = "字" * 300  # 3 bytes a letter; titles are cut to what a row shows
         titles = [movie(i, f"{long}{i}", year=long) for i in range(120)]
-        genres = [(str(i), f"{long}{i}", 120) for i in range(150)]
+        genres = [(str(i), f"{long}{i}", 120) for i in range(200)]
         self.catalog.group_list["movies"] = genres
         for gid, _title, _count in genres:
             self.catalog.item_map[("movies", gid)] = titles
         keys = self.opened()
-        self.library.genres("movies", 0, "字字")  # 100 genres and 50 titles at once
+        self.library.genres("movies", 1, "字字")  # 100 genres and 50 titles at once
+        genres_page = self.last("genres")
         self.library.titles("movies", next(iter(keys.values())), 0, "")
-        for message in (self.last("genres"), self.last("library")):
+        for message in (genres_page, self.last("library")):
             encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
             self.assertLessEqual(len(encoded), MAX_MESSAGE, message["t"])
-        self.assertEqual(len(self.last("genres")["titles"]), LIBRARY_PAGE)
+        self.assertEqual(len(genres_page["rows"]), GENRES_PAGE)
+        self.assertEqual(len(genres_page["titles"]), LIBRARY_PAGE)
+
+    def test_a_finds_genres_past_the_first_hundred_come_a_page_at_a_time(self):
+        """The genres a find matches 100 a page, the titles it finds 50 a page after them: the
+        page where the genres end begins them."""
+        genres = [(str(i), f"Drama {i}", 1) for i in range(160)]
+        self.catalog.group_list["movies"] = genres
+        for gid, _title, _count in genres:
+            self.catalog.item_map[("movies", gid)] = [movie(int(gid), f"Drama film {gid}")]
+        self.opened()
+        pages = []
+        for page in range(5):
+            self.library.genres("movies", page, "drama")
+            pages.append(self.last("genres"))
+        self.assertEqual(pages[0]["found"], 160)
+        self.assertEqual([m["pages"] for m in pages], [5] * 5)
+        rows = [g["title"] for m in pages for g in m["rows"]]
+        self.assertEqual(rows, [f"Drama {i}" for i in range(160)])
+        self.assertEqual((len(pages[0]["rows"]), pages[0]["titles"]), (GENRES_PAGE, []))
+        self.assertEqual(len(pages[1]["titles"]), LIBRARY_PAGE)  # with the last genres
+        titles = [t["title"] for m in pages for t in m["titles"]]
+        self.assertEqual(sorted(titles), sorted(f"Drama film {i}" for i in range(160)))
 
     def test_many_genres_come_a_page_at_a_time_inside_a_frame(self):
         many = [(str(i), f"Genre {i} " + "x" * 200, 1) for i in range(450)]
@@ -378,6 +410,69 @@ class PhoneLibraryTests(unittest.TestCase):
         message = self.last("genres")
         self.assertEqual((len(message["rows"]), message["pages"]), (GENRES_PAGE, 5))
         self.assertLess(len(json.dumps(message, ensure_ascii=False).encode()), FRAME // 2)
+
+
+class BackgroundFindTests(unittest.TestCase):
+    """A large section's finds are a worker's: the phone's page says it is searching, then
+    comes again with what the GUI thread would have found."""
+
+    def setUp(self):
+        patch = mock.patch.object(library, "BACKGROUND_FROM", 50)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.jobs = JobRunner()
+
+    def made(self, jobs):
+        catalog, config, sent = catalog_with(), make_config(), []
+        cache = LibraryCache(jobs)
+        made = PhoneLibrary(catalog, config, WatchState(config), sent.append, cache=cache)
+        self.addCleanup(made.deleteLater)
+        made.genres("movies", 0, "")
+        catalog.sectionReady.emit("movies")
+        self.assertTrue(wait_until(lambda: not last(sent, "genres")["loading"]))
+        return made, sent
+
+    def test_a_find_among_the_genres_is_a_workers(self):
+        small, small_sent = self.made(None)
+        phone, sent = self.made(self.jobs)
+        folds = OnThreads(library.fold)
+        with mock.patch.object(library, "fold", folds):
+            phone.genres("movies", 0, "movie 1")
+            first = last(sent, "genres")
+            self.assertEqual((first["titles"], first["searching"]), ([], True))
+            self.assertTrue(wait_until(lambda: last(sent, "genres")["titles"]))
+        small.genres("movies", 0, "movie 1")
+        self.assertEqual(titles(last(sent, "genres")), titles(last(small_sent, "genres")))
+        self.assertFalse(last(sent, "genres")["searching"])
+        self.assertLess(folds.gui, 10)  # the find's own words, not 121 titles
+
+    def test_a_find_in_a_genre_is_a_workers(self):
+        small, small_sent = self.made(None)
+        phone, sent = self.made(self.jobs)
+        for made, got in ((small, small_sent), (phone, sent)):
+            drama = next(g["id"] for g in last(got, "genres")["rows"] if g["title"] == "Drama")
+            made.titles("movies", drama, 0, "")
+        self.assertTrue(wait_until(lambda: last(sent, "library")["items"]))
+        folds = OnThreads(library.fold)
+        with mock.patch.object(library, "fold", folds):
+            phone.titles("movies", drama, 0, "movie 2")
+            first = last(sent, "library")
+            self.assertEqual((first["items"], first["searching"]), ([], True))
+            self.assertTrue(wait_until(lambda: last(sent, "library")["items"]))
+        small.titles("movies", drama, 0, "movie 2")
+        names = [[t["title"] for t in last(got, "library")["items"]] for got in (sent, small_sent)]
+        self.assertEqual(names[0], names[1])
+        self.assertTrue(names[0])
+        self.assertLess(folds.gui, 10)
+
+
+def last(sent, kind):
+    found = [m for m in sent if m["t"] == kind]
+    return found[-1] if found else None
+
+
+def titles(message):
+    return [t["title"] for t in message["titles"]]
 
 
 if __name__ == "__main__":

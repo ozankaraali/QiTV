@@ -7,6 +7,8 @@ on a Library title or episode offers the players and its link (`show_target`).
 - "Add to favorites" / "Remove from favorites" (channels only);
 - "Open in picture-in-picture" (channels, when the shell offers picture in picture): the
   channel plays small beside the one playing (Ctrl/⌘+P on the highlighted row does the same);
+- "Record at a time…" (channels, when QiTV records, 2.8): the channel recorded from one time to
+  another, once or on chosen days, with no guide needed (`ui.record_timer_dialog`);
 - "Remove from Recents" (a channel of ⟲ Recent, while the list shows it): it leaves the list
   (Delete on the highlighted row does the same); "Clear Recents ›" there, and on the ⟲ Recent
   row itself, opens one entry that clears the whole list: the submenu is the confirmation;
@@ -29,7 +31,7 @@ from PySide6.QtWidgets import QMenu, QWidget
 
 from services import external_players, favorites, i18n
 from services.i18n import N_, tr, tr_n, translate
-from services.navigation import RECENT_GROUP, NavModel, NavNode
+from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode
 from ui.link_lanes import LinkLanes, Target
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -41,6 +43,10 @@ LINK_COPIED_TEXT = N_("Link copied")  # i18n: a toast: the stream's link is on t
 OPEN_PIP_TEXT = N_("Open in picture-in-picture")  # i18n: a menu entry
 # i18n: a menu entry: the channel leaves the list of channels watched lately ("Recent")
 REMOVE_RECENT_TEXT = N_("Remove from Recents")
+# i18n: a channel's or a group's right-click entry: parental controls hide it (2.8)
+HIDE_TEXT = N_("Hide (parental controls)")
+# i18n: a channel's right-click entry: record it from one time to another (no guide needed)
+RECORD_AT_TEXT = N_("Record at a time…")
 # i18n: a menu entry opening a submenu that confirms emptying the "Recent" list
 CLEAR_RECENTS_TEXT = N_("Clear Recents")
 PLAYERS = ((N_("Play in VLC"), "vlc"), (N_("Play in MPV"), "mpv"))
@@ -88,15 +94,22 @@ class ContextActions(QObject):
         open_pip: Optional[Callable[[NavNode], None]] = None,
         forget_recent: Optional[Callable[[dict], None]] = None,
         clear_recents: Optional[Callable[[], None]] = None,
+        hide: Optional[Callable[[NavNode], None]] = None,
+        may_hide: Callable[[], bool] = lambda: True,
+        record_at: Optional[Callable[[], Optional[Callable[[dict], None]]]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`external` is services.external_players or a stand-in; `notify(text, kind)` toasts.
 
         `open_pip(node)` opens a channel row in picture in picture, `forget_recent(item)` takes
         a channel out of ⟲ Recent and `clear_recents()` empties it (None: no such entry).
+        `record_at()` is what records a channel at a time (2.8; None while QiTV cannot).
         """
         super().__init__(parent)
         self._open_pip = open_pip
+        self._hide = hide  # 2.8: parental controls hide a channel or a group ...
+        self._may_hide = may_hide  # ... once their PIN is set
+        self._record_at = record_at
         self._forget_recent = forget_recent
         self._clear_recents = clear_recents
         self.nav = nav
@@ -139,6 +152,12 @@ class ContextActions(QObject):
         """`node`'s menu; None when it has nothing to offer (a series)."""
         if node.layer == "group" and node.key == RECENT_GROUP:
             return self._recents_menu(parent)
+        hide = self._hide if self._may_hide() else None
+        if node.layer == "group" and hide is not None and node.key != FAVORITES_GROUP:
+            menu = QMenu(parent)  # 2.8: a group's menu: parental controls hide it
+            menu.setStyleSheet(menu_style())
+            menu.addAction(translate(HIDE_TEXT)).triggered.connect(lambda _=False: hide(node))
+            return menu
         channel = is_channel(self.nav, node)
         playable = isinstance(node.payload, dict) and self.nav.is_playable(node)
         if not channel and not playable:
@@ -155,6 +174,11 @@ class ContextActions(QObject):
                 menu.addAction(translate(OPEN_PIP_TEXT)).triggered.connect(
                     lambda _=False: open_pip(node)
                 )
+            record_at = self._record_at() if self._record_at is not None else None
+            if record_at is not None:
+                menu.addAction(translate(RECORD_AT_TEXT)).triggered.connect(
+                    lambda _=False: record_at(item)
+                )
             forget = self._forget_recent
             if forget is not None and self.nav.is_recent_row(node):
                 menu.addSeparator()
@@ -162,6 +186,8 @@ class ContextActions(QObject):
                     lambda _=False: forget(item)
                 )
                 self._add_clear_recents(menu)
+            if hide is not None:
+                menu.addAction(translate(HIDE_TEXT)).triggered.connect(lambda _=False: hide(node))
         if playable:
             if channel:
                 menu.addSeparator()

@@ -19,15 +19,17 @@ At most GENRE_LIMIT genres are kept, and CHANNEL_LIMIT channels of each provider
 from __future__ import annotations
 
 from array import array
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 import logging
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 from PySide6.QtCore import QObject, Signal
 
 from services.catalog import ALL_GROUP_ID
 from services.navigation import item_key
+from services.provider_ids import ALL_PROVIDERS
 from services.search import _title, iter_items
 from services.text_fold import fold, fold_all
 
@@ -54,6 +56,9 @@ class FoundChannel:
     title: str
     item: dict
     group_id: str  # the first of its provider's genres that lists it ("" when none does)
+
+
+_Found = TypeVar("_Found", FoundGenre, FoundChannel)
 
 
 @dataclass(frozen=True)
@@ -290,6 +295,25 @@ def find_channels(
             ranked.append((tier, at, position, hit))
     ranked.sort(key=lambda entry: entry[:3])
     return [hit for _tier, _provider, _position, hit in ranked]
+
+
+def by_scope(
+    found: Sequence[_Found], provider: str, own: Collection[tuple[str, str]] = ()
+) -> list[_Found]:
+    """What a find found (genres or channels, ranked) widening as the lists do, phone and
+    desktop alike: the open group's channels first (`own`: their providers and item keys),
+    then those of the provider the list shows (`provider`; every one for ALL_PROVIDERS or
+    ""), then every provider's; each keeps its rank."""
+
+    def scope(hit: _Found) -> int:
+        item = getattr(hit, "item", None)
+        if own and isinstance(item, dict) and (hit.provider, item_key(item)) in own:
+            return 0
+        if provider in ("", ALL_PROVIDERS) or hit.provider == provider:
+            return 1
+        return 2
+
+    return sorted(found, key=scope)  # (stable: each keeps its rank)
 
 
 class FindWorker(QObject):

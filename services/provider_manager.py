@@ -6,7 +6,7 @@ import random
 import string
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlencode, urlsplit
 
 from PySide6.QtCore import QObject, Signal
@@ -23,7 +23,9 @@ from services.provider_api import (
     known_http_only,
     remember_http_only,
 )
+from services.provider_types import is_media_server
 from services.redact import safe_exc
+from services.vlc_profile import STB_USER_AGENT
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
@@ -87,15 +89,15 @@ class ProviderManager(QObject):
         os.makedirs(self.provider_dir, exist_ok=True)
         self.index_file = os.path.join(self.provider_dir, "index.json")
         self.providers = []
-        self.current_provider = {}
-        self.current_provider_content = {}
+        self.current_provider: dict[str, Any] = {}
+        self.current_provider_content: dict[str, Any] = {}
         self.token = ""
-        self.headers = {}
+        self.headers: dict[str, str] = {}
         self.handshake_failure = None  # a HANDSHAKE_* reason after a failed STB setup
         self._cache_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="provider-cache")
         self._cache_lock = threading.Lock()
-        self._cache_generations = {}
-        self._pending_cache_snapshots = {}
+        self._cache_generations: dict[str, int] = {}
+        self._pending_cache_snapshots: dict[str, tuple[int, Any]] = {}
         if providers is not None:
             self.providers = providers
         else:
@@ -169,6 +171,22 @@ class ProviderManager(QObject):
             return True
         age = time.time() - refreshed_at
         return not 0 <= age < self.CONTENT_CACHE_TTL
+
+    def content_expired(self, content_type) -> bool:
+        """The saved content is the current provider's as set up now, only older than
+        CONTENT_CACHE_TTL (2.8: a film or series list then shows while it loads again)."""
+        if content_type not in self.current_provider_content:
+            return False
+        metadata = self.current_provider_content.get("_cache")
+        if not isinstance(metadata, dict):
+            return False
+        if metadata.get("identity") != self.provider_cache_identity(self.current_provider):
+            return False
+        timestamps = metadata.get("refreshed_at")
+        refreshed_at = timestamps.get(content_type) if isinstance(timestamps, dict) else None
+        if isinstance(refreshed_at, bool) or not isinstance(refreshed_at, (int, float)):
+            return False
+        return self.is_content_stale(content_type)
 
     def mark_content_fresh(self, content_type) -> None:
         """Mark only a successful root fetch; category persistence must not call this."""
@@ -282,7 +300,8 @@ class ProviderManager(QObject):
                 cache = self._load_provider_cache(provider)
             # Playlists offer live channels only; an older catalog may have stored the
             # playlist again under "vod" or "series".
-            playlist = str(provider.get("type", "")).upper() not in ("STB", "XTREAM")
+            kind = str(provider.get("type", "")).upper()
+            playlist = kind not in ("STB", "XTREAM") and not is_media_server(kind)
             content = {
                 key: value
                 for key, value in list(cache.items())
@@ -429,7 +448,10 @@ class StbHandshake:
             if try_https:
                 url = "https://" + url[len("http://") :]
 
-            fetchurl = f"{url}{serverload}?type=stb&action=handshake&prehash={_PREHASH}&token=&JsHttpRequest=1-xml"
+            fetchurl = (
+                f"{url}{serverload}?type=stb&action=handshake&prehash={_PREHASH}"
+                "&token=&JsHttpRequest=1-xml"
+            )
             handshake = requests.get(fetchurl, timeout=5, headers=self.headers, verify=ssl_verify)
             if handshake.status_code == 200:
                 body = handshake.json()
@@ -505,7 +527,11 @@ class StbHandshake:
     def profile_url(url, serverload, mac):
         """The portal's get_profile request, as a set-top box sends it after its handshake."""
         params = {
-            "ver": "ImageDescription: 2.20.02-pub-424; ImageDate: Fri May 8 15:39:55 UTC 2020; PORTAL version: 5.3.0; API Version: JS API version: 343; STB API version: 146; Player Engine version: 0x588",
+            "ver": (
+                "ImageDescription: 2.20.02-pub-424; ImageDate: Fri May 8 15:39:55 UTC 2020; "
+                "PORTAL version: 5.3.0; API Version: JS API version: 343; "
+                "STB API version: 146; Player Engine version: 0x588"
+            ),
             "num_banks": "2",
             "sn": "062014N067770",
             "stb_type": "MAG424",
@@ -518,14 +544,20 @@ class StbHandshake:
             "auth_second_step": "1",
             "hw_version": "1.7-BD-00",
             "not_valid_token": "0",
-            "metrics": f'{{"mac":"{mac}", "sn":"062014N067770","model":"MAG424","type":"STB","uid":"","random":""}}',
+            "metrics": (
+                f'{{"mac":"{mac}", "sn":"062014N067770","model":"MAG424",'
+                '"type":"STB","uid":"","random":""}'
+            ),
             "hw_version_2": "bb8b74cdcaa19c7f6a6bdfecc8e91b7e4b5ea556",
             "timestamp": "1729441259",
             "api_signature": "262",
             "prehash": _PREHASH,
         }
         encoded_params = urlencode(params)
-        return f"{url}{serverload}?type=stb&action=get_profile&hd=1&{encoded_params}&JsHttpRequest=1-xml"
+        return (
+            f"{url}{serverload}?type=stb&action=get_profile&hd=1&{encoded_params}"
+            "&JsHttpRequest=1-xml"
+        )
 
     def check_profile(self, url, mac, headers):
         """A profile request on a session that is signed in already (`headers`, with its
@@ -587,7 +619,7 @@ class StbHandshake:
             cookie_parts.append(f"device_id={device_id}")
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+            "User-Agent": STB_USER_AGENT,
             "Accept-Charset": "UTF-8,*;q=0.8",
             "X-User-Agent": "Model: MAG200; Link: Ethernet",
             "Host": parts.netloc,

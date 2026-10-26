@@ -22,8 +22,9 @@ catalog's, as for pipeline tunes), from its start until libVLC let go of its str
 PiP sees the slot taken. It never waits for one: this gate already orders the main player's
 streams. It waits for the other pictures' tuners of its provider, though
 (`wait_for_each_other`): a closing PiP's stream may still hold the provider's last slot, so
-the open runs at that tuner's `released`; another provider's closing stream holds none. A local file (`local=True`) is no provider's stream: it is stopped and waited for
-like a direct play, but holds no slot.
+the open runs at that tuner's `released`; another provider's closing stream holds none. A local file
+(`local=True`) is no provider's stream: it is stopped and waited for like a direct play, but holds
+no slot.
 
 Picture in picture and the multiview's tiles give each player a tuner of its own.
 Its budget slots carry the player's slot name as their purpose ("main", "pip", "t2" …): a
@@ -64,6 +65,7 @@ class LiveStart:
     channel: str = ""  # its key for what it taught (services.live.tuning; "": none)
     referrer: str = ""  # the channel's M3U http-referrer (2.1; "": none)
     https: bool = False  # 2.7.1: the helper asks it over HTTPS first (see live_start)
+    max_height: Optional[int] = None  # 2.8, the live ⚙: the size cap chosen (None: its own)
 
 
 def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) -> dict[str, Any]:
@@ -74,6 +76,7 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
     goes on in that memory (`ram_bytes`). A channel with a key passes it (`channel`), one whose
     M3U names a referrer passes that (`referrer`, and its `Referer` header for the helper).
     A start asked over HTTPS first has the helper try that first (`https_first`, 2.7.1).
+    A size cap chosen in the ⚙ goes with it (`max_height`, 2.8; 0: the best again).
     """
     consent = bool(config.timeshift_enabled)
     disk = consent if disk is None else disk and consent
@@ -99,6 +102,8 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
         kwargs["referrer"] = start.referrer  # a direct play's
     if start.https:
         kwargs["https_first"] = True
+    if start.max_height is not None:
+        kwargs["max_height"] = start.max_height
     return kwargs
 
 
@@ -266,7 +271,7 @@ class LiveTuner(QObject):
     def tune(self, start: LiveStart, provider: str, limit: Optional[int]) -> None:
         """Stop what plays and start `start` through the pipeline with a budget slot."""
         assert self._stream is not None
-        self.stop()
+        self.stop(next_channel=start.channel)
         self._pending = start
         self._pending_limit = limit
         self._stream.request(provider, limit)
@@ -283,14 +288,15 @@ class LiveTuner(QObject):
             others = [p for p in others if p not in going]
         return limit <= 0 or len(others) >= limit
 
-    def stop(self) -> None:
-        """Stop what plays or waits to; a held slot goes back once its upstream is closed."""
+    def stop(self, next_channel: str = "") -> None:
+        """Stop what plays or waits to; a held slot goes back once its upstream is closed.
+        `next_channel`: the channel a tune opens next (`BudgetedStream.stop`)."""
         self._action = None
         self._pending = None
         self._pause = False
         self.timeline = None
         if self._stream is not None:
-            self._stream.stop()  # released() follows, at once when nothing is left open
+            self._stream.stop(next_channel)  # released() follows, at once when nothing is left open
         if self._direct:
             self._direct = False
             self.session.stop()

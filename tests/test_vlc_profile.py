@@ -1,6 +1,13 @@
 import unittest
 
-from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind, classify, media_options
+from services.vlc_profile import (
+    DEFAULT_USER_AGENT,
+    STB_USER_AGENT,
+    PlayKind,
+    classify,
+    media_options,
+    user_agent_for,
+)
 
 
 def option(options, name):
@@ -21,6 +28,12 @@ class ClassifyTests(unittest.TestCase):
         self.assertIs(classify("http://h/live/u/p/1.ts", True), PlayKind.LIVE)
         self.assertIs(classify("http://h/series/1.m3u8", False), PlayKind.VOD_STREAM)
         self.assertIs(classify("http://h/stream", None), PlayKind.UNKNOWN)
+
+    def test_a_recording_on_the_disk_seeks_like_a_film(self):
+        self.assertIs(
+            classify("file:///rec/News%202026-10-19%2021.30.ts", False), PlayKind.VOD_FILE
+        )
+        self.assertIs(classify("http://h/movie/u/p/1.ts", False), PlayKind.VOD_STREAM)
 
 
 class PipelineProfileTests(unittest.TestCase):
@@ -88,6 +101,25 @@ class MediaOptionsTests(unittest.TestCase):
         self.assertIn(
             ":http-user-agent=Custom/1", media_options(PlayKind.LIVE, user_agent="Custom/1")
         )
+
+    def test_an_stb_portals_streams_are_asked_for_as_its_box(self):  # 2.8
+        self.assertIn("MAG200 stbapp", STB_USER_AGENT)
+        self.assertEqual(user_agent_for({}, "STB"), STB_USER_AGENT)
+        self.assertEqual(user_agent_for({}, "stb"), STB_USER_AGENT)
+        self.assertEqual(user_agent_for({"user_agent": "Box/2"}, "STB"), "Box/2")  # its own
+        for kind in ("XTREAM", "M3UPLAYLIST", "JELLYFIN", ""):
+            self.assertEqual(user_agent_for({}, kind), DEFAULT_USER_AGENT)
+
+    def test_a_size_cap_reaches_vlcs_own_adaptive_streams(self):  # 2.8, the live ⚙
+        for kind in (PlayKind.LIVE, PlayKind.UNKNOWN):
+            self.assertIn(":adaptive-maxheight=720", media_options(kind, max_height=720))
+            self.assertNotIn(
+                "adaptive-maxheight",
+                " ".join(media_options(kind) + media_options(kind, max_height=0)),
+            )
+        # The loopback stream is one transport stream: nothing to pick from.
+        pipeline = media_options(PlayKind.LIVE_PIPELINE, max_height=720)
+        self.assertNotIn("adaptive-maxheight", " ".join(pipeline))
 
     def test_referrer(self):
         # A channel's M3U http-referrer goes with VLC's own requests; without one, none.

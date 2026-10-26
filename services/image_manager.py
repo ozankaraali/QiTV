@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import threading
+import time
 
 import orjson as json
 
@@ -15,6 +16,20 @@ from services.redact import redact_url, safe_exc
 logger = logging.getLogger(__name__)
 aiohttp = lazy_module("aiohttp")
 asyncio = lazy_module("asyncio")
+
+# 2.8: TMDB's images (services/tmdb.py) are fetched again once as old as the details kept with
+# them: TMDB's terms allow six months at most. A file's time is its download's.
+TMDB_IMAGES = "https://image.tmdb.org/"
+TMDB_IMAGE_MAX_AGE_S = 30 * 24 * 60 * 60
+
+
+def _too_old(url: str, path: str) -> bool:
+    if not url.startswith(TMDB_IMAGES):
+        return False
+    try:
+        return time.time() - os.path.getmtime(path) > TMDB_IMAGE_MAX_AGE_S
+    except OSError:
+        return False
 
 
 class ImageManager:
@@ -43,7 +58,11 @@ class ImageManager:
         cache_path = os.path.join(self.cache_dir, f"{url_hash}.{ext}")
 
         # If already cached on disk, update metadata and return
-        if os.path.exists(cache_path) and self._touch_cache_entry(url_hash, cache_path):
+        if (
+            os.path.exists(cache_path)
+            and not _too_old(url, cache_path)
+            and self._touch_cache_entry(url_hash, cache_path)
+        ):
             return cache_path
 
         # Download and write to disk
@@ -56,7 +75,8 @@ class ImageManager:
                             break
                         wait_time = (2**attempt) + random.uniform(0, 1)
                         logger.debug(
-                            f"Received error or empty response. Retrying in {wait_time:.2f} seconds..."
+                            "Received error or empty response. "
+                            f"Retrying in {wait_time:.2f} seconds..."
                         )
                         await asyncio.sleep(wait_time)
                         continue
@@ -73,14 +93,14 @@ class ImageManager:
                         self._manage_cache_size(protect=url_hash)
                         return cache_path
                     except OSError as e:
-                        logger.warning(f"Error writing image to cache: {e}")
+                        logger.warning("Error writing image to cache: %s", safe_exc(e))
                         return None
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 logger.info("Error fetching image: %s", safe_exc(e))  # e names the URL
                 if attempt == max_retries - 1:
                     break
                 wait_time = (2**attempt) + random.uniform(0, 1)
-                logger.debug(f"Retrying in {wait_time:.2f} seconds...")
+                logger.debug("Retrying in %.2f seconds...", wait_time)
                 await asyncio.sleep(wait_time)
         return None
 
@@ -102,7 +122,7 @@ class ImageManager:
             self._manage_cache_size(protect=image_hash)
             return cache_path
         except Exception as e:
-            logger.warning(f"Error decoding/saving base64 image: {e}")
+            logger.warning("Error decoding/saving base64 image: %s", safe_exc(e))
             return None
 
     def _touch_cache_entry(self, key_hash, cache_path) -> bool:
@@ -175,7 +195,7 @@ class ImageManager:
                         data = json.loads(f.read())
                         self.cache = OrderedDict(data) if data else OrderedDict()
                     except (json.JSONDecodeError, IOError) as e:
-                        logger.warning(f"Error loading index file: {e}")
+                        logger.warning("Error loading index file: %s", safe_exc(e))
 
             # Index files that exist on disk but not in the index (metadata only)
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

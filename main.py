@@ -77,9 +77,9 @@ def handle_replace_flag():
 
 def written_dirs(config_dir: str) -> list[str]:
     """Where QiTV writes files through services.atomic_write: the config (and the channel
-    stores beside it), the guide cache and the provider cache."""
+    stores beside it), the cache (TMDB's, 2.8), the guide cache and the provider cache."""
     cache = os.path.join(config_dir, "cache")
-    return [config_dir, os.path.join(cache, "epg"), os.path.join(cache, "provider")]
+    return [config_dir, cache, os.path.join(cache, "epg"), os.path.join(cache, "provider")]
 
 
 def _migrate_favorites(config_manager) -> None:
@@ -95,7 +95,6 @@ def _migrate_favorites(config_manager) -> None:
 def main() -> int:
     from PySide6 import QtGui
     from PySide6.QtCore import QLocale, QLoggingCategory, qInstallMessageHandler
-    from PySide6.QtWidgets import QApplication
     import qdarktheme
 
     from services import i18n, log_file
@@ -106,6 +105,7 @@ def main() -> int:
     from services.image_manager import ImageManager
     from services.provider_manager import ProviderManager
     from services.sleep_manager import allow_sleep, prevent_sleep
+    from ui.quit_reason import QiTVApplication
     from ui.tv_window import TVWindow
     from ui.update_dialogs import check_for_updates
 
@@ -134,7 +134,7 @@ def main() -> int:
     # thread waiting up to 5 ms at every callback it makes: a 0.5 ms switch interval keeps
     # the window responsive while it works.
     sys.setswitchinterval(0.0005)
-    app = QApplication(sys.argv)
+    app = QiTVApplication(sys.argv)  # notes a quit request the system sends (2.8)
     # Why QiTV ended, in its log: the window closed (tv_window says how), or its last one.
     app.lastWindowClosed.connect(lambda: log.info("The last window closed."))
     app.aboutToQuit.connect(lambda: log.info("QiTV quits."))
@@ -144,7 +144,8 @@ def main() -> int:
 
     # Optional: capture Qt warnings to help debug thread/timer issues
     def _qt_msg_handler(mode, context, message):
-        # Focus on timer/thread-related warnings only when enabled. Print directly to stderr to avoid recursion.
+        # Focus on timer/thread-related warnings only when enabled. Print directly to stderr to
+        # avoid recursion.
         if "QBasicTimer::start" in message or "QObject::startTimer" in message:
             try:
                 sys.stderr.write(f"Qt: {message}\n")
@@ -175,11 +176,13 @@ def main() -> int:
     provider_manager = ProviderManager(config_manager)
     epg_manager = EpgManager(config_manager, provider_manager)
     # Temporary files of writes killed midway, a day old, go (on a thread of their own).
-    sweep_in_background(written_dirs(config_manager.get_config_dir()))
+    sweep_in_background(  # each downloaded subtitle's folder too (2.8)
+        written_dirs(config_manager.get_config_dir()), nested=[config_manager.subtitles_dir()]
+    )
 
     if platform.system() == "Windows":
         myappid = f"com.ozankaraali.qitv.{get_app_version()}"
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)  # type: ignore
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
     app.setWindowIcon(QtGui.QIcon(icon_path))
     qdarktheme.setup_theme("dark", custom_colors={"primary": "#C96B43"})

@@ -6,7 +6,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QWidget
-from test_multiview import MultiviewCase
+from test_multiview import MIB, MultiviewCase
 from test_tv_controller import (
     BACKUP_TWO,
     CHANNELS,
@@ -149,6 +149,23 @@ class RecordingAsideTests(_RecordCase):
         self.assertIn(("set_roles", "b1", "main"), self.frame.calls)
         self.assertEqual(self.sessions.background(), [])
 
+    def test_a_stop_for_an_update_ends_the_recordings_before_their_players_stop(self):
+        # 2.8 (review of 2.6): a self-update closed a recording's buffer; ended first (saved),
+        # its player parks as any other and its disk buffer is kept, as Quit's question does.
+        recording = self.record_large(0)
+        self.leave_for(1)
+        seen = []
+        stop_background = self.sessions.stop_background
+
+        def stopping():
+            seen.append(recording.recording())
+            stop_background()
+
+        self.sessions.stop_background = stopping
+        self.controller.stop_live()
+        self.assertEqual(seen, [False])
+        self.assertIn(("stop_recording",), self.since_recording(recording))
+
     def test_quitting_stops_the_recordings_in_the_background(self):
         recording = self.record_large(0)
         self.leave_for(1)
@@ -261,6 +278,38 @@ class StreamQuestionTests(_RecordCase):
         self.assertFalse(recording.recording())
         recording.released.emit()
         self.assertTrue(wait_until(lambda: launched == ["http://stream/2"]))
+
+    def test_a_phones_question_takes_the_tvs_card_down(self):
+        """The phone's Watch asks while the TV's card asks: the phone's question stands for
+        it, the card goes, and the TV's keys answer nothing (not the phone's question)."""
+        self.one_stream()
+        self.record_large(0)
+        self.leave_for_backup()
+        launch = lambda target, url: (True, "")  # noqa: E731
+        self.controller.play_elsewhere(launch, self.target(1))  # an outside player's ask
+        self.ready("http://stream/2")
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        asked = []
+        self.controller.phoneAsked.connect(lambda *a: asked.append(a))
+        self.controller.play_elsewhere(launch, self.target(2), ask_on="s8")
+        self.ready("http://stream/3")
+        self.assertEqual(len(asked), 1)
+        self.assertTrue(self.question.isHidden())
+        self.assertFalse(self.controller.answer_key(Action.OK))
+        self.assertTrue(self.controller._question.asking())  # the phone's, still
+
+    def test_a_phone_asked_again_is_not_told_its_question_went(self):
+        """A phone's newer question replaces its own sheet: only another's says it went."""
+        self.one_stream()
+        self.record_large(0)
+        self.leave_for_backup()
+        settled = []
+        self.controller.phoneSettled.connect(settled.append)
+        launch = lambda target, url: (True, "")  # noqa: E731
+        for index, sid in ((1, "s8"), (2, "s8"), (1, "s9")):
+            self.controller.play_elsewhere(launch, self.target(index), ask_on=sid)
+            self.ready(f"http://stream/{index + 1}")
+        self.assertEqual(settled, ["s8"])  # when s9's came
 
     def test_a_page_change_takes_the_question_along(self):  # Stage C review I3
         self.one_stream()
@@ -517,6 +566,20 @@ class RecordingTileTests(MultiviewCase):
         )
         self.assertEqual([s.name for s in self.sessions.background()], ["t2"])
         self.assertTrue(self.sessions.muted("t2"))
+
+    def test_a_recording_tile_left_in_the_background_takes_the_full_buffer(self):
+        # 2.8 (review of 2.6): it kept its small tile buffer, also once brought back large.
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.pick_in("t3", CHANNELS[3], "http://stream/4")
+        self.assertTrue(t2.live.start_recording("/tmp/x.ts"))
+        self.grid_frame.focusRequested.emit("main")
+        self.assertEqual(t2.live.resizes[-1], 64 * MIB)
+        self.v()
+        self.assertEqual([s.name for s in self.sessions.background()], ["t2"])
+        self.assertEqual(t2.live.resizes[-1], 256 * MIB)
 
     def with_question(self):
         self.host = QWidget()

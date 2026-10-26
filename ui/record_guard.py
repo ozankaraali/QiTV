@@ -3,11 +3,13 @@
 Some providers do not say how many streams they allow, and when a second one opens they close
 the older. A recording would lose its stream to a zap. So, while a channel records at a
 provider whose limit is unknown, the guard notes each stream that starts there; when the
-recording's stream breaks (reconnecting, or failed) within `DROP_WINDOW_S` of another one of
-that provider starting, that newer stream is stopped, the provider counts as allowing as many
+recording's stream breaks (it reconnects) within `DROP_WINDOW_S` of another one of that
+provider starting, that newer stream is stopped, the provider counts as allowing as many
 streams as were open before it for the rest of the run (`ConnectionBudget.learn`, so every
 later open is refused as over the limit or asks first), and a toast says why. The recording
 reconnects by itself. A newer stream that records too is never stopped for an older one.
+(2.8: a failure is not watched: `LiveSession` ends a recording before it says `failed`, so
+none is left to save then.)
 """
 
 from __future__ import annotations
@@ -58,7 +60,6 @@ class RecordGuard(QObject):
     def watch_slot(self, slot: Slot) -> None:
         """Follow a player's stream: each player's at wiring, a made one's when added."""
         slot.live.timelineChanged.connect(partial(self._on_timeline, slot))
-        slot.live.failed.connect(lambda _message, s=slot: self._on_break(s))
 
     def _on_granted(self, ticket: int) -> None:
         entry = self._budget.entry(ticket)

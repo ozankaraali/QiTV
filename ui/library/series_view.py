@@ -343,7 +343,18 @@ class SeriesView(QWidget):
         self._layout()
 
     # ---- data ---------------------------------------------------------------------------
-    def set_series(self, series: dict, details: Details) -> None:
+    def set_details(self, details: Details, poster: str = "") -> None:
+        """The same series' details (and poster, when given) told anew: its seasons stay."""
+        self._details = details
+        self._plot_lines_cache = None
+        if poster and poster != self._poster_url:
+            self._poster_url = poster
+            if self._posters is not None:
+                self._posters.request([poster])
+        self.update()
+
+    def set_series(self, series: dict, details: Details, poster: str = "") -> None:
+        """`poster`: its URL when not the series' own (2.8: TMDB's)."""
         self._series = series
         self._details = details
         self._seasons = None
@@ -358,7 +369,7 @@ class SeriesView(QWidget):
         self._button = False
         self._moved = False
         self._plot_lines_cache = None
-        self._poster_url = poster_url(series)
+        self._poster_url = poster or poster_url(series)
         if self._poster_url and self._posters is not None:
             self._posters.request([self._poster_url])
         self._sync()

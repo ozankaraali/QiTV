@@ -683,8 +683,48 @@ class DiskBudgetTests(unittest.TestCase):
         budget.register(first)
         budget.register(second)
         self.fill(second, 1)
-        budget.trim()
+        changed = budget.trim()
         self.assertEqual((first.oldest_seq, second.oldest_seq), (1, 0))
+        self.assertEqual(changed, [first])  # 2.8: an active ring's session says so too
+
+    def test_registering_never_waits_for_a_trims_files(self):
+        # 2.8: segments are deleted outside the budget's lock (the command loop parks rings).
+        kept, live = self.ring(), self.ring()
+        self.fill(kept, 2)
+        self.fill(live, 2)
+        budget = DiskBudget(kept.charged + live.charged)
+        budget.register(kept, parked=True)
+        budget.register(live)
+        held = []
+        retire = DiskRing.retire_oldest
+
+        def retiring(ring):
+            free = budget._lock.acquire(blocking=False)
+            if free:
+                budget._lock.release()
+            held.append(not free)
+            return retire(ring)
+
+        self.fill(live, 1)
+        with patch.object(DiskRing, "retire_oldest", retiring):
+            budget.trim()
+        self.assertEqual(held, [False])
+        self.assertEqual(kept.oldest_seq, 1)
+
+    def test_a_lowered_amount_applies_to_open_rings_at_once(self):
+        # 2.8: not only at the next fresh disk open.
+        kept, live = self.ring(), self.ring()
+        self.fill(kept, 3)
+        self.fill(live, 3)
+        budget = DiskBudget(kept.charged + live.charged)
+        budget.register(kept, parked=True)
+        budget.register(live)
+        lower = live.charged + kept.charged // 3
+        changed = budget.set_max_bytes(lower)
+        self.assertEqual(budget.max_bytes, lower)
+        self.assertLessEqual(kept.charged + live.charged, lower)
+        self.assertEqual(changed, [kept])  # the kept one gave way
+        self.assertEqual((kept.max_bytes, live.max_bytes), (lower, lower))
 
     def test_the_disk_budget_passes_over_a_protected_ring(self):
         # 2.7: a parked ring whose oldest is protected is no victim; the next one is.
@@ -836,9 +876,48 @@ class IndexTests(unittest.TestCase):
     def test_a_short_file_counts_as_missing(self):
         ring = self.ring()
         self.fill(ring, 3)
+        with open(self.folder(ring) / "segment-1.ts", "r+b") as handle:
+            handle.truncate(100)
+        self.assertEqual([s["seg"] for s in read_index(self.folder(ring)).segments], [2])
+
+    def test_a_damaged_newest_segment_keeps_the_run_before_it(self):
+        # 2.8 (review of 2.6): a newest segment torn by a crash no longer drops the whole run;
+        # the part it began goes with it.
+        ring = self.ring()
+        ring.note_part(0, 0.0, 1_000.0)
+        self.fill(ring, 2)
+        ring.note_part(2, 4.0, 9_000.0)
+        self.fill(ring, 1, start_seq=2)
         with open(self.folder(ring) / "segment-2.ts", "r+b") as handle:
             handle.truncate(100)
-        self.assertEqual(read_index(self.folder(ring)).segments, [])
+        index = read_index(self.folder(ring))
+        self.assertEqual([s["seg"] for s in index.segments], [0, 1])
+        self.assertEqual([p["part"] for p in index.parts], [0])
+
+    def test_a_dead_index_does_not_keep_its_folder(self):
+        # 2.8: a folder whose index could not be written would be taken back wrong: it goes.
+        ring = self.ring()
+        self.fill(ring, 2)
+        folder = self.folder(ring)
+        with patch.object(Path, "open", side_effect=OSError("the disk failed")):
+            ring.note_label({"channel": "k1"})
+        ring.close(keep=True)
+        self.assertFalse(folder.exists())
+
+    def test_a_compacted_index_is_on_the_disk_before_it_replaces_the_old_one(self):
+        ring = self.ring()
+        self.fill(ring, 2)
+        calls = []
+        fsync, replace = os.fsync, os.replace
+        with (
+            patch.object(ring_module.os, "fsync", lambda fd: calls.append("fsync") or fsync(fd)),
+            patch.object(
+                ring_module.os, "replace", lambda a, b: calls.append("replace") or replace(a, b)
+            ),
+        ):
+            ring._compact()
+        self.assertEqual(calls, ["fsync", "replace"])
+        self.assertEqual([s["seg"] for s in read_index(self.folder(ring)).segments], [0, 1])
 
     def test_retired_segments_leave_the_index_and_it_stays_small(self):
         ring = self.ring()

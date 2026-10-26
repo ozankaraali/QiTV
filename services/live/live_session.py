@@ -91,25 +91,24 @@ within stay-live's band or 5 s nearer and nothing jumped within a minute (a tune
 reopen: see `StayLive`). Its reopen at live (such a jump, or beyond the target plus 20 s)
 waits until a stream opened (Go live, a seek, a reopen) has played and `_REOPEN_HOLD_S`
 passed, and a Go live right after stay-live's reopen (also one the tick made after it could
-not open at once) opens nothing more: never two opens in a row. The timeline's `shown` is the lag as the
-indicator shows it (`SettledLag`: half seconds, changed after 3 s), `nudge` the rate a nudge
+not open at once) opens nothing more: never two opens in a row. The timeline's `shown` is the lag as
+the indicator shows it (`SettledLag`: half seconds, changed after 3 s), `nudge` the rate a nudge
 ramps to. On some channels VLC cannot play at any rate but 1x: its position crawls. While
-stay-live's rate is not 1x, VLC's progress is checked against rate x wall time
-(`RateHealth`), counted only while VLC plays and at least `_MEASURE_AHEAD_S` of media is
-ahead at both ends of a tick, and from `_RATE_GRACE_S` after an opened stream plays or after
-VLC was at the live edge (within `_EDGE_S`, BUFFERING, or the source stalled): a starved
-VLC, and its restart once data comes again (it refills its caching while its clock stands
-still), are not taken for a slow one. The progress is VLC's own clock's, in its steps, never
-the position (whose clock runs at the rate by design): a stretch runs from VLC's first step
-once counting starts to a later step (a step only late or missing counts at its end), or
-holds nothing played once VLC's clock stood still a whole window and two of its holds. Under
-70% of it over 3 s (at least two such stretches), the rate goes back to 1x at once and
-stay-live changes it no more on that channel (`StayLive.lock_rate`). On some HLS
-channels VLC crawls through the pipeline even at 1x (measured, 2.0.2), while its own HLS
-plays them smoothly: counted the same way at 1x, under 70% progress in `_CRAWL_WINDOWS`
-windows of `_CRAWL_WINDOW_S` in a row makes the channel play directly ("Plays without rewind
-for smoother playback", `CRAWLING`), and the channel's next tune plays directly at once (for
-a day: see `services.live.tuning`). A raw TS channel never does.
+stay-live's rate is not 1x, VLC's progress is checked against rate x wall time (`RateHealth`),
+counted only while VLC plays and at least `_MEASURE_AHEAD_S` of media is ahead at both ends of a
+tick, and from `_RATE_GRACE_S` after an opened stream plays or after VLC was at the live edge
+(within `_EDGE_S`, BUFFERING, or the source stalled): a starved VLC, and its restart once data comes
+again (it refills its caching while its clock stands still), are not taken for a slow one. The
+progress is VLC's own clock's, in its steps, never the position (whose clock runs at the rate by
+design): a stretch runs from VLC's first step once counting starts to a later step (a step only late
+or missing counts at its end), or holds nothing played once VLC's clock stood still a whole window
+and two of its holds. Under 70% of it over 3 s (at least two such stretches), the rate goes back to
+1x at once and stay-live changes it no more on that channel (`StayLive.lock_rate`). On some HLS
+channels VLC crawls through the pipeline even at 1x (measured, 2.0.2), while its own HLS plays them
+smoothly: counted the same way at 1x, under 70% progress in `_CRAWL_WINDOWS` windows of
+`_CRAWL_WINDOW_S` in a row makes the channel play directly ("Plays without rewind for smoother
+playback", `CRAWLING`), and the channel's next tune plays directly at once (for a day: see
+`services.live.tuning`). A raw TS channel never does.
 
 With hardware decoding (Settings), a picture that stands still while the sound plays
 (`PlaybackSession.pictureFroze`, `services.picture_watch`) makes the channel decode in
@@ -175,9 +174,9 @@ Interruptions while playing from the pipeline:
   refill after it do not count). It opens again: at live in LIVE, else where VLC got to.
 - VLC ended or failed: reopen at the position, or 30 s past the oldest buffered point (half
   way into a shorter buffer) with "Rewound past the buffer" (once until VLC plays again) when
-  the ring evicted it (after a long pause, say). Resuming from a pause checks for that eviction first. Nothing is reopened
-  once the session ended: playback runs to the end of the buffer. Interruptions that do not reach playing again within
-  `ready_timeout_ms` fall back.
+  the ring evicted it (after a long pause, say). Resuming from a pause checks for that eviction
+  first. Nothing is reopened once the session ended: playback runs to the end of the buffer.
+  Interruptions that do not reach playing again within `ready_timeout_ms` fall back.
 - `sessionFailed("disk")`: the helper went on in RAM without the history: a notice, then go
   live on the RAM ring's first state (`sessionUpdated`), not on the old ring's spans. A
   seek, Go live or resume meanwhile waits for that state too. Fall back when it does not
@@ -232,6 +231,7 @@ position's time of day and now (the time away included).
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+import dataclasses
 from enum import Enum
 import logging
 import math
@@ -534,6 +534,7 @@ class LiveSession(QObject):
         self._user_agent: Optional[str] = None
         self._referrer: Optional[str] = None
         self._open_args: dict[str, Any] = {}
+        self._back_paused = False  # the place offered last was left paused (2.8)
         self._stay = StayLive()
         self._background = False  # a multiview tile without the focus (set_background)
         self._shrink_to: Optional[int] = None  # a smaller buffer, once it is back at live
@@ -734,6 +735,7 @@ class LiveSession(QObject):
         kept: Optional[KeptRing] = None,
         one_stream: bool = False,
         https_first: bool = False,
+        max_height: Optional[int] = None,
     ) -> None:
         """`ram_bytes`: the memory a disk buffer that fails goes on in (the helper's default
         when None). `channel`: the channel's key in the tuning store ("": nothing kept).
@@ -743,7 +745,10 @@ class LiveSession(QObject):
         afresh. `one_stream` (2.7): the provider leaves no second stream, so the live
         upstream parks while a server part plays and resumes after it. `https_first` (2.7.1):
         every stream the helper opens for it, a server part's
-        and a resume's too, is asked over HTTPS first (a direct play stays as given)."""
+        and a resume's too, is asked over HTTPS first (a direct play stays as given).
+        `max_height` (2.8, the live ⚙): every stream the helper opens for it plays an HLS
+        master's best variant of at most that many lines, and the channel keeps it (0: the
+        best again); None: the cap the channel kept, if any."""
         self.stop()
         self._kept = kept
         self._one_stream = one_stream
@@ -755,6 +760,10 @@ class LiveSession(QObject):
         self._channel = channel
         memory = self._tuning.get(channel) if self._tuning is not None else None
         self._memory = memory or Tuning()
+        if max_height is not None and max(0, max_height) != self._memory.max_height:
+            self._memory = dataclasses.replace(self._memory, max_height=max(0, max_height))
+            if self._tuning is not None:
+                self._tuning.remember(channel, self._memory)
         self._software = self._memory.software
         self._latency = latency if latency in LATENCIES else "normal"
         self._learned = self._new_learned() if self._latency == AUTO else None
@@ -776,6 +785,8 @@ class LiveSession(QObject):
             self._open_args["ram_bytes"] = ram_bytes
         if https_first:
             self._open_args["https_first"] = True
+        if self._memory.max_height > 0:
+            self._open_args["max_height"] = self._memory.max_height
         self._stay = StayLive(self._latency)
         self._stay.set_background(self._background)  # a multiview tile without the focus
         self._stay.jump_lag = self._jump_lag  # where a jump to live would land
@@ -992,7 +1003,8 @@ class LiveSession(QObject):
     def go_live(self) -> None:
         """The Go live button: back to the live edge at 1x, playing (not paused). While a
         kept buffer plays without its stream (2.6), the channel is tried again first; after
-        its disk failed twice, it starts afresh (the helper's own memory fallback)."""
+        its disk failed twice, it starts afresh (the helper's own memory fallback). One played
+        before its channel came back goes live once the new run comes (2.8)."""
         if self._live_parked and self._sid is not None and self._phase is _Phase.PIPELINE:
             # 2.7: a live upstream parked for a server part opens again; live once its new
             # run comes (as a kept buffer's), not at the parked ring's stale edge.
@@ -1003,6 +1015,17 @@ class LiveSession(QObject):
             self._send_resume(self._sid)
             return
         self._close_part()  # 2.7: the server part goes
+        if (
+            self._resuming
+            and self._from_kept
+            and self._sid is not None
+            and self._phase is _Phase.PIPELINE
+        ):
+            # 2.8: a kept buffer played from where it was (`go_back_to`) before its channel
+            # came back: live once the new run comes, not at the old run's stale edge.
+            self._live_after_resume = True
+            self._late = None
+            return
         if self._kept_only and self._sid is not None and self._phase is _Phase.PIPELINE:
             if self._disk_failures >= 2:
                 self._start_afresh()
@@ -1143,6 +1166,35 @@ class LiveSession(QObject):
         snapshot = self._snapshot()
         return (self._buffer_start(snapshot), self._live_edge(snapshot))
 
+    def _keep_heights(self, snapshot: Mapping[str, Any]) -> None:
+        """The channel's picture sizes (2.8), kept with what it taught when they change: the
+        ⚙ lists them where no helper state names them (`known_sizes`)."""
+        heights = snapshot.get("heights")
+        if not isinstance(heights, list) or len(heights) < 2:
+            return
+        found = tuple(int(h) for h in heights if type(h) is int)
+        if found == self._memory.heights:
+            return
+        self._memory = dataclasses.replace(self._memory, heights=found)
+        if self._tuning is not None and self._channel:
+            self._tuning.remember(self._channel, self._memory)
+
+    def channel_key(self) -> str:
+        """The key of the channel it plays (its tuning store's; "": none)."""
+        return self._channel
+
+    def known_sizes(self) -> Optional[dict]:
+        """The channel's picture sizes as it kept them (2.8: two or more), and the cap its
+        streams open with; the playing one is not known here. None: none kept."""
+        heights = list(self._memory.heights)
+        if len(heights) < 2:
+            return None
+        return {"heights": heights, "height": 0, "max_height": self.max_height()}
+
+    def max_height(self) -> int:
+        """The size cap the channel's streams open with (2.8, the live ⚙; 0: their best)."""
+        return int(self._open_args.get("max_height", 0)) if self._open_args else 0
+
     def server_window(self) -> float:
         """How many seconds the channel's own server keeps beyond the buffer (2.7): its HLS
         playlist's window back from now, less the time since the buffer's start (a kept
@@ -1205,6 +1257,15 @@ class LiveSession(QObject):
     def recordable(self) -> bool:
         """It plays from the time-shift buffer: a recording can start."""
         return self._phase is _Phase.PIPELINE and self._sid is not None
+
+    def reopen_player(self) -> bool:
+        """VLC opens the channel again from the buffer where it played (2.8: a cast begins or
+        ends, so the picture goes to its new output); False when it plays without the buffer
+        (the caller reopens the stream itself)."""
+        if not self.recordable():
+            return False
+        self._reopen_at_position()
+        return True
 
     def recording(self) -> bool:
         return self._recording is not None
@@ -1317,7 +1378,8 @@ class LiveSession(QObject):
         self._from_kept = self._resuming = True
         self._on_disk = kept.disk  # it stays the kind it is, whatever this tune asked for
         self._back = kept.where if kept.where.position is not None else None
-        self._send_resume(kept.sid)
+        # 2.8: a rewound viewer plays on into the new run: it goes on after the old one.
+        self._send_resume(kept.sid, join=self._back is not None)
         self._phase = _Phase.WAITING
         self._ready_seen = self._loading = self._held_said = False
         self._edges = []
@@ -1338,7 +1400,7 @@ class LiveSession(QObject):
         aside, self._aside = self._aside, None
         self.go_live()
         if aside is not None and aside.position is not None and self._sid is not None:
-            self._offer_back(aside.position)
+            self._offer_back(aside.position, aside.paused)
 
     def go_back_to(self, t: float) -> None:
         """Play on from timeline second `t` (2.6: where the user was before leaving), also
@@ -1356,7 +1418,7 @@ class LiveSession(QObject):
         if self._phase is _Phase.PIPELINE:
             self._seek(t)
 
-    def _send_resume(self, sid: str) -> None:
+    def _send_resume(self, sid: str, *, join: bool = False) -> None:
         learned = self._learned
         self._engine.resume_session(
             sid,
@@ -1367,6 +1429,8 @@ class LiveSession(QObject):
             target=start_target(self._latency) if learned is None else learned.target(0.0),
             extra=0.0,
             https_first=bool(self._open_args.get("https_first")),
+            max_height=int(self._open_args.get("max_height", 0)),
+            **({"join": True} if join else {}),
         )
 
     def _on_resumed(self, sid: str) -> None:
@@ -1382,7 +1446,7 @@ class LiveSession(QObject):
             self._on_ready(sid)  # a tune's start, on the new run
             back, self._back = self._back, None
             if back is not None and back.position is not None:
-                self._offer_back(back.position)
+                self._offer_back(back.position, back.paused)
         elif self._phase is _Phase.PIPELINE and self._live_after_resume:
             self._live_after_resume = False
             self._go_live(unpause=True, merge=False)
@@ -1390,10 +1454,16 @@ class LiveSession(QObject):
             # It came after "can't open", the user still where that put them: as in time.
             self._go_live(unpause=True, merge=False)
             if late.position is not None:
-                self._offer_back(late.position)
+                self._offer_back(late.position, late.paused)
 
-    def _offer_back(self, position: float) -> None:
+    def back_paused(self) -> bool:
+        """Where the place offered last was left, playback was paused (2.8: a new size of
+        the channel plays on there at once, paused as it was)."""
+        return self._back_paused
+
+    def _offer_back(self, position: float, paused: bool = False) -> None:
         """Offer timeline second `position`, where the user was, with its time of day."""
+        self._back_paused = paused
         snapshot = self._snapshot()
         parts = live_parts.from_state(snapshot.get("parts"))
         edge = self._live_edge(snapshot)
@@ -1547,6 +1617,10 @@ class LiveSession(QObject):
 
     def _recover(self) -> None:
         self._phase = _Phase.RECOVERING
+        # 2.8: the helper reopens it afresh (its buffer went with the helper): nothing of a
+        # kept buffer's take-back is pending, and its failures are any session's again.
+        self._from_kept = self._resuming = self._kept_only = self._live_after_resume = False
+        self._late = None
         self._tick_timer.stop()
         self._after_update = self._retry = self._failing_since = None
         self._deferred = None
@@ -1623,6 +1697,7 @@ class LiveSession(QObject):
         if sid != self._sid:
             return
         self._say_scheme(snapshot)
+        self._keep_heights(snapshot)
         if part is not None:
             self._follow_buffer_start(part)
         self._since_edge_moved(snapshot)  # when a burst lands, to the update
@@ -1998,8 +2073,11 @@ class LiveSession(QObject):
 
     def _play_provider(self) -> None:
         """The provider's stream in VLC itself, with the channel's agent and, when its M3U
-        names one, its referrer (2.1; the loopback stream needs neither)."""
+        names one, its referrer (2.1; the loopback stream needs neither), and its size cap
+        (2.8, the live ⚙: VLC's own HLS plays no taller variant)."""
         extra: dict[str, Any] = {"referrer": self._referrer} if self._referrer else {}
+        if self._memory.max_height > 0:
+            extra["max_height"] = self._memory.max_height
         self._playback.play(
             self._url,
             kind=PlayKind.LIVE,
@@ -2352,10 +2430,10 @@ class LiveSession(QObject):
         """Keep what the channel taught (Auto's learned target, a locked rate, playing
         directly, decoding in software) for its next tune. Under Auto the learned target,
         and no 2.0.2 `extra` (it was read as the prior: left, it would be read so again);
-        under another latency what Auto learned before stays as it was. `learned_only` (the learned target's own saves:
-        trouble, a move worth saying, the tune's end): the lock, direct play and software
-        decoding as the store has them now, so a lock restored at the tune and expired since
-        is not set again."""
+        under another latency what Auto learned before stays as it was. `learned_only` (the learned
+        target's own saves: trouble, a move worth saying, the tune's end): the lock, direct play and
+        software decoding as the store has them now, so a lock restored at the tune and expired
+        since is not set again."""
         learned = self._learned
         if learned_only:
             if learned is None:
@@ -2369,17 +2447,34 @@ class LiveSession(QObject):
                 stored.direct,
                 learned.learned(),
                 software=stored.software,
+                max_height=stored.max_height,
+                heights=stored.heights,
             )
             if self._tuning is not None:
                 self._tuning.remember(self._channel, self._memory)
             return
         locked, direct = self._stay.rate_locked, self._memory.direct or direct
         software = self._memory.software or software
+        cap, heights = self._memory.max_height, self._memory.heights
         if learned is not None:
-            self._memory = Tuning(None, locked, direct, learned.learned(), software=software)
+            self._memory = Tuning(
+                None,
+                locked,
+                direct,
+                learned.learned(),
+                software=software,
+                max_height=cap,
+                heights=heights,
+            )
         else:
             self._memory = Tuning(
-                self._memory.extra, locked, direct, self._memory.learned, software=software
+                self._memory.extra,
+                locked,
+                direct,
+                self._memory.learned,
+                software=software,
+                max_height=cap,
+                heights=heights,
             )
         if self._tuning is not None:
             self._tuning.remember(self._channel, self._memory)
@@ -2767,6 +2862,12 @@ class LiveSession(QObject):
             "parts": [list(part) for part in snapshot.get("parts") or ()],
             "behind": self._behind(snapshot, position, edge),
         }
+        heights = snapshot.get("heights")
+        if isinstance(heights, list) and heights:
+            # 2.8, the live ⚙: the channel's picture sizes, the playing one's and the cap.
+            state["heights"] = [int(h) for h in heights if type(h) is int]
+            state["height"] = int(_number(snapshot.get("height")))
+            state["max_height"] = self.max_height()
         beyond = self.server_window()
         archive = self._archive is not None
         if beyond > 0.0 or self._part is not None or archive:

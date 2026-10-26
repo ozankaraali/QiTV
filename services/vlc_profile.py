@@ -5,6 +5,28 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 DEFAULT_USER_AGENT = "VLC/3.0.20"
+# What a MAG set-top box says it is: an STB portal is asked as one, and (2.8) its streams too,
+# as its box asks for them (some portals' stream servers drop any other client).
+STB_USER_AGENT = (
+    "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) "
+    "MAG200 stbapp ver: 2 rev: 250 Safari/533.3"
+)
+
+
+def stream_agent(item: dict, provider_type: str) -> Optional[str]:
+    """The user agent a stream of `item` is asked for with: its own (an M3U entry's), else an
+    STB portal's box's; None: VLC's own (DEFAULT_USER_AGENT)."""
+    own = item.get("user_agent")
+    if own:
+        return str(own)
+    return STB_USER_AGENT if str(provider_type or "").upper() == "STB" else None
+
+
+def user_agent_for(item: dict, provider_type: str) -> str:
+    """`stream_agent`, VLC's own when it names none: what the time-shift helper sends."""
+    return stream_agent(item, provider_type) or DEFAULT_USER_AGENT
+
+
 _VOD_CONTAINERS = (".mkv", ".mp4", ".avi", ".webm", ".mov", ".m4v")
 # Live network caching per Settings → Live latency (ms) and HLS distance from the live edge.
 _LIVE_CACHING_MS = {"low": 300, "normal": 1000, "stable": 3000}
@@ -21,8 +43,12 @@ class PlayKind(str, Enum):
 
 
 def classify(url: str, is_live: Optional[bool]) -> PlayKind:
-    if urlsplit(url).path.lower().endswith(_VOD_CONTAINERS):
+    parts = urlsplit(url)
+    path = parts.path.lower()
+    if path.endswith(_VOD_CONTAINERS):
         return PlayKind.VOD_FILE
+    if parts.scheme == "file" and path.endswith(".ts"):
+        return PlayKind.VOD_FILE  # 2.8: a recording on the disk seeks like a film
     if is_live is True:
         return PlayKind.LIVE
     if is_live is False:
@@ -36,8 +62,11 @@ def media_options(
     latency: str = "normal",
     user_agent: Optional[str] = None,
     referrer: Optional[str] = None,
+    max_height: int = 0,
 ) -> list[str]:
-    """`referrer`: the channel's M3U http-referrer (2.1), sent with VLC's own requests."""
+    """`referrer`: the channel's M3U http-referrer (2.1), sent with VLC's own requests.
+    `max_height` (2.8, the live ⚙): VLC's own HLS or DASH plays no variant taller than that
+    (0: its best); the loopback stream has no variants."""
     options = [
         f":http-user-agent={user_agent or DEFAULT_USER_AGENT}",
         # No ":avcodec-hw" here: a media option overrides the instance's, and the decoder is
@@ -68,6 +97,8 @@ def media_options(
             ":clock-jitter=0",
             f":adaptive-livedelay={delay}",
         ]
+        if max_height > 0:
+            options.append(f":adaptive-maxheight={int(max_height)}")
     elif kind is PlayKind.VOD_FILE:
         options += [
             ":network-caching=4000",

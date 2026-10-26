@@ -34,7 +34,8 @@ until `close_session`; its buffer is gone after a death, but it hears nothing ab
 kind and the HTTP status the helper sends after the message, 2.1: why a channel plays
 directly); each kind has one meaning:
 - "disk": a notice, the only non-final kind. The disk buffer failed; the session goes on in
-  RAM, and so does a reopen.
+  RAM, and so does a reopen. (2.8: one resumed once, a kept buffer, parks with its disk buffer
+  as it stands instead, and a new helper takes that back after a death.)
 - "unsupported", "network", "tls", "timeout", "http": the input ended for good (the stream
   cannot be time-shifted, or the source gave up). Final; the buffer stays playable.
 - "crashed": the helper failed this session unexpectedly while staying up. Final.
@@ -89,6 +90,7 @@ from services.live.ring import (
     STALE_S,
     Index,
     cleanup_session_dir,
+    lock_manager,
     read_index,
     remove_stale_sessions,
 )
@@ -106,6 +108,9 @@ _HELLO_TIMEOUT = 30.0  # a helper that never says hello counts as dead
 _RAM_BYTES = 128 * 1024 * 1024  # a disk ring's memory fallback when it names none
 _SHUTDOWN_WAIT_MS = 1800  # the escalation takes at most 1.5 s
 _SESSION_PREFIX = ".qitv-buffer-"  # 2.6: a v2 folder, kept past the helper (services.live.ring)
+# 2.8: how long a scan of the kept folders waits for the buffers' manager lock (another QiTV's
+# helper holds it while it makes a folder, briefly)
+_MANAGER_WAIT_S = 2.0
 _INTERNAL = "The live buffer stopped unexpectedly."
 _UNAVAILABLE = "The live buffer is not available."
 _FAILED, _LOST = "failed", "lost"  # a recording that could not start, or whose helper died
@@ -144,6 +149,9 @@ class _Record:
     label: dict | None = None  # 2.6: "keep", also sent after a (re)open or a take-back
     where: dict | None = None  # 2.6: "where", likewise
     resume: _Command | None = None  # 2.6: a resume that came before its take-back was sent
+    # 2.8: resumed once (a kept buffer): the helper parks it with its disk ring as it stands
+    # when the disk fails, never going on in RAM, so its record keeps the disk spec.
+    history: bool = False
 
 
 @dataclass
@@ -237,6 +245,11 @@ class _Supervisor(QThread):
             return
         if command[0] == "drop_kept":
             self._drop_kept()
+            return
+        if command[0] == "disk_amount":  # 2.8
+            self._disk_amount(int(command[1]))
+            if self._up:
+                conn.send(command)  # otherwise its next disk open brings it
             return
         name, sid = command[0], command[1]
         if name == "open":
@@ -347,6 +360,7 @@ class _Supervisor(QThread):
         ring = record.command[5]
         record.command = ("open", sid, url, headers, verify_ssl, ring, live_delay, *start)
         record.over = record.failed = record.parked = False
+        record.history = True
         conn.send(command)
 
     def _receive(self, message: Any) -> None:
@@ -381,10 +395,12 @@ class _Supervisor(QThread):
         if name == "error":
             if len(message) not in (4, 5):  # an HTTP failure's status last (2.1)
                 return
-            if message[2] == "disk":
+            if message[2] == "disk" and not record.history:
                 # The only non-final error: the helper went on in RAM, and so does a reopen.
                 ram = {"kind": "ram", "max_bytes": _fallback_bytes(record.command[5])}
                 record.command = (*record.command[:5], ram, *record.command[6:])
+            elif message[2] == "disk":
+                pass  # 2.8: a kept buffer's: parked with its disk ring, which a death keeps
             else:
                 # Final, "crashed" included: a reopen would only retry what failed.
                 record.failed = record.over = True
@@ -414,11 +430,40 @@ class _Supervisor(QThread):
         self._relay(message)
 
     # ---- 2.6: kept folders ----------------------------------------------------------------
+    def _disk_amount(self, max_bytes: int) -> None:
+        """2.8: the user's disk amount changed: a reopen after a helper's death takes it too."""
+        for record in self._records.values():
+            ring = record.command[5]
+            if ring.get("kind") == "disk":
+                resized = dict(ring, max_bytes=max_bytes)
+                record.command = (*record.command[:5], resized, *record.command[6:])
+
+    def _scanning(self) -> Any:
+        """The buffers' manager lock for a scan of the kept folders (2.8): another QiTV's
+        helper holds it while it makes a folder, so the scan never takes one half made (no
+        lock, no index yet) for one to remove. None (nothing scanned now) while it stays
+        held, or without a root."""
+        if not self._root.is_dir():
+            return None
+        manager = lock_manager(self._root, _MANAGER_WAIT_S)
+        if manager is None:
+            _LOG.info("The kept buffers were not looked at: another QiTV is making one.")
+        return manager
+
     def _adopt_kept(self, max_bytes: int) -> None:
         """Take back the kept folders no helper holds (at the start, and when a new engine
         starts): a fresh labelled one becomes a parked session ("adopting" says its id first);
         one over a day old, unlabelled or unreadable is removed; one another process holds is
-        left alone. Runs on this thread: never the GUI's."""
+        left alone. Under the manager lock (2.8). Runs on this thread: never the GUI's."""
+        manager = self._scanning()
+        if manager is None:
+            return
+        try:
+            self._adopt_kept_locked(max_bytes)
+        finally:
+            manager.unlock()
+
+    def _adopt_kept_locked(self, max_bytes: int) -> None:
         now = time.time()
         found: dict[str, tuple[float, str, Index]] = {}  # channel -> its newest folder
         for name in self._kept_names():
@@ -450,9 +495,16 @@ class _Supervisor(QThread):
                 self._send_open(self._conn, record)
 
     def _drop_kept(self) -> None:
-        """The disk buffer is off: every kept folder no helper holds goes."""
-        for name in self._kept_names():
-            self._remove(name)
+        """The disk buffer is off: every kept folder no helper holds goes (under the manager
+        lock, 2.8; it needs no helper)."""
+        manager = self._scanning()
+        if manager is None:
+            return
+        try:
+            for name in self._kept_names():
+                self._remove(name)
+        finally:
+            manager.unlock()
 
     def _kept_names(self) -> list[str]:
         if not self._root.is_dir():
@@ -598,7 +650,11 @@ class _Supervisor(QThread):
             return
         if command is None:
             return
-        if command[0] == "open":
+        if command[0] == "drop_kept":
+            self._drop_kept()  # 2.8: the disk buffer turned off needs no helper
+        elif command[0] in ("adopt_kept", "disk_amount"):
+            return  # 2.8: no helper takes anything back or holds a disk ring
+        elif command[0] == "open":
             # Time-shift is off: available(False) was emitted already, and no reopen follows.
             self._relay(("error", command[1], "unavailable", _UNAVAILABLE))
         elif command[0] == "record_start":
@@ -715,6 +771,9 @@ class LiveEngine(QObject):
     # 2.6: a kept folder taken back as a parked session: (sid, label, where)
     keptFound = Signal(str, dict, dict)
     sessionResumed = Signal(str)  # 2.6: a resumed session's new run has its first segment
+    # 2.8: a kept (parked) session could not be taken back by a new helper: it is gone (its
+    # `sessionFailed` follows); the kept buffers' registry lets it go
+    keptLost = Signal(str)
 
     def __init__(self, root_dir: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -724,6 +783,10 @@ class LiveEngine(QObject):
         # rid -> (its file, its size) as the helper last told them ("", -1 before), until it
         # ends
         self._recordings: dict[str, tuple[str, int]] = {}
+        self._writes: dict[str, str] = {}  # rid -> the file it writes, from its start (2.8)
+        # The files recordings write now (2.8): the Library keeps them from deletion, a phone
+        # reads one on as it grows. Replaced, never changed: other threads read it.
+        self.writing: frozenset[str] = frozenset()
         self._base_url = ""
         self._available = False
         self._started = False
@@ -765,6 +828,7 @@ class LiveEngine(QObject):
         extra: float = 0.0,
         window: Mapping[str, Any] | None = None,
         https_first: bool = False,
+        max_height: int = 0,
     ) -> str:
         """`ram_bytes`: a disk session's memory if its disk fails (_RAM_BYTES when None).
         `target` and `extra`: the target the session steers to and what it adds to it (Auto's
@@ -772,7 +836,8 @@ class LiveEngine(QObject):
         `target`, `live_delay` seconds back. `window` (2.7): a server part of the HLS
         playlist, `{"back_s", "until_seq", "ahead_s"}` (`services.live.source.HlsSource`);
         never reopened after a helper's death. `https_first` (2.7.1): an http:// address is
-        asked over HTTPS first (`open_source`)."""
+        asked over HTTPS first (`open_source`). `max_height` (2.8, the live ⚙): an HLS master
+        plays its best variant of at most that many lines (0: its best)."""
         sid = secrets.token_hex(8)
         if self._shut:
             return sid
@@ -798,6 +863,8 @@ class LiveEngine(QObject):
             start["window"] = dict(window)
         if https_first:
             start["https"] = True
+        if max_height > 0:
+            start["max_height"] = int(max_height)
         if start:
             command = (*command, start)
         self._commands.put(command)
@@ -829,10 +896,13 @@ class LiveEngine(QObject):
         target: float | None = None,
         extra: float = 0.0,
         https_first: bool = False,
+        max_height: int = 0,
+        join: bool = False,
     ) -> None:
         """A new upstream for a parked session (2.6): `sessionResumed` once its first
         segment came, else `sessionFailed` (it stays parked). The arguments as for
-        `open_session`."""
+        `open_session`; `join` (2.8): an HLS run goes on after the earlier run's last segment
+        (a rewound viewer's: nothing plays twice where they join)."""
         view = self._sessions.get(sid)
         if view is None or view.closing or self._shut:
             return
@@ -842,6 +912,10 @@ class LiveEngine(QObject):
             start.update(target=float(target), extra=float(extra))
         if https_first:
             start["https"] = True
+        if max_height > 0:
+            start["max_height"] = int(max_height)
+        if join:
+            start["join"] = True
         if start:
             command = (*command, start)
         self._commands.put(command)
@@ -859,6 +933,12 @@ class LiveEngine(QObject):
         """Remove the kept buffers no session holds (2.6: the disk buffer was turned off)."""
         if not self._shut:
             self._commands.put(("drop_kept",))
+
+    def set_disk_amount(self, max_bytes: int) -> None:
+        """The user's disk amount changed (2.8): every disk buffer holds it at once (a kept one
+        gives way first), not only from the next disk open."""
+        if not self._shut and max_bytes > 0:
+            self._commands.put(("disk_amount", int(max_bytes)))
 
     def set_until(self, sid: str, seq: int) -> None:
         """Move a server part's stop to media sequence `seq` (2.7: the live buffer's start
@@ -900,6 +980,8 @@ class LiveEngine(QObject):
             return ""
         rid = secrets.token_hex(6)
         self._recordings[rid] = ("", -1)
+        self._writes[rid] = path
+        self.writing = frozenset(self._writes.values())
         limits = {"max_s": float(max_s), "min_free": int(min_free)}
         self._commands.put(("record_start", sid, rid, path, int(seq), limits))
         return rid
@@ -934,6 +1016,7 @@ class LiveEngine(QObject):
         self._base_url = ""
         self._sessions.clear()
         self._recordings.clear()  # the helper's shutdown ends them; no signal follows
+        self._wrote(*self._writes)
         supervisor, cleanup = self._supervisor, self._cleanup
         if supervisor is None:
             return
@@ -945,8 +1028,15 @@ class LiveEngine(QObject):
             # Run ThreadCleanup's queued check now, so no pending thread outlives shutdown.
             QCoreApplication.sendPostedEvents(cleanup, QEvent.Type.MetaCall)
 
+    def _wrote(self, *rids: str) -> None:
+        """Recordings `rids` write no more."""
+        for rid in rids:
+            self._writes.pop(rid, None)
+        self.writing = frozenset(self._writes.values())
+
     def _lose_recordings(self) -> None:
         recordings, self._recordings = self._recordings, {}
+        self._wrote(*recordings)
         for rid, (path, written) in recordings.items():
             self.recordingEnded.emit(rid, _LOST, path, written)
 
@@ -984,6 +1074,7 @@ class LiveEngine(QObject):
             _, _, rid, reason, path, written = message
             if rid in self._recordings:
                 del self._recordings[rid]
+                self._wrote(str(rid))
                 self.recordingEnded.emit(str(rid), str(reason), str(path), int(written))
             return
         view = self._sessions.get(sid)
@@ -1018,6 +1109,7 @@ class LiveEngine(QObject):
             pass  # taken back (it was told at "adopting")
         elif name == "unkept":
             del self._sessions[sid]
+            self.keptLost.emit(sid)  # 2.8: the kept buffers' registry lets it go
             self.sessionFailed.emit(sid, "crashed", _INTERNAL)  # a tune of it starts afresh
         elif name == "resumed":
             self.sessionResumed.emit(sid)

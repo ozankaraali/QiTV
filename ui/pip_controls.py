@@ -779,7 +779,7 @@ class PipControls(QObject):
             url,
             kind=kind,
             latency=self.config.live_latency,
-            **live_controls.reopen_options(playback, target.item),
+            **live_controls.reopen_options(playback, target.item, self.catalog),
         )
 
     def _cancel_reopen(self) -> None:

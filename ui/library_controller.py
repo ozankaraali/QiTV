@@ -42,13 +42,20 @@ from services.library import (
 )
 from services.navigation import episode_key
 from services.pending_action import LOAD, RUN, Pending, PendingAction
-from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, provider_of
+from services.provider_ids import (
+    ALL_PROVIDERS,
+    ALL_PROVIDERS_TITLE,
+    provider_of,
+    split_group_id,
+)
 from services.search import Hit
 from services.watch_state import RESUME_MAX_RATIO, WatchState
+from ui.context_actions import HIDE_TEXT
 from ui.keymap import Action
 from ui.library.library_screen import LibraryScreen
 from ui.library.poster_grid import poster_url
 from ui.library.search_session import DEBOUNCE_MS, SearchSession
+from ui.library.top_nav import REFRESH_TEXT
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +82,7 @@ EMPTY_TEXT = N_("Nothing here")  # i18n: a Library genre without titles
 RETRY_TEXT = N_("Couldn't load — press Enter to retry")
 SERIES_FAILED_NOTICE = N_("Couldn't load that series")
 UNKNOWN_PROVIDER_NOTICE = N_("That title's provider is no longer in your list")
+REFRESHING_TEXT = N_("Refreshing films and series…")  # i18n: a toast (2.8: the Library's ↻)
 _MOVES = {
     Action.NAV_LEFT: (-1, 0),
     Action.NAV_RIGHT: (1, 0),
@@ -114,10 +122,13 @@ class LibraryController(QObject):
         tune_live: Callable[[dict], None],
         back_to_tv: Callable[[], None],
         context_menu: Optional[Callable[[dict, str, QPoint], None]] = None,
+        tmdb=None,
         parent: Optional[QObject] = None,
     ):
+        """`tmdb` (2.8, a ui.tmdb_fill.TmdbFill) fills titles' gaps from TMDB; None: never."""
         super().__init__(parent)
         self._config = config
+        self._tmdb = tmdb
         self._catalog = catalog
         self._model = model
         self._watch = watch
@@ -126,6 +137,9 @@ class LibraryController(QObject):
         self._tune_live = tune_live
         self._back_to_tv = back_to_tv
         self._context_menu = context_menu
+        # 2.8: parental controls hide a genre (set_hiding); none until set.
+        self._hide_genre: Optional[Callable[[str, str, str, str], None]] = None
+        self._may_hide: Callable[[], bool] = lambda: False
         self._closed = False
         self._mode = "browse"
         self._zone = "grid"
@@ -197,15 +211,71 @@ class LibraryController(QObject):
         nav.tabRequested.connect(self._on_tab)
         nav.searchRequested.connect(self.open_search)
         nav.sourceRequested.connect(self._show_source_menu)
+        genres.genreMenuRequested.connect(self._show_genre_menu)
+        nav.refreshRequested.connect(self.refresh_lists)
         screen.search_field.clicked.connect(lambda: self._focus("search"))
         self._search.changed.connect(self._show_hits)
         self._search.changed.connect(self.searchChanged)
+        if self._tmdb is not None:  # 2.8
+            model.set_filler(self._tmdb.fill)
+            grid.focusChanged.connect(self._on_grid_focus)
+            grid.set_settled_handler(self._on_grid_settled)
+            self._tmdb.changed.connect(self._on_tmdb_changed)
 
     def shutdown(self) -> None:
         """The window is closing: a running search's result and a pending action are dropped."""
         self._closed = True
         self._search.shutdown()
         self._pending.cancel()
+        if self._tmdb is not None:
+            self._tmdb.shutdown()
+
+    # ---- TMDB (2.8) ---------------------------------------------------------------------------
+
+    def _grid_kind(self, item: dict) -> str:
+        """A grid title's kind: a search hit's own, else the shown section's."""
+        if self._grid_content == "search":
+            return self._search.kind_of(item)
+        return self._model.item_kind(item)
+
+    def _poster(self, item: dict, own: str, kind: Optional[str] = None) -> str:
+        """A title's poster: its provider's (`own`), else TMDB's when the provider has none or
+        it could not be loaded. `kind`: the title's, a grid title's by default."""
+        if self._tmdb is None or (own and not self._screen.grid_posters.failed(own)):
+            return own
+        return self._tmdb.poster_url(item, kind or self._grid_kind(item)) or own
+
+    def _on_grid_focus(self, index: int) -> None:
+        item = self._screen.grid.item(index)
+        if item is not None and self._tmdb is not None:
+            self._tmdb.focus(item, self._grid_kind(item))
+
+    def _on_grid_settled(self, items: list[dict]) -> None:
+        if self._tmdb is None:
+            return
+        posters = self._screen.grid_posters
+        posterless = []
+        for item in items:
+            kind = self._grid_kind(item)
+            own = poster_url(item)
+            if kind in ("movie", "series") and (not own or posters.failed(own)):
+                posterless.append((item, kind))
+        self._tmdb.want_posters(posterless)
+
+    def _on_tmdb_changed(self) -> None:
+        if self._closed:
+            return
+        self._screen.grid.refresh_details()
+        series = self._series
+        if series is not None and self._tmdb is not None:
+            back = self._series_back
+            details = (
+                self._search.details(series) if back == "search" else self._model.details(series)
+            )
+            self._series_details = details
+            own = poster_url(series)
+            poster = self._poster(series, own, "series")
+            self._screen.series.set_details(details, poster if poster != own else "")
 
     def leave(self) -> None:
         """The window left the Library: nothing waiting for a provider plays any more."""
@@ -243,16 +313,29 @@ class LibraryController(QObject):
         self._mode = mode
         self._screen.set_mode(mode)
 
+    def _tabs(self) -> list[str]:
+        """The provider's sections, and Movies for the recordings when it has no films (2.8)."""
+        tabs = list(self._catalog.sections())
+        if "movies" not in tabs and self._model.lists_recordings():
+            tabs.append("movies")
+        return tabs
+
     def _sync_nav(self, active: str) -> None:
         nav = self._screen.nav
-        nav.set_tabs(self._catalog.sections())
+        nav.set_tabs(self._tabs())
         nav.set_source_name(self._source_title())
         nav.set_active(active)
 
     def _source_title(self) -> str:
-        """The Library's source as the user reads it: a provider's name, or All providers."""
-        name = self._catalog.current_provider_name()
-        return translate(ALL_PROVIDERS_TITLE) if name == ALL_PROVIDERS else name
+        """The Library's source as the user reads it: a provider's name, the names it mixes
+        (2.8), or All providers."""
+        name = str(self._catalog.current_provider_name())
+        if name != ALL_PROVIDERS:
+            return name
+        mixed = self._catalog.mixed_names()
+        if len(mixed) < len(self._catalog.provider_names()):
+            return ", ".join(mixed)
+        return translate(ALL_PROVIDERS_TITLE)
 
     def _series_owner(self) -> str:
         """The provider of the series open (the one shown while none is)."""
@@ -282,6 +365,18 @@ class LibraryController(QObject):
         else:
             self._on_model_changed()
         self._focus("grid")
+
+    def open_on(self, provider: str, section: str) -> None:
+        """Show Movies or Series of `provider` (a provider's name, or All providers): the
+        channel list's rows open the Library on the provider they are listed under (2.8). An
+        empty or unknown one keeps the Library's own source."""
+        if self._closed:
+            return
+        if provider == ALL_PROVIDERS:
+            self._mix_sources([])  # every provider, not a mix the Library kept (review M6)
+        elif provider in self._catalog.provider_names():
+            self._choose_source(provider)
+        self.open(section)
 
     def remote_search(self, query: str) -> None:
         """The phone remote's typing: the search shows and searches `query` as it is now."""
@@ -321,7 +416,9 @@ class LibraryController(QObject):
             self._grid_content = "search"
             self._grid_signature = None
             logo_key = self._screen.grid_posters.logo_key
-            grid.set_poster_url_provider(lambda item: self._search.poster_url(item, logo_key))
+            grid.set_poster_url_provider(
+                lambda item: self._poster(item, self._search.poster_url(item, logo_key))
+            )
             grid.set_tile_provider(self._search.is_channel)
             grid.set_details_provider(self._search.details)
             grid.set_progress_provider(lambda _item: None)
@@ -338,7 +435,7 @@ class LibraryController(QObject):
         grid = self._screen.grid
         self._grid_content = "browse"
         self._grid_signature = None
-        grid.set_poster_url_provider(poster_url)
+        grid.set_poster_url_provider(lambda item: self._poster(item, poster_url(item)))
         grid.set_tile_provider(None)
         grid.set_details_provider(self._model.details)
         grid.set_progress_provider(self._model.progress)
@@ -523,21 +620,91 @@ class LibraryController(QObject):
         menu.popup(pos)
 
     def _source_menu(self) -> QMenu:
+        """A tick for each provider the Library shows (2.8: several mix), and All providers."""
         menu = QMenu(self._screen)
-        current = self._catalog.current_provider_name()
         names = self._catalog.provider_names()
+        shown = self._shown_providers()
         for name in names:
             action = menu.addAction(name)
             action.setCheckable(True)
-            action.setChecked(name == current)
-            action.triggered.connect(lambda _checked=False, n=name: self._choose_source(n))
+            action.setChecked(name in shown)
+            action.triggered.connect(lambda _checked=False, n=name: self._tick_source(n))
         if len(names) > 1:  # with one provider there is nothing to mix
             menu.addSeparator()
             action = menu.addAction(translate(ALL_PROVIDERS_TITLE))
             action.setCheckable(True)
-            action.setChecked(current == ALL_PROVIDERS)
-            action.triggered.connect(lambda _checked=False: self._choose_source(ALL_PROVIDERS))
+            action.setChecked(self._catalog.all_providers() and len(shown) == len(names))
+            action.triggered.connect(lambda _checked=False: self._mix_sources([]))
+        menu.addSeparator()
+        refresh = menu.addAction(translate(REFRESH_TEXT))
+        refresh.triggered.connect(lambda _checked=False: self.refresh_lists())
         return menu
+
+    def set_hiding(
+        self,
+        hide: Callable[[str, str, str, str], None],
+        may_hide: Callable[[], bool],
+    ) -> None:
+        """Parental controls (2.8): `hide(section, provider, genre id, title)` hides a genre,
+        offered on its right-click while `may_hide()` (a PIN is set)."""
+        self._hide_genre, self._may_hide = hide, may_hide
+
+    def _show_genre_menu(self, gid: str, pos: QPoint) -> None:
+        menu = self.genre_menu(gid)
+        if menu is not None:
+            menu.aboutToHide.connect(menu.deleteLater)
+            menu.popup(pos)
+
+    def genre_menu(self, gid: str) -> Optional[QMenu]:
+        """A genre's right-click menu: Hide (parental controls); None for a pinned row (My
+        list, Continue …), a genre not shown, or without a PIN."""
+        hide = self._hide_genre
+        if hide is None or not self._may_hide() or self._closed:
+            return None
+        genre = next((g for g in self._model.genres() if g.id == gid and not g.header), None)
+        if genre is None or genre.pinned:
+            return None
+        name, own = split_group_id(gid)
+        provider = name or self._catalog.current_provider_name()
+        section = self._model.section
+        menu = QMenu(self._screen)
+        menu.addAction(translate(HIDE_TEXT)).triggered.connect(
+            lambda _=False: hide(section, provider, own or gid, genre.title)
+        )
+        return menu
+
+    def refresh_lists(self) -> None:
+        """The films and series of the providers shown load again (2.8: ↻, the source menu,
+        Ctrl/⌘+Shift+R): an Xtream panel's and a server's behind the saved lists, which show
+        meanwhile (a server's asks only what changed); a portal's genres anew (a provider
+        setting up first finishes). Says so when any loads."""
+        if self._closed:
+            return
+        if self._catalog.refresh_sections():
+            self.notice.emit(translate(REFRESHING_TEXT))
+
+    def _shown_providers(self) -> list[str]:
+        """The providers the Library shows: those it mixes, else its own."""
+        if self._catalog.all_providers():
+            return list(self._catalog.mixed_names())
+        return [self._catalog.current_provider_name()]
+
+    def _tick_source(self, name: str) -> None:
+        """A provider ticked joins what the Library shows, one unticked leaves it; the last one
+        stays (something is shown)."""
+        shown = self._shown_providers()
+        if name in shown:
+            if len(shown) == 1:
+                return
+            self._mix_sources([n for n in shown if n != name])
+        else:
+            self._mix_sources(shown + [name])
+
+    def _mix_sources(self, names: list[str]) -> None:
+        """Show these providers (one alone, several mixed; none: every one). The TV page and
+        what plays are not touched; the model re-opens its section when they are ready."""
+        if not self._closed:
+            self._catalog.select_mix(names)
 
     def _choose_source(self, name: str) -> None:
         if self._closed:
@@ -551,11 +718,12 @@ class LibraryController(QObject):
     # ---- model --------------------------------------------------------------------------------
 
     def _section_available(self) -> bool:
-        return self._model.section in self._catalog.sections()
+        return self._model.available  # the provider's section, or (Movies) recordings
 
     def _on_model_changed(self) -> None:
         if self._closed:
             return
+        self._screen.nav.set_tabs(self._tabs())  # a first recording brings Movies (2.8)
         genres = self._screen.genres
         available = self._section_available()
         genres.set_genres(self._model.genres(genres.filter_text) if available else [])
@@ -716,7 +884,11 @@ class LibraryController(QObject):
     def _activate_item(
         self, item: dict, provider: str, kind: str, start_over: bool, genre_items
     ) -> None:
-        if kind == "series":
+        if kind == "recording":  # a file of the disk: no provider to wait for (2.8)
+            self._play(item, "recording", _context(start_over=start_over))
+        elif kind == "scheduled":  # 2.8: still to come: when, and on which channel
+            self.notice.emit(str(item.get("description") or ""))
+        elif kind == "series":
             self._request(provider, lambda: self._open_series(item, provider, back="browse"))
         elif kind == "episode":  # Continue in Series: no series dict, so no autoplay
             context = _context(start_over=start_over)
@@ -751,7 +923,10 @@ class LibraryController(QObject):
         if item is None:
             return
         kind = self._model.item_kind(item)
-        if kind != "series":  # a series plays nothing: its episodes have the menu
+        if kind in ("recording", "scheduled"):  # its own menu, no provider's (2.8)
+            if self._context_menu is not None:
+                self._context_menu(item, kind, global_pos)
+        elif kind != "series":  # a series plays nothing: its episodes have the menu
             section = "series" if kind == "episode" else "movies"
             self._menu(item, section, provider_of(item) or self._browse_provider(), global_pos)
 
@@ -864,7 +1039,11 @@ class LibraryController(QObject):
         view = self._screen.series
         details = self._search.details(series) if back == "search" else self._model.details(series)
         self._series_details = details
-        view.set_series(series, details)
+        own = poster_url(series)
+        poster = self._poster(series, own, "series")
+        view.set_series(series, details, poster if poster != own else "")
+        if self._tmdb is not None:
+            self._tmdb.focus(series, "series")
         view.set_progress_provider(self._episode_progress)
         self._history_episode = history_episode(
             self._config.watch_history, self._series_owner(), series
@@ -950,7 +1129,9 @@ class LibraryController(QObject):
         season = self._screen.series.current_season()
         if season is None or self._catalog.seasons(self._series) is None:
             details = self._series_details or self._model.details(self._series)
-            self._screen.series.set_series(self._series, details)
+            own = poster_url(self._series)
+            poster = self._poster(self._series, own, "series")
+            self._screen.series.set_series(self._series, details, poster if poster != own else "")
             self._catalog.request_seasons(self._series)
         else:
             self._screen.series.set_episodes(season, None)

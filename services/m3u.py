@@ -37,8 +37,8 @@ def decode_playlist(response) -> str:
     """
     content_type = response.headers.get("Content-Type", "") or ""
     if "charset" in content_type.lower():
-        return response.text
-    return response.content.decode("utf-8-sig", errors="replace")
+        return str(response.text)
+    return str(response.content.decode("utf-8-sig", errors="replace"))
 
 
 def parse_m3u(data: str, categorize: bool = False):

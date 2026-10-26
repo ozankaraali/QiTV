@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import Enum
 import logging
 import threading
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from PySide6.QtCore import QObject, Signal
 
@@ -23,11 +23,14 @@ from services.provider_api import (
     stb_endpoint,
     stb_portal_base,
 )
+from services.provider_types import is_media_server
 from services.redact import safe_exc
 from services.search import iter_items
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
+if TYPE_CHECKING:  # the real module, for annotations only: the lazy one loads later
+    import requests as requests_types
 
 SECTION_KEYS = {"live": "itv", "movies": "vod", "series": "series"}
 REQUEST_TIMEOUT = (10, 30)
@@ -39,6 +42,8 @@ MSG_STB_SERIES_ONLY = N_(
 )
 MSG_LOAD_LIVE = N_("Load Live TV first.")
 MSG_NOTHING_LOADED = N_("Nothing is loaded in this section yet.")
+# i18n: File → Export on a Jellyfin or Emby server (its titles have no playlist addresses)
+MSG_MEDIA_SERVER = N_("A Jellyfin or Emby server's titles can't be exported to a playlist.")
 MSG_CANCELLED = N_("Export cancelled")
 MSG_NO_EPISODES = N_("No episodes found to export.")
 MSG_UNREACHABLE = N_("Couldn\u2019t reach the provider to fetch episodes.")
@@ -89,6 +94,8 @@ def export_available(
     three-argument form cannot see what is loaded, so it is an optional fourth argument. It
     runs on the GUI thread, so it only looks for a first item (the worker collects them).
     """
+    if is_media_server(provider.get("type")):
+        return MSG_MEDIA_SERVER  # 2.8: its streams are made at play time, per sign-in
     if kind == ExportKind.COMPLETE_SERIES:
         if provider.get("type") != "STB" or section != "series":
             return MSG_STB_SERIES_ONLY
@@ -205,7 +212,7 @@ class ExportWorker(QObject):
             raise _Cancelled
 
     def _fetch(
-        self, session: requests.Session, series: dict, season_id: Any, sortby: str
+        self, session: requests_types.Session, series: dict, season_id: Any, sortby: str
     ) -> Optional[dict]:
         """One STB series listing (season_id 0 lists the seasons); None on failure. Asked
         over HTTPS first: a portal that does not answer there is asked over HTTP (and so

@@ -18,9 +18,10 @@ from services.epg_view import Programme
 from services.find import FoundChannel, FoundGenre
 from services.navigation import NavNode
 from services.provider_ids import ALL_PROVIDERS
-from services.remote.protocol import MAX_MESSAGE, Get, OpenItem
+from services.remote.protocol import MAX_MESSAGE, Get, OpenItem, Schedule, Timer
 from tests.fixtures import local_provider
 from tests.fixtures.local_provider import PROVIDER_NAME
+from ui.recording_scheduler import RecordingScheduler
 from ui.remote_guide import GUIDE_PAGE, PhoneGuide
 
 
@@ -223,6 +224,85 @@ class PhoneGuideTests(WindowCase):
             [row] = self.last("timetable")["rows"]
         self.assertIn("id", row)
 
+    def test_a_programme_to_come_is_scheduled_and_cancelled_from_the_phone(self):  # 2.8
+        self.start()
+        now = datetime.now(timezone.utc)
+        listed = [
+            programme("Noon", now - timedelta(minutes=10)),
+            programme("Evening", now + timedelta(minutes=20)),
+        ]
+        remote = self.window.remote
+        remote._guides["s1"] = self.guide
+        self.addCleanup(remote._guides.pop, "s1", None)
+        window = self.window
+        window.scheduler = RecordingScheduler(  # without libVLC the window has none
+            schedule=window.recording_schedule,
+            engine=mock.MagicMock(),
+            catalogs=window.catalogs,
+            budget=mock.Mock(),
+            config=window.config_manager,
+            toast=mock.Mock(),
+            parent=window,
+        )
+        with mock.patch.object(self.window.catalog, "programmes", return_value=listed):
+            self.guide.timetable(self.last()["rows"][0]["id"])
+            later = self.last("timetable")["rows"][1]
+            self.assertFalse(later["rec"])
+            remote.bridge.post(Schedule("s1", later["sched"], "once"))
+            self.assertTrue(wait_until(lambda: self.last("timetable")["rows"][1]["rec"]))
+            later = self.last("timetable")["rows"][1]
+            remote.bridge.post(Schedule("s1", later["sched"], "cancel"))
+            self.assertTrue(wait_until(lambda: not self.last("timetable")["rows"][1]["rec"]))
+        self.assertEqual(self.window.recording_schedule.items(), [])
+
+    def test_a_channel_is_recorded_at_a_time_from_the_phone(self):  # 2.8 (owner)
+        # A channel with no guide at all: its timetable still offers "Record at a time".
+        self.start()
+        remote, window = self.window.remote, self.window
+        remote._guides["s1"] = self.guide
+        self.addCleanup(remote._guides.pop, "s1", None)
+        window.scheduler = RecordingScheduler(  # without libVLC the window has none
+            schedule=window.recording_schedule,
+            engine=mock.MagicMock(),
+            catalogs=window.catalogs,
+            budget=mock.Mock(),
+            config=window.config_manager,
+            toast=mock.Mock(),
+            parent=window,
+        )
+        replies = []
+        send = mock.patch.object(remote, "_send", side_effect=lambda sid, m: replies.append(m))
+        with mock.patch.object(window.catalog, "programmes", return_value=[]), send:
+            handle = self.last()["rows"][0]["id"]
+            self.guide.timetable(handle)
+            self.assertTrue(self.last("timetable")["timer"])
+            remote.bridge.post(Timer("s1", handle, "", 21 * 60, 60, (0, 1, 2, 3, 4), ""))
+            self.assertTrue(wait_until(lambda: replies))
+            self.assertEqual(replies[-1]["t"], "timer")
+            self.assertEqual(replies[-1]["id"], handle)
+            self.assertIn("Monday to Friday", replies[-1]["text"])
+            remote.bridge.post(Timer("s1", handle, "", 60, 30, (), "2020-01-01"))  # over
+            self.assertTrue(wait_until(lambda: len(replies) == 2))
+            self.assertEqual(replies[-1].get("failed"), "passed")
+            # review 7: a channel no longer listed is answered too (the phone's form closed)
+            remote.bridge.post(Timer("s1", "gone", "", 60, 30, (0,), ""))
+            self.assertTrue(wait_until(lambda: len(replies) == 3))
+            self.assertEqual(replies[-1], {"t": "timer", "id": "gone", "failed": "error"})
+        # review 11: the times are the TV's clock's: the phone is told its offset
+        offset = datetime.now().astimezone().utcoffset()
+        self.assertEqual(self.last("timetable")["tz"], int(offset.total_seconds() // 60))
+        kinds = [i["kind"] for i in window.recording_schedule.items()]
+        self.assertEqual(kinds, ["timer"])
+
+    def test_a_past_programme_is_not_offered_for_recording(self):  # 2.8
+        self.start()
+        now = datetime.now(timezone.utc)
+        past = programme("Morning", now - timedelta(minutes=90))
+        with mock.patch.object(self.window.catalog, "programmes", return_value=[past]):
+            self.guide.timetable(self.last()["rows"][0]["id"])
+        [row] = self.last("timetable")["rows"]
+        self.assertNotIn("sched", row)
+
     def test_a_programme_guide_arriving_pushes_whats_on(self):
         self.start()
         self.assertIsNone(self.last()["rows"][0]["now"])
@@ -333,32 +413,60 @@ class GuideFindTests(WindowCase):
 
     def test_the_largest_find_fits_a_frame_in_any_script(self):
         """100 rows of groups (the shown provider's and others' genres), and the channels found
-        below them with what's on, in a three-byte script."""
+        below them with what's on, in a three-byte script: the page where the groups end."""
         self.open_first_channel()
         guide = self.make()
         long = "字" * 300  # 3 bytes a letter
         now = datetime.now(timezone.utc)
         on = programme(long, now - timedelta(minutes=5))
-        genres = [FoundGenre("Other", str(i), f"{long}{i}", 9999) for i in range(150)]
+        genres = [FoundGenre("Other", str(i), f"{long}{i}", 9999) for i in range(99)]
         hits = [
             FoundChannel("P", f"{long}{i}", {"name": f"{long}{i}", "id": i}, "") for i in range(80)
         ]
         controller = self.window.controller
-        for nodes in (
-            [NavNode("group", f"g{i}", f"{long}{i}", None, 9999) for i in range(150)],
-            [],
+        for nodes, page in (
+            ([NavNode("group", f"g{i}", f"{long}{i}", None, 9999) for i in range(100)], 1),
+            ([], 0),
         ):
             with (
                 mock.patch.object(guide, "_group_nodes", return_value=nodes),
                 mock.patch.object(guide, "_everywhere", return_value=(genres, hits, False)),
                 mock.patch.object(controller, "now_next", return_value=(on, on)),
             ):
-                guide.groups(0, "字字")
+                guide.groups(page, "字字")
             message = self.last("groups")
             self.assertEqual(len(message["rows"]), 100)
             self.assertTrue(message["channels"])
             encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
             self.assertLessEqual(len(encoded), MAX_MESSAGE)
+
+    def test_a_finds_groups_past_the_first_hundred_come_a_page_at_a_time(self):
+        """Groups first, a page of 100 at a time (the shown provider's, then the others'), the
+        channels found 25 at a time after them: the page where the groups end begins them."""
+        self.open_first_channel()
+        guide = self.make()
+        nodes = [NavNode("group", f"g{i}", f"Group {i}", None, 3) for i in range(150)]
+        genres = [FoundGenre("Other", str(i), f"Genre {i}", 2) for i in range(30)]
+        hits = [FoundChannel("P", f"C{i}", {"name": f"C{i}", "id": i}, "") for i in range(40)]
+        pages = []
+        with (
+            mock.patch.object(guide, "_group_nodes", return_value=nodes),
+            mock.patch.object(guide, "_everywhere", return_value=(genres, hits, False)),
+            mock.patch.object(guide._catalog, "source", return_value=PROVIDER_NAME),
+        ):
+            for page in range(4):
+                guide.groups(page, "g")
+                pages.append(self.last("groups"))
+        self.assertEqual([m["pages"] for m in pages], [3] * 4)
+        rows = [r["title"] for m in pages for r in m["rows"]]
+        self.assertEqual(rows[:150], [f"Group {i}" for i in range(150)])
+        self.assertEqual(rows[150:], ["Other"] + [f"Genre {i}" for i in range(30)])
+        self.assertEqual(len(pages[0]["rows"]), 100)
+        self.assertEqual(pages[0]["channels"], [])  # more groups to come first
+        channels = [c["name"] for m in pages for c in m["channels"]]
+        self.assertEqual(channels, [f"C{i}" for i in range(40)])
+        self.assertEqual(len(pages[1]["channels"]), 25)  # with the last groups
+        self.assertEqual((pages[3]["rows"], pages[3]["channels"]), ([], []))  # past the end
 
     def test_the_guides_of_the_channels_found_load(self):
         self.open_first_channel()
@@ -394,6 +502,25 @@ class GuideFindTests(WindowCase):
         self.assertEqual((channel["name"], group, channels), ("Channel 9 Other", "", []))
         kind, (channel, group, channels) = guide.handles.get(message["rows"][0]["id"])
         self.assertTrue(group and channels)  # the group's own: tuned within it
+
+    def test_the_find_widens_from_the_provider_shown(self):
+        """As the desktop's find: the provider these lists show first, then every
+        provider's, each in the find's ranking."""
+        self.open_first_channel()
+        finder = FakeFinder()
+        guide = PhoneGuide(self.window, self.sent.append, bare=True, finder=finder)
+        self.lists.append(guide)
+        mine = {"name": "Channel 8 Mine", "id": 8, "cmd": "file:///8", "_provider": PROVIDER_NAME}
+        other = {"name": "Channel 9 Other", "id": 9, "cmd": "file:///9", "_provider": "Other"}
+        guide.groups(0, "zz")
+        finder.searching = False
+        finder.channels = [  # the other's ranks first (the whole word, say)
+            FoundChannel("Other", other["name"], other, ""),
+            FoundChannel(PROVIDER_NAME, mine["name"], mine, ""),
+        ]
+        guide.groups(0, "zz")
+        names = [c["name"] for c in self.last("chgroups")["channels"]]
+        self.assertEqual(names, ["Channel 8 Mine", "Channel 9 Other"])
 
     def test_the_group_s_own_are_not_listed_twice(self):
         self.open_first_channel()

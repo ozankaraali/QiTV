@@ -1,4 +1,5 @@
 import os
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -7,12 +8,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import wait_until
 
 from services import library
+from services.jobs import JobRunner
 from services.library import (
     CONTINUE,
     MY_LIST,
     NEW,
+    RECORDINGS,
     LibraryModel,
     Sort,
     history_episode,
@@ -126,6 +130,25 @@ class LibraryModelTests(unittest.TestCase):
         self.assertEqual([g.id for g in model.genres()], [MY_LIST, "1", "2"])
         self.assertTrue(model.genres()[0].pinned)
 
+    def test_continue_leaves_out_what_parental_controls_hide_while_locked(self):  # 2.8 review I6
+        from services import parental
+
+        m1, m2 = movie(1), movie(2)
+        cfg = make_config()
+        for m in (m1, m2):
+            history(cfg, m, "movie")
+            resume(cfg, m, "movie")
+        cat = FakeCatalog({"movies": [("1", "G", 2)]}, {("movies", "1"): [m1, m2]})
+        model, _ = build(cat, cfg)
+        kept = SimpleNamespace(parental=None, save_config=lambda: None)
+        guard = parental.Parental(kept)
+        guard.set_pin("1234")
+        guard.hide_item("movies", with_provider(m1, "P"))
+        parental.install(guard)
+        self.addCleanup(parental.install, None)
+        cat.version += 1  # the browsed catalog's version follows the lock
+        self.assertEqual([i["id"] for i in model._pinned_items(CONTINUE)], ["2"])
+
     def test_continue_movies_and_series(self):
         m1, m2, m3 = movie(1), movie(2), movie(3)
         cfg = make_config()
@@ -166,6 +189,17 @@ class LibraryModelTests(unittest.TestCase):
         plain = FakeCatalog({"movies": [("1", "G", 1)]}, {("movies", "1"): [movie(1)]})
         model, _ = build(plain)
         self.assertEqual([g.id for g in model.genres()], ["1"])
+
+    def test_a_find_in_a_pinned_shelf_follows_the_shelf(self):  # 2.8 review M2
+        # My list changes with the stars, not the content version: its find is not kept.
+        cat = FakeCatalog({"movies": [("1", "G", 2)]}, {("movies", "1"): [movie(1), movie(2)]})
+        model, cfg = build(cat)
+        item = movie(1)
+        model.toggle_favorite(item)
+        model.select_genre(MY_LIST)
+        self.assertEqual([i["name"] for i in model.find_in_genre("movie")], ["Movie 1"])
+        model.toggle_favorite(movie(2))
+        self.assertEqual([i["name"] for i in model.find_in_genre("movie")], ["Movie 1", "Movie 2"])
 
     def test_favorites_toggle(self):
         cat = FakeCatalog({"movies": [("1", "G", 2)]}, {("movies", "1"): [movie(1), movie(2)]})
@@ -281,6 +315,32 @@ class LibraryModelTests(unittest.TestCase):
         self.assertEqual(model.details(movie(2)).genre, "Genre One")
         self.assertEqual(model.details(movie(2)).rating, "")
         self.assertIsNone(model.details(movie(2)).resume_ms)
+
+    def test_details_take_what_the_filler_knows(self):  # 2.8: TMDB fills the provider's gaps
+        m = movie(1, plot="")
+        cat = FakeCatalog({"movies": [("1", "Genre One", 1)]}, {("movies", "1"): [m]})
+        model, _ = build(cat, make_config())
+        model.select_genre("1")
+        asked = []
+
+        def filler(item, kind):
+            asked.append(kind)
+            return {**item, "plot": "From elsewhere", "year": "2019", "genre": "Drama"}
+
+        model.set_filler(filler)
+        d = model.details(m)
+        self.assertEqual((d.plot, d.year, d.genre), ("From elsewhere", "2019", "Drama"))
+        self.assertEqual(asked, ["movie"])
+        self.assertEqual(model.details(m, kind="series").kind, "series")
+        self.assertEqual(asked[-1], "series")
+        self.assertEqual(m["plot"], "")  # the catalog's item stays as it is
+
+    def test_details_name_the_cast(self):
+        cat = FakeCatalog({"movies": [("1", "G", 1)]}, {("movies", "1"): [movie(1)]})
+        model, _ = build(cat, make_config())
+        self.assertEqual(model.details(movie(2, cast="Ana, Bo")).cast, "Ana, Bo")
+        self.assertEqual(model.details(movie(2, actors="Cy")).cast, "Cy")
+        self.assertEqual(model.details(movie(2)).cast, "")
 
     def test_a_title_without_a_genre_never_takes_a_shelfs_or_all_s_name(self):
         # "Continue", "New", "My list" and the provider's "All" are no genres.
@@ -903,3 +963,269 @@ class SharedCacheTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeRecordings(QObject):
+    """A RecordingsList: its titles, its version and its change signal."""
+
+    changed = Signal()
+
+    def __init__(self, items=()):
+        super().__init__()
+        self.list = list(items)
+        self.version = 1
+
+    def items(self):
+        return list(self.list)
+
+    def set(self, items):
+        self.list, self.version = list(items), self.version + 1
+        self.changed.emit()
+
+
+def recording_title(name="News", when="1761000000"):
+    return {
+        "id": f"recording:{name} 2026-10-19 21.30.ts",
+        "name": name,
+        "cmd": "file:///rec/x.ts",
+        "added": when,
+        "genre": "Recording",
+        "description": "Recorded 2026-10-19 21:30 · 1.5 GB",
+        "_recording": True,
+    }
+
+
+class RecordingsShelfTests(unittest.TestCase):
+    """Recordings in the Library (2.8): a Recordings shelf in Movies, whatever the provider."""
+
+    def model(self, catalog, recordings, section="movies"):
+        cfg = make_config()
+        model = LibraryModel(catalog, cfg, WatchState(cfg), recordings=recordings)
+        model.set_section(section)
+        if section in catalog.sections():
+            catalog.sectionReady.emit(section)
+        return model
+
+    def test_movies_list_the_recordings_after_the_other_shelves(self):
+        cat = FakeCatalog({"movies": [("1", "Drama", 1)]}, {("movies", "1"): [movie(1)]})
+        model = self.model(cat, FakeRecordings([recording_title()]))
+        genres = model.genres()
+        self.assertEqual([g.id for g in genres], [RECORDINGS, "1"])
+        self.assertTrue(genres[0].pinned)
+        self.assertEqual(genres[0].title, "Recordings")
+        model.select_genre(RECORDINGS)
+        self.assertEqual([i["name"] for i in model.items()], ["News"])
+
+    def test_series_have_no_recordings_shelf(self):
+        cat = FakeCatalog({"series": [("1", "Drama", 0)]})
+        model = self.model(cat, FakeRecordings([recording_title()]), section="series")
+        self.assertNotIn(RECORDINGS, [g.id for g in model.genres()])
+
+    def test_a_provider_without_movies_still_shows_its_recordings(self):
+        cat = FakeCatalog()
+        cat.section_list = ["live"]  # an M3U playlist
+        model = self.model(cat, FakeRecordings([recording_title()]))
+        self.assertTrue(model.available)
+        self.assertTrue(model.ready)
+        self.assertEqual(model.genre_id, RECORDINGS)
+        self.assertEqual([i["name"] for i in model.items()], ["News"])
+        self.assertNotIn(("section", "movies"), cat.requests)
+
+    def test_without_recordings_such_a_provider_has_no_movies(self):
+        cat = FakeCatalog()
+        cat.section_list = ["live"]
+        recordings = FakeRecordings()
+        model = self.model(cat, recordings)
+        self.assertFalse(model.available)
+        changes = []
+        model.changed.connect(lambda: changes.append(True))
+        recordings.set([recording_title()])  # the first recording ends
+        self.assertTrue(changes)
+        self.assertTrue(model.available)
+        self.assertEqual(model.genre_id, RECORDINGS)
+
+    def test_a_recording_is_its_own_kind_with_its_own_details(self):
+        cat = FakeCatalog({"movies": [("1", "Drama", 1)]}, {("movies", "1"): [movie(1)]})
+        model = self.model(cat, FakeRecordings([recording_title()]))
+        item = recording_title()
+        self.assertEqual(model.item_kind(item), "recording")
+        self.assertEqual(model.identity(item), item["id"])
+        details = model.details(item)
+        self.assertEqual(details.kind, "recording")
+        self.assertEqual(details.genre, "Recording")
+        self.assertIn("1.5 GB", details.plot)
+        self.assertFalse(details.favorite)
+        cfg = model._config
+        cfg.playback_positions[item["id"]] = {"position": 60000, "duration": 600000}
+        self.assertEqual(model.details(item).resume_ms, 60000)
+
+    def test_a_shelf_without_recordings_is_not_listed(self):
+        cat = FakeCatalog({"movies": [("1", "Drama", 1)]}, {("movies", "1"): [movie(1)]})
+        model = self.model(cat, FakeRecordings())
+        self.assertEqual([g.id for g in model.genres()], ["1"])
+
+
+class OnThreads:
+    """A spy: how often `function` ran on the GUI thread and on the others."""
+
+    def __init__(self, function):
+        self.function = function
+        self.gui = self.workers = 0
+        self.lock = threading.Lock()
+
+    def __call__(self, *args, **kwargs):
+        with self.lock:
+            if threading.current_thread() is threading.main_thread():
+                self.gui += 1
+            else:
+                self.workers += 1
+        return self.function(*args, **kwargs)
+
+
+class BackgroundWorkTests(unittest.TestCase):
+    """A large section (BACKGROUND_FROM titles and more): its titles each once, the newest, a
+    genre's sorted list and its letters, and its finds are worked out by a worker; the GUI
+    thread applies them. The answers are the ones worked out on the GUI thread for a small
+    one."""
+
+    def setUp(self):
+        self.items = [
+            movie(i, f"Título {300 - i}", added=str(1700000000 + (i * 7919) % 300))
+            for i in range(300)
+        ]
+        self.groups = {"movies": [("1", "Big", 300), ("2", "Small", 3)]}
+        self.lists = {("movies", "1"): self.items, ("movies", "2"): self.items[:3]}
+        self.jobs = JobRunner()
+        patch = mock.patch.object(library, "BACKGROUND_FROM", 100)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def model(self, jobs=True):
+        cfg = make_config()
+        cat = FakeCatalog(self.groups, self.lists)
+        model = LibraryModel(cat, cfg, WatchState(cfg), jobs=self.jobs if jobs else None)
+        self.addCleanup(model.deleteLater)
+        return model, cat
+
+    def opened(self, jobs=True):
+        model, cat = self.model(jobs)
+        model.set_section("movies")
+        cat.sectionReady.emit("movies")
+        if jobs:
+            self.assertTrue(wait_until(lambda: model.ready))
+        return model, cat
+
+    def test_a_large_sections_titles_are_worked_out_by_a_worker(self):
+        added = OnThreads(library._added)
+        with mock.patch.object(library, "_added", added):
+            model, cat = self.model()
+            changed = []
+            model.changed.connect(lambda: changed.append(model.ready))
+            model.set_section("movies")
+            cat.sectionReady.emit("movies")
+            self.assertFalse(model.ready)  # on their way: opened once they are
+            self.assertTrue(wait_until(lambda: model.ready))
+            genres = model.genres()
+        self.assertEqual((added.gui, added.workers >= 300), (0, True))
+        self.assertTrue(changed[-1])
+        small, _cat = self.opened(jobs=False)
+        self.assertEqual(genres, small.genres())
+        self.assertEqual(model.genre_id, NEW)  # the first shelf, as on the GUI thread
+        self.assertEqual(model.items(), small.items())
+
+    def test_a_large_genre_is_sorted_by_a_worker(self):
+        az = OnThreads(library._az_key)
+        small, _cat = self.opened(jobs=False)
+        model, _cat = self.opened()
+        with mock.patch.object(library, "_az_key", az):
+            for each in (model, small):
+                each.select_genre("1")
+                each.set_sort(Sort.AZ)
+            self.assertIsNone(model.items())  # on its way
+            self.assertEqual(model.letter_index(), {})
+            self.assertTrue(wait_until(lambda: model.items() is not None))
+            gui = az.gui
+            self.assertEqual(model.items(), small.items())
+        self.assertEqual((gui, az.gui - gui), (0, 300))  # then the small model's, here
+        self.assertEqual(model.letter_index(), small.letter_index())
+        self.assertEqual(model.folded_titles(), [])  # on its way
+        self.assertTrue(wait_until(lambda: model.folded_titles()))
+        self.assertEqual(model.folded_titles(), small.folded_titles())
+        for sort in (Sort.ADDED, Sort.YEAR, Sort.RATING):
+            model.set_sort(sort)
+            small.set_sort(sort)
+            self.assertTrue(wait_until(lambda: model.items() is not None))
+            self.assertEqual(model.items(), small.items(), sort)
+
+    def test_meanwhile_the_last_lists_answer_and_the_shelf_stays(self):
+        """The content changed (another list loaded): until the worker's answer comes, the
+        lists worked out before answer; the shelf shown stays."""
+        model, cat = self.opened()
+        model.select_genre("1")
+        self.assertTrue(wait_until(lambda: model.items() is not None))
+        before = model.items()
+        model.select_genre(NEW)
+        shelf = model.items()
+        cat.version += 1
+        cat.groupReady.emit("movies", "2")
+        self.assertEqual(model.genre_id, NEW)
+        self.assertEqual(model.items(), shelf)
+        model.select_genre("1")
+        self.assertEqual(model.items(), before)  # the earlier version's, meanwhile
+        key = ("P", "items", "movies", "1", model.sort, cat.version)
+        self.assertTrue(wait_until(lambda: key in model.cache.memo))
+        self.assertEqual(model.items(), before)
+
+    def test_a_list_from_before_a_parental_lock_never_answers_after_it(self):  # review M3
+        # The lock changes what is hidden (and the content version): until the worker's
+        # answer comes, nothing answers rather than the list from before (it may hold titles
+        # hidden now).
+        model, cat = self.opened()
+        cat.lock = 0
+        cat.parental_state = lambda: cat.lock
+        model.select_genre("1")
+        self.assertTrue(wait_until(lambda: model.items() is not None))
+        before = model.items()
+        cat.version += 1  # a content change of the same lock: the earlier list answers
+        self.assertEqual(model.items(), before)
+        self.assertTrue(wait_until(lambda: model.cache.pending == set()))
+        cat.lock, cat.version = 1, cat.version + 1  # locked
+        self.assertIsNone(model.items())
+        self.assertTrue(wait_until(lambda: model.items() is not None))
+
+    def test_without_a_runner_everything_is_worked_out_here(self):
+        added = OnThreads(library._added)
+        with mock.patch.object(library, "_added", added):
+            model, _cat = self.opened(jobs=False)
+            self.assertTrue(model.ready)
+            model.genres()
+        self.assertEqual(added.workers, 0)
+
+    def test_a_find_in_the_section_is_worked_out_by_a_worker(self):
+        folds = OnThreads(library.fold)
+        small, _cat = self.opened(jobs=False)
+        model, _cat = self.opened()
+        with mock.patch.object(library, "fold", folds):
+            self.assertIsNone(model.find_titles("título 1"))  # on its way
+            self.assertTrue(wait_until(lambda: model.find_titles("título 1") is not None))
+            self.assertIsNone(model.find_titles("título 12"))  # the next letter: a worker's too
+            self.assertTrue(wait_until(lambda: model.find_titles("título 12") is not None))
+        self.assertLess(folds.gui, 10)  # the find's own text, not 300 titles
+        self.assertGreaterEqual(folds.workers, 300)
+        self.assertEqual(model.find_titles("título 12"), small.find_titles("título 12"))
+        self.assertTrue(model.find_titles("título 1"))
+
+    def test_a_find_in_a_genre_is_worked_out_by_a_worker(self):
+        folds = OnThreads(library.fold)
+        small, _cat = self.opened(jobs=False)
+        model, _cat = self.opened()
+        for each in (model, small):
+            each.select_genre("1")
+        self.assertTrue(wait_until(lambda: model.items() is not None))
+        with mock.patch.object(library, "fold", folds):
+            self.assertIsNone(model.find_in_genre("título 2"))
+            self.assertTrue(wait_until(lambda: model.find_in_genre("título 2") is not None))
+        self.assertLess(folds.gui, 10)
+        self.assertEqual(model.find_in_genre("título 2"), small.find_in_genre("título 2"))
+        self.assertTrue(model.find_in_genre("título 2"))
+        self.assertEqual(model.find_in_genre(""), model.items())

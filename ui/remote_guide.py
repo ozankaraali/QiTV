@@ -19,19 +19,20 @@ The Remote tab's channel list is a bare one: the same groups and channels, witho
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QObject, QTimer
 
 from services.catalog import shown_label
 from services.catchup import programme_in_archive
+from services.find import by_scope
 from services.i18n import translate
 from services.navigation import NavModel, NavNode, item_key, section_title
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, mixed_group_id, provider_of
 from services.text_fold import fold
 from services.zapping import ZapContext
-from ui.remote_snapshots import Handles, programme_dict, stable_key
+from ui.remote_snapshots import Handles, find_page, programme_dict, stable_key
 
 GROUPS_PAGE = 100
 GUIDE_PAGE = 50
@@ -143,6 +144,11 @@ class PhoneGuide(QObject):
         self._wanted = key if group is None else None
         self._ask(("guide", group, find), page, n)
 
+    def refresh_timetable(self) -> None:
+        """The timetable shown, sent again (2.8: a programme was scheduled or cancelled)."""
+        if self._timetable:
+            self.timetable(self._timetable)
+
     def timetable(self, handle: str) -> None:
         """`handle`'s channel: its programmes from the one on now (with an archive, from earlier,
         each a tap away), the one on now a tap from live."""
@@ -174,6 +180,11 @@ class PhoneGuide(QObject):
             ):
                 payload = (channel, programme, group_key, channels)
                 row["id"] = self.handles.issue("catchup", payload)
+            scheduled = getattr(self._window, "recording_schedule", None)
+            if programme.stop > now and getattr(self._window, "scheduler", None) is not None:
+                # 2.8: on now or to come: recorded at its time (or cancelled) from the phone
+                row["sched"] = self.handles.issue("sched", (channel, programme))
+                row["rec"] = bool(scheduled and scheduled.is_scheduled(channel, programme))
             rows.append(row)
         self.providers = self.providers | ({provider_of(channel)} - {""})
         message: dict = {
@@ -183,6 +194,11 @@ class PhoneGuide(QObject):
             "num": controller.channel_number(channel),
             "rows": rows,
         }
+        if getattr(self._window, "scheduler", None) is not None:
+            message["timer"] = True  # 2.8: Record at a time, guide or not
+            # its times are this computer's clock's: how far from UTC (minutes)
+            offset = datetime.now().astimezone().utcoffset()
+            message["tz"] = int(offset.total_seconds() // 60) if offset is not None else 0
         if not rows and controller.guide_loading(channel):
             message["loading"] = True  # sent again once the guide is in
         self._send(message)
@@ -288,20 +304,19 @@ class PhoneGuide(QObject):
         return self._channels_page(page)
 
     def _groups_page(self, page: int) -> tuple[dict, tuple]:
-        """The groups; with a find, the groups it matches on the first page and the channels it
-        finds (the desktop search's rules) a page at a time after them."""
+        """The groups; with a find, the groups it matches (and the genres it finds at the other
+        providers) and the channels it finds (the desktop search's rules) after them, each a
+        page at a time."""
         find = self._view[1] if self._view is not None else ""
         nodes = _matching(self._group_nodes(), fold(find.strip()))
         genres, hits, searching = self._everywhere(find)
-        if hits:
-            shown = nodes[:GROUPS_PAGE] if page == 0 else []
-            pages = _pages(len(hits), FOUND_PAGE)
-        else:
-            shown = nodes[page * GROUPS_PAGE : (page + 1) * GROUPS_PAGE]
-            pages = _pages(len(nodes), GROUPS_PAGE)
-        others = self._other_genres(genres) if page == 0 else []
-        others = others[: max(0, GROUPS_PAGE - len(shown))]  # 100 rows of groups, a frame's worth
-        found = [hit.item for hit in hits[page * FOUND_PAGE : (page + 1) * FOUND_PAGE]]
+        others = self._other_genres(genres)  # below the groups shown, as more of them
+        listed, at, pages = find_page(
+            page, len(nodes) + len(others), len(hits), GROUPS_PAGE, FOUND_PAGE
+        )
+        shown = nodes[listed]  # 100 rows of groups a page, a frame's worth
+        others = others[max(0, listed.start - len(nodes)) : max(0, listed.stop - len(nodes))]
+        found = [hit.item for hit in hits[at]]
         section = self._section()
         error = self.nav.load_error(section)
         loading = not nodes and not error and self.nav.is_loading(section)
@@ -340,7 +355,8 @@ class PhoneGuide(QObject):
 
     def _everywhere(self, find: str) -> tuple[list, list, bool]:
         """The desktop find's genres and channels at every provider for `find`, ranked as
-        there, and whether they are still on their way (a push follows when they land)."""
+        there (the provider these lists show, then every provider's, each in the find's
+        ranking), and whether they are still on their way (a push follows when they land)."""
         finder = self._finder
         if finder is None or not find.strip():
             return [], [], False
@@ -350,7 +366,8 @@ class PhoneGuide(QObject):
             if self._prefer is not None:
                 self._prefer(self._catalog.source())  # ranked first: what these lists show
             finder.set_query(find)
-        return list(finder.genres), list(finder.channels), bool(finder.searching)
+        channels = by_scope(finder.channels, self._catalog.source())
+        return list(finder.genres), channels, bool(finder.searching)
 
     def finding(self) -> bool:
         """Whether what this list shows is a find (the shared find stays while one is)."""

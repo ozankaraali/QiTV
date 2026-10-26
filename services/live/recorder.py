@@ -255,8 +255,10 @@ class Recorder:
                 continue
             data, complete, header_len = result
             if data:
-                self._place(number, offset, header_len, len(data), ring)
+                at = self.written
                 self._write(data)
+                # 2.8: noted once written (a reader of the file never meets bytes not there).
+                self._place(number, offset, header_len, len(data), ring, at)
                 offset += len(data)
                 self._progress()
                 if self._short_of_space():
@@ -289,9 +291,11 @@ class Recorder:
                 self._ring = ring
 
     # ---- 2.6: reading back what it wrote ---------------------------------------------------
-    def _place(self, seq: int, offset: int, header_len: int, size: int, ring: Ring) -> None:
-        """Note where segment `seq`'s bytes [offset, offset + size) go in the file."""
-        at = self.written
+    def _place(
+        self, seq: int, offset: int, header_len: int, size: int, ring: Ring, at: int
+    ) -> None:
+        """Note where segment `seq`'s bytes [offset, offset + size), written at `at` in the
+        file, are (after the write: 2.8)."""
         with self._index_lock:
             place = self._places.get(seq)
             if place is None:

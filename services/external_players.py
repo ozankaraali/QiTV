@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Single-instance python-mpv player, reused across launches (was PlaybackMixin state).
 _external_mpv_player: Optional[Any] = None
+_mpv_defaults: tuple[str, str] = ("", "")  # its own agent and referrer (2.8)
 
 PYTHON_MPV = "python-mpv"  # find_mpv(): mpv plays through the python-mpv module
 # A missing player's message: its first line (the headline) is what a toast shows; the rest,
@@ -106,14 +107,35 @@ def find_vlc() -> Optional[str]:
     return vlc_cmd
 
 
-def launch_vlc(url: str) -> Tuple[bool, str]:
-    """Launch VLC with platform-specific handling."""
+def _http_args(user_agent: Optional[str], referrer: Optional[str], *, vlc: bool) -> list[str]:
+    """A player's options for the stream's own agent and referrer (VLC's or mpv's names),
+    none for what it does not have."""
+    args = []
+    if user_agent:
+        args.append(f"--{'http-user-agent' if vlc else 'user-agent'}={user_agent}")
+    if referrer:
+        args.append(f"--{'http-referrer' if vlc else 'referrer'}={referrer}")
+    return args
+
+
+def launch_vlc(
+    url: str, user_agent: Optional[str] = None, referrer: Optional[str] = None
+) -> Tuple[bool, str]:
+    """Launch VLC with platform-specific handling. `user_agent` and `referrer` (2.8: an STB
+    portal's box's, an M3U channel's own): VLC asks the stream so, in a window of its own (a
+    VLC already running would take the address without them)."""
     vlc_cmd = find_vlc()
     if not vlc_cmd:
         return False, vlc_missing()
+    http = _http_args(user_agent, referrer, vlc=True)
     if platform.system() == "Darwin":
-        # "--": a URL that starts with "-" must not be read as an option.
-        argv = ["open", "-a", vlc_cmd, "--", url]
+        if http:  # `open` hands VLC the address only: its program, with the options
+            argv = [os.path.join(vlc_cmd, "Contents", "MacOS", "VLC"), *http, "--", url]
+        else:
+            # "--": a URL that starts with "-" must not be read as an option.
+            argv = ["open", "-a", vlc_cmd, "--", url]
+    elif http:
+        argv = [vlc_cmd, "--no-one-instance", *http, "--", url]
     else:
         # --started-from-file sends URL to existing VLC instance (replaces current)
         argv = [vlc_cmd, "--started-from-file", "--", url]
@@ -233,9 +255,12 @@ def find_mpv() -> Optional[str]:
     return PYTHON_MPV if _python_mpv_loads() else _mpv_executable()
 
 
-def launch_mpv(url: str) -> Tuple[bool, str]:
-    """Launch MPV - try python-mpv first, fall back to subprocess."""
-    global _external_mpv_player
+def launch_mpv(
+    url: str, user_agent: Optional[str] = None, referrer: Optional[str] = None
+) -> Tuple[bool, str]:
+    """Launch MPV - try python-mpv first, fall back to subprocess. `user_agent` and
+    `referrer` as for launch_vlc (2.8): the player asks the stream so."""
+    global _external_mpv_player, _mpv_defaults
 
     # Try python-mpv for single-instance behavior
     try:
@@ -247,7 +272,10 @@ def launch_mpv(url: str) -> Tuple[bool, str]:
                 input_vo_keyboard=True,
                 osc=True,
             )
-
+            _mpv_defaults = (_external_mpv_player["user-agent"], _external_mpv_player["referrer"])
+        agent, referer = _mpv_defaults
+        _external_mpv_player["user-agent"] = user_agent or agent  # this stream's, else its own
+        _external_mpv_player["referrer"] = referrer or referer
         _external_mpv_player.play(url)
         return True, ""
     except Exception as e:
@@ -259,7 +287,8 @@ def launch_mpv(url: str) -> Tuple[bool, str]:
         return False, mpv_missing()
 
     try:
-        subprocess.Popen([mpv_cmd, "--", url], env=player_env())
+        http = _http_args(user_agent, referrer, vlc=False)
+        subprocess.Popen([mpv_cmd, *http, "--", url], env=player_env())
         return True, ""
     except Exception as e:
         # i18n: the first line shows in a toast; {error} is the system's reason

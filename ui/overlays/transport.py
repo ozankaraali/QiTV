@@ -125,6 +125,7 @@ WAITING = N_("Waiting for the channel…")
 # i18n: the Stay live indicator: a new connection to the channel is being opened
 RECONNECTING = N_("Reconnecting…")
 TOOLTIPS = {
+    "quality": N_("Quality"),  # i18n: tooltip of the ⚙: a title's versions and conversions (2.8)
     "pip": N_("Second channel (P)"),  # i18n: tooltip; P is the key (picture in picture)
     "layout": N_("Tiles: 2, 4, 6 or 9"),  # i18n: tooltip of the multiview's layout chip
     "restore": N_("The channels of the last grid"),  # i18n: tooltip of the "Last grid" chip
@@ -133,6 +134,7 @@ TOOLTIPS = {
     "mini_back": N_("Back to the full window (Alt+P)"),  # i18n: tooltip in the mini player
     "fullscreen_back": N_("Exit fullscreen (F)"),  # i18n: tooltip; F is the key
     "external": N_("Open in external player"),  # i18n: tooltip; VLC or MPV
+    "cast": N_("Cast to a TV"),  # i18n: tooltip (2.8): send the picture to a Chromecast
     "volume": N_("Volume (+/−, M)"),  # i18n: tooltip; +, − and M are its keys
     "slower": N_("Slower"),  # i18n: tooltip of the playback speed's − button
     "speed": N_("Normal speed"),  # i18n: tooltip of the playback speed chip (back to 1x)
@@ -169,7 +171,7 @@ RECORD_KEY = "R"  # record the channel, or stop recording (2.2)
 # i18n: tooltip of the record button (and a toast) on a channel played without time-shift
 NO_RECORDING = N_("Can't record: this channel plays without time-shift")
 # button name -> painting icon, if they differ
-_ICONS = {"mini": "mini_player", "pip": "pip", "previous": "recent"}
+_ICONS = {"mini": "mini_player", "pip": "pip", "previous": "recent", "quality": "gear"}
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
 # A quick second click (a double-click) repeats these steps; on any other control it counts
 # once: a toggle (★, ⛶, ▶) would undo itself, a jump (⟲, Next) go one further.
@@ -178,11 +180,13 @@ _ICON_BUTTONS = (  # painted as icons
     "previous",
     "guide",
     "search",
+    "quality",
     "subtitles",
     "picture",
     "audio",
     "volume",
     "external",
+    "cast",
     "pip",
     "grid",
     "mini",
@@ -350,6 +354,8 @@ class Transport(Overlay):
     # "Open in external player": the shell's menu opens from this point (the button's
     # top-left, global coordinates).
     externalRequested = Signal(QPoint)
+    # Cast (2.8): the devices' menu opens from this point (the button's top-left, global).
+    castRequested = Signal(QPoint)
     volumeRequested = Signal()  # the speaker: the mixer, on the large picture's row
     searchRequested = Signal()
     guideRequested = Signal()
@@ -357,6 +363,7 @@ class Transport(Overlay):
     infoRequested = Signal()  # the channel's name: its info (the banner)
     favoriteRequested = Signal()  # the star after the name: add or remove the channel
     libraryRequested = Signal()  # ‹ Library: back to the Library the title came from (Esc)
+    qualityRequested = Signal()  # 2.8: the ⚙ quality menu
     recordRequested = Signal()  # the record button: record the channel, or stop (2.2)
     bandChanged = Signal()  # its controls changed (a mode, the bar): controls_top() moved
 
@@ -398,8 +405,11 @@ class Transport(Overlay):
         self._muted = False  # the large picture's mute: the speaker shows it
         self._level = 100  # and its volume (libVLC's default until the mixer says)
         self._mini = self._fullscreen = False  # their buttons then show the way back
+        self._cast_available = False  # 2.8: QiTV can cast (its button shows) ...
+        self._casting = False  # ... and casts now (the button is lit)
         self._favorite = False  # the live channel is a favorite: its star is lit
         self._library = False  # the title came from the Library: ‹ Library shows
+        self._quality = False  # 2.8: its server offers versions or conversions: ⚙ shows
         self._held = ""  # the button whose panel is open: no fade meanwhile, and it is lit
         self._hand = False  # the pointer is over the title row's controls
         self._timeline: _Timeline | None = None
@@ -516,6 +526,13 @@ class Transport(Overlay):
         closing) is dropped instead of reaching a deleted object."""
         self.set_pip_rect(rect.translated(-self.pos()))
 
+    def set_cast_state(self, available: bool, casting: bool) -> None:
+        """The cast button (2.8): shown when QiTV can cast, lit while it casts."""
+        if (available, casting) != (self._cast_available, self._casting):
+            self._cast_available, self._casting = available, casting
+            self.update()
+            self._controls_changed()
+
     def set_pip_state(self, available: bool, open_: bool) -> None:
         """The second channel's button: shown on live TV when `available`; lit while open."""
         if (available, open_) != (self._pip_available, self._pip_open):
@@ -599,6 +616,15 @@ class Transport(Overlay):
         played from the Library); never on live TV."""
         if available != self._library:
             self._library = available
+            self.update()
+            self._controls_changed()
+
+    def set_quality_available(self, available: bool) -> None:
+        """The ⚙ quality menu's button (2.8): shown during a film or an episode whose server
+        offers versions or conversions, and on a channel whose stream comes in several picture
+        sizes (the controller says which)."""
+        if available != self._quality:
+            self._quality = available
             self.update()
             self._controls_changed()
 
@@ -1060,14 +1086,20 @@ class Transport(Overlay):
         before a text gives way: the multiview's chips, the Stay live indicator or the speed
         chip's − and +."""
         rects, crowded = self._layout_at(_ICON_GAP_U)
-        if crowded or self._grid_chips_short(rects) or self._squeezed(rects):
-            return self._layout_at(_TIGHT_GAP_U)[0]
+        if not (crowded or self._grid_chips_short(rects) or self._squeezed(rects)):
+            return rects
+        rects, crowded = self._layout_at(_TIGHT_GAP_U)
+        if "quality" in rects and (
+            crowded or self._grid_chips_short(rects) or self._squeezed(rects)
+        ):
+            # 2.8: the ⚙ gives way first (the speed and the other buttons keep their room).
+            return self._layout_at(_TIGHT_GAP_U, extras=False)[0]
         return rects
 
     def _squeezed(self, rects: dict[str, QRectF]) -> bool:
         """The Stay live indicator went without a part of its text (or altogether), or the
-        speed chip without its − and +."""
-        if "speed" in rects and "slower" not in rects:
+        speed chip without its − and + (or altogether, under the bar: 2.8, the ⚙ gives way)."""
+        if ("speed" in rects or self._shows_bar()) and "slower" not in rects:
             return True
         variants = self._indicator_variants() if self._timeshift and not self._shows_bar() else []
         if not variants:
@@ -1089,9 +1121,10 @@ class Transport(Overlay):
             return True
         return self._grid_restorable and "restore" not in rects
 
-    def _layout_at(self, icon_gap: float) -> tuple[dict[str, QRectF], bool]:
-        """The rects with `icon_gap` (u) between the icons, and whether the chips at their left
-        (LIVE, Go live, ‹ Library) run into the buttons at the row's left."""
+    def _layout_at(self, icon_gap: float, extras: bool = True) -> tuple[dict[str, QRectF], bool]:
+        """The rects with `icon_gap` (u) between the icons (without the ⚙ unless `extras`), and
+        whether the chips at their left (LIVE, Go live, ‹ Library) run into the buttons at the
+        row's left."""
         un = Units(self.width())
         left, right = un.px(3), self.width() - un.px(3)
         bottom = self.height() - un.px(3)
@@ -1128,7 +1161,7 @@ class Transport(Overlay):
             # As wide as its word in a longer language ("EN VIVO"), never narrower than LIVE's.
             badge = QFontMetricsF(self._live_font(un)).horizontalAdvance(_live_label())
             pill_w = max(float(un.px(5.2)), badge + un.px(1.6))
-            buttons = self._right_buttons("picture", "subtitles", "audio", "volume")
+            buttons = self._right_buttons("picture", "subtitles", "audio", "volume", extras=extras)
             floor = left_end + pill_w + un.px(0.4)  # the LIVE badge keeps its room
             x = self._put_right(rects, un, buttons, cy, floor, icon_gap)
             rects["live"] = QRectF(x - pill_w - un.px(0.4), cy - un.px(1.1), pill_w, un.px(2.2))
@@ -1161,7 +1194,7 @@ class Transport(Overlay):
             x = self._put_right(
                 rects,
                 un,
-                self._right_buttons("picture", "audio", "volume", "subtitles"),
+                self._right_buttons("picture", "audio", "volume", "subtitles", extras=extras),
                 cy,
                 room,
                 icon_gap,
@@ -1274,13 +1307,16 @@ class Transport(Overlay):
             return False
         return chip.width() >= self._layout_chip_width(Units(self.width()), True) - 0.5
 
-    def _right_buttons(self, *rest: str) -> tuple[str, ...]:
+    def _right_buttons(self, *rest: str, extras: bool = True) -> tuple[str, ...]:
         """The icon buttons from the right edge inwards: the window's and the picture's, the
-        sound's (`rest`), then Search and, on live TV, the guide and the previous channel."""
+        sound's (`rest`), the ⚙ quality menu (2.8, with `extras`), then Search and, on live
+        TV, the guide and the previous channel."""
         grid = ("grid",) if self._grid_available and self._live else ()
         pip = ("pip",) if self._pip_available and self._live and not self._grid_shown else ()
         tv = ("search", "guide", "previous") if self._live else ("search",)
-        return ("fullscreen", "mini", *pip, *grid, "external", *rest, *tv)
+        cast = ("cast",) if self._cast_available else ()
+        quality = ("quality",) if self._quality and extras else ()
+        return ("fullscreen", "mini", *pip, *grid, *cast, "external", *rest, *quality, *tv)
 
     def seek_rect(self) -> QRectF:
         return self._layout()["seek"]
@@ -1345,7 +1381,11 @@ class Transport(Overlay):
             self._paint_vod(p, un, rects, text)
         for name in _ICON_BUTTONS:
             if name in rects:
-                lit = (name == "pip" and self._pip_open) or name == self._held
+                lit = (
+                    (name == "pip" and self._pip_open)
+                    or (name == "cast" and self._casting)
+                    or name == self._held
+                )
                 draw_icon(p, self.icon(name), rects[name], qcolor(PALETTE.accent) if lit else text)
         chip = rects.get("layout")
         if chip is not None:
@@ -1871,8 +1911,12 @@ class Transport(Overlay):
                 self.miniPlayerRequested.emit()
             elif name == "external":
                 self.externalRequested.emit(self.mapToGlobal(rect.topLeft().toPoint()))
+            elif name == "cast":
+                self.castRequested.emit(self.mapToGlobal(rect.topLeft().toPoint()))
             elif name == "search":
                 self.searchRequested.emit()
+            elif name == "quality":
+                self.qualityRequested.emit()
             elif name == "guide":
                 self.guideRequested.emit()
             elif name == "previous":

@@ -621,6 +621,17 @@ class MultiviewCase(PipCase):
 
 
 class MultiviewTests(MultiviewCase):
+    def test_while_casting_the_multiview_waits(self):  # 2.8 review M13
+        from unittest import mock
+
+        self.start_large(0)
+        cast = mock.Mock()
+        cast.casting.return_value = True
+        self.controller._cast = cast
+        self.v()
+        self.assertFalse(self.grid.shown())
+        self.assertEqual(self.toast.messages()[-1], ("Stop casting to show the multiview", "info"))
+
     def test_v_makes_the_big_picture_tile_1_and_the_pip_tile_2_reopening_nothing(self):
         self.start_large(0)
         self.session.stateChanged.emit("playing")

@@ -317,7 +317,7 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertEqual(config.watch_history[0]["item_data"], {"id": 5, "name": "Demo 5"})
         self.assertFalse(nav.shows_provider(recent))  # one provider: nothing to tell apart
 
-    # ---- where a channel names its provider -------------------------------------------------------
+    # ---- where a channel names its provider ------------------------------------------------------
 
     def test_the_mixed_lists_show_their_providers_names(self):
         self.config.favorites = ["News"]

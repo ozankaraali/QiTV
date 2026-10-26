@@ -39,6 +39,7 @@ a = Analysis(
     datas=[
         ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
         ('assets/qitv.png', 'assets'),  # the logo the Library, welcome card and About show
+        ('assets/tmdb.png', 'assets'),  # TMDB's logo: About credits it, as its terms ask
         # QiTV's license, and those of what the app ships (VLC, Qt, Python libraries).
         ('LICENSE', '.'),
         ('THIRD-PARTY-NOTICES.md', '.'),
@@ -126,5 +127,12 @@ app = BUNDLE(
         'LSApplicationCategoryType': 'public.app-category.video',
         'NSHighResolutionCapable': True,
         'NSPrincipalClass': 'NSApplication',
+        # 2.8: newer macOS asks before an app reaches the home network (a media server, the
+        # phone remote) or browses Bonjour for the TVs it casts to.
+        'NSLocalNetworkUsageDescription': (
+            'QiTV finds TVs to cast to and reaches your media server and phone remote on your '
+            'home network.'
+        ),
+        'NSBonjourServices': ['_googlecast._tcp'],
     }
 )

@@ -75,10 +75,70 @@ PAGE_STRINGS: dict[str, str] = {
     ),
     # i18n: the phone remote: the provider didn't hand QiTV the film for the phone
     "film_provider": N_("The film didn't open. Tap TV to watch it there."),
+    # i18n: the phone remote, where a recording (of a TV channel, by QiTV) would play on the
+    # phone; TV: the TV | Phone switch
+    "rec_format": N_("This recording doesn't play on a phone. Tap TV to watch it there."),
+    # i18n: the phone remote, where a recording would play on the phone (its sound: MPEG audio)
+    "rec_sound": N_("This recording's sound doesn't play on a phone. Tap TV to watch it there."),
+    # i18n: the phone remote through the relay (QiTV's server on the internet): recordings come
+    # from QiTV itself, at home; a guest network or a VPN can't reach it
+    "rec_relay": N_(
+        "The relay can't carry recordings. To watch this one on the phone, be at home on "
+        "QiTV's network (not a guest network or a VPN)."
+    ),
+    # i18n: the phone remote: QiTV couldn't read the recording for the phone (deleted, say)
+    "rec_open": N_("The recording didn't open. Tap TV to watch it there."),
+    # i18n: the phone remote: its Watch's question gave way to a newer one (the TV's, another's)
+    "asked_elsewhere": N_(
+        "QiTV asked about the recording on another screen: nothing opened on this phone"
+    ),
     "remote": N_("Remote"),  # i18n: the phone remote: the tab with the buttons
     "channel_number": N_("Channel number"),  # i18n: the phone remote: the numpad's heading
     "previous": N_("Previous"),  # i18n: the phone remote's numpad: the previous channel
     "record": N_("Record"),  # i18n: the phone remote: a button (verb)
+    # 2.8: casting and scheduled recordings
+    "cast_to": N_("Cast to a TV"),  # i18n: the phone remote: a button: QiTV sends it to a TV
+    "stop_casting": N_("Stop casting"),  # i18n: the phone remote: the picture back on QiTV
+    # i18n: the phone remote: no device to cast to was found yet
+    "looking_devices": N_("Looking for devices…"),
+    # i18n: the phone remote's Library: a chip that loads the films and series again (short)
+    "refresh": N_("Refresh"),
+    # i18n: the phone remote: the Library's films and series load again
+    "refreshing": N_("Refreshing films and series…"),
+    # i18n: the phone remote: QiTV's computer cannot cast (its VLC has no casting)
+    "no_casting": N_("Casting isn't available on this computer"),
+    # i18n: the phone remote's guide: record every airing of this programme (a short chip)
+    "record_series": N_("Series"),
+    # i18n: the phone remote's guide: a scheduled programme's chip: it will not be recorded
+    "cancel_recording": N_("Cancel recording"),
+    # i18n: the phone remote's timetable: record the channel at a time of one's choosing (no
+    # guide needed), once or on chosen days
+    "record_at": N_("Record at a time"),
+    # i18n: the phone remote's "Record at a time": its name field's placeholder
+    "timer_name": N_("Name (optional)"),
+    "once": N_("Once"),  # i18n: a timer recording's repeat: one time, on the day chosen
+    "daily": N_("Every day"),  # i18n: a timer recording's repeat
+    "weekdays": N_("Monday to Friday"),  # i18n: a timer recording's repeat
+    "on_days": N_("On these days"),  # i18n: a timer recording's repeat: the days ticked
+    "day": N_("Day"),  # i18n: a field's label: the date it records on
+    "from": N_("From"),  # i18n: a field's label: the time it starts
+    "to": N_("To"),  # i18n: a field's label: the time it stops
+    "cancel": N_("Cancel"),  # i18n: a button
+    # i18n: the button of "Record at a time" that adds the recording to the schedule
+    "schedule": N_("Schedule"),
+    # i18n: a hint in "Record at a time": the end time is earlier than the start
+    "next_day": N_("Ends the next day."),
+    # i18n: a hint in "Record at a time": a one-time recording whose time is over
+    "passed": N_("That time has passed."),
+    # i18n: a hint in "Record at a time": "On these days" with no day ticked
+    "no_day": N_("Choose at least one day."),
+    # i18n: a hint in "Record at a time": the start and end times are the same
+    "no_length": N_("From and To are the same."),
+    # i18n: the phone remote: QiTV could not add the recording at a time
+    "timer_failed": N_("Couldn't schedule that recording"),
+    # i18n: the phone remote's "Record at a time", when the phone's clock is another than the
+    # computer's (another time zone): the times are the computer's ({time}: its time now)
+    "tv_clock": N_("Times are QiTV's clock: {time} there now."),
     "pip": N_("Picture in picture"),  # i18n: the phone remote: a button
     # i18n: the phone remote: the same button while the TV shows a small picture
     "close_pip": N_("Close picture in picture"),

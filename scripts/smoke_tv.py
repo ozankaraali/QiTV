@@ -49,9 +49,10 @@ player (their play and open counts stay) and moves the sound to A; after a 4 s p
 and two more swaps A is still at least 3 s behind live; the two players keep a volume and a
 mute of their own, read back from libVLC; after a move and resize the geometry holds; P
 closes the small picture (B): one session plays on, its budget ticket is back and the live
-helper streams a single session (2.6: B's buffer is kept, parked: no upstream, no updates). With the PiP up, each source never has more than one
-connection open and both together two. libVLC's audio output modules are recorded, and on
-Windows it must be DirectSound (per-player volume; services/playback.default_args).
+helper streams a single session (2.6: B's buffer is kept, parked: no upstream, no updates). With the
+PiP up, each source never has more than one connection open and both together two. libVLC's audio
+output modules are recorded, and on Windows it must be DirectSound (per-player volume;
+services/playback.default_args).
 
 Every check is written to <out>/smoke.json as {"name", "ok", "detail"}; any failed check makes
 the exit code non-zero. The overlay gate (spec D4) passes only when every expected "overlay: …"
@@ -1528,8 +1529,8 @@ class Driver:
         self._capture(PIPELINE_SCREENSHOTS[0])  # Space shows the transport: the time-shift bar
 
         # 4. Go live (L): live within 6 s, at most a segment past stay-live's band (plus VLC's
-        # open), and still there or closer by the end of the 6 s. VLC's position jitters by about half a
-        # second, so the lag is judged against bounds, not step by step.
+        # open), and still there or closer by the end of the 6 s. VLC's position jitters by about
+        # half a second, so the lag is judged against bounds, not step by step.
         report.step("pipeline 4. Go live")
         pressed = time.monotonic()
         self._key(Qt.Key.Key_L)

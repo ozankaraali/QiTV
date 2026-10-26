@@ -45,6 +45,7 @@
   <symbol id="i-aspect" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 10V8.5h2.5M17 14v1.5h-2.5"/></symbol>
   <symbol id="i-full" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" class="solid"/></symbol>
+  <symbol id="i-cast" viewBox="0 0 24 24"><path d="M3 9V6.5A1.5 1.5 0 0 1 4.5 5h15A1.5 1.5 0 0 1 21 6.5v11a1.5 1.5 0 0 1-1.5 1.5H14"/><path d="M3 12.5a6.5 6.5 0 0 1 6.5 6.5M3 16a3 3 0 0 1 3 3"/><circle cx="3.6" cy="18.6" r="1" class="solid"/></symbol>
   <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></symbol>
 </svg>
 
@@ -154,6 +155,35 @@
       <h1 id="timetableName"></h1>
       <button type="button" class="again" id="timetableWatch" data-t="watch">Watch</button>
     </div>
+    <div class="timer-bar" id="timerBar" hidden>
+      <button type="button" class="chip" id="timerOpen"><span data-t="record_at">Record at a time</span></button>
+      <span class="timer-note" id="timerNote"></span>
+    </div>
+    <form class="timer" id="timerForm" hidden>
+      <label class="sr" for="timerName"></label>
+      <input class="field" id="timerName" type="text" maxlength="80" autocomplete="off" placeholder="Name (optional)" data-tp="timer_name">
+      <div class="timer-pick">
+        <select class="field" id="timerRepeat">
+          <option value="once" data-t="once">Once</option>
+          <option value="daily" data-t="daily">Every day</option>
+          <option value="weekdays" data-t="weekdays">Monday to Friday</option>
+          <option value="days" data-t="on_days">On these days</option>
+        </select>
+        <svg><use href="#i-down"/></svg>
+      </div>
+      <div class="timer-days" id="timerDays" hidden></div>
+      <label class="timer-line" id="timerDayLine"><span data-t="day">Day</span><input class="field" id="timerDay" type="date"></label>
+      <div class="timer-times">
+        <label class="timer-line"><span data-t="from">From</span><input class="field" id="timerFrom" type="time"></label>
+        <label class="timer-line"><span data-t="to">To</span><input class="field" id="timerTo" type="time"></label>
+      </div>
+      <div class="timer-hint" id="timerClock" hidden></div>
+      <div class="timer-hint" id="timerHint"></div>
+      <div class="timer-buttons">
+        <button type="button" class="again" id="timerCancel" data-t="cancel">Cancel</button>
+        <button type="submit" class="again go" id="timerSchedule" data-t="schedule">Schedule</button>
+      </div>
+    </form>
     <div class="rows" id="timetableRows"></div>
   </section>
 
@@ -176,6 +206,7 @@
     <div class="chips" id="libraryChips">
       <button type="button" class="on" data-lib="movies" data-t="movies">Movies</button>
       <button type="button" data-lib="series" data-t="series">Series</button>
+      <button type="button" id="libraryRefresh" data-t="refresh">Refresh</button>
     </div>
     <label class="sr" for="libraryFind"></label>
     <input class="field" id="libraryFind" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search">
@@ -207,6 +238,7 @@
     <button type="button" data-key="multiview"><svg><use href="#i-grid"/></svg><span data-t="multiview">Multiview</span></button>
     <button type="button" data-key="picture"><svg><use href="#i-aspect"/></svg><span data-t="picture">Picture</span></button>
     <button type="button" data-key="fullscreen"><svg><use href="#i-full"/></svg><span data-t="fullscreen">Full screen</span></button>
+    <button type="button" id="castTo"><svg><use href="#i-cast"/></svg><span data-t="cast_to">Cast to a TV</span></button>
     <button type="button" class="stop" data-key="stop"><svg><use href="#i-stop"/></svg><span data-t="stop">Stop</span></button>
   </div>
 </div>

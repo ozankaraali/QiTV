@@ -88,10 +88,13 @@ class RecordGuardTests(unittest.TestCase):
         main.live.timelineChanged.emit({"reconnecting": True})  # once
         self.assertEqual(len(self.stopped), 1)
 
-    def test_a_failure_counts_too(self):
-        main, b1 = self.recording_then_another()
+    def test_a_failure_is_not_watched(self):
+        # 2.8 (review of 2.6): LiveSession ends a recording before it says `failed`
+        # (test_live_session_recording), so a failure never finds one to save; the path that
+        # could only fire with a fake is gone.
+        main, _b1 = self.recording_then_another()
         main.live.failed.emit("Connection refused")
-        self.assertEqual(self.stopped, [b1])
+        self.assertEqual(self.stopped, [])
 
     def test_a_known_limit_is_left_to_the_budget(self):
         self.limits["P"] = 2

@@ -16,19 +16,23 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import logging
+import os
 from typing import Any, Iterator, Optional
 
-from PySide6.QtCore import QObject, QPoint, QThread
-from PySide6.QtWidgets import QFileDialog, QWidget
+from PySide6.QtCore import QObject, QPoint, QThread, QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QWidget
 
 from services.exporter import ExportKind
 from services.failure_reasons import shown_message
 from services.i18n import tr
 from services.library import LibraryModel
+from services.recordings_list import RecordingsList
 from ui.keymap import Action
 from ui.library_controller import LibraryController
 from ui.page_stack import PageStack
 from ui.pointer import SecondClickGuard
+from ui.tmdb_fill import TmdbFill
 from ui.tv_controller import ERROR_MS, INFO_MS, scrub
 
 logger = logging.getLogger(__name__)
@@ -63,8 +67,30 @@ class TVPages(QObject):
         self._second_click = SecondClickGuard(self)
         # The event loop level a key or a menu item moves the pages at, else None: from_keys.
         self._keys_level: Optional[int] = None
+        # 2.8: the Recordings folder's files, the Library's Recordings shelf (and the phone's).
+        schedule = getattr(window, "recording_schedule", None)
+        writing = getattr(window, "writing_paths", None)
+        self.recordings = RecordingsList(
+            window.config_manager,
+            parent=self,
+            titles=schedule.title_of if schedule is not None else None,
+            # one still written can't be deleted (2.8)
+            writing=(lambda: set(writing())) if writing is not None else None,
+        )
         self.library_model = LibraryModel(
-            window.library_catalog, window.config_manager, window.watch, self
+            window.library_catalog,
+            window.config_manager,
+            window.watch,
+            self,
+            recordings=self.recordings,
+            jobs=window.jobs,  # a large section's lists are worked out off the GUI thread
+        )
+        # 2.8: TMDB fills in what the Library's titles lack (Settings turns it off).
+        self.tmdb = TmdbFill(
+            config=window.config_manager,
+            jobs=window.jobs,
+            cache_path=os.path.join(window.config_manager.get_config_dir(), "cache", "tmdb.json"),
+            parent=self,
         )
         self.library_controller = LibraryController(
             config=window.config_manager,
@@ -78,11 +104,17 @@ class TVPages(QObject):
             tune_live=self.tune_live,
             back_to_tv=self.back_to_tv,
             context_menu=self.context_menu,
+            tmdb=self.tmdb,
             parent=self,
         )
         self.library_controller.notice.connect(self.notify)
+        # 2.8: a Library genre's right-click hides it, as the TV list's groups.
+        self.library_controller.set_hiding(
+            lambda *args: window.controller.hide_group(*args),
+            lambda: window.parental is not None and window.parental.has_pin(),
+        )
         window.library_catalog.providerFailed.connect(self._on_provider_failed)
-        window.overlays.drawer.libraryRequested.connect(self.open_library)
+        window.overlays.drawer.libraryRequested.connect(self.open_from_list)
 
     # ---- pages --------------------------------------------------------------------------------
 
@@ -170,8 +202,19 @@ class TVPages(QObject):
         """
         if self._window.closing():
             return
+        self.recordings.refresh()  # read again: a recording made meanwhile shows (2.8)
         self._enter_library()
         self.library_controller.open(section)
+        self._guard_second_click()
+
+    def open_from_list(self, section: str) -> None:
+        """The channel list's Movies or Series row: the Library of the provider the list shows
+        (2.8; Ctrl/⌘+2, the menu and the list's Library button keep the Library's own)."""
+        if self._window.closing():
+            return
+        self.recordings.refresh()
+        self._enter_library()
+        self.library_controller.open_on(self._window.catalog.source(), section)
         self._guard_second_click()
 
     def open_search(self, query: str = "") -> None:
@@ -208,6 +251,9 @@ class TVPages(QObject):
         from_library = self.library_shown()  # the page switch ends the controller's Library state
         self._show_page(window.player_page)
         self._set_return_to_library(True)
+        if kind == "recording":  # a file of the Recordings folder (2.8)
+            window.controller.play_recording(item, bool((context or {}).get("start_over")))
+            return
         window.controller.play_vod(item, kind, context, from_library=from_library)
 
     def tune_live(self, channel: dict, group: Optional[tuple[str, list]] = None) -> None:
@@ -309,8 +355,49 @@ class TVPages(QObject):
     def context_menu(self, item: dict, section: str, global_pos: QPoint) -> None:
         """A right-click on a Library film or episode: Play in VLC/MPV or Copy stream link."""
         window = self._window
-        if not window.closing():
-            window.controller.show_library_menu(item, section, global_pos, window.library_page)
+        if window.closing():
+            return
+        if section == "recording":
+            self._recording_menu(item, global_pos)
+            return
+        if section == "scheduled":  # 2.8: a recording still to come
+            menu = QMenu(window.library_page)
+            item_id = str(item.get("_item_id") or "")
+            # i18n: a scheduled recording's right-click menu entry: it will not be recorded
+            menu.addAction(tr("Cancel Recording"), lambda: window.cancel_scheduled(item_id))
+            menu.popup(global_pos)
+            return
+        window.controller.show_library_menu(item, section, global_pos, window.library_page)
+
+    def _recording_menu(self, item: dict, global_pos: QPoint) -> None:
+        """A recording's right-click (2.8): its folder, or deleting its file (asked first)."""
+        path = str(item.get("path") or "")
+        if not path:
+            return
+        menu = QMenu(self._window.library_page)
+        # i18n: a recording's right-click menu entry: opens the folder that holds its file
+        menu.addAction(tr("Show in Folder"), lambda: self._show_in_folder(path))
+        # i18n: a recording's right-click menu entry: deletes its file (asks first)
+        delete = menu.addAction(tr("Delete Recording…"), lambda: self._delete_recording(item))
+        delete.setEnabled(not self.recordings.is_writing(path))  # one still written stays
+        menu.popup(global_pos)
+
+    def _show_in_folder(self, path: str) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
+
+    def _delete_recording(self, item: dict) -> None:
+        window = self._window
+        name = os.path.basename(str(item.get("path") or ""))
+        answer = QMessageBox.question(
+            window,
+            tr("Delete Recording"),  # i18n: the title of the question before a recording goes
+            # i18n: the question before deleting a recording's file ({name}: the file's name)
+            tr("Delete “{name}”? Its file is removed from the disk.", name=name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes and not window.closing():
+            self.recordings.delete(str(item.get("path") or ""))
 
     def open_file(self) -> None:
         """File → Open File…: a local media file plays as a movie."""

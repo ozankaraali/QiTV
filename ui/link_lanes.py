@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 
@@ -53,6 +53,12 @@ class Target:
     # `archive_until` (a past programme's end) when given; None: live.
     archive_at: Optional[float] = None
     archive_until: Optional[float] = None
+    # 2.8: the player's quality menu: a media server's version or conversion (its Quality),
+    # and where the title goes on from (ms) when its quality changed while it played.
+    quality: Any = None
+    start_ms: Optional[int] = None
+    # 2.8: a channel's size cap chosen in the ⚙ (lines; 0: its best; None: the one it keeps).
+    max_height: Optional[int] = None
 
     @property
     def live(self) -> bool:
@@ -68,6 +74,11 @@ class Target:
             return False
         # STB episodes share the season's cmd and id; the episode number tells them apart.
         return self.section != "series" or episode_key(self.item) == episode_key(other.item)
+
+
+def _quality(target: Target) -> dict:
+    """The link request's quality argument: only when the quality menu chose one (2.8)."""
+    return {"quality": target.quality} if target.quality is not None else {}
 
 
 @dataclass
@@ -124,7 +135,10 @@ class LinkLanes(QObject):
             self._inflight = None
         self.queued = None  # the target sent now is the newest choice
         request_id = self.catalog.request_link(
-            target.item, section=target.section, is_episode=target.section == "series"
+            target.item,
+            section=target.section,
+            is_episode=target.section == "series",
+            **_quality(target),
         )
         self._inflight = (request_id, target, self._generation)
 
@@ -200,7 +214,10 @@ class LinkLanes(QObject):
             request_id = self.catalog.request_archive_link(job.target.item, job.programme)
         else:
             request_id = self.catalog.request_link(
-                job.target.item, section=section, is_episode=section == "series"
+                job.target.item,
+                section=section,
+                is_episode=section == "series",
+                **_quality(job.target),
             )
         self._side = (request_id, job)
 

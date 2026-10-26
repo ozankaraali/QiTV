@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import os
 from types import SimpleNamespace
 import unittest
@@ -10,6 +10,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 
+from services import media_server as ms
 from services.catalog import (
     ALL_GROUP_ID,
     SECTION_UNAVAILABLE_MESSAGE,
@@ -70,6 +71,11 @@ class FakeProviders:
 
     def is_content_stale(self, ct):
         return ct in self.stale
+
+    other_identity = False  # the saved content is for other settings of the provider
+
+    def content_expired(self, ct):
+        return ct in self.stale and ct in self.current_provider_content and not self.other_identity
 
     def mark_content_fresh(self, ct):
         self.stale.discard(ct)
@@ -527,6 +533,96 @@ SIGNALS = (
     "linkReady",
     "linkFailed",
 )
+
+
+JELLY = {
+    "name": "Home server",
+    "type": "JELLYFIN",
+    "url": "http://server.test:8096",
+    "username": "me",
+    "token": "T",
+    "user_id": "U",
+    "device_id": "D",
+}
+MEDIA_FILMS = {
+    "categories": [{"id": "*", "title": "All"}, {"id": "L1", "title": "Movies"}],
+    "contents": [{"id": "f1", "name": "Salt Roads", "tv_genre_id": "L1", "cmd": ""}],
+    "sorted_channels": {"L1": [0]},
+}
+
+
+class MediaServerCatalogTests(unittest.TestCase):
+    """Jellyfin and Emby (2.8): films and series only, asked of the server's workers."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_a_server_has_films_and_series_and_no_channels(self):
+        for kind in ("JELLYFIN", "EMBY"):
+            service, *_ = make_service({**JELLY, "type": kind})
+            self.assertEqual(service.sections(), ["movies", "series"])
+            self.assertFalse(service.is_live("movies"))
+
+    def test_its_films_come_from_its_section_worker(self):
+        service, providers, factory, _ = make_service(dict(JELLY))
+        factory.results["media_section"] = {"result": MEDIA_FILMS}
+        ready = collect(service.sectionReady)
+        service.request_section("movies")
+        QCoreApplication.processEvents()
+        self.assertEqual(ready, [("movies",)])
+        name, args, _kwargs = factory.calls[-1]
+        self.assertEqual((name, args[0]["type"], args[1]), ("media_section", "JELLYFIN", "vod"))
+        self.assertEqual([i["name"] for i in service.items("movies", "L1")], ["Salt Roads"])
+
+    def test_a_series_seasons_carry_their_episodes(self):
+        service, _providers, factory, _ = make_service(dict(JELLY))
+        episodes = [{"id": "e1", "ename": "One", "cmd": ""}]
+        seasons = {
+            "seasons": [
+                {"id": "s1", "name": "Season 1", "season_number": "1", "episodes": episodes}
+            ]
+        }
+        factory.results["media_series"] = {"result": seasons}
+        ready = collect(service.seasonsReady)
+        series = {"id": "show", "name": "Show"}
+        service.request_seasons(series)
+        QCoreApplication.processEvents()
+        self.assertEqual(ready, [("show",)])
+        (season,) = service.seasons(series)
+        self.assertEqual(season["number"], "1")
+        self.assertEqual([e["ename"] for e in service.episodes(series, season)], ["One"])
+
+    def test_a_titles_stream_is_asked_with_the_settings_choices(self):
+        service, _providers, factory, _ = make_service(dict(JELLY))
+        service.config.media_4k_versions = "always"
+        service.screen_4k = lambda: True
+        factory.results["media_link"] = {
+            "result": {"link": "http://server.test:8096/Videos/f1/stream.mkv"}
+        }
+        links = collect(service.linkReady)
+        request = service.request_link({"id": "f1", "cmd": ""}, section="movies")
+        QCoreApplication.processEvents()
+        self.assertEqual(links, [(request, "http://server.test:8096/Videos/f1/stream.mkv")])
+        name, args, kwargs = factory.calls[-1]
+        self.assertEqual((name, args[1]), ("media_link", "f1"))
+        self.assertEqual(kwargs, {"screen_4k": True, "four_k": "always", "quality": None})
+
+    def test_a_titles_quality_is_asked_for_and_its_versions_kept(self):  # 2.8: the ⚙ menu
+        service, _providers, factory, _ = make_service(dict(JELLY))
+        versions = [{"id": "uhd", "height": 2160}, {"id": "hd", "height": 1080}]
+        chosen = ms.Quality(height=720, bitrate=4_000_000)
+        factory.results["media_link"] = {
+            "result": {"link": "http://s.test/m.m3u8", "versions": versions, "quality": chosen}
+        }
+        self.assertIsNone(service.media_menu({"id": "f1"}))  # nothing asked yet
+        service.request_link({"id": "f1", "cmd": ""}, section="movies", quality=chosen)
+        QCoreApplication.processEvents()
+        self.assertIs(factory.calls[-1][2]["quality"], chosen)
+        self.assertEqual(
+            service.media_menu({"id": "f1"}), {"versions": versions, "quality": chosen}
+        )
+        self.assertIsNone(service.media_menu({"id": "f2"}))
 
 
 class CatalogShutdownTests(unittest.TestCase):

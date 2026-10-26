@@ -37,6 +37,7 @@ from ui.overlays.drawer import (
     EMPTY_TEXT,
     FIND_LIBRARY_TEXT,
     FIND_TOOLTIP,
+    LIBRARY_ACTION,
     LOADING_TEXT,
     PAD_SIDE_U,
     PREVIEW_DEBOUNCE_MS,
@@ -383,6 +384,20 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.actions, [SEARCH_ACTION])
         self.assertEqual(self.library, [])
         self.assertTrue(self.drawer.isVisible())  # the shell opens the search
+
+    def test_the_header_opens_the_library_in_one_click(self):  # 2.8: no climb to the sections
+        self.drawer.open_drawer("1")
+        self.record_hand_offs()
+        d = self.drawer
+        library, search, crumb = d.library_rect(), d.search_rect(), d.breadcrumb_text_rect()
+        self.assertLess(library.right(), search.left())  # ▤ ⌕ ↻ ⚙
+        self.assertAlmostEqual(library.center().y(), crumb.center().y(), delta=1)
+        self.assertLessEqual(crumb.right(), library.left())  # the names never run under it
+        hit = d.header_hit_rect(library)
+        self.assertGreaterEqual(min(hit.width(), hit.height()), 28)
+        self.assertEqual(d.tooltip_at(library.center()), key_hint("Movies and series", "Ctrl+2"))
+        self.click(library.center())
+        self.assertEqual(self.actions, [LIBRARY_ACTION])
 
     def test_the_header_buttons_take_clicks_over_28_px(self):
         self.drawer.open_drawer("1")
@@ -1266,15 +1281,15 @@ class FindTests(unittest.TestCase):
             rows[:4],
             [
                 ("header", "Genres"),
-                ("found_genre", "TR: Spor"),  # the word itself first (services.find ranks)
-                ("found_genre", "Sports"),
+                ("found_genre", "Sports"),  # the provider's own first, as the phone's
+                ("found_genre", "TR: Spor"),  # then every provider's
                 ("header", "Channels"),
             ],
         )
         channels = [title for layer, title in rows if layer == "item"]
         self.assertEqual(len(channels), 201)  # 200 at most of a provider, then the other's
-        self.assertEqual(channels[0], "Harbor Spor 2")
-        self.assertEqual(channels[1], "Northwind Sport 1")
+        self.assertEqual(channels[0], "Northwind Sport 1")
+        self.assertEqual(channels[-1], "Harbor Spor 2")  # the word itself, but elsewhere
         library = FIND_LIBRARY_TEXT
         self.assertEqual(rows[-1], ("found_library", library))
         self.assertEqual(self.data("Sports", CountRole), "Home · 300 channels")
@@ -1282,8 +1297,25 @@ class FindTests(unittest.TestCase):
         self.assertEqual(self.data("Harbor Spor 2", ChannelRowsModel.ProviderRole), "Backup")
         self.assertEqual(self.data(library, IconRole), "search")
         self.assertEqual(self.drawer.focus_side, "right")
-        self.assertEqual(self.drawer.highlighted().title, "TR: Spor")
+        self.assertEqual(self.drawer.highlighted().title, "Sports")
         self.assertFalse(self.drawer.grab().isNull())
+
+    def test_the_open_groups_channels_come_first_then_the_providers(self):
+        """As the phone's find: the group open when the find began first, then its
+        provider's, then every provider's; each in the find's own ranking."""
+        self.nav.reset_to("live", "Sports")
+        self.drawer.open_drawer()
+        self.type("n")
+        channels = [title for layer, title in self.rows() if layer == "item"]
+        news = channels.index("Evening News")
+        self.assertGreater(news, 0)  # (the provider's list order puts the news first)
+        self.assertEqual(channels[:news], [f"Northwind Sport {n}" for n in range(1, news + 1)])
+        self.assertEqual(channels[news : news + 2], ["Evening News", "Morning News"])
+        self.nav.reset_to("live", "News")
+        self.drawer.open_drawer()
+        self.type("n")
+        channels = [title for layer, title in self.rows() if layer == "item"]
+        self.assertEqual(channels[:3], ["Evening News", "Morning News", "Northwind Sport 1"])
 
     def test_typing_with_the_focus_on_the_genres_finds_there_too(self):
         self.drawer.left()  # the genre column: no ← first, no filter of that column alone
@@ -1346,8 +1378,7 @@ class FindTests(unittest.TestCase):
 
     def test_a_found_genre_opens_as_if_walked_to_and_back_returns_to_it(self):
         self.type("spor")
-        self.drawer.move_by(1)
-        self.drawer.activate()  # Enter on "Sports" (after "TR: Spor")
+        self.drawer.activate()  # Enter on "Sports" (the provider's own, before "TR: Spor")
         self.assertEqual([n.key for n in self.nav.path], ["Home", "live", "Sports"])
         self.assertEqual(self.drawer.find_text, "")
         self.assertEqual(self.drawer._columns["left"].current.title, "Sports")

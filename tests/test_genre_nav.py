@@ -71,6 +71,17 @@ class GenreListTests(unittest.TestCase):
         )
         self.assertEqual(self.list.current_id(), "continue")
 
+    def test_a_right_click_on_a_genre_asks_for_its_menu(self):  # 2.8: parental Hide
+        asked = []
+        self.list.genreMenuRequested.connect(lambda gid, pos: asked.append(gid))
+        view = self.list._view
+        row = self.list._rows_by_id["comedy"]
+        point = view.visualRect(view.model().index(row, 0)).center()
+        view.customContextMenuRequested.emit(point)
+        header = view.visualRect(view.model().index(0, 0)).center()  # "PINNED": no genre
+        view.customContextMenuRequested.emit(header)
+        self.assertEqual(asked, ["comedy"])
+
     def test_the_same_genres_again_keep_the_list(self):
         # Every genre switch and sort sets the genres again: the list is not rebuilt for that.
         resets = []
@@ -304,6 +315,22 @@ class TopNavTests(unittest.TestCase):
         self.nav.show()  # made after its host showed: shown for the window's events
         host = self.host.windowHandle()
         QTest.mouseDClick(host, Qt.LeftButton, Qt.NoModifier, self.nav.mapTo(self.host, point))
+
+    def test_a_refresh_button_beside_the_source(self):  # 2.8: the Library's films and series
+        refreshes = []
+        self.nav.refreshRequested.connect(lambda: refreshes.append(True))
+        rects = self.nav._item_rects()
+        button = rects["refresh"]
+        self.assertGreater(button.left(), rects["source"].right())
+        self.assertLess(button.right(), rects["fullscreen"].left())
+        self.assertGreaterEqual(min(button.width(), button.height()), 28)
+        self.assertEqual(
+            self.nav.tooltip_at(button.center()),
+            key_hint("Refresh films and series", "Ctrl+Shift+R"),
+        )
+        QTest.mouseClick(self.nav, Qt.LeftButton, pos=button.center().toPoint())
+        self.assertEqual(refreshes, [True])
+        self.assertEqual((self.tabs, self.sources, self.searches), ([], [], []))
 
     def test_a_quick_second_click_on_fullscreen_asks_once(self):
         # 2.0.1: not into fullscreen and straight out again.

@@ -55,6 +55,11 @@ def debug_curl(url: str, params: dict, headers: dict, timeout: float, mode: str)
     return f'curl -sS -m {timeout} {flags} "{full_url}"'
 
 
+# 2.8: a slow portal (a tester's) timed pages out at ten at once and 5 s each: fewer at once,
+# more time and one more try (a page that still fails fails its genre, which can be retried).
+PAGES_AT_ONCE = 4
+
+
 class ContentLoader(QThread):
     content_loaded = Signal(dict)
     progress_updated = Signal(int, int)
@@ -74,8 +79,8 @@ class ContentLoader(QThread):
         size=0,
         action="get_ordered_list",
         sortby="name",
-        max_retries=2,
-        timeout=5,
+        max_retries=3,
+        timeout=15,
         verify_ssl=True,
     ):
         super().__init__()
@@ -102,13 +107,13 @@ class ContentLoader(QThread):
         the STB guide) when the window closes."""
         return self.isInterruptionRequested() or cancel_requested()
 
-    async def fetch_page(self, session, page, max_retries=2, timeout=5):
+    async def fetch_page(self, session, page, max_retries=3, timeout=15):
         for attempt in range(max_retries):
             if self._interrupted():
                 raise asyncio.CancelledError()
             try:
                 if attempt:
-                    logger.debug(f"Retrying page {page}...")
+                    logger.debug("Retrying page %s...", page)
                 params = self.get_params(page)
                 # For EPG debugging: a copy-paste-friendly curl with headers when enabled
                 mode = os.getenv("QITV_DEBUG_CURL")
@@ -123,12 +128,12 @@ class ContentLoader(QThread):
                 ) as response:
                     content = await response.read()
                     if response.status == 503 or not content:
-                        logger.warning(f"Received error or empty response fetching page {page}")
+                        logger.warning("Received error or empty response fetching page %s", page)
                         if attempt == max_retries - 1:
                             self.counter_page_not_fetched += 1
                             return [], 0, 0
                         wait_time = (2**attempt) + random.uniform(0, 1)
-                        logger.debug(f"Retrying in {wait_time:.2f} seconds...")
+                        logger.debug("Retrying in %.2f seconds...", wait_time)
                         await asyncio.sleep(wait_time)
                         continue
                     response.raise_for_status()
@@ -155,7 +160,7 @@ class ContentLoader(QThread):
                     self.counter_page_not_fetched += 1
                     return [], 0, 0
                 wait_time = (2**attempt) + random.uniform(0, 1)
-                logger.debug(f"Retrying in {wait_time:.2f} seconds...")
+                logger.debug("Retrying in %.2f seconds...", wait_time)
                 await asyncio.sleep(wait_time)
         return [], 0, 0
 
@@ -214,7 +219,7 @@ class ContentLoader(QThread):
         return params
 
     async def load_content(self):
-        semaphore = asyncio.Semaphore(10)  # Limit concurrent fetch_page calls
+        semaphore = asyncio.Semaphore(PAGES_AT_ONCE)  # Limit concurrent fetch_page calls
 
         connector = aiohttp.TCPConnector(ssl=self.verify_ssl)
         async with aiohttp.ClientSession(connector=connector) as session:

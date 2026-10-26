@@ -40,11 +40,13 @@ class KeptBuffers:
 
     Every player's stream slot shares one (`BudgetedStream.kept`): a stop parks its channel
     here (`put`), a start of a channel takes its own back (`take`). A memory buffer costs
-    memory as long as it is kept, so one is kept at most: the channel left last. Disk buffers
+    memory as long as it is kept, so one is kept at most: the channel left last (2.8: one
+    whose channel is tuned again at once, a new picture size, leaves the others). Disk buffers
     are all kept: their total is the user's disk amount, which the helper keeps them under.
     Letting one go closes its session at the engine; one the helper emptied (the disk amount,
-    the day's limit, its files gone) goes by itself once its state says so. What a later
-    helper took back after a restart comes in by itself too (`LiveEngine.keptFound`).
+    the day's limit, its files gone) goes by itself once its state says so, and so does one
+    a new helper could not take back (2.8, `LiveEngine.keptLost`). What a later helper took
+    back after a restart comes in by itself too (`LiveEngine.keptFound`).
     """
 
     def __init__(self, engine: Any) -> None:
@@ -60,6 +62,15 @@ class KeptBuffers:
         found = getattr(engine, "keptFound", None)
         if found is not None:
             found.connect(self._on_found)
+        lost = getattr(engine, "keptLost", None)
+        if lost is not None:
+            lost.connect(self._on_lost)
+
+    def _on_lost(self, sid: str) -> None:
+        """2.8: a new helper could not take it back: the engine forgot it already."""
+        for channel, ring in list(self._rings.items()):
+            if ring.sid == sid:
+                del self._rings[channel]
 
     def _on_found(self, sid: str, label: dict, where: dict) -> None:
         """A later helper took a kept disk buffer back (it survived a restart)."""
@@ -76,21 +87,32 @@ class KeptBuffers:
         if snapshot.get("oldest") is None and any(r.sid == sid for r in self._rings.values()):
             self.drop(sid)  # nothing of it is left
 
-    def put(self, ring: KeptRing) -> None:
+    def put(self, ring: KeptRing, *, coming_back: bool = False) -> None:
+        """Keep `ring`; `coming_back`: its channel is tuned again at once (it is taken back
+        next), so the memory ring kept before stays."""
         old = self._rings.pop(ring.channel, None)
         if old is not None and old.sid != ring.sid:
             self._engine.close_session(old.sid)
         if ring.disk and not self._disk:
             self._engine.close_session(ring.sid)  # the disk buffer is off now
             return
-        if not ring.disk:
+        if not ring.disk and not coming_back:
             for other in [r for r in self._rings.values() if not r.disk]:
                 self.drop(other.sid)
         self._rings[ring.channel] = ring
 
     def take(self, channel: str) -> Optional[KeptRing]:
-        """The channel's kept buffer, no longer kept here (its player takes it back)."""
-        return self._rings.pop(channel, None)
+        """The channel's kept buffer, no longer kept here (its player takes it back). A ring
+        put to come right back that another channel's start passed by leaves one memory ring
+        kept again: the channel left last."""
+        ring = self._rings.pop(channel, None)
+        for other in [r for r in self._rings.values() if not r.disk][:-1]:
+            self.drop(other.sid)
+        return ring
+
+    def let_go(self, ring: KeptRing) -> None:
+        """A ring taken that its player could not take back (2.8: its start raised): closed."""
+        self._engine.close_session(ring.sid)
 
     def drop(self, sid: str) -> None:
         """Let session `sid` go (it is closed)."""

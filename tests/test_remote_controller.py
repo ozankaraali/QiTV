@@ -8,12 +8,13 @@ import threading
 import unittest
 from unittest import mock
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtTest import QTest
 from test_tv_window import WindowCase, wait_until
 
 from services.remote.protocol import (
     Answered,
+    CastTo,
     Closed,
     Code,
     Get,
@@ -22,7 +23,9 @@ from services.remote.protocol import (
     Paired,
     Position,
     Press,
+    Query,
     RecAct,
+    RefreshLists,
     Status,
     StoreSaved,
     ToTv,
@@ -329,6 +332,17 @@ class PhoneQuestionTests(WindowCase):
         ask = self.ask()
         self.window.controller.phoneSettled.emit("s8")
         self.assertEqual(self.sent("unask"), [{"t": "unask", "id": ask["id"]}])
+        # A newer question (the TV's, another phone's) stands for it: nothing opens there,
+        # and the phone says so instead of "Opening on this phone…".
+        self.assertEqual(self.sent("play"), [{"t": "play", "failed": True, "why": "elsewhere"}])
+
+    def test_an_answered_question_closes_without_more(self):
+        ask = self.ask()
+        with mock.patch.object(self.window.controller, "answer_phone") as answer:
+            answer.side_effect = lambda yes: self.window.controller.phoneSettled.emit("s8")
+            self.window.remote.bridge.post(Answered("s8", ask["id"], True))
+            self.assertTrue(wait_until(lambda: answer.called))
+        self.assertEqual((self.sent("unask"), self.sent("play")), ([], []))
 
     def test_the_rec_line_goes_back_or_stops(self):
         self.connect()
@@ -343,12 +357,61 @@ class PhoneQuestionTests(WindowCase):
         back.assert_called_once_with("b1")
         stop.assert_called_once_with("b2")
 
+    def cast_controls(self):  # 2.8: one device found, nothing cast yet
+        controls = mock.Mock()
+        controls.menu_entries.return_value = [("This computer", "", True), ("Den", "Den", False)]
+        controls.device.return_value = None
+        return controls
+
+    def test_the_phone_lists_the_devices_to_cast_to(self):  # 2.8
+        self.connect()
+        controls = self.cast_controls()
+        with mock.patch.object(self.window.controller, "cast_controls", return_value=controls):
+            self.window.remote.bridge.post(Get("s8", "cast", "", 0))
+            self.assertTrue(wait_until(lambda: self.sent("cast")))
+        self.assertEqual(
+            self.sent("cast"), [{"t": "cast", "devices": [{"name": "Den", "on": False}], "on": ""}]
+        )
+
+    def test_the_phone_hears_when_casting_is_not_available(self):  # 2.8
+        self.connect()
+        controls = mock.Mock()
+        controls.menu_entries.return_value = [("Casting isn't available", None, False)]
+        controls.device.return_value = None
+        controls.available.return_value = False
+        with mock.patch.object(self.window.controller, "cast_controls", return_value=controls):
+            self.window.remote.bridge.post(Get("s8", "cast", "", 0))
+            self.assertTrue(wait_until(lambda: self.sent("cast")))
+        self.assertEqual(self.sent("cast"), [{"t": "cast", "devices": [], "on": "", "off": True}])
+
+    def test_the_phone_casts_and_stops_casting(self):  # 2.8
+        self.connect()
+        controls = self.cast_controls()
+        with mock.patch.object(self.window.controller, "cast_controls", return_value=controls):
+            self.window.remote.bridge.post(CastTo("s8", "Den"))
+            self.window.remote.bridge.post(CastTo("s8", ""))
+            self.assertTrue(wait_until(lambda: controls.stop.called))
+        controls.cast_to.assert_called_once_with("Den")
+        self.assertEqual(self.hub.broadcast.call_count, 2)  # every phone's list follows
+
+    def test_casting_that_fails_leaves_qitv_running(self):  # 2.8
+        self.connect()
+        controls = self.cast_controls()
+        controls.cast_to.side_effect = RuntimeError("no renderer")
+        with (
+            mock.patch.object(self.window.controller, "cast_controls", return_value=controls),
+            self.assertLogs("ui.remote_controller", "ERROR"),
+        ):
+            self.window.remote.bridge.post(CastTo("s8", "Den"))
+            self.assertTrue(wait_until(lambda: self.hub.broadcast.called))
+
     def test_watch_asks_on_that_phone(self):
         self.connect()
         asked_on = []
 
-        def play_elsewhere(launch, chosen=None, *, ask_on=None):
+        def play_elsewhere(launch, chosen=None, *, ask_on=None, recordings=False):
             asked_on.append(ask_on)
+            self.assertTrue(recordings)  # 2.8: the TV's recording goes to the phone too
             return True
 
         with mock.patch.object(
@@ -357,6 +420,88 @@ class PhoneQuestionTests(WindowCase):
             self.window.remote.bridge.post(WatchHere("s8"))
             self.assertTrue(wait_until(lambda: asked_on))
         self.assertEqual(asked_on, ["s8"])
+
+
+class FakeSearcher(QObject):
+    """The remote's SearchSession as the phones' own Search uses it."""
+
+    changed = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.query, self.hits, self.searching, self.asked = "", None, False, []
+
+    def set_query(self, text):
+        self.query, self.searching = text, True
+        self.asked.append(text)
+
+    def land(self, hits):
+        self.hits, self.searching = hits, False
+        self.changed.emit()
+
+    def clear(self):
+        self.query, self.hits, self.searching = "", None, False
+
+
+class QuietSearchTests(WindowCase):
+    """A phone's own Search (the TV's picture stays) answers that phone: two phones searching
+    at once each get what their own text finds, one after the other."""
+
+    def setUp(self):
+        super().setUp()
+        remote = self.window.remote
+        self.hub = mock.Mock()
+        remote.hub = self.hub
+        self.addCleanup(setattr, remote, "hub", None)
+        for sid in ("s1", "s2"):
+            remote._phones.add(sid)
+            self.addCleanup(remote._phones.discard, sid)
+        self.searcher = FakeSearcher()
+        self.searcher.changed.connect(remote._push_quiet_results)
+        remote._title_searcher = self.searcher
+        self.addCleanup(setattr, remote, "_title_searcher", None)
+
+    def answers(self, sid):
+        """The texts of the results `sid` received, and the titles of the last."""
+        sent = [c.args[1] for c in self.hub.send.call_args_list if c.args[0] == sid]
+        sent += [c.args[0] for c in self.hub.broadcast.call_args_list]
+        found = [m for m in sent if m["t"] == "results"]
+        titles = [i["title"] for g in found[-1]["groups"] for i in g["items"]] if found else []
+        return [m["q"] for m in found], titles
+
+    def hit(self, title):
+        return Hit("P", "movies", title, {"id": title, "name": title})
+
+    def test_two_phones_searching_at_once_each_get_their_own(self):
+        remote = self.window.remote
+        remote.bridge.post(Query("s1", "dune"))
+        remote.bridge.post(Query("s2", "alien"))
+        self.assertEqual(self.searcher.asked, ["dune", "alien"])
+        self.searcher.land([self.hit("Alien")])
+        self.assertEqual(self.answers("s2"), (["alien"], ["Alien"]))
+        self.assertEqual(self.answers("s1"), ([], []))  # not another phone's text
+        self.assertEqual(self.searcher.asked[-1], "dune")  # its turn now
+        self.searcher.land([self.hit("Dune")])
+        self.assertEqual(self.answers("s1"), (["dune"], ["Dune"]))
+        self.assertEqual(self.answers("s2"), (["alien"], ["Alien"]))
+
+    def test_a_phone_clearing_its_text_leaves_the_others_search(self):
+        remote = self.window.remote
+        remote.bridge.post(Query("s1", "dune"))
+        remote.bridge.post(Query("s2", ""))
+        self.assertEqual(self.answers("s2"), ([""], []))
+        self.assertEqual(self.answers("s1"), ([], []))
+        self.assertEqual(self.searcher.query, "dune")  # still searched for
+        self.searcher.land([self.hit("Dune")])
+        self.assertEqual(self.answers("s1"), (["dune"], ["Dune"]))
+
+    def test_a_phone_gone_is_searched_for_no_more(self):
+        remote = self.window.remote
+        remote.bridge.post(Query("s1", "dune"))
+        remote.bridge.post(Query("s2", "alien"))
+        remote.bridge.post(Closed("s1", "d1"))
+        self.searcher.land([self.hit("Alien")])
+        self.assertEqual(self.searcher.asked, ["dune", "alien"])
 
 
 class WatchHereTests(WindowCase):
@@ -442,6 +587,13 @@ class WatchHereTests(WindowCase):
         self.assertTrue(wait_until(self.plays))
         self.assertEqual(self.plays()[-1], {"t": "play", "failed": True})
 
+    def test_the_phones_refresh_loads_the_librarys_lists_again(self):  # 2.8
+        self.connect()
+        controller = self.window.screens.library_controller
+        with mock.patch.object(controller, "refresh_lists") as refresh:
+            self.window.remote.bridge.post(RefreshLists("s8"))
+            self.assertTrue(wait_until(lambda: refresh.called))
+
     def test_back_to_the_tv_tunes_what_the_phone_played(self):
         row = self.listed_row(1)
         self.hand_off("http://p.test/two.m3u8", handle=row["id"])
@@ -524,15 +676,52 @@ class WatchHereTests(WindowCase):
         self.hand_off("http://p.test/movie/u/p/7.mp4", handle=handle)
         key = self.window.controller.resume_key(self.window.controller.title_target(film, "movie"))
         with mock.patch.object(self.window.watch, "update_position") as update:
-            remote.bridge.post(Position("s8", 61000, 5400000))
+            remote.bridge.post(Position("s8", 61000, 5400000, self.plays()[-1]["p"]))
             self.assertTrue(wait_until(lambda: update.called))
         update.assert_called_once_with(key, 61000, 5400000)
+
+    def test_a_report_made_for_the_title_before_is_not_the_new_ones(self):
+        """The phone zapped to another film: a report of the first still on its way when the
+        second was handed over is the first one's (each play has its number), not kept."""
+        self.connect()
+        remote, controller = self.window.remote, self.window.controller
+        films = [
+            {"id": n, "name": f"Harbour {n}", "cmd": f"http://p.test/movie/u/p/{n}.mp4"}
+            for n in (7, 8)
+        ]
+        plays = []
+        for film in films:
+            handle = remote._library("s8").handles.issue("title", (film, "movie", None))
+            self.hand_off(film["cmd"], handle=handle)
+            plays.append(self.plays()[-1]["p"])
+        self.assertNotEqual(plays[0], plays[1])
+        second = controller.resume_key(controller.title_target(films[1], "movie"))
+        with mock.patch.object(self.window.watch, "update_position") as update:
+            remote.bridge.post(Position("s8", 61000, 5400000, plays[0]))
+            remote.bridge.post(Position("s8", 2000, 3600000, plays[1]))
+            self.assertTrue(wait_until(lambda: update.called))
+        update.assert_called_once_with(second, 2000, 3600000)
+
+    def test_a_page_from_before_play_numbers_keeps_its_positions(self):  # 2.8 review M6
+        """A page loaded before QiTV was updated says no play number: its reports are kept as
+        2.7 kept them (what plays now is the one it reports on)."""
+        self.connect()
+        remote, controller = self.window.remote, self.window.controller
+        film = {"id": 7, "name": "Harbour Lights", "cmd": "http://p.test/movie/u/p/7.mp4"}
+        handle = remote._library("s8").handles.issue("title", (film, "movie", None))
+        self.hand_off(film["cmd"], handle=handle)
+        key = controller.resume_key(controller.title_target(film, "movie"))
+        with mock.patch.object(self.window.watch, "update_position") as update:
+            remote.bridge.post(Position("s8", 1000, 3600000))
+            self.assertTrue(wait_until(lambda: update.called))
+        update.assert_called_once_with(key, 1000, 3600000)
 
     def test_a_channel_on_the_phone_keeps_no_position(self):
         self.connect()
         self.hand_off("http://p.test/news.m3u8")
+        play = self.plays()[-1]["p"]
         with mock.patch.object(self.window.watch, "update_position") as update:
-            self.window.remote.bridge.post(Position("s8", 61000, 5400000))
+            self.window.remote.bridge.post(Position("s8", 61000, 5400000, play))
             QTest.qWait(200)
         update.assert_not_called()
 
@@ -575,6 +764,7 @@ class WatchHereTests(WindowCase):
         self.assertEqual((sid, device, url), ("s8", "s8", "http://p.test/movie/u/p/7.mkv"))
         self.assertTrue(headers["User-Agent"])
         self.assertIs(verify, True)
+        self.assertIsInstance(message.pop("p"), int)  # its reports carry it back
         self.assertEqual(message, {"t": "play", "name": "Harbour Lights", "start": 61})
 
     def test_an_mkv_film_for_a_phone_through_the_relay(self):
@@ -588,6 +778,71 @@ class WatchHereTests(WindowCase):
         self.hand_off("http://p.test/movie/u/p/7.mkv", handle=handle)
         self.hub.open_film.assert_not_called()
         self.assertEqual(self.plays()[-1], {"t": "play", "failed": True, "why": "relay"})
+
+    RECORDING = {
+        "id": "recording:Harbour News 2026-10-26 20.00.ts",
+        "name": "Harbour News",
+        "path": "/r/Harbour News 2026-10-26 20.00.ts",
+        "_recording": True,
+    }
+
+    def hand_recording(self):
+        remote = self.window.remote
+        item = dict(self.RECORDING)
+        handle = remote._library("s8").handles.issue("title", (item, "recording", None))
+        self.hand_off(Path(item["path"]).as_uri(), handle=handle)
+        return item
+
+    def test_a_recording_goes_through_qitvs_home_door(self):
+        """2.8: Safari plays a recording's MPEG-TS as HLS: QiTV's home door hands it to the
+        phone from the disk (services/remote/recorded.py), from where it stopped."""
+        self.connect()
+        watch = self.window.watch
+        with mock.patch.object(watch, "resume_position", return_value=61_000) as resume:
+            item = self.hand_recording()
+        resume.assert_called_with(item["id"])
+        self.assertEqual(self.plays(), [])
+        message = self.hub.open_recording.call_args.args[3]
+        self.assertIsInstance(message.pop("p"), int)
+        self.hub.open_recording.assert_called_once_with(
+            "s8",
+            "s8",
+            item["path"],
+            {"t": "play", "name": "Harbour News", "start": 61},
+            writing=mock.ANY,
+        )
+        writing = self.hub.open_recording.call_args.kwargs["writing"]
+        self.assertFalse(writing())  # 2.8 final review 8: the TV says whether it is written
+        engine = mock.Mock(writing=frozenset({item["path"]}))
+        with mock.patch.object(self.window, "engine", engine):
+            self.assertTrue(writing())
+
+    def test_a_recording_for_a_phone_through_the_relay(self):
+        self.connect()
+        remote = self.window.remote
+        remote.bridge.post(Opened("s8", "d1", "relay"))
+        self.assertTrue(wait_until(lambda: "s8" in remote._relayed))
+        self.hand_recording()
+        self.hub.open_recording.assert_not_called()
+        self.assertEqual(self.plays()[-1], {"t": "play", "failed": True, "why": "rec_relay"})
+
+    def test_how_far_the_phone_got_in_a_recording_is_kept_for_the_tv(self):
+        self.connect()
+        item = self.hand_recording()
+        play = self.hub.open_recording.call_args.args[3]["p"]
+        with mock.patch.object(self.window.watch, "update_position") as update:
+            self.window.remote.bridge.post(Position("s8", 61000, 5400000, play))
+            self.assertTrue(wait_until(lambda: update.called))
+        update.assert_called_once_with(item["id"], 61000, 5400000)
+
+    def test_a_recording_handed_back_plays_on_the_tv(self):
+        self.connect()
+        item = self.hand_recording()
+        with mock.patch.object(self.window.controller, "play_recording") as play_recording:
+            self.window.remote.bridge.post(ToTv("s8"))
+            self.assertTrue(wait_until(lambda: play_recording.called))
+        play_recording.assert_called_once_with(item)
+        self.hub.forget_film.assert_called_with("s8")
 
     def test_a_phone_at_the_home_door_gets_its_films_there(self):
         self.connect()
