@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 from typing import Optional
 import unittest
 from unittest import mock
@@ -2593,6 +2594,33 @@ class OptionsDialogTests(WindowCase):
             dialog.save_settings()
         refresh_epg.assert_called_once_with(force=True)
         set_current_epg.assert_not_called()  # never on the GUI thread
+
+
+class DiskAmountSettingTests(unittest.TestCase):
+    def window(self, enabled):
+        self.amounts, self.dropped = [], []
+        config = SimpleNamespace(
+            save_config=lambda: None, timeshift_enabled=enabled, timeshift_max_mib=512
+        )
+        engine = SimpleNamespace(
+            set_disk_amount=self.amounts.append, drop_kept=lambda: self.dropped.append(True)
+        )
+        return SimpleNamespace(
+            config_manager=config,
+            controller=SimpleNamespace(settings_saved=lambda: None),
+            kept=None,
+            engine=engine,
+            remote=SimpleNamespace(apply_config=lambda: None),
+        )
+
+    def test_a_saved_disk_amount_reaches_the_helper_at_once(self):
+        # 2.8 (review of 2.6): a lowered amount applied only at the next disk open.
+        TVWindow.save_config(self.window(enabled=True))
+        self.assertEqual(self.amounts, [512 * 1024 * 1024])
+
+    def test_with_the_disk_buffer_off_no_amount_is_sent(self):
+        TVWindow.save_config(self.window(enabled=False))
+        self.assertEqual(self.amounts, [])
 
 
 class QtPlatformTests(unittest.TestCase):

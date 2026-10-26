@@ -44,8 +44,9 @@ class KeptBuffers:
     whose channel is tuned again at once, a new picture size, leaves the others). Disk buffers
     are all kept: their total is the user's disk amount, which the helper keeps them under.
     Letting one go closes its session at the engine; one the helper emptied (the disk amount,
-    the day's limit, its files gone) goes by itself once its state says so. What a later
-    helper took back after a restart comes in by itself too (`LiveEngine.keptFound`).
+    the day's limit, its files gone) goes by itself once its state says so, and so does one
+    a new helper could not take back (2.8, `LiveEngine.keptLost`). What a later helper took
+    back after a restart comes in by itself too (`LiveEngine.keptFound`).
     """
 
     def __init__(self, engine: Any) -> None:
@@ -61,6 +62,15 @@ class KeptBuffers:
         found = getattr(engine, "keptFound", None)
         if found is not None:
             found.connect(self._on_found)
+        lost = getattr(engine, "keptLost", None)
+        if lost is not None:
+            lost.connect(self._on_lost)
+
+    def _on_lost(self, sid: str) -> None:
+        """2.8: a new helper could not take it back: the engine forgot it already."""
+        for channel, ring in list(self._rings.items()):
+            if ring.sid == sid:
+                del self._rings[channel]
 
     def _on_found(self, sid: str, label: dict, where: dict) -> None:
         """A later helper took a kept disk buffer back (it survived a restart)."""

@@ -1653,6 +1653,11 @@ class TVWindow(QMainWindow):
             self.kept.set_disk(self.config_manager.timeshift_enabled)
             if self.engine is not None and not self.config_manager.timeshift_enabled:
                 self.engine.drop_kept()
+        if self.engine is not None and self.config_manager.timeshift_enabled:
+            # 2.8: the disk amount applies to the disk buffers at once (a kept one gives way
+            # first), not only from the next disk open.
+            mib = int(self.config_manager.timeshift_max_mib)
+            self.engine.set_disk_amount(mib * 1024 * 1024)
         self.remote.apply_config()
 
     def set_provider(self, force_update: bool = False) -> None:
