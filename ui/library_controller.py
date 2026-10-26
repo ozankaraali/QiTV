@@ -726,6 +726,8 @@ class LibraryController(QObject):
     ) -> None:
         if kind == "recording":  # a file of the disk: no provider to wait for (2.8)
             self._play(item, "recording", _context(start_over=start_over))
+        elif kind == "scheduled":  # 2.8: still to come: when, and on which channel
+            self.notice.emit(str(item.get("description") or ""))
         elif kind == "series":
             self._request(provider, lambda: self._open_series(item, provider, back="browse"))
         elif kind == "episode":  # Continue in Series: no series dict, so no autoplay
@@ -761,9 +763,9 @@ class LibraryController(QObject):
         if item is None:
             return
         kind = self._model.item_kind(item)
-        if kind == "recording":  # its own menu (Show in folder, Delete), no provider's (2.8)
+        if kind in ("recording", "scheduled"):  # its own menu, no provider's (2.8)
             if self._context_menu is not None:
-                self._context_menu(item, "recording", global_pos)
+                self._context_menu(item, kind, global_pos)
         elif kind != "series":  # a series plays nothing: its episodes have the menu
             section = "series" if kind == "episode" else "movies"
             self._menu(item, section, provider_of(item) or self._browse_provider(), global_pos)

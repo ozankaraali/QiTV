@@ -153,6 +153,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>←</kbd> / <kbd>→</kbd> | Earlier / later |
 | <kbd>0–9</kbd> | Jump to a channel number |
 | <kbd>Enter</kbd> | Watch the channel; a past programme from its start |
+| <kbd>R</kbd> | Record the programme at its time, or cancel its recording |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>F</kbd> / <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>G</kbd> / <kbd>Esc</kbd> | Close the guide |

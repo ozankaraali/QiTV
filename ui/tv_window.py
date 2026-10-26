@@ -72,6 +72,7 @@ from services.casting import CastDevices, LibVlcDiscovery
 from services.catalogs import Catalogs
 from services.catchup_memory import FILE_NAME as CATCHUP_FILE, CatchupMemory
 from services.connection_budget import ConnectionBudget
+from services.epg_view import Programme
 from services.find import Preferences, preferences_for
 from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
@@ -93,6 +94,7 @@ from services.playback import (
 )
 from services.provider_link import ProviderLink
 from services.provider_types import is_media_server
+from services.recording_schedule import FILE_NAME as SCHEDULE_FILE, Schedule
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
@@ -124,6 +126,7 @@ from ui.overlays.guide import Guide
 from ui.overlays.layout_row import LayoutRow
 from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
+from ui.overlays.painting import fmt_clock
 from ui.overlays.pip_label import PipLabel
 from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import RecSign
@@ -140,11 +143,12 @@ from ui.overlays.zap_banner import ZapBanner
 from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
+from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
 from ui.settings_dialog import OptionsDialog
 from ui.subtitle_search import OnlineSetup
 from ui.track_controls import SUBTITLE_FILTER
-from ui.tv_controller import ERROR_MS, Overlays, TVController
+from ui.tv_controller import ERROR_MS, INFO_MS, Overlays, TVController
 from ui.tv_menus import TVMenus
 from ui.tv_pages import TVPages
 from ui.video_surface import VideoSurface
@@ -521,6 +525,11 @@ class TVWindow(QMainWindow):
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
         self.corner_controls = CornerControls(host)
+        # 2.8: the recordings scheduled from the guide (a small file beside the config).
+        self.recording_schedule = Schedule(
+            os.path.join(config_manager.get_config_dir(), SCHEDULE_FILE)
+        )
+        self.scheduler: Optional[RecordingScheduler] = None
         self.overlays = Overlays(
             banner=ZapBanner(host),
             column=ChannelColumn(self.logos, now_provider, parent=host),
@@ -534,6 +543,8 @@ class TVWindow(QMainWindow):
                 parent=host,
                 archive_days=archive_days,
                 archive_reach=archive_reach,
+                # 2.8: QiTV records programmes at their time (with the time-shift helper)
+                scheduled=self._programme_scheduled if self._instance is not None else None,
             ),
             next_card=NextCard(host),
             welcome=WelcomeCard(host),
@@ -677,6 +688,20 @@ class TVWindow(QMainWindow):
         # settles the provider change before a Library play waiting for it runs.
         controller.wire()
         self.screens = TVPages(self, self)  # the Library's controller and the page moves
+        if self.engine is not None:  # 2.8: scheduled recordings, by the time-shift helper
+            self.scheduler = RecordingScheduler(
+                schedule=self.recording_schedule,
+                engine=self.engine,
+                catalogs=self.catalogs,
+                budget=self.budget,
+                config=config_manager,
+                toast=lambda text, kind="info", ms=INFO_MS: self.screens.notify(text, kind, ms),
+                parent=self,
+            )
+            self.scheduler.changed.connect(self._schedule_changed)
+            controller.extra_guides = self.scheduler.providers
+        self.overlays.guide.recordRequested.connect(self._schedule_programme)
+        self.overlays.guide.recordCancelled.connect(self._cancel_programme)
         self.library_controller = self.screens.library_controller
         self.exports = ExportFlow(
             catalog=self.catalog,
@@ -775,6 +800,62 @@ class TVWindow(QMainWindow):
         source.wheelSteps.connect(controller.wheel)
         source.backPressed.connect(controller.mouse_back)
         source.forwardPressed.connect(controller.mouse_forward)
+
+    # ---- scheduled recordings (2.8) -----------------------------------------------------------
+
+    def _programme_scheduled(self, channel: dict, programme: Programme) -> bool:
+        return self.recording_schedule.is_scheduled(channel, programme)
+
+    def _schedule_programme(self, channel: dict, programme: Programme, series: bool) -> None:
+        """The guide's Record (or Record series, R): QiTV records it at its time."""
+        schedule = self.recording_schedule
+        name = str(channel.get("name") or "")
+        if series:
+            schedule.add_series(channel, programme.title)
+            # i18n: a toast: every airing of the programme on the channel will be recorded
+            text = tr(
+                "Every “{title}” on {channel} will be recorded.",
+                title=programme.title,
+                channel=name,
+            )
+        else:
+            schedule.add_once(channel, programme)
+            when = fmt_clock(programme.start.astimezone())
+            # i18n: a toast: the programme will be recorded at its time ({time}: its start)
+            text = tr("“{title}” will be recorded at {time}.", title=programme.title, time=when)
+        self.screens.notify(text)
+        self.controller.update_guides()
+        self._schedule_changed()
+        if self.scheduler is not None:
+            self.scheduler.tick()  # one on now starts at once
+
+    def _cancel_programme(self, channel: dict, programme: Programme) -> None:
+        item = self.recording_schedule.scheduled_item(channel, programme)
+        if item is not None:
+            self.cancel_scheduled(str(item.get("id") or ""))
+
+    def cancel_scheduled(self, item_id: str) -> None:
+        """A scheduled recording is cancelled (the guide's, the Library's right-click)."""
+        if self.scheduler is not None:
+            self.scheduler.cancel(item_id)
+        else:
+            self.recording_schedule.cancel(item_id)
+        # i18n: a toast: a scheduled recording was cancelled
+        self.screens.notify(tr("Recording cancelled."))
+        self._schedule_changed()
+
+    def _schedule_changed(self) -> None:
+        """The guide's dots, the Library's Recordings shelf and the guides in use follow."""
+        if self._closing:
+            return
+        self.overlays.guide.update()
+        self.screens.recordings.set_scheduled(self.recording_schedule.items())
+        self.screens.recordings.refresh()  # a recording that ended is a file now
+        self.controller.update_guides()
+
+    def _stop_scheduler(self) -> None:
+        if self.scheduler is not None:
+            self.scheduler.shutdown()
 
     @staticmethod
     def _screen_is_4k() -> bool:
@@ -1537,6 +1618,9 @@ class TVWindow(QMainWindow):
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         self.controller.start()
         self.epg_refresh.start()
+        if self.scheduler is not None:
+            self.scheduler.start()  # what was missed meanwhile is said; then the schedule
+            self._schedule_changed()
         if self.config_manager.save_failed():  # e.g. the defaults patched in at start
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
 
@@ -1761,6 +1845,8 @@ class TVWindow(QMainWindow):
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
             ("stop the channel list's find", self.finder.shutdown),
+            # 2.8: before the helper goes, so they keep what they recorded
+            ("stop the scheduled recordings", self._stop_scheduler),
             ("stop the live pipeline", self.stop_live),
             ("stop the catalogs", self.catalogs.shutdown),  # and cancel their running jobs
             ("cancel the Library's jobs", self.jobs.cancel_all),  # its searches

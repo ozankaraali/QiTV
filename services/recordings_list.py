@@ -29,6 +29,34 @@ _NAMED = re.compile(r"^(?P<channel>.+) (?P<when>\d{4}-\d{2}-\d{2} \d{2}\.\d{2})(
 DESCRIPTION = N_("Recorded {when} · {size}")
 # i18n: the Library's genre line for a recording (what QiTV recorded from a channel)
 GENRE = N_("Recording")
+# i18n: a scheduled recording's genre line in the Library (it is still to come)
+SCHEDULED_GENRE = N_("Scheduled")
+# i18n: a scheduled recording's details in the Library ({when}: its time, {channel}: its channel)
+SCHEDULED_ONCE = N_("Records {when} on {channel}")
+# i18n: a series recording's details in the Library: every airing of it on the channel
+SCHEDULED_SERIES = N_("Records every airing on {channel}")
+SCHEDULED_PREFIX = "scheduled:"
+
+
+def scheduled_item(entry: dict) -> dict[str, Any]:
+    """A scheduled recording (services.recording_schedule's item) as a Library title: shown
+    first, not playable (its right-click cancels it)."""
+    channel = str((entry.get("channel") or {}).get("name") or "")
+    start = float(entry.get("start") or entry.get("created") or 0)
+    if entry.get("kind") == "series":
+        description = translate(SCHEDULED_SERIES, channel=channel)
+    else:
+        when = datetime.fromtimestamp(start).strftime("%Y-%m-%d %H:%M") if start else ""
+        description = translate(SCHEDULED_ONCE, when=when, channel=channel)
+    return {
+        "id": SCHEDULED_PREFIX + str(entry.get("id") or ""),
+        "name": str(entry.get("title") or ""),
+        "added": str(int(start)),
+        "genre": translate(SCHEDULED_GENRE),
+        "description": description,
+        "_scheduled": True,
+        "_item_id": str(entry.get("id") or ""),
+    }
 
 
 def parse_name(file_name: str) -> tuple[str, Optional[datetime]]:
@@ -116,10 +144,14 @@ class RecordingsList(QObject):
         config: Any,
         writing: Optional[Callable[[], set[str]]] = None,
         parent: Optional[QObject] = None,
+        titles: Optional[Callable[[str], str]] = None,
     ) -> None:
+        """`titles(path)` (2.8): the programme a scheduled recording's file holds ("": none)."""
         super().__init__(parent)
         self._config = config
         self._writing = writing or (lambda: set())
+        self._titles = titles or (lambda path: "")
+        self._scheduled: list[dict[str, Any]] = []  # 2.8: still to come, listed first
         self._items: list[dict[str, Any]] = []
         self._signature: Optional[tuple] = None
         self._reading = False
@@ -129,7 +161,20 @@ class RecordingsList(QObject):
         self._deleted.connect(self.refresh)
 
     def items(self) -> list[dict[str, Any]]:
-        return list(self._items)
+        return self._scheduled + self._items
+
+    def set_scheduled(self, entries: list[dict]) -> None:
+        """The schedule's items (2.8), listed before the recordings, soonest first."""
+        ordered = sorted(
+            entries,
+            key=lambda e: (
+                e.get("kind") == "series",
+                float(e.get("start") or e.get("created") or 0),
+            ),
+        )
+        self._scheduled = [scheduled_item(entry) for entry in ordered]
+        self.version += 1
+        self.changed.emit()
 
     def delete(self, path: str) -> None:
         """Delete the recording at `path` (on a thread of its own), then read the folder again.
@@ -181,6 +226,11 @@ class RecordingsList(QObject):
         self._reading = False
         if items is not None and signature != self._signature:
             self._signature = signature
+            for item in items:  # 2.8: a scheduled recording is named by its programme
+                title = self._titles(item.get("path", ""))
+                if title and title != item["name"]:
+                    item["description"] = f"{item['name']} · {item['description']}"
+                    item["name"] = title
             self._items = items
             self.version += 1
             self.changed.emit()

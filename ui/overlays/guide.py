@@ -71,6 +71,14 @@ TIME_DETAIL_U = 8.0  # boxes at least this wide show their time under the title
 NO_INFO_TEXT = N_("No programme information")  # i18n: a channel's guide is empty
 # i18n: the guide's button: a past programme from the provider's archive, from its beginning
 WATCH_TEXT = N_("Watch from the start")
+# 2.8: the footer's recording buttons for a programme still to come (or on now)
+# i18n: the guide's footer button: record this programme (QiTV records it at its time)
+RECORD_TEXT = N_("Record")
+# i18n: the guide's footer button: record every airing of this programme on this channel
+SERIES_TEXT = N_("Record series")
+# i18n: the guide's footer button: the programme is scheduled; this cancels its recording
+CANCEL_TEXT = N_("Cancel recording")
+RECORD_KEY = "R"
 BUTTON_U = 2.2  # the header's buttons: 28 px at the default 1280 px window
 BUTTON_GAP_U = 0.6
 # The header's buttons, left to right: what they do and their key (ui.keymap.SHORTCUTS);
@@ -213,6 +221,9 @@ class Guide(Overlay):
     searchRequested = Signal()  # the header's ⌕
     fullscreenRequested = Signal()  # the header's ⛶
     rowsMoved = Signal()  # other rows are on screen now (opened, scrolled)
+    # 2.8: (channel dict, Programme, series): record it at its time (every airing: series)
+    recordRequested = Signal(object, object, bool)
+    recordCancelled = Signal(object, object)  # (channel dict, Programme): no longer
 
     def __init__(
         self,
@@ -222,10 +233,12 @@ class Guide(Overlay):
         parent: QWidget | None = None,
         archive_days: Callable[[dict], int] = lambda channel: 0,
         archive_reach: Callable[[dict], timedelta] | None = None,
+        scheduled: Callable[[dict, Programme], bool] | None = None,
     ) -> None:
         """`archive_days(channel)`: the days of the channel's archive that may play now (0:
         none); `archive_reach(channel)` (2.7): how far back its past programmes play, its
-        own server window's included (`archive_days` when not given)."""
+        own server window's included (`archive_days` when not given). `scheduled(channel,
+        programme)` (2.8): whether it is to be recorded; None: the guide records nothing."""
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
@@ -242,6 +255,8 @@ class Guide(Overlay):
         )
         self._back = timedelta(0)  # how far back the window goes (the deepest archive listed)
         self._picked: tuple[int, Programme] | None = None  # a past programme clicked on
+        self._scheduled = scheduled
+        self._upcoming: tuple[int, Programme] | None = None  # 2.8: one to come, clicked on
         self._window_start = slot_start(now())
         self._cache: dict[_Key, list[Programme]] = {}
         self._failed: set[_Key] = set()  # lookups that raised: logged once, retried
@@ -269,7 +284,7 @@ class Guide(Overlay):
         )
         self._current = min(max(current, 0), len(self._channels) - 1)
         self._window_start = slot_start(self._now())
-        self._picked = None
+        self._picked = self._upcoming = None
         deepest = max((_archive_depth(c) for c in self._channels), default=0)
         windows = max((self._archive_reach(c) for c in self._channels), default=timedelta(0))
         self._back = min(MAX_BACK, max(timedelta(days=deepest), windows))
@@ -309,7 +324,7 @@ class Guide(Overlay):
         target = self._shifted(delta)
         if target != self._window_start:
             self._window_start = target
-            self._picked = None
+            self._picked = self._upcoming = None
             self._forget_lookups()
             self.update()
 
@@ -344,9 +359,15 @@ class Guide(Overlay):
             if rect.contains(point):
                 what, keys = HEADER_BUTTONS[name]
                 return key_hint(translate(what), keys)
-        if self.watch_button().contains(point):
-            what = translate(WATCH_TEXT)
-            return key_hint(what, "Return") if self.chosen() is not None else what
+        for name, rect in self.footer_buttons().items():
+            if not rect.contains(point):
+                continue
+            if name == "watch":
+                what = translate(WATCH_TEXT)
+                return key_hint(what, "Return") if self.chosen() is not None else what
+            if name == "series":
+                return translate(SERIES_TEXT)
+            return key_hint(translate(RECORD_TEXT if name == "record" else CANCEL_TEXT), RECORD_KEY)
         return ""
 
     def activate(self) -> None:
@@ -400,27 +421,91 @@ class Guide(Overlay):
         chosen = self.chosen()
         if chosen is not None:
             return chosen, True
-        if self.current_channel() is None:
+        channel = self.current_channel()
+        if channel is None:
             return None, False
         now = self._now().astimezone()
-        programme = footer_programme(self._programmes_for(self._current), now)
+        upcoming = self._upcoming
+        if upcoming is not None and upcoming[0] == self._current and upcoming[1].stop > now:
+            programme: Programme | None = upcoming[1]  # 2.8: one to come, clicked on
+        else:
+            programme = footer_programme(self._programmes_for(self._current), now)
         on_now = programme is not None and programme.is_on(now)
-        return programme, on_now and self._playable(programme, self.current_channel())
+        return programme, on_now and self._playable(programme, channel)
+
+    def record_target(self) -> Programme | None:
+        """2.8: the footer's programme when it can be recorded (on now or still to come)."""
+        if self._scheduled is None or self.current_channel() is None:
+            return None
+        programme = self._footer_choice()[0]
+        if programme is None or programme.stop <= self._now().astimezone():
+            return None
+        return programme
+
+    def _target_scheduled(self, programme: Programme) -> bool:
+        channel = self.current_channel()
+        return bool(channel is not None and self._scheduled and self._scheduled(channel, programme))
+
+    def footer_buttons(self) -> dict[str, QRectF]:
+        """The footer's buttons, right to left: Record and Record series (or Cancel recording
+        for a scheduled one, 2.8), then "▶ Watch from the start"; only those that show."""
+        if self.isHidden() or self.current_channel() is None:
+            return {}
+        layout = self._layout()
+        units, footer = layout.units, layout.footer
+        u = units.u
+        names: list[str] = []
+        target = self.record_target()
+        if target is not None:
+            names += ["cancel"] if self._target_scheduled(target) else ["record", "series"]
+        if self._footer_choice()[1]:
+            names.append("watch")
+        fm = QFontMetrics(units.font(1.05, QFont.Weight.DemiBold))
+        height = max(2.6 * u, fm.height() + 0.8 * u)
+        right = footer.right() - SIDE_U * u
+        rects: dict[str, QRectF] = {}
+        for name in names:
+            width = fm.horizontalAdvance(self._button_text(name)) + 2.4 * u
+            rects[name] = QRectF(right - width, footer.center().y() - height / 2, width, height)
+            right -= width + 0.8 * u
+        return rects
+
+    @staticmethod
+    def _button_text(name: str) -> str:
+        return {
+            "watch": "▶  " + translate(WATCH_TEXT),
+            "record": "●  " + translate(RECORD_TEXT),
+            "series": translate(SERIES_TEXT),
+            "cancel": translate(CANCEL_TEXT),
+        }[name]
 
     def watch_button(self) -> QRectF:
         """The footer's "▶ Watch from the start" (empty when it doesn't show)."""
-        if self.isHidden() or not self._footer_choice()[1]:
-            return QRectF()
-        return self._watch_rect(self._layout())
+        return self.footer_buttons().get("watch", QRectF())
 
-    def _watch_rect(self, layout: _Layout) -> QRectF:
-        units, footer = layout.units, layout.footer
-        u = units.u
-        fm = QFontMetrics(units.font(1.05, QFont.Weight.DemiBold))
-        width = fm.horizontalAdvance("▶  " + translate(WATCH_TEXT)) + 2.4 * u
-        height = max(2.6 * u, fm.height() + 0.8 * u)
-        right = footer.right() - SIDE_U * u
-        return QRectF(right - width, footer.center().y() - height / 2, width, height)
+    def record_key(self) -> bool:
+        """R in the guide (2.8): the footer's programme is recorded at its time, or its
+        recording cancelled. False when there is none to record."""
+        channel, programme = self.current_channel(), self.record_target()
+        if channel is None or programme is None:
+            return False
+        if self._target_scheduled(programme):
+            self.recordCancelled.emit(channel, programme)
+        else:
+            self.recordRequested.emit(channel, programme, False)
+        self.update()
+        return True
+
+    def _press_footer(self, name: str) -> None:
+        channel, programme = self.current_channel(), self.record_target()
+        if name == "watch":
+            self._watch_chosen()
+        elif channel is not None and programme is not None:
+            if name == "cancel":
+                self.recordCancelled.emit(channel, programme)
+            else:
+                self.recordRequested.emit(channel, programme, name == "series")
+            self.update()
 
     def _watch_chosen(self) -> None:
         """The footer's button: its programme from the start."""
@@ -432,7 +517,7 @@ class Guide(Overlay):
     def _pick_at(self, row: int, x: float) -> None:
         """A click on `row` at `x`: a past programme there (within the archive) is chosen."""
         layout = self._layout()
-        picked = None
+        picked = upcoming = None
         if layout.times.left() <= x <= layout.times.right():
             spans = programme_spans(
                 self._programmes_for(row),
@@ -442,13 +527,16 @@ class Guide(Overlay):
                 MIN_BOX_U * layout.units.u,
             )
             for span in spans:
+                if not span.x <= x < span.x + span.width:
+                    continue
                 ended = span.programme.stop <= self._now().astimezone()
-                if span.x <= x < span.x + span.width and ended:
-                    if self._playable(span.programme, self._channels[row]):
-                        picked = (row, span.programme)
-                    break
-        if picked != self._picked:
-            self._picked = picked
+                if ended and self._playable(span.programme, self._channels[row]):
+                    picked = (row, span.programme)
+                elif not ended:
+                    upcoming = (row, span.programme)  # 2.8: the footer can record it
+                break
+        if (picked, upcoming) != (self._picked, self._upcoming):
+            self._picked, self._upcoming = picked, upcoming
             self.update()
 
     def escape(self) -> bool:
@@ -474,7 +562,7 @@ class Guide(Overlay):
         if row != self._current:
             old, top = self._current, self._top
             self._current = row
-            self._picked = None
+            self._picked = self._upcoming = None
             self._ensure_visible()
             if self._top != top:
                 self.update()  # the rows scrolled
@@ -588,10 +676,14 @@ class Guide(Overlay):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             button = self._button_at(event)
+            footer = next(
+                (n for n, r in self.footer_buttons().items() if r.contains(event.position())),
+                None,
+            )
             if button is not None:
                 self._press_button(button)
-            elif self.watch_button().contains(event.position()):
-                self._watch_chosen()
+            elif footer is not None:
+                self._press_footer(footer)
             else:
                 self._select_at(event)
         event.accept()
@@ -601,8 +693,8 @@ class Guide(Overlay):
             button = self._button_at(event)
             if button in ("earlier", "later"):
                 self._press_button(button)  # a quick second click moves the window again
-            elif self.watch_button().contains(event.position()):
-                pass  # the first press played it
+            elif any(r.contains(event.position()) for r in self.footer_buttons().values()):
+                pass  # the first press did it
             elif button is None and self._select_at(event):
                 self.activate()
         event.accept()
@@ -771,6 +863,21 @@ class Guide(Overlay):
             )
             on_now = span.programme.is_on(now)
             self._paint_box_fill(p, units, box, on_now)
+            channel = self._channels[row]
+            if (
+                self._scheduled is not None
+                and span.programme.stop > now
+                and self._scheduled(channel, span.programme)
+            ):
+                p.save()  # 2.8: to be recorded: a red dot in its corner
+                p.setPen(Qt.NoPen)
+                p.setBrush(qcolor(PALETTE.live))
+                corner = QPointF(box.right() - 0.9 * u, box.top() + 0.9 * u)
+                p.drawEllipse(corner, 0.45 * u, 0.45 * u)
+                p.restore()
+            upcoming = self._upcoming
+            if upcoming is not None and upcoming[0] == row and span.programme == upcoming[1]:
+                chosen = span.programme  # 2.8: outlined as the footer's, as a past one is
             if chosen is not None and span.programme == chosen:
                 p.save()  # Enter plays it from its start: outlined
                 p.setPen(QPen(qcolor(PALETTE.accent), max(1.5, 0.2 * u)))
@@ -870,12 +977,22 @@ class Guide(Overlay):
                 elided(p, fmt_span(programme), inner.width()),
             )
 
-    def _paint_watch(self, p: QPainter, units: Units, button: QRectF) -> None:
-        """The footer's "▶ Watch from the start" chip."""
-        fill_round(p, button, qcolor(PALETTE.accent), button.height() / 2)
+    def _paint_button(self, p: QPainter, units: Units, name: str, button: QRectF) -> None:
+        """A footer chip: "▶ Watch from the start" and "● Record" filled, the others outlined."""
         p.setFont(units.font(1.05, QFont.Weight.DemiBold))
-        p.setPen(qcolor(PALETTE.canvas))
-        p.drawText(button, Qt.AlignCenter, "▶  " + translate(WATCH_TEXT))
+        if name in ("watch", "record"):
+            color = PALETTE.accent if name == "watch" else PALETTE.live
+            fill_round(p, button, qcolor(color), button.height() / 2)
+            p.setPen(qcolor(PALETTE.canvas))
+        else:
+            p.save()
+            p.setPen(QPen(qcolor(PALETTE.text, 0.5), 1.0))
+            p.setBrush(Qt.NoBrush)
+            half = button.height() / 2
+            p.drawRoundedRect(button.adjusted(0.5, 0.5, -0.5, -0.5), half, half)
+            p.restore()
+            p.setPen(qcolor(PALETTE.text))
+        p.drawText(button, Qt.AlignCenter, self._button_text(name))
 
     def _paint_now_line(self, p: QPainter, layout: _Layout, now: datetime, bottom: float) -> None:
         now_x = self._now_x(layout, now)
@@ -896,12 +1013,13 @@ class Guide(Overlay):
         )
         if self.current_channel() is None:
             return
-        programme, watch = self._footer_choice()
+        programme = self._footer_choice()[0]
         left, width = SIDE_U * u, footer.width() - 2 * SIDE_U * u
-        if watch:
-            button = self._watch_rect(layout)
-            width = max(0.0, button.left() - 1.2 * u - left)
-            self._paint_watch(p, units, button)
+        buttons = self.footer_buttons()
+        if buttons:
+            width = max(0.0, min(r.left() for r in buttons.values()) - 1.2 * u - left)
+        for name, button in buttons.items():
+            self._paint_button(p, units, name, button)
         if programme is None:
             p.setFont(units.font(1.0))
             p.setPen(qcolor(PALETTE.text, 0.45))

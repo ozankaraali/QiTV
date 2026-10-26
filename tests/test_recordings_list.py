@@ -125,6 +125,42 @@ class RecordingsListTests(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertEqual(shelf.items(), [])
 
+    def test_a_scheduled_recording_is_named_by_its_programme(self):
+        path = touch(self.folder, "News 2026-10-19 21.30.ts")
+        titles = {str(path): "The Evening News"}
+        shelf = RecordingsList(self.config, titles=lambda p: titles.get(p, ""))
+        shelf.refresh()
+        self.wait_for(shelf, 0)
+        (item,) = shelf.items()
+        self.assertEqual(item["name"], "The Evening News")
+        self.assertIn("News", item["description"])  # its channel stays in the details
+
+    def test_scheduled_ones_come_first_and_change_the_list(self):
+        touch(self.folder, "News 2026-10-19 21.30.ts")
+        shelf = RecordingsList(self.config)
+        shelf.refresh()
+        self.wait_for(shelf, 0)
+        version = shelf.version
+        shelf.set_scheduled(
+            [
+                {
+                    "id": "a1",
+                    "kind": "once",
+                    "title": "Late Show",
+                    "start": 1_800_000_000.0,
+                    "stop": 1_800_003_600.0,
+                    "channel": {"name": "Two"},
+                },
+                {"id": "b2", "kind": "series", "title": "Quiz", "channel": {"name": "One"}},
+            ]
+        )
+        self.assertGreater(shelf.version, version)
+        names = [i["name"] for i in shelf.items()]
+        self.assertEqual(names[:2], ["Late Show", "Quiz"])
+        self.assertTrue(shelf.items()[0]["_scheduled"])
+        self.assertEqual(shelf.items()[1]["_item_id"], "b2")
+        self.assertEqual(names[2], "News")
+
     def test_a_recording_being_written_is_marked(self):
         path = touch(self.folder, "News 2026-10-19 21.30.ts")
         shelf = RecordingsList(self.config, writing=lambda: {str(path)})

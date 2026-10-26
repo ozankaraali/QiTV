@@ -67,7 +67,12 @@ class TVPages(QObject):
         # The event loop level a key or a menu item moves the pages at, else None: from_keys.
         self._keys_level: Optional[int] = None
         # 2.8: the Recordings folder's files, the Library's Recordings shelf (and the phone's).
-        self.recordings = RecordingsList(window.config_manager, parent=self)
+        schedule = getattr(window, "recording_schedule", None)
+        self.recordings = RecordingsList(
+            window.config_manager,
+            parent=self,
+            titles=schedule.title_of if schedule is not None else None,
+        )
         self.library_model = LibraryModel(
             window.library_catalog,
             window.config_manager,
@@ -326,6 +331,13 @@ class TVPages(QObject):
             return
         if section == "recording":
             self._recording_menu(item, global_pos)
+            return
+        if section == "scheduled":  # 2.8: a recording still to come
+            menu = QMenu(window.library_page)
+            item_id = str(item.get("_item_id") or "")
+            # i18n: a scheduled recording's right-click menu entry: it will not be recorded
+            menu.addAction(tr("Cancel Recording"), lambda: window.cancel_scheduled(item_id))
+            menu.popup(global_pos)
             return
         window.controller.show_library_menu(item, section, global_pos, window.library_page)
 

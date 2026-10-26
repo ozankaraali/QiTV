@@ -162,6 +162,7 @@ _GUIDE_CHARS = {
         _K.Key_Space.value,
         _K.Key_X.value,
         _K.Key_G.value,
+        _K.Key_R.value,  # 2.8: record the footer's programme (or cancel its recording)
         _K.Key_F.value,
         _K.Key_M.value,
         _K.Key_Plus.value,
@@ -342,6 +343,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Left, Right", N_("Earlier / later")),
         ("0…9", N_("Jump to a channel number")),
         ("Return", N_("Watch the channel; a past programme from its start")),
+        ("R", N_("Record the programme at its time, or cancel its recording")),
         ("Ctrl+F", N_("Search")),
         ("F, F11, Ctrl+Meta+F", N_("Fullscreen")),
         ("G, Esc", N_("Close the guide")),

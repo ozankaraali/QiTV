@@ -130,6 +130,8 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("guide", "Up, Down"): (("guide", "rows"),),
     ("guide", "Left, Right"): (("guide", "earlier"), ("guide", "later")),
     ("guide", "Return"): (("guide", "rows"),),  # a double-click
+    # 2.8: the footer's ● Record (Cancel recording for a scheduled programme)
+    ("guide", "R"): (("guide", "record"),),
     ("guide", "Ctrl+F"): (("guide", "search"),),
     ("guide", "F, F11, Ctrl+Meta+F"): (("guide", "fullscreen"),),
     ("guide", "G, Esc"): (("guide", "close"),),
@@ -372,9 +374,22 @@ def _drawer_and_context(host: QWidget) -> tuple[set[str], set[str]]:
 def _guide(host: QWidget) -> set[str]:
     from datetime import datetime, timezone
 
-    guide = Guide(None, lambda channel, start, limit: [], lambda: datetime.now(timezone.utc), host)
+    from datetime import timedelta
+
+    from services.epg_view import Programme
+
+    now = datetime.now(timezone.utc)
+    on_now = [Programme("On now", now - timedelta(minutes=10), now + timedelta(minutes=20))]
+    guide = Guide(
+        None,
+        lambda channel, start, limit: on_now,
+        lambda: now,
+        host,
+        scheduled=lambda channel, programme: False,  # 2.8: QiTV records (its footer shows)
+    )
     guide.open_guide([{"id": "1", "name": "One"}, {"id": "2", "name": "Two"}], 0)
     found = {n for n, r in guide.header_buttons().items() if not r.isEmpty()}
+    found.update(n for n, r in guide.footer_buttons().items() if not r.isEmpty())
     if guide.current_channel() is not None:
         found.add("rows")
     return found

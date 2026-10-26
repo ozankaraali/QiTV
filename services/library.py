@@ -578,13 +578,15 @@ class LibraryModel(QObject):
     def item_kind(self, item: dict) -> str:
         if item.get("_recording"):
             return "recording"
+        if item.get("_scheduled"):
+            return "scheduled"  # 2.8: a recording still to come (its right-click cancels it)
         if self._section == "series":
             return "episode" if self._genre == CONTINUE else "series"
         return "movie"
 
     def _item_cid(self, item: dict) -> str:
         kind = self.item_kind(item)
-        if kind == "recording":
+        if kind in ("recording", "scheduled"):
             return str(item.get("id") or "")  # "recording:<file name>": no provider's
         return self._content_id(item, {"episode": "episode", "series": "serie"}.get(kind, "movie"))
 
@@ -855,7 +857,7 @@ class LibraryModel(QObject):
         )
 
     def is_favorite(self, item: dict) -> bool:
-        if item.get("_recording"):
+        if item.get("_recording") or item.get("_scheduled"):
             return False  # a file of the disk: no provider's title to star
         return favorites.is_favorite(self._config, item)
 

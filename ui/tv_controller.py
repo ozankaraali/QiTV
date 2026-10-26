@@ -443,6 +443,8 @@ class TVController(QObject):
         # 2.6: before a recording is stopped for a stream, the question.
         # 2.8: a Jellyfin or Emby server hears where its title plays (None: none told).
         self._media = media_reporter
+        # 2.8: the providers scheduled recordings record from (their guides stay loaded).
+        self.extra_guides: Callable[[], set[str]] = set
         # 2.8: casting the large picture to a Chromecast (none without libVLC's renderers).
         self._cast: Optional[CastControls] = None
         if cast_devices is not None:
@@ -2795,6 +2797,7 @@ class TVController(QObject):
             items.extend(self._grid.channels())  # the multiview's tiles'
         names.update(provider_of(item) for item in items if item)
         names.update(self._phone_guides)  # the channels the phone remote lists
+        names.update(self.extra_guides())  # 2.8: a scheduled series follows its channel's guide
         source = self.catalog.current_provider_name()
         if source != ALL_PROVIDERS:
             names.add(source)
@@ -2872,6 +2875,10 @@ class TVController(QObject):
             return {provider}
         rows = self.catalog.items("live", group.key) or []
         return {provider_of(c) for c in rows[:_DRAWER_ROWS]}
+
+    def update_guides(self) -> None:
+        """The guides in use again (2.8: the schedule changed)."""
+        self._update_guides()
 
     def _update_guides(self) -> None:
         if self._closed:
