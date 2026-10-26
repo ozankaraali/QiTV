@@ -359,6 +359,21 @@ class PipTests(PipCase):
         self.assertIs(self.controller.session, self.pip_session)
         self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
 
+    def test_a_swap_while_casting_tells_the_cast(self):  # 2.8 review M13
+        from unittest import mock
+
+        self.start_large(0)
+        self.open_small(GROUP_B[0], "20", GROUP_B)
+        cast = mock.Mock()
+        cast.casting.return_value = True
+        self.controller._cast = cast
+        large, live = self.session, self.sessions.large().live
+        self.controller.handle(Action.SWAP)
+        (session, small_live, target), _kw = cast.swapped.call_args
+        self.assertIs(session, large)
+        self.assertIs(small_live, live)
+        self.assertEqual(target.item["name"], "One")
+
     def test_a_swap_records_the_channel_now_watched(self):
         # Recent and "start with the last channel" follow the large picture.
         self.start_large(0)

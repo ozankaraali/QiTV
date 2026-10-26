@@ -135,6 +135,9 @@ from ui.player_keys import PlayerKeys
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
 from ui.quality_controls import SIZE_WHILE_RECORDING, QualityControls
+
+# i18n: a toast: the multiview cannot open while a picture is cast to a TV
+MULTIVIEW_WHILE_CASTING = N_("Stop casting to show the multiview")
 from ui.record_guard import RecordGuard
 from ui.stream_question import StreamQuestion, quit_text
 from ui.subtitle_search import OnlineSetup, OnlineSubtitles
@@ -1997,7 +2000,13 @@ class TVController(QObject):
             return False
         self._cancel_external()
         self._lanes.drop_tune()  # superseded: it would replace the picture swapped in
-        return sessions.swap()
+        cast = self._cast
+        small = (self.session, sessions.large().live, self._current)  # small after the swap
+        if not sessions.swap():
+            return False
+        if cast is not None and cast.casting():
+            cast.swapped(*small)  # 2.8: the cast follows the large picture
+        return True
 
     def open_pip(self, channel: dict, *, group_key: str, channels: list[dict]) -> None:
         """Open `channel` small (the drawer's menu or Ctrl/⌘+P), or show it in the PiP."""
@@ -2048,6 +2057,9 @@ class TVController(QObject):
     def toggle_multiview(self) -> None:
         """V, View → Multiview, the grid button: the grid, or back to one picture."""
         if self._grid is None or self._closed:
+            return
+        if self._cast is not None and self._cast.casting() and not self._grid.shown():
+            self._toast(MULTIVIEW_WHILE_CASTING)  # 2.8: one picture goes to the device
             return
         if self._digits:
             self.zap.cancel_digits()

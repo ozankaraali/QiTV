@@ -6,6 +6,8 @@ multiview and closes the picture in picture (one picture goes to the device), th
 plays again with the device as its output: a channel from its time-shift buffer where it was, a
 film where it is. A pill says "Playing on <device>", with Stop casting. The cast stays on for
 whatever plays next until it is stopped, or until the device goes away (said in a toast).
+A picture in picture opened while casting plays here; a swap moves the cast to the picture
+now large, and the one now small plays here again. The multiview waits for the cast to stop.
 """
 
 from __future__ import annotations
@@ -144,14 +146,28 @@ class CastControls(QObject):
         """QiTV closes: discovery ends and the devices are let go."""
         self._devices.stop()
 
+    def swapped(self, small_session: Any, small_live: Any, small_target: Any) -> None:
+        """A swap while casting (2.8): the picture now small (its player, LiveSession and
+        target) plays here again, and the one now large goes to the device."""
+        device = self._devices.find(self._device) if self._device is not None else None
+        if device is None:
+            return
+        small_session.cast_to(None)
+        self._reopen_in(small_session, small_live, small_target)
+        self._session().cast_to(device.handle)
+        self._reopen()
+
     def _reopen(self) -> None:
         """What plays opens again with its new output, from where it is."""
         target = self._current()
+        live = self._live() if target is not None and target.live else None
+        self._reopen_in(self._session(), live, target)
+
+    @staticmethod
+    def _reopen_in(session: Any, live: Any, target: Any) -> None:
         if target is None:
             return  # nothing plays: the next play goes there
-        session = self._session()
-        live = self._live() if target.live else None
-        if live is not None and live.reopen_player():
+        if target.live and live is not None and live.reopen_player():
             return  # a channel from its time-shift buffer, where it was
         session.reopen(None if target.live else session.time_ms())
 

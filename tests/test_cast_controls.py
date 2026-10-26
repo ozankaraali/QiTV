@@ -147,6 +147,25 @@ class CastControlsTests(unittest.TestCase):
         self.assertEqual(self.session.renderers, ["handle:Living Room TV"])
         self.assertEqual((self.session.reopens, self.live.reopened), ([], 0))
 
+    def test_a_swap_moves_the_cast_to_the_large_picture(self):  # 2.8 review M13
+        self.found("Living Room TV")
+        self.controls.cast_to("Living Room TV")
+        small_session, small_live = self.session, self.live  # it goes small now
+        small_target = self.target
+        self.session, self.live = FakeSession(), FakeLive()  # the PiP's, now large
+        self.target = SimpleNamespace(live=False)
+        self.controls.swapped(small_session, small_live, small_target)
+        self.assertEqual(small_session.renderers[-1], None)  # here again
+        self.assertEqual(small_live.reopened, 2)  # from its buffer, where it was
+        self.assertEqual(self.session.renderers, ["handle:Living Room TV"])
+        self.assertEqual(self.session.reopens, [61_000])  # the film, from where it is
+        self.assertTrue(self.controls.casting())
+
+    def test_a_swap_without_a_cast_changes_nothing(self):
+        other = FakeSession()
+        self.controls.swapped(other, FakeLive(), self.target)
+        self.assertEqual((other.renderers, self.session.renderers), ([], []))
+
     def test_stopping_brings_the_picture_back_here(self):
         self.target = SimpleNamespace(live=False)
         self.found("Living Room TV")
