@@ -467,10 +467,10 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             screen.lineTo(0.58, 0.82)
             line(screen)
             for radius in (0.24, 0.4):
-                box = QRectF(0.1 - radius, 0.82 - radius, 2 * radius, 2 * radius)
+                corner = QRectF(0.1 - radius, 0.82 - radius, 2 * radius, 2 * radius)
                 wave = QPainterPath()
-                wave.arcMoveTo(box, 0)
-                wave.arcTo(box, 0, 90)
+                wave.arcMoveTo(corner, 0)
+                wave.arcTo(corner, 0, 90)
                 line(wave)
             dot = QPainterPath(QPointF(0.1, 0.82))
             dot.arcTo(QRectF(0.0, 0.72, 0.2, 0.2), 90, -90)

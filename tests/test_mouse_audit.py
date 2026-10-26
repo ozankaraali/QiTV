@@ -372,9 +372,7 @@ def _drawer_and_context(host: QWidget) -> tuple[set[str], set[str]]:
 
 
 def _guide(host: QWidget) -> set[str]:
-    from datetime import datetime, timezone
-
-    from datetime import timedelta
+    from datetime import datetime, timedelta, timezone
 
     from services.epg_view import Programme
 

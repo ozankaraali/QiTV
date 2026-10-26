@@ -21,6 +21,7 @@ from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, CatalogServ
 from services.catalogs import Catalogs
 from services.epg_view import Programme
 from services.i18n import N_
+from services.parental import Parental
 from services.provider_ids import (
     ALL_PROVIDERS,
     mixed_group_id,
@@ -491,7 +492,7 @@ class BrowsedCatalog(QObject):
             return []
         return guard.visible(section, found)  # 2.8: without the channels hidden while locked
 
-    def _parental(self):
+    def _parental(self) -> Optional[Parental]:
         """The window's parental controls (2.8; None: none)."""
         return getattr(self._catalogs, "parental", None)
 

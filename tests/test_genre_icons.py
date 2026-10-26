@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtGui import QFontMetricsF
 from PySide6.QtWidgets import QApplication, QWidget
 
-from services.library import CONTINUE, MY_LIST, NEW, PINNED_TITLES, Genre
+from services.library import CONTINUE, MY_LIST, NEW, PINNED_TITLES, RECORDINGS, Genre
 from ui.library.genre_list import ICON_GAP_U, ICON_SCALE, GenreList
 from ui.overlays.painting import Units
 
@@ -40,13 +40,14 @@ class PinnedRowIconTests(unittest.TestCase):
     def test_titles_carry_no_glyphs(self):
         for title in PINNED_TITLES.values():
             self.assertTrue(title.isascii() and title == title.strip(), title)
-        self.assertEqual(list(PINNED_TITLES.values()), ["Continue", "New", "My list"])
+        self.assertEqual(list(PINNED_TITLES.values()), ["Continue", "New", "My list", "Recordings"])
 
     def test_each_pinned_row_paints_an_icon_before_its_label(self):
         genres = [
             Genre(CONTINUE, "Continue", 4, pinned=True),
             Genre(NEW, "New", 48, pinned=True),
             Genre(MY_LIST, "My list", 2, pinned=True),
+            Genre(RECORDINGS, "Recordings", 3, pinned=True),  # 2.8
             Genre("plain", "Continue", 9),
         ]
         genre_list, view, image = self.render(genres, "plain")
@@ -64,12 +65,14 @@ class PinnedRowIconTests(unittest.TestCase):
             )
 
         plain_left = row_ink("plain", int(pad + 40))[0]
-        for genre_id in (CONTINUE, NEW, MY_LIST):
+        for genre_id in (CONTINUE, NEW, MY_LIST, RECORDINGS):
             icon_cols = row_ink(genre_id, int(pad + size))
             self.assertGreaterEqual(len(icon_cols), size * 0.5, genre_id)
             ink = row_ink(genre_id, int(pad + size + gap + 40))
             text_left = [x for x in ink if x >= pad + size + gap - 2][0]
             self.assertAlmostEqual(text_left, plain_left + size + gap, delta=3, msg=genre_id)
+            between = [x for x in ink if pad + size + 1 <= x <= pad + size + gap - 3]
+            self.assertEqual(between, [], genre_id)  # an icon, then the label: not a label alone
             # the plain row has nothing in the icon's slot beyond its own label start
 
 

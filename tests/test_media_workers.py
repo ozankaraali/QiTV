@@ -4,10 +4,10 @@ import unittest
 
 from services import media_server as ms
 from services.media_workers import (
+    NO_VERSION_TEXT,
     MediaLinkWorker,
     MediaSectionWorker,
     MediaSignInWorker,
-    NO_VERSION_TEXT,
 )
 
 BASE = "http://server.test:8096"

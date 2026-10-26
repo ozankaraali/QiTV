@@ -1,7 +1,6 @@
 """Scheduled recordings (2.8): what is to be recorded, when each is due, and what became of it."""
 
 from datetime import datetime, timedelta, timezone
-import os
 from pathlib import Path
 import shutil
 import tempfile

@@ -95,7 +95,7 @@ class GuideRecordingTests(unittest.TestCase):
         self.assertEqual(self.cancelled, ["Show 2"])
 
     def test_without_recordings_the_footer_offers_none(self):
-        guide = Guide(None, lambda c, s, l: half_hours(c, s), lambda: NOW, self.host)
+        guide = Guide(None, lambda c, s, _hours: half_hours(c, s), lambda: NOW, self.host)
         guide.open_guide(CHANNELS, 0)
         self.assertEqual(guide.footer_buttons(), {})
         self.assertFalse(guide.record_key())

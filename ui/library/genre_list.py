@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QW
 
 from services import i18n
 from services.i18n import tr
-from services.library import CONTINUE, MY_LIST, NEW, Genre
+from services.library import CONTINUE, MY_LIST, NEW, RECORDINGS, Genre
 from ui.overlays.channel_rows import ChannelListView
 from ui.overlays.painting import Units, draw_icon, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
@@ -31,7 +31,7 @@ DEFAULT_HOST_WIDTH = 1280
 KindRole = Qt.UserRole + 20
 CountRole = Qt.UserRole + 21
 IdRole = Qt.UserRole + 22
-PINNED_ICONS = {CONTINUE: "clock", NEW: "sparkle", MY_LIST: "star"}
+PINNED_ICONS = {CONTINUE: "clock", NEW: "sparkle", MY_LIST: "star", RECORDINGS: "record"}
 ICON_SCALE = 1.2  # icon box / cap height: the glyphs sit inside a padded unit box
 ICON_GAP_U = 0.7
 HEADER = "header"

@@ -28,13 +28,13 @@ from typing import Any, Iterable, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 import uuid
 
-import requests
-
 from services.catalog import ALL_GROUP_ID
 from services.i18n import N_
+from services.lazy_import import lazy_module
 from services.provider_types import EMBY, JELLYFIN, MEDIA_SERVERS, is_media_server  # noqa: F401
 
 logger = logging.getLogger(__name__)
+requests = lazy_module("requests")  # the window shows before the network libraries load
 
 TYPES = MEDIA_SERVERS
 TICKS_PER_MS = 10_000
