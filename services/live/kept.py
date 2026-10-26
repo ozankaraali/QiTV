@@ -102,8 +102,13 @@ class KeptBuffers:
         self._rings[ring.channel] = ring
 
     def take(self, channel: str) -> Optional[KeptRing]:
-        """The channel's kept buffer, no longer kept here (its player takes it back)."""
-        return self._rings.pop(channel, None)
+        """The channel's kept buffer, no longer kept here (its player takes it back). A ring
+        put to come right back that another channel's start passed by leaves one memory ring
+        kept again: the channel left last."""
+        ring = self._rings.pop(channel, None)
+        for other in [r for r in self._rings.values() if not r.disk][:-1]:
+            self.drop(other.sid)
+        return ring
 
     def let_go(self, ring: KeptRing) -> None:
         """A ring taken that its player could not take back (2.8: its start raised): closed."""

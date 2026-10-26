@@ -67,6 +67,16 @@ class KeptBuffersTests(unittest.TestCase):
         self.kept.put(KeptRing("c", "k3", False, LIVE))
         self.assertEqual(self.engine.closed, ["a"])
 
+    def test_a_ring_that_did_not_come_back_leaves_one_memory_ring(self):  # 2.8 review M4
+        # Put to come right back, but another channel was tuned instead: once that one is
+        # taken, one memory ring is kept again, the channel left last.
+        self.kept.put(KeptRing("a", "k1", False, LIVE))
+        self.kept.put(KeptRing("b", "k2", False, LIVE), coming_back=True)
+        self.kept.put(KeptRing("d", "k4", True, LIVE))  # a disk ring stays whatever
+        self.assertIsNone(self.kept.take("k3"))
+        self.assertEqual(self.engine.closed, ["a"])
+        self.assertEqual([r.sid for r in self.kept.rings()], ["b", "d"])
+
     def test_disk_rings_are_all_kept(self):
         for sid, channel in (("a", "k1"), ("b", "k2"), ("c", "k3")):
             self.kept.put(KeptRing(sid, channel, True, LIVE))
