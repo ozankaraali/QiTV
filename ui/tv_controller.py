@@ -1786,7 +1786,10 @@ class TVController(QObject):
                 def play_direct() -> None:
                     self._prepare(session, target, previous)
                     session.play(
-                        url, kind=kind, latency=self.config.live_latency, **stream_options(item)
+                        url,
+                        kind=kind,
+                        latency=self.config.live_latency,
+                        **stream_options(item, self.catalog),
                     )
                     self._reset_speed(session)
 
@@ -1809,7 +1812,13 @@ class TVController(QObject):
 
             def open_vod() -> None:
                 self._prepare(session, target, previous)
-                session.play(url, kind=classify(url, False), start_ms=start)
+                agent = None if target.local else item_provider.stream_agent(self.catalog, item)
+                session.play(
+                    url,
+                    kind=classify(url, False),
+                    start_ms=start,
+                    **({"user_agent": agent} if agent else {}),  # 2.8: an STB portal's box's
+                )
                 self._reset_speed(session)
 
             self._tuner.open(self._guarded(target, open_vod), direct=True, provider=provider_name)
@@ -2341,7 +2350,12 @@ class TVController(QObject):
 
         def play_direct() -> None:
             self._prepare(session, target, previous)
-            session.play(url, kind=kind, latency=self.config.live_latency, **stream_options(item))
+            session.play(
+                url,
+                kind=kind,
+                latency=self.config.live_latency,
+                **stream_options(item, self.catalog),
+            )
             self._reset_speed(session)
 
         grid.open_focused(
@@ -2429,7 +2443,10 @@ class TVController(QObject):
 
             def play_direct() -> None:
                 session.play(
-                    url, kind=kind, latency=self.config.live_latency, **stream_options(item)
+                    url,
+                    kind=kind,
+                    latency=self.config.live_latency,
+                    **stream_options(item, self.catalog),
                 )
 
             grid.open_tile(name, item, play_direct, provider=provider_name, limit=limit)

@@ -51,7 +51,7 @@ from services.remote.protocol import (
     WatchHere,
 )
 from services.search import Hit
-from services.vlc_profile import DEFAULT_USER_AGENT
+from services.vlc_profile import user_agent_for
 from ui.find_session import FindSession
 from ui.keymap import Action
 from ui.library.search_session import SearchSession
@@ -669,7 +669,7 @@ class RemoteController(QObject):
         except KeyError:
             entry = {}
         verify = bool(entry.get("ssl_verify", config.ssl_verify))
-        headers = {"User-Agent": str(item.get("user_agent") or DEFAULT_USER_AGENT)}
+        headers = {"User-Agent": user_agent_for(item, str(entry.get("type") or ""))}
         self.hub.open_film(sid, self._device(sid), url, headers, verify, message)
 
     def _recording_to(self, sid: str, path: str, message: dict) -> None:

@@ -19,7 +19,7 @@ from services.live.refusals import STREAM_LIMIT
 from services.live.tuning import channel_key
 from services.provider_ids import with_provider
 from services.sessions import PIP_FAILED, SessionManager, Slot
-from services.vlc_profile import DEFAULT_USER_AGENT
+from services.vlc_profile import STB_USER_AGENT
 from tests.test_tv_controller import (
     CHANNELS,
     HARBOR_ONE,
@@ -266,10 +266,10 @@ class PipTests(PipCase):
         self.assertEqual(  # a main tune's start arguments
             kwargs,
             {
-                "headers": {"User-Agent": DEFAULT_USER_AGENT},
+                "headers": {"User-Agent": STB_USER_AGENT},  # an STB portal's box's
                 "verify_ssl": True,
                 "latency": "low",
-                "user_agent": DEFAULT_USER_AGENT,
+                "user_agent": STB_USER_AGENT,
                 "disk": False,
                 "max_bytes": 256 * MIB,  # the memory per stream
                 "channel": channel_key("Home", CHANNELS[0]),

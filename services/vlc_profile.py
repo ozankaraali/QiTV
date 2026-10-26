@@ -5,6 +5,28 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 DEFAULT_USER_AGENT = "VLC/3.0.20"
+# What a MAG set-top box says it is: an STB portal is asked as one, and (2.8) its streams too,
+# as its box asks for them (some portals' stream servers drop any other client).
+STB_USER_AGENT = (
+    "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) "
+    "MAG200 stbapp ver: 2 rev: 250 Safari/533.3"
+)
+
+
+def stream_agent(item: dict, provider_type: str) -> Optional[str]:
+    """The user agent a stream of `item` is asked for with: its own (an M3U entry's), else an
+    STB portal's box's; None: VLC's own (DEFAULT_USER_AGENT)."""
+    own = item.get("user_agent")
+    if own:
+        return str(own)
+    return STB_USER_AGENT if str(provider_type or "").upper() == "STB" else None
+
+
+def user_agent_for(item: dict, provider_type: str) -> str:
+    """`stream_agent`, VLC's own when it names none: what the time-shift helper sends."""
+    return stream_agent(item, provider_type) or DEFAULT_USER_AGENT
+
+
 _VOD_CONTAINERS = (".mkv", ".mp4", ".avi", ".webm", ".mov", ".m4v")
 # Live network caching per Settings → Live latency (ms) and HLS distance from the live edge.
 _LIVE_CACHING_MS = {"low": 300, "normal": 1000, "stable": 3000}

@@ -25,6 +25,7 @@ from services.provider_api import (
 )
 from services.provider_types import is_media_server
 from services.redact import safe_exc
+from services.vlc_profile import STB_USER_AGENT
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
@@ -618,10 +619,7 @@ class StbHandshake:
             cookie_parts.append(f"device_id={device_id}")
 
         headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) "
-                "MAG200 stbapp ver: 2 rev: 250 Safari/533.3"
-            ),
+            "User-Agent": STB_USER_AGENT,
             "Accept-Charset": "UTF-8,*;q=0.8",
             "X-User-Agent": "Model: MAG200; Link: Ethernet",
             "Host": parts.netloc,

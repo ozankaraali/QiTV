@@ -29,7 +29,7 @@ from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode, item_key
 from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of
-from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
+from services.vlc_profile import DEFAULT_USER_AGENT, STB_USER_AGENT, PlayKind
 from services.watch_state import WatchState
 from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
@@ -1888,7 +1888,10 @@ class VodTests(ControllerTestCase):
         self.assertEqual(self.catalog.links[0][2:], ("movies", False))
         self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
         url, kwargs = self.session.plays[0]
-        self.assertEqual(kwargs, {"kind": PlayKind.VOD_FILE, "start_ms": 125_000})
+        self.assertEqual(
+            kwargs,
+            {"kind": PlayKind.VOD_FILE, "start_ms": 125_000, "user_agent": STB_USER_AGENT},
+        )
         self.assertEqual(self.toast.messages(), [("Resumed at 2:05", "info")])
         self.assertEqual(self.watch.plays, [("Home", self.MOVIE, "movie", url, None)])
         self.assertEqual(self.transport.named("show_vod"), [("Heat", "")])
@@ -1941,6 +1944,17 @@ class VodTests(ControllerTestCase):
         links = len(self.catalog.links)
         self.controller.change_quality(ms.Quality(height=720, bitrate=4_000_000))
         self.assertEqual(len(self.catalog.links), links)
+
+    def test_an_stb_portals_film_streams_as_its_box(self):  # 2.8
+        self.play_movie()  # the fake catalog is an STB portal's
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.assertEqual(self.session.plays[0][1]["user_agent"], STB_USER_AGENT)
+
+    def test_another_providers_film_streams_as_vlc(self):
+        self.catalog.ptype = "XTREAM"
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.assertIsNone(self.session.plays[0][1].get("user_agent"))  # VLC's own
 
     def test_episode_requests_a_series_link(self):
         episode = {"id": "s", "cmd": "x", "series": 2}
@@ -3000,10 +3014,10 @@ class PipelineTuneTests(PipelineCase):
         self.assertEqual(
             kwargs,
             {
-                "headers": {"User-Agent": DEFAULT_USER_AGENT},
+                "headers": {"User-Agent": STB_USER_AGENT},  # an STB portal's box's (2.8)
                 "verify_ssl": True,
                 "latency": "low",
-                "user_agent": DEFAULT_USER_AGENT,
+                "user_agent": STB_USER_AGENT,
                 "disk": False,
                 "max_bytes": 256 * MIB,  # without consent, the memory per stream: 256 MiB
                 "channel": channel_key("Home", CHANNELS[0]),  # what it taught is kept (2.0.2)
@@ -3030,6 +3044,19 @@ class PipelineTuneTests(PipelineCase):
         self.assertNotIn("referrer", kwargs)
         self.assertFalse(kwargs["verify_ssl"])
         self.assertEqual((kwargs["disk"], kwargs["max_bytes"]), (True, 4096 * MIB))
+
+    def test_an_stb_portals_channel_streams_as_its_box(self):  # 2.8: a box's own agent
+        self.play(0)  # the fake catalog is an STB portal's
+        self.assertTrue(wait_until(lambda: self.starts()))
+        kwargs = self.starts()[0][1]
+        self.assertEqual(kwargs["headers"], {"User-Agent": STB_USER_AGENT})
+        self.assertEqual(kwargs["user_agent"], STB_USER_AGENT)
+
+    def test_another_providers_channel_streams_as_vlc(self):
+        self.catalog.ptype = "XTREAM"
+        self.play(0)
+        self.assertTrue(wait_until(lambda: self.starts()))
+        self.assertEqual(self.starts()[0][1]["user_agent"], DEFAULT_USER_AGENT)
 
     def test_a_second_tune_stops_the_first_and_starts_only_after_released(self):
         self.start_pipeline(0)

@@ -65,5 +65,8 @@ others' distributions, which may have malware.**
 
 ## Fixed
 
+- **STB portals' channels and films open again where their stream servers want a box.** QiTV
+  asks for an STB portal's streams as a MAG box does (its user agent), as QiTV 1.x did: some
+  portals' stream servers drop any other client, and their channels failed to open.
 - **QiTV's log says why it quit.** It now tells QiTV's own Quit from a quit asked from outside
   (the Dock, another app, logging out), to explain quits that looked like crashes.

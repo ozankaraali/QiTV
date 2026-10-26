@@ -1,6 +1,13 @@
 import unittest
 
-from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind, classify, media_options
+from services.vlc_profile import (
+    DEFAULT_USER_AGENT,
+    STB_USER_AGENT,
+    PlayKind,
+    classify,
+    media_options,
+    user_agent_for,
+)
 
 
 def option(options, name):
@@ -94,6 +101,14 @@ class MediaOptionsTests(unittest.TestCase):
         self.assertIn(
             ":http-user-agent=Custom/1", media_options(PlayKind.LIVE, user_agent="Custom/1")
         )
+
+    def test_an_stb_portals_streams_are_asked_for_as_its_box(self):  # 2.8
+        self.assertIn("MAG200 stbapp", STB_USER_AGENT)
+        self.assertEqual(user_agent_for({}, "STB"), STB_USER_AGENT)
+        self.assertEqual(user_agent_for({}, "stb"), STB_USER_AGENT)
+        self.assertEqual(user_agent_for({"user_agent": "Box/2"}, "STB"), "Box/2")  # its own
+        for kind in ("XTREAM", "M3UPLAYLIST", "JELLYFIN", ""):
+            self.assertEqual(user_agent_for({}, kind), DEFAULT_USER_AGENT)
 
     def test_referrer(self):
         # A channel's M3U http-referrer goes with VLC's own requests; without one, none.

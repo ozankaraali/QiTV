@@ -35,7 +35,7 @@ from services.connection_budget import DENIED
 from services.i18n import N_, translate
 from services.live.recorder import FAILED, LIMIT, MIN_FREE_BYTES, STOPPED
 from services.provider_api import known_http_only
-from services.vlc_profile import DEFAULT_USER_AGENT
+from services.vlc_profile import user_agent_for
 
 logger = logging.getLogger(__name__)
 
@@ -359,7 +359,7 @@ class RecordingScheduler(QObject):
             self._retry(run, rs.FAILED, translate(NO_HELPER))
             return
         channel = job.channel
-        headers = {"User-Agent": str(channel.get("user_agent") or DEFAULT_USER_AGENT)}
+        headers = {"User-Agent": user_agent_for(channel, str(entry.get("type") or ""))}
         if channel.get("referrer"):
             headers["Referer"] = str(channel["referrer"])
         xtream = str(entry.get("type") or "").upper() == "XTREAM"

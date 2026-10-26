@@ -54,7 +54,7 @@ from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
 from services.provider_api import known_http_only
-from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
+from services.vlc_profile import PlayKind
 from ui import item_provider
 from ui.catchup_controls import NO_RECORDING_TEXT, NOT_AVAILABLE_TEXT, CatchUp
 from ui.link_lanes import LinkLanes, Target
@@ -98,19 +98,21 @@ _PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
 NOT_REOPENED = (PlayKind.VOD_FILE, PlayKind.VOD_STREAM, PlayKind.LIVE_PIPELINE)
 
 
-def stream_options(item: dict) -> dict[str, Any]:
-    """A channel's own HTTP options for VLC's direct play: its agent, and the referrer its M3U
-    names (2.1, `:http-referrer`); an item without one plays exactly as before."""
-    options: dict[str, Any] = {"user_agent": item.get("user_agent")}
+def stream_options(item: dict, catalog: Any = None) -> dict[str, Any]:
+    """A channel's own HTTP options for VLC's direct play: its agent (with `catalog`, 2.8: an
+    STB portal's box's when it names none), and the referrer its M3U names (2.1,
+    `:http-referrer`); an item without them plays exactly as before."""
+    agent = item_provider.stream_agent(catalog, item) if catalog is not None else None
+    options: dict[str, Any] = {"user_agent": agent or item.get("user_agent")}
     if item.get("referrer"):
         options["referrer"] = item["referrer"]
     return options
 
 
-def reopen_options(player, item: dict) -> dict[str, Any]:
+def reopen_options(player, item: dict, catalog: Any = None) -> dict[str, Any]:
     """An ended stream opened again in `player`: the channel's options, and software decoding
     when its open decoded in software (a channel whose picture froze before, or since)."""
-    options = stream_options(item)
+    options = stream_options(item, catalog)
     if player.decodes_in_software():
         options["software"] = True
     return options
@@ -435,7 +437,7 @@ class LiveControls(QObject):
         address: the panel's sign-in found no HTTPS); and the channel's key for what it
         taught stay-live (Auto's target, a locked rate)."""
         provider = item_provider.provider_dict(self.catalog, target.item)
-        user_agent = target.item.get("user_agent") or DEFAULT_USER_AGENT
+        user_agent = item_provider.user_agent(self.catalog, target.item)
         verify_ssl = bool(provider.get("ssl_verify", self.config.ssl_verify))
         channel = channel_key(str(provider.get("name", "")), target.item)
         referrer = str(target.item.get("referrer") or "")
@@ -503,7 +505,7 @@ class LiveControls(QObject):
             url,
             kind=kind,
             latency=self.config.live_latency,
-            **reopen_options(session, target.item),
+            **reopen_options(session, target.item, self.catalog),
         )
 
     def _cancel_reopen(self) -> None:

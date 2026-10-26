@@ -11,6 +11,7 @@ from datetime import tzinfo
 from typing import Optional, cast
 from urllib.parse import urlsplit
 
+from services import vlc_profile
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP
 from services.provider_ids import ALL_PROVIDERS, provider_of
 
@@ -52,6 +53,17 @@ def provider_type(catalog, item: dict) -> str:
     if _browsed(catalog, item):
         return cast(str, catalog.provider_type())
     return str(provider_dict(catalog, item).get("type", "")).upper()
+
+
+def stream_agent(catalog, item: dict) -> Optional[str]:
+    """The user agent the item's stream is asked for with (vlc_profile.stream_agent): its own,
+    an STB portal's box's (2.8), or None for VLC's own."""
+    return vlc_profile.stream_agent(item, provider_type(catalog, item))
+
+
+def user_agent(catalog, item: dict) -> str:
+    """`stream_agent`, or VLC's own: what the time-shift helper and the probes send."""
+    return vlc_profile.user_agent_for(item, provider_type(catalog, item))
 
 
 def max_connections(catalog, item: dict) -> Optional[int]:
