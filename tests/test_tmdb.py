@@ -229,6 +229,13 @@ class ClientTests(unittest.TestCase):
             TmdbClient("tok", http=http).details(MOVIE, 7)
         self.assertEqual(caught.exception.kind, tmdb.NETWORK)
 
+    def test_no_request_starts_once_qitv_is_closing(self):
+        http = FakeHttp()
+        with mock.patch.object(tmdb, "cancel_requested", return_value=True):
+            with self.assertRaises(TmdbError):
+                TmdbClient("tok", http=http).details(MOVIE, 7)
+        self.assertEqual(http.calls, [])
+
     def test_no_token_asks_nothing(self):
         http = FakeHttp()
         with self.assertRaises(TmdbError) as caught:

@@ -432,6 +432,8 @@ class TmdbClient:
     def _get(self, path: str, params: dict) -> Optional[dict]:
         if not self.token:
             raise TmdbError(BAD_TOKEN)
+        if cancel_requested():  # QiTV is closing: no new request keeps it waiting
+            raise TmdbError(NETWORK)
         http = self._http if self._http is not None else requests
         headers = {
             "Authorization": f"Bearer {self.token}",
