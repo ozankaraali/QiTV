@@ -1955,6 +1955,29 @@ video.m3u8
         self.assertIsInstance(parts[1], CaughtUp)  # right after a.ts and b.ts
         self.assertIsInstance(parts[-1], CaughtUp)  # and after c.ts
 
+    def test_a_reload_that_brings_the_same_copy_is_not_parsed_again(self):  # 2.8
+        # A long DVR window's parse takes tens of ms; about half the reloads bring nothing new.
+        same = hls(0, ["a.ts", "b.ts"])
+        copies = [same, same, same, hls(0, ["a.ts", "b.ts", "c.ts"], ended=True)]
+
+        def playlist(_request, count):
+            return 200, {}, copies[min(count, len(copies)) - 1]
+
+        routes = {f"/{n}": (200, {}, self.video) for n in ("a.ts", "b.ts", "c.ts")}
+        routes["/live.m3u8"] = playlist
+        server = self.server(routes)
+        loads = []
+        real = source_module.m3u8.loads
+
+        def counted(text, *args, **kwargs):
+            loads.append(1)
+            return real(text, *args, **kwargs)
+
+        with patch.object(source_module.m3u8, "loads", side_effect=counted):
+            media(server.url + "/live.m3u8", live_delay=2.0)
+        self.assertEqual(server.counts["/live.m3u8"], 4)
+        self.assertEqual(len(loads), 2)  # the first copy and the new one
+
     def test_a_resumed_run_goes_on_after_the_run_it_joins(self):  # 2.8: no replay
         # A rewound viewer's kept buffer taken back (a new picture size, a quick zap back):
         # the new run starts after the old run's last whole segment when its playlist still

@@ -1138,6 +1138,7 @@ class HlsSource:
         height: int = 0,
         max_height: int = 0,
         after_seq: int | None = None,
+        copy: bytes | None = None,
     ) -> None:
         """`window` (2.7): a server part, `{"back_s": seconds, "until_seq": sequence}`: it
         starts that far back from the playlist's end and its input ends before that media
@@ -1146,10 +1147,15 @@ class HlsSource:
         at that much media). `heights` and `height` (2.8): its master's picture sizes and the
         variant's; `max_height`: the cap it was chosen under, which a reload's keeps.
         `after_seq` (2.8): a resumed run's start goes on after that media sequence (the run it
-        joins, `_start`)."""
+        joins, `_start`). `copy`: the bytes `playlist` was parsed from, when its address
+        answered with it (a reload's same copy is not parsed again, `_reloaded`)."""
         self.user_agent = http.user_agent
         self.heights, self.height, self._max_height = heights, height, max_height
         self._after = after_seq if window is None else None
+        # The last copy of the media playlist parsed: (its URL, its bytes, the parse).
+        self._last_copy: tuple[str, bytes, Any] | None = (
+            (url, copy, playlist) if copy is not None else None
+        )
         self._whole_seq: int | None = None  # the last segment that arrived whole's sequence
         back = window.get("back_s") if window is not None else None
         if window is not None and back is None and _archive_window(window):
@@ -1524,10 +1530,22 @@ class HlsSource:
                 raise _Closed()
             loaded = time.monotonic()
             content, final = http.fetch(lambda: _load_playlist(http, url))
-            playlist, url = _media_playlist(http, content, final, self._max_height)[:2]
+            playlist, url = self._reloaded(http, content, final)
             self._burst = float(playlist.target_duration or 0)
             self._finite = bool(playlist.is_endlist) or self._back is not None
             yield from self._emit(self._release())
+
+    def _reloaded(self, http: _Http, content: bytes, final: str) -> tuple[Any, str]:
+        """A reload's media playlist and its URL. The same copy again (byte for byte, at the
+        same address) is the one parsed before: a long DVR window's parse takes tens of ms, and
+        about half the reloads bring nothing new (2.8). A copy that led through a master to its
+        variant is parsed each time (the variant's may have changed)."""
+        last = self._last_copy
+        if last is not None and last[0] == final and last[1] == content:
+            return last[2], final
+        playlist, url = _media_playlist(http, content, final, self._max_height)[:2]
+        self._last_copy = (final, content, playlist) if url == final else None
+        return playlist, url
 
     def _segment(self, segment: Any, sequence: int, base: str) -> Iterator[bytes | Discontinuity]:
         uri = _resolve(base, segment.uri)
@@ -2057,6 +2075,7 @@ def _open_http(
         height=media.height,
         max_height=max_height,
         after_seq=after_seq,
+        copy=content if media.url == final else None,
     )
 
 
