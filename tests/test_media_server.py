@@ -242,6 +242,16 @@ class StreamUrlTests(unittest.TestCase):
         )
         self.assertIsNone(ms.parse_stream_url("http://other.test/Videos/f1/stream.mkv", [BASE]))
 
+    def test_a_server_on_this_computer_is_reached_by_its_home_address_from_a_phone(self):
+        url = "http://localhost:8096/Videos/f1/stream.mkv?static=true&api_key=t"
+        self.assertEqual(
+            ms.phone_reachable(url, "192.168.1.20"),
+            "http://192.168.1.20:8096/Videos/f1/stream.mkv?static=true&api_key=t",
+        )
+        other = "https://media.example.test/Videos/f1/stream.mkv"
+        self.assertEqual(ms.phone_reachable(other, "192.168.1.20"), other)
+        self.assertEqual(ms.phone_reachable(url, None), url)
+
     def test_a_converted_stream_is_capped_and_still_known(self):
         url = ms.converted_url(BASE, "f1", {"Id": "ms1"}, "tok", "ps1", 8_000_000, "dev-1")
         self.assertIn("/Videos/f1/master.m3u8?", url)

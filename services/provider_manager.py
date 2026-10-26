@@ -23,6 +23,7 @@ from services.provider_api import (
     known_http_only,
     remember_http_only,
 )
+from services.provider_types import is_media_server
 from services.redact import safe_exc
 
 logger = logging.getLogger(__name__)
@@ -282,7 +283,8 @@ class ProviderManager(QObject):
                 cache = self._load_provider_cache(provider)
             # Playlists offer live channels only; an older catalog may have stored the
             # playlist again under "vod" or "series".
-            playlist = str(provider.get("type", "")).upper() not in ("STB", "XTREAM")
+            kind = str(provider.get("type", "")).upper()
+            playlist = kind not in ("STB", "XTREAM") and not is_media_server(kind)
             content = {
                 key: value
                 for key, value in list(cache.items())

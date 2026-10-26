@@ -80,6 +80,7 @@ from services.live.engine import LiveEngine
 from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
 from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
+from services.media_reporter import MediaReporter
 from services.navigation import NavModel
 from services.picture import FILE_NAME as PICTURE_FILE, ChannelPictures
 from services.playback import (
@@ -91,6 +92,7 @@ from services.playback import (
     default_args,
 )
 from services.provider_link import ProviderLink
+from services.provider_types import is_media_server
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
@@ -404,6 +406,7 @@ class TVWindow(QMainWindow):
         self.catalogs = catalogs or Catalogs(
             config_manager, provider_manager, in_use=self._providers_in_use, parent=self
         )
+        self.catalogs.screen_4k = self._screen_is_4k  # 2.8: a media server's 4K versions
         self.catalog = BrowsedCatalog(
             self.catalogs,
             config_manager,
@@ -666,6 +669,7 @@ class TVWindow(QMainWindow):
             host=self.host,
             make_slot=self._make_slot,
             cast_devices=self.cast_devices,
+            media_reporter=MediaReporter(self._media_servers),  # 2.8: Jellyfin, Emby
             parent=self,
         )
         self.controller = controller
@@ -771,6 +775,28 @@ class TVWindow(QMainWindow):
         source.wheelSteps.connect(controller.wheel)
         source.backPressed.connect(controller.mouse_back)
         source.forwardPressed.connect(controller.mouse_forward)
+
+    @staticmethod
+    def _screen_is_4k() -> bool:
+        """Whether a screen shows 4K (its pixels, at least 3,800 across): a Jellyfin or Emby
+        title's 4K version plays then, by default (2.8)."""
+        for screen in QGuiApplication.screens():
+            size = screen.size()
+            if max(size.width(), size.height()) * screen.devicePixelRatio() >= 3800:
+                return True
+        return False
+
+    def _media_servers(self) -> list[dict]:
+        """The Jellyfin and Emby providers' entries (2.8: the reporter tells them)."""
+        servers = []
+        for name in self.catalogs.names():
+            try:
+                entry = self.catalogs.provider(name)
+            except KeyError:
+                continue
+            if is_media_server(entry.get("type")):
+                servers.append(entry)
+        return servers
 
     def _make_slot(self, name: str) -> Optional[Slot]:
         """A multiview tile's player: a surface on the player page (hidden until the grid lays

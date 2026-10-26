@@ -32,11 +32,11 @@ import requests
 
 from services.catalog import ALL_GROUP_ID
 from services.i18n import N_
+from services.provider_types import EMBY, JELLYFIN, MEDIA_SERVERS, is_media_server  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-JELLYFIN, EMBY = "JELLYFIN", "EMBY"
-TYPES = (JELLYFIN, EMBY)
+TYPES = MEDIA_SERVERS
 TICKS_PER_MS = 10_000
 PAGE = 2_000  # titles a request (a library of 50,000 comes in 25)
 TIMEOUT_S = 30
@@ -58,11 +58,7 @@ ONLY_4K_TEXT = N_(
     "This title is only in 4K. To play it here, choose Always for 4K versions in Settings."
 )
 # i18n: a Jellyfin or Emby server refused QiTV's access (its sign-in ended)
-SIGN_IN_AGAIN = N_("The server asks to sign in again: Settings → Providers → Verify.")
-
-
-def is_media_server(provider_type: Any) -> bool:
-    return str(provider_type or "").upper() in TYPES
+SIGN_IN_AGAIN = N_("The server asks to sign in again: Settings → Providers → Verify Provider.")
 
 
 def new_device_id() -> str:
@@ -383,25 +379,25 @@ def seasons_payload(seasons: list[dict], episodes: list[dict], base: str) -> dic
     by_season: dict[str, list[dict]] = {}
     for raw in episodes:
         by_season.setdefault(str(raw.get("SeasonId") or ""), []).append(raw)
-    out = []
+    out: list[dict[str, Any]] = []
     for raw in seasons:
         season_id = str(raw.get("Id") or "")
         listed = sorted(by_season.get(season_id, []), key=lambda e: int(e.get("IndexNumber") or 0))
         number = raw.get("IndexNumber")
+        season_number = str(number) if number is not None else ""
+        episodes = [episode_item(e, base) for e in listed]
+        for episode in episodes:  # an episode without its own number has its season's
+            episode["season"] = episode["season"] or season_number
         out.append(
             {
                 "id": season_id,
                 "name": str(raw.get("Name") or ""),
-                "season_number": str(number) if number is not None else "",
+                "season_number": season_number,
                 "cover": _image(raw, base),
                 "overview": str(raw.get("Overview") or ""),
                 "episode_count": str(len(listed)),
-                "episodes": [episode_item(e, base) for e in listed],
+                "episodes": episodes,
             }
-        )
-    for item in (e for s in out for e in s["episodes"]):
-        item["season"] = item["season"] or next(
-            (s["season_number"] for s in out if s["id"] == item["season_id"]), ""
         )
     return {"seasons": out}
 
@@ -480,6 +476,29 @@ def converted_url(
         }
     )
     return f"{base}/Videos/{item_id}/master.m3u8?{query}"
+
+
+def server_resume(item: dict) -> Optional[int]:
+    """Where a media server says the user stopped in `item` (ms; None: nowhere)."""
+    try:
+        position = int(item.get("server_position_ms") or 0)
+    except TypeError, ValueError:
+        return None
+    return position if position > 0 else None
+
+
+_LOOPBACK = ("localhost", "127.0.0.1", "::1", "[::1]")
+
+
+def phone_reachable(url: str, home: Optional[str]) -> str:
+    """`url` as another device at home reaches it: a server on this computer ("localhost")
+    by this computer's home address `home` (None: as it is)."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if not home or not (host in _LOOPBACK or host.startswith("127.")):
+        return url
+    netloc = home + (f":{parts.port}" if parts.port else "")
+    return parts._replace(netloc=netloc).geturl()
 
 
 @dataclass(frozen=True)

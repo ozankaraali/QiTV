@@ -83,6 +83,8 @@ from services.i18n import N_, tr, translate
 from services.live import parts as live_parts
 from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
+from services.media_reporter import MediaReporter
+from services.media_server import server_resume
 from services.navigation import (
     FAVORITES_GROUP,
     RECENT_GROUP,
@@ -221,6 +223,7 @@ class TVController(QObject):
         host=None,
         make_slot: Optional[Callable[[str], Optional[Slot]]] = None,
         cast_devices: Optional[CastDevices] = None,
+        media_reporter: Optional[MediaReporter] = None,
         parent: Optional[QObject] = None,
     ):
         """With `sessions` (picture in picture), its large slot's player, live session and
@@ -438,6 +441,8 @@ class TVController(QObject):
             parent=self,
         )
         # 2.6: before a recording is stopped for a stream, the question.
+        # 2.8: a Jellyfin or Emby server hears where its title plays (None: none told).
+        self._media = media_reporter
         # 2.8: casting the large picture to a Chromecast (none without libVLC's renderers).
         self._cast: Optional[CastControls] = None
         if cast_devices is not None:
@@ -678,6 +683,8 @@ class TVController(QObject):
         self._picture.shutdown()  # the sleep timer ends unsaid
         if self._cast is not None:
             self._cast.shutdown()  # no more looking for devices (2.8)
+        if self._media is not None:
+            self._media.shutdown()  # a server's title stops where it was (2.8)
         self._cancel_external()
         self._flow.shutdown()
         if self._account_checks is not None:
@@ -732,6 +739,8 @@ class TVController(QObject):
         has let go of it. Until resume_live(), tune_live() or play_vod(), a provider change
         neither tunes the last channel nor opens the drawer.
         """
+        if self._media is not None:
+            self._media.stopped()  # 2.8: a server's title stopped where it was
         if self._closed:
             return
         self.leave_multiview(keep_pip=False)
@@ -1101,6 +1110,8 @@ class TVController(QObject):
         plays."""
         if self._closed:
             return
+        if self._media is not None:
+            self._media.stopped()  # 2.8: a server's title stopped where it was
         sessions = self.sessions
         small = sessions is not None and (sessions.pip_open() or sessions.pip_opening())
         busy = self._lanes.busy() or self._tuner.opening() or self.multiview_shown()
@@ -1634,6 +1645,8 @@ class TVController(QObject):
 
     def _deliver(self, target: Target, url: str) -> None:
         item = target.item
+        if self._media is not None and not (target.live and self.multiview_shown()):
+            self._media.playing(url)  # 2.8: a server's title starts (another's stops)
         self._freed_for = None  # it came: the large picture is the title's
         if target is self._room_for and self._pip is not None:
             self._room_for = None
@@ -1701,6 +1714,8 @@ class TVController(QObject):
         else:
             cid = self.watch.content_id(provider_name, item, item_type=target.item_type)
             start = 0 if target.start_over else self.watch.resume_position(cid)
+            if not target.start_over and not start:
+                start = server_resume(item)  # 2.8: where a media server says it stopped
             self._current, self._cid = target, cid
             session = self.session
 
@@ -2964,6 +2979,8 @@ class TVController(QObject):
                 self.watch.update_position(self._cid, position_ms, length_ms)
             except Exception as e:
                 self._log_failure("save the playback position", e)
+        if self._media is not None:
+            self._media.position(position_ms)  # 2.8: a server's title, every 10 s
         self.overlays.transport.update_position(position_ms, length_ms)
 
     def _on_small_position(self, name: str, position_ms: int, length_ms: int) -> None:
@@ -3016,6 +3033,8 @@ class TVController(QObject):
         if self._closed or self._current is None:
             return
         current = self._current
+        if not current.live and self._media is not None:
+            self._media.stopped()  # 2.8: a server's title ended where it was
         if current.live:
             if self._live_controls.catchup.on_ended():
                 return  # the archive's next stretch opens, or the channel live

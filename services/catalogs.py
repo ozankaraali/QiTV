@@ -89,6 +89,9 @@ class Catalogs(QObject):
         # The providers whose guides are in use (None: nobody said yet, every guide loads).
         self._guides: Optional[set[str]] = None
         self._closed = False
+        # 2.8: whether a screen shows 4K (the window's check; a media server's 4K version
+        # plays only then, by default).
+        self.screen_4k: Callable[[], bool] = lambda: False
 
     # --- providers -------------------------------------------------------------------
     def names(self) -> list[str]:
@@ -120,6 +123,7 @@ class Catalogs(QObject):
             link_ids=self._ids,
         )
         catalog.epg_enabled = self._guides is None or name in self._guides
+        catalog.screen_4k = lambda: self.screen_4k()  # 2.8: asked at each media server play
         self._connect(name, catalog)
         self._by_name[name] = catalog
         self._specs[name] = spec

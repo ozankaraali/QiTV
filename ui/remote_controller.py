@@ -18,10 +18,13 @@ from services import favorites
 from services.browsed_catalog import BrowsedCatalog
 from services.find import Preferences, preferences_for
 from services.i18n import N_, translate
+from services.media_server import phone_reachable, server_resume
 from services.provider_api import xtream_hls
 from services.provider_ids import ALL_PROVIDERS, provider_of
+from services.provider_types import is_media_server
 from services.redact import safe_message
 from services.remote.films import is_matroska
+from services.remote.net import home_ipv4
 from services.remote.protocol import (
     BUTTON_META,
     MAX_ASK,
@@ -587,6 +590,8 @@ class RemoteController(QObject):
                 key = controller.resume_key(target)
                 watch = self._window.watch
                 start = None if target.start_over or not key else watch.resume_position(key)
+                if not start and not target.start_over:
+                    start = server_resume(target.item)  # 2.8: a media server's own
                 if start:
                     message["start"] = start // 1000
             if not target.live and is_matroska(target.item, url):
@@ -696,6 +701,9 @@ class RemoteController(QObject):
             entry = catalog.provider_entry(provider_of(item) or catalog.current_provider_name())
         except KeyError:
             return url
+        if is_media_server(entry.get("type")):
+            # 2.8: a server on this computer, as the phone reaches it (home's address).
+            return phone_reachable(url, home_ipv4())
         if str(entry.get("type") or "").upper() != "XTREAM":
             return url
         return xtream_hls(url, str(entry.get("username") or ""), str(entry.get("password") or ""))

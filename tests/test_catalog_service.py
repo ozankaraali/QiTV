@@ -529,6 +529,81 @@ SIGNALS = (
 )
 
 
+JELLY = {
+    "name": "Home server",
+    "type": "JELLYFIN",
+    "url": "http://server.test:8096",
+    "username": "me",
+    "token": "T",
+    "user_id": "U",
+    "device_id": "D",
+}
+MEDIA_FILMS = {
+    "categories": [{"id": "*", "title": "All"}, {"id": "L1", "title": "Movies"}],
+    "contents": [{"id": "f1", "name": "Salt Roads", "tv_genre_id": "L1", "cmd": ""}],
+    "sorted_channels": {"L1": [0]},
+}
+
+
+class MediaServerCatalogTests(unittest.TestCase):
+    """Jellyfin and Emby (2.8): films and series only, asked of the server's workers."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_a_server_has_films_and_series_and_no_channels(self):
+        for kind in ("JELLYFIN", "EMBY"):
+            service, *_ = make_service({**JELLY, "type": kind})
+            self.assertEqual(service.sections(), ["movies", "series"])
+            self.assertFalse(service.is_live("movies"))
+
+    def test_its_films_come_from_its_section_worker(self):
+        service, providers, factory, _ = make_service(dict(JELLY))
+        factory.results["media_section"] = {"result": MEDIA_FILMS}
+        ready = collect(service.sectionReady)
+        service.request_section("movies")
+        QCoreApplication.processEvents()
+        self.assertEqual(ready, [("movies",)])
+        name, args, _kwargs = factory.calls[-1]
+        self.assertEqual((name, args[0]["type"], args[1]), ("media_section", "JELLYFIN", "vod"))
+        self.assertEqual([i["name"] for i in service.items("movies", "L1")], ["Salt Roads"])
+
+    def test_a_series_seasons_carry_their_episodes(self):
+        service, _providers, factory, _ = make_service(dict(JELLY))
+        episodes = [{"id": "e1", "ename": "One", "cmd": ""}]
+        seasons = {
+            "seasons": [
+                {"id": "s1", "name": "Season 1", "season_number": "1", "episodes": episodes}
+            ]
+        }
+        factory.results["media_series"] = {"result": seasons}
+        ready = collect(service.seasonsReady)
+        series = {"id": "show", "name": "Show"}
+        service.request_seasons(series)
+        QCoreApplication.processEvents()
+        self.assertEqual(ready, [("show",)])
+        (season,) = service.seasons(series)
+        self.assertEqual(season["number"], "1")
+        self.assertEqual([e["ename"] for e in service.episodes(series, season)], ["One"])
+
+    def test_a_titles_stream_is_asked_with_the_settings_choices(self):
+        service, _providers, factory, _ = make_service(dict(JELLY))
+        service.config.media_4k_versions = "always"
+        service.config.media_max_mbps = 8
+        service.screen_4k = lambda: True
+        factory.results["media_link"] = {
+            "result": {"link": "http://server.test:8096/Videos/f1/stream.mkv"}
+        }
+        links = collect(service.linkReady)
+        request = service.request_link({"id": "f1", "cmd": ""}, section="movies")
+        QCoreApplication.processEvents()
+        self.assertEqual(links, [(request, "http://server.test:8096/Videos/f1/stream.mkv")])
+        name, args, kwargs = factory.calls[-1]
+        self.assertEqual((name, args[1]), ("media_link", "f1"))
+        self.assertEqual(kwargs, {"screen_4k": True, "four_k": "always", "max_bitrate": 8_000_000})
+
+
 class CatalogShutdownTests(unittest.TestCase):
     """The window is closing: start no more jobs and report nothing."""
 

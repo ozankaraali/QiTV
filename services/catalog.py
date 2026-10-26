@@ -37,6 +37,7 @@ from services.provider_api import (
     xtream_stream_url,
 )
 from services.provider_ids import stamp
+from services.provider_types import is_media_server
 from services.redact import safe_message
 from services.workers import NO_PORTAL_DATA_MESSAGE, STB_DEVICE_REJECTED_MESSAGE, find_roman_token
 
@@ -366,6 +367,22 @@ class WorkerFactory:
 
         return LinkCreatorWorker(prefer_https=True, **kwargs)
 
+    # Jellyfin and Emby (2.8): the server's address as given (it answers where it is).
+    def media_section(self, provider, content_type, verify_ssl) -> QObject:
+        from services.media_workers import MediaSectionWorker
+
+        return MediaSectionWorker(provider, content_type, verify_ssl)
+
+    def media_series(self, provider, series_id, verify_ssl) -> QObject:
+        from services.media_workers import MediaSeriesWorker
+
+        return MediaSeriesWorker(provider, series_id, verify_ssl)
+
+    def media_link(self, provider, item_id, verify_ssl, **choices) -> QObject:
+        from services.media_workers import MediaLinkWorker
+
+        return MediaLinkWorker(provider, item_id, verify_ssl, **choices)
+
 
 class CatalogService(QObject):
     """The TV shell's view of the current provider.
@@ -414,6 +431,9 @@ class CatalogService(QObject):
         self.epg_manager = epg_manager
         self.runner = runner if runner is not None else JobRunner(self)
         self.factory = factory or WorkerFactory()
+        # 2.8: whether a screen shows 4K (a media server's 4K version plays only then, by
+        # default); the window's check, set by Catalogs (none: no 4K screen).
+        self.screen_4k: Callable[[], bool] = lambda: False
         self._generation = 0
         self._content_version = 0  # bumped whenever the catalog content may have changed
         self._epg_ready = False
@@ -691,10 +711,12 @@ class CatalogService(QObject):
     def sections(self) -> list[str]:
         if self.provider_type() in ("STB", "XTREAM"):
             return ["live", "movies", "series"]
+        if is_media_server(self.provider_type()):
+            return ["movies", "series"]  # 2.8: a Jellyfin or Emby server's films and series
         return ["live"]
 
     def is_live(self, section: str) -> Optional[bool]:
-        if self.provider_type() in ("STB", "XTREAM"):
+        if self.provider_type() in ("STB", "XTREAM") or is_media_server(self.provider_type()):
             return section == "live"
         return None  # M3U entries may be live or on demand
 
@@ -731,7 +753,7 @@ class CatalogService(QObject):
             )
             self._emit_later(self.sectionReady, section)
             return
-        if ptype not in ("M3UPLAYLIST", "XTREAM", "STB"):
+        if ptype not in ("M3UPLAYLIST", "XTREAM", "STB") and not is_media_server(ptype):
             self._fail_later(self.sectionFailed, section, f"Unsupported provider: {ptype}")
             return
         self._request_catalog(("section", section), "section", section, self._section_worker)
@@ -740,6 +762,8 @@ class CatalogService(QObject):
         provider, ptype = self.current_provider(), self.provider_type()
         ct = SECTION_CONTENT_TYPES[section]
         verify = provider.get("ssl_verify", self.config.ssl_verify)
+        if is_media_server(ptype):
+            return self.factory.media_section(provider, ct, verify)
         if ptype == "M3UPLAYLIST":
             return self.factory.m3u(provider.get("url", ""), verify)
         if ptype == "XTREAM":
@@ -935,7 +959,9 @@ class CatalogService(QObject):
         if self.seasons(series) is not None:
             self._emit_later(self.seasonsReady, series_id)
             return
-        if self.provider_type() not in ("XTREAM", "STB"):
+        if self.provider_type() not in ("XTREAM", "STB") and not is_media_server(
+            self.provider_type()
+        ):
             self._fail_later(self.seasonsFailed, series_id, NO_SERIES_MESSAGE)
             return
         self._request_catalog(("seasons", series_id), "seasons", series, self._seasons_worker)
@@ -943,6 +969,8 @@ class CatalogService(QObject):
     def _seasons_worker(self, series: dict) -> QObject:
         provider = self.current_provider()
         verify = provider.get("ssl_verify", self.config.ssl_verify)
+        if is_media_server(self.provider_type()):
+            return self.factory.media_series(provider, str(series.get("id")), verify)
         if self.provider_type() == "XTREAM":
             return self.factory.xtream_series(
                 base_url=provider.get("url", ""),
@@ -992,6 +1020,10 @@ class CatalogService(QObject):
             )
             stamp(formatted, self.current_provider_name())  # made on the fly, never stored
             return formatted
+        if is_media_server(self.provider_type()):  # 2.8: they came with their season
+            episodes = [e for e in season.get("episodes") or [] if isinstance(e, dict)]
+            stamp(episodes, self.current_provider_name())
+            return episodes
         cached = (
             self._series_cache()
             .get("episodes", {})
@@ -1079,6 +1111,19 @@ class CatalogService(QObject):
             return request_id
         if section not in SECTION_CONTENT_TYPES:
             self._fail_later(self.linkFailed, request_id, f"Unknown section: {section}")
+            return request_id
+        if is_media_server(self.provider_type()):
+            # 2.8: the version the settings pick, as its file is (asked of the server now).
+            provider = self.current_provider()
+            worker = self.factory.media_link(
+                provider,
+                str(item.get("id") or ""),
+                provider.get("ssl_verify", self.config.ssl_verify),
+                screen_4k=self.screen_4k(),
+                four_k=getattr(self.config, "media_4k_versions", "screen"),
+                max_bitrate=int(getattr(self.config, "media_max_mbps", 0) or 0) * 1_000_000,
+            )
+            self._start(worker, "link", request_id, self._on_link_ready, self._on_link_error)
             return request_id
         if self.provider_type() != "STB":
             url = str(item.get("cmd") or "").strip()

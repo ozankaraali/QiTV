@@ -23,6 +23,7 @@ from services.provider_api import (
     stb_endpoint,
     stb_portal_base,
 )
+from services.provider_types import is_media_server
 from services.redact import safe_exc
 from services.search import iter_items
 
@@ -39,6 +40,8 @@ MSG_STB_SERIES_ONLY = N_(
 )
 MSG_LOAD_LIVE = N_("Load Live TV first.")
 MSG_NOTHING_LOADED = N_("Nothing is loaded in this section yet.")
+# i18n: File → Export on a Jellyfin or Emby server (its titles have no playlist addresses)
+MSG_MEDIA_SERVER = N_("A Jellyfin or Emby server's titles can't be exported to a playlist.")
 MSG_CANCELLED = N_("Export cancelled")
 MSG_NO_EPISODES = N_("No episodes found to export.")
 MSG_UNREACHABLE = N_("Couldn\u2019t reach the provider to fetch episodes.")
@@ -89,6 +92,8 @@ def export_available(
     three-argument form cannot see what is loaded, so it is an optional fourth argument. It
     runs on the GUI thread, so it only looks for a first item (the worker collects them).
     """
+    if is_media_server(provider.get("type")):
+        return MSG_MEDIA_SERVER  # 2.8: its streams are made at play time, per sign-in
     if kind == ExportKind.COMPLETE_SERIES:
         if provider.get("type") != "STB" or section != "series":
             return MSG_STB_SERIES_ONLY

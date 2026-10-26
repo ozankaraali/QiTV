@@ -27,6 +27,7 @@ from services.provider_ids import (
     provider_of,
     split_group_id,
 )
+from services.provider_types import is_media_server
 from services.redact import safe_message
 
 logger = logging.getLogger(__name__)
@@ -388,6 +389,8 @@ class BrowsedCatalog(QObject):
             kind = str(self._catalogs.provider(name).get("type", "")).upper()
         except KeyError:
             return []
+        if is_media_server(kind):
+            return ["movies", "series"]  # 2.8: a Jellyfin or Emby server
         return ["live", "movies", "series"] if kind in _TYPED_PROVIDERS else ["live"]
 
     def sections(self) -> list[str]:
