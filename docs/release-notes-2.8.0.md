@@ -23,13 +23,15 @@ others' distributions, which may have malware.**
   server gives it, not your password. Older Jellyfin servers work too.
 - **A channel's picture size.** A channel whose stream comes in several sizes shows the ⚙ in
   the player controls too: Auto (its best) or a smaller size, for a slow or busy connection.
-  The channel goes on from where it was, its time-shift buffer kept, and keeps that size for
-  next time until you choose Auto.
+  The channel goes on from where it was, its time-shift buffer kept (and the one of the
+  channel you watched before it), and keeps that size for next time until you choose Auto,
+  also when it plays without the time-shift buffer.
 - **Cast to a TV.** The new cast button in the player controls sends what plays to a
   Chromecast, or a TV with Chromecast built in, on your network: a channel goes on from where
   it was in its time-shift buffer, a film from where it is. **Playing on …** says where the
   picture went, and **Stop casting** brings it back. The phone remote's More has **Cast to a
-  TV** too.
+  TV** too. A picture in picture opened while casting plays on the computer, and swapping the
+  pictures sends the new large one to the TV.
 - **Scheduled recordings.** In the guide, **Record** (or R) records a programme on now or still
   to come at its time, and **Record series** every airing of it on that channel; a red dot marks
   them, and Cancel recording takes one off. QiTV records in the background, from a minute
@@ -49,7 +51,8 @@ others' distributions, which may have malware.**
   adds later. While QiTV is locked, what you hid is gone from the channel list, the guide,
   changing channels, the Library, the search and the phone, and a hidden channel that plays
   stops; unlocking with the PIN lasts an hour, and only then can anything be shown again.
-  What you hid leaves Recent and Continue, locked or not.
+  What you hid leaves Recent and Continue, locked or not. A Library genre hides the same way
+  (right-click it).
 - **New for Xtream films and series.** The Library's New shelf and Recently added sort now
   know when an Xtream provider added each film and series.
 - **The Library in one click, and without waiting.** The channel list's top row has a Library
@@ -60,6 +63,11 @@ others' distributions, which may have malware.**
   Live TV error. An Xtream provider's and a media server's film and series lists load ahead
   once the provider is ready, and a list past its six hours shows at once while the new one
   loads behind it.
+- **Refresh films and series.** The Library's ↻ (beside its provider menu, also in that menu
+  and as Ctrl/⌘+Shift+R) loads the films and series of the providers it shows again, while
+  the saved lists stay on screen. A Jellyfin or Emby server is asked only for what changed
+  since the last look (titles added, removed, changed, or watched elsewhere), not its whole
+  library again.
 - **Film and series details from TMDB.** Where your provider leaves a film or a series without
   a poster (or with one that doesn't load), a story, a year, a running time, a genre, a rating
   or a cast, the Library shows TMDB's, in QiTV's language; the strip now names the cast too.
@@ -72,5 +80,19 @@ others' distributions, which may have malware.**
 - **STB portals' channels and films open again where their stream servers want a box.** QiTV
   asks for an STB portal's streams as a MAG box does (its user agent), as QiTV 1.x did: some
   portals' stream servers drop any other client, and their channels failed to open.
+- **STB portals' lists are asked more patiently.** Film and series pages go four at a time,
+  wait 15 s and are tried three times; the whole channel list waits 30 s and is asked again
+  after a timeout. VLC or MPV chosen as the player gets the box's user agent too, and an M3U
+  channel's own agent and referrer.
+- **Casting says when it can't.** Without VLC's casting on a computer, the cast menu (and the
+  phone's) says so instead of looking for devices forever.
+- **Recordings.** A recording still being written can't be deleted; quitting while a programme
+  records keeps it named in the Library, and reopening QiTV while it airs records the rest; a
+  programme that ended is not scheduled (a phone's old timetable); a series is found among
+  very short programmes; the schedule file no longer keeps an Xtream account inside channel
+  addresses.
+- **Time-shift.** After a stream's clock leapt ahead, a reconnect onto a clock a little behind
+  no longer steps the picture back; a long server window's playlist is not parsed again when
+  it hasn't changed.
 - **QiTV's log says why it quit.** It now tells QiTV's own Quit from a quit asked from outside
   (the Dock, another app, logging out), to explain quits that looked like crashes.
