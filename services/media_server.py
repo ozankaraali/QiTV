@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import logging
 import platform
 from typing import Any, Iterable, Optional
@@ -140,6 +141,9 @@ class MediaServerClient:
         self.verify = verify
         self.timeout = timeout
         self._http = session if session is not None else requests.Session()
+        # 2.8: the server's clock at its last answer (Unix seconds, its Date header), if it
+        # said: a refresh dates its look by it, whatever this computer's clock says.
+        self.server_time: Optional[float] = None
         self._set_auth()
 
     def _set_auth(self) -> None:
@@ -173,6 +177,7 @@ class MediaServerClient:
                 timeout=self.timeout,
                 verify=self.verify,
             )
+            self._note_date(response)
             if response.status_code == 404 and index < len(paths) - 1:
                 continue
             if response.status_code == 401:
@@ -181,6 +186,16 @@ class MediaServerClient:
                 raise MediaServerError(f"The server answered {response.status_code}")
             return response.json() if response.content else None
         return None
+
+    def _note_date(self, response: Any) -> None:
+        headers = getattr(response, "headers", None)
+        date = headers.get("Date") if headers is not None else None
+        if not date:
+            return
+        try:
+            self.server_time = parsedate_to_datetime(str(date)).timestamp()
+        except (TypeError, ValueError, IndexError, OverflowError):
+            pass  # a malformed Date: this computer's clock stands in
 
     def _user_routes(self, modern: str, classic: str) -> list[str]:
         if self.kind == JELLYFIN:
@@ -230,19 +245,22 @@ class MediaServerClient:
         page: int = PAGE,
         *,
         since: str = "",
-        for_user: bool = False,
+        resumable: bool = False,
         ids: Iterable[str] = (),
     ) -> list[dict]:
         """Every `item_type` ("Movie", "Series") title of the library `parent_id`; with
-        `since` (2.8, a refresh), only those saved since (`for_user`: whose user data, a
-        position or a watched mark, was); with `ids`, only those."""
+        `since` (2.8, a refresh), only those saved since; with `resumable`, those started
+        (the server's own resume list: where each stopped, set in any of its apps); with
+        `ids`, only those."""
         params: dict[str, Any] = {
             "Fields": FIELDS,
             "EnableImageTypes": "Primary",
             "ImageTypeLimit": 1,
         }
         if since:
-            params["MinDateLastSavedForUser" if for_user else "MinDateLastSaved"] = since
+            params["MinDateLastSaved"] = since
+        if resumable:
+            params["Filters"] = "IsResumable"
         wanted = ",".join(ids)
         if wanted:
             params["Ids"] = wanted
@@ -448,7 +466,10 @@ def saved_summary(payload: Optional[dict]) -> Optional[dict]:
     if not isinstance(since, str) or not isinstance(full, (int, float)):
         return None
     contents = payload.get("contents") or []
-    members: dict[str, list[str]] = {}
+    # The libraries looked at (an empty one too: review I2), then their titles.
+    members: dict[str, list[str]] = {
+        str(lib): [] for lib in payload.get("server_libraries") or () if isinstance(lib, str)
+    }
     for key, indices in (payload.get("sorted_channels") or {}).items():
         if key in (ALL_GROUP_ID, CONTINUE_ID):
             continue
@@ -458,19 +479,34 @@ def saved_summary(payload: Optional[dict]) -> Optional[dict]:
 
 def merged_payload(saved: Optional[dict], delta: dict) -> Optional[dict]:
     """A refresh's answer (`delta`: the libraries, each one's titles' ids in order, the titles
-    that changed or came, and the new look's date) merged into the saved section, by the
-    server's own ids (never by name: two titles alike stay two). None without a saved list."""
+    that changed or came, where each title started stops now (`positions`, the server's resume
+    list) and the new look's date) merged into the saved section, by the server's own ids
+    (never by name: two titles alike stay two). A saved title whose position moved is a copy
+    (a worker may read the saved one). None without a saved list."""
     if not isinstance(saved, dict):
         return None
     made = {str(item.get("id")): item for item in saved.get("contents") or []}
+    positions = delta.get("positions")
+    if isinstance(positions, dict):
+        for item_id, item in made.items():
+            now = positions.get(item_id)
+            if item.get("server_position_ms") != now:
+                moved = dict(item)
+                if now:
+                    moved["server_position_ms"] = now
+                else:
+                    moved.pop("server_position_ms", None)
+                made[item_id] = moved
     made.update(delta.get("changed") or {})
     ordered = {
         library: [made[i] for i in ids if i in made]
         for library, ids in (delta.get("order") or {}).items()
     }
-    payload = _payload(list(delta.get("libraries") or []), ordered)
+    libraries = list(delta.get("libraries") or [])
+    payload = _payload(libraries, ordered)
     payload["server_since"] = delta.get("server_since")
     payload["server_full"] = saved.get("server_full")
+    payload["server_libraries"] = [lib["id"] for lib in libraries]
     return payload
 
 

@@ -158,10 +158,21 @@ class ChangedSinceTests(unittest.TestCase):
     def test_changed_titles_are_asked_by_when_they_were_saved(self):
         c, http = self.answering({"Items": [FILM], "TotalRecordCount": 1}, {"Items": []})
         self.assertEqual(c.items("Movie", "L1", since="2026-10-26T10:00:00Z")[0]["Id"], "f1")
-        c.items("Movie", "L1", since="2026-10-26T10:00:00Z", for_user=True)
+        c.items("Movie", "L1", resumable=True)  # review I1: the server's resume list
         self.assertEqual(http.asked[0][2]["MinDateLastSaved"], "2026-10-26T10:00:00Z")
-        self.assertEqual(http.asked[1][2]["MinDateLastSavedForUser"], "2026-10-26T10:00:00Z")
+        self.assertEqual(http.asked[1][2]["Filters"], "IsResumable")
         self.assertNotIn("MinDateLastSaved", http.asked[1][2])
+
+    def test_the_servers_clock_is_noted_from_its_answers(self):
+        c, http = client({})
+
+        class Dated(_Response):
+            headers = {"Date": "Fri, 15 Jan 2027 08:00:00 GMT"}
+
+        http.request = lambda *a, **kw: Dated(200, {"Items": [], "TotalRecordCount": 0})
+        self.assertIsNone(c.server_time)
+        c.count("Movie", "L1")
+        self.assertEqual(c.server_time, 1_800_000_000.0)
 
     def test_titles_are_asked_by_their_ids(self):
         c, http = self.answering({"Items": [FILM], "TotalRecordCount": 1})
@@ -208,6 +219,33 @@ class ChangedSinceTests(unittest.TestCase):
         self.assertNotIn(ms.CONTINUE_ID, merged["sorted_channels"])  # nothing started now
         self.assertEqual(merged["server_since"], "2026-10-26T11:50:00Z")
         self.assertEqual(merged["server_full"], 1000.0)
+
+    def test_positions_and_an_empty_library_merge_in(self):  # review I1, I2
+        libraries = [
+            {"id": "L1", "name": "Movies", "type": "movies"},
+            {"id": "L2", "name": "Home videos", "type": "homevideos"},  # no films: empty
+        ]
+        saved = ms.section_payload(
+            libraries, {"L1": [FILM, {"Id": "f2", "Name": "Tide"}], "L2": []}, BASE
+        )
+        saved.update(server_since="x", server_full=1.0, server_libraries=["L1", "L2"])
+        summary = ms.saved_summary(saved)
+        self.assertEqual(summary["members"], {"L1": ["f1", "f2"], "L2": []})
+        delta = {
+            "delta": True,
+            "libraries": libraries,
+            "order": {"L1": ["f1", "f2"], "L2": []},
+            "changed": {},
+            "positions": {"f2": 120_000},  # f1 was watched to the end since; f2 started
+            "server_since": "y",
+        }
+        merged = ms.merged_payload(saved, delta)
+        by_id = {i["id"]: i for i in merged["contents"]}
+        self.assertNotIn("server_position_ms", by_id["f1"])
+        self.assertEqual(by_id["f2"]["server_position_ms"], 120_000)
+        self.assertEqual(merged["sorted_channels"][ms.CONTINUE_ID], [1])
+        self.assertEqual(merged["server_libraries"], ["L1", "L2"])
+        self.assertEqual(saved["contents"][0]["server_position_ms"], 600_000)  # not changed
 
     def test_a_list_without_a_look_s_time_has_no_summary(self):
         payload = ms.section_payload([], {}, BASE)

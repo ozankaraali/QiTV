@@ -30,17 +30,22 @@ class FakeClient:
             raise self._fail
         return list(self._libraries)
 
-    def items(self, item_type, parent_id, *, since="", for_user=False, ids=()):
+    def items(self, item_type, parent_id, *, since="", resumable=False, ids=()):
         asked = (item_type, parent_id)
-        self.asked.append(asked + (since, for_user, tuple(ids)) if since or ids else asked)
+        more = since or ids or resumable
+        self.asked.append(asked + (since, resumable, tuple(ids)) if more else asked)
         if ids:
             return [i for i in self.everything.get(parent_id, []) if i["Id"] in ids]
+        if resumable:
+            return list(self.resumable.get(parent_id, []))
         if since:
-            return list(self.changed.get((parent_id, for_user), []))
+            return list(self.changed.get(parent_id, []))
         return list(self._items.get(parent_id, []))
 
     everything: dict = {}  # a library's every title now (by id asks and the count)
-    changed: dict = {}  # (library, for_user) -> the titles saved since
+    changed: dict = {}  # library -> the titles saved since
+    resumable: dict = {}  # library -> its titles started (the server's resume list)
+    server_time = None  # the server's clock at its last answer (Unix seconds), if it said
 
     def count(self, item_type, parent_id):
         self.asked.append(("count", parent_id))
@@ -115,7 +120,7 @@ class SectionWorkerTests(unittest.TestCase):
         lib = {"id": "L1", "name": "Movies", "type": "movies"}
         client = FakeClient(libraries=[lib])
         client.everything = {"L1": [{"Id": "f1", "Name": "Salt"}, {"Id": "f2", "Name": "Tide"}]}
-        client.changed = {("L1", True): [{"Id": "f2", "Name": "Tide", "UserData": {}}]}
+        client.changed = {"L1": [{"Id": "f2", "Name": "Tide", "UserData": {}}]}
         saved = {
             "since": "2027-01-15T07:50:00Z",
             "full": 1_800_000_000.0,
@@ -145,7 +150,7 @@ class SectionWorkerTests(unittest.TestCase):
             (
                 "one came, saved since",
                 [f0, f1, f2],
-                {("L1", False): [f0]},
+                {"L1": [f0]},
                 ["f0", "f1", "f2"],
                 ["f0"],
             ),
@@ -166,6 +171,50 @@ class SectionWorkerTests(unittest.TestCase):
                 _kind, delta = outcome(worker)
                 self.assertEqual(delta["order"], {"L1": order})
                 self.assertEqual(list(delta["changed"]), came)
+
+    def later(self, client, saved, clock=1_800_003_600.0):
+        worker = MediaSectionWorker(
+            PROVIDER, "vod", True, client=lambda p, v: client, saved=saved, clock=lambda: clock
+        )
+        return outcome(worker)[1]
+
+    def test_positions_come_from_the_servers_resume_list(self):  # review I1
+        # Played in the server's own app: the title itself was not saved since, its user data
+        # was; the server's resume list says where each title stopped, the others started none.
+        lib = {"id": "L1", "name": "Movies", "type": "movies"}
+        client = FakeClient(libraries=[lib])
+        client.everything = {"L1": [{"Id": "f1"}, {"Id": "f2"}]}
+        ticks = 600_000 * ms.TICKS_PER_MS
+        client.resumable = {"L1": [{"Id": "f2", "UserData": {"PlaybackPositionTicks": ticks}}]}
+        saved = {"since": "x", "full": 1_800_000_000.0, "members": {"L1": ["f1", "f2"]}}
+        delta = self.later(client, saved)
+        self.assertEqual(delta["positions"], {"f2": 600_000})
+        self.assertIn(("Movie", "L1", "", True, ()), client.asked)
+
+    def test_a_title_in_two_libraries_keeps_the_first(self):  # review M1
+        libs = [
+            {"id": "LA", "name": "A", "type": "movies"},
+            {"id": "LB", "name": "B", "type": "movies"},
+        ]
+        client = FakeClient(libraries=libs)
+        both = {"Id": "f1", "Name": "Salt"}
+        client.everything = {"LA": [both], "LB": [both]}
+        client.changed = {"LA": [both], "LB": [both]}
+        saved = {"since": "x", "full": 1_800_000_000.0, "members": {"LA": ["f1"], "LB": ["f1"]}}
+        delta = self.later(client, saved)
+        self.assertEqual(delta["changed"]["f1"]["tv_genre_id"], "LA")  # as a whole load has it
+
+    def test_a_look_is_dated_by_the_servers_clock(self):
+        # A server whose clock is behind this computer's: the next look asks from its time.
+        lib = {"id": "L1", "name": "Movies", "type": "movies"}
+        client = FakeClient(libraries=[lib], items={"L1": [{"Id": "f1"}]})
+        client.server_time = 1_800_000_000.0 - 3600  # an hour behind
+        worker = MediaSectionWorker(
+            PROVIDER, "vod", True, client=lambda p, v: client, clock=lambda: 1_800_000_000.0
+        )
+        payload = outcome(worker)[1]
+        self.assertEqual(payload["server_since"], "2027-01-15T06:50:00Z")
+        self.assertEqual(payload["server_libraries"], ["L1"])
 
     def test_after_a_week_or_with_a_new_library_it_loads_whole(self):
         libs = [{"id": "L1", "name": "Movies", "type": "movies"}]

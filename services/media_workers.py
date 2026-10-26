@@ -79,11 +79,13 @@ class MediaSectionWorker(_ServerWorker):
     A first load (or one a week after the last whole one, or with a library new since) asks
     every title and notes when it looked. A later one (2.8: a refresh, a list past its time)
     is given the saved list's summary (`media_server.saved_summary`) and asks only what
-    changed: per library, the titles saved since the last look and those whose user data
-    was (a position, a watched mark), and its count; when titles came or went (the count, or
-    a changed title it did not hold, says so), the library's ids in order, and those it did
-    not hold by their ids. Its answer is a delta that the catalog merges into the saved list
-    (`media_server.merged_payload`), on the GUI thread, where that list lives."""
+    changed: per library, the titles saved since the last look, its resume list (where each
+    title started stops now, set in any of the server's apps: review I1) and its count; when
+    titles came or went (the count, or a changed title it did not hold, says so), the
+    library's ids in order, and those it did not hold by their ids. A title in two libraries
+    is the first one's, as in a whole load. A look is dated by the server's clock (this
+    computer's when it tells none). Its answer is a delta that the catalog merges into the
+    saved list (`media_server.merged_payload`), on the GUI thread, where that list lives."""
 
     def __init__(
         self,
@@ -106,7 +108,8 @@ class MediaSectionWorker(_ServerWorker):
         libraries = [lib for lib in client.libraries() if lib["type"] in wanted]
         item_type = "Series" if series else "Movie"
         now = self._clock()
-        since = ms.server_time(now - ms.SINCE_MARGIN_S)
+        looked = client.server_time if client.server_time is not None else now
+        since = ms.server_time(looked - ms.SINCE_MARGIN_S)
         saved = self.saved
         if (
             saved is None
@@ -115,19 +118,29 @@ class MediaSectionWorker(_ServerWorker):
         ):
             titles = {lib["id"]: client.items(item_type, lib["id"]) for lib in libraries}
             payload = ms.section_payload(libraries, titles, client.base)
-            payload.update(server_since=since, server_full=now)
+            payload.update(
+                server_since=since,
+                server_full=now,
+                server_libraries=[lib["id"] for lib in libraries],
+            )
             return payload
         changed: dict[str, dict] = {}
         order: dict[str, list[str]] = {}
+        positions: dict[str, int] = {}
         for library in libraries:
             lib_id, known = library["id"], saved["members"][library["id"]]
             fresh: list[str] = []
-            for for_user in (False, True):
-                for raw in client.items(item_type, lib_id, since=saved["since"], for_user=for_user):
-                    item_id = str(raw.get("Id") or "")
-                    if item_id:
+            for raw in client.items(item_type, lib_id, since=saved["since"]):
+                item_id = str(raw.get("Id") or "")
+                if item_id:
+                    if item_id not in changed:  # a title in two libraries is the first's
                         changed[item_id] = ms.title_item(raw, client.base, lib_id)
-                        fresh.append(item_id)
+                    fresh.append(item_id)
+            for raw in client.items(item_type, lib_id, resumable=True):
+                item_id = str(raw.get("Id") or "")
+                ticks = int((raw.get("UserData") or {}).get("PlaybackPositionTicks") or 0)
+                if item_id and ticks > 0:
+                    positions.setdefault(item_id, ticks // ms.TICKS_PER_MS)
             held = set(known)
             if any(i not in held for i in fresh) or client.count(item_type, lib_id) != len(known):
                 ids = client.item_ids(item_type, lib_id)
@@ -136,7 +149,7 @@ class MediaSectionWorker(_ServerWorker):
                     chunk = missing[start : start + ms.IDS_A_REQUEST]
                     for raw in client.items(item_type, lib_id, ids=chunk):
                         item_id = str(raw.get("Id") or "")
-                        if item_id:
+                        if item_id and item_id not in changed:
                             changed[item_id] = ms.title_item(raw, client.base, lib_id)
                 order[lib_id] = ids
             else:
@@ -146,6 +159,7 @@ class MediaSectionWorker(_ServerWorker):
             "libraries": libraries,
             "order": order,
             "changed": changed,
+            "positions": positions,
             "server_since": since,
         }
 
