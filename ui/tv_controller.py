@@ -134,6 +134,7 @@ from ui.pip_controls import PipControls
 from ui.player_keys import PlayerKeys
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
+from ui.quality_controls import QualityControls
 from ui.record_guard import RecordGuard
 from ui.stream_question import StreamQuestion, quit_text
 from ui.subtitle_search import OnlineSetup, OnlineSubtitles
@@ -197,6 +198,8 @@ class Overlays:
     stopped_notice: Any = None  # 2.6: "Stopped", with Play again, after Stop
     library_rec_sign: Any = None  # its twin on the Library page
     cast_notice: Any = None  # 2.8: "Playing on <device>", with Stop casting
+    quality_panel: Any = None  # 2.8: the ⚙ quality menu's panel above its button
+    quality_question: Any = None  # 2.8: its own QuestionCard (convert on the server?)
 
 
 class TVController(QObject):
@@ -286,6 +289,9 @@ class TVController(QObject):
         self._started = False
         self._wired = False
         self._closed = False
+        # 2.8: a media server's conversion chosen in the quality menu, by provider: its titles
+        # play converted until QiTV closes (a version as it is ends it).
+        self._media_quality: dict[str, Any] = {}
         self._guides_applied: Optional[set[str]] = None  # what the hub was last told
         self._phone_guides: set[str] = set()  # the providers the phone remote lists
         self._lanes = LinkLanes(catalog, self)
@@ -452,6 +458,18 @@ class TVController(QObject):
             show_transport=self._show_transport,
             parent=self,
         )
+        # 2.8: the ⚙ quality menu: a media server's versions and conversions.
+        self._quality: Optional[QualityControls] = None
+        if overlays.quality_panel is not None and overlays.quality_question is not None:
+            self._quality = QualityControls(
+                panel=overlays.quality_panel,
+                transport=overlays.transport,
+                card=overlays.quality_question,
+                current=lambda: self._current,
+                menu=self._media_menu,
+                choose=self.change_quality,
+                parent=self,
+            )
         # 2.6: before a recording is stopped for a stream, the question.
         # 2.8: a Jellyfin or Emby server hears where its title plays (None: none told).
         self._media = media_reporter
@@ -667,6 +685,8 @@ class TVController(QObject):
         self._mixer.wire()
         self._tracks.wire()
         self._picture.wire()
+        if self._quality is not None:
+            self._quality.wire()
         if self._pip is not None:
             self._pip.wire()
         self._on_audio_changed()  # the speakers show the remembered levels from the start
@@ -1023,6 +1043,8 @@ class TVController(QObject):
                 return
         if self._question.handle(action):
             return  # 2.6: QiTV asks (stop a recording?): Enter, Esc, the arrows are its own
+        if self._quality is not None and self._quality.handle(action, key):
+            return  # 2.8: the ⚙ quality menu, or its question (convert on the server?)
         if self._online is not None and self._online.handle(action, payload):
             return  # the OpenSubtitles search shows: typing, the lists, Enter and Esc
         if self._guide.is_open() and self._guide.handle(action, payload):
@@ -1465,6 +1487,11 @@ class TVController(QObject):
         self.leave_multiview()  # live only: the focused tile is the big picture again
         self._flow.leave_library()
         target = self.title_target(item, kind, context)
+        converted = self._media_quality.get(
+            provider_of(item) or self.catalog.current_provider_name()
+        )
+        if converted is not None:  # 2.8: the server's conversion chosen goes on for its titles
+            target = replace(target, quality=converted)
         title = target.title
         beside = self._title_beside_channel()  # what plays large is a title, a channel small
         if self._pip is not None:
@@ -1480,6 +1507,29 @@ class TVController(QObject):
         self._room_for = target if self._pip is not None and self._pip.has_room() else None
         self._lanes.supersede()  # a newer choice than an external play waiting for its link
         self._request(target)
+
+    def _media_menu(self, item: dict) -> Optional[dict]:
+        """What the ⚙ quality menu offers for a title (the catalog's media_menu; None: none)."""
+        menu = getattr(self.catalog, "media_menu", None)
+        return menu(item) if callable(menu) else None
+
+    def change_quality(self, quality: Any) -> None:
+        """The quality menu's choice (2.8): the film or episode playing opens again in that
+        quality (a media server's version as it is, or its conversion), on from where it is.
+        A conversion goes on for that server's titles until QiTV closes; a version as it is
+        ends it."""
+        target = self._current
+        if self._closed or target is None or target.live or target.local:
+            return
+        provider = provider_of(target.item) or self.catalog.current_provider_name()
+        if getattr(quality, "converted", False):
+            self._media_quality[provider] = quality
+        else:
+            self._media_quality.pop(provider, None)
+        start = max(0, int(self.session.time_ms() or 0)) if self._has_media() else None
+        self._request(
+            replace(target, quality=quality, start_ms=start, start_over=False, zapped=False)
+        )
 
     def _title_beside_channel(self) -> bool:
         """A movie or an episode is the large picture's (playing, ended or failed) while the
@@ -1747,8 +1797,12 @@ class TVController(QObject):
                 self._live_controls.show_live_transport(target)
         else:
             cid = self.watch.content_id(provider_name, item, item_type=target.item_type)
-            start = 0 if target.start_over else self.watch.resume_position(cid)
-            if not target.start_over and not start:
+            start: Optional[int]
+            if target.start_ms is not None:  # 2.8: its quality changed: on from where it was
+                start = target.start_ms
+            else:
+                start = 0 if target.start_over else self.watch.resume_position(cid)
+            if not target.start_over and not start and target.start_ms is None:
                 start = server_resume(item)  # 2.8: where a media server says it stopped
             self._current, self._cid = target, cid
             session = self.session
@@ -1761,7 +1815,7 @@ class TVController(QObject):
             self._tuner.open(self._guarded(target, open_vod), direct=True, provider=provider_name)
             if self._current is not None and self._current is not target:
                 return  # its open failed at once: the channel kept small took the picture back
-            if start:
+            if start and target.start_ms is None:
                 # i18n: a toast; {time} is where the film resumes, e.g. 1:02:05
                 self._toast(tr("Resumed at {time}", time=fmt_duration(start)))
             self.overlays.banner.dismiss()  # the transport takes the bottom of the video
@@ -1813,6 +1867,9 @@ class TVController(QObject):
     def _delivered(self, target: Target, url: str) -> None:
         """The target is playing (or opening): confirm the zap and record it in the history."""
         self._current_url = url
+        # 2.8: the ⚙ quality menu, for a media server's title its server offers choices for.
+        offered = not target.live and not target.local and self._media_menu(target.item)
+        self.overlays.transport.set_quality_available(bool(offered))
         if self.sessions is not None:  # what the large picture shows (a zap onto it stays)
             large = self.sessions.large()
             large.channel = target.item if target.live else None

@@ -478,10 +478,9 @@ class ConfigManager:
     recordings_dir = _config_property(
         "recordings_dir", "", coerce=lambda value: value if isinstance(value, str) else ""
     )
-    # 2.8, optional (older builds ignore them): Jellyfin and Emby. Which version of a title
-    # plays ("screen": the 4K one on a 4K screen, or when it's the only one; "always",
-    # "never"), and the bitrate above which the server converts it (Mbit/s; 0: never
-    # converted, the file plays as it is).
+    # 2.8, optional (older builds ignore it): Jellyfin and Emby. Which version of a title plays
+    # ("screen": the 4K one on a 4K screen, or when it's the only one; "always", "never"); the
+    # file plays as it is (the player's ⚙ quality menu asks the server to convert).
     media_4k_versions = _config_property(
         "media_4k_versions", "screen", coerce=_one_of(("screen", "always", "never"), "screen")
     )
@@ -489,12 +488,6 @@ class ConfigManager:
     # services.parental reads and writes it.
     parental = _config_property(
         "parental", None, coerce=lambda value: value if isinstance(value, dict) else None
-    )
-    media_max_mbps = _config_property(
-        "media_max_mbps",
-        0,
-        coerce=lambda value: int(value) if isinstance(value, (int, float)) else 0,
-        clamp=(0, 200),
     )
     # 2.2: OpenSubtitles. Optional keys (older builds ignore them); the key and the password
     # are never logged. The language is the one downloaded last; "hearing impaired" whether

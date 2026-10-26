@@ -639,8 +639,18 @@ class BrowsedCatalog(QObject):
             catalog.request_episodes(series, season)
 
     # --- links and guide -------------------------------------------------------------------
-    def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
-        return self._catalogs.request_link(item, section=section, is_episode=is_episode)
+    def request_link(
+        self, item: dict, *, section: str, is_episode: bool = False, quality: Any = None
+    ) -> int:
+        extra = {"quality": quality} if quality is not None else {}
+        return self._catalogs.request_link(item, section=section, is_episode=is_episode, **extra)
+
+    def media_menu(self, item: dict) -> Optional[dict]:
+        """What the quality menu offers for a media server's title (2.8: its catalog's
+        `media_menu`); None for any other."""
+        catalog = self._for(item)
+        menu = getattr(catalog, "media_menu", None) if catalog is not None else None
+        return menu(item) if callable(menu) else None
 
     def request_archive_link(self, item: dict, programme: str) -> int:
         """The link of a programme's recording in the item's STB portal's archive (catch-up;

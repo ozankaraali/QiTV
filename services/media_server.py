@@ -440,6 +440,52 @@ def choose_source(
     return best, None
 
 
+@dataclass(frozen=True)
+class Quality:
+    """A choice of the player's quality menu (2.8): a version as its file is (`source`, its id;
+    "" for the one the settings pick), or the server's conversion of it to at most `height`
+    lines and `bitrate` bits a second."""
+
+    source: str = ""
+    height: int = 0
+    bitrate: int = 0
+
+    @property
+    def converted(self) -> bool:
+        return self.height > 0 or self.bitrate > 0
+
+    def same_as(self, other: "Quality") -> bool:
+        """The same choice: a conversion by its size and rate (of whatever version), a version
+        as it is by its id."""
+        if self.converted or other.converted:
+            return (self.converted, self.height, self.bitrate) == (
+                other.converted,
+                other.height,
+                other.bitrate,
+            )
+        return self.source == other.source
+
+
+# The conversions the quality menu offers, best first (the server converts: its processor).
+CONVERSIONS = (
+    Quality(height=1080, bitrate=8_000_000),
+    Quality(height=720, bitrate=4_000_000),
+    Quality(height=480, bitrate=2_000_000),
+)
+
+
+def version_of(source: dict) -> dict:
+    """A version as the quality menu lists it: its id, height, bitrate, whether it is 4K, and
+    the server's name for it."""
+    return {
+        "id": str(source.get("Id") or ""),
+        "height": int(_video(source).get("Height") or 0),
+        "bitrate": int(source.get("Bitrate") or 0),
+        "uhd": is_4k(source),
+        "name": str(source.get("Name") or "") if source.get("Name") else "",
+    }
+
+
 def _container(source: dict) -> str:
     return str(source.get("Container") or "").split(",")[0].strip()
 
@@ -467,20 +513,23 @@ def converted_url(
     play_session: str,
     max_bitrate: int,
     device_id: str,
+    max_height: int = 0,
 ) -> str:
-    """The server's own conversion (HLS, H.264 and AAC), capped at `max_bitrate`."""
-    query = urlencode(
-        {
-            "MediaSourceId": source.get("Id") or "",
-            "PlaySessionId": play_session,
-            "DeviceId": device_id,
-            "VideoCodec": "h264",
-            "AudioCodec": "aac",
-            "MaxStreamingBitrate": int(max_bitrate),
-            "SegmentContainer": "ts",
-            "api_key": token,
-        }
-    )
+    """The server's own conversion (HLS, H.264 and AAC), capped at `max_bitrate` (and at
+    `max_height` lines when given: 2.8, the quality menu)."""
+    params: dict[str, object] = {
+        "MediaSourceId": source.get("Id") or "",
+        "PlaySessionId": play_session,
+        "DeviceId": device_id,
+        "VideoCodec": "h264",
+        "AudioCodec": "aac",
+        "MaxStreamingBitrate": int(max_bitrate),
+        "SegmentContainer": "ts",
+    }
+    if max_height > 0:
+        params["MaxHeight"] = int(max_height)
+    params["api_key"] = token
+    query = urlencode(params)
     return f"{base}/Videos/{item_id}/master.m3u8?{query}"
 
 

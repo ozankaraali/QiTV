@@ -264,6 +264,36 @@ class StreamUrlTests(unittest.TestCase):
         self.assertIn("VideoCodec=h264", url)
         self.assertEqual(ms.parse_stream_url(url, [BASE]).item_id, "f1")
 
+    def test_a_conversion_asks_for_its_height_too(self):  # 2.8: the quality menu
+        url = ms.converted_url(
+            BASE, "f1", {"Id": "ms1"}, "tok", "ps1", 4_000_000, "dev-1", max_height=720
+        )
+        self.assertIn("MaxStreamingBitrate=4000000", url)
+        self.assertIn("MaxHeight=720", url)
+        self.assertNotIn("MaxHeight", ms.converted_url(BASE, "f1", {}, "t", "p", 1, "d"))
+
+
+class QualityTests(unittest.TestCase):  # 2.8: the quality menu's choices
+    def test_a_version_is_known_by_its_size_and_rate(self):
+        uhd = SourceTests.source(None, "uhd", 3840, 2160, 25_000_000)
+        hd = SourceTests.source(None, "hd", 1920, 1080, 8_200_000)
+        self.assertEqual(
+            [ms.version_of(s) for s in (uhd, hd)],
+            [
+                {"id": "uhd", "height": 2160, "bitrate": 25_000_000, "uhd": True, "name": ""},
+                {"id": "hd", "height": 1080, "bitrate": 8_200_000, "uhd": False, "name": ""},
+            ],
+        )
+
+    def test_the_conversions_offered_step_down(self):
+        self.assertEqual(
+            [(q.height, q.bitrate) for q in ms.CONVERSIONS],
+            [(1080, 8_000_000), (720, 4_000_000), (480, 2_000_000)],
+        )
+        self.assertTrue(all(q.converted for q in ms.CONVERSIONS))
+        self.assertFalse(ms.Quality(source="hd").converted)
+        self.assertFalse(ms.Quality().converted)
+
 
 if __name__ == "__main__":
     unittest.main()

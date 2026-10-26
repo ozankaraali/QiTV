@@ -10,6 +10,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 
+from services import media_server as ms
 from services.catalog import (
     ALL_GROUP_ID,
     SECTION_UNAVAILABLE_MESSAGE,
@@ -595,7 +596,6 @@ class MediaServerCatalogTests(unittest.TestCase):
     def test_a_titles_stream_is_asked_with_the_settings_choices(self):
         service, _providers, factory, _ = make_service(dict(JELLY))
         service.config.media_4k_versions = "always"
-        service.config.media_max_mbps = 8
         service.screen_4k = lambda: True
         factory.results["media_link"] = {
             "result": {"link": "http://server.test:8096/Videos/f1/stream.mkv"}
@@ -606,7 +606,23 @@ class MediaServerCatalogTests(unittest.TestCase):
         self.assertEqual(links, [(request, "http://server.test:8096/Videos/f1/stream.mkv")])
         name, args, kwargs = factory.calls[-1]
         self.assertEqual((name, args[1]), ("media_link", "f1"))
-        self.assertEqual(kwargs, {"screen_4k": True, "four_k": "always", "max_bitrate": 8_000_000})
+        self.assertEqual(kwargs, {"screen_4k": True, "four_k": "always", "quality": None})
+
+    def test_a_titles_quality_is_asked_for_and_its_versions_kept(self):  # 2.8: the ⚙ menu
+        service, _providers, factory, _ = make_service(dict(JELLY))
+        versions = [{"id": "uhd", "height": 2160}, {"id": "hd", "height": 1080}]
+        chosen = ms.Quality(height=720, bitrate=4_000_000)
+        factory.results["media_link"] = {
+            "result": {"link": "http://s.test/m.m3u8", "versions": versions, "quality": chosen}
+        }
+        self.assertIsNone(service.media_menu({"id": "f1"}))  # nothing asked yet
+        service.request_link({"id": "f1", "cmd": ""}, section="movies", quality=chosen)
+        QCoreApplication.processEvents()
+        self.assertIs(factory.calls[-1][2]["quality"], chosen)
+        self.assertEqual(
+            service.media_menu({"id": "f1"}), {"versions": versions, "quality": chosen}
+        )
+        self.assertIsNone(service.media_menu({"id": "f2"}))
 
 
 class CatalogShutdownTests(unittest.TestCase):

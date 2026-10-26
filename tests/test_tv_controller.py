@@ -18,7 +18,7 @@ from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config,
 from test_browsed_catalog import FakeEpg, ScriptedFactory
 from timer_fixtures import elapse, wait_until
 
-from services import provider_api
+from services import media_server as ms, provider_api
 from services.browsed_catalog import BrowsedCatalog
 from services.catalog import PROVIDER_LOADING_MESSAGE, UNREACHABLE_MESSAGE
 from services.catalogs import Catalogs
@@ -133,6 +133,8 @@ class FakeCatalog(NavCatalog):
         self.live = {"10": list(CHANNELS)}
         self.names = ["Home", "Backup"]
         self.links = []  # (request_id, item, section, is_episode)
+        self.qualities = []  # each link request's quality (2.8)
+        self.menus = {}  # item id -> what its quality menu offers (2.8)
         self.epg = {}
         self.loading = False
         self.epg_refreshes = 0
@@ -177,9 +179,13 @@ class FakeCatalog(NavCatalog):
     def use_guides(self, names):
         self.guides_used.append(set(names))
 
-    def request_link(self, item, *, section, is_episode=False):
+    def media_menu(self, item):  # 2.8: a media server's versions for the quality menu
+        return self.menus.get(item.get("id"))
+
+    def request_link(self, item, *, section, is_episode=False, quality=None):
         request_id = len(self.links) + 1
         self.links.append((request_id, item, section, is_episode))
+        self.qualities.append(quality)  # 2.8: the quality menu's choice
         return request_id
 
     def programmes(self, channel, now, limit=8):
@@ -248,6 +254,11 @@ class FakeSession(QObject):
         self.deinterlacing = "auto"
         self.stats = {}  # what video_stats() reads
         self.software = False  # decodes_in_software(): asked for, or the picture froze
+
+    now_ms = 0  # time_ms(): where what plays is (2.8: a quality change goes on from there)
+
+    def time_ms(self):
+        return self.now_ms
 
     def play(self, url, **kwargs):
         self.plays.append((url, kwargs))
@@ -506,8 +517,14 @@ class FakeTransport(FakeOverlay):
     infoRequested = Signal()
     favoriteRequested = Signal()
     recordRequested = Signal()  # 2.3
+    qualityRequested = Signal()  # 2.8: the ⚙ quality menu
     bandChanged = Signal()
     recording_since = None
+
+    quality_states = ()  # each set_quality_available (kept apart from `calls`)
+
+    def set_quality_available(self, available):
+        self.quality_states = (*self.quality_states, available)
 
     def set_muted(self, muted):
         self.record("set_muted", muted)
@@ -1881,6 +1898,49 @@ class VodTests(ControllerTestCase):
         self.session.ended.emit()
         self.assertEqual(self.toast.messages()[-1], ("Finished", "info"))
         self.assertEqual(self.watch.flushes, 1)
+
+    def test_a_new_quality_opens_the_film_again_where_it_is(self):  # 2.8: the ⚙ menu
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.session.now_ms = 600_000
+        chosen = ms.Quality(source="uhd")
+        self.controller.change_quality(chosen)
+        self.assertEqual(len(self.catalog.links), 2)
+        self.assertIs(self.catalog.qualities[-1], chosen)
+        self.catalog.linkReady.emit(2, "http://vod/heat-uhd.mkv")
+        url, kwargs = self.session.plays[-1]
+        self.assertEqual((url, kwargs["start_ms"]), ("http://vod/heat-uhd.mkv", 600_000))
+        self.assertNotIn(("Resumed at 10:00", "info"), self.toast.messages())
+
+    def test_a_conversion_goes_on_for_that_servers_next_titles_until_qitv_closes(self):
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        converted = ms.Quality(height=720, bitrate=4_000_000)
+        self.controller.change_quality(converted)
+        self.catalog.linkReady.emit(2, "http://vod/heat.m3u8")
+        self.controller.play_vod({"id": "m8", "name": "Ronin", "cmd": "x"}, "movie", play_context())
+        self.assertIs(self.catalog.qualities[-1], converted)
+        self.catalog.linkReady.emit(3, "http://vod/ronin.m3u8")
+        self.controller.change_quality(ms.Quality(source="hd"))  # a version: back as it is
+        self.catalog.linkReady.emit(4, "http://vod/ronin.mkv")
+        self.controller.play_vod({"id": "m9", "name": "Tron", "cmd": "y"}, "movie", play_context())
+        self.assertIsNone(self.catalog.qualities[-1])
+
+    def test_the_quality_button_shows_for_a_title_its_server_offers_choices_for(self):
+        self.catalog.menus["m7"] = {"versions": [{"id": "hd"}], "quality": ms.Quality("hd")}
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.assertEqual(self.transport.quality_states[-1], True)
+        self.controller.tune(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.catalog.linkReady.emit(2, "http://x/1.ts")
+        self.assertEqual(self.transport.quality_states[-1], False)
+
+    def test_live_tv_has_no_quality_to_change(self):
+        self.controller.tune(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.catalog.linkReady.emit(1, "http://x/1.ts")
+        links = len(self.catalog.links)
+        self.controller.change_quality(ms.Quality(height=720, bitrate=4_000_000))
+        self.assertEqual(len(self.catalog.links), links)
 
     def test_episode_requests_a_series_link(self):
         episode = {"id": "s", "cmd": "x", "series": 2}

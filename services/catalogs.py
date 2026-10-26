@@ -270,9 +270,16 @@ class Catalogs(QObject):
             logger.debug("An unstamped item goes to the selected provider")
         return name
 
-    def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
+    def request_link(
+        self, item: dict, *, section: str, is_episode: bool = False, quality: Any = None
+    ) -> int:
+        """A playable URL of the item's provider; `quality`: the quality menu's (2.8)."""
+        extra = {"quality": quality} if quality is not None else {}
         return self._link(
-            item, lambda catalog: catalog.request_link(item, section=section, is_episode=is_episode)
+            item,
+            lambda catalog: catalog.request_link(
+                item, section=section, is_episode=is_episode, **extra
+            ),
         )
 
     def request_archive_link(self, item: dict, programme: str) -> int:

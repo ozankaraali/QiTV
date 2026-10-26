@@ -465,6 +465,10 @@ class CatalogService(QObject):
         self._link_ids = link_ids if link_ids is not None else itertools.count(1)
         self._closed = False  # shutdown(): nothing starts or reports any more
         self._waited_sections: set[str] = set()  # asked for with nothing saved to show (2.8)
+        # 2.8: a media server's link requests (request id -> item id) and what each title's
+        # quality menu offers (item id -> {"versions", "quality"}).
+        self._media_links: dict[int, str] = {}
+        self._media_menus: dict[str, dict] = {}
 
     # --- providers -------------------------------------------------------------------
     def provider_names(self) -> list[str]:
@@ -1161,8 +1165,12 @@ class CatalogService(QObject):
         self._fail(self.episodesFailed, str(series.get("id")), str(season.get("id")), message)
 
     # --- links ------------------------------------------------------------------------
-    def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
-        """Resolve a playable URL. STB portals mint a fresh link; others play `cmd` directly."""
+    def request_link(
+        self, item: dict, *, section: str, is_episode: bool = False, quality: Any = None
+    ) -> int:
+        """Resolve a playable URL. STB portals mint a fresh link; others play `cmd` directly.
+        `quality` (2.8, a media server's title: media_server.Quality) is the player's quality
+        menu's choice; the versions the server answers with are kept for it (`media_menu`)."""
         request_id = next(self._link_ids)
         if self._closed:
             return request_id
@@ -1173,16 +1181,19 @@ class CatalogService(QObject):
             self._fail_later(self.linkFailed, request_id, f"Unknown section: {section}")
             return request_id
         if is_media_server(self.provider_type()):
-            # 2.8: the version the settings pick, as its file is (asked of the server now).
+            # 2.8: the version the settings pick, as its file is (asked of the server now), or
+            # the quality menu's choice.
             provider = self.current_provider()
+            item_id = str(item.get("id") or "")
             worker = self.factory.media_link(
                 provider,
-                str(item.get("id") or ""),
+                item_id,
                 provider.get("ssl_verify", self.config.ssl_verify),
                 screen_4k=self.screen_4k(),
                 four_k=getattr(self.config, "media_4k_versions", "screen"),
-                max_bitrate=int(getattr(self.config, "media_max_mbps", 0) or 0) * 1_000_000,
+                quality=quality,
             )
+            self._media_links[request_id] = item_id
             self._start(worker, "link", request_id, self._on_link_ready, self._on_link_error)
             return request_id
         if self.provider_type() != "STB":
@@ -1232,15 +1243,27 @@ class CatalogService(QObject):
         return request_id
 
     def _on_link_ready(self, job: _Job, payload) -> None:
+        item_id = self._media_links.pop(job.data, None)
         if not self._current(job):
             return
+        if item_id and isinstance(payload.get("versions"), list):
+            self._media_menus[item_id] = {
+                "versions": payload["versions"],
+                "quality": payload.get("quality"),
+            }
         url = str(payload.get("link") or "").strip()
         if url:
             self.linkReady.emit(job.data, url)
         else:
             self._fail(self.linkFailed, job.data, EMPTY_LINK_MESSAGE)
 
+    def media_menu(self, item: dict) -> Optional[dict]:
+        """What the quality menu offers for a media server's title its link was asked for:
+        {"versions": [media_server.version_of …], "quality": the Quality playing}; else None."""
+        return self._media_menus.get(str(item.get("id") or ""))
+
     def _on_link_error(self, job: _Job, message: str) -> None:
+        self._media_links.pop(job.data, None)
         if self._current(job):
             self._fail(self.linkFailed, job.data, message)
 

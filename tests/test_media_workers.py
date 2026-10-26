@@ -93,7 +93,7 @@ class SectionWorkerTests(unittest.TestCase):
 class LinkWorkerTests(unittest.TestCase):
     def link(self, sources, **choices):
         client = FakeClient(sources=sources)
-        settings = {"screen_4k": False, "four_k": ms.FOUR_K_SCREEN, "max_bitrate": 0}
+        settings = {"screen_4k": False, "four_k": ms.FOUR_K_SCREEN}
         settings.update(choices)
         return outcome(
             MediaLinkWorker(PROVIDER, "f1", True, client=lambda p, v: client, **settings)
@@ -104,13 +104,34 @@ class LinkWorkerTests(unittest.TestCase):
         self.assertEqual(kind, "ok")
         self.assertIn("/Videos/f1/stream.mkv?static=true&MediaSourceId=hd", payload["link"])
 
-    def test_over_the_cap_the_server_converts_it(self):
-        kind, payload = self.link([source("hd", 1920, 1080, 20_000_000)], max_bitrate=8_000_000)
-        self.assertIn("/Videos/f1/master.m3u8?", payload["link"])
-
-    def test_under_the_cap_it_plays_as_it_is(self):
-        kind, payload = self.link([source("hd", 1920, 1080, 4_000_000)], max_bitrate=8_000_000)
+    def test_without_a_choice_nothing_is_converted(self):  # 2.8: the quality menu converts
+        kind, payload = self.link([source("hd", 1920, 1080, 60_000_000)])
         self.assertIn("/stream.mkv?static=true", payload["link"])
+        self.assertEqual(payload["quality"], ms.Quality(source="hd"))
+
+    def test_the_versions_come_with_the_link(self):
+        sources = [source("uhd", 3840, 2160, 25_000_000), source("hd", 1920, 1080, 8_000_000)]
+        kind, payload = self.link(sources)
+        self.assertEqual([v["id"] for v in payload["versions"]], ["uhd", "hd"])
+        self.assertEqual(payload["quality"], ms.Quality(source="hd"))  # the settings' pick
+
+    def test_a_version_chosen_plays_as_its_file_is(self):
+        sources = [source("uhd", 3840, 2160, 25_000_000), source("hd", 1920, 1080, 8_000_000)]
+        kind, payload = self.link(sources, quality=ms.Quality(source="uhd"))
+        self.assertIn("/stream.mkv?static=true&MediaSourceId=uhd", payload["link"])
+        self.assertEqual(payload["quality"], ms.Quality(source="uhd"))
+
+    def test_a_version_gone_is_the_settings_pick(self):
+        kind, payload = self.link([source("hd", 1920, 1080)], quality=ms.Quality(source="old"))
+        self.assertIn("MediaSourceId=hd", payload["link"])
+
+    def test_a_conversion_chosen_is_the_servers(self):
+        chosen = ms.Quality(height=720, bitrate=4_000_000)
+        kind, payload = self.link([source("hd", 1920, 1080, 20_000_000)], quality=chosen)
+        self.assertIn("/Videos/f1/master.m3u8?", payload["link"])
+        self.assertIn("MaxHeight=720", payload["link"])
+        self.assertIn("MediaSourceId=hd", payload["link"])
+        self.assertEqual(payload["quality"], ms.Quality("hd", 720, 4_000_000))  # of "hd"
 
     def test_only_4k_plays_as_it_is_below_a_4k_screen(self):
         kind, payload = self.link([source("uhd", 3840, 2160)])

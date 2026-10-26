@@ -509,25 +509,6 @@ class OptionsDialog(QDialog):
         )
         # i18n: a setting (Jellyfin and Emby): when a title's 4K version plays
         self.settings_layout.addRow(tr("4K versions (Jellyfin, Emby)"), self.media_4k_combo)
-        self.media_conversion_combo = QComboBox(self.settings_tab)
-        # i18n: a choice for the server conversion: never; the file plays as it is
-        self.media_conversion_combo.addItem(tr("Off: the file as it is"), 0)
-        for mbps in (20, 8, 4, 2):
-            # i18n: a choice for the server conversion: above this bitrate, in megabits a second
-            self.media_conversion_combo.addItem(tr("Above {n} Mbit/s", n=mbps), mbps)
-        self.media_conversion_combo.setCurrentIndex(
-            max(0, self.media_conversion_combo.findData(self.config_manager.media_max_mbps))
-        )
-        self.media_conversion_combo.setToolTip(
-            tr(
-                "Jellyfin and Emby: a file above this bitrate is converted by the server to play"
-                " over a slower connection. Converting uses the server's processor."
-            )
-        )
-        # i18n: a setting (Jellyfin and Emby): when the server converts a title
-        self.settings_layout.addRow(
-            tr("Server conversion (Jellyfin, Emby)"), self.media_conversion_combo
-        )
 
         # 2.8: TMDB fills in what the Library's titles lack (services/tmdb.py).
         self.tmdb_checkbox = QCheckBox(tr("Film and series details from TMDB"), self.settings_tab)
@@ -1393,7 +1374,6 @@ class OptionsDialog(QDialog):
         self.config_manager.live_latency = self.live_latency_combo.currentData()
         self.config_manager.hardware_decoding = self.hardware_decoding_checkbox.isChecked()
         self.config_manager.media_4k_versions = self.media_4k_combo.currentData() or "screen"
-        self.config_manager.media_max_mbps = int(self.media_conversion_combo.currentData() or 0)
         self.config_manager.tmdb_details = self.tmdb_checkbox.isChecked()
         self.config_manager.tmdb_token = "".join(self.tmdb_token_input.text().split())
         if sys.platform == "darwin":

@@ -13,7 +13,9 @@ others' distributions, which may have malware.**
   Emby, then Verify Provider) and its films and series join the Library: its libraries are the
   genres, with Continue watching first, the server's posters and stories, and the search
   finding them beside your other providers'. A title plays as its file is, straight from the
-  server, which converts nothing unless you ask it to in Settings (Server conversion). When a
+  server, which converts nothing unless you ask it to: the player's ⚙ lists the title's
+  versions and the server's conversions (1080p, 720p, 480p), and asks before the first
+  conversion on a server, since it uses that server's processor. When a
   title has a 4K version and another one, the 4K one plays on a 4K screen, the other below it;
   a title only in 4K plays anywhere, as it is (Settings → 4K versions). Where you stop is told
   to the server, so its own Continue watching and watched marks follow, and a title started

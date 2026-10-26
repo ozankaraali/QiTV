@@ -101,8 +101,8 @@ class MediaSeriesWorker(_ServerWorker):
 
 
 class MediaLinkWorker(_ServerWorker):
-    """A title's stream: the version the settings pick, as its file is (or, over the bitrate
-    cap, the server's conversion)."""
+    """A title's stream: the version the settings pick (or the quality menu's, 2.8), as its file
+    is, or the server's conversion when the menu chose one. Its answer lists the versions."""
 
     def __init__(
         self,
@@ -112,36 +112,43 @@ class MediaLinkWorker(_ServerWorker):
         *,
         screen_4k: bool,
         four_k: str,
-        max_bitrate: int,
+        quality: Optional[ms.Quality] = None,
         client=None,
     ) -> None:
         super().__init__(provider, verify, client)
         self.item_id = item_id
         self.screen_4k = screen_4k
         self.four_k = four_k
-        self.max_bitrate = max_bitrate
+        self.quality = quality or ms.Quality()
 
     def work(self, client: ms.MediaServerClient) -> dict:
         sources = client.media_sources(self.item_id)
-        source, why = ms.choose_source(sources, screen_4k=self.screen_4k, setting=self.four_k)
-        if source is None:
-            text = ms.ONLY_4K_TEXT if why == ms.ONLY_4K else NO_VERSION_TEXT
-            raise _Shown(translate(text))
+        wanted = self.quality
+        source = next((s for s in sources if wanted.source and s.get("Id") == wanted.source), None)
+        if source is None:  # the settings' pick (a version chosen before may be gone)
+            source, why = ms.choose_source(sources, screen_4k=self.screen_4k, setting=self.four_k)
+            if source is None:
+                text = ms.ONLY_4K_TEXT if why == ms.ONLY_4K else NO_VERSION_TEXT
+                raise _Shown(translate(text))
         session = uuid.uuid4().hex
-        bitrate = int(source.get("Bitrate") or 0)
-        if self.max_bitrate > 0 and bitrate > self.max_bitrate:
+        if wanted.converted:
             link = ms.converted_url(
                 client.base,
                 self.item_id,
                 source,
                 client.token,
                 session,
-                self.max_bitrate,
+                wanted.bitrate,
                 client.device_id,
+                max_height=wanted.height,
             )
+            # The conversion, of the version it converts (the menu offers those below it).
+            playing = ms.Quality(str(source.get("Id") or ""), wanted.height, wanted.bitrate)
         else:
             link = ms.stream_url(client.base, self.item_id, source, client.token, session)
-        return {"link": link}
+            playing = ms.Quality(source=str(source.get("Id") or ""))
+        versions = [ms.version_of(s) for s in sources if s.get("Id")]
+        return {"link": link, "versions": versions, "quality": playing}
 
     def run(self) -> None:
         client = self._client(self.provider, self.verify)

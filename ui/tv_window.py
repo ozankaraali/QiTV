@@ -527,10 +527,12 @@ class TVWindow(QMainWindow):
         self.sound_panel = TrackPanel(host)
         self.subtitle_panel = TrackPanel(host)
         self.picture_panel = TrackPanel(host)
+        self.quality_panel = TrackPanel(host)  # 2.8: the ⚙ quality menu
         self.stats_overlay = StatsOverlay(host)
         self.sleep_notice = SleepNotice(host)
         self.back_notice = BackNotice(host)  # 2.6: Resume, where a channel was left
         self.question_card = QuestionCard(host)  # 2.6: stop a recording for a stream?
+        self.quality_card = QuestionCard(host)  # 2.8: convert on the server?
         self.rec_sign = RecSign(host)  # 2.6: recordings in the background
         self.stopped_notice = StoppedNotice(host)  # 2.6: after Stop, Play again
         self.cast_notice = CastNotice(host)  # 2.8: Playing on <device>, Stop casting
@@ -567,6 +569,8 @@ class TVWindow(QMainWindow):
             subtitle_panel=self.subtitle_panel,
             subtitle_search=self.subtitle_search,
             picture_panel=self.picture_panel,
+            quality_panel=self.quality_panel,
+            quality_question=self.quality_card,
             stats=self.stats_overlay,
             sleep_notice=self.sleep_notice,
             back_notice=self.back_notice,
@@ -603,6 +607,7 @@ class TVWindow(QMainWindow):
             self.sound_panel,
             self.subtitle_panel,
             self.picture_panel,
+            self.quality_panel,
             self.layout_row,
             self.overlays.drawer,
             self.overlays.guide,
@@ -616,6 +621,7 @@ class TVWindow(QMainWindow):
             self.cast_notice,
             self.rec_sign,
             self.question_card,
+            self.quality_card,
             self.pair_overlay,
             self.overlays.toast,
         ):
