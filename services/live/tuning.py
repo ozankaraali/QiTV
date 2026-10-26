@@ -20,8 +20,8 @@ day later the next tune tries the pipeline again, and so is decoding in software
 counts as expired.
 
 `LiveTuning` keeps the entries in memory and in `live_tuning.json` beside the config, at
-most `MAX_ENTRIES` (beyond it the least recently learned go first, a locked rate, direct
-play or software decoding still in force last), as `services.channel_store` keeps them: read
+most `MAX_ENTRIES` (beyond it a channel's sizes alone go first, then the least recently
+learned, a locked rate, direct play or software decoding still in force last), as `services.channel_store` keeps them: read
 once, written in the background, a bad entry left out. The learned target is an optional
 field of version 1, so 2.0.x reads 2.1's file (it ignores the field): one that makes no
 sense, or would not change the next tune (`Learned.informative`), is left out on its own,
@@ -271,16 +271,18 @@ class LiveTuning(ChannelStore):
         self._save()
 
     def _trim(self, now: Optional[float] = None) -> None:
-        """Drop the entries beyond the cap: the least recently learned first, those with a
+        """Drop the entries beyond the cap: those with only a channel's sizes first (2.8: they
+        only list the ⚙'s choices again), then the least recently learned, those with a
         locked rate, direct play or software decoding still in force, or a size cap, last."""
         excess = len(self._entries) - self._max
         if excess > 0:
             when = self._now() if now is None else now
 
-            def worth(key: str) -> tuple[bool, float]:
+            def worth(key: str) -> tuple[bool, bool, float]:
                 entry = self._entries[key]
                 kept = any(_in_force(entry, when)) or "max_height" in entry
-                return kept, entry["used"]
+                lesson = any(v for k, v in entry.items() if k not in ("used", "heights"))
+                return kept, lesson, entry["used"]
 
             for key in sorted(self._entries, key=worth)[:excess]:
                 del self._entries[key]

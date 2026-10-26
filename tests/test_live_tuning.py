@@ -303,6 +303,18 @@ class LiveTuningTests(unittest.TestCase):
             store.remember(key, Tuning(learned=Learned(need=8.0)))
         self.assertEqual(store.get("capped"), Tuning(max_height=720))
 
+    def test_sizes_alone_go_before_what_was_learned(self):  # 2.8 review M5
+        # A channel's sizes only list the ⚙'s choices again: a full file lets them go first,
+        # though they were seen after the lesson.
+        store = self.store(max_entries=2)
+        store.remember("learned", Tuning(learned=Learned(need=8.0)))
+        self.clock.now += 1
+        store.remember("seen", Tuning(heights=(1080, 720)))
+        self.clock.now += 1
+        store.remember("new", Tuning(extra=1.0))
+        self.assertEqual(store.get("seen"), Tuning())
+        self.assertEqual(store.get("learned").learned, Learned(need=8.0))
+
     def test_software_decoding_is_not_pushed_out_by_learned_entries(self):
         store = self.store(max_entries=2)
         store.remember("soft", Tuning(software=True))
