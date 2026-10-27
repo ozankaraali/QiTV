@@ -2553,6 +2553,9 @@ class OptionsDialogTests(WindowCase):
         dialog.save_settings()
         self.assertTrue(ConfigManager().detailed_log)
         self.assertTrue(logging.getLogger("services").isEnabledFor(logging.DEBUG))  # at once
+        with mock.patch.object(self.window, "engine") as engine:
+            self.window.save_config()  # the running time-shift helper too, no restart
+        engine.set_detailed_log.assert_called_once_with(True)
 
     def test_settings_load_and_save_the_tv_options(self):
         self.config.live_latency = "stable"

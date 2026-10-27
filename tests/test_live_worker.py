@@ -26,6 +26,7 @@ from urllib.error import HTTPError
 from urllib.request import urlopen
 import warnings
 
+from timer_fixtures import wait_until
 from http_fixtures import LocalSource, leaf, tls_server_context
 from process_fixtures import still_running, terminate
 from test_fmp4 import movie, trak, visual
@@ -2739,6 +2740,21 @@ class LogForwardTests(unittest.TestCase):  # 2.8.1: the helper's own lines reach
         self.assertEqual(
             sent, [("log", logging.DEBUG, "services.live.source", "Segment 7 fetched.")]
         )
+
+    def test_a_running_helper_turns_its_detail_up_and_down(self):  # 2.8.2
+        helper = InProcessHelper(self)
+        sent = self.forward()
+        helper.helper.log_forwarder = next(
+            h for h in logging.getLogger("services.live").handlers if hasattr(h, "set_detailed")
+        )
+        helper.parent.send(("detailed_log", True))
+        self.assertTrue(wait_until(lambda: logging.getLogger("services.live").isEnabledFor(10)))
+        logging.getLogger("services.live.ts").debug("a restart's clock re-based by %.2f s", 9.5)
+        self.assertIn(
+            ("log", logging.DEBUG, "services.live.ts", "a restart's clock re-based by 9.50 s"), sent
+        )
+        helper.parent.send(("detailed_log", False))
+        self.assertTrue(wait_until(lambda: not logging.getLogger("services.live").isEnabledFor(10)))
 
     def test_a_flood_is_cut_with_one_note_until_the_next_minute(self):
         now = [0.0]
