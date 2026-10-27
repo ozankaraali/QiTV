@@ -8,6 +8,8 @@ from services.provider_api import (
     known_http_only,
     portal_http_only,
     remember_http_only,
+    stb_command_has_number,
+    stb_command_link,
     stb_command_shape,
     stb_commands_summary,
     stb_create_link_url,
@@ -228,6 +230,32 @@ class StbCommandShapeTests(unittest.TestCase):  # 2.8.3: a portal's commands, in
             stb_commands_summary([{"cmd": "ffrt http://localhost/ch/2_"}], self.PORTAL),
             "1 channel, 1 with a number in its command",
         )
+
+    def test_a_play_link_names_its_number_in_its_stream(self):  # 2.8.4
+        listed = "ffmpeg http://portal.example/play/live.php?mac=00:1A&stream=4711&play_token=x"
+        self.assertTrue(stb_command_has_number(listed))
+        self.assertTrue(stb_command_has_number("ffrt http://localhost/ch/4711_"))
+        for cmd in ("ffmpeg http://portal.example/play/live.php?mac=00:1A:79&stream=", ""):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(stb_command_has_number(cmd))
+
+    def test_a_commands_own_link_is_one_on_a_server_naming_what_it_plays(self):  # 2.8.4
+        listed = "http://portal.example/play/live.php?mac=00:1A&stream=4711&play_token=x"
+        self.assertEqual(stb_command_link(f"ffmpeg {listed}", self.PORTAL), listed)
+        self.assertEqual(stb_command_link(listed, self.PORTAL), listed)
+        for cmd in (
+            "ffrt http://localhost/ch/4711_",  # a box's placeholder: the portal makes its link
+            "ffmpeg http://127.0.0.1/ch/4711_",
+            "ffmpeg http://portal.example/play/live.php?mac=00:1A&stream=&play_token=x",
+            "auto /media/4711.mpg",
+            "",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(stb_command_link(cmd, self.PORTAL), "")
+
+    def test_a_portal_on_this_computer_has_its_own_links_there(self):
+        listed = "http://127.0.0.1:8080/play/live.php?mac=00:1A&stream=4711&play_token=x"
+        self.assertEqual(stb_command_link(listed, "http://127.0.0.1:8080/c/"), listed)
 
     def test_a_link_asking_an_empty_stream_names_nothing_to_play(self):
         names_none = "http://p.example/play/live.php?mac=00:1A&stream=&extension=ts&play_token=x"

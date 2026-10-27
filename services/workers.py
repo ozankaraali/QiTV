@@ -35,6 +35,7 @@ from services.provider_api import (
     remember_http_only,
     remember_xtream_root,
     stb_archive_link_url,
+    stb_command_link,
     stb_command_shape,
     stb_commands_summary,
     stb_create_link_url,
@@ -720,13 +721,16 @@ class LinkCreatorWorker(QObject):
             if link:  # 2.8.1: what kind of link a portal gives, should its streams fail
                 logger.info("The portal's link: %s.", stb_link_shape(link, self.base_url))
             if link and not self.programme and stb_link_names_no_stream(link):
-                # 2.8.3: no stream would open; the command is what the portal was asked with
+                # 2.8.3: no stream would open; the command is what the portal was asked with.
+                # 2.8.4: a command that is a play link itself plays (EMPTY_LINK_MESSAGE when not).
+                own = stb_command_link(self.cmd, self.base_url)
                 logger.info(
                     "The portal's link names no channel or title; it was made from a "
-                    "command: %s.",
+                    "command: %s%s.",
                     stb_command_shape(self.cmd, self.base_url),
+                    "; the channel's own link plays" if own else "",
                 )
-                link = ""  # EMPTY_LINK_MESSAGE, at once
+                link = own
             self.finished.emit({"link": link})
         except Exception as e:
             self.error.emit(str(e))

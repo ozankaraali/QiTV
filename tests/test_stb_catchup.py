@@ -403,6 +403,26 @@ class PortalLiveLinkTests(PortalCase):  # 2.8.3
         self.assertEqual(kind, "finished")
         self.assertIn(f"&stream={PLAIN_ID}&", payload["link"])
 
+    def test_a_channel_listed_with_its_own_play_link_plays_that_link(self):  # 2.8.4
+        # Some portals list each channel's finished link, and make one naming no channel of it
+        # when asked again (they look for /ch/<number> in what they are asked).
+        self.portal.play_links = True
+        headers = self.signed_in_headers()
+        own = (
+            f"{self.portal.url}/play/live.php?mac=00:1A:79:00:00:01&stream={PLAIN_ID}"
+            "&extension=ts&play_token=listed"
+        )
+        with self.assertLogs("services.workers", "INFO") as logged:
+            answer = run(self.worker(f"ffmpeg {own}", headers))
+        self.assertEqual(answer, ("finished", {"link": own}))
+        self.assertTrue(
+            any(
+                "names no channel or title" in r.getMessage()
+                and r.getMessage().endswith("; the channel's own link plays.")
+                for r in logged.records
+            )
+        )
+
 
 class CatalogLinkTests(PortalCase):
     """The catalogs ask the portal of the item's provider, signed in, and sign in again."""
