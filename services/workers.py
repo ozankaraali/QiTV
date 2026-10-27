@@ -1,5 +1,6 @@
 """Provider workers: catalog loads, provider setup, EPG and STB links, for CatalogService."""
 
+from datetime import datetime, timezone
 from functools import partial
 import logging
 import re
@@ -17,8 +18,13 @@ from services.catchup import (
 )
 from services.failure_reasons import (
     DEVICE_MESSAGE,
+    DISABLED,
+    DISABLED_MESSAGE,
+    EXPIRED,
+    EXPIRED_MESSAGE,
     UNEXPECTED_ANSWER_MESSAGE,
     UNREACHABLE_MESSAGE,
+    xtream_reason,
 )
 from services.i18n import N_
 from services.lazy_import import lazy_module
@@ -244,12 +250,26 @@ def _xtream_categories(
     try:
         response = get(url, timeout=10, verify=worker.verify_ssl)
         if response.ok and response.content:
-            for c in response.json() or []:
+            listed = response.json()
+            # Anything but a list (an expired account's panel answers its account): none.
+            for c in listed if isinstance(listed, list) else []:
                 name = c.get("category_name") or N_("Unknown")
                 categories.append({"id": str(c.get("category_id")), "title": name})
     except Exception as e:
         logger.warning("Failed to fetch categories: %s", safe_exc(e))
     return categories
+
+
+def _xtream_refusal(answer: Any, user_info: Any) -> str:
+    """Why a panel answered a list with no list: it answers its account details instead when
+    the account has expired or is disabled (what its sign-in said, when the answer does not
+    say). The message in English, as the catalog shows it."""
+    info = answer.get("user_info") if isinstance(answer, dict) else None
+    info = info if isinstance(info, dict) else user_info
+    reason = xtream_reason({"user_info": info}, datetime.now(timezone.utc))
+    return {EXPIRED: EXPIRED_MESSAGE, DISABLED: DISABLED_MESSAGE}.get(
+        reason.kind, UNEXPECTED_ANSWER_MESSAGE
+    )
 
 
 def _xtream_item(
@@ -376,6 +396,8 @@ class XtreamLoaderWorker(QObject):
             streams_resp = session.get(streams_url, timeout=15, verify=self.verify_ssl)
             streams_resp.raise_for_status()
             streams = streams_resp.json() or []
+            if not isinstance(streams, list):
+                raise ValueError(_xtream_refusal(streams, user_info))
 
             address = partial(xtream_stream_url, resolved_base, kind, self.username, self.password)
             items: List[Dict] = []

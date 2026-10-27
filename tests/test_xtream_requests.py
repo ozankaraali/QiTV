@@ -11,7 +11,8 @@ import requests
 
 from services import provider_api, workers
 from services.account_check import check_xtream
-from services.catalog import format_xtream_episodes
+from services.catalog import format_xtream_episodes, friendly_error
+from services.failure_reasons import EXPIRED_MESSAGE
 from services.provider_api import (
     known_http_only,
     xtream_base,
@@ -49,6 +50,8 @@ class XtreamRequestTests(unittest.TestCase):
         self.allowed_formats = ["m3u8", "ts"]
         self.prefix = ""  # the path the panel is served under
         self.elsewhere = 404  # what the API's file answers anywhere else: 404, or 200 (a page)
+        self.account: dict = {}  # the sign-in's account fields beyond the formats
+        self.refused = False  # every list asked answers the account alone (as when expired)
         roots = patch.dict(provider_api._answered_at_root, clear=True)  # this test's session
         roots.start()
         self.addCleanup(roots.stop)
@@ -90,8 +93,13 @@ class XtreamRequestTests(unittest.TestCase):
                             "time_now": "2026-01-20 15:05:30",
                             "timestamp_now": 1768917930,
                         },
-                        "user_info": {"allowed_output_formats": fixture.allowed_formats},
+                        "user_info": {
+                            "allowed_output_formats": fixture.allowed_formats,
+                            **fixture.account,
+                        },
                     }
+                elif fixture.refused:
+                    payload = {"user_info": dict(fixture.account), "server_info": {}}
                 elif action in ("get_live_categories", "get_vod_categories"):
                     payload = [{"category_id": "10", "category_name": "Fixture"}]
                 elif action == "get_live_streams":
@@ -157,6 +165,20 @@ class XtreamRequestTests(unittest.TestCase):
             ],
         )
         self.assertEqual(catalog["contents"][0]["cmd"], f"{self.base}/live/user/password/7.ts")
+
+    def test_an_expired_account_says_so_instead_of_loading_an_empty_list(self):
+        self.account = {"auth": 1, "status": "Expired", "exp_date": "1783641600"}
+        self.refused = True
+        for content_type in ("itv", "vod"):
+            with self.subTest(content_type=content_type):
+                worker = XtreamLoaderWorker(self.base, "user", "password", content_type)
+                results, errors = [], []
+                worker.finished.connect(results.append)
+                worker.error.connect(errors.append)
+                with self.assertNoLogs("services.workers", "WARNING"):
+                    worker.run()
+                self.assertEqual((results, errors), ([], [EXPIRED_MESSAGE]))
+                self.assertEqual(friendly_error(errors[0]), EXPIRED_MESSAGE)  # shown as it is
 
     def test_the_archive_and_the_panels_time_zone_are_kept_compactly(self):
         catalog = self.load_catalog("itv")
