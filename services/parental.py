@@ -261,18 +261,35 @@ class Parental:
         """Whether `item` is hidden (in a hidden group, or alone), locked or not."""
         if not self._hides_anything():
             return False
-        provider = provider_of(item) or ""
-        if channel_key(section, item) in self._items:
-            return True
-        for field in ("tv_genre_id", "category_id"):
-            group = item.get(field)
-            if group in (None, ""):
-                continue
-            if group_key(section, provider, str(group)) in self._groups:
+        return self._protector(section)(item)
+
+    def _protector(self, section: str) -> Callable[[dict], bool]:
+        """`protects` for many items of `section` (2.8.2: All providers froze 22 s over a
+        million channels): the rules are read once, each group's answer once, and a channel's
+        own key only when channels are hidden one by one."""
+        alone = bool(self._items)
+        groups: dict[tuple[str, str], bool] = {}
+
+        def group_hidden(provider: str, group: str) -> bool:
+            answer = groups.get((provider, group))
+            if answer is None:
+                answer = group_key(section, provider, group) in self._groups or self._adult_group(
+                    section, provider, group
+                )
+                groups[(provider, group)] = answer
+            return answer
+
+        def hidden(item: dict) -> bool:
+            if alone and channel_key(section, item) in self._items:
                 return True
-            if self._adult_group(section, provider, str(group)):
-                return True
-        return False
+            provider = provider_of(item) or ""
+            for field in ("tv_genre_id", "category_id"):
+                group = item.get(field)
+                if group not in (None, "") and group_hidden(provider, str(group)):
+                    return True
+            return False
+
+        return hidden
 
     def protects_play(self, section: str, item: dict, context: Optional[dict]) -> bool:
         """`protects`, and for an episode its series too (an episode has no genre of its own)."""
@@ -301,7 +318,8 @@ class Parental:
         items = list(items)
         if not self.active():
             return items
-        return [item for item in items if not self.protects(section, item)]
+        hidden = self._protector(section)
+        return [item for item in items if not hidden(item)]
 
 
 _installed: list[Parental] = []
