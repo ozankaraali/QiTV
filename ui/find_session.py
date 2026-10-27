@@ -186,7 +186,7 @@ class FindSession(QObject):
                 ]
             self.genres = list(genres)
             stamped = [replace(h, item=with_provider(h.item, h.provider)) for h in hits]
-            self.channels = parental.visible_hits(stamped)
+            self.channels = parental.visible_hits(stamped, "live")
             self.searching = False
             self.changed.emit()
 
