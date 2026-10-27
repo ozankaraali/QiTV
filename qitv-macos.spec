@@ -134,5 +134,12 @@ app = BUNDLE(
             'home network.'
         ),
         'NSBonjourServices': ['_googlecast._tcp'],
+        # 2.8.2: macOS asked for the microphone as QiTV's sound started with a Bluetooth
+        # speaker connected (its Bluetooth audio plugin, not QiTV, asks): the question says
+        # what QiTV does with it.
+        'NSMicrophoneUsageDescription': (
+            'QiTV never records sound. macOS may ask when QiTV starts its sound while a '
+            'Bluetooth audio device is connected; QiTV works the same if you don\'t allow it.'
+        ),
     }
 )
