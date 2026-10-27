@@ -528,7 +528,8 @@ class TVWindowTests(WindowCase):
             ],
         )
         self.assertEqual(
-            shortcuts(menus["Help"]), [("Keyboard Shortcuts…", ""), ("Report an Issue…", "")]
+            shortcuts(menus["Help"]),
+            [("Keyboard Shortcuts…", ""), ("Report an Issue…", ""), ("Show the Log File…", "")],
         )
         # Only modifier combinations are live shortcuts; single keys are hints in the menu.
         actions = self.menu_actions()
