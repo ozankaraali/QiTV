@@ -1155,6 +1155,35 @@ class SmallWidthLayoutTests(unittest.TestCase):
                 self.assertEqual(t.indicator_text(), shown)
         self.assertLessEqual({1, 2, "cut"}, stages)
 
+    def test_the_icons_stay_put_while_the_stay_live_text_changes(self):  # 2.8.2
+        # The owner: the bottom icons went wild as "Reconnecting…" and "adjusted" came and
+        # went. The text gives way; the buttons and the LIVE badge keep their places.
+        t = Transport(idle_ms=3000)
+        self.addCleanup(t.close)
+        t.set_pip_state(True, False)
+        t.show_timeshift("One", "")
+        auto = {"target": 10.0, "auto": True}
+        states = [
+            dict(self.state("live", 3.5, 1.0), **auto, adjusted=False),
+            dict(self.state("live", 12.5, 0.95), **auto, adjusted=True, nudge=0.95),
+            dict(self.state("live", 12.5, 1.0), **auto, stalled=True, reconnecting=True),
+            dict(self.state("live", 12.5, 1.05), **auto, adjusted=True, nudge=1.05),
+            dict(self.state("live", 4.0, 1.0), **auto, stalled=True),
+        ]
+        for width in self.WIDTHS:
+            t.setGeometry(0, 0, width, round(width * 9 / 16))
+            places = set()
+            for state in states:
+                t.update_timeline(state, [])
+                rects = t._layout()
+                places.add(
+                    tuple(
+                        (n, round(r.x(), 2)) for n, r in sorted(rects.items()) if n != "indicator"
+                    )
+                )
+            with self.subTest(width=width):
+                self.assertEqual(len(places), 1)
+
     def test_a_wide_transport_shows_the_whole_indicator(self):
         t = Transport(idle_ms=3000)
         self.addCleanup(t.close)
