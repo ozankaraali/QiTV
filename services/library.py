@@ -33,6 +33,7 @@ from services.provider_ids import (
     split_group_id,
     with_provider,
 )
+from services.provider_types import is_media_server
 from services.search import Hit, search_index
 from services.text_fold import fold
 from services.watch_state import WatchState
@@ -919,6 +920,7 @@ class LibraryModel(QObject):
 
     def _continue_items(self) -> list[dict]:
         guard = parental.installed()
+        gone = self._gone_from_server()
         out: list[dict] = []
         seen: set[str] = set()
         for entry in self._history_entries():
@@ -927,6 +929,8 @@ class LibraryModel(QObject):
                 continue
             seen.add(cid)
             item = entry["item_data"]
+            if gone(entry["provider_name"], item):
+                continue  # 2.8.2: its server has it under another id now (or not at all)
             if guard is not None and guard.hides_item(
                 self._section, with_provider(item, entry["provider_name"])
             ):
@@ -935,6 +939,33 @@ class LibraryModel(QObject):
             # plays, stars and asks for its link there, whatever page is on another provider.
             out.append(with_provider(item, entry["provider_name"]))
         return out
+
+    def _gone_from_server(self) -> Callable[[str, dict], bool]:
+        """Whether a film of the history is gone from its Jellyfin or Emby server (2.8.2): the
+        server's list is loaded, which holds its every film, and no film of it has that id (a
+        server that added it again gave it another). Other providers' lists may come in parts,
+        and a series' episodes are not in the list: those stay."""
+        if self._section != "movies":
+            return lambda _provider, _item: False
+        listed: dict[str, set[str]] = {}
+        for title in self._loaded_items():
+            name = provider_of(title) or self._catalog.current_provider_name()
+            listed.setdefault(name, set()).add(str(title.get("id") or ""))
+        servers: dict[str, bool] = {}
+
+        def server(name: str) -> bool:
+            if name not in servers:
+                try:
+                    servers[name] = is_media_server(self._catalog.provider_entry(name).get("type"))
+                except AttributeError, KeyError:
+                    servers[name] = False
+            return servers[name]
+
+        def gone(provider: str, item: dict) -> bool:
+            ids = listed.get(provider)
+            return bool(ids) and str(item.get("id") or "") not in ids and server(provider)
+
+        return gone
 
     def _my_list_items(self) -> list[dict]:
         is_kept = favorites.matcher(self._config)

@@ -42,6 +42,14 @@ def client_for(provider: dict, verify: bool) -> ms.MediaServerClient:
     )
 
 
+def _logged(error: Exception) -> str:
+    """An error for the log: its type and, for a server's, its fixed text (2.8.2: which answer,
+    such as "The server answered 500"); never an address, which may carry the token."""
+    if isinstance(error, ms.MediaServerError) and str(error):
+        return f"{type(error).__name__} ({error})"
+    return type(error).__name__
+
+
 def _failure(error: Exception) -> str:
     if isinstance(error, ms.SignInNeeded):
         return translate(ms.SIGN_IN_AGAIN)
@@ -64,7 +72,7 @@ class _ServerWorker(QObject):
         try:
             self.finished.emit(self.work(client))
         except Exception as e:
-            logger.warning("A media server's request failed: %s", type(e).__name__)
+            logger.warning("A media server's request failed: %s", _logged(e))
             self.error.emit(_failure(e))
         finally:
             client.close()
@@ -233,7 +241,7 @@ class MediaLinkWorker(_ServerWorker):
         except _Shown as shown:
             self.error.emit(str(shown))
         except Exception as e:
-            logger.warning("A media server's stream failed: %s", type(e).__name__)
+            logger.warning("A media server's stream failed: %s", _logged(e))
             self.error.emit(_failure(e))
         finally:
             client.close()

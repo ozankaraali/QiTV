@@ -251,6 +251,28 @@ class LinkWorkerTests(unittest.TestCase):
             MediaLinkWorker(PROVIDER, "f1", True, client=lambda p, v: client, **settings)
         )
 
+    def test_a_failure_logs_the_servers_answer(self):  # 2.8.2: which answer, never an address
+        client = FakeClient(fail=ms.MediaServerError("The server answered 500"))
+        with self.assertLogs("services.media_workers", "WARNING") as logs:
+            kind, _payload = outcome(
+                MediaLinkWorker(
+                    PROVIDER,
+                    "f1",
+                    True,
+                    client=lambda p, v: client,
+                    screen_4k=False,
+                    four_k=ms.FOUR_K_SCREEN,
+                )
+            )
+        self.assertEqual(kind, "error")
+        self.assertEqual(
+            logs.output,
+            [
+                "WARNING:services.media_workers:A media server's stream failed: "
+                "MediaServerError (The server answered 500)"
+            ],
+        )
+
     def test_the_file_plays_as_it_is(self):
         kind, payload = self.link([source("hd", 1920, 1080)])
         self.assertEqual(kind, "ok")
