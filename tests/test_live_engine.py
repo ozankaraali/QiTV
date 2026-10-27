@@ -825,6 +825,17 @@ class AdoptKeptTests(unittest.TestCase):
         self.assertTrue((self.root / parked).exists())
 
 
+class HelperArgsTests(unittest.TestCase):  # 2.8.2: the detailed log reaches the helper
+    def test_the_helper_starts_with_the_logs_detail(self):
+        from services import log_file
+        from services.live import engine as engine_module
+
+        self.addCleanup(log_file.set_detailed, False)
+        self.assertEqual(engine_module._helper_args("c", Path("/r")), ("c", "/r", False))
+        log_file.set_detailed(True)
+        self.assertEqual(engine_module._helper_args("c", Path("/r")), ("c", "/r", True))
+
+
 class FailureReasonTests(unittest.TestCase):
     """2.1: why a channel plays directly is logged, by kind and HTTP status only."""
 
@@ -944,12 +955,12 @@ class Unreadable:
         return (operator.truediv, (1, 0))
 
 
-def silent_helper(conn, root):
+def silent_helper(conn, root, detailed_log=False):
     """A helper that never says hello."""
     time.sleep(60)
 
 
-def crashing_session_helper(conn, root):
+def crashing_session_helper(conn, root, detailed_log=False):
     """The real helper, except that a session whose URL ends in "/crash" fails unexpectedly
     (its helper stays up)."""
     from services.live import worker
@@ -965,7 +976,7 @@ def crashing_session_helper(conn, root):
     worker.helper_main(conn, root)
 
 
-def stubborn_helper(conn, root):
+def stubborn_helper(conn, root, detailed_log=False):
     """A helper that holds a real disk buffer and ignores "shutdown" and SIGTERM."""
     from services.live.ring import DiskRing
 

@@ -25,10 +25,13 @@ logger = logging.getLogger(__name__)
 LOG_NAME = "qitv.log"
 CRASH_NAME = "crash.log"
 MAX_BYTES = 1_000_000  # then qitv.log.1, .2: a few runs' worth, never more than 3 MB
+DETAILED_MAX_BYTES = 5_000_000  # 2.8.2: the detailed log keeps more before it rotates
+OWN_LOGGERS = ("qitv", "services", "ui")  # QiTV's own lines; a library's may name addresses
 BACKUPS = 2
 FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 _crash_file: Optional[IO[str]] = None  # open while QiTV runs: a crash writes to it
+_handler: Optional[RotatingFileHandler] = None  # the file's, once installed
 
 
 def log_dir(
@@ -75,8 +78,10 @@ def install(directory: Optional[Path] = None) -> Optional[Path]:
     except OSError as error:
         logger.warning("The log file could not be opened (%s).", type(error).__name__)
         return None
+    global _handler
     handler.setFormatter(_Masked(FORMAT))
     logging.getLogger().addHandler(handler)
+    _handler = handler
     sys.excepthook = _unhandled
     try:
         _crash_file = open(directory / CRASH_NAME, "a", encoding="utf-8")
@@ -84,6 +89,16 @@ def install(directory: Optional[Path] = None) -> Optional[Path]:
     except OSError as error:
         logger.warning("The crash log could not be opened (%s).", type(error).__name__)
     return directory / LOG_NAME
+
+
+def set_detailed(on: bool) -> None:
+    """The detailed log (2.8.2, Settings): QiTV's own loggers write their debug lines too,
+    every one masked as ever, and the file keeps more before it rotates. Other libraries keep
+    their level (their debug lines may name addresses)."""
+    for name in OWN_LOGGERS:
+        logging.getLogger(name).setLevel(logging.DEBUG if on else logging.NOTSET)
+    if _handler is not None:
+        _handler.maxBytes = DETAILED_MAX_BYTES if on else MAX_BYTES
 
 
 def close() -> None:

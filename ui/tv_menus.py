@@ -30,7 +30,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLayout, QWidget
 
-from services import recording
+from services import log_file, recording
 from services.config_manager import get_app_version
 from services.exporter import ExportKind
 from services.i18n import N_, tr, translate
@@ -250,6 +250,8 @@ class TVMenus(QObject):
         help_menu = bar.addMenu(tr("Help"))  # i18n: the menu bar's Help menu
         add(help_menu, tr("Keyboard Shortcuts…"), "", self.show_shortcuts)
         add(help_menu, tr("Report an Issue…"), "", self.report_issue)
+        # i18n: a Help menu entry: shows QiTV's log file in Finder or Explorer (2.8.2)
+        add(help_menu, tr("Show the Log File…"), "", self.show_log)
         catalog = window.catalog
         # Bound slots: Qt lets go of them with this object (a lambda would outlive it).
         catalog.providerReady.connect(self._on_providers_changed)
@@ -391,6 +393,10 @@ class TVMenus(QObject):
 
     def report_issue(self) -> None:
         QDesktopServices.openUrl(QUrl(ISSUES_URL))
+
+    def show_log(self) -> None:
+        """The folder of QiTV's log file (qitv.log), in the system's file manager (2.8.2)."""
+        open_folder(str(log_file.log_dir()))
 
     def on_drawer_action(self, row: str) -> None:
         """The drawer's Settings, Add provider, Free channels and Open file rows, and its

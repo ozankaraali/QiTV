@@ -455,6 +455,8 @@ class ConfigManager:
     multiview_hinted = _config_property(
         "multiview_hinted", False, coerce=lambda value: value is True
     )
+    # The detailed log (2.8.2, optional; older builds ignore it): QiTV's own debug lines too.
+    detailed_log = _config_property("detailed_log", False, coerce=lambda value: value is True)
     multiview_tile_ram_mib = _config_property(
         "multiview_tile_ram_mib",
         DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB,

@@ -163,6 +163,12 @@ class _View:
     closing: bool = False
 
 
+def _helper_args(child: Any, root: Path) -> tuple[Any, str, bool]:
+    """A helper's start arguments: its pipe, its buffers' folder and whether it forwards its
+    debug lines too (2.8.2: while the detailed log is on, QiTV's own loggers are at DEBUG)."""
+    return child, str(root), logging.getLogger("services").isEnabledFor(logging.DEBUG)
+
+
 class _Supervisor(QThread):
     """Owns the helper process and its pipe; everything here runs on this thread."""
 
@@ -590,7 +596,7 @@ class _Supervisor(QThread):
             # The URL and headers travel over this pipe later, never in argv.
             process = context.Process(
                 target=helper_main,
-                args=(child, str(self._root)),
+                args=_helper_args(child, self._root),
                 name="qitv-live",
                 daemon=True,
             )

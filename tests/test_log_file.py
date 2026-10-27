@@ -66,6 +66,27 @@ class InstallTests(unittest.TestCase):
         for secret in ("secret", "panel.test", "username="):
             self.assertNotIn(secret, text)
 
+    def test_the_detailed_log_adds_qitvs_own_debug_lines(self):  # 2.8.2, Settings
+        log_file.install(self.directory)
+        self.addCleanup(log_file.set_detailed, False)
+        logging.getLogger("services.anything").debug("hidden while not detailed")
+        log_file.set_detailed(True)
+        logging.getLogger("services.anything").debug("Tuning %s", "http://p.test/x?token=t")
+        logging.getLogger("ui.anything").debug("a screen's line")
+        logging.getLogger("urllib3.connectionpool").debug("http://p.test/x?token=t")  # not ours
+        text = self.text()
+        self.assertNotIn("hidden while not detailed", text)
+        self.assertIn("[DEBUG] services.anything: Tuning", text)
+        self.assertIn("[DEBUG] ui.anything: a screen's line", text)
+        self.assertNotIn("urllib3", text)
+        self.assertNotIn("token=", text)  # masked, as every line
+        handler = next(h for h in logging.getLogger().handlers if hasattr(h, "maxBytes"))
+        self.assertEqual(handler.maxBytes, log_file.DETAILED_MAX_BYTES)  # keeps more
+        log_file.set_detailed(False)
+        logging.getLogger("services.anything").debug("hidden again")
+        self.assertNotIn("hidden again", self.text())
+        self.assertEqual(handler.maxBytes, log_file.MAX_BYTES)
+
     def test_a_native_crash_dumps_its_stacks_beside_the_log(self):
         log_file.install(self.directory)
         self.assertTrue(faulthandler.is_enabled())

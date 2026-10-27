@@ -31,7 +31,14 @@ from PySide6.QtWidgets import (
 )
 import orjson as json
 
-from services import failure_reasons as reasons, free_channels, i18n, provider_link, recording
+from services import (
+    failure_reasons as reasons,
+    free_channels,
+    i18n,
+    log_file,
+    provider_link,
+    recording,
+)
 from services.account_check import check_account
 from services.config_manager import ConfigManager
 from services.epg_view import (
@@ -424,6 +431,21 @@ class OptionsDialog(QDialog):
         self.check_updates_checkbox.setChecked(self.config_manager.check_updates)
         self.check_updates_checkbox.stateChanged.connect(self.on_check_updates_toggled)
         self.settings_layout.addRow(self.check_updates_checkbox)
+
+        # 2.8.2: QiTV's own debug lines in its log too, for a report (Help → Show the Log File).
+        # i18n: a setting: write more to QiTV's log file, to find out why something went wrong
+        self.detailed_log_checkbox = QCheckBox(
+            tr("Detailed log (for troubleshooting)"), self.settings_tab
+        )
+        self.detailed_log_checkbox.setChecked(self.config_manager.detailed_log)
+        self.detailed_log_checkbox.setToolTip(
+            tr(
+                "QiTV's log file also gets every step QiTV takes, for a report of what went wrong."
+                " Addresses and passwords are left out as always. Help → Show the Log File finds"
+                " it."
+            )
+        )
+        self.settings_layout.addRow(self.detailed_log_checkbox)
 
         # Add check button to enable channel logos
         self.channel_logos_checkbox = QCheckBox(tr("Enable Channel Logos"), self.settings_tab)
@@ -1369,6 +1391,8 @@ class OptionsDialog(QDialog):
         )
         self.config_manager.language = self.language_combo.currentData() or None
         self.config_manager.check_updates = self.check_updates_checkbox.isChecked()
+        self.config_manager.detailed_log = self.detailed_log_checkbox.isChecked()
+        log_file.set_detailed(self.config_manager.detailed_log)  # at once (the helper: anew)
         self.config_manager.max_cache_image_size = int(self.cache_image_size_input.text())
         self.config_manager.ssl_verify = self.ssl_verify_checkbox.isChecked()
         self.config_manager.live_latency = self.live_latency_combo.currentData()

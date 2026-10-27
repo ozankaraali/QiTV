@@ -364,6 +364,7 @@ def _merge(older: tuple[Any, ...], newer: tuple[Any, ...]) -> tuple[Any, ...]:
 
 
 _LOG_LINES = 120  # 2.8.1: the most of the helper's own log lines sent in a minute
+_DETAILED_LINES = 1200  # 2.8.2: with the detailed log (its debug lines too)
 _LOG_CUT = "More of the helper's lines this minute were left out."
 
 
@@ -373,9 +374,15 @@ class _LogForwarder(logging.Handler):
     helper's output goes nowhere). They name no URL, as every line of QiTV's own; the app's
     file masks addresses all the same. At most `_LOG_LINES` a minute, then one note."""
 
-    def __init__(self, send: Callable[[tuple[Any, ...]], None], clock: Callable[[], float]):
-        super().__init__(logging.INFO)
-        self._send, self._clock = send, clock
+    def __init__(
+        self,
+        send: Callable[[tuple[Any, ...]], None],
+        clock: Callable[[], float],
+        level: int = logging.INFO,
+        lines: int = _LOG_LINES,
+    ):
+        super().__init__(level)
+        self._send, self._clock, self._lines = send, clock, lines
         self._minute, self._count = -1, 0
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -384,21 +391,26 @@ class _LogForwarder(logging.Handler):
             if minute != self._minute:
                 self._minute, self._count = minute, 0
             self._count += 1
-            if self._count <= _LOG_LINES:
+            if self._count <= self._lines:
                 self._send(("log", record.levelno, record.name, record.getMessage()[:500]))
-            elif self._count == _LOG_LINES + 1:
+            elif self._count == self._lines + 1:
                 self._send(("log", logging.INFO, record.name, _LOG_CUT))
         except Exception:  # a log line must never break what logged it
             pass
 
 
 def _forward_logs(
-    send: Callable[[tuple[Any, ...]], None], clock: Callable[[], float] = time.monotonic
+    send: Callable[[tuple[Any, ...]], None],
+    clock: Callable[[], float] = time.monotonic,
+    *,
+    detailed: bool = False,
 ) -> logging.Handler:
-    """Send the helper's own log lines to the app (`_LogForwarder`); returns the handler."""
-    handler = _LogForwarder(send, clock)
+    """Send the helper's own log lines to the app (`_LogForwarder`); returns the handler.
+    `detailed` (2.8.2, the detailed log): its debug lines too, more of them a minute."""
+    level = logging.DEBUG if detailed else logging.INFO
+    handler = _LogForwarder(send, clock, level, _DETAILED_LINES if detailed else _LOG_LINES)
     package = logging.getLogger("services.live")
-    package.setLevel(logging.INFO)
+    package.setLevel(level)
     package.addHandler(handler)
     return handler
 
@@ -1947,7 +1959,7 @@ def _raise_open_files() -> None:
         _LOG.info("The open files limit stays as it is (%s).", type(error).__name__)
 
 
-def helper_main(conn: Connection, root: str) -> None:
+def helper_main(conn: Connection, root: str, detailed_log: bool = False) -> None:
     """Spawn entry point: arguments travel through multiprocessing IPC, not argv.
 
     It never returns: the process ends with `os._exit` once the helper has shut down.
@@ -1965,7 +1977,7 @@ def helper_main(conn: Connection, root: str) -> None:
         ).start()
         _raise_open_files()
         helper = _Helper(conn, root, owner_gone)
-        _forward_logs(helper.send)  # 2.8.1: into the app's log
+        _forward_logs(helper.send, detailed=detailed_log)  # 2.8.1: into the app's log
         helper.run()
     except BaseException:
         # No traceback crosses IPC: it could disclose provider URLs.

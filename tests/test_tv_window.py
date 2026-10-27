@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -2400,6 +2401,13 @@ class DrawerSettingsTests(WindowCase):
 
 
 class HelpAndAboutTests(WindowCase):
+    def test_help_shows_the_log_file(self):  # 2.8.2: no folder to know by heart
+        from services import log_file
+
+        with mock.patch("ui.tv_menus.open_folder", return_value=True) as opened:
+            self.menu_actions()["Show the Log File…"].trigger()
+        opened.assert_called_once_with(str(log_file.log_dir()))
+
     def test_every_key_in_the_shortcuts_table_works_in_its_screen(self):
         menu_keys = {
             action.shortcut().toString()
@@ -2532,6 +2540,18 @@ class OptionsDialogTests(WindowCase):
         dialog = OptionsDialog(self.window)
         self.addCleanup(dialog.deleteLater)
         return dialog
+
+    def test_the_detailed_log_is_a_setting_that_applies_at_once(self):  # 2.8.2
+        from services import log_file
+
+        self.addCleanup(log_file.set_detailed, False)
+        dialog = self.dialog()
+        self.assertFalse(dialog.detailed_log_checkbox.isChecked())
+        self.assertEqual(dialog.detailed_log_checkbox.text(), "Detailed log (for troubleshooting)")
+        dialog.detailed_log_checkbox.setChecked(True)
+        dialog.save_settings()
+        self.assertTrue(ConfigManager().detailed_log)
+        self.assertTrue(logging.getLogger("services").isEnabledFor(logging.DEBUG))  # at once
 
     def test_settings_load_and_save_the_tv_options(self):
         self.config.live_latency = "stable"
