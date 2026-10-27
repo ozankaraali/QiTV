@@ -413,6 +413,12 @@ _PLAYING = PlaybackState.PLAYING.value
 _PAUSED = PlaybackState.PAUSED.value
 
 
+def _failure_text(kind: str, message: str) -> str:
+    """A helper failure for the log (2.8.2): its kind and its fixed text, which names no URL."""
+    text = str(message or "").strip().rstrip(".")
+    return f"{kind}: {text[:160]}" if text else kind
+
+
 class _Phase(Enum):
     IDLE = "idle"
     STARTING = "starting"  # start() waits for an earlier session to close
@@ -1501,11 +1507,12 @@ class LiveSession(QObject):
         self._await_close(sid)
         self._keeper(KeptRing(sid, self._channel, self._on_disk, Where(None, False)))
 
-    def _kept_fallback(self, notice: str = KEPT_ONLY, *, late: bool = False) -> None:
+    def _kept_fallback(self, notice: str = KEPT_ONLY, *, late: bool = False, why: str = "") -> None:
         """The channel's stream could not open again (2.6): what was kept plays on, from its
         newest point when nothing plays yet, and Go live tries the channel again. Nothing
         newer comes meanwhile: no reopen at live, no stay-live (`_ended`). `late`: it did not
-        come in time, and may still (`_late`)."""
+        come in time, and may still (`_late`). `why` (2.8.2) goes to the log."""
+        _LOG.info("What was kept plays on: %s.", why or "its channel did not open again")
         self._resuming = self._live_after_resume = False
         if self._sid is not None and not self._engine.spans(self._sid):
             self._start_afresh()  # nothing of it is left to play (it was not taken back)
@@ -1727,7 +1734,8 @@ class LiveSession(QObject):
             self._ready_timer.start(self._ready_more_ms)
             self.notice.emit(LOADING)
         elif self._resuming and not self._ready_seen:
-            self._kept_fallback(late=True)  # 2.6: the channel did not come back in time
+            # 2.6: the channel did not come back in time
+            self._kept_fallback(late=True, why=self._unready_reason())
         else:
             _LOG.info("Playing the channel directly: %s.", self._unready_reason())
             self._fall_back(UNAVAILABLE)
@@ -1935,7 +1943,10 @@ class LiveSession(QObject):
                 return
             self._part_resuming = False
             live = self._live_after_resume
-            self._kept_fallback(KEPT_ONLY)
+            self._kept_fallback(
+                KEPT_ONLY,
+                why=f"the channel did not open again after a server part ({_failure_text(kind, message)})",
+            )
             if live and self._sid is not None:
                 pick = self._live_start()
                 seq = pick[0] if pick is not None else self._oldest_seq()
@@ -1947,7 +1958,11 @@ class LiveSession(QObject):
             # helper parked it as it stands): what was kept plays on.
             if kind == "disk":
                 self._disk_failures += 1
-            self._kept_fallback(KEPT_DISK if kind == "disk" else KEPT_ONLY)
+            if kind == "disk":
+                self._kept_fallback(KEPT_DISK, why="its disk buffer failed")
+            else:
+                why = f"its channel did not open again ({_failure_text(kind, message)})"
+                self._kept_fallback(KEPT_ONLY, why=why)
             return
         if self._ended:
             return

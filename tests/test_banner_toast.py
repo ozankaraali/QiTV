@@ -190,6 +190,23 @@ class HiddenHostTest(Base):
 
 
 class ToastTest(Base):
+    def test_every_message_is_logged_once_as_shown(self):  # 2.8.2: the log says what showed
+        player, library = Toast(self.host), Toast(self.host)
+        with self.assertLogs("ui.overlays.toast", "INFO") as logs:
+            for toast in (player, library):  # one message on each page's toast
+                toast.show_message("This channel can't open right now. Playing what was kept.")
+            player.show_message("No stream", "error")
+            player.set_hint("Loading Home…")
+        self.assertEqual(
+            logs.output,
+            [
+                "INFO:ui.overlays.toast:Message shown: This channel can't open right now. "
+                "Playing what was kept.",
+                "INFO:ui.overlays.toast:Error shown: No stream",
+                "INFO:ui.overlays.toast:Message shown: Loading Home…",
+            ],
+        )
+
     def test_hides(self):
         t = Toast(self.host)
         t.show_message("x", ms=60)
