@@ -335,13 +335,14 @@ def installed() -> "Parental | None":
     return _installed[0] if _installed else None
 
 
-def visible_hits(hits: Iterable[Any]) -> list[Any]:
-    """Search hits (`.section`, `.item`) without what parental controls hide now."""
+def visible_hits(hits: Iterable[Any], section: str = "") -> list[Any]:
+    """Search hits (`.item`, and `.section` unless `section` names theirs: the channel
+    finder's are all "live") without what parental controls hide now."""
     hits = list(hits)
     guard = installed()
     if guard is None or not guard.active():
         return hits
-    return [hit for hit in hits if not guard.hides_item(hit.section, hit.item)]
+    return [hit for hit in hits if not guard.hides_item(section or hit.section, hit.item)]
 
 
 def adult_groups(groups: Iterable[Any]) -> list[Any]:

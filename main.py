@@ -189,9 +189,22 @@ def main() -> int:
     qdarktheme.setup_theme("dark", custom_colors={"primary": "#C96B43"})
 
     prevent_sleep()
+    control = None
     try:
         window = TVWindow(app, config_manager, provider_manager, image_manager, epg_manager)
         window.show()
+        # 2.8.3: a developer's tools read and drive this QiTV (loopback only, token-guarded).
+        from services import control as control_port
+
+        if control_port.enabled():
+            from ui.control_commands import WindowControl
+
+            commands = WindowControl(window, python=control_port.python_allowed())
+            directory = log_file.log_dir()
+            control = control_port.ControlServer(
+                commands.handle, directory, directory / log_file.LOG_NAME
+            )
+            control.start()
 
         if config_manager.check_updates:
             check_for_updates(config_manager=config_manager)
@@ -200,6 +213,8 @@ def main() -> int:
         log.info("QiTV's event loop ended (%d).", code)
         return code
     finally:
+        if control is not None:
+            control.stop()
         allow_sleep()
         log_file.close()
 

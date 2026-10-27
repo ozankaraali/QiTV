@@ -1714,6 +1714,8 @@ class TVWindow(QMainWindow):
             # first), not only from the next disk open.
             mib = int(self.config_manager.timeshift_max_mib)
             self.engine.set_disk_amount(mib * 1024 * 1024)
+        if self.engine is not None:  # 2.8.2: the running helper's detail follows at once
+            self.engine.set_detailed_log(self.config_manager.detailed_log)
         self.remote.apply_config()
 
     def set_provider(self, force_update: bool = False) -> None:

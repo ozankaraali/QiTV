@@ -288,6 +288,15 @@ class PortalLoadTests(PortalCase):
         self.assertIsNone(archive_of(by_id[PLAIN_ID]))
         self.assertNotIn(ARCHIVE_KEY, by_id[PLAIN_ID])
 
+    def test_the_live_list_logs_how_many_commands_hold_a_number(self):  # 2.8.3
+        worker = STBCategoriesWorker(self.portal.url, self.signed_in_headers(), "itv")
+        with self.assertLogs("services.workers", "INFO") as logged:
+            self.assertEqual(run(worker)[0], "finished")
+        self.assertIn(
+            "The portal's live list: 2 channels, 2 with a number in its command.",
+            [record.getMessage() for record in logged.records],
+        )
+
     def test_a_portal_cached_before_gets_its_archives_as_the_cache_loads(self):
         _config, manager = mixed_config(
             self.dir,
@@ -366,6 +375,33 @@ class PortalLinkTests(PortalCase):
         self.portal.expire()
         programme = self.portal.programme(ARCHIVED_ID, self.portal.now - 3600)["id"]
         self.assertEqual(run(self.worker(programme, headers))[0], "error")
+
+
+class PortalLiveLinkTests(PortalCase):  # 2.8.3
+    def worker(self, cmd, headers):
+        return LinkCreatorWorker(
+            base_url=self.portal.url, headers=headers, content_type="itv", cmd=cmd
+        )
+
+    def test_a_link_naming_no_channel_is_no_link_and_the_command_is_logged(self):
+        self.portal.play_links = True
+        headers = self.signed_in_headers()
+        with self.assertLogs("services.workers", "INFO") as logged:
+            answer = run(self.worker("ffmpeg http://localhost/ch/", headers))
+        self.assertEqual(answer, ("finished", {"link": ""}))  # the catalog: EMPTY_LINK_MESSAGE
+        self.assertIn(
+            "The portal's link names no channel or title; it was made from a command: ffmpeg "
+            "http, this computer (localhost), its default port, a path of 1 part without an "
+            "extension, asking nothing, no number in it.",
+            [record.getMessage() for record in logged.records],
+        )
+
+    def test_a_link_naming_its_channel_plays(self):
+        self.portal.play_links = True
+        headers = self.signed_in_headers()
+        kind, payload = run(self.worker(f"ffrt http://localhost/ch/{PLAIN_ID}_", headers))
+        self.assertEqual(kind, "finished")
+        self.assertIn(f"&stream={PLAIN_ID}&", payload["link"])
 
 
 class CatalogLinkTests(PortalCase):

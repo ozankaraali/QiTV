@@ -542,6 +542,23 @@ class ParkResumeTests(unittest.TestCase):
         self.assertEqual(supervisor._records["d"].command[5]["max_bytes"], 512 * MIB)
         self.assertEqual(supervisor._records["r"].command[5], ram)
 
+    def test_the_detailed_log_reaches_a_running_helper(self):  # 2.8.2: no restart needed
+        engine, commands = self.engine()
+        engine.set_detailed_log(True)
+        self.assertEqual(commands.get_nowait(), ("detailed_log", True))
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), commands)
+        sent = []
+        commands.put(("detailed_log", True))
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent, [])  # no helper is up: the next one starts with it
+        supervisor._up = True
+        commands.put(("detailed_log", False))
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent, [("detailed_log", False)])
+        supervisor._dead = True
+        commands.put(("detailed_log", True))
+        supervisor._serve_without_helper()  # time-shift off: nothing to tell, nothing fails
+
     def test_a_resume_without_a_helper_fails(self):
         import queue
 

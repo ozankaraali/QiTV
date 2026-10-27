@@ -108,6 +108,61 @@ def stb_link_shape(link: str, portal: str) -> str:
     return shape + (f" (empty: {', '.join(empty)})" if empty else "")
 
 
+# A command's first word that names how a set-top box plays it (any other is "a word").
+_PLAYER_WORDS = frozenset({"ffmpeg", "ffrt", "ffrt2", "ffrt3", "ffrt4", "auto"})
+
+
+def stb_command_has_number(cmd: str) -> bool:
+    """Whether a portal's command for a channel or title holds a number in its address's path
+    (the channel's own: a portal makes the link of the number it finds there, 2.8.3)."""
+    words = str(cmd or "").split()
+    try:
+        path = urlsplit(words[-1]).path if words else ""
+    except ValueError:
+        return False
+    return any(c.isdigit() for c in path)
+
+
+def stb_command_shape(cmd: str, portal: str) -> str:
+    """A portal's command, for the log (2.8.3): its player's word, its address as
+    `stb_link_shape` says it, and whether it holds a number. Never a value."""
+    words = str(cmd or "").split()
+    if not words:
+        return "empty"
+    lead = words[0].lower() if len(words) > 1 else ""
+    player = f"{lead if lead in _PLAYER_WORDS else 'a word'} " if lead else ""
+    number = "a number in it" if stb_command_has_number(cmd) else "no number in it"
+    return f"{player}{stb_link_shape(words[-1], portal)}, {number}"
+
+
+def stb_commands_summary(channels: Any, portal: str) -> str:
+    """How many of a portal's channels have a number in their command, and the shape of one
+    without (`stb_command_shape`), for the log (2.8.3)."""
+    total = numbered = 0
+    without = ""
+    for channel in channels:
+        if not isinstance(channel, dict):
+            continue
+        total += 1
+        cmd = str(channel.get("cmd") or "")
+        if stb_command_has_number(cmd):
+            numbered += 1
+        elif not without:
+            without = stb_command_shape(cmd, portal)
+    text = f"{total} channel{'' if total == 1 else 's'}, {numbered} with a number in its command"
+    return text + (f"; one without: {without}" if without else "")
+
+
+def stb_link_names_no_stream(link: str) -> bool:
+    """Whether a portal's link asks for a `stream` it leaves empty: a link to nothing, which
+    its server closes at once (what a portal makes of a command without a number, 2.8.3)."""
+    try:
+        query = parse_qsl(urlsplit(link.strip()).query, keep_blank_values=True)
+    except ValueError:
+        return False
+    return any(name == "stream" and not value.strip() for name, value in query)
+
+
 def https_fallback_candidates(url: str, prefer_https: bool) -> List[str]:
     """Return the URLs to try in order: the HTTPS form first when it is preferred (and its
     host has not answered only over HTTP this run)."""

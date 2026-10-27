@@ -257,6 +257,10 @@ class _Supervisor(QThread):
             if self._up:
                 conn.send(command)  # otherwise its next disk open brings it
             return
+        if command[0] == "detailed_log":  # 2.8.2: the next helper starts with it anyway
+            if self._up:
+                conn.send(command)
+            return
         name, sid = command[0], command[1]
         if name == "open":
             opened = self._records[sid] = _Record(command)
@@ -674,8 +678,8 @@ class _Supervisor(QThread):
             return
         if command[0] == "drop_kept":
             self._drop_kept()  # 2.8: the disk buffer turned off needs no helper
-        elif command[0] in ("adopt_kept", "disk_amount"):
-            return  # 2.8: no helper takes anything back or holds a disk ring
+        elif command[0] in ("adopt_kept", "disk_amount", "detailed_log"):
+            return  # 2.8: no helper takes anything back, holds a disk ring or logs
         elif command[0] == "open":
             # Time-shift is off: available(False) was emitted already, and no reopen follows.
             self._relay(("error", command[1], "unavailable", _UNAVAILABLE))
@@ -961,6 +965,12 @@ class LiveEngine(QObject):
         gives way first), not only from the next disk open."""
         if not self._shut and max_bytes > 0:
             self._commands.put(("disk_amount", int(max_bytes)))
+
+    def set_detailed_log(self, on: bool) -> None:
+        """The detailed log turned on or off (2.8.2): the running helper forwards its debug
+        lines, or stops, at once; a helper started later starts so (`_helper_args`)."""
+        if not self._shut:
+            self._commands.put(("detailed_log", bool(on)))
 
     def set_until(self, sid: str, seq: int) -> None:
         """Move a server part's stop to media sequence `seq` (2.7: the live buffer's start

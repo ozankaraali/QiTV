@@ -4,6 +4,7 @@ Fictional providers and channels only.
 """
 
 import os
+import types
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -13,6 +14,7 @@ from job_fixtures import ImmediateRunner
 from mixed_fixtures import live_content
 from timer_fixtures import elapse
 
+from services import parental
 from services.find import (
     GENRE_LIMIT,
     FindWorker,
@@ -27,7 +29,8 @@ from services.find import (
     preferences_for,
     words,
 )
-from services.provider_ids import ALL_PROVIDERS, provider_of
+from services.parental import Parental
+from services.provider_ids import ALL_PROVIDERS, provider_of, with_provider
 from ui.find_session import DEBOUNCE_MS, FindSession
 
 APP = QApplication.instance() or QApplication([])
@@ -301,6 +304,17 @@ class SessionTests(unittest.TestCase):
         )
         hits = self.session.channels
         self.assertEqual([provider_of(h.item) for h in hits], ["Harbor IPTV", "Demo TV", "Demo TV"])
+
+    def test_with_parental_controls_on_a_hidden_channel_is_left_out_and_the_rest_found(self):
+        config = types.SimpleNamespace(parental=None, save_config=lambda: None)
+        guard = Parental(config)
+        guard.set_pin("1234")
+        guard.hide_item("live", with_provider(demo()["itv"]["contents"][3], "Demo TV"))
+        parental.install(guard)
+        self.addCleanup(parental.install, None)
+        self.session.set_query("news")
+        elapse(WAIT)
+        self.assertEqual([h.title for h in self.session.channels], ["Evening News"])
 
     def test_typing_on_narrows_what_was_found_at_once_and_the_index_is_kept(self):
         self.session.set_query("n")

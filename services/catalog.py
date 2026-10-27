@@ -20,6 +20,8 @@ from services.catchup import known_zone
 from services.epg_view import Programme, programmes_for_channel
 from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as before)
     BLOCKED_PREFIX,
+    DISABLED_MESSAGE,
+    EXPIRED_MESSAGE,
     FORBIDDEN_MESSAGE,
     LOGIN_REFUSED_MESSAGE,
     NOT_FOUND_MESSAGE,
@@ -83,6 +85,8 @@ _SAFE_MESSAGES = frozenset(
         FORBIDDEN_MESSAGE,
         NOT_FOUND_MESSAGE,
         PROXY_MESSAGE,
+        EXPIRED_MESSAGE,
+        DISABLED_MESSAGE,
     }
 )
 _SAFE_PREFIXES = ("Unknown section: ", "Unsupported provider: ", BLOCKED_PREFIX)

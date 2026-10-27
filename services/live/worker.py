@@ -385,6 +385,13 @@ class _LogForwarder(logging.Handler):
         self._send, self._clock, self._lines = send, clock, lines
         self._minute, self._count = -1, 0
 
+    def set_detailed(self, on: bool) -> None:
+        """The detailed log turned on or off while the helper runs (2.8.2)."""
+        level = logging.DEBUG if on else logging.INFO
+        self.setLevel(level)
+        self._lines = _DETAILED_LINES if on else _LOG_LINES
+        logging.getLogger("services.live").setLevel(level)
+
     def emit(self, record: logging.LogRecord) -> None:
         try:
             minute = int(self._clock() // 60)
@@ -404,7 +411,7 @@ def _forward_logs(
     clock: Callable[[], float] = time.monotonic,
     *,
     detailed: bool = False,
-) -> logging.Handler:
+) -> _LogForwarder:
     """Send the helper's own log lines to the app (`_LogForwarder`); returns the handler.
     `detailed` (2.8.2, the detailed log): its debug lines too, more of them a minute."""
     level = logging.DEBUG if detailed else logging.INFO
@@ -1642,6 +1649,7 @@ class _Helper:
         # process can hold a copy of its end).
         self._owner_gone = owner_gone or threading.Event()
         self._outbox = _Outbox(conn)
+        self.log_forwarder: _LogForwarder | None = None  # 2.8.2: helper_main's, when it runs
         self._sessions: dict[str, _Session] = {}
         self._budget: DiskBudget | None = None  # 2.6: the disk rings' shared amount
         self._expiry = threading.Event()  # set: the expiry ticker ends
@@ -1778,6 +1786,11 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.note(name, command[2])
+            elif name == "detailed_log":  # 2.8.2: the detailed log turned on or off
+                if len(command) != 2 or type(command[1]) is not bool:
+                    raise ValueError("the detailed log needs on or off")
+                if self.log_forwarder is not None:
+                    self.log_forwarder.set_detailed(command[1])
             elif name == "disk_amount":  # 2.8: the user's disk amount changed
                 if len(command) != 2 or type(command[1]) is not int or command[1] <= 0:
                     raise ValueError("a disk amount needs a positive size")
@@ -1977,7 +1990,8 @@ def helper_main(conn: Connection, root: str, detailed_log: bool = False) -> None
         ).start()
         _raise_open_files()
         helper = _Helper(conn, root, owner_gone)
-        _forward_logs(helper.send, detailed=detailed_log)  # 2.8.1: into the app's log
+        # 2.8.1: into the app's log; 2.8.2: its detail follows the setting while it runs
+        helper.log_forwarder = _forward_logs(helper.send, detailed=detailed_log)
         helper.run()
     except BaseException:
         # No traceback crosses IPC: it could disclose provider URLs.

@@ -1,5 +1,6 @@
 """Provider workers: catalog loads, provider setup, EPG and STB links, for CatalogService."""
 
+from datetime import datetime, timezone
 from functools import partial
 import logging
 import re
@@ -17,8 +18,13 @@ from services.catchup import (
 )
 from services.failure_reasons import (
     DEVICE_MESSAGE,
+    DISABLED,
+    DISABLED_MESSAGE,
+    EXPIRED,
+    EXPIRED_MESSAGE,
     UNEXPECTED_ANSWER_MESSAGE,
     UNREACHABLE_MESSAGE,
+    xtream_reason,
 )
 from services.i18n import N_
 from services.lazy_import import lazy_module
@@ -29,7 +35,10 @@ from services.provider_api import (
     remember_http_only,
     remember_xtream_root,
     stb_archive_link_url,
+    stb_command_shape,
+    stb_commands_summary,
     stb_create_link_url,
+    stb_link_names_no_stream,
     stb_link_shape,
     stb_portal_base,
     stb_request_url,
@@ -244,12 +253,26 @@ def _xtream_categories(
     try:
         response = get(url, timeout=10, verify=worker.verify_ssl)
         if response.ok and response.content:
-            for c in response.json() or []:
+            listed = response.json()
+            # Anything but a list (an expired account's panel answers its account): none.
+            for c in listed if isinstance(listed, list) else []:
                 name = c.get("category_name") or N_("Unknown")
                 categories.append({"id": str(c.get("category_id")), "title": name})
     except Exception as e:
         logger.warning("Failed to fetch categories: %s", safe_exc(e))
     return categories
+
+
+def _xtream_refusal(answer: Any, user_info: Any) -> str:
+    """Why a panel answered a list with no list: it answers its account details instead when
+    the account has expired or is disabled (what its sign-in said, when the answer does not
+    say). The message in English, as the catalog shows it."""
+    info = answer.get("user_info") if isinstance(answer, dict) else None
+    info = info if isinstance(info, dict) else user_info
+    reason = xtream_reason({"user_info": info}, datetime.now(timezone.utc))
+    return {EXPIRED: EXPIRED_MESSAGE, DISABLED: DISABLED_MESSAGE}.get(
+        reason.kind, UNEXPECTED_ANSWER_MESSAGE
+    )
 
 
 def _xtream_item(
@@ -376,6 +399,8 @@ class XtreamLoaderWorker(QObject):
             streams_resp = session.get(streams_url, timeout=15, verify=self.verify_ssl)
             streams_resp.raise_for_status()
             streams = streams_resp.json() or []
+            if not isinstance(streams, list):
+                raise ValueError(_xtream_refusal(streams, user_info))
 
             address = partial(xtream_stream_url, resolved_base, kind, self.username, self.password)
             items: List[Dict] = []
@@ -574,6 +599,10 @@ class STBCategoriesWorker(QObject):
                     sorted_channels.setdefault(category_id, []).append(index)
                 if "None" in sorted_channels:
                     categories.append({"id": "None", "title": N_("Unknown Category")})
+                logger.info(  # 2.8.3: a portal links a command's number
+                    "The portal's live list: %s.",
+                    stb_commands_summary(all_channels, self.base_url),
+                )
                 result["contents"] = all_channels
                 result["sorted_channels"] = sorted_channels
             self.finished.emit(result)
@@ -690,6 +719,14 @@ class LinkCreatorWorker(QObject):
                 link = result["js"]["cmd"].split(" ")[-1]
             if link:  # 2.8.1: what kind of link a portal gives, should its streams fail
                 logger.info("The portal's link: %s.", stb_link_shape(link, self.base_url))
+            if link and not self.programme and stb_link_names_no_stream(link):
+                # 2.8.3: no stream would open; the command is what the portal was asked with
+                logger.info(
+                    "The portal's link names no channel or title; it was made from a "
+                    "command: %s.",
+                    stb_command_shape(self.cmd, self.base_url),
+                )
+                link = ""  # EMPTY_LINK_MESSAGE, at once
             self.finished.emit({"link": link})
         except Exception as e:
             self.error.emit(str(e))

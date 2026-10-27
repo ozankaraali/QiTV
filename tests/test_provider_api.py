@@ -8,8 +8,11 @@ from services.provider_api import (
     known_http_only,
     portal_http_only,
     remember_http_only,
+    stb_command_shape,
+    stb_commands_summary,
     stb_create_link_url,
     stb_endpoint,
+    stb_link_names_no_stream,
     stb_link_shape,
     stb_portal_base,
     xtream_https_bases,
@@ -183,6 +186,59 @@ class StbLinkShapeTests(unittest.TestCase):  # 2.8.1: what a portal's link is, i
         for link in ("auto", "", "/media/1.mpg"):
             with self.subTest(link=link):
                 self.assertEqual(stb_link_shape(link, self.PORTAL), "no address")
+
+
+class StbCommandShapeTests(unittest.TestCase):  # 2.8.3: a portal's commands, in the log
+    PORTAL = "http://portal.example:8080/c/"
+
+    def test_a_command_is_its_players_word_its_address_and_whether_it_holds_a_number(self):
+        self.assertEqual(
+            stb_command_shape("ffrt http://localhost/ch/4711_", self.PORTAL),
+            "ffrt http, this computer (localhost), its default port, "
+            "a path of 2 parts without an extension, asking nothing, a number in it",
+        )
+        self.assertEqual(
+            stb_command_shape("ffmpeg http://localhost/ch/", self.PORTAL),
+            "ffmpeg http, this computer (localhost), its default port, "
+            "a path of 1 part without an extension, asking nothing, no number in it",
+        )
+
+    def test_an_empty_command_and_a_word_of_its_own_say_nothing_of_it(self):
+        for cmd in ("", "  "):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(stb_command_shape(cmd, self.PORTAL), "empty")
+        shape = stb_command_shape("Zq9x http://localhost/ch/1_", self.PORTAL)
+        self.assertTrue(shape.startswith("a word http, "))
+        self.assertNotIn("Zq9x", shape)
+
+    def test_a_list_is_counted_with_one_command_without_a_number_shown(self):
+        channels = [
+            {"cmd": "ffmpeg http://localhost/ch/1_"},
+            {"cmd": "ffmpeg http://localhost/ch/"},
+            {"cmd": ""},
+            "not a channel",
+        ]
+        self.assertEqual(
+            stb_commands_summary(channels, self.PORTAL),
+            "3 channels, 1 with a number in its command; one without: ffmpeg http, this "
+            "computer (localhost), its default port, a path of 1 part without an extension, "
+            "asking nothing, no number in it",
+        )
+        self.assertEqual(
+            stb_commands_summary([{"cmd": "ffrt http://localhost/ch/2_"}], self.PORTAL),
+            "1 channel, 1 with a number in its command",
+        )
+
+    def test_a_link_asking_an_empty_stream_names_nothing_to_play(self):
+        names_none = "http://p.example/play/live.php?mac=00:1A&stream=&extension=ts&play_token=x"
+        self.assertTrue(stb_link_names_no_stream(names_none))
+        for link in (
+            "http://p.example/play/live.php?mac=00:1A&stream=4711&extension=ts&play_token=x",
+            "http://p.example/live/4711.ts?play_token=",
+            "",
+        ):
+            with self.subTest(link=link):
+                self.assertFalse(stb_link_names_no_stream(link))
 
 
 if __name__ == "__main__":

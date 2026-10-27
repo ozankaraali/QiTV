@@ -65,7 +65,7 @@ from tests.process_fixtures import still_running, terminate
 from tests.test_keymap import resolve_text
 from tests.ts_fixtures import make_stream
 from ui.brand import logo_aspect
-from ui.keymap import SHORTCUTS, shortcut_keys
+from ui.keymap import SHORTCUTS, Action, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT, LIBRARY_ACTION
 from ui.overlays.zap_banner import BannerInfo
@@ -2207,6 +2207,60 @@ class MediaServerWindowTests(WindowCase):  # 2.8.1: a server's title played in t
         )
 
 
+class ControlCommandsTests(WindowCase):  # 2.8.3: the control port's commands
+    def commands(self, python=True):
+        from ui.control_commands import WindowControl
+
+        return WindowControl(self.window, python=python)
+
+    def test_status_says_what_plays(self):
+        commands = self.commands()
+        status = commands.handle("status", {})
+        self.assertIsNone(status["playing"])
+        self.assertEqual(status["providers"], [PROVIDER_NAME])
+        self.open_first_channel()
+        self.assertTrue(wait_until(lambda: commands.handle("status", {})["playing"] is not None))
+        playing = commands.handle("status", {})["playing"]
+        self.assertEqual((playing["title"], playing["live"]), ("Channel 1", True))
+
+    def test_a_channel_tunes_by_its_name(self):
+        commands = self.commands()
+        self.show()
+        self.wait_for_drawer()
+        answer = commands.handle("tune", {"name": "channel 2"})
+        self.assertEqual(answer["tuned"], "Channel 2")
+        current = self.window.controller.now_playing
+        self.assertTrue(
+            wait_until(lambda: current() is not None and current().title == "Channel 2")
+        )
+        self.assertIn("error", commands.handle("tune", {"name": "no such channel"}))
+
+    def test_an_action_runs_as_its_key_does(self):
+        commands = self.commands()
+        with mock.patch.object(self.window.controller, "handle") as handle:
+            self.assertEqual(commands.handle("action", {"name": "GO_LIVE"}), {"done": "go_live"})
+        handle.assert_called_once_with(Action.GO_LIVE, "")
+        self.assertIn("error", commands.handle("action", {"name": "fly"}))
+        self.assertIn("go_live", commands.handle("actions", {})["actions"])
+
+    def test_python_runs_from_source_only(self):
+        self.assertEqual(
+            self.commands().handle("python", {"code": "window.controller.now_playing()"})["value"],
+            "None",
+        )
+        commands = self.commands()
+        commands.handle("python", {"code": "x = 41\nprint('set')"})
+        self.assertEqual(commands.handle("python", {"code": "x + 1"})["value"], "42")
+        self.assertIn("error", self.commands(python=False).handle("python", {"code": "1"}))
+
+    def test_quit_closes_the_window_after_answering(self):
+        commands = self.commands()
+        with mock.patch.object(self.window, "close") as close:
+            self.assertEqual(commands.handle("quit", {}), {"quitting": True})
+            close.assert_not_called()
+            self.assertTrue(wait_until(lambda: close.called))
+
+
 class DrawerSettingsTests(WindowCase):
     def test_the_drawer_reaches_settings_and_add_provider_with_arrows_and_enter(self):
         self.show()
@@ -2553,6 +2607,9 @@ class OptionsDialogTests(WindowCase):
         dialog.save_settings()
         self.assertTrue(ConfigManager().detailed_log)
         self.assertTrue(logging.getLogger("services").isEnabledFor(logging.DEBUG))  # at once
+        with mock.patch.object(self.window, "engine") as engine:
+            self.window.save_config()  # the running time-shift helper too, no restart
+        engine.set_detailed_log.assert_called_once_with(True)
 
     def test_settings_load_and_save_the_tv_options(self):
         self.config.live_latency = "stable"
@@ -2645,10 +2702,15 @@ class DiskAmountSettingTests(unittest.TestCase):
     def window(self, enabled):
         self.amounts, self.dropped = [], []
         config = SimpleNamespace(
-            save_config=lambda: None, timeshift_enabled=enabled, timeshift_max_mib=512
+            save_config=lambda: None,
+            timeshift_enabled=enabled,
+            timeshift_max_mib=512,
+            detailed_log=False,
         )
         engine = SimpleNamespace(
-            set_disk_amount=self.amounts.append, drop_kept=lambda: self.dropped.append(True)
+            set_disk_amount=self.amounts.append,
+            drop_kept=lambda: self.dropped.append(True),
+            set_detailed_log=lambda on: None,  # 2.8.2
         )
         return SimpleNamespace(
             config_manager=config,
