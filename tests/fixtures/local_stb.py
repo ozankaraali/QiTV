@@ -86,6 +86,7 @@ class StbFixture:
         # portal without an archive to ask answers).
         self.errors: dict[str, str] = {}
         self.requests: list[tuple[str, dict[str, str], str]] = []  # path, query, bearer
+        self.play_links = False  # a channel's link as /play/live.php?…&stream=<its number>
         self.guide = self._guide()
         owner = self
 
@@ -191,6 +192,14 @@ class StbFixture:
         if (kind, action) == ("itv", "get_epg_info"):
             return {"js": self.guide}
         if (kind, action) == ("itv", "create_link"):
+            if self.play_links:  # as some portals answer: the channel's number in `stream`
+                channel = re.sub(r"\D", "", query.get("cmd", ""))
+                return {
+                    "js": {
+                        "cmd": f"ffmpeg {self.url}/play/live.php?mac=00:1A:79:00:00:01"
+                        f"&stream={channel}&extension=ts&play_token=fixture"
+                    }
+                }
             channel = re.sub(r"\D", "", query.get("cmd", "")) or "0"
             return {"js": {"cmd": f"ffmpeg {self.url}/live/{channel}.ts?play_token=fixture"}}
         if (kind, action) == ("tv_archive", "create_link"):

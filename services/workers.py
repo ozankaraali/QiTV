@@ -35,7 +35,10 @@ from services.provider_api import (
     remember_http_only,
     remember_xtream_root,
     stb_archive_link_url,
+    stb_command_shape,
+    stb_commands_summary,
     stb_create_link_url,
+    stb_link_names_no_stream,
     stb_link_shape,
     stb_portal_base,
     stb_request_url,
@@ -596,6 +599,10 @@ class STBCategoriesWorker(QObject):
                     sorted_channels.setdefault(category_id, []).append(index)
                 if "None" in sorted_channels:
                     categories.append({"id": "None", "title": N_("Unknown Category")})
+                logger.info(  # 2.8.3: a portal links a command's number
+                    "The portal's live list: %s.",
+                    stb_commands_summary(all_channels, self.base_url),
+                )
                 result["contents"] = all_channels
                 result["sorted_channels"] = sorted_channels
             self.finished.emit(result)
@@ -712,6 +719,14 @@ class LinkCreatorWorker(QObject):
                 link = result["js"]["cmd"].split(" ")[-1]
             if link:  # 2.8.1: what kind of link a portal gives, should its streams fail
                 logger.info("The portal's link: %s.", stb_link_shape(link, self.base_url))
+            if link and not self.programme and stb_link_names_no_stream(link):
+                # 2.8.3: no stream would open; the command is what the portal was asked with
+                logger.info(
+                    "The portal's link names no channel or title; it was made from a "
+                    "command: %s.",
+                    stb_command_shape(self.cmd, self.base_url),
+                )
+                link = ""  # EMPTY_LINK_MESSAGE, at once
             self.finished.emit({"link": link})
         except Exception as e:
             self.error.emit(str(e))
