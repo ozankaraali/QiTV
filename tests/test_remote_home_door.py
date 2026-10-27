@@ -13,7 +13,7 @@ from remote_phone import PhoneClient
 
 from services.remote.hub import RemoteHub
 from services.remote.net import is_private
-from services.remote.protocol import Closed, Code, Opened, Paired, Press, Status, b64d
+from services.remote.protocol import Closed, Code, Opened, Paired, Press, Status, StoreSaved, b64d
 from services.remote.server import private_only
 
 
@@ -260,6 +260,83 @@ class PortTests(unittest.TestCase):
                 self.assertGreater(hub.port, 0)
             finally:
                 hub.stop()
+
+    def test_with_all_its_own_ports_taken_it_listens_where_the_system_says_and_keeps_it(self):
+        # Another program on 5384…5393, or a range the system keeps for itself (Windows does
+        # for Hyper-V): any free port, kept so that phones find QiTV there next time too.
+        web = self._web()
+        with socket.socket() as busy:
+            busy.bind(("127.0.0.1", 0))
+            busy.listen()
+            taken = busy.getsockname()[1]
+            events = Recorder()
+            hub = RemoteHub(events, web, ports=[taken], host="127.0.0.1")
+            hub.start({"version": 1, "enabled": True, "relay": False})
+            try:
+                self.assertTrue(hub.ready.wait(3))
+                self.assertGreater(hub.port, 0)
+                self.assertNotEqual(hub.port, taken)
+                events.wait(StoreSaved, where=lambda e: e.data.get("port") == hub.port)
+            finally:
+                hub.stop()
+
+    def test_the_port_it_kept_is_tried_first(self):
+        kept = _free_port()
+        events = Recorder()
+        hub = RemoteHub(events, self._web(), ports=[0], host="127.0.0.1")
+        hub.start({"version": 1, "enabled": True, "relay": False, "port": kept})
+        try:
+            self.assertTrue(hub.ready.wait(3))
+            self.assertEqual(hub.port, kept)
+        finally:
+            hub.stop()
+
+    def test_back_on_one_of_its_own_ports_it_forgets_the_one_it_kept(self):
+        own = _free_port()
+        with socket.socket() as busy:
+            busy.bind(("127.0.0.1", 0))
+            busy.listen()
+            taken = busy.getsockname()[1]
+            events = Recorder()
+            hub = RemoteHub(events, self._web(), ports=[own], host="127.0.0.1")
+            hub.start({"version": 1, "enabled": True, "relay": False, "port": taken})
+            try:
+                self.assertTrue(hub.ready.wait(3))
+                self.assertEqual(hub.port, own)
+                events.wait(StoreSaved, where=lambda e: "port" not in e.data)
+            finally:
+                hub.stop()
+
+    def test_a_start_that_fails_is_logged_and_closes_its_port_and_the_pairing_screen_hears(self):
+        async def broken(_core):
+            raise RuntimeError("the relay's setup broke")
+
+        events = Recorder()
+        hub = RemoteHub(events, self._web(), ports=[0], host="127.0.0.1")
+        with (
+            mock.patch("services.remote.hub.HubCore._sync_relay", broken),
+            self.assertLogs("services.remote.hub", "ERROR") as logs,
+        ):
+            hub.start({"version": 1, "enabled": True, "relay": False})
+            self.assertTrue(hub.ready.wait(3))
+            events.wait(Status, where=lambda e: e.relay == "error")
+        self.assertIn("could not start", "\n".join(logs.output))
+        self.assertIn("RuntimeError", "\n".join(logs.output))
+        opened = hub._core.port
+        self.assertGreater(opened, 0)
+        with self.assertRaises(ConnectionRefusedError):
+            socket.create_connection(("127.0.0.1", opened), timeout=1).close()
+
+    def _web(self) -> Path:
+        web = Path(tempfile.mkdtemp())
+        (web / "index.html").write_text("x")
+        return web
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 class EarlyCallTests(unittest.TestCase):

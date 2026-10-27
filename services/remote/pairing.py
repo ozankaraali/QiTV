@@ -67,6 +67,9 @@ class RemoteStore:
         self.enabled = False
         self.relay = True
         self.relay_url = RELAY_URL
+        # The home door's port when none of QiTV's own was free (another program's, or kept by
+        # the system): tried first next time, so phones find QiTV at the same address.
+        self.port: Optional[int] = None
         self.room: Optional[str] = None
         self.room_secret: Optional[str] = None
         self.devices: list[Device] = []
@@ -95,6 +98,9 @@ class RemoteStore:
         for name in ("room", "room_secret"):
             if isinstance(data.get(name), str):
                 setattr(store, name, data[name])
+        port = data.get("port")
+        if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536:
+            store.port = port
         try:
             store._identity = Keypair.from_private(b64d(data["identity"]))
         except KeyError:
@@ -132,6 +138,8 @@ class RemoteStore:
                 for d in self.devices
             ],
         }
+        if self.port is not None:
+            data["port"] = self.port
         if self._identity is not None:
             data["identity"] = b64e(self._identity.priv)
         return data

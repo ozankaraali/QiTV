@@ -80,8 +80,11 @@ PLAYING_ON_TEXT = N_("Playing on {name}")
 PLAYING_ON_PHONE_TEXT = N_("Playing on the phone")  # i18n: a toast, the phone's name unknown
 # i18n: a message when a phone that asked for the stream disconnected before it was sent
 PHONE_GONE_TEXT = N_("The phone left before the stream reached it")
-# i18n: the pairing screen when the phone remote couldn't start (no free network port)
-START_FAILED_TEXT = N_("The phone remote couldn't start. Is another program using its port?")
+# i18n: the pairing screen when the phone remote couldn't start; "Help → Show the Log File" is
+# the Help menu's "Show the Log File…"
+START_FAILED_TEXT = N_(
+    "The phone remote couldn't start. The log says why: Help → Show the Log File."
+)
 
 
 class _PhoneChoice:

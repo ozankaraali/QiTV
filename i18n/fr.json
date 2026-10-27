@@ -884,7 +884,7 @@
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "La nouvelle version a été enregistrée ici :\n{path}\n\nRemplacez l’application actuelle par le fichier téléchargé.",
   "The phone left before the stream reached it": "Le téléphone est parti avant que le flux n'arrive",
   "The phone remote couldn't start": "La télécommande sur téléphone n'a pas pu démarrer",
-  "The phone remote couldn't start. Is another program using its port?": "La télécommande sur téléphone n'a pas pu démarrer. Un autre programme utilise-t-il son port ?",
+  "The phone remote couldn't start. The log says why: Help → Show the Log File.": "La télécommande sur téléphone n'a pas pu démarrer. Le journal indique pourquoi : Aide → Afficher le fichier journal.",
   "The portal has no recording of this programme": "Le portail n’a aucun enregistrement de ce programme",
   "The portal returned an empty link": "Le portail a renvoyé un lien vide",
   "The portal returned no data": "Le portail n’a renvoyé aucune donnée",
