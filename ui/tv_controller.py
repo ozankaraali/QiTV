@@ -903,6 +903,10 @@ class TVController(QObject):
         """The large picture's volume (0-100)."""
         return self._mixer.main_level()
 
+    def now_playing(self) -> Optional[Target]:
+        """What the large picture plays or opens (None: nothing), for the control port."""
+        return self._current
+
     def resume_live(self) -> None:
         """Back to live TV from the Library: the last live channel again, else the drawer (see
         ProviderFlow.resume_live)."""

@@ -10,6 +10,7 @@ A PySide6 IPTV player on libVLC (VLC 3.0.20 ships inside the app). What each rel
 - Playback smoke (muted, offscreen, local fixtures):
   `QT_QPA_PLATFORM=offscreen QITV_SMOKE_MUTE=1 uv run python scripts/smoke_tv.py --out <dir> --pipeline --pip --fixtures tests/fixtures`
 - black, isort and flake8 as configured; keep mypy green on the modules you change.
+- Drive a QiTV run from source: `uv run python scripts/qitv_control.py status|log|tune|action|python|restart` (a loopback port; its token is in `control.json` beside the log).
 
 ## Rules the code doesn't show
 - No native builds: VLC's official build is bundled, and the time-shift helper (`services/live/`)

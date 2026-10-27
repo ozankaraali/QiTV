@@ -26,10 +26,10 @@ from urllib.error import HTTPError
 from urllib.request import urlopen
 import warnings
 
-from timer_fixtures import wait_until
 from http_fixtures import LocalSource, leaf, tls_server_context
 from process_fixtures import still_running, terminate
 from test_fmp4 import movie, trak, visual
+from timer_fixtures import wait_until
 from ts_fixtures import AUDIO_PID, CLOCK, PMT_PID, VIDEO_PID, make_stream
 from urllib3.exceptions import InsecureRequestWarning
 
