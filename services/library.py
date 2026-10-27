@@ -962,7 +962,7 @@ class LibraryModel(QObject):
             return servers[name]
 
         def gone(provider: str, item: dict) -> bool:
-            ids = listed.get(provider)
+            ids = listed.get(provider) or set()
             return bool(ids) and str(item.get("id") or "") not in ids and server(provider)
 
         return gone
