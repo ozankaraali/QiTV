@@ -3,11 +3,13 @@
 import unittest
 from unittest import mock
 
+from PySide6.QtGui import QFontMetricsF
+
 from services import tmdb
 from services.config_manager import ConfigManager
 from tests import test_config_tv, test_tv_window as base
 from ui.settings_dialog import OptionsDialog
-from ui.tv_menus import ABOUT_LOGO_PX, AboutDialog, about_text
+from ui.tv_menus import ABOUT_LOGO_PX, SMALL_TEXT, AboutDialog, about_text
 
 
 class TmdbConfigTests(unittest.TestCase):
@@ -101,7 +103,18 @@ class TmdbSettingsTests(base.WindowCase):
         about.show()
         about.layout().activate()
         self.assertEqual(about.tmdb_logo.x(), about.text.x())  # flush left with the text
-        self.assertEqual(about.tmdb_logo.width(), round(logo.width() / logo.devicePixelRatio()))
+        # 2.8.1: and with its letters, which start their small font's left bearing into the
+        # line: the logo's picture starts as many device pixels in
+        ratio = logo.devicePixelRatio()
+        bearing = QFontMetricsF(about.text.font()).leftBearing("Q") * SMALL_TEXT
+        image = logo.toImage()
+        ink = next(
+            x
+            for x in range(image.width())
+            if any(image.pixelColor(x, y).alpha() for y in range(image.height()))
+        )
+        self.assertEqual(ink, int(bearing * ratio))  # whole pixels, as text snaps to them
+        self.assertEqual(about.tmdb_logo.width(), round(logo.width() / ratio))
 
 
 if __name__ == "__main__":
