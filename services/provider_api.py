@@ -113,14 +113,40 @@ _PLAYER_WORDS = frozenset({"ffmpeg", "ffrt", "ffrt2", "ffrt3", "ffrt4", "auto"})
 
 
 def stb_command_has_number(cmd: str) -> bool:
-    """Whether a portal's command for a channel or title holds a number in its address's path
-    (the channel's own: a portal makes the link of the number it finds there, 2.8.3)."""
+    """Whether a portal's command for a channel or title names its number: in its address's
+    path (a box's placeholder, …/ch/<number>_, 2.8.3) or as its `stream` (a play link that
+    some portals list as the command itself, 2.8.4)."""
     words = str(cmd or "").split()
     try:
-        path = urlsplit(words[-1]).path if words else ""
+        parts = urlsplit(words[-1]) if words else None
+        query = parse_qsl(parts.query, keep_blank_values=True) if parts else []
     except ValueError:
         return False
-    return any(c.isdigit() for c in path)
+    if parts is None:
+        return False
+    named = any(name == "stream" and any(c.isdigit() for c in value) for name, value in query)
+    return named or any(c.isdigit() for c in parts.path)
+
+
+def stb_command_link(cmd: str, portal: str) -> str:
+    """The address of a portal's command when it plays as it is: on a server (not a box's
+    `localhost` placeholder, unless the portal is there itself) and not naming an empty
+    `stream`; "" otherwise. Some portals list each channel's play link as its command, and
+    make one naming no channel of it when asked for a link (2.8.4): that listed link plays."""
+    words = str(cmd or "").split()
+    address = words[-1] if words else ""
+    try:
+        parts = urlsplit(address)
+        host = (parts.hostname or "").lower()
+        portal_host = (urlsplit(portal).hostname or "").lower()
+    except ValueError:
+        return ""
+    if parts.scheme.lower() not in ("http", "https") or not host:
+        return ""
+    placeholder = (host in _LOCAL_HOSTS or host.startswith("127.")) and host != portal_host
+    if placeholder or stb_link_names_no_stream(address):
+        return ""
+    return address
 
 
 def stb_command_shape(cmd: str, portal: str) -> str:
