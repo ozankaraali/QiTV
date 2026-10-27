@@ -166,6 +166,7 @@ def main() -> int:
             icon_path = os.path.join(sys._MEIPASS, "assets", "qitv.png")
 
     config_manager = ConfigManager()
+    log_file.set_detailed(config_manager.detailed_log)  # 2.8.2: Settings' detailed log
     # The language, before any window: every text is looked up as it is shown.
     i18n.set_language(i18n.resolve(config_manager.language))
     i18n.install_qt_translations(app)

@@ -765,6 +765,32 @@ class MixedProvidersTests(unittest.TestCase):
         self.assertEqual(model.genre_id, CONTINUE)
         self.assertEqual([i["name"] for i in model.items()], ["Ledger Nights"])
 
+    def server_continue(self, kind, listed=True):
+        """Continue at a provider of `kind` whose list holds "Hive" under a new id; the history
+        has it under the new id and under the id the server had before."""
+        hive = with_provider(movie("new", "Hive"), "Home")
+        cat = FakeCatalog(
+            {"movies": [("*", "All", 1)]}, {("movies", "*"): [hive] if listed else None}
+        )
+        cat.name, cat.names = "Home", ["Home"]
+        cat.provider_entry = lambda name: {"name": name, "type": kind}
+        cfg = make_config()
+        for item_id in ("new", "old"):
+            history(cfg, movie(item_id, "Hive"), "movie", provider="Home")
+            resume(cfg, movie(item_id, "Hive"), "movie", provider="Home")
+        model, _ = build(cat, cfg)
+        model.select_genre(CONTINUE)
+        return [i["id"] for i in model.items()]
+
+    def test_a_server_title_its_server_no_longer_has_leaves_continue(self):  # 2.8.2
+        for kind in ("EMBY", "JELLYFIN"):
+            with self.subTest(kind=kind):
+                self.assertEqual(self.server_continue(kind), ["new"])
+
+    def test_other_providers_and_unloaded_lists_keep_their_continue(self):  # 2.8.2
+        self.assertEqual(self.server_continue("XTREAM"), ["new", "old"])  # lists may be partial
+        self.assertEqual(self.server_continue("EMBY", listed=False), ["new", "old"])
+
     def test_one_provider_continue_is_stamped_with_its_provider(self):
         cat = FakeCatalog({"movies": [("1", "G", 1)]}, {("movies", "1"): [movie(1)]})
         cfg = make_config()

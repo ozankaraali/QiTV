@@ -461,7 +461,7 @@ A build from the source code has no OpenSubtitles API key of its own: enter your
 <details>
 <summary>Environment variables for troubleshooting</summary>
 
-QiTV keeps its log in a file too, a few runs' worth: `~/Library/Logs/QiTV/qitv.log` on a Mac, `%LOCALAPPDATA%\QiTV\Logs\qitv.log` on Windows, `~/.local/state/qitv/qitv.log` on Linux. Addresses and query strings are left out of it; it says how QiTV ended each time, and after a crash a `crash.log` beside it holds where each thread was. Attach them when you report a problem. What a switch below logs lands in that file too.
+QiTV keeps its log in a file too, a few runs' worth: `~/Library/Logs/QiTV/qitv.log` on a Mac, `%LOCALAPPDATA%\QiTV\Logs\qitv.log` on Windows, `~/.local/state/qitv/qitv.log` on Linux. Addresses and query strings are left out of it; it says how QiTV ended each time, and after a crash a `crash.log` beside it holds where each thread was. Attach them when you report a problem: **Help → Show the Log File…** opens their folder. For a problem that is hard to pin down, tick **Settings → Detailed log (for troubleshooting)**: the log then also gets every step QiTV takes (still without addresses or passwords), and every message QiTV showed is in it either way. What a switch below logs lands in that file too.
 
 Set these before starting QiTV (for example `QITV_DEBUG_QT=1 python main.py`):
 

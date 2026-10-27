@@ -67,6 +67,23 @@ class ParentalTests(unittest.TestCase):
         self.assertFalse(self.guard.hides_item("live", NEWS))
         self.assertEqual(self.guard.visible("live", [NEWS, ADULT]), [NEWS])
 
+    def test_a_long_list_reads_the_rules_once_and_each_group_once(self):  # 2.8.2
+        # All providers froze for 22 s: every channel of every list re-read the settings
+        # (the PIN, the hidden entries) and asked its group again.
+        self.guard.set_pin("1234")
+        self.guard.hide_group("live", "P", "66")
+        self.config.parental = dict(self.config.parental, adult=True)
+        self.guard._load()
+        asked = []
+        self.guard.group_title = lambda *key: asked.append(key) or "News"
+        reads = []
+        data = self.guard._data
+        self.guard._data = lambda: reads.append(1) or data()
+        many = [dict(NEWS, id=str(i)) for i in range(2000)] + [ADULT]
+        self.assertEqual(self.guard.visible("live", many), many[:-1])
+        self.assertLessEqual(len(reads), 3)  # not once a channel
+        self.assertEqual(asked, [("live", "P", "10")])  # each group's name once
+
     def test_a_hidden_channel_is_hidden_alone(self):
         self.guard.set_pin("1234")
         self.guard.hide_item("live", NEWS)

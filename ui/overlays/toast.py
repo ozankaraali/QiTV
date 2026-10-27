@@ -3,7 +3,12 @@
 A message or hint shows in the active language: an English text kept in a constant (marked
 with services.i18n.N_) is translated here; any other text (already translated, or a name)
 shows as it is.
+
+Every message and hint is logged as it shows (2.8.2), once when both pages' toasts show it.
 """
+
+import logging
+import time
 
 from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
 from PySide6.QtGui import QFont, QFontMetrics, QPainter, QPaintEvent
@@ -13,6 +18,21 @@ from services.i18n import translate
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units
 from ui.theme import PALETTE, qcolor
+
+logger = logging.getLogger(__name__)
+
+_SAME_S = 1.0  # the same message again this soon (the other page's toast) is not logged again
+_last_logged: tuple[str, str, float] = ("", "", 0.0)
+
+
+def _log_shown(text: str, kind: str) -> None:
+    """The log says what the user was shown: "Error shown: …" or "Message shown: …"."""
+    global _last_logged
+    now = time.monotonic()
+    if (text, kind) == _last_logged[:2] and now - _last_logged[2] < _SAME_S:
+        return
+    _last_logged = (text, kind, now)
+    logger.info("%s shown: %s", "Error" if kind == "error" else "Message", text)
 
 
 class Toast(Overlay):
@@ -65,6 +85,7 @@ class Toast(Overlay):
     def _show(self, text: str, kind: str) -> None:
         self._text = translate(text)
         self._kind = kind
+        _log_shown(self._text, kind)
         self._layout()
         self.show()
         self.raise_()

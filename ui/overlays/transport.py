@@ -1097,19 +1097,40 @@ class Transport(Overlay):
         return rects
 
     def _squeezed(self, rects: dict[str, QRectF]) -> bool:
-        """The Stay live indicator went without a part of its text (or altogether), or the
-        speed chip without its − and + (or altogether, under the bar: 2.8, the ⚙ gives way)."""
+        """The Stay live indicator has no room for its settled text (`_steady_width`), or the
+        speed chip went without its − and + (or altogether, under the bar: 2.8, the ⚙ gives
+        way). 2.8.2: the settled text, not the one shown, so the icons keep their places while
+        "Reconnecting…", "adjusted" or a rate come and go: the text gives way instead."""
         if ("speed" in rects or self._shows_bar()) and "slower" not in rects:
             return True
         variants = self._indicator_variants() if self._timeshift and not self._shows_bar() else []
         if not variants:
             return False
         un = Units(self.width())
+        live, back = rects.get("live"), rects.get("back10")
+        if live is None or back is None:
+            return True
+        room = live.x() - un.px(0.8) - (back.right() + un.px(1.5))  # between ◀10 and LIVE
+        return room < self._steady_width(un) - 0.5
+
+    def _steady_width(self, un: Units) -> float:
+        """The indicator's width for its busiest text, whatever it reads now: its name with a
+        two-digit lag (and "adjusted", under Auto) and the wider of its rates, or a stall's
+        text: the icons' spacing then depends on the width and the language alone."""
         fm = QFontMetricsF(self._indicator_font(un))
-        head, tail = variants[0]
-        whole = self._indicator_bare(un, fm, head) + fm.horizontalAdvance(tail)
-        box = rects.get("indicator")
-        return box is None or box.width() < whole - 0.5
+        seconds = i18n.decimal("88.8")
+        if self._auto is not None:
+            lag = tr("≈ {seconds} s behind", seconds=seconds) + " · " + tr("adjusted")
+        else:
+            lag = tr("≈ {seconds} s behind source", seconds=seconds)
+        rates = (
+            tr("adding buffer {rate}×", rate=i18n.decimal("0.95")),
+            tr("catching up {rate}×", rate=i18n.decimal("1.05")),
+        )
+        busiest = lag + " · " + max(rates, key=fm.horizontalAdvance)
+        tails = (busiest, translate(RECONNECTING), translate(WAITING))
+        head = tr("Stay live")
+        return self._indicator_bare(un, fm, head) + max(fm.horizontalAdvance(t) for t in tails)
 
     def _grid_chips_short(self, rects: dict[str, QRectF]) -> bool:
         """While the grid shows: its layout chip went without its name, or left out, or

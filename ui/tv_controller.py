@@ -3911,10 +3911,9 @@ class TVController(QObject):
         return tr("{name}: {message}", name=name, message=message)
 
     def _error(self, text: str) -> None:
-        """Toast an error; addresses and query strings never reach the toast or any log."""
-        clean = scrub(text)
-        logger.info("Error shown: %s", clean)
-        self._toast(clean, "error", ERROR_MS)
+        """Toast an error; addresses and query strings never reach the toast or any log (the
+        toast logs it as it shows: "Error shown: …")."""
+        self._toast(scrub(text), "error", ERROR_MS)
 
     def _menu_notify(self, text: str, kind: str) -> None:
         """A context menu's message: on the Library's toast while the Library shows (the
@@ -3924,9 +3923,7 @@ class TVController(QObject):
     def _menu_error(self, text: str) -> None:
         """An external play or a context menu's link failed: _error's text, on _menu_notify's
         toast."""
-        clean = scrub(text)
-        logger.info("Error shown: %s", clean)
-        self._menu_notify(clean, "error")
+        self._menu_notify(scrub(text), "error")  # the toast logs it ("Error shown: …")
 
     @staticmethod
     def _log_failure(what: str, error: Exception) -> None:

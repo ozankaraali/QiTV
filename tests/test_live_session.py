@@ -838,6 +838,31 @@ class KeptTests(LiveSessionCase):
         self.assertTrue(self.playback.plays)
         self.assertEqual(self.playback.plays[-1][1], PlayKind.LIVE_PIPELINE)
 
+    def test_why_what_was_kept_plays_is_logged(self):  # 2.8.2: the notice's reason, logged
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        self.resume(KeptRing("k", "k1", False, Where(None, False)))
+        with self.assertLogs("services.live.live_session", "INFO") as logs:
+            self.engine.sessionFailed.emit(
+                "k", "network", "The channel's server refused the connection."
+            )
+        self.assertIn(
+            "INFO:services.live.live_session:What was kept plays on: its channel did not open"
+            " again (network: The channel's server refused the connection).",
+            logs.output,
+        )
+
+    def test_why_what_was_kept_plays_after_the_wait_is_logged(self):  # 2.8.2
+        self.slow()
+        self.engine.buffer("k", segments(0, 30), parts=[[0, 0.0, 1_000.0]])
+        with self.assertLogs("services.live.live_session", "INFO") as logs:
+            self.resume(KeptRing("k", "k1", False, Where(20.0, True)))
+            self.wait_until(lambda: self.notices)
+        self.assertIn(
+            "INFO:services.live.live_session:What was kept plays on: the channel did not answer"
+            " within 0 s.",
+            logs.output,
+        )
+
     def slow(self):
         """A LiveSession whose ready wait ends at once, and is extended while bytes flow."""
         self.live = self.make(ready_timeout_ms=50, ready_max_ms=60_000)

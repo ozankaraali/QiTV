@@ -123,6 +123,11 @@ class MainModuleTests(unittest.TestCase):
         keys = {ast.literal_eval(key): value for key, value in zip(plist.keys, plist.values)}
         self.assertTrue(ast.literal_eval(keys["NSLocalNetworkUsageDescription"]))
         self.assertIn("_googlecast._tcp", ast.literal_eval(keys["NSBonjourServices"]))
+        # 2.8.2: macOS asked for the microphone as QiTV's sound started with a Bluetooth
+        # speaker on; QiTV never records: the question says so.
+        microphone = ast.literal_eval(keys["NSMicrophoneUsageDescription"])
+        self.assertIn("never records", microphone)
+        self.assertIn("Bluetooth", microphone)
 
 
 if __name__ == "__main__":

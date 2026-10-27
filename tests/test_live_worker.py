@@ -2705,11 +2705,12 @@ class HeardEdgeTests(unittest.TestCase):
 
 
 class LogForwardTests(unittest.TestCase):  # 2.8.1: the helper's own lines reach qitv.log
-    def forward(self, clock=None):
+    def forward(self, clock=None, detailed=False):
         package = logging.getLogger("services.live")
         level = package.level
         sent = []
-        handler = worker._forward_logs(sent.append, **({"clock": clock} if clock else {}))
+        more = {"clock": clock} if clock else {}
+        handler = worker._forward_logs(sent.append, detailed=detailed, **more)
         self.addCleanup(package.setLevel, level)
         self.addCleanup(package.removeHandler, handler)
         return sent
@@ -2730,6 +2731,13 @@ class LogForwardTests(unittest.TestCase):  # 2.8.1: the helper's own lines reach
                     "The channel's first answer failed (ConnectionError); asking again.",
                 )
             ],
+        )
+
+    def test_the_detailed_log_forwards_debug_lines_too(self):  # 2.8.2
+        sent = self.forward(detailed=True)
+        logging.getLogger("services.live.source").debug("Segment %d fetched.", 7)
+        self.assertEqual(
+            sent, [("log", logging.DEBUG, "services.live.source", "Segment 7 fetched.")]
         )
 
     def test_a_flood_is_cut_with_one_note_until_the_next_minute(self):

@@ -18,11 +18,19 @@ from functools import partial
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, QUrl
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QDesktopServices,
+    QFontMetricsF,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+)
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLayout, QWidget
 
-from services import recording
+from services import log_file, recording
 from services.config_manager import get_app_version
 from services.exporter import ExportKind
 from services.i18n import N_, tr, translate
@@ -70,6 +78,24 @@ TMDB_NOTICE = N_(
 )
 TMDB_LOGO_FILE = "tmdb.png"
 ABOUT_TMDB_LOGO_PX = 9
+SMALL_TEXT = 0.8  # about how much smaller rich text's <small> is than the label's own
+
+
+def indented(pixmap: QPixmap, device_px: int) -> QPixmap:
+    """`pixmap` with `device_px` transparent device pixels before it (2.8.1: a picture flush
+    with letters, which start a fraction of a pixel into their line)."""
+    if device_px <= 0:
+        return pixmap
+    ratio = pixmap.devicePixelRatio()
+    out = QPixmap(pixmap.width() + device_px, pixmap.height())
+    out.setDevicePixelRatio(ratio)
+    out.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(out)
+    painter.drawPixmap(QPointF(device_px / ratio, 0), pixmap)
+    painter.end()
+    return out
+
+
 NO_PROVIDERS_TEXT = N_("No providers")  # i18n: the Providers menu's only entry, when it is empty
 ADD_PROVIDER_TEXT = N_("Add provider")  # i18n: the Providers menu's entry; opens the provider form
 _SHORTCUT_MODIFIERS = (
@@ -121,11 +147,15 @@ class AboutDialog(QDialog):
         self.text.setOpenExternalLinks(True)
         self.text.setMinimumWidth(ABOUT_TEXT_MIN_W)
         self.text.setWordWrap(True)
-        # TMDB's logo under its notice (the text's last line), flush left.
+        # TMDB's logo under its notice (the text's last line), flush left with its letters:
+        # the notice's first letter starts its small font's left bearing right of the line (a
+        # device pixel or two), a picture at once (2.8.1: the owner saw the step).
         self.tmdb_logo = QLabel(self)
         tmdb_logo = scaled_asset(TMDB_LOGO_FILE, ABOUT_TMDB_LOGO_PX, ratio)
         if tmdb_logo is not None:
-            self.tmdb_logo.setPixmap(tmdb_logo)
+            first = translate(TMDB_NOTICE)[:1] or "Q"
+            bearing = QFontMetricsF(self.text.font()).leftBearing(first) * SMALL_TEXT
+            self.tmdb_logo.setPixmap(indented(tmdb_logo, int(bearing * ratio)))
         else:
             self.tmdb_logo.hide()
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, self)
@@ -220,6 +250,8 @@ class TVMenus(QObject):
         help_menu = bar.addMenu(tr("Help"))  # i18n: the menu bar's Help menu
         add(help_menu, tr("Keyboard Shortcuts…"), "", self.show_shortcuts)
         add(help_menu, tr("Report an Issue…"), "", self.report_issue)
+        # i18n: a Help menu entry: shows QiTV's log file in Finder or Explorer (2.8.2)
+        add(help_menu, tr("Show the Log File…"), "", self.show_log)
         catalog = window.catalog
         # Bound slots: Qt lets go of them with this object (a lambda would outlive it).
         catalog.providerReady.connect(self._on_providers_changed)
@@ -361,6 +393,10 @@ class TVMenus(QObject):
 
     def report_issue(self) -> None:
         QDesktopServices.openUrl(QUrl(ISSUES_URL))
+
+    def show_log(self) -> None:
+        """The folder of QiTV's log file (qitv.log), in the system's file manager (2.8.2)."""
+        open_folder(str(log_file.log_dir()))
 
     def on_drawer_action(self, row: str) -> None:
         """The drawer's Settings, Add provider, Free channels and Open file rows, and its
