@@ -1943,10 +1943,9 @@ class LiveSession(QObject):
                 return
             self._part_resuming = False
             live = self._live_after_resume
-            self._kept_fallback(
-                KEPT_ONLY,
-                why=f"the channel did not open again after a server part ({_failure_text(kind, message)})",
-            )
+            failure = _failure_text(kind, message)
+            why = f"the channel did not open again after a server part ({failure})"
+            self._kept_fallback(KEPT_ONLY, why=why)
             if live and self._sid is not None:
                 pick = self._live_start()
                 seq = pick[0] if pick is not None else self._oldest_seq()
