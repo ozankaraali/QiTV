@@ -84,7 +84,9 @@ _TRIM_HOLD_BYTES = 48 * 1024 * 1024  # ... and at most this much: a 15 s burst o
 _TRIM_MARGIN_S = 0.25  # R is taken this much short: a frame or two repeated beats new ones lost
 _TRIM_MIN_S = 2.0  # a smaller R is a backlog that made up its silence (a control's 0.6 s)
 _TRIM_RUNS = 2  # a repeat reaches this many runs back: one upstream's crossed another's 9 s run
-_TRIM_NO_BURST_S = 0.5  # a run held this long that brought no burst is let go (a splice at 1x)
+# A run held this long that brought no burst is let go (a splice at 1x). An encoder seen
+# live paused a second after its restart, then sent 7-10 s at once: 0.5 s let them through.
+_TRIM_NO_BURST_S = 2.0
 _TRIM_EXTRA_MAX_S = 15.0  # stay-live asks a restart to take at most this much more (`extra`)
 _TRIM_QUICK_S = 1.5  # ... of one this soon after the run before it last brought media
 _TRIM_FAR_S = 8.0  # ... or, asked this much (stay-live far behind) ...
@@ -1836,20 +1838,25 @@ class RepeatTrimmer:
 
     def _due(self, now: float) -> str | None:
         """Why to release now: "" for a settled burst or a cap (R decides), "no burst" when
-        the first `_TRIM_NO_BURST_S` brought none; None to hold on (with `extra` asked: until
-        the run brought R and that much more)."""
+        the first `_TRIM_NO_BURST_S` brought none (until then a run without a burst yet is
+        held on: one may come late); None to hold on (with `extra` asked: until the run
+        brought R and that much more)."""
         assert self._held is not None
         held_for = now - self._held_at
         extra = self._extra()
         if held_for >= _TRIM_HOLD_S + extra or len(self._held) >= _TRIM_HOLD_BYTES:
             return ""
         media = self._run_media()
-        if held_for >= _TRIM_NO_BURST_S and self._before is not None and not extra:
-            earlier = [m for at, m in self._samples if at <= now - _TRIM_NO_BURST_S]
-            gained = media - earlier[-1] if earlier else media
+        if self._before is not None and not extra:
             excess = self._done + media - now - self._before - _TRIM_MARGIN_S
-            if excess < _TRIM_MIN_S and gained <= _TRIM_NO_BURST_S * _TRIM_BURST_RATE:
-                return "no burst"
+            if held_for < _TRIM_NO_BURST_S:
+                if excess < _TRIM_MIN_S:
+                    return None  # no burst yet (no settling either: it may come)
+            else:
+                earlier = [m for at, m in self._samples if at <= now - _TRIM_NO_BURST_S]
+                gained = media - earlier[-1] if earlier else media
+                if excess < _TRIM_MIN_S and gained <= _TRIM_NO_BURST_S * _TRIM_BURST_RATE:
+                    return "no burst"
         earlier_samples = [sample for sample in self._samples if sample[0] <= now - 1.0]
         if earlier_samples and media - earlier_samples[-1][1] <= _TRIM_BURST_RATE:
             if self._settle is None:
