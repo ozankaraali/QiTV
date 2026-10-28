@@ -66,7 +66,7 @@ STATE_KEYS = {
     "reconnecting",
     "parts",  # 2.6: a kept buffer's runs, each with its time of day
     "secure",  # 2.7.1: its source's address is HTTPS
-    "restarts",  # 2.8.5: raw TS quick restarts, and those that took stay-live's ask
+    "restarts",  # 2.8.5: raw TS restarts, and those that took stay-live's ask
     "steered",
 }
 HEADERS = {"User-Agent": "QiTV-test"}

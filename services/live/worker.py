@@ -1546,9 +1546,9 @@ class _Session:
             "reconnecting": self._reconnecting,
             # 2.6: the buffer's parts, [first_seq, start, wall] each (`services.live.parts`).
             "parts": [[p.first_seq, p.start, p.wall] for p in timeline.parts()],
-            # 2.8.5, raw TS: quick restarts in the connection so far (those stay-live's asks
-            # go at), and those that took some of what it asked (`RepeatTrimmer.extra`).
-            "restarts": trimmer.quick if trimmer is not None else 0,
+            # 2.8.5, raw TS: restarts in the connection so far (stay-live steers while they
+            # come), and those that took some of what it asked (`RepeatTrimmer.extra`).
+            "restarts": trimmer.restarts if trimmer is not None else 0,
             "steered": trimmer.steered if trimmer is not None else 0,
         }
         if source is not None:

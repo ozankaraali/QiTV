@@ -2287,18 +2287,19 @@ class LiveSession(QObject):
     def _follow_restarts(self, snapshot: Mapping[str, Any]) -> None:
         """2.8.5: the raw TS source's restarts, as the helper counts them. While one came
         within `_JUNCTION_RECENT_S` (and one before it), stay-live takes its lag back at the
-        next (`StayLive.junctions`); a slower restart that took it counts too (the helper's
-        fallback, a minute after a quick one: two minutes without one were seen). One that
-        took what it was asked stepped the lag down: the lag filter starts afresh, and what
-        was asked was taken: the helper is told 0 (an ask that came while that restart was
-        held would otherwise stay for the next)."""
+        next (`StayLive.junctions`): a quick one takes it, and far behind a slower one too
+        (the helper's fallback; on a tune the first quick ones came minutes apart, and a
+        target the burst lowered jumped meanwhile). One that took what it was asked stepped
+        the lag down: the lag filter starts afresh, and what was asked was taken: the helper
+        is told 0 (an ask that came while that restart was held would otherwise stay for the
+        next)."""
         if self._sid != self._junction_sid:  # another helper session: its own counts
             self._junction_sid, self._restarts, self._steered_cuts = self._sid, 0, 0
             self._junction_asked, self._restart_at = 0.0, -math.inf
         restarts = int(_number(snapshot.get("restarts")))
         steered = int(_number(snapshot.get("steered")))
         now = self._clock()
-        if restarts > self._restarts or steered > self._steered_cuts:
+        if restarts > self._restarts:
             self._restart_at = now
         if steered > self._steered_cuts:
             self._filter.reset()

@@ -393,6 +393,7 @@ class RepeatTrimmerTests(unittest.TestCase):
                 taken = int(dropped > 4.0)
                 self.assertEqual((trim.reason, trim.dropped_s), ("dropped", dropped))
                 self.assertEqual((run.trimmer.steered, run.trimmer.quick), (taken, 0))
+                self.assertEqual(run.trimmer.restarts, 1)  # what the session steers by
                 self.assertEqual(run.trimmer.extra, 0.0 if taken else extra)
 
     def test_what_stay_live_asks_waits_for_a_restart_that_can_take_it(self):

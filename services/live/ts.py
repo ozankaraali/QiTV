@@ -1551,8 +1551,10 @@ class RepeatTrimmer:
         self._settle: tuple[float, float] | None = None  # (clock, media held) where it settled
         self._runs: deque[float] = deque(maxlen=_TRIM_RUNS)  # the media of the latest runs
         # Seconds stay-live asks the next quick restart to take beyond R (set by the
-        # session); the quick restarts so far, and those that took some of what was asked.
+        # session); the restarts so far, the quick ones, and those that took some of what was
+        # asked.
         self.extra = 0.0
+        self.restarts = 0
         self.quick = 0
         self.steered = 0
         self._quick_held = False  # the held restart came within `_TRIM_QUICK_S`
@@ -1929,6 +1931,7 @@ class RepeatTrimmer:
         arrived = next((at for at, media in self._samples if media >= final), now)
         self._ahead, self._noted = self._done + final - dropped_s - arrived, self._top
         taken = max(0.0, dropped_s - repeat) if extra else 0.0
+        self.restarts += 1
         if self._quick_held:
             self.quick += 1
         self._noted_at = arrived  # (the run's last media as passed on)
