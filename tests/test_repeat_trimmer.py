@@ -265,6 +265,46 @@ class RepeatTrimmerTests(unittest.TestCase):
         self.assertEqual(trim.reason, "dropped")
         self.assertGreaterEqual(trim.dropped_s, 7.0)
 
+    def test_a_late_burst_is_measured_when_stay_live_asked_too(self):
+        # As above with 3 s asked and the burst 1.3 s after the restart: the settle point
+        # waits for the burst, so R is the repeat (about 9 s) and the drop reaches R and the
+        # ask, not the ask alone (a settle point taken at 1 s measured R as 0).
+        silence = 1.0
+        resume = backlogged(20.0) + silence
+        first = 11 * FPS
+
+        def paused(media: float) -> float:
+            return resume if media < 0.2 else resume + 1.3 + max(0.0, media - 11.0)
+
+        timed = stream(
+            [
+                (range(20 * FPS), 900000, backlogged, FPS),
+                (range(first, 40 * FPS), 900000 + first * TICKS, paused, FPS),
+            ]
+        )
+        run = Run([item for item in timed if item[0] < resume], finish=False)
+        run.trimmer.extra = 3.0  # asked before the restart came
+        run.now = resume
+        run._take(run.trimmer.feed(b"".join(p for at, p in timed if at == resume)))
+        self.assertTrue(run.trimmer.holding)
+        for k in range(1, 6):
+            run.now = resume + 0.25 * k
+            run._take(run.trimmer.tick())
+        rest = [item for item in timed if item[0] > resume]
+        k = 0
+        while k < len(rest):
+            run.now = rest[k][0]
+            chunk = []
+            while k < len(rest) and rest[k][0] == run.now:
+                chunk.append(rest[k][1])
+                k += 1
+            run._take(run.trimmer.feed(b"".join(chunk)))
+        run._take(run.trimmer.finish())
+        (trim,) = run.trimmer.trims
+        self.assertGreater(trim.excess_s, 7.0)
+        self.assertGreaterEqual(trim.dropped_s, 10.0)
+        self.assertGreater(trim.extra_s, 0.0)
+
     def test_after_a_silence_it_did_not_make_up_a_run_goes_at_once(self):
         # Seen live: 9.4 s of silence, VLC ran dry; a 2 s wait for a late burst froze it on.
         silence = 9.0

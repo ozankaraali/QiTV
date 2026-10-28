@@ -1855,15 +1855,17 @@ class RepeatTrimmer:
         if held_for >= _TRIM_HOLD_S + extra or len(self._held) >= _TRIM_HOLD_BYTES:
             return ""
         media = self._run_media()
-        if self._before is not None and not extra:
+        if self._before is not None:
             excess = self._done + media - now - self._before - _TRIM_MARGIN_S
             noted = self._held_at if self._noted_at is None else self._noted_at
             spent = _TRIM_SPENT_S - (self._held_at - noted)  # what the wait may take of it
             wait = min(_TRIM_NO_BURST_LATE_S, max(_TRIM_NO_BURST_S, spent))
             if held_for < wait:
                 if excess < _TRIM_MIN_S and held_for >= _TRIM_NO_BURST_S:
-                    return None  # no burst yet (no settling either: it may come late)
-            else:
+                    # No burst yet, and no settling either (it may come late; with `extra`
+                    # asked a settle point taken now would measure R as 0 and keep it).
+                    return None
+            elif not extra:
                 earlier = [m for at, m in self._samples if at <= now - wait]
                 gained = media - earlier[-1] if earlier else media
                 if excess < _TRIM_MIN_S and gained <= wait * _TRIM_BURST_RATE:

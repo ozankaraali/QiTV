@@ -1123,7 +1123,7 @@ class JunctionTests(unittest.TestCase):
         self.assertFalse(any(d.reopen_live for d in decisions))
         self.assertEqual({d.junction for d in decisions}, {10.0})
 
-    def test_a_target_lowered_meanwhile_asks_no_deeper_for_five_minutes(self):
+    def test_a_target_lowered_meanwhile_asks_no_deeper_for_five_minutes_at_least(self):
         # Seen live: the burst lowered the target 3.2 s in a lull, the cut taken from it left
         # less than the provider's next silence, and VLC ran dry.
         stay, clock = live(10.0), Clock()
@@ -1131,10 +1131,23 @@ class JunctionTests(unittest.TestCase):
         stay.update(12.0, False, now=clock.tick())
         stay.target = 6.8
         self.assertAlmostEqual(stay.update(16.7, False, now=clock.tick()).junction, 6.7)
-        clock.tick(stay_live._JUNCTION_REF_S)
+        clock.tick(2 * stay_live._JUNCTION_REF_S)
         self.assertAlmostEqual(stay.update(16.7, False, now=clock.tick()).junction, 9.9)
         stay.target = 12.0  # a rise counts at once
         self.assertAlmostEqual(stay.update(16.7, False, now=clock.tick()).junction, 4.7)
+
+    def test_the_highest_target_of_the_window_counts_not_the_last_one(self):
+        # 10 s, then 5 s after 200 s, then 3.2 s after 300 s: the ask is measured from 5 s at
+        # least, never from the 3.2 s the burst lowered it to.
+        stay, clock = live(10.0), Clock()
+        stay.junctions = True
+        stay.update(12.0, False, now=clock.tick())
+        clock.tick(200.0)
+        stay.target = 5.0
+        stay.update(12.0, False, now=clock.tick())
+        clock.tick(100.0)
+        stay.target = 3.2
+        self.assertLessEqual(stay.update(16.7, False, now=clock.tick()).junction, 16.7 - 5.0)
 
     def test_within_a_second_of_the_target_nothing_is_asked(self):
         stay, clock = live(), Clock()
