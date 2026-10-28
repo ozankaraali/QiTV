@@ -131,12 +131,14 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Sequence
 import contextlib
+import faulthandler
 import logging
 import multiprocessing
 from multiprocessing.connection import Connection, wait as wait_for_connection
 import os
 from pathlib import Path
 import re
+import signal
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -1998,6 +2000,42 @@ def _raise_open_files() -> None:
         _LOG.info("The open files limit stays as it is (%s).", type(error).__name__)
 
 
+def _stacks_on_signal() -> None:
+    """2.8.5: `kill -USR1 <helper>` appends every thread's stack to helper-stacks.txt beside
+    QiTV's log, so a hang can be read without a debugger (POSIX only; file names and
+    functions, no addresses)."""
+    if not hasattr(signal, "SIGUSR1"):
+        return
+    from services.log_file import log_dir
+
+    try:
+        stacks = open(log_dir() / "helper-stacks.txt", "a", encoding="utf-8")
+    except OSError:
+        return
+    faulthandler.register(signal.SIGUSR1, file=stacks, all_threads=True)
+
+
+def _log_thread_death(args: threading.ExceptHookArgs) -> None:
+    """A helper thread ended with an exception (2.8.5): its stderr is discarded (native
+    libraries may print addresses there), so the log says which thread, what kind of
+    exception and where, never its message (it may hold an address)."""
+    if args.exc_type is SystemExit:
+        return
+    tb = args.exc_traceback
+    while tb is not None and tb.tb_next is not None:
+        tb = tb.tb_next
+    where = (
+        f"{Path(tb.tb_frame.f_code.co_filename).name}:{tb.tb_lineno} "
+        f"({tb.tb_frame.f_code.co_name})"
+        if tb is not None
+        else "?"
+    )
+    name = args.thread.name if args.thread is not None else "?"
+    _LOG.error(
+        "A live helper thread (%s) ended with %s at %s.", name, args.exc_type.__name__, where
+    )
+
+
 def helper_main(conn: Connection, root: str, detailed_log: bool = False) -> None:
     """Spawn entry point: arguments travel through multiprocessing IPC, not argv.
 
@@ -2014,6 +2052,8 @@ def helper_main(conn: Connection, root: str, detailed_log: bool = False) -> None
         threading.Thread(
             target=_exit_with_owner, args=(owner_gone,), name="qitv-live-owner", daemon=True
         ).start()
+        threading.excepthook = _log_thread_death  # 2.8.5: fd 2 is gone, the log says it
+        _stacks_on_signal()
         _raise_open_files()
         helper = _Helper(conn, root, owner_gone)
         # 2.8.1: into the app's log; 2.8.2: its detail follows the setting while it runs

@@ -1705,6 +1705,27 @@ class JunctionCommandTests(unittest.TestCase):
             self.assertEqual(session._trimmer.extra, 2.5)
 
 
+class ThreadDeathTests(unittest.TestCase):
+    def test_a_helper_thread_that_dies_is_logged_without_its_message(self):
+        # 2.8.5: the helper's stderr is discarded, so a thread's death would vanish.
+        def fail():
+            raise RuntimeError("http://user:secret@provider.example/live/1.ts")
+
+        try:
+            fail()
+        except RuntimeError as error:
+            args = threading.ExceptHookArgs(
+                (RuntimeError, error, error.__traceback__, threading.current_thread())
+            )
+        with self.assertLogs(worker._LOG, "ERROR") as logged:
+            worker._log_thread_death(args)
+        (line,) = logged.output
+        self.assertIn("RuntimeError", line)
+        self.assertIn("test_live_worker.py:", line)
+        self.assertIn("(fail)", line)
+        self.assertNotIn("secret", line)
+
+
 class HttpsFirstTests(unittest.TestCase):
     def test_a_session_asked_https_first_tries_https_then_plays_over_http(self):
         # 2.7.1: the start's "https" reaches the source: its HTTPS attempt fails on a plain
