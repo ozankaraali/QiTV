@@ -85,6 +85,12 @@ _AUDIO_STEPS = 3  # ... and so on, this many segments back at most
 _PACKET = 188
 _BLOCK = 16
 _RECONNECT_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0, 8.0)
+# 2.8.5: a reconnect the provider refuses (`_refused`) is asked again this often, for this
+# long: one that allows a single stream counts the connection that broke for minutes (one
+# provider: 5-7 minutes), and the buffer plays on meanwhile.
+_REFUSED_RETRY_S = 15.0
+_REFUSED_PATIENCE_S = 420.0
+_REFUSED_STATUS = (403, 407, 429, 458, 509, 511)
 # A first answer that failed in passing is asked for again after the first this many reconnect
 # delays (3.5 s in all, inside the GUI's 6 s ready timeout).
 _OPEN_RETRIES = 3
@@ -354,6 +360,13 @@ def _quietly(action: Callable[[], object], what: str) -> None:
         log.debug("Closing the %s failed (%s).", what, type(error).__name__)
 
 
+def _refused(error: Exception) -> bool:
+    """An answer that may mean the provider still counts a connection (`_REFUSED_STATUS`)."""
+    if not isinstance(error, requests.exceptions.HTTPError):
+        return False
+    return (_status(error) or 0) in _REFUSED_STATUS
+
+
 def _retryable(error: Exception) -> bool:
     if isinstance(error, (_ReadError, _NotPlaylist)):
         return True
@@ -549,11 +562,18 @@ class _Http:
         """Sleep, waking early (True) when the source closes."""
         return self._closed_event.wait(max(0.0, seconds))
 
-    def retry(self, attempt: Callable[[], _T], backoff: _Backoff | None = None) -> _T:
-        """Repeat ``attempt`` after each remaining reconnect delay; then give up."""
+    def retry(
+        self, attempt: Callable[[], _T], backoff: _Backoff | None = None, *, patient: bool = False
+    ) -> _T:
+        """Repeat ``attempt`` after each remaining reconnect delay; then give up. `patient`
+        (2.8.5: a stream that broke): a refusal (`_refused`) is asked again every
+        `_REFUSED_RETRY_S` for up to `_REFUSED_PATIENCE_S`, outside the delays: a provider
+        that allows one stream may still count the connection that broke."""
         if backoff is None:
             backoff = _Backoff()
-        while (delay := backoff.next_delay()) is not None:
+        refused_since: float | None = None
+        delay = backoff.next_delay()
+        while delay is not None:
             if self.wait(delay):
                 raise _Closed()
             try:
@@ -561,6 +581,21 @@ class _Http:
             except Exception as error:
                 if self.closed:
                     raise _Closed() from None
+                if patient and _refused(error):
+                    now = time.monotonic()
+                    if refused_since is None:
+                        refused_since = now
+                        log.info(
+                            "The channel refused the reconnect (HTTP %s): it may still count the"
+                            " connection that broke; asking again every %.0f s for %.0f minutes.",
+                            _status(error),  # type: ignore[arg-type]
+                            _REFUSED_RETRY_S,
+                            _REFUSED_PATIENCE_S / 60,
+                        )
+                    if now - refused_since < _REFUSED_PATIENCE_S:
+                        delay = _REFUSED_RETRY_S
+                        continue
+                    raise
                 if not _retryable(error):
                     raise
                 log.info(
@@ -569,6 +604,7 @@ class _Http:
                     len(_RECONNECT_DELAYS),
                     type(error).__name__,
                 )
+            delay = backoff.next_delay()
         raise _Exhausted()
 
     def fetch(self, attempt: Callable[[], _T]) -> _T:
@@ -754,7 +790,7 @@ class TsSource:
             finally:
                 http.release(response)
             yield Reconnecting()  # before the backoff: the helper says so at once
-            response = http.retry(lambda: http.get(self._url), backoff)
+            response = http.retry(lambda: http.get(self._url), backoff, patient=True)
             if capture is not None:
                 capture.mark("reconnect")
             connected, received, reconnected = time.monotonic(), 0, True
