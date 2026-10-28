@@ -955,7 +955,8 @@ class _Session:
             trimmer = self._trimmer = RepeatTrimmer(
                 program=program, clock=time.monotonic, join_counters=self._clock_joiner is None
             )
-            trimmer.extra = self._junction  # asked before the source opened
+            # Asked before the source opened: this trimmer's now (a later one starts afresh).
+            trimmer.extra, self._junction = self._junction, 0.0
             self._loop_trimmer = LoopTrimmer(program=program, clock=time.monotonic)
         else:
             # A clock that leaps ahead inside a segment is re-based too: each segment's EXTINF
@@ -1370,11 +1371,15 @@ class _Session:
 
     def set_junction(self, seconds: float) -> None:
         """Stay-live asks the next restart in the stream to take `seconds` more than its
-        repeat (2.8.5, `RepeatTrimmer.extra`); 0 asks nothing."""
-        self._junction = max(0.0, float(seconds))
+        repeat (2.8.5, `RepeatTrimmer.extra`); 0 asks nothing. Before the source opened it
+        waits for the trimmer; a trimmer that took it forgets it (a resumed run's new trimmer
+        never takes it again)."""
+        seconds = max(0.0, float(seconds))
         trimmer = self._trimmer
         if trimmer is not None:
-            trimmer.extra = self._junction
+            trimmer.extra = seconds
+        else:
+            self._junction = seconds
 
     def set_until(self, seq: int) -> None:
         """A server part's stop moves to media sequence `seq` (2.7, "until")."""

@@ -1905,7 +1905,7 @@ class RepeatTrimmer:
         self._noted_at = arrived  # (the run's last media as passed on)
         if taken:
             self.steered += 1
-            if self.extra == self._latched:
+            if min(max(0.0, self.extra), _TRIM_EXTRA_MAX_S) == self._latched:
                 self.extra = 0.0  # taken: stay-live asks afresh (a newer ask is the next's)
         trim = Trim(
             self._held_pos, self._held_at, now, excess, dropped_s, tuple(ranges), reason, taken

@@ -815,6 +815,16 @@ class TVWindowTests(WindowCase):
         self.assertTrue(wait_until(lambda: not self.window.isFullScreen()))
         self.assertTrue(wait_until(self.on_top))
 
+    def test_keep_on_top_chosen_while_minimized_leaves_it_minimized_until_it_is_back(self):
+        self.show()
+        self.window.showMinimized()
+        self.assertTrue(wait_until(self.window.isMinimized))
+        self.window.menus.keep_on_top.trigger()
+        self.assertTrue(self.window.isMinimized())
+        self.assertFalse(self.on_top())
+        self.window.showNormal()
+        self.assertTrue(wait_until(self.on_top))
+
     def test_mini_player_gives_a_maximized_window_back_maximized(self):
         self.show()
         self.window.showMaximized()

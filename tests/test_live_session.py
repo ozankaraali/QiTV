@@ -3190,13 +3190,13 @@ class SafeJumpTests(LiveSessionCase):
         asked = [seconds for s, seconds in self.engine.junctions if s == sid]
         self.assertTrue(asked)
         self.assertAlmostEqual(asked[-1], 10.0, delta=1.0)
-        # The next restart took it (the helper asks nothing more): asked afresh only once
-        # the lag filter, started afresh by the step, settled again.
-        asks = len(self.engine.junctions)
+        # The next restart took it: the helper is told 0 (an ask that came while it was held
+        # goes too), and asked afresh only once the lag filter, started afresh, settled.
         feed.restarts, feed.steered = 4, 1
         feed.push()
         feed.run(5.0)
-        self.assertEqual(len(self.engine.junctions), asks)
+        self.assertEqual(self.engine.junctions[-1], (sid, 0.0))
+        asks = len(self.engine.junctions)
         feed.run(15.0)
         self.assertGreater(len(self.engine.junctions), asks)  # (the fake took nothing)
 

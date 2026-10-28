@@ -1697,12 +1697,15 @@ class JunctionCommandTests(unittest.TestCase):
         helper.wait_for(lambda m: m == ("ready", "p"))
         session = helper.helper._sessions["p"]
         helper.parent.send(("junction", "p", 2.5))
+
+        def asked():
+            trimmer = session._trimmer
+            return trimmer.extra if trimmer is not None else session._junction
+
         deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and session._junction != 2.5:
+        while time.monotonic() < deadline and asked() != 2.5:
             time.sleep(0.02)
-        self.assertEqual(session._junction, 2.5)
-        if session._trimmer is not None:  # (the stream may have ended already)
-            self.assertEqual(session._trimmer.extra, 2.5)
+        self.assertEqual(asked(), 2.5)
 
 
 class ThreadDeathTests(unittest.TestCase):

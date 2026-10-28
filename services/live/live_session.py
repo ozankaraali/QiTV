@@ -2288,8 +2288,8 @@ class LiveSession(QObject):
         """2.8.5: the raw TS source's restarts, as the helper counts them. While one came
         within `_JUNCTION_RECENT_S` (and one before it), stay-live takes its lag back at the
         next (`StayLive.junctions`). One that took what it was asked stepped the lag down:
-        the lag filter starts afresh, and what was asked was taken (the helper asks nothing
-        more until told)."""
+        the lag filter starts afresh, and what was asked was taken: the helper is told 0 (an
+        ask that came while that restart was held would otherwise stay for the next)."""
         if self._sid != self._junction_sid:  # another helper session: its own counts
             self._junction_sid, self._restarts, self._steered_cuts = self._sid, 0, 0
             self._junction_asked, self._restart_at = 0.0, -math.inf
@@ -2301,6 +2301,8 @@ class LiveSession(QObject):
         if steered > self._steered_cuts:
             self._filter.reset()
             self._stay.absorb()
+            if self._sid is not None:  # an ask that came while it was held is withdrawn too
+                self._engine.set_junction(self._sid, 0.0)
             self._junction_asked = 0.0
         self._restarts, self._steered_cuts = restarts, steered
         self._stay.junctions = (

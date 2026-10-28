@@ -317,6 +317,14 @@ class RepeatTrimmerTests(unittest.TestCase):
         self.assertEqual(trim.dropped_s, 7.0)
         self.assertAlmostEqual(trim.extra_s, 7.0 - (5.0 - ts._TRIM_MARGIN_S), delta=0.05)
 
+    def test_an_ask_beyond_the_most_one_restart_takes_is_taken_once(self):
+        # Asked 20 s, a restart takes at most 15: the ask is spent, never taken again.
+        resume = backlogged(20.0) + 1.0
+        run = self.ask_before_restart(stream(repeat_runs(5.0, 1.0, new=30.0)), 20.0, resume)
+        (trim,) = run.trimmer.trims
+        self.assertGreater(trim.extra_s, 0.0)
+        self.assertEqual((run.trimmer.extra, run.trimmer.steered), (0.0, 1))
+
     def test_a_slow_restart_takes_nothing_of_what_stay_live_asks(self):
         # Three seconds of silence before it: the provider measured repeats nothing there.
         resume = backlogged(20.0) + 3.0
