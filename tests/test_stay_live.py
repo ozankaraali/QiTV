@@ -3,6 +3,7 @@ import unittest
 
 from auto_target import AutoTarget
 
+from services.live import stay_live
 from services.live.stay_live import (
     AUTO,
     TARGETS,
@@ -1105,6 +1106,92 @@ def keyframes(every, *, since=1000.0):
     least a quarter second short of the target, as Go live picks (`since`: one was at the
     target less a quarter second then)."""
     return lambda now, lag: T - 0.25 + (now - since) % every
+
+
+class JunctionTests(unittest.TestCase):
+    """2.8.5 (a provider's raw TS restarted every ~20 s and hid seconds of repeat from the
+    trimmer: its edge ran 4-8 s a minute ahead and stay-live jumped every minute or two):
+    while the source restarts often (`junctions`), what stay-live is behind is asked of the
+    next restart (`Decision.junction`) instead of a rate or a jump; the 20 s bound stays."""
+
+    def test_behind_the_target_the_next_restart_is_asked_and_the_rate_stays_1x(self):
+        stay, clock = live(), Clock()
+        stay.junctions = True
+        stay.jump_lag = lambda: T  # a clean jump would help: still none
+        decisions = [stay.update(T + 10.0, False, now=clock.tick()) for _ in range(240)]
+        self.assertEqual({d.rate for d in decisions}, {1.0})
+        self.assertFalse(any(d.reopen_live for d in decisions))
+        self.assertEqual({d.junction for d in decisions}, {10.0})
+
+    def test_a_target_lowered_meanwhile_asks_no_deeper_for_five_minutes_at_least(self):
+        # Seen live: the burst lowered the target 3.2 s in a lull, the cut taken from it left
+        # less than the provider's next silence, and VLC ran dry.
+        stay, clock = live(10.0), Clock()
+        stay.junctions = True
+        stay.update(12.0, False, now=clock.tick())
+        stay.target = 6.8
+        self.assertAlmostEqual(stay.update(16.7, False, now=clock.tick()).junction, 6.7)
+        clock.tick(2 * stay_live._JUNCTION_REF_S)
+        self.assertAlmostEqual(stay.update(16.7, False, now=clock.tick()).junction, 9.9)
+        stay.target = 12.0  # a rise counts at once
+        self.assertAlmostEqual(stay.update(16.7, False, now=clock.tick()).junction, 4.7)
+
+    def test_the_highest_target_of_the_window_counts_not_the_last_one(self):
+        # 10 s, then 5 s after 200 s, then 3.2 s after 300 s: the ask is measured from 5 s at
+        # least, never from the 3.2 s the burst lowered it to.
+        stay, clock = live(10.0), Clock()
+        stay.junctions = True
+        stay.update(12.0, False, now=clock.tick())
+        clock.tick(200.0)
+        stay.target = 5.0
+        stay.update(12.0, False, now=clock.tick())
+        clock.tick(100.0)
+        stay.target = 3.2
+        self.assertLessEqual(stay.update(16.7, False, now=clock.tick()).junction, 16.7 - 5.0)
+
+    def test_within_a_second_of_the_target_nothing_is_asked(self):
+        stay, clock = live(), Clock()
+        stay.junctions = True
+        decision = stay.update(T + 0.9, False, now=clock.tick())
+        self.assertEqual(decision, Decision(1.0))
+
+    def test_ahead_of_the_target_it_steers_as_ever(self):
+        stay, clock = live(6.0), Clock()
+        stay.junctions = True
+        lag, rates = drive(stay, 4.0, 200.0, clock=clock)
+        self.assertEqual(calls(rates), [0.99, 0.98, 0.97, 0.98, 0.99, 1.0])
+
+    def test_a_catch_up_under_way_ramps_out_once_restarts_take_the_lag(self):
+        stay, clock = live(), Clock()
+        drive(stay, T + 2.0, 17.0, clock=clock)
+        self.assertGreater(stay.nudge, 1.0)
+        stay.junctions = True
+        _, rates = drive(stay, T + 2.0, 5.0, clock=clock)
+        self.assertEqual(rates[-1], 1.0)
+        self.assertEqual(stay.nudge, 1.0)
+
+    def test_the_hard_bound_still_reopens_and_a_stream_just_opened_asks_nothing(self):
+        stay, clock = live(), Clock()
+        stay.junctions = True
+        self.assertTrue(stay.update(R + 1, False, now=clock.tick()).reopen_live)
+        stay.user_go_live()
+        stay.hold_reopen = True
+        self.assertEqual(stay.update(T + 5.0, False, now=clock.tick()).junction, 0.0)
+
+    def test_a_locked_rate_or_a_tile_asks_too_and_never_jumps(self):
+        for setup in (StayLive.lock_rate, lambda s: s.set_background(True)):
+            stay, clock = live(), Clock()
+            setup(stay)
+            stay.junctions = True
+            stay.jump_lag = lambda: T
+            decisions = [stay.update(T + 12.0, False, now=clock.tick()) for _ in range(80)]
+            self.assertFalse(any(d.reopen_live for d in decisions))
+            self.assertEqual(decisions[-1], Decision(1.0, junction=12.0))
+
+    def test_without_restarts_it_jumps_as_before(self):
+        stay, clock = live(), Clock()
+        _, _, jumps = steer(stay, T + 10.0, 30.0, clock=clock, landing=lambda *_: T + 0.2)
+        self.assertEqual(len(jumps), 1)
 
 
 class JumpTests(unittest.TestCase):

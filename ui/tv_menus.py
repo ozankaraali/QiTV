@@ -177,6 +177,7 @@ class TVMenus(QObject):
         self._provider_group: Optional[QActionGroup] = None
         self._free_menu: Optional[QMenu] = None  # the Providers menu's Free channels
         self.providers_menu: QMenu
+        self.keep_on_top: QAction  # View → Keep on Top, checkable (2.8.5)
         # A mouse button was let go on an open menu: the entry it triggers now was clicked
         # (until the event is handled), not chosen by its shortcut or the menu's keys.
         self._clicked = False
@@ -233,6 +234,10 @@ class TVMenus(QObject):
         player.append(add(view, tr("Channel List"), "Return", self._handler(Action.OPEN_DRAWER)))
         add(view, tr("Fullscreen"), "F", window.toggle_fullscreen)
         player.append(add(view, tr("Mini Player"), "Alt+P", self._handler(Action.MINI_PLAYER)))
+        # i18n: a View menu entry, checked while the window stays above other apps' windows
+        self.keep_on_top = add(view, tr("Keep on Top"), "", self._toggle_keep_on_top)
+        self.keep_on_top.setCheckable(True)
+        self.keep_on_top.setChecked(bool(getattr(window.config_manager, "keep_on_top", False)))
         playback = bar.addMenu(tr("Playback"))  # i18n: the menu bar's Playback menu
         player.append(add(playback, tr("Play/Pause"), "Space", self._handler(Action.PLAY_PAUSE)))
         # i18n: a menu entry (2.6): every picture stops, nothing streams (verb)
@@ -308,6 +313,9 @@ class TVMenus(QObject):
 
     def _handler(self, action: Action) -> Callable[[], None]:
         return lambda: self._window.controller.handle(action)
+
+    def _toggle_keep_on_top(self) -> None:
+        self._window.set_keep_on_top(self.keep_on_top.isChecked())
 
     def open_recordings(self) -> None:
         """The Recordings folder in the system's file manager; a toast when there is none."""

@@ -11,6 +11,7 @@ on the network. The home door also hands phones the MKV films they play as HLS
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 import logging
@@ -123,8 +124,16 @@ class HubCore:
 
         self.store = RemoteStore.from_config(config)
         self.store.ensure_identity()
-        self._runner, self.port = await start_home_door(self, self.web_dir, self.ports, self.host)
+        kept = self.store.port
+        ports = ([kept] if kept else []) + [p for p in self.ports if p != kept]
+        if 0 not in ports:
+            ports.append(0)  # none free: any the system gives; the QR and the relay say which
+        self._runner, self.port = await start_home_door(self, self.web_dir, ports, self.host)
         logger.info("Phone remote listening on port %s", self.port)
+        keep = None if self.port in self.ports or 0 in self.ports else self.port
+        if keep != self.store.port:
+            self.store.port = keep
+            self.emit(StoreSaved(self.store.to_config()))
         self._started = True
         self._status()
         await self._sync_relay()
@@ -562,8 +571,13 @@ class RemoteHub:
         try:
             loop.run_until_complete(self._core.start(config))
             self.port = self._core.port
-        except OSError as error:
-            logger.warning("Phone remote could not start: %s", error)
+        except Exception as error:  # the pairing screen must not wait for a remote that died
+            if isinstance(error, OSError):
+                logger.warning("Phone remote could not start: %s", error)
+            else:
+                logger.error("Phone remote could not start: %s", error, exc_info=True)
+            with suppress(Exception):  # a port it had opened is closed again
+                loop.run_until_complete(self._core.stop())
             self._emit(Status("", "error"))
             loop.close()
             return

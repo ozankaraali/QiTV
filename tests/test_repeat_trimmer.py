@@ -222,12 +222,101 @@ class RepeatTrimmerTests(unittest.TestCase):
         ]
         run = Run(stream(runs))
         (trim,) = run.trimmer.trims
-        # Released as soon as its first half second showed no burst, untouched (a run of its
-        # own all the same).
+        # Released as soon as its first `_TRIM_NO_BURST_S` showed no burst, untouched (a run
+        # of its own all the same).
         self.assertEqual(trim.reason, "no burst")
-        self.assertLess(trim.released_at - trim.held_at, 1.0)
+        self.assertLess(trim.released_at - trim.held_at, ts._TRIM_NO_BURST_S + 0.5)
         self.assertEqual((run.junctions, trim.dropped_bytes), (1, 0))
         self.assertEqual(run.output, run.input)
+
+    def test_a_burst_a_second_after_the_restart_is_still_measured(self):
+        # Seen live: the new run's first packets, a second's pause (the caller ticks), then
+        # 9 s at once (a repeat), then real time. Let go as "no burst" on a tick within the
+        # pause, all of it went through.
+        silence = 1.0
+        resume = backlogged(20.0) + silence
+        first = 11 * FPS  # run A's last 9 s again
+
+        def paused(media: float) -> float:
+            return resume if media < 0.2 else resume + 1.0 + max(0.0, media - 11.0)
+
+        timed = stream(
+            [
+                (range(20 * FPS), 900000, backlogged, FPS),
+                (range(first, 40 * FPS), 900000 + first * TICKS, paused, FPS),
+            ]
+        )
+        run = Run([item for item in timed if item[0] <= resume], finish=False)
+        self.assertTrue(run.trimmer.holding)
+        for k in range(1, 4):
+            run.now = resume + 0.25 * k
+            run._take(run.trimmer.tick())
+        rest = [item for item in timed if item[0] > resume]
+        k = 0
+        while k < len(rest):
+            run.now = rest[k][0]
+            chunk = []
+            while k < len(rest) and rest[k][0] == run.now:
+                chunk.append(rest[k][1])
+                k += 1
+            run._take(run.trimmer.feed(b"".join(chunk)))
+        run._take(run.trimmer.finish())
+        (trim,) = run.trimmer.trims
+        self.assertEqual(trim.reason, "dropped")
+        self.assertGreaterEqual(trim.dropped_s, 7.0)
+
+    def test_a_late_burst_is_measured_when_stay_live_asked_too(self):
+        # As above with 3 s asked and the burst 1.3 s after the restart: the settle point
+        # waits for the burst, so R is the repeat (about 9 s) and the drop reaches R and the
+        # ask, not the ask alone (a settle point taken at 1 s measured R as 0).
+        silence = 1.0
+        resume = backlogged(20.0) + silence
+        first = 11 * FPS
+
+        def paused(media: float) -> float:
+            return resume if media < 0.2 else resume + 1.3 + max(0.0, media - 11.0)
+
+        timed = stream(
+            [
+                (range(20 * FPS), 900000, backlogged, FPS),
+                (range(first, 40 * FPS), 900000 + first * TICKS, paused, FPS),
+            ]
+        )
+        run = Run([item for item in timed if item[0] < resume], finish=False)
+        run.trimmer.extra = 3.0  # asked before the restart came
+        run.now = resume
+        run._take(run.trimmer.feed(b"".join(p for at, p in timed if at == resume)))
+        self.assertTrue(run.trimmer.holding)
+        for k in range(1, 6):
+            run.now = resume + 0.25 * k
+            run._take(run.trimmer.tick())
+        rest = [item for item in timed if item[0] > resume]
+        k = 0
+        while k < len(rest):
+            run.now = rest[k][0]
+            chunk = []
+            while k < len(rest) and rest[k][0] == run.now:
+                chunk.append(rest[k][1])
+                k += 1
+            run._take(run.trimmer.feed(b"".join(chunk)))
+        run._take(run.trimmer.finish())
+        (trim,) = run.trimmer.trims
+        self.assertGreater(trim.excess_s, 7.0)
+        self.assertGreaterEqual(trim.dropped_s, 10.0)
+        self.assertGreater(trim.extra_s, 0.0)
+
+    def test_after_a_silence_it_did_not_make_up_a_run_goes_at_once(self):
+        # Seen live: 9.4 s of silence, VLC ran dry; a 2 s wait for a late burst froze it on.
+        silence = 9.0
+        resume = backlogged(20.0) + silence
+        runs = [
+            (range(20 * FPS), 900000, backlogged, FPS),
+            (range(20 * FPS, 35 * FPS), 0, after(resume, 0.0), FPS),
+        ]
+        run = Run(stream(runs))
+        (trim,) = run.trimmer.trims
+        self.assertEqual(trim.reason, "no burst")
+        self.assertLess(trim.released_at - trim.held_at, ts._TRIM_NO_BURST_S + 0.5)
 
     def test_a_stall_and_backlog_without_a_restart_are_never_held(self):
         silence = 3.0
@@ -258,6 +347,117 @@ class RepeatTrimmerTests(unittest.TestCase):
                 if not dropped:
                     self.assertEqual(run.output, run.input)
 
+    def ask_before_restart(self, timed, extra: float, at: float, quick_at=None):
+        """Feed `timed`, setting the trimmer's `extra` once the clock reaches `at` (and with
+        `quick_at`, when its last quick restart came)."""
+        run = Run([item for item in timed if item[0] < at], finish=False)
+        run.trimmer.extra = extra
+        if quick_at is not None:
+            run.trimmer._quick_at = quick_at
+        rest = [item for item in timed if item[0] >= at]
+        k = 0
+        while k < len(rest):
+            now = rest[k][0]
+            chunk = []
+            while k < len(rest) and rest[k][0] == now:
+                chunk.append(rest[k][1])
+                k += 1
+            run.now = now
+            run._take(run.trimmer.feed(b"".join(chunk)))
+        run._take(run.trimmer.finish())
+        return run
+
+    def test_stay_live_s_extra_is_taken_at_the_next_restart(self):
+        # R reads 4.75 s; stay-live is 3 s behind: the run is held until it brought 7.75 s
+        # and dropped to its keyframe at 7 s, 2.25 s of it for stay-live. Asked once.
+        resume = backlogged(20.0) + 1.0
+        run = self.ask_before_restart(stream(repeat_runs(5.0, 1.0)), 3.0, resume)
+        (trim,) = run.trimmer.trims
+        self.assertEqual((trim.reason, trim.dropped_s), ("dropped", 7.0))
+        self.assertAlmostEqual(trim.extra_s, 7.0 - (5.0 - ts._TRIM_MARGIN_S), delta=0.05)
+        self.assertGreater(trim.released_at - trim.held_at, 1.7)  # until 7.75 s had come
+        self.assertEqual((run.trimmer.extra, run.trimmer.steered, run.trimmer.quick), (0.0, 1, 1))
+        self.assertEqual(video_pts(run.output)[20 * FPS], 7 * CLOCK)
+        self.assertEqual(cc_breaks(run.output), 0)
+
+    def test_a_run_without_a_burst_is_held_for_what_stay_live_asks(self):
+        # A quick splice at real time would go on untouched; asked for 3 s, it is held until
+        # 3 s came and dropped to its keyframe at 3 s.
+        silence = 1.0
+        resume = backlogged(20.0) + silence
+        runs = [
+            (range(20 * FPS), 900000, backlogged, FPS),
+            (range(20 * FPS, 35 * FPS), 0, after(resume, silence), FPS),
+        ]
+        run = self.ask_before_restart(stream(runs), 3.0, resume)
+        (trim,) = run.trimmer.trims
+        self.assertEqual((trim.reason, trim.dropped_s, trim.extra_s), ("dropped", 3.0, 3.0))
+        self.assertEqual(video_pts(run.output)[20 * FPS], 3 * CLOCK)
+
+    def test_an_ask_that_changes_while_a_restart_is_held_is_the_next_ones(self):
+        # Asked 3 s when the restart came: it takes them though the ask went to 0 meanwhile.
+        timed = stream(repeat_runs(5.0, 1.0))
+        resume = backlogged(20.0) + 1.0
+        run = Run([item for item in timed if item[0] < resume], finish=False)
+        run.trimmer.extra = 3.0
+        for at, packet in [item for item in timed if item[0] >= resume]:
+            run.now = at
+            run._take(run.trimmer.feed(packet))
+            if run.trimmer.holding and run.trimmer._confirmed:
+                run.trimmer.extra = 0.0  # stay-live took it back meanwhile
+        (trim,) = run.trimmer.trims
+        self.assertEqual(trim.dropped_s, 7.0)
+        self.assertAlmostEqual(trim.extra_s, 7.0 - (5.0 - ts._TRIM_MARGIN_S), delta=0.05)
+
+    def test_an_ask_beyond_the_most_one_restart_takes_is_taken_once(self):
+        # Asked 20 s, a restart takes at most 15: the ask is spent, never taken again.
+        resume = backlogged(20.0) + 1.0
+        run = self.ask_before_restart(stream(repeat_runs(5.0, 1.0, new=30.0)), 20.0, resume)
+        (trim,) = run.trimmer.trims
+        self.assertGreater(trim.extra_s, 0.0)
+        self.assertEqual((run.trimmer.extra, run.trimmer.steered), (0.0, 1))
+
+    def test_a_slow_restart_takes_nothing_of_what_stay_live_asks(self):
+        # Three seconds of silence before it: the provider measured repeats nothing there.
+        resume = backlogged(20.0) + 3.0
+        run = self.ask_before_restart(stream(repeat_runs(5.0, 3.0)), 3.0, resume)
+        (trim,) = run.trimmer.trims
+        self.assertEqual((trim.reason, trim.dropped_s, trim.extra_s), ("dropped", 4.0, 0.0))
+        self.assertEqual((run.trimmer.extra, run.trimmer.quick), (3.0, 0))
+
+    def test_far_behind_long_after_a_quick_restart_a_slower_one_takes_the_ask(self):
+        # Asked 9 s (far behind), 3 s of silence before it: with no quick restart for
+        # `_TRIM_WAIT_S` it takes the ask less the 1.5 s of silence beyond a quick one's, held
+        # until R (4.75 s) and 7.5 s came, and dropped to its keyframe at 12 s. A quick one
+        # just before, a smaller ask or a longer silence: nothing (R alone, to 4 s).
+        far = ts._TRIM_FAR_S + 1.0
+        cases = (
+            (3.0, far, -ts._TRIM_WAIT_S, 12.0),
+            (3.0, far, -30.0, 4.0),
+            (3.0, ts._TRIM_FAR_S - 1.0, -ts._TRIM_WAIT_S, 4.0),
+            (ts._TRIM_SLOW_S + 1.0, far, -ts._TRIM_WAIT_S, 4.0),
+        )
+        for silence, extra, quick_ago, dropped in cases:
+            with self.subTest(silence=silence, extra=extra, quick_ago=quick_ago):
+                resume = backlogged(20.0) + silence
+                timed = stream(repeat_runs(5.0, silence, new=30.0))
+                run = self.ask_before_restart(timed, extra, resume, quick_at=resume + quick_ago)
+                (trim,) = run.trimmer.trims
+                taken = int(dropped > 4.0)
+                self.assertEqual((trim.reason, trim.dropped_s), ("dropped", dropped))
+                self.assertEqual((run.trimmer.steered, run.trimmer.quick), (taken, 0))
+                self.assertEqual(run.trimmer.restarts, 1)  # what the session steers by
+                self.assertEqual(run.trimmer.extra, 0.0 if taken else extra)
+
+    def test_what_stay_live_asks_waits_for_a_restart_that_can_take_it(self):
+        # A reconnect takes nothing: what was asked stays for the next restart.
+        timed = stream(repeat_runs(5.0, 1.0))
+        restart = next(k for k, (at, _) in enumerate(timed) if at > backlogged(20.0))
+        run = Run(timed[:restart], finish=False)
+        run.trimmer.extra = 2.0
+        run._take(run.trimmer.discontinuity())
+        self.assertEqual((run.trimmer.extra, run.trimmer.steered), (2.0, 0))
+
     def test_the_hold_is_capped_in_time(self):
         # The new run comes at three times real time and never settles: released at the cap.
         resume = backlogged(20.0) + 1.0
@@ -277,7 +477,8 @@ class RepeatTrimmerTests(unittest.TestCase):
         self.assertLess(trim.released_at - trim.held_at, 0.5)  # with the burst's first read
 
     def test_a_repeat_reaches_no_further_back_than_the_last_two_runs(self):
-        # Runs of 10 s and 3 s, then one whose burst claims 20 s: 13 s is the most it drops.
+        # Runs of 10 s and 3 s (it makes up its silence: R under `_TRIM_MIN_S`), then one
+        # whose burst claims 20 s: 13 s is the most it drops.
         runs = [
             (range(10 * FPS), 900000, backlogged, FPS),
             (range(1000, 1000 + 3 * FPS), 0, after(backlogged(10.0) + 1.0, 1.0), FPS),
@@ -285,7 +486,7 @@ class RepeatTrimmerTests(unittest.TestCase):
         ]
         run = Run(stream(runs))
         trims = list(run.trimmer.trims)
-        self.assertEqual([trim.reason for trim in trims], ["no burst", "dropped"])
+        self.assertEqual([trim.reason for trim in trims], ["small", "dropped"])
         self.assertGreater(trims[1].excess_s, 15.0)
         self.assertEqual(trims[1].dropped_s, 13.0)
 

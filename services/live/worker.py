@@ -131,12 +131,14 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Sequence
 import contextlib
+import faulthandler
 import logging
 import multiprocessing
 from multiprocessing.connection import Connection, wait as wait_for_connection
 import os
 from pathlib import Path
 import re
+import signal
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -559,6 +561,7 @@ class _Session:
         self._rejoiner: ReconnectTrimmer | None = None
         # Raw TS only: drops what a restart inside the connection sends twice.
         self._trimmer: RepeatTrimmer | None = None
+        self._junction = 0.0  # what stay-live asks the next restart to take (`set_junction`)
         # Raw TS only: drops what a provider replays while its own source is down.
         self._loop_trimmer: LoopTrimmer | None = None
         # Re-bases a restarted run's timestamps (raw TS) and a clock that leaps ahead (raw TS
@@ -952,6 +955,8 @@ class _Session:
             trimmer = self._trimmer = RepeatTrimmer(
                 program=program, clock=time.monotonic, join_counters=self._clock_joiner is None
             )
+            # Asked before the source opened: this trimmer's now (a later one starts afresh).
+            trimmer.extra, self._junction = self._junction, 0.0
             self._loop_trimmer = LoopTrimmer(program=program, clock=time.monotonic)
         else:
             # A clock that leaps ahead inside a segment is re-based too: each segment's EXTINF
@@ -1364,6 +1369,18 @@ class _Session:
             self._apply(self._segmenter.feed(held))
         self._apply(self._segmenter.finish())
 
+    def set_junction(self, seconds: float) -> None:
+        """Stay-live asks the next restart in the stream to take `seconds` more than its
+        repeat (2.8.5, `RepeatTrimmer.extra`); 0 asks nothing. Before the source opened it
+        waits for the trimmer; a trimmer that took it forgets it (a resumed run's new trimmer
+        never takes it again)."""
+        seconds = max(0.0, float(seconds))
+        trimmer = self._trimmer
+        if trimmer is not None:
+            trimmer.extra = seconds
+        else:
+            self._junction = seconds
+
     def set_until(self, seq: int) -> None:
         """A server part's stop moves to media sequence `seq` (2.7, "until")."""
         window = self._start.get("window")
@@ -1468,6 +1485,7 @@ class _Session:
             return
         self._last_notify = now
         ring, timeline, source = self._ring, self._timeline, self._source
+        trimmer = self._trimmer
         # No ring yet while the source opens: only its answer can be news then.
         oldest = ring.oldest_seq if ring is not None else None
         recorder = self._recorder
@@ -1528,6 +1546,10 @@ class _Session:
             "reconnecting": self._reconnecting,
             # 2.6: the buffer's parts, [first_seq, start, wall] each (`services.live.parts`).
             "parts": [[p.first_seq, p.start, p.wall] for p in timeline.parts()],
+            # 2.8.5, raw TS: restarts in the connection so far (stay-live steers while they
+            # come), and those that took some of what it asked (`RepeatTrimmer.extra`).
+            "restarts": trimmer.restarts if trimmer is not None else 0,
+            "steered": trimmer.steered if trimmer is not None else 0,
         }
         if source is not None:
             snapshot["secure"] = bool(getattr(source, "secure", False))  # 2.7.1: over HTTPS
@@ -1805,6 +1827,17 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.set_until(command[2])
+            elif name == "junction":  # 2.8.5: what stay-live asks the next restart to take
+                if (
+                    len(command) != 3
+                    or not isinstance(command[1], str)
+                    or type(command[2]) is not float
+                    or not 0.0 <= command[2] < 3600.0
+                ):
+                    raise ValueError("a junction needs a session and seconds")
+                session = self._sessions.get(command[1])
+                if session is not None:
+                    session.set_junction(command[2])
             elif name == "record_start":
                 self._record(command)
             elif name == "record_stop":
@@ -1972,6 +2005,42 @@ def _raise_open_files() -> None:
         _LOG.info("The open files limit stays as it is (%s).", type(error).__name__)
 
 
+def _stacks_on_signal() -> None:
+    """2.8.5: `kill -USR1 <helper>` appends every thread's stack to helper-stacks.txt beside
+    QiTV's log, so a hang can be read without a debugger (POSIX only; file names and
+    functions, no addresses)."""
+    if not hasattr(signal, "SIGUSR1"):
+        return
+    from services.log_file import log_dir
+
+    try:
+        stacks = open(log_dir() / "helper-stacks.txt", "a", encoding="utf-8")
+    except OSError:
+        return
+    faulthandler.register(signal.SIGUSR1, file=stacks, all_threads=True)
+
+
+def _log_thread_death(args: threading.ExceptHookArgs) -> None:
+    """A helper thread ended with an exception (2.8.5): its stderr is discarded (native
+    libraries may print addresses there), so the log says which thread, what kind of
+    exception and where, never its message (it may hold an address)."""
+    if args.exc_type is SystemExit:
+        return
+    tb = args.exc_traceback
+    while tb is not None and tb.tb_next is not None:
+        tb = tb.tb_next
+    where = (
+        f"{Path(tb.tb_frame.f_code.co_filename).name}:{tb.tb_lineno} "
+        f"({tb.tb_frame.f_code.co_name})"
+        if tb is not None
+        else "?"
+    )
+    name = args.thread.name if args.thread is not None else "?"
+    _LOG.error(
+        "A live helper thread (%s) ended with %s at %s.", name, args.exc_type.__name__, where
+    )
+
+
 def helper_main(conn: Connection, root: str, detailed_log: bool = False) -> None:
     """Spawn entry point: arguments travel through multiprocessing IPC, not argv.
 
@@ -1988,6 +2057,8 @@ def helper_main(conn: Connection, root: str, detailed_log: bool = False) -> None
         threading.Thread(
             target=_exit_with_owner, args=(owner_gone,), name="qitv-live-owner", daemon=True
         ).start()
+        threading.excepthook = _log_thread_death  # 2.8.5: fd 2 is gone, the log says it
+        _stacks_on_signal()
         _raise_open_files()
         helper = _Helper(conn, root, owner_gone)
         # 2.8.1: into the app's log; 2.8.2: its detail follows the setting while it runs

@@ -797,6 +797,7 @@ class TVWindow(QMainWindow):
 
         self.menus.build()
         config_manager.apply_window_settings(WINDOW_NAME, self)
+        self._apply_keep_on_top()  # before the first show: only the flag
 
     # ---- the players --------------------------------------------------------------------------
 
@@ -1432,6 +1433,41 @@ class TVWindow(QMainWindow):
             self.setWindowState(Qt.WindowState.WindowMaximized)
         self._show_again()
 
+    def set_keep_on_top(self, on: bool) -> None:
+        """View → Keep on Top (2.8.5): the window stays above other apps' windows. Saved; the
+        mini player is on top anyway and leaves it as chosen; in fullscreen (on its way to
+        it, or back) or minimized, the change waits for the window to be a normal one again."""
+        self.config_manager.keep_on_top = on
+        try:
+            self.config_manager.save_config()
+        except Exception as e:  # a locked config: kept for this run only
+            logger.warning("Couldn't save Keep on Top: %s", safe_message(e))
+        self._apply_keep_on_top()
+
+    def _apply_keep_on_top(self) -> None:
+        on = bool(getattr(self.config_manager, "keep_on_top", False))
+        hint = Qt.WindowType.WindowStaysOnTopHint
+        if self._mini_restore is not None:  # the flags the mini player ends with
+            geometry, flags, maximized = self._mini_restore
+            self._mini_restore = (geometry, flags | hint if on else flags & ~hint, maximized)
+            return
+        if self._closing or self._fs_target is not None or self.isFullScreen():
+            return  # applied once fullscreen ends (`_fit_to_screen`)
+        if self.isMinimized():
+            return  # showing it again would bring the window back: applied when it is back
+        if bool(self.windowFlags() & hint) == on:
+            return
+        if not self.isVisible():
+            self.setWindowFlag(hint, on)  # before the first show: nothing to show again
+            return
+        maximized = self.isMaximized()
+        geometry = self.normalGeometry() if maximized else self.geometry()
+        self.setWindowFlag(hint, on)
+        self.setGeometry(geometry)
+        if maximized:
+            self.setWindowState(Qt.WindowState.WindowMaximized)
+        self._show_again()
+
     def _show_again(self) -> None:
         """setWindowFlags hides the window: show it again and keep the video bound."""
         self._update_menu_bar()
@@ -1527,6 +1563,8 @@ class TVWindow(QMainWindow):
                     self._pre_fullscreen = normal if normal.isValid() else None
                 elif was_fullscreen and not self.isFullScreen():
                     self._after_fullscreen_exit(event.spontaneous())
+                elif event.oldState() & Qt.WindowState.WindowMinimized and not self.isMinimized():
+                    QTimer.singleShot(0, self, self._apply_keep_on_top)  # chosen while minimized
         super().changeEvent(event)
 
     def _after_fullscreen_exit(self, finished: bool) -> None:
@@ -1550,6 +1588,8 @@ class TVWindow(QMainWindow):
         handle = self.windowHandle()
         if handle is not None:
             handle.removeEventFilter(self._exit_watch)
+        # Keep on Top chosen in fullscreen: once this fit is done, however fullscreen ended.
+        QTimer.singleShot(0, self, self._apply_keep_on_top)
         target = self._fullscreen_restore or self._pre_fullscreen
         self._fullscreen_restore = self._pre_fullscreen = None
         unfit_states = (

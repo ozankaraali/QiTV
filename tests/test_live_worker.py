@@ -64,6 +64,8 @@ STATE_KEYS = {
     "reconnecting",
     "parts",
     "secure",
+    "restarts",  # 2.8.5
+    "steered",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -1682,6 +1684,49 @@ class ServerPartStopTests(unittest.TestCase):
         helper.wait_for(lambda m: m == ("ended", "p"))
         fetched = [path.rsplit("/", 1)[1] for path, _h in upstream.requests if path.endswith(".ts")]
         self.assertEqual(fetched, [f"s{n}.ts" for n in range(5)])
+
+
+class JunctionCommandTests(unittest.TestCase):
+    def test_what_stay_live_asks_reaches_the_sessions_trimmer(self):
+        # 2.8.5: ("junction", sid, seconds) sets what the next restart is to take.
+        body = make_stream(4)
+        upstream = LocalSource({SECRET_PATH: (200, {"Content-Length": str(len(body))}, body)})
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        helper.parent.send(("open", "p", upstream.url + SECRET_PATH, {}, True, RAM, 6.0, {}))
+        helper.wait_for(lambda m: m == ("ready", "p"))
+        session = helper.helper._sessions["p"]
+        helper.parent.send(("junction", "p", 2.5))
+
+        def asked():
+            trimmer = session._trimmer
+            return trimmer.extra if trimmer is not None else session._junction
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and asked() != 2.5:
+            time.sleep(0.02)
+        self.assertEqual(asked(), 2.5)
+
+
+class ThreadDeathTests(unittest.TestCase):
+    def test_a_helper_thread_that_dies_is_logged_without_its_message(self):
+        # 2.8.5: the helper's stderr is discarded, so a thread's death would vanish.
+        def fail():
+            raise RuntimeError("http://user:secret@provider.example/live/1.ts")
+
+        try:
+            fail()
+        except RuntimeError as error:
+            args = threading.ExceptHookArgs(
+                (RuntimeError, error, error.__traceback__, threading.current_thread())
+            )
+        with self.assertLogs(worker._LOG, "ERROR") as logged:
+            worker._log_thread_death(args)
+        (line,) = logged.output
+        self.assertIn("RuntimeError", line)
+        self.assertIn("test_live_worker.py:", line)
+        self.assertIn("(fail)", line)
+        self.assertNotIn("secret", line)
 
 
 class HttpsFirstTests(unittest.TestCase):

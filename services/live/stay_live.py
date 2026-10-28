@@ -61,6 +61,16 @@ live that lands short builds nothing (`landed(build=False)`): it was picked at t
 a full buffer, so its shortfall is the pick's error, tolerated but for too little room and
 trouble, until a stall's end (the source's step, steered as ever).
 
+A raw TS source that restarts often (2.8.5: the caller sets `junctions` while one restarted
+within two minutes) is steered at its restarts instead, where the helper's trimmer takes what
+it is asked beyond the repeat it measures (`services.live.ts.RepeatTrimmer.extra`): one
+provider restarts every ~20 s and hides seconds of repeat from that measure, so its edge ran
+4-8 s a minute ahead and stay-live jumped every minute or two. Behind the target by more than
+`_JUNCTION_MIN_S`, `Decision.junction` asks the next restart to take that much back, at a
+cut the stream has anyway (where the run hides a repeat, the repeat goes): no nudge behind
+the target starts (one under way ramps out) and no jump is made. The reopen beyond the target
+plus 20 s stays; ahead of the target, as ever.
+
 On some channels VLC cannot play at any rate but 1x: its position crawls instead (measured in
 2.0.2: 4.5 s of media in 37 s). `RateHealth` notices that from VLC's progress, and the caller
 then calls `lock_rate()`: from there on stay-live keeps 1x and only reopens at live when the
@@ -125,6 +135,9 @@ _JUMP_GAP_S = 60.0  # never two jumps (a tune, Go live, a reopen at live) within
 _JUMP_CLOSER_S = 5.0  # a jump helps when it lands within the band, or at least this much nearer
 _JUMP_WAIT_S = 12.0  # far behind, waiting this long for one that helps (keyframes 10 s apart)
 _GRAIN_S = 1.0  # no jump does better than the lag less this: the keyframes' grain, no drift
+# Junctions (2.8.5): a source that restarts often takes back what stay-live is behind.
+_JUNCTION_MIN_S = 1.0  # behind the target by more than this: asked of the next restart
+_JUNCTION_REF_S = 300.0  # ... the highest target of this long at least (twice at most)
 _TICK_S = 0.25  # the caller's update interval (what a first sample stands for)
 _MAX_DT = 1.0  # a longer gap between two updates counts as this long
 
@@ -170,6 +183,9 @@ class Decision:
     rate: float
     reopen_live: bool = False
     jump: bool = False  # the reopen is a jump instead of a catch-up (not the 20 s bound)
+    # 2.8.5, with `StayLive.junctions`: seconds behind the target the next stream restart is
+    # to take back (0.0: none asked).
+    junction: float = 0.0
 
 
 class RateHealth:
@@ -502,6 +518,13 @@ class StayLive:
         self._reopened = False
         self.rate_locked = False  # VLC cannot play this channel at another rate: 1x for good
         self.background = False  # a multiview tile without the focus: 1x, jumps only (2.2)
+        # Set by the caller (2.8.5): the source restarts often, and the helper takes what a
+        # restart is asked (`Decision.junction`): behind the target, that is how the lag goes.
+        self.junctions = False
+        # What an ask is measured from (`_junction`): the highest target (behind it) in this
+        # `_JUNCTION_REF_S` block of the caller's clock and in the one before.
+        self._ref_block = -1
+        self._ref_now = self._ref_before = 0.0
         self._last: Optional[float] = None  # the last update's time
         self._outside = 0.0  # seconds outside the band, on `_side`, counted while playing
         self._side = 0  # +1 behind the band, -1 ahead of it
@@ -718,20 +741,43 @@ class StayLive:
         self._own_shortfall(lag_s, dt)
         if self._reopened:
             return Decision(1.0)  # asked for: the caller reopens (and calls user_go_live)
+        junction = self._junction(lag_s, now)
         if self.rate_locked or self.background:
             # 1x: set by lock_rate() (never changed after) or by set_background() (a tile
             # without the focus); far behind, a jump changes no rate (the channel stay-live
-            # cannot nudge needs it most).
-            if self._far_locked(dt, lag_s):
+            # cannot nudge needs it most), unless the next restart takes it.
+            if not self.junctions and self._far_locked(dt, lag_s):
                 return self._jump(now)
-            return Decision(self._rate)
+            return Decision(self._rate, junction=junction)
         if self._wide and self._budget_free(now):
             self._wide = 0.0
         if self._owed:
             self._pay(lag_s, dt)
+        nudge = self._nudge
+        if self.junctions and nudge is not None and nudge.peak > 1.0 and not nudge.ending:
+            nudge.ending = True  # a catch-up gives way to the next restart
+            nudge.cut = nudge.cut or not nudge.spent
         if self._steer(dt, lag_s, now) if self._nudge is not None else self._watch(dt, lag_s, now):
             return self._jump(now)
-        return Decision(self._rate)
+        return Decision(self._rate, junction=junction)
+
+    def _junction(self, lag: float, now: float) -> float:
+        """With `junctions`: what the next stream restart is to take back, the lag behind the
+        target (as high as the burst reported now would set it, and the highest of the last
+        `_JUNCTION_REF_S` at least) when that is more than `_JUNCTION_MIN_S`; else 0.0. Never
+        while a stream just opened (its lag comes first). Seen live: the burst lowered the target
+        3.2 s in a lull between restarts, a cut taken from it left 9 s, the provider's next
+        silence was 9.4 s, and VLC ran dry; a cut is for good, the lag is not seen."""
+        block = int(now // _JUNCTION_REF_S)
+        if block != self._ref_block:
+            follows = block == self._ref_block + 1
+            self._ref_before, self._ref_now = (self._ref_now if follows else 0.0), 0.0
+            self._ref_block = block
+        self._ref_now = max(self._ref_now, self._centre(1))
+        if not self.junctions or self.hold_reopen:
+            return 0.0
+        behind = lag - max(self._ref_now, self._ref_before)
+        return behind if behind > _JUNCTION_MIN_S else 0.0
 
     def _own_shortfall(self, lag: float, dt: float) -> None:
         """Only a landing's own shortfall is built at the start or tolerated (for jumps,
@@ -861,6 +907,9 @@ class StayLive:
         tolerated = self._accepting or self._tolerant  # a start's rest, a jump's pick
         under = short or (ahead < -self.band(-1) and not tolerated)
         side = 1 if far or behind > self.band(1) else -1 if under else 0
+        if side > 0 and self.junctions:
+            self.absorb()  # the next restart takes it (`Decision.junction`): no rate, no jump
+            return False
         error = behind if side > 0 else ahead
         if not far:
             self._waited = 0.0

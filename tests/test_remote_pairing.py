@@ -136,6 +136,15 @@ class ReviewFixStoreTests(unittest.TestCase):
     def test_no_port_field(self):
         self.assertNotIn("port", RemoteStore.from_config(None).to_config())
 
+    def test_a_kept_port_round_trips_and_a_wrong_one_is_dropped(self):
+        kept = RemoteStore.from_config({"version": 1, "port": 51234})
+        self.assertEqual(kept.port, 51234)
+        self.assertEqual(kept.to_config()["port"], 51234)
+        for wrong in (0, 70000, "51234", True, None):
+            store = RemoteStore.from_config({"version": 1, "port": wrong})
+            self.assertIsNone(store.port, wrong)
+            self.assertNotIn("port", store.to_config())
+
 
 class HopAnsweredTests(unittest.TestCase):
     def test_an_unredeemed_ticket_means_home_was_out_of_reach(self):

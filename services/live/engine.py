@@ -307,7 +307,7 @@ class _Supervisor(QThread):
             if record.sent:  # else after its open (`_send_notes`)
                 conn.send(command)
             return
-        if name == "until":  # 2.7: a server part's stop (never the close fallback below)
+        if name in ("until", "junction"):  # 2.7, 2.8.5: never the close fallback below
             if record is not None and record.sent and not record.closing:
                 conn.send(command)
             return
@@ -678,7 +678,7 @@ class _Supervisor(QThread):
             return
         if command[0] == "drop_kept":
             self._drop_kept()  # 2.8: the disk buffer turned off needs no helper
-        elif command[0] in ("adopt_kept", "disk_amount", "detailed_log"):
+        elif command[0] in ("adopt_kept", "disk_amount", "detailed_log", "junction"):
             return  # 2.8: no helper takes anything back, holds a disk ring or logs
         elif command[0] == "open":
             # Time-shift is off: available(False) was emitted already, and no reopen follows.
@@ -971,6 +971,13 @@ class LiveEngine(QObject):
         lines, or stops, at once; a helper started later starts so (`_helper_args`)."""
         if not self._shut:
             self._commands.put(("detailed_log", bool(on)))
+
+    def set_junction(self, sid: str, seconds: float) -> None:
+        """Ask a raw TS session's next stream restart to take `seconds` more than its repeat
+        (2.8.5: stay-live's lag goes at a cut the stream has anyway); 0 asks nothing."""
+        view = self._sessions.get(sid)
+        if view is not None and not view.closing and not self._shut:
+            self._commands.put(("junction", sid, max(0.0, float(seconds))))
 
     def set_until(self, sid: str, seq: int) -> None:
         """Move a server part's stop to media sequence `seq` (2.7: the live buffer's start

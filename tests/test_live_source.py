@@ -1637,6 +1637,57 @@ video.m3u8
         self.assertEqual(b"".join(received[:-1]), self.video[:half])
         self.assertEqual(server.counts["/user/secret/live.ts"], 7)
 
+    def test_a_refused_reconnect_is_asked_again_patiently_until_the_slot_frees(self):
+        # 2.8.5: a provider that allows one stream counts the connection that broke for
+        # minutes: 407 for a while (as seen), then the stream again. The source waits it out.
+        half = len(self.video) // 2 // 188 * 188
+
+        def live(_request, count):
+            if count == 1:
+
+                def broken(request):
+                    request.wfile.write(self.video[:half])
+
+                return 200, {"Content-Length": str(len(self.video))}, broken
+            if count <= 4:
+                return 407, {}, b""
+            return 200, {}, self.video[half:]
+
+        server = self.server({"/user/secret/live.ts": live})
+        source = open_source(
+            server.url + "/user/secret/live.ts", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        patient = {"_REFUSED_RETRY_S": 0.05, "_REFUSED_PATIENCE_S": 5.0}
+        with patch.multiple(source_module, _RECONNECT_DELAYS=FAST_RETRIES, **patient):
+            received = list(source.chunks())
+        media_bytes = b"".join(item for item in received if isinstance(item, bytes))
+        self.assertEqual(media_bytes, self.video)
+        self.assertIn(Reconnecting(), received)
+        self.assertEqual(server.counts["/user/secret/live.ts"], 5)
+
+    def test_a_reconnect_refused_beyond_the_patience_ends_with_the_refusal(self):
+        half = len(self.video) // 2 // 188 * 188
+
+        def live(_request, count):
+            if count == 1:
+
+                def broken(request):
+                    request.wfile.write(self.video[:half])
+
+                return 200, {"Content-Length": str(len(self.video))}, broken
+            return 407, {}, b""
+
+        server = self.server({"/user/secret/live.ts": live})
+        source = open_source(
+            server.url + "/user/secret/live.ts", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        patient = {"_REFUSED_RETRY_S": 0.05, "_REFUSED_PATIENCE_S": 0.3}
+        with patch.multiple(source_module, _RECONNECT_DELAYS=FAST_RETRIES, **patient):
+            with self.assertRaises(SourceError) as raised:
+                list(source.chunks())
+        self.assertEqual((raised.exception.kind, raised.exception.status), ("http", 407))
+        self.assertGreater(server.counts["/user/secret/live.ts"], 3)
+
     def test_local_paths_and_file_urls_need_allow_local(self):
         with tempfile.TemporaryDirectory(prefix="qitv-source-local-") as directory:
             path = Path(directory) / "local.ts"

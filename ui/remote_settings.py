@@ -52,7 +52,7 @@ RELAY_STATES = {
     "resting": N_("Resting until 00:00 UTC (its daily limit)"),
     # i18n: the relay's state: a copy of this QiTV's settings runs elsewhere
     "replaced": N_("Another QiTV is using this relay room"),
-    # i18n: the phone remote's state: it couldn't start (no free port)
+    # i18n: the phone remote's state: it couldn't start
     "error": N_("The phone remote couldn't start"),
 }
 

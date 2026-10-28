@@ -85,6 +85,7 @@ class FakeEngine(QObject):
         self.recordings = []  # (rid, sid, path, seq, keyword arguments)
         self.record_stops = []  # sids
         self.untils = []  # (sid, seq): a server part's stop moved (2.7)
+        self.junctions = []  # (sid, seconds): what a session's next restart is asked (2.8.5)
         self.events = []  # ("open", sid) as sessions open
         self._answered = set()
         self._spans = {}
@@ -134,6 +135,9 @@ class FakeEngine(QObject):
 
     def set_until(self, sid, seq):
         self.untils.append((sid, seq))  # 2.7: a server part's stop moved
+
+    def set_junction(self, sid, seconds):
+        self.junctions.append((sid, seconds))  # 2.8.5
 
     def start_recording(self, sid, path, seq, **kwargs):
         rid = f"r{len(self.recordings) + 1}"
@@ -190,6 +194,8 @@ class FakeEngine(QObject):
         secure=None,
         heights=None,
         height=0,
+        restarts=None,
+        steered=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -235,6 +241,8 @@ class FakeEngine(QObject):
             self._snapshots[sid]["secure"] = secure
         if heights is not None:  # 2.8: an HLS master's picture sizes, the playing one's
             self._snapshots[sid].update(heights=list(heights), height=height)
+        if restarts is not None:  # 2.8.5: raw TS restarts so far, those that took an ask
+            self._snapshots[sid].update(restarts=restarts, steered=steered or 0)
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def receive(self, sid, count):
@@ -441,6 +449,7 @@ class Feed:
         self.gaps = None  # an iterator of the seconds to each next arrival (None: `chunk`)
         self.starved_s = 0.0  # how long VLC had nothing to play
         self.before = []  # the lag right before each arrival
+        self.restarts = self.steered = None  # 2.8.5: the helper's restart counts, if any
         self.push()
 
     def push(self):
@@ -458,6 +467,8 @@ class Feed:
             burst=burst,
             hls=self.hls,
             breaks=self.reported,
+            restarts=self.restarts,
+            steered=self.steered,
         )
 
     def ready(self, backlog_after_start=True):
@@ -3161,6 +3172,75 @@ class SafeJumpTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), 2)
         self.assertEqual(self.playback.rates, [])  # no catch-up: never another rate
         self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=0.5)
+
+    def test_a_restarting_source_takes_its_lag_back_at_its_restarts_not_by_a_jump(self):
+        # 2.8.5: a raw TS source restarting every ~20 s; 10 s of backlog lands at once
+        # (drift). No jump, no rate: its next restart is asked to take it back.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
+        feed.restarts = 2
+        feed.run(65.0)
+        self.assertEqual(self.engine.junctions, [])  # at the target: nothing to ask
+        feed.restarts = 3
+        feed.edge += 10.0
+        feed.push()
+        feed.run(30.0)
+        self.assertEqual(len(self.playback.plays), 1)  # no jump
+        self.assertEqual(self.playback.rates, [])  # no catch-up
+        asked = [seconds for s, seconds in self.engine.junctions if s == sid]
+        self.assertTrue(asked)
+        self.assertAlmostEqual(asked[-1], 10.0, delta=1.0)
+        # The next restart took it: the helper is told 0 (an ask that came while it was held
+        # goes too), and asked afresh only once the lag filter, started afresh, settled.
+        feed.restarts, feed.steered = 4, 1
+        feed.push()
+        feed.run(5.0)
+        self.assertEqual(self.engine.junctions[-1], (sid, 0.0))
+        asks = len(self.engine.junctions)
+        feed.run(15.0)
+        self.assertGreater(len(self.engine.junctions), asks)  # (the fake took nothing)
+
+    def test_what_was_asked_stands_through_the_silence_before_a_restart(self):
+        # The provider falls silent before each restart: the stall must not take the ask
+        # back (it did, seen live, at every restart meant to take it).
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
+        feed.restarts = 2
+        feed.run(20.0)
+        feed.restarts = 3
+        feed.edge += 10.0
+        feed.push()
+        feed.run(20.0)
+        asked = self.engine.junctions[-1][1]
+        self.assertGreater(asked, 8.0)
+        feed.stalled = True
+        feed.run(8.0)
+        self.assertEqual(self.engine.junctions[-1], (sid, asked))
+
+    def test_restarts_three_minutes_ago_steer_no_more(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
+        feed.restarts = 2
+        feed.run(125.0)  # two minutes without a quick restart (seen live): still steering
+        self.assertTrue(self.live._stay.junctions)
+        feed.run(60.0)  # the last restart was seen at the start: over three minutes ago
+        self.assertFalse(self.live._stay.junctions)
+        at = self.far_behind(feed, 10.0)
+        self.assertIsNotNone(at)  # a jump, as before
+
+    def test_a_paused_restarting_source_asks_nothing(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
+        feed.restarts = 2
+        feed.run(20.0)
+        feed.restarts = 3
+        feed.edge += 10.0
+        feed.push()
+        feed.run(20.0)
+        self.assertGreater(self.engine.junctions[-1][1], 0.0)
+        self.live.toggle_pause()
+        feed.run(1.0)
+        self.assertEqual(self.engine.junctions[-1], (sid, 0.0))
 
     def test_again_within_a_minute_it_catches_up_then_jumps_once_the_minute_passed(self):
         sid = self.start()

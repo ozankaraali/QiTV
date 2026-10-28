@@ -67,9 +67,10 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -445,20 +446,25 @@ class _Clock:
 
 
 class _ReplaySource:
-    """`services.live.source.Source` over a capture: each read's bytes at its arrival time."""
+    """`services.live.source.Source` over a capture: each read's bytes at its arrival time.
+    `before(at)` runs ahead of each read (the hold ticker's ticks up to it)."""
 
     hls = False
     burst_s = 0.0
 
-    def __init__(self, capture: Capture, clock: _Clock) -> None:
+    def __init__(
+        self, capture: Capture, clock: _Clock, before: Callable[[float], None] = lambda at: None
+    ) -> None:
         self.user_agent = DEFAULT_USER_AGENT
         self._capture = capture
         self._clock = clock
+        self._before = before
 
     def chunks(self) -> Iterator[bytes | source_module.Discontinuity]:
         data, done = self._capture.data, 0
         reconnects = set(self._capture.reconnects)
         for end, at in self._capture.reads:
+            self._before(at)
             self._clock.now = at
             if end > done:
                 yield data[done:end]
@@ -665,6 +671,8 @@ class _Untrimmed:
     def __init__(self, **_: Any) -> None:
         self.trims: list[Trim] = []
         self.cut_short: list[tuple[int, int]] = []
+        self.extra = 0.0  # stay-live's ask: nothing takes it
+        self.restarts = self.quick = self.steered = 0
 
     def feed(self, chunk: bytes) -> list[bytes]:
         return [chunk]
@@ -763,14 +771,30 @@ def replay(capture: Capture, stages: str = "all") -> Replay:
         rejoiner = worker.ReconnectTrimmer if stages != "none" else _Unrejoined
         clock_joiner = worker.ClockJoiner if stages in ("all", "noloop") else (lambda **_: None)
         looper = worker.LoopTrimmer if stages in ("all", "trim") else _Unlooped
+        ticked = [0.0]
+
+        def ticks(at: float) -> None:
+            """The hold ticker's ticks before a read at `at`, on the simulated clock (live, a
+            thread judges a held restart every `_HOLD_TICK_S` while the source is silent)."""
+            held = session._trimmer
+            while ticked[0] + worker._HOLD_TICK_S <= at:
+                ticked[0] += worker._HOLD_TICK_S
+                if not getattr(held, "holding", False):  # none, or one that holds nothing
+                    continue
+                clock.now = ticked[0]
+                with session._moving:
+                    session._pass_on(held.tick())
+                    session._measure()
+
         with (
             mock.patch.object(worker, "time", SimpleNamespace(monotonic=clock)),
+            mock.patch.object(worker._Session, "_hold_ticker", lambda *_: threading.Event()),
             mock.patch.object(worker, "RepeatTrimmer", trimmer),
             mock.patch.object(worker, "ReconnectTrimmer", rejoiner),
             mock.patch.object(worker, "ClockJoiner", clock_joiner),
             mock.patch.object(worker, "LoopTrimmer", looper),
             mock.patch.object(
-                source_module, "open_source", lambda *_, **__: _ReplaySource(capture, clock)
+                source_module, "open_source", lambda *_, **__: _ReplaySource(capture, clock, ticks)
             ),
         ):
             session._ingest()

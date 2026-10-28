@@ -66,6 +66,8 @@ STATE_KEYS = {
     "reconnecting",
     "parts",  # 2.6: a kept buffer's runs, each with its time of day
     "secure",  # 2.7.1: its source's address is HTTPS
+    "restarts",  # 2.8.5: raw TS restarts, and those that took stay-live's ask
+    "steered",
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024
@@ -265,6 +267,37 @@ class StartTargetTests(unittest.TestCase):
         supervisor._receive(("hello", "http://127.0.0.1:1/t"))
         self.assertEqual([command[1] for command in sent if command[0] == "open"], ["l"])
         self.assertIn(("error", "p", "internal", engine_module._INTERNAL), relayed)
+
+    def test_set_junction_reaches_the_helper_and_never_closes(self):
+        # 2.8.5: stay-live's ask of a stream's next restart. The supervisor's fallback for
+        # an unknown command is a close: without its branch, the first ask closed the
+        # time-shift stream under VLC (seen live), and with no helper it said "closed".
+        import queue
+
+        from services.live import engine as engine_module
+
+        commands: queue.Queue = queue.Queue()
+        engine = engine_module.LiveEngine.__new__(engine_module.LiveEngine)
+        engine._shut, engine._sessions, engine._commands = False, {}, commands
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB, window={}
+        )
+        opened = commands.get_nowait()
+        engine.set_junction(sid, 2.5)
+        junction = commands.get_nowait()
+        self.assertEqual(junction, ("junction", sid, 2.5))
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        supervisor._records[sid] = engine_module._Record(command=opened, sent=True)
+        supervisor._commands.put(junction)
+        sent = []
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent, [junction])
+        self.assertFalse(supervisor._records[sid].closing)
+        relayed = []
+        supervisor._relay = relayed.append  # no helper: nothing to forward, nothing closed
+        supervisor._commands.put(junction)
+        supervisor._serve_without_helper()
+        self.assertEqual(relayed, [])
 
     def test_set_until_reaches_the_helper_and_never_closes(self):
         # 2.7: a server part's stop follows the live buffer's start; the supervisor's
