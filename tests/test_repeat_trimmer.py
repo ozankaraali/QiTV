@@ -265,6 +265,19 @@ class RepeatTrimmerTests(unittest.TestCase):
         self.assertEqual(trim.reason, "dropped")
         self.assertGreaterEqual(trim.dropped_s, 7.0)
 
+    def test_after_a_silence_it_did_not_make_up_a_run_goes_at_once(self):
+        # Seen live: 9.4 s of silence, VLC ran dry; a 2 s wait for a late burst froze it on.
+        silence = 9.0
+        resume = backlogged(20.0) + silence
+        runs = [
+            (range(20 * FPS), 900000, backlogged, FPS),
+            (range(20 * FPS, 35 * FPS), 0, after(resume, 0.0), FPS),
+        ]
+        run = Run(stream(runs))
+        (trim,) = run.trimmer.trims
+        self.assertEqual(trim.reason, "no burst")
+        self.assertLess(trim.released_at - trim.held_at, ts._TRIM_NO_BURST_S + 0.5)
+
     def test_a_stall_and_backlog_without_a_restart_are_never_held(self):
         silence = 3.0
         resume = backlogged(20.0) + silence

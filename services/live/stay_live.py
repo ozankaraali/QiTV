@@ -137,6 +137,7 @@ _JUMP_WAIT_S = 12.0  # far behind, waiting this long for one that helps (keyfram
 _GRAIN_S = 1.0  # no jump does better than the lag less this: the keyframes' grain, no drift
 # Junctions (2.8.5): a source that restarts often takes back what stay-live is behind.
 _JUNCTION_MIN_S = 1.0  # behind the target by more than this: asked of the next restart
+_JUNCTION_REF_S = 300.0  # ... the highest target of this long (behind it), not a lower one
 _TICK_S = 0.25  # the caller's update interval (what a first sample stands for)
 _MAX_DT = 1.0  # a longer gap between two updates counts as this long
 
@@ -520,6 +521,8 @@ class StayLive:
         # Set by the caller (2.8.5): the source restarts often, and the helper takes what a
         # restart is asked (`Decision.junction`): behind the target, that is how the lag goes.
         self.junctions = False
+        self._junction_ref = 0.0  # what an ask is measured from (`_junction`) ...
+        self._junction_ref_at = -math.inf  # ... since when
         self._last: Optional[float] = None  # the last update's time
         self._outside = 0.0  # seconds outside the band, on `_side`, counted while playing
         self._side = 0  # +1 behind the band, -1 ahead of it
@@ -736,7 +739,7 @@ class StayLive:
         self._own_shortfall(lag_s, dt)
         if self._reopened:
             return Decision(1.0)  # asked for: the caller reopens (and calls user_go_live)
-        junction = self._junction(lag_s)
+        junction = self._junction(lag_s, now)
         if self.rate_locked or self.background:
             # 1x: set by lock_rate() (never changed after) or by set_background() (a tile
             # without the focus); far behind, a jump changes no rate (the channel stay-live
@@ -756,13 +759,19 @@ class StayLive:
             return self._jump(now)
         return Decision(self._rate, junction=junction)
 
-    def _junction(self, lag: float) -> float:
+    def _junction(self, lag: float, now: float) -> float:
         """With `junctions`: what the next stream restart is to take back, the lag behind the
-        target (as high as the burst reported now would set it) when that is more than
-        `_JUNCTION_MIN_S`; else 0.0. Never while a stream just opened (its lag comes first)."""
+        target (as high as the burst reported now would set it, and the highest of the last
+        `_JUNCTION_REF_S`) when that is more than `_JUNCTION_MIN_S`; else 0.0. Never while a
+        stream just opened (its lag comes first). Seen live: the burst lowered the target
+        3.2 s in a lull between restarts, a cut taken from it left 9 s, the provider's next
+        silence was 9.4 s, and VLC ran dry; a cut is for good, the lag is not seen."""
+        centre = self._centre(1)
+        if centre >= self._junction_ref or now - self._junction_ref_at >= _JUNCTION_REF_S:
+            self._junction_ref, self._junction_ref_at = centre, now
         if not self.junctions or self.hold_reopen:
             return 0.0
-        behind = lag - self._centre(1)
+        behind = lag - self._junction_ref
         return behind if behind > _JUNCTION_MIN_S else 0.0
 
     def _own_shortfall(self, lag: float, dt: float) -> None:

@@ -3,6 +3,7 @@ import unittest
 
 from auto_target import AutoTarget
 
+from services.live import stay_live
 from services.live.stay_live import (
     AUTO,
     TARGETS,
@@ -1121,6 +1122,19 @@ class JunctionTests(unittest.TestCase):
         self.assertEqual({d.rate for d in decisions}, {1.0})
         self.assertFalse(any(d.reopen_live for d in decisions))
         self.assertEqual({d.junction for d in decisions}, {10.0})
+
+    def test_a_target_lowered_meanwhile_asks_no_deeper_for_five_minutes(self):
+        # Seen live: the burst lowered the target 3.2 s in a lull, the cut taken from it left
+        # less than the provider's next silence, and VLC ran dry.
+        stay, clock = live(10.0), Clock()
+        stay.junctions = True
+        stay.update(12.0, False, now=clock.tick())
+        stay.target = 6.8
+        self.assertAlmostEqual(stay.update(16.7, False, now=clock.tick()).junction, 6.7)
+        clock.tick(stay_live._JUNCTION_REF_S)
+        self.assertAlmostEqual(stay.update(16.7, False, now=clock.tick()).junction, 9.9)
+        stay.target = 12.0  # a rise counts at once
+        self.assertAlmostEqual(stay.update(16.7, False, now=clock.tick()).junction, 4.7)
 
     def test_within_a_second_of_the_target_nothing_is_asked(self):
         stay, clock = live(), Clock()
