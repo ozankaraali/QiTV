@@ -398,7 +398,7 @@ _PLAYED_MAX_S = 1.0  # a longer gap between two ticks counts as this much playin
 _LOG_STEP_S = 0.5  # a learned target that moved this much since it was last said is said
 # 2.8.5: a raw TS source that restarted within this long is steered at its restarts
 # (`StayLive.junctions`, the helper's `RepeatTrimmer.extra`), what it is asked in steps of this.
-_JUNCTION_RECENT_S = 120.0
+_JUNCTION_RECENT_S = 180.0
 _JUNCTION_STEP_S = 0.5
 _JUNCTION_CHANGE_S = 1.0  # an ask moves by this much at least (or to 0): no chatter
 
@@ -2287,16 +2287,18 @@ class LiveSession(QObject):
     def _follow_restarts(self, snapshot: Mapping[str, Any]) -> None:
         """2.8.5: the raw TS source's restarts, as the helper counts them. While one came
         within `_JUNCTION_RECENT_S` (and one before it), stay-live takes its lag back at the
-        next (`StayLive.junctions`). One that took what it was asked stepped the lag down:
-        the lag filter starts afresh, and what was asked was taken: the helper is told 0 (an
-        ask that came while that restart was held would otherwise stay for the next)."""
+        next (`StayLive.junctions`); a slower restart that took it counts too (the helper's
+        fallback, a minute after a quick one: two minutes without one were seen). One that
+        took what it was asked stepped the lag down: the lag filter starts afresh, and what
+        was asked was taken: the helper is told 0 (an ask that came while that restart was
+        held would otherwise stay for the next)."""
         if self._sid != self._junction_sid:  # another helper session: its own counts
             self._junction_sid, self._restarts, self._steered_cuts = self._sid, 0, 0
             self._junction_asked, self._restart_at = 0.0, -math.inf
         restarts = int(_number(snapshot.get("restarts")))
         steered = int(_number(snapshot.get("steered")))
         now = self._clock()
-        if restarts > self._restarts:
+        if restarts > self._restarts or steered > self._steered_cuts:
             self._restart_at = now
         if steered > self._steered_cuts:
             self._filter.reset()

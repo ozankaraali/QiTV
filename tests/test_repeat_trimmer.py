@@ -258,10 +258,13 @@ class RepeatTrimmerTests(unittest.TestCase):
                 if not dropped:
                     self.assertEqual(run.output, run.input)
 
-    def ask_before_restart(self, timed, extra: float, at: float):
-        """Feed `timed`, setting the trimmer's `extra` once the clock reaches `at`."""
+    def ask_before_restart(self, timed, extra: float, at: float, quick_at=None):
+        """Feed `timed`, setting the trimmer's `extra` once the clock reaches `at` (and with
+        `quick_at`, when its last quick restart came)."""
         run = Run([item for item in timed if item[0] < at], finish=False)
         run.trimmer.extra = extra
+        if quick_at is not None:
+            run.trimmer._quick_at = quick_at
         rest = [item for item in timed if item[0] >= at]
         k = 0
         while k < len(rest):
@@ -332,6 +335,29 @@ class RepeatTrimmerTests(unittest.TestCase):
         (trim,) = run.trimmer.trims
         self.assertEqual((trim.reason, trim.dropped_s, trim.extra_s), ("dropped", 4.0, 0.0))
         self.assertEqual((run.trimmer.extra, run.trimmer.quick), (3.0, 0))
+
+    def test_far_behind_long_after_a_quick_restart_a_slower_one_takes_the_ask(self):
+        # Asked 9 s (far behind), 3 s of silence before it: with no quick restart for
+        # `_TRIM_WAIT_S` it takes the ask less the 1.5 s of silence beyond a quick one's, held
+        # until R (4.75 s) and 7.5 s came, and dropped to its keyframe at 12 s. A quick one
+        # just before, a smaller ask or a longer silence: nothing (R alone, to 4 s).
+        far = ts._TRIM_FAR_S + 1.0
+        cases = (
+            (3.0, far, -ts._TRIM_WAIT_S, 12.0),
+            (3.0, far, -30.0, 4.0),
+            (3.0, ts._TRIM_FAR_S - 1.0, -ts._TRIM_WAIT_S, 4.0),
+            (ts._TRIM_SLOW_S + 1.0, far, -ts._TRIM_WAIT_S, 4.0),
+        )
+        for silence, extra, quick_ago, dropped in cases:
+            with self.subTest(silence=silence, extra=extra, quick_ago=quick_ago):
+                resume = backlogged(20.0) + silence
+                timed = stream(repeat_runs(5.0, silence, new=30.0))
+                run = self.ask_before_restart(timed, extra, resume, quick_at=resume + quick_ago)
+                (trim,) = run.trimmer.trims
+                taken = int(dropped > 4.0)
+                self.assertEqual((trim.reason, trim.dropped_s), ("dropped", dropped))
+                self.assertEqual((run.trimmer.steered, run.trimmer.quick), (taken, 0))
+                self.assertEqual(run.trimmer.extra, 0.0 if taken else extra)
 
     def test_what_stay_live_asks_waits_for_a_restart_that_can_take_it(self):
         # A reconnect takes nothing: what was asked stays for the next restart.

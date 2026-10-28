@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field, replace
 import logging
+import math
 import time
 from typing import Callable
 
@@ -86,6 +87,9 @@ _TRIM_RUNS = 2  # a repeat reaches this many runs back: one upstream's crossed a
 _TRIM_NO_BURST_S = 0.5  # a run held this long that brought no burst is let go (a splice at 1x)
 _TRIM_EXTRA_MAX_S = 15.0  # stay-live asks a restart to take at most this much more (`extra`)
 _TRIM_QUICK_S = 1.5  # ... of one this soon after the run before it last brought media
+_TRIM_FAR_S = 8.0  # ... or, asked this much (stay-live far behind) ...
+_TRIM_WAIT_S = 60.0  # ... and no quick one for this long, of a slower one ...
+_TRIM_SLOW_S = 6.0  # ... this soon (a run that comes in waves 5 s apart)
 _TRIMS_KEPT = 64  # the latest trims kept for a look (a memory bound)
 # ClockJoiner: a junction's packets wait at most this many for its first picture (a few
 # hundred milliseconds at 25 Mbit/s); then they pass on as they are.
@@ -1482,8 +1486,13 @@ class RepeatTrimmer:
     cushion more, or stay-live would not ask), a run without a burst included, and dropped
     to its last keyframe within. What was asked when a restart is confirmed is that
     restart's (an ask that comes or goes while it is held is the next one's), and taken once
-    (`extra` goes back to 0, `steered` counts it); a slower restart and a reconnect take
-    nothing (`quick` counts the restarts that could).
+    (`extra` goes back to 0, `steered` counts it); a slower restart takes nothing (`quick`
+    counts the restarts that could), but as a fallback: far behind (`_TRIM_FAR_S`) with no
+    quick restart for `_TRIM_WAIT_S`, one within `_TRIM_SLOW_S` takes the ask less its
+    silence beyond a quick one's (VLC played that much of its cushion meanwhile). The
+    provider once sent no quick restart for over two minutes, and stay-live jumped; a cut
+    at a slower restart skips new pictures where a quick one's drops a repeat, so it waits
+    first. A reconnect takes nothing.
 
     Every restart held passes on as a piece of its own: a new run starts between two pieces
     (`ClockJoiner` re-bases it there, the segmenter cuts it a segment). With `join_counters`
@@ -1545,7 +1554,9 @@ class RepeatTrimmer:
         self.quick = 0
         self.steered = 0
         self._quick_held = False  # the held restart came within `_TRIM_QUICK_S`
-        self._latched = 0.0  # what was asked when the held restart was confirmed
+        self._latched = 0.0  # what the held restart takes of what was asked at its confirm
+        self._asked = 0.0  # ... and what was asked then
+        self._quick_at: float | None = None  # when the last quick restart came
         self._noted_at: float | None = None  # when the run passed on last brought media
         self.trims: deque[Trim] = deque(maxlen=_TRIMS_KEPT)
         self.cut_short: deque[tuple[int, int]] = deque(maxlen=_TRIMS_KEPT)  # (offset, bytes)
@@ -1727,10 +1738,21 @@ class RepeatTrimmer:
         assert self._video_back is not None
         self._confirmed = True
         self._before = self._ahead  # as noted at an earlier read's end: before the silence
-        noted = self._noted_at
-        self._quick_held = noted is not None and self._held_at - noted <= _TRIM_QUICK_S + 1e-9
+        silence = math.inf if self._noted_at is None else self._held_at - self._noted_at
+        self._quick_held = silence <= _TRIM_QUICK_S + 1e-9
         # What stay-live asks now is this restart's: a later ask is the next one's.
-        self._latched = min(max(0.0, self.extra), _TRIM_EXTRA_MAX_S) if self._quick_held else 0.0
+        asked = self._asked = min(max(0.0, self.extra), _TRIM_EXTRA_MAX_S)
+        quick_at = -math.inf if self._quick_at is None else self._quick_at
+        if self._quick_held:
+            self._latched, self._quick_at = asked, self._held_at
+        elif (
+            asked >= _TRIM_FAR_S
+            and self._held_at - quick_at >= _TRIM_WAIT_S - 1e-9
+            and silence <= _TRIM_SLOW_S + 1e-9
+        ):
+            self._latched = asked - (silence - _TRIM_QUICK_S)  # the fallback (see the class)
+        else:
+            self._latched = 0.0
         self._runs.append(self._run_media())
         self._done += self._runs[-1]
         self._first = self._top = self._video_back
@@ -1809,7 +1831,7 @@ class RepeatTrimmer:
 
     def _extra(self) -> float:
         """What stay-live asked of this restart beyond R, as it was when the restart was
-        confirmed (0 without a baseline, or for a restart that was not quick)."""
+        confirmed (0 without a baseline, or for a slower restart but as the fallback)."""
         return 0.0 if self._before is None else self._latched
 
     def _due(self, now: float) -> str | None:
@@ -1905,7 +1927,7 @@ class RepeatTrimmer:
         self._noted_at = arrived  # (the run's last media as passed on)
         if taken:
             self.steered += 1
-            if min(max(0.0, self.extra), _TRIM_EXTRA_MAX_S) == self._latched:
+            if min(max(0.0, self.extra), _TRIM_EXTRA_MAX_S) == self._asked:
                 self.extra = 0.0  # taken: stay-live asks afresh (a newer ask is the next's)
         trim = Trim(
             self._held_pos, self._held_at, now, excess, dropped_s, tuple(ranges), reason, taken
@@ -1916,7 +1938,11 @@ class RepeatTrimmer:
             now - self._held_at,
             "-" if excess is None else f"{excess:.1f}",
             dropped_s,
-            f", {taken:.1f} s of it for stay-live" if taken else "",
+            (
+                f", {taken:.1f} s of it for stay-live{'' if self._quick_held else ' (slower)'}"
+                if taken
+                else ""
+            ),
             reason,
         )
 

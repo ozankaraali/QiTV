@@ -3217,14 +3217,28 @@ class SafeJumpTests(LiveSessionCase):
         feed.run(8.0)
         self.assertEqual(self.engine.junctions[-1], (sid, asked))
 
-    def test_restarts_two_minutes_ago_steer_no_more(self):
+    def test_restarts_three_minutes_ago_steer_no_more(self):
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
         feed.restarts = 2
-        feed.run(125.0)  # the last restart was seen at the start: over two minutes ago
+        feed.run(125.0)  # two minutes without a quick restart (seen live): still steering
+        self.assertTrue(self.live._stay.junctions)
+        feed.run(60.0)  # the last restart was seen at the start: over three minutes ago
         self.assertFalse(self.live._stay.junctions)
         at = self.far_behind(feed, 10.0)
         self.assertIsNotNone(at)  # a jump, as before
+
+    def test_a_slower_restart_that_took_the_ask_keeps_steering(self):
+        # The helper's fallback (no quick restart for a minute, far behind): its cut counts
+        # as a restart, so the next ask goes to the next restart, not to a jump.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
+        feed.restarts = 2
+        feed.run(150.0)
+        feed.steered = 1  # quick restarts unchanged
+        feed.push()
+        feed.run(60.0)
+        self.assertTrue(self.live._stay.junctions)
 
     def test_a_paused_restarting_source_asks_nothing(self):
         sid = self.start()
