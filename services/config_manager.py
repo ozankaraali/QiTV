@@ -469,6 +469,9 @@ class ConfigManager:
     desktop_pip = _config_property("desktop_pip", True, coerce=lambda value: value is not False)
     # 2.4.1, optional: where the user moved or resized that window, [x, y, width, height].
     desktop_pip_rect = _config_property("desktop_pip_rect", None)
+    # 2.8.5, optional (older builds ignore it): the window stays above other apps' windows
+    # (View → Keep on Top).
+    keep_on_top = _config_property("keep_on_top", False, coerce=lambda value: value is True)
     # 2.3, optional (older builds ignore it): the Picture panel's deinterlacing, every player's.
     deinterlace = _config_property(
         "deinterlace",

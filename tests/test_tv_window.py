@@ -514,6 +514,7 @@ class TVWindowTests(WindowCase):
                 ("Channel List", "Return"),
                 ("Fullscreen", "F"),
                 ("Mini Player", "Alt+P"),
+                ("Keep on Top", ""),  # 2.8.5: checkable
             ],
         )
         self.assertEqual(
@@ -770,6 +771,49 @@ class TVWindowTests(WindowCase):
         self.mini()
         self.assert_not_mini()
         self.assertTrue(wait_until(lambda: self.window.geometry().width() == 960))
+
+    def on_top(self) -> bool:
+        return bool(self.window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+
+    def test_keep_on_top_stays_above_other_windows_and_is_saved(self):
+        self.show()
+        action = self.window.menus.keep_on_top
+        self.assertTrue(action.isCheckable())
+        self.assertFalse(action.isChecked())
+        action.trigger()
+        self.assertTrue(self.on_top())
+        self.assertTrue(self.window.isVisible())
+        self.assertIs(self.window.config_manager.keep_on_top, True)
+        action.trigger()
+        self.assertFalse(self.on_top())
+        self.assertIs(self.window.config_manager.keep_on_top, False)
+
+    def test_the_mini_player_leaves_keep_on_top_as_chosen(self):
+        self.show()
+        action = self.window.menus.keep_on_top
+        action.trigger()
+        self.mini()
+        self.assert_mini()
+        self.mini()
+        self.assertTrue(self.on_top())
+        self.assertFalse(self.window.windowFlags() & Qt.WindowType.FramelessWindowHint)
+        # Turned off while the mini player shows: the mini player stays on top until it ends.
+        self.mini()
+        action.trigger()
+        self.assert_mini()
+        self.mini()
+        self.assert_not_mini()
+
+    def test_keep_on_top_chosen_in_fullscreen_applies_once_it_ends(self):
+        self.show()
+        QTest.keyClick(self.window, Qt.Key.Key_F)
+        self.assertTrue(wait_until(self.window.isFullScreen))
+        self.window.menus.keep_on_top.trigger()
+        self.assertTrue(self.window.isFullScreen())
+        self.assertFalse(self.on_top())
+        QTest.keyClick(self.window, Qt.Key.Key_F)
+        self.assertTrue(wait_until(lambda: not self.window.isFullScreen()))
+        self.assertTrue(wait_until(self.on_top))
 
     def test_mini_player_gives_a_maximized_window_back_maximized(self):
         self.show()

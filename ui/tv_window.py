@@ -797,6 +797,7 @@ class TVWindow(QMainWindow):
 
         self.menus.build()
         config_manager.apply_window_settings(WINDOW_NAME, self)
+        self._apply_keep_on_top()  # before the first show: only the flag
 
     # ---- the players --------------------------------------------------------------------------
 
@@ -1360,6 +1361,8 @@ class TVWindow(QMainWindow):
         state = self.windowState()
         fullscreen = Qt.WindowState.WindowFullScreen
         self.setWindowState(state | fullscreen if on else state & ~fullscreen)
+        if not on and self._fs_target is None:  # a platform that changes it at once
+            QTimer.singleShot(0, self, self._apply_keep_on_top)
 
     def _fullscreen_settled(self) -> None:
         """The platform reported a state (or never did): apply a request made meanwhile."""
@@ -1373,6 +1376,8 @@ class TVWindow(QMainWindow):
         queued, self._fs_queued = self._fs_queued, None
         if queued is not None and not self._closing:
             QTimer.singleShot(0, self, lambda: self._request_fullscreen(queued))
+        elif not self.isFullScreen():
+            QTimer.singleShot(0, self, self._apply_keep_on_top)  # a change made in fullscreen
 
     def toggle_mini_player(self) -> None:
         """Frameless and on top, a quarter of the screen wide in the bottom-right corner."""
@@ -1427,6 +1432,39 @@ class TVWindow(QMainWindow):
         self._drag = None
         self._dragged = self._click_on_release = False  # never swallow the next click
         self.setWindowFlags(flags)
+        self.setGeometry(geometry)
+        if maximized:
+            self.setWindowState(Qt.WindowState.WindowMaximized)
+        self._show_again()
+
+    def set_keep_on_top(self, on: bool) -> None:
+        """View → Keep on Top (2.8.5): the window stays above other apps' windows. Saved; the
+        mini player is on top anyway and leaves it as chosen; in fullscreen (on its way to
+        it, or back) the change waits for the window to be a normal one again."""
+        self.config_manager.keep_on_top = on
+        try:
+            self.config_manager.save_config()
+        except Exception as e:  # a locked config: kept for this run only
+            logger.warning("Couldn't save Keep on Top: %s", safe_message(e))
+        self._apply_keep_on_top()
+
+    def _apply_keep_on_top(self) -> None:
+        on = bool(getattr(self.config_manager, "keep_on_top", False))
+        hint = Qt.WindowType.WindowStaysOnTopHint
+        if self._mini_restore is not None:  # the flags the mini player ends with
+            geometry, flags, maximized = self._mini_restore
+            self._mini_restore = (geometry, flags | hint if on else flags & ~hint, maximized)
+            return
+        if self._closing or self._fs_target is not None or self.isFullScreen():
+            return
+        if bool(self.windowFlags() & hint) == on:
+            return
+        if not self.isVisible():
+            self.setWindowFlag(hint, on)  # before the first show: nothing to show again
+            return
+        maximized = self.isMaximized()
+        geometry = self.normalGeometry() if maximized else self.geometry()
+        self.setWindowFlag(hint, on)
         self.setGeometry(geometry)
         if maximized:
             self.setWindowState(Qt.WindowState.WindowMaximized)
