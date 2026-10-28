@@ -559,6 +559,7 @@ class _Session:
         self._rejoiner: ReconnectTrimmer | None = None
         # Raw TS only: drops what a restart inside the connection sends twice.
         self._trimmer: RepeatTrimmer | None = None
+        self._junction = 0.0  # what stay-live asks the next restart to take (`set_junction`)
         # Raw TS only: drops what a provider replays while its own source is down.
         self._loop_trimmer: LoopTrimmer | None = None
         # Re-bases a restarted run's timestamps (raw TS) and a clock that leaps ahead (raw TS
@@ -952,6 +953,7 @@ class _Session:
             trimmer = self._trimmer = RepeatTrimmer(
                 program=program, clock=time.monotonic, join_counters=self._clock_joiner is None
             )
+            trimmer.extra = self._junction  # asked before the source opened
             self._loop_trimmer = LoopTrimmer(program=program, clock=time.monotonic)
         else:
             # A clock that leaps ahead inside a segment is re-based too: each segment's EXTINF
@@ -1364,6 +1366,14 @@ class _Session:
             self._apply(self._segmenter.feed(held))
         self._apply(self._segmenter.finish())
 
+    def set_junction(self, seconds: float) -> None:
+        """Stay-live asks the next restart in the stream to take `seconds` more than its
+        repeat (2.8.5, `RepeatTrimmer.extra`); 0 asks nothing."""
+        self._junction = max(0.0, float(seconds))
+        trimmer = self._trimmer
+        if trimmer is not None:
+            trimmer.extra = self._junction
+
     def set_until(self, seq: int) -> None:
         """A server part's stop moves to media sequence `seq` (2.7, "until")."""
         window = self._start.get("window")
@@ -1468,6 +1478,7 @@ class _Session:
             return
         self._last_notify = now
         ring, timeline, source = self._ring, self._timeline, self._source
+        trimmer = self._trimmer
         # No ring yet while the source opens: only its answer can be news then.
         oldest = ring.oldest_seq if ring is not None else None
         recorder = self._recorder
@@ -1528,6 +1539,10 @@ class _Session:
             "reconnecting": self._reconnecting,
             # 2.6: the buffer's parts, [first_seq, start, wall] each (`services.live.parts`).
             "parts": [[p.first_seq, p.start, p.wall] for p in timeline.parts()],
+            # 2.8.5, raw TS: quick restarts in the connection so far (those stay-live's asks
+            # go at), and those that took some of what it asked (`RepeatTrimmer.extra`).
+            "restarts": trimmer.quick if trimmer is not None else 0,
+            "steered": trimmer.steered if trimmer is not None else 0,
         }
         if source is not None:
             snapshot["secure"] = bool(getattr(source, "secure", False))  # 2.7.1: over HTTPS
@@ -1805,6 +1820,17 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.set_until(command[2])
+            elif name == "junction":  # 2.8.5: what stay-live asks the next restart to take
+                if (
+                    len(command) != 3
+                    or not isinstance(command[1], str)
+                    or type(command[2]) is not float
+                    or not 0.0 <= command[2] < 3600.0
+                ):
+                    raise ValueError("a junction needs a session and seconds")
+                session = self._sessions.get(command[1])
+                if session is not None:
+                    session.set_junction(command[2])
             elif name == "record_start":
                 self._record(command)
             elif name == "record_stop":

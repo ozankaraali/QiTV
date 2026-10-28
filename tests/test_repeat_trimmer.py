@@ -258,6 +258,82 @@ class RepeatTrimmerTests(unittest.TestCase):
                 if not dropped:
                     self.assertEqual(run.output, run.input)
 
+    def ask_before_restart(self, timed, extra: float, at: float):
+        """Feed `timed`, setting the trimmer's `extra` once the clock reaches `at`."""
+        run = Run([item for item in timed if item[0] < at], finish=False)
+        run.trimmer.extra = extra
+        rest = [item for item in timed if item[0] >= at]
+        k = 0
+        while k < len(rest):
+            now = rest[k][0]
+            chunk = []
+            while k < len(rest) and rest[k][0] == now:
+                chunk.append(rest[k][1])
+                k += 1
+            run.now = now
+            run._take(run.trimmer.feed(b"".join(chunk)))
+        run._take(run.trimmer.finish())
+        return run
+
+    def test_stay_live_s_extra_is_taken_at_the_next_restart(self):
+        # R reads 4.75 s; stay-live is 3 s behind: the run is held until it brought 7.75 s
+        # and dropped to its keyframe at 7 s, 2.25 s of it for stay-live. Asked once.
+        resume = backlogged(20.0) + 1.0
+        run = self.ask_before_restart(stream(repeat_runs(5.0, 1.0)), 3.0, resume)
+        (trim,) = run.trimmer.trims
+        self.assertEqual((trim.reason, trim.dropped_s), ("dropped", 7.0))
+        self.assertAlmostEqual(trim.extra_s, 7.0 - (5.0 - ts._TRIM_MARGIN_S), delta=0.05)
+        self.assertGreater(trim.released_at - trim.held_at, 1.7)  # until 7.75 s had come
+        self.assertEqual((run.trimmer.extra, run.trimmer.steered, run.trimmer.quick), (0.0, 1, 1))
+        self.assertEqual(video_pts(run.output)[20 * FPS], 7 * CLOCK)
+        self.assertEqual(cc_breaks(run.output), 0)
+
+    def test_a_run_without_a_burst_is_held_for_what_stay_live_asks(self):
+        # A quick splice at real time would go on untouched; asked for 3 s, it is held until
+        # 3 s came and dropped to its keyframe at 3 s.
+        silence = 1.0
+        resume = backlogged(20.0) + silence
+        runs = [
+            (range(20 * FPS), 900000, backlogged, FPS),
+            (range(20 * FPS, 35 * FPS), 0, after(resume, silence), FPS),
+        ]
+        run = self.ask_before_restart(stream(runs), 3.0, resume)
+        (trim,) = run.trimmer.trims
+        self.assertEqual((trim.reason, trim.dropped_s, trim.extra_s), ("dropped", 3.0, 3.0))
+        self.assertEqual(video_pts(run.output)[20 * FPS], 3 * CLOCK)
+
+    def test_an_ask_that_changes_while_a_restart_is_held_is_the_next_ones(self):
+        # Asked 3 s when the restart came: it takes them though the ask went to 0 meanwhile.
+        timed = stream(repeat_runs(5.0, 1.0))
+        resume = backlogged(20.0) + 1.0
+        run = Run([item for item in timed if item[0] < resume], finish=False)
+        run.trimmer.extra = 3.0
+        for at, packet in [item for item in timed if item[0] >= resume]:
+            run.now = at
+            run._take(run.trimmer.feed(packet))
+            if run.trimmer.holding and run.trimmer._confirmed:
+                run.trimmer.extra = 0.0  # stay-live took it back meanwhile
+        (trim,) = run.trimmer.trims
+        self.assertEqual(trim.dropped_s, 7.0)
+        self.assertAlmostEqual(trim.extra_s, 7.0 - (5.0 - ts._TRIM_MARGIN_S), delta=0.05)
+
+    def test_a_slow_restart_takes_nothing_of_what_stay_live_asks(self):
+        # Three seconds of silence before it: the provider measured repeats nothing there.
+        resume = backlogged(20.0) + 3.0
+        run = self.ask_before_restart(stream(repeat_runs(5.0, 3.0)), 3.0, resume)
+        (trim,) = run.trimmer.trims
+        self.assertEqual((trim.reason, trim.dropped_s, trim.extra_s), ("dropped", 4.0, 0.0))
+        self.assertEqual((run.trimmer.extra, run.trimmer.quick), (3.0, 0))
+
+    def test_what_stay_live_asks_waits_for_a_restart_that_can_take_it(self):
+        # A reconnect takes nothing: what was asked stays for the next restart.
+        timed = stream(repeat_runs(5.0, 1.0))
+        restart = next(k for k, (at, _) in enumerate(timed) if at > backlogged(20.0))
+        run = Run(timed[:restart], finish=False)
+        run.trimmer.extra = 2.0
+        run._take(run.trimmer.discontinuity())
+        self.assertEqual((run.trimmer.extra, run.trimmer.steered), (2.0, 0))
+
     def test_the_hold_is_capped_in_time(self):
         # The new run comes at three times real time and never settles: released at the cap.
         resume = backlogged(20.0) + 1.0

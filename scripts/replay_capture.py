@@ -671,6 +671,8 @@ class _Untrimmed:
     def __init__(self, **_: Any) -> None:
         self.trims: list[Trim] = []
         self.cut_short: list[tuple[int, int]] = []
+        self.extra = 0.0  # stay-live's ask: nothing takes it
+        self.quick = self.steered = 0
 
     def feed(self, chunk: bytes) -> list[bytes]:
         return [chunk]

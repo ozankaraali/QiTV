@@ -396,6 +396,11 @@ _LAND_OFFSET_MAX_S = 1.5  # ... up to this much either way
 _CACHING_S = 0.3
 _PLAYED_MAX_S = 1.0  # a longer gap between two ticks counts as this much playing
 _LOG_STEP_S = 0.5  # a learned target that moved this much since it was last said is said
+# 2.8.5: a raw TS source that restarted within this long is steered at its restarts
+# (`StayLive.junctions`, the helper's `RepeatTrimmer.extra`), what it is asked in steps of this.
+_JUNCTION_RECENT_S = 120.0
+_JUNCTION_STEP_S = 0.5
+_JUNCTION_CHANGE_S = 1.0  # an ask moves by this much at least (or to 0): no chatter
 
 
 def segment_floor_from(value: str) -> bool:
@@ -586,6 +591,7 @@ class LiveSession(QObject):
         # The mean lag over the source's arrival rhythm, and the lag as shown (2.1).
         self._filter = LagFilter()
         self._settled = SettledLag()
+        self._forget_restarts()  # 2.8.5: the source's restarts, what its helper was asked
         self._was_stalled = False  # the source had stalled at the last tick
         # Rate health: VLC's progress at stay-live's rates other than 1x (see _check_rate).
         self._health = RateHealth()
@@ -808,6 +814,7 @@ class LiveSession(QObject):
         self._edge_seen = None
         self._reopened_at = -math.inf
         self._filter = LagFilter()  # a new source: its burst too is known afresh
+        self._forget_restarts()
         self._settled.reset()
         self._was_stalled = False
         self._rewound = False
@@ -2078,7 +2085,7 @@ class LiveSession(QObject):
             self._direct_retries = 0
             self.failed.emit(message)
         else:
-            self._on_interrupted()
+            self._on_interrupted(message or "an error")
 
     def _retry_direct(self) -> None:
         if self._phase is _Phase.DIRECT:
@@ -2118,9 +2125,10 @@ class LiveSession(QObject):
             # (A reopen still to be made, or the RAM ring's next state, opens in software.)
             self._reopen_at_position()
 
-    def _on_interrupted(self) -> None:
+    def _on_interrupted(self, why: str = "it ended") -> None:
         if self._phase is not _Phase.PIPELINE:
             return
+        _LOG.debug("VLC's time-shift stream stopped (%s).", why)
         if self._opening:
             self._retry = _Retry.RESUME  # failed inside play(): handled on the next tick
             return
@@ -2243,7 +2251,12 @@ class LiveSession(QObject):
                 stalled or self._playback.state() is PlaybackState.BUFFERING or self._clock_frozen()
             )
             self._learn_landing(lag, disturbed=buffering)
+            self._follow_restarts(snapshot)
             decision = self._stay.update(lag, buffering, now=self._clock())
+            if self._stay.mode is not Mode.LIVE:
+                self._ask_junction(0.0)
+            elif not buffering and not self._was_stalled:
+                self._ask_junction(decision.junction)
             self._set_rate(decision.rate)
             if decision.reopen_live:
                 _LOG.debug(
@@ -2258,9 +2271,63 @@ class LiveSession(QObject):
         else:
             self._land_check = None
             self._lost_since = None
+            self._ask_junction(0.0)
             if not live and not self._paused:
                 self._no_live_edge(snapshot, position)
         self._emit_timeline()
+
+    def _forget_restarts(self) -> None:
+        """A new source (2.8.5): its restarts and what its helper session was asked start
+        afresh."""
+        self._junction_sid: Optional[str] = None
+        self._restarts = self._steered_cuts = 0  # the helper's counts as last seen
+        self._restart_at = -math.inf  # when the source last restarted, by this clock
+        self._junction_asked = 0.0  # what the helper was last asked (`set_junction`)
+
+    def _follow_restarts(self, snapshot: Mapping[str, Any]) -> None:
+        """2.8.5: the raw TS source's restarts, as the helper counts them. While one came
+        within `_JUNCTION_RECENT_S` (and one before it), stay-live takes its lag back at the
+        next (`StayLive.junctions`). One that took what it was asked stepped the lag down:
+        the lag filter starts afresh, and what was asked was taken (the helper asks nothing
+        more until told)."""
+        if self._sid != self._junction_sid:  # another helper session: its own counts
+            self._junction_sid, self._restarts, self._steered_cuts = self._sid, 0, 0
+            self._junction_asked, self._restart_at = 0.0, -math.inf
+        restarts = int(_number(snapshot.get("restarts")))
+        steered = int(_number(snapshot.get("steered")))
+        now = self._clock()
+        if restarts > self._restarts:
+            self._restart_at = now
+        if steered > self._steered_cuts:
+            self._filter.reset()
+            self._stay.absorb()
+            self._junction_asked = 0.0
+        self._restarts, self._steered_cuts = restarts, steered
+        self._stay.junctions = (
+            snapshot.get("hls") is not True
+            and restarts >= 2
+            and now - self._restart_at <= _JUNCTION_RECENT_S
+        )
+
+    def _ask_junction(self, seconds: float) -> None:
+        """Ask the helper's next restart to take `seconds` back (2.8.5), in steps of
+        `_JUNCTION_STEP_S`, a move of `_JUNCTION_CHANGE_S` at least (or to 0). The caller
+        asks only while VLC plays and the source sends: this provider falls silent before
+        each restart, and what was asked stands through it (a wait would have taken it back
+        at the very restart meant to take it). Nothing new while the lag filter has not
+        settled (right after a step its mean still moves: what it reads would be asked
+        twice); 0 (leaving live, the lag back in the band) goes at once."""
+        if seconds and not self._filter.settled(self._clock()):
+            return
+        seconds = math.floor(max(0.0, seconds) / _JUNCTION_STEP_S) * _JUNCTION_STEP_S
+        sid = self._sid
+        if sid is None or abs(seconds - self._junction_asked) < 1e-9:
+            return
+        if seconds and abs(seconds - self._junction_asked) < _JUNCTION_CHANGE_S - 1e-9:
+            return
+        self._junction_asked = seconds
+        _LOG.debug("Stay-live asks the stream's next quick restart to take %.1f s back.", seconds)
+        self._engine.set_junction(sid, seconds)
 
     def _learn_landing(self, lag: float, *, disturbed: bool) -> None:
         """A Go live or a jump picked from a settled lag filter's mean (`_start_lags`,
