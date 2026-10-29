@@ -2243,7 +2243,7 @@ class AdoptTests(unittest.TestCase):
         self.assertTrue(all(0 < step <= 2 * (CLOCK // 25) for step in steps), sorted(set(steps)))
 
     def test_a_taken_back_buffer_knows_its_program_map(self):
-        # 2.8: the audio relabeler is primed as the segmenter is: a new run whose map changed
+        # 2.8: the codec relabeler is primed as the segmenter is: a new run whose map changed
         # under the same version is renumbered, so VLC does not ignore it.
         directory, before, _, body = self.kept_folder()
         self.assertEqual(pmt_versions(body)[:1], [0])

@@ -3487,9 +3487,11 @@ def _shift_packet(buf: bytearray, at: int, offset: int) -> None:
             _write_timestamp(buf, start + 14, dts)
 
 
-_RELABEL_PES = 3  # audio PES starts in a row of a codec the PMT misnames before it is renamed
+_RELABEL_PES = 3  # PES starts in a row of a codec the PMT misnames before it is renamed
 _RELABEL_HOLD_PACKETS = 64  # a PMT section spanning packets is held this long at most
 _CODEC_FAMILY = {0x03: "mpeg", 0x04: "mpeg", 0x0F: "aac", 0x11: "latm", 0x81: "ac3", 0x87: "ac3"}
+_CODEC_FAMILY.update({0x1B: "h264", _HEVC: "hevc"})
+_VIDEO_FAMILIES = ("h264", "hevc")
 
 
 def _sniffed_type(es: bytes) -> int | None:
@@ -3509,17 +3511,37 @@ def _sniffed_type(es: bytes) -> int | None:
     return None
 
 
-class AudioRelabeler:
-    """Renames an audio stream's codec in the PMT when its PES carry another one.
+def _sniffed_video(es: bytes) -> int | None:
+    """The stream type a video PES's first bytes show: 0x1B for an H.264 access unit delimiter
+    (NAL 0x09 and its primary_pic_type byte) or sequence parameter set, else 0x24 for an HEVC
+    access unit delimiter, VPS or SPS (layer 0); None for neither. H.264 counts first: its NAL
+    header bytes there are odd, which no single-layer HEVC NAL's is, while one provider's H.264
+    carries an HEVC access unit delimiter in front of each picture's own."""
+    found = None
+    at = es.find(b"\x00\x00\x01")
+    while 0 <= at and at + 5 <= len(es):
+        b0, b1 = es[at + 3], es[at + 4]
+        if (b0 == 0x09 and b1 & 0x1F == 0x10) or (b0 & 0x9F == 0x07 and b0 & 0x60):
+            return 0x1B
+        if b0 in (0x40, 0x42, 0x46) and 1 <= b1 <= 7:
+            found = _HEVC
+        at = es.find(b"\x00\x00\x01", at + 3)
+    return found
+
+
+class CodecRelabeler:
+    """Renames a stream's codec in the PMT when its PES carry another one.
 
     One provider alternates sources behind a channel and sometimes keeps the old source's PMT:
     it declares MPEG audio (stream_type 0x03) while the PES carry ADTS AAC, and VLC decodes
-    them with the MPEG audio decoder: silence (ffprobe too). At each PES start of an audio PID
-    the PMT lists (MPEG audio, AAC, LATM, AC-3), the payload's first bytes tell the codec
-    (`_sniffed_type`; anything else counts for nothing). After `_RELABEL_PES` PES in a row of a
-    codec the PMT does not declare, every following PMT names that one (0x0F, 0x03 or 0x04,
-    0x81) with its CRC32 recomputed; the same way back once the PES carry what the provider
-    declares again. A renaming is forgotten when the provider's PMT declares another type for
+    them with the MPEG audio decoder: silence (ffprobe too). Another's channel switched from
+    HEVC to H.264 and kept declaring HEVC (0x24): no picture decodes, and the last one stays on
+    screen. At each PES start of a PID the PMT lists as MPEG audio, AAC, LATM, AC-3, H.264 or
+    HEVC, the payload's first bytes tell the codec (`_sniffed_type`, `_sniffed_video`; anything
+    else counts for nothing). After `_RELABEL_PES` PES in a row of a codec the PMT does not
+    declare, every following PMT names that one (0x0F, 0x03 or 0x04, 0x81; 0x1B or 0x24) with
+    its CRC32 recomputed; the same way back once the PES carry what the provider declares
+    again. A renaming is forgotten when the provider's PMT declares another type for
     that PID, names another PMT PID, or a reconnect comes (`reconnect()`): its PMT is trusted
     again until its PES disagree anew. From the first renaming on, the version_number is this
     stage's: the last one written plus one whenever the section written differs from the last
@@ -3542,8 +3564,8 @@ class AudioRelabeler:
         self._buf = b""  # a partial packet, or a PMT section that spans packets and the rest
         self._pmt_pid: int | None = None
         self._program: int | None = None  # the program the PAT lists first
-        self._declared: dict[int, int] = {}  # audio PID -> the stream type its PMT declares
-        self._renamed: dict[int, int] = {}  # audio PID -> the stream type written instead
+        self._declared: dict[int, int] = {}  # PID -> the stream type its PMT declares
+        self._renamed: dict[int, int] = {}  # PID -> the stream type written instead
         self._streak: dict[int, tuple[int, int]] = {}  # PID -> (sniffed type, PES in a row)
         self._managed = False  # a renaming came: the version_number is this stage's
         self._version: int | None = None  # the last version_number written
@@ -3611,8 +3633,8 @@ class AudioRelabeler:
                 return
 
     def _on_pmt(self, data: bytes, off: int) -> list[tuple[int, int]] | None:
-        """Read the PMT section starting at `off`: its audio streams' declared types, and the
-        bytes to change ((offset in `data`, value)); None while it ends beyond `data`."""
+        """Read the PMT section starting at `off`: its streams' declared types, and the bytes
+        to change ((offset in `data`, value)); None while it ends beyond `data`."""
         places = _section_places(data, off, self._pmt_pid)
         if places is None:
             return None
@@ -3661,10 +3683,11 @@ class AudioRelabeler:
 
     def _sniff(self, pid: int, data: bytes, off: int) -> None:
         pkt = data[off : off + PACKET]
-        found = _sniffed_type(pkt[_pes_start(pkt)[2] :])
+        declared = self._declared[pid]
+        video = _CODEC_FAMILY[declared] in _VIDEO_FAMILIES
+        found = (_sniffed_video if video else _sniffed_type)(pkt[_pes_start(pkt)[2] :])
         if found is None:
             return
-        declared = self._declared[pid]
         written = self._renamed.get(pid, declared)
         if _CODEC_FAMILY[found] == _CODEC_FAMILY[written]:
             self._streak.pop(pid, None)
@@ -3683,7 +3706,11 @@ class AudioRelabeler:
         to = self._renamed.get(pid, declared)
         self.renamings.append((pid, written, to))
         logger.info(
-            "Audio PID %#x carries stream type %#x, not %#x: its PMT is renamed.", pid, to, written
+            "%s PID %#x carries stream type %#x, not %#x: its PMT is renamed.",
+            "Video" if video else "Audio",
+            pid,
+            to,
+            written,
         )
 
 

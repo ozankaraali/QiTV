@@ -56,7 +56,7 @@ Commands (parent to helper):
   ("shutdown", its owner gone) keeps v2 folders for the next helper; "close" removes them;
 - `("adopt", sid, dir_name, max_bytes)` (2.6): take a kept folder back (a v2 folder a helper
   that went down kept, `services.live.ring.DiskRing.adopt`) as parked session `sid`: its ring,
-  timeline and parts as they were, its segmenter, audio relabeler (2.8) and clock joiner primed
+  timeline and parts as they were, its segmenter, codec relabeler (2.8) and clock joiner primed
   with its newest segment so a resume goes on after it, and (2.8) every disk ring fitted into
   the disk amount at once. Answered by a state holding every span, then
   `("parked", sid)` and `("kept", sid, label, where)`; `("unkept", sid)` when it cannot be
@@ -145,8 +145,8 @@ from typing import TYPE_CHECKING, Any
 
 from services.live.timeline import Span, StartQuality, Timeline
 from services.live.ts import (
-    AudioRelabeler,
     ClockJoiner,
+    CodecRelabeler,
     Data,
     Event,
     LoopTrimmer,
@@ -553,7 +553,7 @@ class _Session:
         self._ended = False
         self._segmenter = Segmenter()
         # Renames an audio stream the PMT misnames, on the bytes' way to the segmenter.
-        self._relabeler = AudioRelabeler()
+        self._relabeler = CodecRelabeler()
         # 2.8: a resumed run joins the earlier one after this HLS media sequence (its first
         # open only).
         self._join_after: int | None = None
@@ -810,7 +810,7 @@ class _Session:
             joiner.feed(last)
             joiner.finish()
             # 2.8: the program map VLC saw last, so a new run's map that changed under the same
-            # version is renumbered (`AudioRelabeler`), as after a park in one helper.
+            # version is renumbered (`CodecRelabeler`), as after a park in one helper.
             self._relabeler.feed(last)
             self._relabeler.flush()
         except Exception as error:  # a resume then starts its clock afresh
@@ -1353,7 +1353,7 @@ class _Session:
                 self._to_segmenter(tail)
 
     def _to_segmenter(self, data: bytes) -> None:
-        """Bytes for the segmenter, through the audio relabeler."""
+        """Bytes for the segmenter, through the codec relabeler."""
         self._apply(self._segmenter.feed(self._relabeler.feed(data)))
 
     def _discontinuity(self) -> None:

@@ -1,16 +1,54 @@
-"""Tests for AudioRelabeler (services/live/ts.py): a PMT that names an audio stream's codec
-wrongly is renamed after the PES, on synthetic streams (`ts_fixtures.make_stream`, whose sound
-is ADTS AAC that its PMT declares as such, stream type 0x0F)."""
+"""Tests for CodecRelabeler (services/live/ts.py): a PMT that names a stream's codec wrongly
+is renamed after the PES, on synthetic streams (`ts_fixtures.make_stream`, whose sound is ADTS
+AAC that its PMT declares as such, stream type 0x0F, and whose pictures are H.264 access units
+it declares as `video_type`, 0x1B unless told otherwise)."""
 
 from __future__ import annotations
 
 import unittest
 
 from services.live import ts
-from services.live.ts import PACKET, AudioRelabeler
-from tests.ts_fixtures import AUDIO_PID, PMT_PID, VIDEO_PID, crc32_mpeg, make_stream
+from services.live.ts import PACKET, CodecRelabeler
+from tests.ts_fixtures import (
+    AUDIO_PID,
+    PMT_PID,
+    VIDEO_PID,
+    crc32_mpeg,
+    h264_access_unit,
+    make_stream,
+    pat,
+    pes_packets,
+    pmt,
+)
 
 MPEG_AUDIO, AAC = 0x03, 0x0F
+H264, HEVC = 0x1B, 0x24
+HEVC_AUD = b"\x00\x00\x00\x01\x46\x01\x50"
+
+
+def hevc_access_unit(key: bool) -> bytes:
+    """An HEVC picture: its access unit delimiter, then VPS, SPS, PPS and an IDR slice when
+    `key`, else a trailing slice."""
+    nal = lambda head, size: b"\x00\x00\x00\x01" + head + b"\x55" * size  # noqa: E731
+    au = HEVC_AUD
+    if key:
+        au += nal(b"\x40\x01", 20) + nal(b"\x42\x01", 30) + nal(b"\x44\x01", 8)
+        return au + nal(b"\x26\x01", 2000)
+    return au + nal(b"\x02\x01", 1500)
+
+
+def pictures(access_unit, video_type: int, frames: int = 30) -> bytes:
+    """`frames` pictures (a key one every 10) under a PMT declaring them as `video_type`, its
+    PAT and PMT before every fifth."""
+    out, cc, psi_cc = [], 0, 0
+    for i in range(frames):
+        if i % 5 == 0:
+            out += [pat(cc=psi_cc), pmt(video_type=video_type, audio_pids=(), cc=psi_cc)]
+            psi_cc = (psi_cc + 1) & 0x0F
+        pts = 900000 + i * 3600
+        ps, cc = pes_packets(VIDEO_PID, 0xE0, access_unit(i % 10 == 0), pts, cc_start=cc, pcr=pts)
+        out += ps
+    return b"".join(out)
 
 
 def packets(data: bytes) -> list[bytes]:
@@ -21,8 +59,8 @@ def pid_of(p: bytes) -> int:
     return ((p[1] & 0x1F) << 8) | p[2]
 
 
-def declared(data: bytes, extra_streams: int = 0) -> list[tuple[int, int, bool]]:
-    """(audio stream type, version, CRC intact) of each whole PMT section in `data`."""
+def declared(data: bytes, pid: int = AUDIO_PID) -> list[tuple[int, int, bool]]:
+    """(`pid`'s stream type, version, CRC intact) of each whole PMT section in `data`."""
     out, section = [], b""
     for p in packets(data):
         if pid_of(p) != PMT_PID:
@@ -36,7 +74,7 @@ def declared(data: bytes, extra_streams: int = 0) -> list[tuple[int, int, bool]]
             body = section[: 3 + (((section[1] & 0x0F) << 8) | section[2])]
             i, end, audio = 12 + (((body[10] & 0x0F) << 8) | body[11]), len(body) - 4, None
             while i + 5 <= end:
-                if ((body[i + 1] & 0x1F) << 8) | body[i + 2] == AUDIO_PID:
+                if ((body[i + 1] & 0x1F) << 8) | body[i + 2] == pid:
                     audio = body[i]
                 i += 5 + (((body[i + 3] & 0x0F) << 8) | body[i + 4])
             out.append((audio, (body[5] >> 1) & 0x1F, crc32_mpeg(body) == 0))
@@ -97,14 +135,14 @@ def sound_from(data: bytes, first: int, sync: bytes) -> bytes:
     return b"".join(out)
 
 
-def relabelled(data: bytes, chunk: int | None = None) -> tuple[bytes, AudioRelabeler]:
-    relabeler = AudioRelabeler()
+def relabelled(data: bytes, chunk: int | None = None) -> tuple[bytes, CodecRelabeler]:
+    relabeler = CodecRelabeler()
     step = chunk or len(data)
     out = b"".join(relabeler.feed(data[at : at + step]) for at in range(0, len(data), step))
     return out + relabeler.flush(), relabeler
 
 
-class AudioRelabelerTests(unittest.TestCase):
+class CodecRelabelerTests(unittest.TestCase):
     def test_a_stream_its_pmt_names_right_passes_untouched(self):
         for data in (make_stream(4), labelled(sound_from(make_stream(4), 0, b"\xff\xfd"), 3)):
             out, relabeler = relabelled(data, chunk=1000)
@@ -176,7 +214,7 @@ class AudioRelabelerTests(unittest.TestCase):
         # After a reconnect the stale PMT passes as declared (another version than the renamed
         # one, so VLC re-creates the stream), and three PES later it is renamed again.
         data = labelled(make_stream(3), MPEG_AUDIO)
-        relabeler = AudioRelabeler()
+        relabeler = CodecRelabeler()
         out = relabeler.feed(data) + relabeler.flush()
         relabeler.reconnect()
         out += relabeler.feed(data) + relabeler.flush()
@@ -269,9 +307,50 @@ class AudioRelabelerTests(unittest.TestCase):
         self.assertEqual(out, data)
         self.assertEqual(list(relabeler.renamings), [])
 
+    def test_h264_declared_as_hevc_is_renamed_after_three_pes(self):
+        # A channel that switched from HEVC to H.264 and kept declaring HEVC: no picture
+        # decodes (VLC keeps the last one on screen) until its PMT says H.264.
+        data = make_stream(4, video_type=HEVC)
+        for chunk in (None, 1000, 100):
+            with self.subTest(chunk=chunk):
+                out, relabeler = relabelled(data, chunk)
+                self.assertEqual(len(out), len(data))
+                tables = declared(out, VIDEO_PID)
+                self.assertEqual(tables[0], (HEVC, 0, True))  # before three PES came
+                self.assertEqual(set(tables[1:]), {(H264, 1, True)})
+                self.assertEqual(list(relabeler.renamings), [(VIDEO_PID, HEVC, H264)])
+                self.assertEqual({t[0] for t in declared(out)}, {AAC})  # the sound as it came
+                changed = {pid_of(a) for a, b in zip(packets(data), packets(out)) if a != b}
+                self.assertEqual(changed, {PMT_PID})
+
+    def test_h264_behind_a_stray_hevc_delimiter_is_still_h264(self):
+        # The provider puts an HEVC access unit delimiter in front of each H.264 picture's own.
+        data = pictures(lambda key: HEVC_AUD + h264_access_unit(key), HEVC)
+        out, relabeler = relabelled(data, chunk=1000)
+        self.assertEqual(declared(out, VIDEO_PID)[-1], (H264, 1, True))
+        self.assertEqual(list(relabeler.renamings), [(VIDEO_PID, HEVC, H264)])
+
+    def test_hevc_declared_as_h264_is_renamed_and_true_hevc_passes(self):
+        out, relabeler = relabelled(pictures(hevc_access_unit, H264), chunk=1000)
+        self.assertEqual(declared(out, VIDEO_PID)[-1], (HEVC, 1, True))
+        self.assertEqual(list(relabeler.renamings), [(VIDEO_PID, H264, HEVC)])
+        for access_unit, video_type in ((hevc_access_unit, HEVC), (h264_access_unit, H264)):
+            data = pictures(access_unit, video_type)
+            out, relabeler = relabelled(data, chunk=1000)
+            self.assertEqual(out, data)
+            self.assertEqual(list(relabeler.renamings), [])
+
+    def test_pictures_without_a_delimiter_or_parameter_set_count_for_nothing(self):
+        # Slices alone tell neither codec apart: the PMT is trusted.
+        slices = lambda key: b"\x00\x00\x00\x01\x41" + b"\x55" * 1500  # noqa: E731
+        data = pictures(slices, HEVC)
+        out, relabeler = relabelled(data, chunk=1000)
+        self.assertEqual(out, data)
+        self.assertEqual(list(relabeler.renamings), [])
+
     def test_a_flush_passes_a_partial_packet_on(self):
         data = make_stream(2)
-        relabeler = AudioRelabeler()
+        relabeler = CodecRelabeler()
         out = relabeler.feed(data[:-100])
         self.assertEqual(out + relabeler.flush(), data[:-100])
 
