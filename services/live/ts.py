@@ -3492,6 +3492,9 @@ _RELABEL_HOLD_PACKETS = 64  # a PMT section spanning packets is held this long a
 _CODEC_FAMILY = {0x03: "mpeg", 0x04: "mpeg", 0x0F: "aac", 0x11: "latm", 0x81: "ac3", 0x87: "ac3"}
 _CODEC_FAMILY.update({0x1B: "h264", _HEVC: "hevc"})
 _VIDEO_FAMILIES = ("h264", "hevc")
+_ADTS_RATES: tuple[int, ...] = (96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000)
+_ADTS_RATES += (12000, 11025, 8000, 7350)  # Hz by ADTS sampling_frequency_index
+_MOVED_PID_FIRST = 0x1F00  # a sound whose format changed moves to the first free PID from here
 
 
 def _sniffed_type(es: bytes) -> int | None:
@@ -3558,6 +3561,16 @@ class CodecRelabeler:
     holds is changed. While the PES agree with the PMT nothing changes. It reads the bytes on
     their way to the segmenter (raw TS and HLS), whose segment headers then carry the renamed
     PMT; `flush()` before a discontinuity or the end passes on what it holds.
+
+    The same channel's sound went from 44.1 to 48 kHz AAC at that switch, on its PID and type:
+    VLC 3 restarted its audio output at the old rate and dropped about 40 ms twice a second (a
+    stutter), and a new PMT version alone keeps that decoder. So an ADTS sound whose sampling
+    rate or channel configuration changes for `_RELABEL_PES` PES in a row moves to another PID
+    (`_MOVED_PID_FIRST` on, the first one its PMT does not list; the next change moves it back)
+    from the next PMT of the program on: the PMT names the new PID (the PCR PID too when the
+    sound carries the PCR), and every packet of the sound from there on carries it. VLC then
+    creates a new stream with a new decoder: about 30 ms of sound go missing once. A move
+    stays across a reconnect (VLC's decoder does too) and is forgotten with the PMT PID.
     """
 
     def __init__(self) -> None:
@@ -3567,10 +3580,15 @@ class CodecRelabeler:
         self._declared: dict[int, int] = {}  # PID -> the stream type its PMT declares
         self._renamed: dict[int, int] = {}  # PID -> the stream type written instead
         self._streak: dict[int, tuple[int, int]] = {}  # PID -> (sniffed type, PES in a row)
+        self._format: dict[int, tuple[int, int]] = {}  # AAC PID -> (rate index, channels) VLC has
+        self._format_streak: dict[int, tuple[tuple[int, int], int]] = {}  # PID -> (format, PES)
+        self._move: set[int] = set()  # PIDs whose sound moves at the next PMT
+        self._moved: dict[int, int] = {}  # PID -> the PID written instead
         self._managed = False  # a renaming came: the version_number is this stage's
         self._version: int | None = None  # the last version_number written
         self._written = b""  # the last section written, but for its version and CRC
         self.renamings: deque[tuple[int, int, int]] = deque(maxlen=_TRIMS_KEPT)  # (PID, from, to)
+        self.moves: deque[tuple[int, int]] = deque(maxlen=_TRIMS_KEPT)  # (PID, PID written)
 
     def feed(self, chunk: bytes) -> bytes:
         """Take bytes; return what passes on (a partial packet waits for the next bytes)."""
@@ -3600,6 +3618,13 @@ class CodecRelabeler:
                             out = bytearray(data)
                         for at, value in done:
                             out[at] = value
+            if self._moved:
+                to = self._moved.get(((b1 & 0x1F) << 8) | data[off + 2])
+                if to is not None:
+                    if out is None:
+                        out = bytearray(data)
+                    out[off + 1] = (b1 & 0xE0) | (to >> 8)
+                    out[off + 2] = to & 0xFF
             off += PACKET
         self._buf = data[off:]
         return bytes(out[:off]) if out is not None else data[:off]
@@ -3613,6 +3638,7 @@ class CodecRelabeler:
         """A new connection (or an HLS discontinuity) comes next: its PMT is trusted again."""
         self._renamed.clear()
         self._streak.clear()
+        self._format_streak.clear()
 
     def _on_pat(self, data: bytes, off: int) -> None:
         section = _section_at(data, off)
@@ -3627,6 +3653,10 @@ class CodecRelabeler:
                     self._declared.clear()
                     self._renamed.clear()
                     self._streak.clear()
+                    self._format.clear()
+                    self._format_streak.clear()
+                    self._move.clear()
+                    self._moved.clear()
                     if not self._managed:  # a map elsewhere: nothing to compare it with yet
                         self._version, self._written = None, b""
                 self._program = program
@@ -3648,21 +3678,44 @@ class CodecRelabeler:
         end = len(section) - 4
         i = 12 + (((section[10] & 0x0F) << 8) | section[11])
         declared: dict[int, int] = {}
+        entries: list[tuple[int, int]] = []  # (where each stream's entry starts, its PID)
         while i + 5 <= end:
             stream_type = section[i]
             pid = ((section[i + 1] & 0x1F) << 8) | section[i + 2]
+            entries.append((i, pid))
             if stream_type in _CODEC_FAMILY:
                 declared[pid] = stream_type
                 if self._declared.get(pid, stream_type) != stream_type:
                     self._renamed.pop(pid, None)  # the provider's PMT says otherwise now
                     self._streak.pop(pid, None)
+                    self._format.pop(pid, None)  # another codec: VLC makes another decoder
+                    self._format_streak.pop(pid, None)
                 renamed = self._renamed.get(pid)
                 if renamed is not None:
                     section[i] = renamed
             i += 5 + (((section[i + 3] & 0x0F) << 8) | section[i + 4])
         for pid in set(self._renamed) - set(declared):
             del self._renamed[pid]  # no longer listed
+        for pid in set(self._moved) - set(declared):
+            del self._moved[pid]
         self._declared = declared
+        pcr = ((section[8] & 0x1F) << 8) | section[9]
+        for pid in sorted(self._move & declared.keys()):
+            if pid in self._moved:
+                del self._moved[pid]  # back where it came
+            else:
+                taken = {p for _, p in entries} | set(self._moved.values()) | {pcr, self._pmt_pid}
+                self._moved[pid] = next(
+                    p for p in range(_MOVED_PID_FIRST, 0x1FFF) if p not in taken
+                )
+            self._managed = True
+            self.moves.append((pid, self._moved.get(pid, pid)))
+        self._move.clear()
+        for at, pid in entries + [(7, pcr)]:  # (the PCR PID sits where an entry's would at 7)
+            to = self._moved.get(pid)
+            if to is not None:
+                section[at + 1] = (section[at + 1] & 0xE0) | (to >> 8)
+                section[at + 2] = to & 0xFF
         written = bytes(section[:5]) + bytes([section[5] & 0xC1]) + bytes(section[6:-4])
         version = (section[5] >> 1) & 0x1F
         if not self._managed and self._written and written != self._written:
@@ -3683,14 +3736,17 @@ class CodecRelabeler:
 
     def _sniff(self, pid: int, data: bytes, off: int) -> None:
         pkt = data[off : off + PACKET]
+        es = pkt[_pes_start(pkt)[2] :]
         declared = self._declared[pid]
         video = _CODEC_FAMILY[declared] in _VIDEO_FAMILIES
-        found = (_sniffed_video if video else _sniffed_type)(pkt[_pes_start(pkt)[2] :])
+        found = (_sniffed_video if video else _sniffed_type)(es)
         if found is None:
             return
         written = self._renamed.get(pid, declared)
         if _CODEC_FAMILY[found] == _CODEC_FAMILY[written]:
             self._streak.pop(pid, None)
+            if found == 0x0F:
+                self._follow_format(pid, es)
             return
         last, count = self._streak.get(pid, (found, 0))
         count = count + 1 if _CODEC_FAMILY[last] == _CODEC_FAMILY[found] else 1
@@ -3702,6 +3758,8 @@ class CodecRelabeler:
             del self._renamed[pid]  # what the provider's PMT declares again
         else:
             self._renamed[pid] = found
+        self._format.pop(pid, None)  # another codec: VLC makes another decoder
+        self._format_streak.pop(pid, None)
         self._managed = True
         to = self._renamed.get(pid, declared)
         self.renamings.append((pid, written, to))
@@ -3711,6 +3769,30 @@ class CodecRelabeler:
             pid,
             to,
             written,
+        )
+
+    def _follow_format(self, pid: int, es: bytes) -> None:
+        """Note an ADTS frame's format; after `_RELABEL_PES` PES in a row of another one than
+        VLC's decoder has, the sound moves to another PID at the next PMT."""
+        if len(es) < 4 or (es[2] >> 2) & 0x0F >= len(_ADTS_RATES):
+            return
+        found = ((es[2] >> 2) & 0x0F, ((es[2] & 0x01) << 2) | (es[3] >> 6))
+        if self._format.setdefault(pid, found) == found:
+            self._format_streak.pop(pid, None)
+            return
+        last, count = self._format_streak.get(pid, (found, 0))
+        count = count + 1 if last == found else 1
+        if count < _RELABEL_PES:
+            self._format_streak[pid] = (found, count)
+            return
+        del self._format_streak[pid]
+        self._format[pid] = found
+        self._move.add(pid)
+        logger.info(
+            "Audio PID %#x changed to %d Hz, %d channels: it moves to another PID.",
+            pid,
+            _ADTS_RATES[found[0]],
+            found[1],
         )
 
 

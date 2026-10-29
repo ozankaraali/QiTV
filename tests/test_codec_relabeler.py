@@ -24,6 +24,9 @@ from tests.ts_fixtures import (
 MPEG_AUDIO, AAC = 0x03, 0x0F
 H264, HEVC = 0x1B, 0x24
 HEVC_AUD = b"\x00\x00\x00\x01\x46\x01\x50"
+RATE_44K = b"\xff\xf1\x50\x80"  # ADTS: AAC LC, 44.1 kHz (index 4), stereo
+RATE_48K = b"\xff\xf1\x4c\x80"  # 48 kHz (index 3), stereo
+MOVED = 0x1F00  # the PID a sound whose format changed moves to first
 
 
 def hevc_access_unit(key: bool) -> bytes:
@@ -80,6 +83,36 @@ def declared(data: bytes, pid: int = AUDIO_PID) -> list[tuple[int, int, bool]]:
             out.append((audio, (body[5] >> 1) & 0x1F, crc32_mpeg(body) == 0))
             section = b"\xff" * 1000  # until the next start
     return out
+
+
+def maps(data: bytes) -> list[tuple[dict[int, int], int, int]]:
+    """({PID: stream type}, version, PCR PID) of each PMT in `data` whose CRC holds (sections
+    in one packet, as `make_stream` writes them)."""
+    out = []
+    for p in packets(data):
+        if pid_of(p) != PMT_PID or not p[1] & 0x40:
+            continue
+        payload = p[4:]
+        body = payload[1 + payload[0] :]
+        body = body[: 3 + (((body[1] & 0x0F) << 8) | body[2])]
+        if crc32_mpeg(body):
+            continue
+        streams, i = {}, 12 + (((body[10] & 0x0F) << 8) | body[11])
+        while i + 5 <= len(body) - 4:
+            streams[((body[i + 1] & 0x1F) << 8) | body[i + 2]] = body[i]
+            i += 5 + (((body[i + 3] & 0x0F) << 8) | body[i + 4])
+        out.append((streams, (body[5] >> 1) & 0x1F, ((body[8] & 0x1F) << 8) | body[9]))
+    return out
+
+
+def pcr_on_sound(data: bytes) -> bytes:
+    """`data` with each PMT naming the sound's PID as the PCR's."""
+    out, cc = [], 0
+    for p in packets(data):
+        if pid_of(p) == PMT_PID:
+            p, cc = pmt(pcr_pid=AUDIO_PID, cc=cc), (cc + 1) & 0x0F
+        out.append(p)
+    return b"".join(out)
 
 
 def psi(section: bytes, cc: int) -> list[bytes]:
@@ -347,6 +380,71 @@ class CodecRelabelerTests(unittest.TestCase):
         out, relabeler = relabelled(data, chunk=1000)
         self.assertEqual(out, data)
         self.assertEqual(list(relabeler.renamings), [])
+
+    def test_aac_whose_rate_changes_moves_to_another_pid_at_the_next_pmt(self):
+        # 44.1 kHz, then 48 kHz from the second second on: VLC 3 would keep its 44.1 kHz
+        # output (a stutter), so the sound moves to a new PID, which the next PMT names.
+        data = sound_from(sound_from(make_stream(4), 0, RATE_44K), 2 * 47, RATE_48K)
+        for chunk in (None, 1000, 100):
+            with self.subTest(chunk=chunk):
+                out, relabeler = relabelled(data, chunk)
+                self.assertEqual(len(out), len(data))
+                self.assertEqual(list(relabeler.moves), [(AUDIO_PID, MOVED)])
+                tables = maps(out)
+                self.assertEqual(tables[0], ({VIDEO_PID: H264, AUDIO_PID: AAC}, 0, VIDEO_PID))
+                self.assertEqual(tables[-1], ({VIDEO_PID: H264, MOVED: AAC}, 1, VIDEO_PID))
+                # The sound on the old PID up to the PMT naming the new one, then on the new.
+                pids = [pid_of(p) for p in packets(out)]
+                first_moved = pids.index(MOVED)
+                last_map = max(k for k in range(first_moved) if pids[k] == PMT_PID)
+                self.assertEqual(maps(out[last_map * PACKET :])[0][0][MOVED], AAC)
+                self.assertNotIn(MOVED, maps(out[: last_map * PACKET])[-1][0])
+                self.assertNotIn(AUDIO_PID, pids[last_map:])
+                self.assertIn(AUDIO_PID, pids[last_map - 20 : last_map])
+                self.assertGreater(first_moved, len(pids) // 2)  # after 2 s and three PES
+                for a, b in zip(packets(data), packets(out)):
+                    if pid_of(b) == MOVED:  # only the PID changed
+                        self.assertEqual((a[0], a[1] & 0xE0, a[3:]), (b[0], b[1] & 0xE0, b[3:]))
+
+    def test_a_rate_that_changes_back_moves_back(self):
+        data = sound_from(make_stream(4), 0, RATE_44K)
+        data = sound_from(sound_from(data, 47, RATE_48K), int(2.5 * 47), RATE_44K)
+        out, relabeler = relabelled(data, chunk=1000)
+        self.assertEqual(list(relabeler.moves), [(AUDIO_PID, MOVED), (AUDIO_PID, AUDIO_PID)])
+        self.assertEqual(maps(out)[-1], ({VIDEO_PID: H264, AUDIO_PID: AAC}, 2, VIDEO_PID))
+        sound = [pid_of(p) for p in packets(out) if pid_of(p) in (AUDIO_PID, MOVED)]
+        self.assertEqual(
+            (sound[0], sound[len(sound) // 2], sound[-1]), (AUDIO_PID, MOVED, AUDIO_PID)
+        )
+
+    def test_a_reconnect_keeps_the_move(self):
+        # VLC's decoder (48 kHz now) stays across a reconnect, and so does the PID it reads.
+        first = sound_from(sound_from(make_stream(3), 0, RATE_44K), 47, RATE_48K)
+        second = sound_from(make_stream(2, pts_start=900000 + 3 * 90000), 0, RATE_48K)
+        relabeler = CodecRelabeler()
+        out = relabeler.feed(first) + relabeler.flush()
+        relabeler.reconnect()
+        later = relabeler.feed(second) + relabeler.flush()
+        self.assertEqual(list(relabeler.moves), [(AUDIO_PID, MOVED)])
+        self.assertIn(MOVED, {pid_of(p) for p in packets(out)})
+        self.assertNotIn(AUDIO_PID, {pid_of(p) for p in packets(later)})
+        self.assertEqual(set(t[1] for t in maps(later)), {1})
+
+    def test_the_pcr_moves_with_the_sound_that_carries_it(self):
+        data = sound_from(sound_from(make_stream(3), 0, RATE_44K), 47, RATE_48K)
+        out, _ = relabelled(pcr_on_sound(data), chunk=1000)
+        self.assertEqual(maps(out)[0][2], AUDIO_PID)
+        self.assertEqual(maps(out)[-1], ({VIDEO_PID: H264, MOVED: AAC}, 1, MOVED))
+
+    def test_one_frame_of_another_rate_does_not_move_the_sound(self):
+        data = sound_from(make_stream(3), 0, RATE_44K)
+        odd = [k for k, p in enumerate(packets(data)) if pid_of(p) == AUDIO_PID and p[1] & 0x40]
+        cut = odd[60] * PACKET
+        once = sound_from(data[cut : cut + PACKET], 0, RATE_48K)
+        data = data[:cut] + once + data[cut + len(once) :]
+        out, relabeler = relabelled(data, chunk=1000)
+        self.assertEqual(out, data)
+        self.assertEqual(list(relabeler.moves), [])
 
     def test_a_flush_passes_a_partial_packet_on(self):
         data = make_stream(2)
