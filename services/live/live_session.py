@@ -80,6 +80,12 @@ time since the edge moved counted up to there only, and StayLive takes it as buf
 it does a VLC whose clock stood still while it reports Playing (libVLC 3 does when starved)
 clearly longer than it steps (1.5 learned intervals plus a quarter second, at least 0.5 s):
 no rate change, no reopen, and the filter starts afresh once the edge moves again.
+Once VLC ran dry within five minutes (2.8.8: a source restarting every minute or two, its
+repeats dropped, ran it dry at each restart, and libVLC 3 drops pictures and sound when media
+comes late), a source silent beyond its bursts holds VLC before it runs dry again
+(`PlaybackSession.hold`: paused, saying buffering; "Waiting for the channel…") until 70% of the
+target is ahead; a sound lost while the picture plays, after its track was cycled
+(`PlaybackSession.soundLost`), opens the stream again where it plays.
 StayLive changes the rate only for a lag outside its dead band for 15 s, by one gentle nudge
 (1.03x or 0.97x, ramped in three steps, sized to end at the target; one per 5 minutes),
 sooner and beyond that budget only far behind (1.10x), with under half a second of room when
@@ -336,6 +342,23 @@ _ARCHIVE_STEP_S = 30.0  # one that brought less than this past its point has not
 _CLOCK_LOST_S = 10.0
 _MEASURE_AHEAD_S = 3.0  # rate health counts only ticks with this much ahead at both ends
 _RATE_GRACE_S = 2.0  # and only from this long after an open plays or VLC was at the edge
+# ... or after VLC met a timestamp jump the helper left out of its timeline (2.8.8): it may wait
+# the jump out, its clock standing still with media ahead. Met: within this of its position.
+_BREAK_NEAR_S = 2.0
+# Hold at the edge (2.8.8): VLC run dry drops pictures and sound when media comes again (and
+# once lost its sound for good), and a source sending less than real time (one restarting every
+# minute or two, its repeats dropped: 92% of real time) ran it dry at every restart. Once VLC
+# ran dry within _HOLD_AFTER_S (a one-off hiccup stays as it was: a hold waits longer than VLC
+# would), with this little ahead while the source has sent nothing for this long beyond its own
+# bursts (a bursty source's wait for its next one stays as it was), VLC is paused instead,
+# reported as buffering, and plays again once the source sends and that much of stay-live's
+# target is ahead (at least _HOLD_MIN_S): a wait that builds the cushion, not one at each gap.
+_HOLD_AFTER_S = 300.0
+_HOLD_AT_S = 0.6
+_HOLD_QUIET_S = 1.0
+_HOLD_BURSTS = 1.5  # ... beyond this many of its bursts (one still measured may be short)
+_HOLD_MIN_S = 2.0
+_HOLD_SHARE = 0.7  # ... of the target (a wait no longer than it must be)
 _CALM_S = 1.0  # Auto: trouble again within this is the same starvation (VLC refills, starves)
 _REOPEN_HOLD_S = 5.0  # no reopen at live within this of an open (and before VLC played it)
 # The tune's start (2.1, `_play_first`). A source other than HLS is held until the
@@ -564,6 +587,11 @@ class LiveSession(QObject):
         self._retry: Optional[_Retry] = None  # a reopen that could not be made yet
         self._failing_since: Optional[float] = None  # first interruption since VLC played
         self._opening = False  # inside playback.play(): its errors are retried on a tick
+        self._held: Optional[float] = None  # VLC held at the edge since (`_hold_at_edge`)
+        # When VLC's last two dry runs at the edge began (a hold counts as one), and whether
+        # it is dry now.
+        self._dry_before = self._dry_seen = -math.inf
+        self._dry_now = False
         self._edge_seen: Optional[float] = None  # the live edge last seen
         self._lost_since: Optional[float] = None  # VLC's clock suspected lost since (`_clock_lost`)
         self._edge_moved = 0.0  # when it last moved (for bursts: when the last one landed)
@@ -596,7 +624,8 @@ class LiveSession(QObject):
         # Rate health: VLC's progress at stay-live's rates other than 1x (see _check_rate).
         self._health = RateHealth()
         self._crawl = RateHealth(_CRAWL_WINDOW_S, windows=_CRAWL_WINDOWS)  # HLS at 1x
-        self._rate_mark: Optional[tuple[float, float]] = None  # (wall, media ahead) last tick
+        # (wall, media ahead, position) at the last tick
+        self._rate_mark: Optional[tuple[float, float, float]] = None
         self._progress: Optional[_Progress] = None  # VLC's progress counted since
         self._rate_from: Optional[float] = None  # counted from here (after an open plays)
         # Auto latency (2.1): the channel's learned target, as stay-live steers by it
@@ -667,6 +696,7 @@ class LiveSession(QObject):
         playback.errorOccurred.connect(self._on_error)
         playback.inputEnded.connect(self._on_input_ended)
         playback.pictureFroze.connect(self._on_picture_froze)
+        playback.soundLost.connect(self._on_sound_lost)
 
     def _wire_engine(self, engine: LiveEngine, *, connect: bool) -> None:
         for signal, slot in (
@@ -922,6 +952,7 @@ class LiveSession(QObject):
         playing = self._phase is _Phase.PIPELINE
         if not playing and self._phase not in _BEFORE_PLAY:
             return
+        self._held = None  # the viewer's pause or play from here
         if not self._paused:
             # From any mode, a catch-up included: paused at 1x, time-shifted. Before ready
             # or while recovering it is remembered: the stream that opens next is paused.
@@ -2125,6 +2156,13 @@ class LiveSession(QObject):
             # (A reopen still to be made, or the RAM ring's next state, opens in software.)
             self._reopen_at_position()
 
+    def _on_sound_lost(self) -> None:
+        """VLC played no sound while the picture played, even after its audio track was
+        cycled (2.8.8, `services.sound_watch`): the time-shift stream opens again where it
+        plays."""
+        if self._phase is _Phase.PIPELINE and self._retry is None and self._deferred is None:
+            self._reopen_at_position()
+
     def _on_interrupted(self, why: str = "it ended") -> None:
         if self._phase is not _Phase.PIPELINE:
             return
@@ -2258,6 +2296,7 @@ class LiveSession(QObject):
             elif not buffering and not self._was_stalled:
                 self._ask_junction(decision.junction)
             self._set_rate(decision.rate)
+            self._hold_at_edge(snapshot, position)
             if decision.reopen_live:
                 _LOG.debug(
                     "Stay-live reopens at live %.1f s behind (target %.1f s)%s.",
@@ -2272,6 +2311,8 @@ class LiveSession(QObject):
             self._land_check = None
             self._lost_since = None
             self._ask_junction(0.0)
+            if self._held is not None and not self._paused:
+                self._release_hold(snapshot, position)  # an ended source: nothing to wait for
             if not live and not self._paused:
                 self._no_live_edge(snapshot, position)
         self._emit_timeline()
@@ -2777,7 +2818,11 @@ class LiveSession(QObject):
         at_edge = ahead <= _EDGE_S or state is PlaybackState.BUFFERING
         if self._rate_from is not None and (at_edge or self._stalled(snapshot)):
             self._rate_from = max(self._rate_from, now + _RATE_GRACE_S)
-        mark, self._rate_mark = self._rate_mark, (now, ahead)
+        mark, self._rate_mark = self._rate_mark, (now, ahead, position)
+        if self._rate_from is not None and mark is not None:
+            wait = self._break_wait(snapshot, mark[2], position)
+            if wait > 0:
+                self._rate_from = max(self._rate_from, now + wait + _RATE_GRACE_S)
         counted = (
             mark is not None
             and self._stay.mode is Mode.LIVE
@@ -2838,6 +2883,67 @@ class LiveSession(QObject):
                 )
                 self._learn(direct=True)
                 self._fall_back(CRAWLING)
+
+    def _hold_at_edge(self, snapshot: Mapping[str, Any], position: float) -> None:
+        """Hold VLC before it runs dry, and play it again once the cushion is back (2.8.8,
+        `_HOLD_AT_S`). Held, VLC reports BUFFERING: a starvation to the learned target and
+        to stay-live's trouble, as VLC run dry was (no rate change, no reopen meanwhile)."""
+        now = self._clock()
+        edge = self._live_edge(snapshot)
+        ahead = edge - position
+        quiet = now - self._edge_moved
+        reported = _number(snapshot.get("burst_s"))
+        burst = max(self._filter.burst_for(reported), reported)
+        if self._held is None:
+            dry = self._starved(snapshot, position)
+            if dry and not self._dry_now:
+                self._dry_before, self._dry_seen = self._dry_seen, now
+            self._dry_now = dry
+            # Run dry already (libVLC 3 says Playing, its clock standing still): held all the
+            # same, so it plays again from a pause, its clock started afresh. Only an earlier
+            # dry run counts, not this one.
+            earlier = self._dry_before if dry else self._dry_seen
+            if (
+                now - earlier <= _HOLD_AFTER_S
+                and self._playback.state() in (PlaybackState.PLAYING, PlaybackState.BUFFERING)
+                and not self._just_opened()
+                and ahead <= _HOLD_AT_S
+                and quiet >= _HOLD_BURSTS * burst + _HOLD_QUIET_S
+            ):
+                _LOG.debug("Held at the edge: %.1f s ahead, the source quiet %.1f s.", ahead, quiet)
+                if not dry:
+                    self._dry_before, self._dry_seen = self._dry_seen, now
+                self._held = now
+                self._playback.hold(True)
+            return
+        if quiet < _HOLD_QUIET_S and ahead >= max(_HOLD_MIN_S, _HOLD_SHARE * self._stay.target):
+            self._release_hold(snapshot, position)
+
+    def _release_hold(self, snapshot: Mapping[str, Any], position: float) -> None:
+        held, self._held = self._held, None
+        if held is None:
+            return
+        _LOG.info(
+            "VLC waited %.1f s for the channel, held before it ran dry; %.1f s ahead again.",
+            self._clock() - held,
+            self._live_edge(snapshot) - position,
+        )
+        self._playback.hold(False)
+
+    @staticmethod
+    def _break_wait(snapshot: Mapping[str, Any], before: float, position: float) -> float:
+        """The largest timestamp jump the helper left out of its timeline (`breaks`) that VLC
+        met since it was at `before`, or meets next (within `_BREAK_NEAR_S`); 0.0: none. VLC
+        may wait such a jump out, its clock standing still with media ahead (2.8.8: read as
+        a crawl to 21%, which kept a channel at 1x for a day)."""
+        return max(
+            (
+                _number(seconds)
+                for where, seconds in snapshot.get("breaks") or ()
+                if before - _BREAK_NEAR_S < _number(where) <= position + _BREAK_NEAR_S
+            ),
+            default=0.0,
+        )
 
     def _lag(self, snapshot: Mapping[str, Any], position: float) -> float:
         """Seconds behind the live edge; for a bursty source, the mean over a burst.
@@ -2938,7 +3044,8 @@ class LiveSession(QObject):
             "paused": self._paused,
             "ended": self._ended,
             "target": self._target(snapshot),
-            "stalled": self._stalled(snapshot),
+            # Held at the edge (2.8.8) it waits for the channel too.
+            "stalled": self._stalled(snapshot) or self._held is not None,
             # The helper is opening a new connection (raw TS), not waiting on this one.
             "reconnecting": bool(snapshot.get("reconnecting", False)),
             "auto": learned is not None,
@@ -3557,6 +3664,7 @@ class LiveSession(QObject):
         self._crawl.reset()
         self._retry = None
         self._land_check = None  # a landing still measured is no longer playing
+        self._held = None  # a new play is not held
         self._opening = True
         try:
             self._playback.play(

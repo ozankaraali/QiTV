@@ -213,6 +213,7 @@ class ModelPlayback(QObject):
     ended = Signal()
     inputEnded = Signal()
     pictureFroze = Signal()
+    soundLost = Signal()
 
     STEP_MS = 50
 
@@ -272,6 +273,12 @@ class ModelPlayback(QObject):
         if paused and self.current is PlaybackState.PLAYING:
             self._set(PlaybackState.PAUSED)
         elif not paused and self.current is PlaybackState.PAUSED:
+            self._set(PlaybackState.PLAYING)
+
+    def hold(self, held):
+        if held and self.current is PlaybackState.PLAYING:
+            self._set(PlaybackState.BUFFERING)
+        elif not held and self.current is PlaybackState.BUFFERING:
             self._set(PlaybackState.PLAYING)
 
     def toggle_pause(self):

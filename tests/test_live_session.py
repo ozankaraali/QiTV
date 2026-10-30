@@ -284,6 +284,7 @@ class FakePlayback(QObject):
     ended = Signal()
     inputEnded = Signal()
     pictureFroze = Signal()
+    soundLost = Signal()
 
     def __init__(self):
         super().__init__()
@@ -299,6 +300,8 @@ class FakePlayback(QObject):
         self.fail_on_play = False
         self.http = []  # (user_agent, referrer) of each play
         self.caps = []  # the size cap of each play (2.8)
+        self.held = False  # paused for the pipeline, reported as buffering (2.8.8)
+        self.holds = []  # each hold(held)
 
     def play(
         self,
@@ -317,6 +320,7 @@ class FakePlayback(QObject):
         self.caps.append(max_height)
         self.software.append(software)
         self.ms = 0
+        self.held = False
         self.set_state(PlaybackState.OPENING)
         if self.fail_on_play:
             self.set_state(PlaybackState.ERROR)
@@ -328,6 +332,7 @@ class FakePlayback(QObject):
 
     def stop(self):
         self.stops += 1
+        self.held = False
         self.set_state(PlaybackState.IDLE)
 
     def state(self):
@@ -346,9 +351,20 @@ class FakePlayback(QObject):
 
     def set_paused(self, paused):
         self.paused.append(paused)
-        if paused and self.current is PlaybackState.PLAYING:
+        held, self.held = self.held, False
+        if paused and (self.current is PlaybackState.PLAYING or held):
             self.set_state(PlaybackState.PAUSED)
-        elif not paused and self.current is PlaybackState.PAUSED:
+        elif not paused and (self.current is PlaybackState.PAUSED or held):
+            self.set_state(PlaybackState.PLAYING)
+
+    def hold(self, held):
+        if held == self.held:
+            return
+        self.holds.append(held)
+        self.held = held
+        if held and self.current is PlaybackState.PLAYING:
+            self.set_state(PlaybackState.BUFFERING)
+        elif not held and self.current is PlaybackState.BUFFERING:
             self.set_state(PlaybackState.PLAYING)
 
     def toggle_pause(self):
@@ -519,9 +535,10 @@ class Feed:
                 if not self.stalled:
                     self.push()
             self.sync()
-            if self.position is not None and playback.current in (
-                PlaybackState.PLAYING,
-                PlaybackState.BUFFERING,
+            if (
+                self.position is not None
+                and playback.current in (PlaybackState.PLAYING, PlaybackState.BUFFERING)
+                and not playback.held  # held at the edge (2.8.8): VLC paused
             ):
                 rate = (playback.rates or [1.0])[-1]
                 wanted = rate * self.DT * (self.speed_1x if rate == 1.0 else self.speed)
@@ -3349,6 +3366,22 @@ class RateHealthTests(LiveSessionCase):
         self.assertFalse(self.live._stay.rate_locked)
         self.assertEqual(len(self.playback.plays), 1)
 
+    def test_vlc_waiting_out_a_timestamp_jump_is_not_taken_for_a_crawl(self):
+        """2.8.8: at a forward timestamp jump the helper left out of its timeline (`breaks`)
+        VLC's clock stood still as long as the jump, with media ahead and saying Playing:
+        stay-live read it as a crawl to 21% and kept the channel at 1x for a day."""
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=12.0).ready().run(6.0)
+        self.assertGreater(self.playback.rates[-1], 1.0)  # catching up
+        where = feed.position + 2.0
+        feed.reported = [(where, 6.0)]
+        feed.jump_at, feed.jump_by = where, 6.0
+        while feed.position < where:
+            feed.run(Feed.DT)
+        feed.frozen_until = self.clock.now + 6.0  # VLC waits out the jump
+        feed.run(30.0)
+        self.assertFalse(self.live._stay.rate_locked)
+
     def test_vlc_waiting_at_the_live_edge_is_not_taken_for_a_crawl(self):
         """VLC meets the edge before the next burst and waits there, its clock standing still
         while it reports Playing (libVLC 3), as stay-live builds the room: no crawl. (2.1: a
@@ -3525,7 +3558,9 @@ class CrawlFallbackTests(LiveSessionCase):
             feed.run(9.0)
             feed.stalled = False
             feed.run(6.0)
-        self.assertGreater(feed.starved_s, 10.0)
+        # It waited at the edge: dry, then held at each stall after (2.8.8).
+        self.assertGreater(feed.starved_s, 5.0)
+        self.assertIn(True, self.playback.holds)
         self.assertEqual(self.modes, ["pipeline"])
         self.assertNotIn(self.CRAWLING, self.notices)
 
@@ -4108,6 +4143,104 @@ class StallTests(LiveSessionCase):
         for _ in range(12):
             self.step(0.25)
         self.assertFalse(self.timelines[-1]["stalled"])
+
+
+class HoldTests(LiveSessionCase):
+    """2.8.8: a source that leaves gaps again and again (one restarting every minute or two,
+    its repeats dropped) ran VLC dry at each, and libVLC 3 drops pictures and sound when media
+    comes late after that. Once VLC ran dry within five minutes, it is held (paused, saying
+    buffering) before it runs dry again, and plays again once the source sends and 70% of
+    the target (at least 2 s) is ahead. A one-off hiccup, and a bursty source's wait for its
+    next burst, stay as they were; the viewer's pause ends a hold."""
+
+    def live_feed(self, **kwargs):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=30.0, starved=PlaybackState.PLAYING, **kwargs)
+        feed.ready()
+        self.live.go_live()
+        feed.sync()
+        feed.run(20.0)
+        return feed
+
+    def gap(self, feed, seconds):
+        feed.stalled = True
+        feed.run(seconds)
+        feed.stalled = False
+
+    def test_a_one_off_hiccup_is_not_held(self):
+        feed = self.live_feed()
+        self.gap(feed, 6.0)
+        feed.run(60.0)
+        self.assertGreater(feed.starved_s, 2.0)  # it ran dry, as before
+        self.assertEqual(self.playback.holds, [])
+
+    def test_the_next_gap_holds_vlc_before_it_runs_dry_until_the_cushion_is_back(self):
+        feed = self.live_feed()
+        self.gap(feed, 6.0)  # VLC runs dry once
+        feed.run(60.0)
+        starved, plays = feed.starved_s, len(self.playback.plays)
+        self.gap(feed, 6.0)
+        self.assertEqual(self.playback.holds, [True])
+        self.assertLess(feed.starved_s - starved, 0.1)  # held before it ran dry
+        self.assertTrue(self.timelines[-1]["stalled"])  # "Waiting for the channel…"
+        self.assertEqual(self.playback.current, PlaybackState.BUFFERING)  # not paused
+        feed.run(1.0)
+        self.assertEqual(self.playback.holds, [True])  # the source sends: the cushion builds
+        while self.playback.held:
+            feed.run(Feed.DT)
+        self.assertEqual(self.playback.holds, [True, False])
+        target = self.timelines[-1]["target"]
+        lag = self.timelines[-1]["lag"]
+        self.assertGreaterEqual(lag, max(2.0, 0.7 * target) - 0.3)
+        feed.run(1.0)
+        self.assertFalse(self.timelines[-1]["stalled"])
+        self.assertEqual(len(self.playback.plays), plays)  # no reopen
+        self.assertEqual(self.playback.paused, [])  # never the viewer's pause
+
+    def test_holds_stop_five_minutes_after_vlc_last_ran_dry(self):
+        feed = self.live_feed()
+        self.gap(feed, 6.0)
+        feed.run(301.0)
+        self.gap(feed, 6.0)
+        self.assertEqual(self.playback.holds, [])
+
+    def test_the_viewers_pause_ends_a_hold(self):
+        feed = self.live_feed()
+        self.gap(feed, 6.0)
+        feed.run(60.0)
+        feed.stalled = True
+        feed.run(6.0)
+        self.assertTrue(self.playback.held)
+        self.live.toggle_pause()
+        self.assertFalse(self.playback.held)
+        self.assertEqual(self.playback.current, PlaybackState.PAUSED)
+        feed.stalled = False
+        feed.run(10.0)
+        self.assertEqual(self.playback.current, PlaybackState.PAUSED)  # still the viewer's
+        self.live.toggle_pause()
+        feed.run(1.0)
+        self.assertEqual(self.playback.current, PlaybackState.PLAYING)
+
+    def test_a_bursty_sources_wait_for_its_next_burst_is_not_held(self):
+        # A start this short comes only after the ready timeout (2.1).
+        self.live = self.make(ready_timeout_ms=50)
+        sid = self.start()
+        feed = Feed(self, sid, burst=10.0, edge=3.0, starved=PlaybackState.PLAYING).ready()
+        self.wait_until(lambda: self.playback.plays)
+        feed.run(120.0)
+        self.assertGreater(feed.starved_s, 5.0)  # it met the edge before bursts, again
+        self.assertEqual(self.playback.holds, [])
+
+    def test_lost_sound_opens_the_stream_again_where_it_plays(self):
+        feed = self.live_feed()
+        plays, before = len(self.playback.plays), self.live.position()
+        self.playback.soundLost.emit()
+        self.assertEqual(len(self.playback.plays), plays + 1)
+        self.assertIs(self.playback.plays[-1][1], PlayKind.LIVE_PIPELINE)
+        self.assertLessEqual(before - self.live.position(), 2.0)  # the segment holding it
+        self.assertGreaterEqual(before - self.live.position(), 0.0)
+        feed.run(5.0)
+        self.assertEqual(self.modes, ["pipeline"])
 
 
 class PositionTests(LiveSessionCase):

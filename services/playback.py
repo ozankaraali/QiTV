@@ -72,6 +72,7 @@ from services import casting, picture
 from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.picture_watch import Counters, FrozenPicture
+from services.sound_watch import SoundWatch
 from services.vlc_profile import PlayKind, media_options
 
 logger = logging.getLogger(__name__)
@@ -232,6 +233,7 @@ class PlaybackSession(QObject):
     # Hardware decoding froze the picture while the sound played: the stream decodes in
     # software now (reopened, unless it is a time-shift stream; see the module docstring).
     pictureFroze = Signal()
+    soundLost = Signal()  # 2.8.8: a time-shift stream's sound did not come back (cycled track)
 
     def __init__(
         self,
@@ -256,6 +258,7 @@ class PlaybackSession(QObject):
         self._max_height = 0  # 2.8: the size cap its open asked VLC for
         self._froze_url: Optional[str] = None  # the stream whose picture froze here
         self._frozen = FrozenPicture()
+        self._sound = SoundWatch()
         self._had_vout = False  # VLC made a video output for one of this player's media
         self._player = instance.media_player_new()
         self._player.video_set_mouse_input(False)
@@ -267,6 +270,7 @@ class PlaybackSession(QObject):
         self._start_ms: Optional[int] = None
         self._seekable = False
         self._ever_played = False
+        self._held = False  # paused for the time-shift pipeline, not by the viewer (hold)
         self._open_timeout_ms = open_timeout_ms
         self._stall_ms = stall_ms
         self._opened = QElapsedTimer()
@@ -417,6 +421,7 @@ class PlaybackSession(QObject):
         if self._released:
             return
         self._cancel_pending()
+        self._held = False
         self._url, self._kind = url, kind
         self._max_height = max(0, int(max_height))
         self._options = media_options(
@@ -461,6 +466,7 @@ class PlaybackSession(QObject):
         self._set_seekable(False)
         self._ever_played = False
         self._frozen.restart()
+        self._sound.restart()
         self._last_time = -1
         self._audio_due = self._mute_wanted is not None or self._volume_wanted is not None
         self._set_state(PlaybackState.OPENING)
@@ -568,6 +574,7 @@ class PlaybackSession(QObject):
     def stop(self) -> None:
         if self._released:
             return
+        self._held = False
         self._poll.stop()
         self._cancel_pending()
         self._start_ms = None
@@ -576,17 +583,36 @@ class PlaybackSession(QObject):
         self._set_state(PlaybackState.IDLE)
 
     def toggle_pause(self) -> None:
+        self._held = False  # the viewer's pause from here
         if self._player_free():
             self._player.pause()
 
     def set_paused(self, paused: bool) -> None:
+        self._held = False
         if self._player_free():
             self._player.set_pause(1 if paused else 0)
+
+    def hold(self, held: bool) -> None:
+        """Pause VLC for the time-shift pipeline while its source owes media (2.8.8), or play
+        it again. Reported as BUFFERING, never PAUSED: the viewer did not pause, and VLC
+        waiting for media is what buffering says. VLC run dry instead (libVLC 3 says Playing,
+        its clock standing still) drops pictures and sound when the media comes."""
+        if held == self._held:
+            return
+        self._held = held
+        if self._player_free():
+            self._player.set_pause(1 if held else 0)
+        if held and self._state is PlaybackState.PLAYING:
+            self._set_state(PlaybackState.BUFFERING)
+        elif not held:
+            self._frozen.restart()  # its pictures come again from here
+            self._sound.restart()
 
     def seek(self, ms: int) -> None:
         if self.is_seekable():
             self._player.set_time(max(0, int(ms)))
             self._frozen.restart()  # the decoder starts again where the seek lands
+            self._sound.restart()
 
     def seek_relative(self, ms: int) -> None:
         self.seek(self.time_ms() + ms)
@@ -978,6 +1004,9 @@ class PlaybackSession(QObject):
             return
         if state is PlaybackState.IDLE and self._state is PlaybackState.OPENING:
             state = PlaybackState.OPENING  # libVLC reports NothingSpecial briefly after play()
+        if self._held and state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
+            # Held (2.8.8): libVLC says Playing until a pause asked while it starves applies.
+            state = PlaybackState.BUFFERING
         if state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
             if not self._ever_played:
                 self._playing_clock.start()
@@ -1006,6 +1035,7 @@ class PlaybackSession(QObject):
                     target = max(0, min(target, length - _RESUME_END_MARGIN_MS))
                 self._player.set_time(target)
                 self._frozen.restart()
+                self._sound.restart()
                 self._start_ms = None
             elif self._playing_clock.elapsed() > _RESUME_GIVE_UP_MS:
                 logger.debug("Dropping the resume position: the media is not seekable")
@@ -1014,7 +1044,35 @@ class PlaybackSession(QObject):
             self.positionChanged.emit(self.time_ms(), self.length_ms())
         if self._watch_picture(state):
             return  # it decodes in software now
+        if self._watch_sound(state):
+            return  # it opens again
         self._watch_stall(state)
+
+    def _watch_sound(self, state: PlaybackState) -> bool:
+        """A time-shift stream whose sound stopped while its pictures play (2.8.8,
+        `services.sound_watch`): its audio track is cycled, then, if that brought no sound,
+        LiveSession opens it again where it plays (`soundLost`). True when it said so. (A
+        direct live stream has the stall watch, which cycles the track too.)"""
+        if self._kind is not PlayKind.LIVE_PIPELINE:
+            return False
+        counters = self._counters()
+        if counters is None:
+            return False
+        has_audio = self._pending_track is None and int(self._player.audio_get_track()) >= 0
+        verdict = self._sound.update(
+            self._clock(), state is PlaybackState.PLAYING, counters, has_audio
+        )
+        if verdict == "cycle":
+            logger.info("The sound stopped while the picture played; restarting the sound track")
+            self._pending_track = self._player.audio_get_track()
+            self._player.audio_set_track(-1)
+            self._restore_timer.start()
+            return False
+        if verdict != "reopen":
+            return False
+        logger.info("The sound did not come back; opening the stream again where it plays")
+        self.soundLost.emit()
+        return True
 
     def _watch_picture(self, state: PlaybackState) -> bool:
         """With hardware decoding, a picture that stands still while the sound plays sends
@@ -1074,6 +1132,7 @@ class PlaybackSession(QObject):
                 int(stats.lost_pictures),
                 int(stats.decoded_video),
                 int(stats.played_abuffers),  # decoded audio may be dropped (a seek's preroll)
+                int(stats.decoded_audio),
             )
         finally:
             media.release()
@@ -1141,6 +1200,7 @@ class Session(Protocol):
     seekableChanged: Any
     inputEnded: Any
     pictureFroze: Any
+    soundLost: Any
 
     @property
     def url(self) -> Optional[str]: ...
@@ -1191,6 +1251,8 @@ class Session(Protocol):
     def toggle_pause(self) -> None: ...
 
     def set_paused(self, paused: bool) -> None: ...
+
+    def hold(self, held: bool) -> None: ...
 
     def seek(self, ms: int) -> None: ...
 
@@ -1255,6 +1317,7 @@ class NullSession(QObject):
     seekableChanged = Signal(bool)
     inputEnded = Signal()
     pictureFroze = Signal()
+    soundLost = Signal()
 
     @property
     def url(self) -> Optional[str]:
@@ -1322,6 +1385,9 @@ class NullSession(QObject):
         pass
 
     def set_paused(self, paused: bool) -> None:
+        pass
+
+    def hold(self, held: bool) -> None:
         pass
 
     def seek(self, ms: int) -> None:

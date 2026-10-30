@@ -485,6 +485,64 @@ class HardwareFallbackTests(unittest.TestCase):
 
 
 @unittest.skipIf(playback.vlc is None, "libVLC is not installed")
+@unittest.skipIf(playback.vlc is None, "libVLC is not installed")
+class TimeShiftSoundTests(unittest.TestCase):
+    """2.8.8: PlaybackSession for a time-shift stream: held at the edge it pauses VLC and
+    says buffering, not paused; its sound lost while the picture plays cycles the audio
+    track, then says so (`soundLost`) for LiveSession to open it again."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    make = HardwareFallbackTests.make
+    tick = HardwareFallbackTests.tick
+
+    def tracks(self):
+        return [call for call in self.player.calls if call[0] == "audio_set_track"]
+
+    def test_lost_sound_cycles_the_track_then_says_so_once(self):
+        session = self.make(hardware=False)
+        lost = []
+        session.soundLost.connect(lambda: lost.append(self.now))
+        session.play(sessions.A, kind=PlayKind.LIVE_PIPELINE)
+        self.tick(session, 5.0)
+        self.tick(session, 4.0, played=0)
+        self.assertEqual(self.tracks(), [("audio_set_track", -1)])
+        session._restore_audio()  # its timer
+        self.assertEqual(self.tracks()[-1], ("audio_set_track", 1))
+        self.tick(session, 20.0, played=0)
+        self.assertEqual(len(lost), 1)
+        self.assertEqual(len(self.tracks()), 2)  # cycled once
+
+    def test_a_direct_stream_is_left_to_the_stall_watch(self):
+        session = self.make(hardware=False)
+        lost = []
+        session.soundLost.connect(lambda: lost.append(self.now))
+        session.play(sessions.A, kind=PlayKind.LIVE)
+        self.tick(session, 5.0)
+        self.tick(session, 20.0, played=0)
+        self.assertEqual((self.tracks(), lost), ([], []))
+
+    def test_a_hold_pauses_vlc_and_says_buffering(self):
+        session = self.make(hardware=False)
+        session.play(sessions.A, kind=PlayKind.LIVE_PIPELINE)
+        self.tick(session, 1.0)
+        self.assertIs(session.state(), playback.PlaybackState.PLAYING)
+        session.hold(True)
+        self.assertEqual(self.player.calls[-1], ("set_pause", 1))
+        self.tick(session, 1.0)  # libVLC says Playing until the pause applies
+        self.assertIs(session.state(), playback.PlaybackState.BUFFERING)
+        session.hold(False)
+        self.assertEqual(self.player.calls[-1], ("set_pause", 0))
+        self.tick(session, 0.25)
+        self.assertIs(session.state(), playback.PlaybackState.PLAYING)
+        session.hold(True)
+        session.set_paused(True)  # the viewer's pause from here
+        self.tick(session, 0.25)
+        self.assertIsNot(session.state(), playback.PlaybackState.BUFFERING)
+
+
 class SoftwareOverrideTests(unittest.TestCase):
     """The fallback's premise, on libVLC itself (muted and offscreen): a media option makes
     one media decode in software on an instance that decodes in hardware."""
