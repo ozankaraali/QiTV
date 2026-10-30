@@ -56,6 +56,7 @@ class Counters:
     lost: int  # lost_pictures: decoded, then dropped (too late)
     video: int  # decoded_video: video blocks the decoder took
     played: int  # played_abuffers: audio buffers played (decoded ones may be dropped)
+    audio: int = 0  # decoded_audio: audio blocks the decoder took (2.8.8, the sound watch)
 
 
 class FrozenPicture:
