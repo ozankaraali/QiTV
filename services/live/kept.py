@@ -87,9 +87,11 @@ class KeptBuffers:
         if snapshot.get("oldest") is None and any(r.sid == sid for r in self._rings.values()):
             self.drop(sid)  # nothing of it is left
 
-    def put(self, ring: KeptRing, *, coming_back: bool = False) -> None:
+    def put(self, ring: KeptRing, *, coming_back: bool = False, next_channel: str = "") -> None:
         """Keep `ring`; `coming_back`: its channel is tuned again at once (it is taken back
-        next), so the memory ring kept before stays."""
+        next), so the memory ring kept before stays. `next_channel` (2.8.12): the channel
+        tuned next; its memory ring stays too (zapping back to a channel paused a moment ago
+        found its buffer gone: leaving the channel between kept that one instead)."""
         old = self._rings.pop(ring.channel, None)
         if old is not None and old.sid != ring.sid:
             self._engine.close_session(old.sid)
@@ -98,7 +100,8 @@ class KeptBuffers:
             return
         if not ring.disk and not coming_back:
             for other in [r for r in self._rings.values() if not r.disk]:
-                self.drop(other.sid)
+                if other.channel != next_channel:
+                    self.drop(other.sid)
         self._rings[ring.channel] = ring
 
     def take(self, channel: str) -> Optional[KeptRing]:

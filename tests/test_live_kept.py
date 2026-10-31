@@ -67,6 +67,17 @@ class KeptBuffersTests(unittest.TestCase):
         self.kept.put(KeptRing("c", "k3", False, LIVE))
         self.assertEqual(self.engine.closed, ["a"])
 
+    def test_zapping_back_finds_the_channel_left_a_moment_ago(self):  # 2.8.12
+        # Paused on k1, zapped to k2, then back: leaving k2 kept k2's memory ring and let
+        # k1's go just before k1's tune would take it back ("Left off at…" never came).
+        self.kept.put(KeptRing("a", "k1", False, Where(40.0, True)))  # left k1 for k2
+        self.kept.put(KeptRing("b", "k2", False, LIVE), next_channel="k1")  # back to k1
+        self.assertEqual(self.engine.closed, [])
+        self.assertEqual(self.kept.take("k1").where, Where(40.0, True))
+        self.assertEqual([r.sid for r in self.kept.rings()], ["b"])  # one memory ring again
+        self.kept.put(KeptRing("c", "k1", False, LIVE), next_channel="k3")
+        self.assertEqual(self.engine.closed, ["b"])
+
     def test_a_ring_that_did_not_come_back_leaves_one_memory_ring(self):  # 2.8 review M4
         # Put to come right back, but another channel was tuned instead: once that one is
         # taken, one memory ring is kept again, the channel left last.

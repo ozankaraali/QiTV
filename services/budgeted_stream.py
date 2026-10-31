@@ -166,7 +166,7 @@ class BudgetedStream(QObject):
                 ring = self.live.park()  # likewise; the channel's buffer is kept
                 if ring is not None:
                     back = bool(next_channel) and ring.channel == next_channel
-                    self.kept.put(ring, coming_back=back)
+                    self.kept.put(ring, coming_back=back, next_channel=next_channel)
         elif ticket is not None:
             self.budget.release(ticket)  # never started: nothing upstream to wait for
 
