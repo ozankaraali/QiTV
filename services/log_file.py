@@ -59,6 +59,14 @@ class _Masked(logging.Formatter):
         return mask(super().format(record))
 
 
+def console_handler() -> logging.Handler:
+    """The console's handler (stderr), its lines masked as the file's are: a terminal's
+    scrollback, or a log a launcher keeps, is read later too."""
+    handler = logging.StreamHandler()
+    handler.setFormatter(_Masked(FORMAT))
+    return handler
+
+
 def _unhandled(kind: type[BaseException], error: BaseException, frames: Any) -> None:
     """sys.excepthook (PySide6 hands it an exception a slot raised): its frames and type, never
     its message, which may repeat an address."""

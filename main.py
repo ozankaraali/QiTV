@@ -157,11 +157,9 @@ def main() -> int:
     from ui.tv_window import TVWindow
     from ui.update_dialogs import check_for_updates, replace_failed
 
-    # Basic logging configuration (tweak level as needed)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    # Basic logging configuration (tweak level as needed); the console's lines are masked as
+    # the file's are (addresses, Xtream paths, sign-in headers, MAC addresses).
+    logging.basicConfig(level=logging.INFO, handlers=[log_file.console_handler()])
     # A packaged app has no terminal: its log is kept in a file too, where it can be read (2.7.2).
     log_file.install()
     log = logging.getLogger("qitv")

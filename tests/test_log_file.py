@@ -66,6 +66,23 @@ class InstallTests(unittest.TestCase):
         for secret in ("secret", "panel.test", "username="):
             self.assertNotIn(secret, text)
 
+    def test_the_console_masks_its_lines_as_the_file_does(self):  # 2.8.12 review
+        import io
+
+        handler = log_file.console_handler()
+        stream = io.StringIO()
+        handler.setStream(stream)
+        logging.getLogger().addHandler(handler)
+        self.addCleanup(logging.getLogger().removeHandler, handler)
+        logging.getLogger("urllib3.connectionpool").warning(
+            "Retrying after Max retries exceeded with url: /live/quser/qpass/1.ts"
+        )
+        logging.getLogger("services.anything").info("Cookie: mac=00:1A:79:12:34:56")
+        text = stream.getvalue()
+        self.assertIn("[WARNING] urllib3.connectionpool: Retrying", text)
+        for secret in ("quser", "qpass", "12:34:56"):
+            self.assertNotIn(secret, text)
+
     def test_the_detailed_log_adds_qitvs_own_debug_lines(self):  # 2.8.2, Settings
         log_file.install(self.directory)
         self.addCleanup(log_file.set_detailed, False)
