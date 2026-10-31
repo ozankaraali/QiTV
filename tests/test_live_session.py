@@ -7129,6 +7129,20 @@ class NightAuditSessionTests(LiveSessionCase):
     in_part = ServerWindowTests.in_part
     SPANS = ServerWindowTests.SPANS
 
+    def test_a_channel_whose_address_is_gone_is_tried_directly_once(self):
+        # A missing channel (HTTP 404) failed for good at once, then three "Reconnecting…"
+        # over ~19 s before "Couldn't open the stream": its direct play is tried once.
+        self.live = self.make(retry_ms=(20, 30, 40))
+        sid = self.start()
+        self.engine.failure_status = lambda failed: 404 if failed == sid else None
+        self.engine.sessionFailed.emit(sid, "http", "The channel could not be reached over HTTP.")
+        self.engine.answer()
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.failures, ["The stream could not be opened"])
+        self.assertNotIn(RECONNECTING, self.notices)
+
     def zap_during_part_resume(self):
         sid, _part = self.in_part(-300.0, one_stream=True)
         self.live.go_live()  # the parked live upstream resumes; sessionResumed not yet here

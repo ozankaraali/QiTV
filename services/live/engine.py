@@ -161,6 +161,7 @@ class _View:
     spans: deque[Span] = field(default_factory=deque)
     snapshot: dict[str, Any] = field(default_factory=dict)
     closing: bool = False
+    status: int | None = None  # 2.8.12: the HTTP status its input failed with, if any
 
 
 def _helper_args(child: Any, root: Path) -> tuple[Any, str, bool]:
@@ -1040,6 +1041,12 @@ class LiveEngine(QObject):
         view = self._sessions.get(sid)
         return dict(view.snapshot) if view is not None else {}
 
+    def failure_status(self, sid: str) -> int | None:
+        """2.8.12: the HTTP status session `sid`'s input failed with (None: none, or not an
+        HTTP failure); read in a `sessionFailed` handler."""
+        view = self._sessions.get(sid)
+        return view.status if view is not None else None
+
     def stream_url(self, sid: str, seq: int) -> str:
         """The loopback URL streaming from segment `seq`; "" while no helper is up."""
         if not self._base_url:
@@ -1153,6 +1160,8 @@ class LiveEngine(QObject):
         elif name == "resumed":
             self.sessionResumed.emit(sid)
         elif name == "error":
+            status = message[4] if len(message) == 5 else None
+            view.status = status if isinstance(status, int) else None
             self.sessionFailed.emit(sid, message[2], message[3])
         elif name == "ended":
             self.sessionEnded.emit(sid)

@@ -318,6 +318,7 @@ PART_NOT_RECORDED = N_("Can't record here: go back into the buffer or live to re
 KEPT_DISK = N_("The disk buffer failed. Playing what was kept; Go live plays the channel again.")
 _DIRECT_RETRIES_MS = (3000, 5000, 10000)  # a fallback's direct play, failing at once ...
 _DIRECT_QUICK_S = 5.0  # ... within this of its play call (a timeout is reported at once)
+_GONE_STATUS = (404, 410)  # 2.8.12: a helper failure with these is not tried again directly
 LOADING = N_("Still loading…")  # i18n: toast: a channel takes long to start
 # i18n: toast: the provider answered with a recording (its connection limit, say), not live TV
 NOT_LIVE = N_("The provider sent a recording, not the channel. Trying again…")
@@ -2070,6 +2071,7 @@ class LiveSession(QObject):
                     self.notice.emit(LOST)
             return
         # Every other kind is final: the session's input is over.
+        status = getattr(self._engine, "failure_status", lambda _sid: None)(sid)
         if self._phase is _Phase.WAITING:
             if not self._limited:  # a refusal plays nothing (`_refuse`)
                 # The engine logged its HTTP status, if it had one.
@@ -2085,6 +2087,10 @@ class LiveSession(QObject):
             self._emit_timeline()
         else:  # at the live edge, or recovering: nothing buffered is worth keeping
             self._fall_back(LOST)
+        if status in _GONE_STATUS:
+            # 2.8.12: the address is not there: its direct play is tried once, not again and
+            # again after "Reconnecting…" (a closed connection still counted is no 404).
+            self._direct_retries = 0
 
     def _on_ended(self, sid: str) -> None:
         if self._part is not None and sid == self._part.sid:

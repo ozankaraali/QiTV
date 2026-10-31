@@ -482,6 +482,19 @@ class ParkResumeTests(unittest.TestCase):
         self.assertEqual((parked, resumed), (["s"], ["s"]))
         self.assertEqual(len(engine.spans("s")), 1)
 
+    def test_a_failures_http_status_is_there_for_the_session(self):
+        # 2.8.12: a channel whose address is gone (404) is not tried again and again.
+        engine, _ = self.engine()
+        engine._sessions["s"] = engine_module._View()
+        statuses = []
+        engine.sessionFailed.connect(lambda sid, *_: statuses.append(engine.failure_status(sid)))
+        engine._on_message(("error", "s", "http", "The channel could not be reached.", 404))
+        self.assertEqual(statuses, [404])
+        engine._sessions["t"] = engine_module._View()
+        engine._on_message(("error", "t", "network", "The channel could not be reached."))
+        self.assertIsNone(engine.failure_status("t"))
+        self.assertIsNone(engine.failure_status("unknown"))
+
     def test_a_parked_session_is_not_reopened_after_a_helper_death(self):
         import queue
 
