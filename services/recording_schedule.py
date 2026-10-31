@@ -485,15 +485,31 @@ class Schedule:
         self._outcomes.append(outcome)
         self._outcomes = self._outcomes[-OUTCOMES:]
 
-    def missed_before(self, now: float) -> list[dict]:
+    def missed_before(
+        self, now: float, *, why: str = "closed", busy: Iterable[str] = ()
+    ) -> list[dict]:
         """The one-time recordings whose window ended before `now` without being started
-        (QiTV was closed): noted missed and taken off; what was noted."""
+        (QiTV was closed; `why` says otherwise, "asleep": QiTV ran): noted missed and taken
+        off; what was noted. One with a part recorded (QiTV closed while it recorded, its
+        file noted) is taken off, never noted missed; `busy`: job keys the caller still
+        handles (left as they are)."""
         missed = []
         kept = []
+        busy = set(busy)
+        parts = {
+            (o.get("title"), o.get("channel"), o.get("start"))
+            for o in self._outcomes
+            if o.get("path")
+        }
         for item in self._items:
-            if item.get("kind") == ONCE and window(item)[1] <= now:
-                key = f"{item['id']}@{int(float(item.get('start') or 0))}"
-                if key not in self._done:
+            key = f"{item['id']}@{int(float(item.get('start') or 0))}"
+            if item.get("kind") == ONCE and window(item)[1] <= now and key not in busy:
+                noted = (
+                    str(item.get("title") or ""),
+                    str((item.get("channel") or {}).get("name") or ""),
+                    float(item.get("start") or 0),
+                )
+                if key not in self._done and noted not in parts:
                     missed.append(item)
                 continue
             kept.append(item)
@@ -506,7 +522,7 @@ class Schedule:
                 item.get("channel") or {},
                 float(item.get("start") or 0),
                 MISSED,
-                why="closed",
+                why=why,
             )
         self._save()
         return [dict(item) for item in missed]

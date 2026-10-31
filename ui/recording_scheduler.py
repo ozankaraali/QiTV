@@ -11,6 +11,9 @@ and said in a toast.
 
 A try that fails before it records (no stream free, no link, the stream failing) is tried again
 every RETRY_S while the programme airs; it is said missed or failed only once its window ended.
+No stream free is said at once too, the first time (the user may free one: what they watch, a
+phone's, an outside player's hold one). A one-time programme whose window passed with no try
+while QiTV ran (the computer slept) is said missed then, not at the next start.
 A recording the stream or the helper cuts short is kept, and the rest goes to another file. The
 next programme on a channel that records hands over: it needs no stream of its own; half a
 minute into it the earlier file ends, and the next starts from the helper's buffer a minute
@@ -20,7 +23,8 @@ file once it ends (the file keeps the longer one's name), or is due again on its
 recording stops before it ended. Due together, the longest begins first. A one-time recording
 made longer while it records goes on to its new end: the scheduler stops every recording at
 its window's end (the helper's own limit is only a day's). What records shows on the REC sign
-(`recording_now`), which stops it (`stop_now`).
+(`recording_now`), which stops it (`stop_now`); its stream's budget purpose is that name, so the
+question before a recording is stopped for a stream counts it (`ui.stream_question`).
 
 QiTV keeps the computer awake while it runs; a sleeping computer or a closed lid misses them.
 """
@@ -60,6 +64,14 @@ NO_STREAM_TEXT = N_("“{title}” was not recorded: no stream of {channel}'s pr
 FAILED_TEXT = N_("“{title}” could not be recorded ({why}).")
 # i18n: a toast at start: scheduled recordings whose time passed while QiTV was closed
 MISSED_TEXT = N_("Missed while QiTV was closed: {titles}")
+# i18n: a toast: scheduled recordings whose time passed while QiTV ran but the computer slept
+MISSED_ASLEEP_TEXT = N_("Missed while the computer was asleep: {titles}")
+# {title}: the programme, {channel}: its channel; it is tried again while it airs.
+# i18n: a toast: a scheduled recording is due, but its provider's streams are all in use
+NO_STREAM_YET_TEXT = N_(
+    "“{title}” can't start recording: no stream of {channel}'s provider is free. "
+    "QiTV tries again every minute while it airs."
+)
 # i18n: a toast: QiTV's time-shift helper is not running, so a scheduled recording can't start
 NO_HELPER = N_("the time-shift helper is not running")
 
@@ -176,6 +188,7 @@ class RecordingScheduler(QObject):
         self._clock = clock
         self._runs: list[_Run] = []
         self._tries: dict[str, _Try] = {}
+        self._said_busy: set[str] = set()  # jobs told once that no stream was free
         self._closed = False
         self._timer = QTimer(self)
         self._timer.setInterval(TICK_MS)
@@ -252,7 +265,9 @@ class RecordingScheduler(QObject):
         for key, attempt in list(self._tries.items()):
             if now >= rs.window(attempt.job)[1]:
                 del self._tries[key]
+                self._said_busy.discard(key)
                 self._said(attempt.job, attempt.state, attempt.why)
+        self._missed_meanwhile(now)
         busy = {job.key for run in self._runs for job in (run.job, *run.covers)}
         due = self.schedule.due(now, self._guide)
         for job in sorted(due, key=lambda job: (job.start, -job.stop)):  # the longest first
@@ -269,6 +284,15 @@ class RecordingScheduler(QObject):
                 self._tries.pop(job.key, None)
                 continue
             self._begin(job)
+
+    def _missed_meanwhile(self, now: float) -> None:
+        """One-time programmes whose window passed while QiTV ran without a try (the computer
+        slept through it): said missed now, not as closed at the next start."""
+        busy = {job.key for run in self._runs for job in (run.job, *run.covers)}
+        missed = self.schedule.missed_before(now, why="asleep", busy=busy | set(self._tries))
+        if missed:
+            titles = ", ".join(str(m.get("title") or "") for m in missed)
+            self._toast(translate(MISSED_ASLEEP_TEXT, titles=titles), "error")
 
     def _holder(self, job: rs.Job) -> Optional[_Run]:
         """A recording (or one about to) on `job`'s channel that goes on at least as long."""
@@ -318,7 +342,7 @@ class RecordingScheduler(QObject):
         since when (time.monotonic), the channel)."""
         return [
             (
-                SCHEDULED_PREFIX + run.job.key,
+                _purpose(run.job),
                 str(run.job.channel.get("name") or ""),
                 run.since,
                 dict(run.job.channel),
@@ -331,7 +355,7 @@ class RecordingScheduler(QObject):
         """The REC sign's Stop recording: this airing's recording stops and is kept (a series
         records its next airing)."""
         for run in list(self._runs):
-            if SCHEDULED_PREFIX + run.job.key == name and not run.stopping:
+            if _purpose(run.job) == name and not run.stopping:
                 run.user_stopped = True
                 self._stop(run)
 
@@ -404,10 +428,12 @@ class RecordingScheduler(QObject):
             self._retry(run, rs.FAILED, "provider")
             return
         limit = self._budget.limit_for(entry, self._catalogs.max_connections(job.provider))
-        run.ticket = self._budget.request(
-            job.provider, limit, purpose=f"rec:{job.item_id}", queue=False
-        )
+        run.ticket = self._budget.request(job.provider, limit, purpose=_purpose(job), queue=False)
         if run.ticket == DENIED:
+            if job.key not in self._said_busy:  # said once, at once: it may be freed
+                self._said_busy.add(job.key)
+                name = str(job.channel.get("name") or "")
+                self._toast(translate(NO_STREAM_YET_TEXT, title=job.title, channel=name), "error")
             self._retry(run, rs.MISSED, "stream")
             return
         # The provider's account back in the channel's address (the file keeps it out).
@@ -506,6 +532,7 @@ class RecordingScheduler(QObject):
             return
         self.schedule.started(run.job)
         self._tries.pop(run.job.key, None)
+        self._said_busy.discard(run.job.key)
         run.since = time.monotonic()
         self._toast(translate(STARTED_TEXT, title=run.job.title, channel=name), "info")
         self.changed.emit()
@@ -538,6 +565,7 @@ class RecordingScheduler(QObject):
         if following is not None and following in self._runs and run.sid and not cut:
             # The next programme takes the session (and its stream) over.
             following.sid, following.ticket = run.sid, run.ticket
+            self._budget.relabel(following.ticket, _purpose(following.job))  # its name now
             following.waiting_for = None
             run.sid, run.ticket = "", DENIED
             self._release(run)
@@ -615,3 +643,8 @@ class RecordingScheduler(QObject):
         if run in self._runs:
             self._runs.remove(run)
             self.changed.emit()
+
+
+def _purpose(job: rs.Job) -> str:
+    """The budget purpose of `job`'s stream: its REC sign name (`recording_now`)."""
+    return SCHEDULED_PREFIX + job.key

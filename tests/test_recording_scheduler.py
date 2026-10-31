@@ -148,7 +148,8 @@ class SchedulerTests(unittest.TestCase):
         sid, url, kwargs = self.engine.opened[0]
         self.assertEqual(url, CHANNEL["cmd"])
         self.assertFalse(kwargs["disk"])
-        self.assertEqual(self.budget.holders("P"), ["rec:" + self.schedule.items()[0]["id"]])
+        # Its stream's purpose is its REC sign name: the stream question counts it (audit).
+        self.assertEqual(self.budget.holders("P"), [rs_name(self.scheduler, "The News")])
         self.engine.sessionReady.emit(sid)
         rid, rec_sid, path, seq, max_s = self.engine.recordings[0]
         self.assertEqual((rec_sid, seq), (sid, 5))  # from the first segment the helper has
@@ -224,8 +225,32 @@ class SchedulerTests(unittest.TestCase):
         self.at(63, 1)
         (outcome,) = self.schedule.outcomes()
         self.assertEqual((outcome["state"], outcome["why"]), (rs.MISSED, "stream"))
-        self.assertEqual(sum(kind == "error" for _text, kind in self.toasts), 1)
+        said = [text for text, kind in self.toasts if kind == "error"]
+        self.assertEqual(len(said), 2)  # at once (audit 1c), and at its end
+        self.assertIn("was not recorded", said[-1])
         self.budget.release(held)
+
+    def test_no_free_stream_is_said_at_once_and_once(self):  # audit 1c
+        held = self.budget.request("P", 1, purpose="main")  # the channel watched holds it
+        self.schedule.add_once(CHANNEL, programme("The News", 30))
+        self.scheduler.tick()
+        self.assertEqual(
+            self.toasts,
+            [
+                (
+                    "“The News” can't start recording: no stream of News One's provider is "
+                    "free. QiTV tries again every minute while it airs.",
+                    "error",
+                )
+            ],
+        )
+        self.at(30, 10)  # tried again: nothing more said
+        self.at(31, 20)
+        self.assertEqual(len(self.toasts), 1)
+        self.budget.release(held)
+        self.at(32, 30)  # freed: it records the rest
+        self.catalogs.linkReady.emit(1, CHANNEL["cmd"])
+        self.assertEqual(len(self.engine.opened), 1)
 
     def test_a_stream_freed_meanwhile_records_the_rest(self):  # review I4
         held = self.budget.request("P", 1, purpose="main")
@@ -295,6 +320,7 @@ class SchedulerTests(unittest.TestCase):
         self.engine.recordingEnded.emit(rid, "stopped", path, 1_000_000)
         self.pump()
         self.assertEqual(self.engine.closed, [])  # the session goes on
+        self.assertEqual(self.budget.holders("P"), [rs_name(self.scheduler, "Ep 2")])
         rid2, sid2, path2, seq2, _max = self.engine.recordings[1]
         self.assertEqual(sid2, sid)
         self.assertEqual(seq2, 16)  # live edge 200 s; Ep 2 from a minute early: 90 s back, 110 s
@@ -442,6 +468,17 @@ class SchedulerTests(unittest.TestCase):
         self.now = now
         self.scheduler.start()
         self.assertTrue(any("Old News" in text for text, _ in self.toasts))
+
+    def test_one_slept_through_while_qitv_ran_is_said_missed_then(self):  # audit 3
+        self.schedule.add_once(CHANNEL, programme("The News", 30))
+        self.now = (T0 + timedelta(minutes=10)).timestamp()
+        self.scheduler.start()  # before its window
+        self.assertEqual(self.toasts, [])
+        self.at(90)  # the computer slept through its window; the clock ticks again
+        self.assertEqual(self.toasts, [("Missed while the computer was asleep: The News", "error")])
+        self.assertEqual(self.schedule.items(), [])
+        self.assertEqual(self.schedule.outcomes()[0]["why"], "asleep")
+        self.scheduler.shutdown()
 
     def test_running_recordings_are_told_and_stopped_at_quit(self):
         self.scheduled_now()
