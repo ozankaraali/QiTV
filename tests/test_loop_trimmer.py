@@ -34,9 +34,13 @@ def _untag(data: bytes) -> int:
     return sum((b & 0x7F) << (7 * k) for k, b in enumerate(data))
 
 
-def picture(content: int) -> bytes:
-    """An H.264 access unit only `content` has: an IDR picture every `GOP`, else P."""
-    head = b"\x00\x00\x00\x01\x09\xf0" + (_IDR if content % GOP == 0 else _P)
+def picture(content: int, sei: int = 0) -> bytes:
+    """An H.264 access unit only `content` has: an IDR picture every `GOP`, else P (`sei`: its
+    content in its delimiter, then an SEI that long)."""
+    head = b"\x00\x00\x00\x01\x09\xf0"
+    if sei:
+        head += _tag(content, 3) + b"\x00\x00\x00\x01\x06" + b"\xb5" * (sei - 6) + b"\x80"
+    head += _IDR if content % GOP == 0 else _P
     return head + _tag(content, 3) + b"\x55" * 300
 
 
@@ -44,8 +48,9 @@ class Writer:
     """A stream written picture by picture: PTS a frame apart, counters running on, the tables
     every 12 pictures, each picture's two sound PES after it."""
 
-    def __init__(self, pts: int = START) -> None:
+    def __init__(self, pts: int = START, *, rai_all: bool = False, sei: int = 0) -> None:
         self.pts = pts
+        self.rai_all, self.sei = rai_all, sei  # every picture flagged RAI; an SEI first
         self.counters = {0: 0, PMT_PID: 0, VIDEO_PID: 0, AUDIO_PID: 0}
         self.written = 0
         self.live = 1 << 21  # the next live sound's number
@@ -62,9 +67,9 @@ class Writer:
             packets, counters[VIDEO_PID] = pes_packets(
                 VIDEO_PID,
                 0xE0,
-                picture(content),
+                picture(content, self.sei),
                 self.pts,
-                rai=content % GOP == 0,
+                rai=self.rai_all or content % GOP == 0,
                 cc_start=counters[VIDEO_PID],
                 pcr=self.pts,
             )
@@ -124,7 +129,7 @@ def contents(data: bytes) -> list[int]:
     """The content of each picture in `data`, in order."""
     found = []
     for _, es in starts(data, VIDEO_PID):
-        at = 6 + (len(_IDR) if es[6:11] == _IDR[:5] else len(_P))
+        at = 6 if es[6] & 0x80 else 6 + (len(_IDR) if es[6:11] == _IDR[:5] else len(_P))
         found.append(_untag(es[at : at + 3]))
     return found
 
@@ -265,6 +270,18 @@ class LoopTrimmerTests(unittest.TestCase):
         w = Writer()
         data = w.pictures(range(500)) + w.pictures(list(range(275, 500)) * 2)
         data += w.pictures(range(1010, 1100))  # a keyframe 15 pictures in
+        pieces, loops = run(data, chunk=1000)
+        self.assertEqual(contents(rebased(pieces)), [*range(500), *range(1025, 1100)])
+        self.assertEqual(loops.loops[0].ended_by, "keyframe")
+
+    def test_with_rai_on_every_picture_a_loop_ends_at_a_keyframe_its_bytes_show(self):
+        # RAI on every picture, each with a 200-byte SEI first: a picture's first packet ends
+        # before its slice header. Taken for a keyframe by its RAI, the first new P picture
+        # ended the loop, and the picture was broken until the next IDR; read whole, the
+        # loop ends at the IDR 15 pictures in.
+        w = Writer(rai_all=True, sei=200)
+        data = w.pictures(range(500)) + w.pictures(list(range(275, 500)) * 2)
+        data += w.pictures(range(1010, 1100))
         pieces, loops = run(data, chunk=1000)
         self.assertEqual(contents(rebased(pieces)), [*range(500), *range(1025, 1100)])
         self.assertEqual(loops.loops[0].ended_by, "keyframe")

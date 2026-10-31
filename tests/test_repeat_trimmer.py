@@ -34,10 +34,12 @@ BACKLOG = 5.0  # media the source sends at connect
 FIRST = 0.1  # when the first byte arrives
 
 
-def picture(index: int, key: bool) -> bytes:
-    """An H.264 access unit only frame `index` has: IDR or P."""
+def picture(index: int, key: bool, sei: int = 0) -> bytes:
+    """An H.264 access unit only frame `index` has: IDR or P (`sei`: an SEI that long first)."""
     tag = bytes(0x80 | ((index >> (7 * k)) & 0x7F) for k in range(3))  # never a start code
     body = b"\x00\x00\x00\x01\x09\xf0"
+    if sei:
+        body += b"\x00\x00\x00\x01\x06" + b"\xb5" * (sei - 6) + b"\x80"
     if key:
         body += b"\x00\x00\x00\x01\x67" + b"\x55" * 15 + b"\x00\x00\x00\x01\x65\x55"
     else:
@@ -46,10 +48,17 @@ def picture(index: int, key: bool) -> bytes:
 
 
 def stream(
-    runs, *, audio: bool = False, flag: bool = True, tables: bool = False
+    runs,
+    *,
+    audio: bool = False,
+    flag: bool = True,
+    tables: bool = False,
+    rai_all: bool = False,
+    sei: int = 0,
 ) -> list[tuple[float, bytes]]:
     """(arrival, packet) of `runs`: (frame indexes, first PTS, arrival, GOP in frames), where
-    arrival maps a frame's media position in its run to the second it arrives."""
+    arrival maps a frame's media position in its run to the second it arrives (`rai_all`:
+    every picture flagged RAI; `sei`: each with an SEI that long first)."""
     counters = {0: 0, PMT_PID: 0, VIDEO_PID: 0, AUDIO_PID: 0}
     timed: list[tuple[float, bytes]] = []
     for number, (indexes, first_pts, arrival, gop) in enumerate(runs):
@@ -77,7 +86,7 @@ def stream(
                 timed.extend((at, packet) for packet in sound_packets)
             key = k % gop == 0
             packets, counters[VIDEO_PID] = pes_packets(
-                VIDEO_PID, 0xE0, picture(index, key), pts, rai=key,
+                VIDEO_PID, 0xE0, picture(index, key, sei), pts, rai=key or rai_all,
                 cc_start=counters[VIDEO_PID], pcr=pts,
             )  # fmt: skip
             if restart:
@@ -308,6 +317,29 @@ class RepeatTrimmerTests(unittest.TestCase):
         first_pcr = next(p for p in packets(kept) if p[3] & 0x20 and p[4] and p[5] & 0x10)
         self.assertTrue(first_pcr[5] & 0x80)
         self.assertEqual(trim.dropped_bytes, len(run.input) - len(run.output))
+
+    def test_with_rai_on_every_picture_a_repeat_is_cut_at_a_keyframe_its_bytes_show(self):
+        # RAI on every picture, each with a 200-byte SEI first (a caption, HDR metadata): a
+        # picture's first packet ends before its slice header. R is 5.75 s and an IDR comes
+        # every 5 s; taken for a keyframe by its RAI, the P picture at 5.72 s was cut to, and
+        # the picture was broken until the next IDR. Read on, the cut is the IDR at 5 s.
+        run = Run(stream(repeat_runs(6.0, 1.0, gop=5 * FPS), rai_all=True, sei=200))
+        (trim,) = run.trimmer.trims
+        self.assertEqual((trim.reason, trim.dropped_s), ("dropped", 5.0))
+        self.assertEqual(video_pts(run.output)[20 * FPS], 5 * CLOCK)
+        self.assertEqual(cc_breaks(run.output), 0)
+
+    def test_a_rai_picture_its_first_packet_cannot_tell_is_read_on(self):
+        # As the segmenter reads on: an IDR or a P picture behind an SEI the first packet ends
+        # in; past `_LOOK_AHEAD` bytes that tell nothing, the RAI is believed.
+        for sei, key, expected in ((200, True, True), (200, False, False), (3200, False, True)):
+            with self.subTest(sei=sei, key=key):
+                data = b"".join(
+                    pes_packets(VIDEO_PID, 0xE0, picture(0, key, sei), 0, rai=True, pcr=0)[0]
+                )
+                rai, _, es = ts._pes_start(data[:PACKET])
+                self.assertIsNone(ts._trim_key(data[:PACKET], rai, es, 0x1B))
+                self.assertIs(ts._read_on(data, 0, 0x1B), expected)
 
     def test_a_burst_that_only_makes_up_its_silence_passes_untouched(self):
         silence = 3.0

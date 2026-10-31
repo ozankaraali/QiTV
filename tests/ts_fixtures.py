@@ -157,8 +157,10 @@ def _nal(t: int, size: int) -> bytes:
     return b"\x00\x00\x00\x01" + bytes([0x60 | t]) + b"\x55" * (size - 5)
 
 
-def h264_access_unit(idr: bool) -> bytes:
-    au = b"\x00\x00\x00\x01\x09\xf0"
+def h264_access_unit(idr: bool, sei: int = 0) -> bytes:
+    """An IDR or P picture (`sei`: with an SEI NAL unit that long after its delimiter, as a
+    caption or HDR SEI)."""
+    au = b"\x00\x00\x00\x01\x09\xf0" + (_nal(6, sei) if sei else b"")
     if idr:
         au += _nal(7, 20) + _nal(8, 8) + _nal(5, FRAME_BYTES - len(au) - 28)
     else:
@@ -192,6 +194,8 @@ def make_stream(
     jumps: tuple[tuple[float, float], ...] = (),
     video_gaps: tuple[tuple[float, float], ...] = (),
     audio_ahead_s=0.0,
+    rai_all=False,
+    sei=0,
 ) -> bytes:
     """`seconds` of H.264-tagged video (PCR on each picture) and AAC-tagged sound.
 
@@ -201,7 +205,8 @@ def make_stream(
     the PTS follows the presentation time, the DTS the decode time: a P picture decoded before
     the leap but shown after it has its PTS ahead already). `video_gaps`: (from, to) seconds
     without pictures, the sound going on. `audio_ahead_s`: each sound frame is muxed this much
-    before the pictures of its time."""
+    before the pictures of its time. `rai_all`: every picture flagged RAI, as some muxers do;
+    `sei`: each picture with an SEI that long first (`h264_access_unit`)."""
     n_frames = int(round(seconds * fps))
     gop_frames = max(1, int(round(gop_s * fps)))
     frame_ticks = round(CLOCK / fps)  # fps may be fractional: 30000 / 1001 gives 3003
@@ -250,9 +255,9 @@ def make_stream(
             ps, ccs[VIDEO_PID] = pes_packets(
                 VIDEO_PID,
                 0xE0,
-                h264_access_unit(key),
+                h264_access_unit(key, sei),
                 pts,
-                rai=rai and key,
+                rai=rai and (key or rai_all),
                 cc_start=ccs[VIDEO_PID],
                 pcr=pts if dts is None else dts,
                 scrambled=scrambled,

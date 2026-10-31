@@ -1101,9 +1101,10 @@ class ReconnectTrimmer:
     the furthest PTS; past it, it goes on at a keyframe that comes within
     `_REJOIN_KEY_WAIT_TICKS` (the pictures before it dropped too), else at the first picture
     past it (a long GOP or intra refresh: the decoder goes on from the old connection's
-    pictures, the same ones), the packets after that picture held meanwhile. Every other PES
-    PID (the sound) goes on at its first PES after that PID's furthest PTS, a PCR on a PID of
-    its own only once past that PID's furthest one, and the tables pass. What a cut
+    pictures, the same ones), the packets after that picture held meanwhile (a RAI picture
+    whose first packet cannot tell is read on in its PES's next packets: `_trim_key`). Every
+    other PES PID (the sound) goes on at its first PES after that PID's furthest PTS, a PCR on
+    a PID of its own only once past that PID's furthest one, and the tables pass. What a cut
     connection passes goes through `ContinuityJoiner` until the next reconnect, so the
     counters run on (about a microsecond a packet). A new connection that resumes after the
     old one, one in another timebase (a reset: `RepeatTrimmer`'s and the segmenter's, as
@@ -1136,6 +1137,10 @@ class ReconnectTrimmer:
         # waited for: (offset, packet, passes; None: a video packet, decided by the wait).
         self._waiting: list[tuple[int, bytes, bool | None]] | None = None
         self._past = 0
+        # While waiting: a RAI picture read on (`_trim_key`), its index in `_waiting`, its PTS.
+        self._look: _Look | None = None
+        self._look_at = 0
+        self._look_pts = 0
         self._after = 0  # packets judged since the picture resumed
         self._at = 0  # where the connection began
         self._step = 0.0
@@ -1188,7 +1193,7 @@ class ReconnectTrimmer:
     def _release(self) -> bytes:
         kept: list[bytes] = []
         if self._waiting is not None:
-            self._end_wait(True, kept)
+            self._end_wait(kept)
         held = b"".join(kept) + b"".join(p for _, p in self._pending or ()) + self._buf
         self._pending, self._buf = None, b""
         if self._armed:
@@ -1219,6 +1224,7 @@ class ReconnectTrimmer:
         self._pending = [] if self._armed else None
         self._searching = True
         self._keep, self._resumed, self._waiting = {}, set(), None
+        self._look = None
         self._after = 0
         self._at, self._step, self._dropped = self._pos, 0.0, []
 
@@ -1303,8 +1309,11 @@ class ReconnectTrimmer:
                 if after:
                     assert pts is not None
                     rai, _, es = _pes_start(pkt)
-                    if not _trim_key(pkt, rai, es, self._video_type):
+                    key = _trim_key(pkt, rai, es, self._video_type)
+                    if not key:
                         self._waiting, self._past = [], pts  # `_judge` holds it from here
+                        if key is None:  # its next packets tell (`_wait`)
+                            self._look, self._look_at, self._look_pts = _starting_look(pkt), 0, pts
                         return False
             elif top is None:
                 after = True  # a PID without a PTS before: nothing to repeat
@@ -1330,30 +1339,48 @@ class ReconnectTrimmer:
         if pid != self._video:
             waiting.append((at, pkt, self._passes(pkt)))
         else:
+            look = self._look
+            if look is not None:  # a RAI picture read on
+                key = _key_on(look, pkt, 0, self._video_type)
+                if key:  # a keyframe after all: the pictures before it go
+                    self._end_wait(kept, self._look_at)
+                    kept.append(pkt)
+                    return
+                if key is False:
+                    self._look = None
+                    if pts_delta(self._past, self._look_pts) > _REJOIN_KEY_WAIT_TICKS:
+                        self._end_wait(kept)  # none in time: from the first past it on
+                        kept.append(pkt)
+                        return
             pts = _pes_times(pkt, 0)[0] if (pkt[1] & 0xC0) == 0x40 else None
             if pts is not None:
                 rai, _, es = _pes_start(pkt)
                 after = pts_delta(self._top[self._video], pts) > 0
-                if after and _trim_key(pkt, rai, es, self._video_type):
-                    self._end_wait(False, kept)  # a keyframe in time: the pictures before go
+                key = _trim_key(pkt, rai, es, self._video_type) if after else False
+                if key:
+                    self._end_wait(kept, len(waiting))  # a keyframe in time: those before go
                     kept.append(pkt)
                     return
-                if pts_delta(self._past, pts) > _REJOIN_KEY_WAIT_TICKS:
-                    self._end_wait(True, kept)  # none in time: from the first past it on
+                if key is None:  # its next packets tell
+                    self._look, self._look_at = _starting_look(pkt), len(waiting)
+                    self._look_pts = pts
+                elif pts_delta(self._past, pts) > _REJOIN_KEY_WAIT_TICKS:
+                    self._end_wait(kept)  # none in time: from the first past it on
                     kept.append(pkt)
                     return
             waiting.append((at, pkt, None))
         if len(waiting) >= _REJOIN_WAIT_PACKETS:
-            self._end_wait(True, kept)
+            self._end_wait(kept)
 
-    def _end_wait(self, pictures: bool, kept: list[bytes]) -> None:
-        """The wait ends: the held packets pass or go as judged, the pictures as `pictures`
-        says; the picture passes from here."""
+    def _end_wait(self, kept: list[bytes], start: int = 0) -> None:
+        """The wait ends: the held packets pass or go as judged, the pictures from the
+        `start`-th held packet on; the picture passes from here."""
         waiting, self._waiting = self._waiting or [], None
+        self._look = None
         assert self._video is not None
         self._resumed.add(self._video)
-        for at, packet, keep in waiting:
-            self._place(packet, at, pictures if keep is None else keep, kept)
+        for k, (at, packet, keep) in enumerate(waiting):
+            self._place(packet, at, k >= start if keep is None else keep, kept)
 
     def _place(self, pkt: bytes, at: int, keep: bool, kept: list[bytes]) -> None:
         if keep:
@@ -1560,7 +1587,9 @@ class RepeatTrimmer:
         # The new run's first video PTS (without pictures, its sound's), once it stepped back.
         self._video_back: int | None = None
         self._release_now: str | None = None  # released at the end of this read, untouched
-        self._keys: list[tuple[int, int]] = []  # (offset in the held bytes, PTS) of keyframes
+        # (offset in the held bytes, PTS, sure) of keyframes; not sure: a RAI picture its first
+        # packet left undecided (`_trim_key`), read on in the held bytes if it is in reach
+        self._keys: list[tuple[int, int, bool]] = []
         self._samples: list[tuple[float, float]] = []  # (clock, media held)
         self._before: float | None = None  # media minus clock before the silence
         self._settle: tuple[float, float] | None = None  # (clock, media held) where it settled
@@ -1635,8 +1664,9 @@ class RepeatTrimmer:
                     if self._confirmed:
                         self._advance(pts)
                         rai, _, es = _pes_start(data[off:end])
-                        if _trim_key(data[off:end], rai, es, video_type):
-                            self._keys.append((len(self._held) + off - start, pts))
+                        key = _trim_key(data[off:end], rai, es, video_type)
+                        if key is not False:
+                            self._keys.append((len(self._held) + off - start, pts, bool(key)))
                 if pid == video_pid and pts is not None and self._held is None:
                     self._advance(pts)
                 if pcr is not None:
@@ -1940,15 +1970,17 @@ class RepeatTrimmer:
         if reason is None:
             assert first is not None  # (a run without pictures has none: it goes untouched)
             reach = repeat + extra
-            keys = [
-                (at, pts) for at, pts in self._keys if 0 < pts_delta(first, pts) <= reach * _CLOCK
-            ]
+            video_type = self._program()[1]
+            keys = [key for key in self._keys if 0 < pts_delta(first, key[1]) <= reach * _CLOCK]
             if excess is None or max(0.0, excess) + extra < _TRIM_MIN_S:
                 reason = "small"
-            elif not keys:
-                reason = "no keyframe"
-            else:
-                reason, drop = "dropped", keys[-1]
+            else:  # the last in reach (one its first packet left undecided, once read on)
+                for at, pts, sure in reversed(keys):
+                    if sure or _read_on(held, at, video_type):
+                        reason, drop = "dropped", (at, pts)
+                        break
+                else:
+                    reason = "no keyframe"
         ranges: list[tuple[int, int]] = []
         if drop is None:
             kept = bytes(held)
@@ -2000,11 +2032,69 @@ class RepeatTrimmer:
         )
 
 
-def _trim_key(pkt: bytes, rai: bool, es: int, video_type: int | None) -> bool:
+def _trim_key(pkt: bytes | bytearray, rai: bool, es: int, video_type: int | None) -> bool | None:
     """Whether a video PES start is a picture VLC can start decoding at: an IDR or an open
-    intra picture, or with RAI one whose kind its first packet cannot tell."""
+    intra picture, or with RAI an intra picture or parameter sets. None with RAI where its first
+    packet cannot tell (its picture lies behind a large SEI, say): its PES's next packets tell,
+    read on as the segmenter reads them (`_key_on`). Some muxers flag RAI on every PES, and with
+    a caption or HDR SEI over ~150 bytes on every picture a trim taken at a P picture's RAI
+    broke the picture until the next IDR."""
     kind = _classify(pkt, es, video_type) if es < PACKET else _UNDECIDED
-    return kind in (_IDR, _OPEN) or (rai and kind in (_INTRA, _PARAM, _UNDECIDED))
+    if rai and kind == _UNDECIDED:
+        return None
+    return kind in (_IDR, _OPEN) or (rai and kind in (_INTRA, _PARAM))
+
+
+def _starting_look(pkt: bytes | bytearray) -> _Look:
+    """Reading on the RAI picture a video PES start `pkt` begins (`_trim_key` gave None)."""
+    es = _pes_start(pkt)[2]
+    return _Look(bytearray(pkt[es:]), pkt[3] & 0x0F, bytes(pkt[:PACKET]), True)
+
+
+def _key_on(look: _Look, data: bytes | bytearray, off: int, video_type: int | None) -> bool | None:
+    """The next packet on the PID of a RAI picture `_trim_key` left undecided (at `off` in
+    `data`): whether the picture is a keyframe once known, None while not. As
+    `Segmenter._read_ahead` reads on: it is none once its bytes show a picture that is not
+    intra; it is one, as its RAI says, where its PES ends first (the next PES start, damage, a
+    lost or repeated counter on a packet that is no true duplicate) or `_LOOK_AHEAD` bytes
+    tell nothing."""
+    b1, b3 = data[off + 1], data[off + 3]
+    if b1 & 0x80 or b1 & 0x40 or b3 & 0xC0:  # a transport error, the next PES, scrambled
+        return True
+    if not b3 & 0x10:
+        return None  # adaptation only: the counter stays
+    end = off + PACKET
+    cc = b3 & 0x0F
+    if cc == look.cc:  # a true duplicate is skipped
+        return None if data[off:end] == look.last else True
+    if cc != (look.cc + 1) & 0x0F:
+        return True
+    look.cc, look.last = cc, bytes(data[off:end])
+    start = off + (5 + data[off + 4] if b3 & 0x20 else 4)
+    if start < end:
+        look.es += data[start:end]
+        kind = _classify(look.es, 0, video_type)
+        if kind == _NOT_KEY:
+            return False
+        if kind not in (_UNDECIDED, _PARAM):
+            return True
+    return True if len(look.es) >= _LOOK_AHEAD else None
+
+
+def _read_on(data: bytes | bytearray, at: int, video_type: int | None) -> bool:
+    """Whether the RAI picture whose PES starts in the packet at `at` in `data` (`_trim_key`
+    gave None) is a keyframe, its PES read on in the packets after it (`_key_on`); one where
+    `data` ends or loses packet sync first."""
+    look = _starting_look(data[at : at + PACKET])
+    pid = ((data[at + 1] & 0x1F) << 8) | data[at + 2]
+    off = at + PACKET
+    while off + PACKET <= len(data) and data[off] == SYNC:
+        if ((data[off + 1] & 0x1F) << 8) | data[off + 2] == pid:
+            key = _key_on(look, data, off, video_type)
+            if key is not None:
+                return key
+        off += PACKET
+    return True
 
 
 def _kept_from(
@@ -2094,11 +2184,12 @@ class Loop:
 @dataclass(slots=True)
 class _Unit:
     """A PES `LoopTrimmer` reads: where its first packet is (an input offset), its PTS, whether
-    it is a keyframe (a picture), and its ES bytes so far."""
+    it is a keyframe (a picture; None: a RAI picture its first packet left undecided, which its
+    bytes tell once read whole, `_trim_key`), and its ES bytes so far."""
 
     at: int
     pts: int | None
-    key: bool
+    key: bool | None
     parts: list[bytes | bytearray]
 
 
@@ -2379,7 +2470,7 @@ class LoopTrimmer:
                 self._new += 1
                 self._live.clear()
                 self._live_now = False
-                if picture.key:
+                if self._keyframe(picture):
                     how = "keyframe"
                 elif self._new * self._ticks() >= _LOOP_MIN_S * _CLOCK:
                     how = "pictures"
@@ -2389,7 +2480,10 @@ class LoopTrimmer:
                     how = "sound"
                 elif self._clock() - self._found_at >= _LOOP_GIVE_UP_S:
                     self._new_since += 1  # (pictures since: a keyframe is waited for)
-                    if picture.key or self._new_since * self._ticks() >= _LOOP_MIN_S * _CLOCK:
+                    if (
+                        self._keyframe(picture)
+                        or self._new_since * self._ticks() >= _LOOP_MIN_S * _CLOCK
+                    ):
                         how = "given up"
                         self._given_up = frozenset(self._run_digests)
             if how is None:
@@ -2431,6 +2525,14 @@ class LoopTrimmer:
             self._repeated = set()
         else:
             self._settle(end, out, drop=False)
+
+    def _keyframe(self, picture: _Unit) -> bool:
+        """Whether a picture read whole is a keyframe: a RAI picture its first packet left
+        undecided is one unless its bytes show a picture that is not intra (`_trim_key`)."""
+        if picture.key is None:
+            kind = _classify(b"".join(picture.parts)[:_LOOK_AHEAD], 0, self._program()[1])
+            picture.key = kind != _NOT_KEY
+        return picture.key
 
     def _verdict(self) -> bool | None:
         """Whether the run held is a loop: None while that is not known yet."""
@@ -3960,7 +4062,7 @@ def _has_stride(window: bytes, stride: int) -> bool:
     return any(run in window[phase::stride] for phase in range(stride))
 
 
-def _pes_start(pkt: bytes) -> tuple[bool, int | None, int]:
+def _pes_start(pkt: bytes | bytearray) -> tuple[bool, int | None, int]:
     """(random access indicator, PTS, offset of the elementary stream bytes) of a PUSI packet.
 
     The offset is PACKET when the PES header cannot be read from this packet.

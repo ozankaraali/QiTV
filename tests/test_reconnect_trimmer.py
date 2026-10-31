@@ -124,6 +124,20 @@ class ReconnectTrimmerTests(unittest.TestCase):
         self.assertEqual(frames, [START + k * FRAME for k in (*range(161), *range(175, 250))])
         self.assertEqual(cc_breaks(out), 0)
 
+    def test_with_rai_on_every_picture_it_goes_on_at_a_keyframe_its_bytes_show(self):
+        # RAI on every picture, each with a 200-byte SEI first: a picture's first packet ends
+        # before its slice header. Taken for a keyframe by its RAI, the P picture right past
+        # the old connection's end went on, and the picture was broken until the next IDR;
+        # read on, the P pictures wait and it goes on at the IDR (175).
+        stream = make_stream(10, rai_all=True, sei=200)
+        old = b"".join(packets(stream)[: frame_at(stream, 160) + 2])
+        for chunk in (None, 1000, 187):
+            with self.subTest(chunk=chunk):
+                out, _ = run(old, new_connection(stream, frame_at(stream, 125)), chunk=chunk)
+                frames = [START + k * FRAME for k in (*range(161), *range(175, 250))]
+                self.assertEqual(times(out, VIDEO_PID), frames)
+                self.assertEqual(cc_breaks(out), 0)
+
     def test_a_reconnect_that_resumes_after_the_old_connection_is_untouched(self):
         stream = make_stream(10)
         cut = frame_at(stream, 150)
