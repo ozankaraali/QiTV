@@ -530,6 +530,23 @@ class PlayerJobTests(unittest.TestCase):
         self.assertIn(":http-user-agent=UA/1", medias[-1].options)
         self.assertIn(":http-referrer=https://s.test/", medias[-1].options)
 
+    def test_an_address_in_no_streams_scheme_never_reaches_libvlc(self):
+        # A hostile portal's link: a share (Windows signs in to it), a capture device.
+        for url in ("file://server/share/a.ts", "smb://server/a.ts", "dshow://", "/etc/hosts"):
+            with self.subTest(url=url), self.assertLogs("services.playback", "WARNING") as log:
+                self.errors.clear()
+                self.session.play(url, kind=PlayKind.LIVE)
+                self.assertEqual(self.opened(), [])
+                self.assertEqual(self.errors, ["This item has no stream address"])
+                self.assertIs(self.session.state(), PlaybackState.ERROR)
+                self.assertIsNone(self.session.url)
+                self.assertNotIn("server", "\n".join(log.output))  # its scheme alone
+
+    def test_qitvs_own_file_plays_wherever_it_is_kept(self):
+        self.session.play("file://server/share/rec.ts", kind=PlayKind.VOD_FILE, local=True)
+        self.assertEqual(self.opened(), ["file://server/share/rec.ts"])
+        self.assertEqual(self.errors, [])
+
     def test_the_first_play_opens_on_the_gui_thread(self):
         self.play(A)
         self.assertEqual(self.runner.jobs, [])

@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from services.provider_api import stb_portal_base
+from services.stream_address import playable
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +68,17 @@ def _write_export_file(content_data, file_path, url_formatter, extinf_formatter)
     try:
         with _open_private(file_path) as file:
             file.write("#EXTM3U\n")
-            count = 0
+            count = refused = 0
             for item in content_data:
                 url = _link(str(url_formatter(item) or ""))
-                if url:
+                if url and not playable(url):  # a player opening the file would follow it
+                    refused += 1
+                elif url:
                     extinf = extinf_formatter(item)
                     file.write(f"{extinf}\n{url}\n")
                     count += 1
+            if refused:
+                logger.warning("Items left out (no stream's address): %s", refused)
             logger.info("Items exported: %s", count)
             logger.info("Content list has been saved to %s", file_path)
         return count

@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional, Tuple
 
 from services import vlc_bundle
 from services.i18n import N_, tr, translate
+from services.stream_address import NO_STREAM_MESSAGE, playable, shape
 from services.vlc_bundle import ENV_LIB, ENV_MODULES, ENV_PLUGINS
 
 logger = logging.getLogger(__name__)
@@ -122,12 +123,29 @@ def _http_args(user_agent: Optional[str], referrer: Optional[str], *, vlc: bool)
     return args
 
 
+def _refused(url: str, local: bool) -> Optional[str]:
+    """The failure to return for an address no player may be handed
+    (`stream_address.playable`; `local`: QiTV's own file), else None."""
+    if playable(url, local=local):
+        return None
+    logger.warning("Not handing a player an address in a scheme no stream uses (%s)", shape(url))
+    return translate(NO_STREAM_MESSAGE)
+
+
 def launch_vlc(
-    url: str, user_agent: Optional[str] = None, referrer: Optional[str] = None
+    url: str,
+    user_agent: Optional[str] = None,
+    referrer: Optional[str] = None,
+    *,
+    local: bool = False,
 ) -> Tuple[bool, str]:
     """Launch VLC with platform-specific handling. `user_agent` and `referrer` (2.8: an STB
     portal's box's, an M3U channel's own): VLC asks the stream so, in a window of its own (a
-    VLC already running would take the address without them)."""
+    VLC already running would take the address without them). `local`: `url` is QiTV's own
+    file's URI; any other address must be a stream's."""
+    refused = _refused(url, local)
+    if refused is not None:
+        return False, refused
     vlc_cmd = find_vlc()
     if not vlc_cmd:
         return False, vlc_missing()
@@ -260,11 +278,19 @@ def find_mpv() -> Optional[str]:
 
 
 def launch_mpv(
-    url: str, user_agent: Optional[str] = None, referrer: Optional[str] = None
+    url: str,
+    user_agent: Optional[str] = None,
+    referrer: Optional[str] = None,
+    *,
+    local: bool = False,
 ) -> Tuple[bool, str]:
-    """Launch MPV - try python-mpv first, fall back to subprocess. `user_agent` and
-    `referrer` as for launch_vlc (2.8): the player asks the stream so."""
+    """Launch MPV - try python-mpv first, fall back to subprocess. `user_agent`, `referrer`
+    and `local` as for launch_vlc (2.8): the player asks the stream so."""
     global _external_mpv_player, _mpv_defaults
+
+    refused = _refused(url, local)
+    if refused is not None:
+        return False, refused
 
     # Try python-mpv for single-instance behavior
     try:

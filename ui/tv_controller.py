@@ -1002,7 +1002,7 @@ class TVController(QObject):
 
         def open_file() -> None:
             self._prepare(session, target, previous)
-            session.play(url, kind=classify(url, False), start_ms=start)
+            session.play(url, kind=classify(url, False), start_ms=start, local=True)
             self._reset_speed(session)
 
         self._tuner.open(self._guarded(target, open_file), local=True)  # no provider slot
@@ -1939,7 +1939,7 @@ class TVController(QObject):
         if launcher is None:  # the setting changed meanwhile: play it here
             self._play_link(replace(target, zapped=False), url)
             return
-        http: dict[str, str] = {}
+        http: dict[str, Any] = {"local": True}  # a file's URI: QiTV's own (play_file)
         if not target.local:  # 2.8: asked as QiTV asks it (an STB portal's box's agent)
             agent = item_provider.stream_agent(self.catalog, target.item)
             referrer = str(target.item.get("referrer") or "")

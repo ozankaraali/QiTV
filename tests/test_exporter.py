@@ -168,7 +168,8 @@ class ExporterTests(unittest.TestCase):
 
     def test_write_items_never_takes_provider_as_list(self):
         provider = {"type": "M3U"}
-        self.assertEqual(write_items(provider, [{"name": "a", "cmd": "u"}], self.path), 1)
+        items = [{"name": "a", "cmd": "http://cdn.test/u"}]
+        self.assertEqual(write_items(provider, items, self.path), 1)
         self.assertIn("#EXTINF", self.read())
 
     def test_cached_stb_uses_portal_base(self):
@@ -344,8 +345,30 @@ class ExporterTests(unittest.TestCase):
             write_items(provider, [{"name": "a", "cmd": "http://a/1"}], self.path)
             self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
 
+    def test_an_address_no_player_should_follow_is_left_out(self):
+        items = [
+            {"name": name, "cmd": cmd}
+            for name, cmd in (
+                ("share", "file://server/share/a.ts"),
+                ("smb", "smb://server/share/a.ts"),
+                ("screen", "screen://"),
+                ("path", "/etc/hosts"),
+                ("ok", "http://cdn.test/ok.ts"),
+                ("udp", "udp://@239.0.0.1:1234"),
+            )
+        ]
+        self.assertEqual(write_items({"type": "M3U"}, items, self.path), 2)
+        text = self.read()
+        self.assertIn("http://cdn.test/ok.ts", text)
+        for refused in ("file:", "smb:", "screen:", "/etc/hosts"):
+            self.assertNotIn(refused, text)
+
     def test_write_items_counts_written_and_tolerates_none_cmd(self):
-        items = [{"name": "a", "cmd": "u"}, {"name": "b", "cmd": None}, {"name": "c"}]
+        items = [
+            {"name": "a", "cmd": "http://cdn.test/u"},
+            {"name": "b", "cmd": None},
+            {"name": "c"},
+        ]
         self.assertEqual(write_items({"type": "M3U"}, items, self.path), 1)
         self.assertEqual(
             write_items({"type": "STB", "url": "http://p.test/c/"}, items, self.path), 1

@@ -73,6 +73,7 @@ from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.picture_watch import Counters, FrozenPicture
 from services.sound_watch import SoundWatch
+from services.stream_address import NO_STREAM_MESSAGE, playable, shape
 from services.vlc_profile import PlayKind, media_options
 
 logger = logging.getLogger(__name__)
@@ -414,11 +415,19 @@ class PlaybackSession(QObject):
         referrer: Optional[str] = None,
         software: bool = False,
         max_height: int = 0,
+        local: bool = False,
     ) -> None:
         """`software`: decode this stream in software (with hardware decoding; a channel
         whose picture froze before). `max_height` (2.8): VLC's own HLS plays no variant
-        taller (`max_height()` tells a reopen)."""
+        taller (`max_height()` tells a reopen). `local`: `url` is QiTV's own file's URI (a
+        recording, a file opened from the disk); any other address must be a stream's
+        (`stream_address.playable`), or the play fails with NO_STREAM_MESSAGE."""
         if self._released:
+            return
+        if not playable(url, local=local):
+            logger.warning("Not playing an address in a scheme no stream uses (%s)", shape(url))
+            self._url = None  # nothing to open again
+            self._fail(translate(NO_STREAM_MESSAGE))
             return
         self._cancel_pending()
         self._held = False
@@ -1244,6 +1253,7 @@ class Session(Protocol):
         referrer: Optional[str] = None,
         software: bool = False,
         max_height: int = 0,
+        local: bool = False,
     ) -> None: ...
 
     def stop(self) -> None: ...
@@ -1366,6 +1376,7 @@ class NullSession(QObject):
         referrer: Optional[str] = None,
         software: bool = False,
         max_height: int = 0,
+        local: bool = False,
     ) -> None:
         self.errorOccurred.emit(translate(NO_VLC_MESSAGE))
 

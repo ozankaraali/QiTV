@@ -41,6 +41,7 @@ from services.provider_api import (
 from services.provider_ids import stamp
 from services.provider_types import is_media_server
 from services.redact import safe_message
+from services.stream_address import NO_STREAM_MESSAGE
 from services.workers import NO_PORTAL_DATA_MESSAGE, STB_DEVICE_REJECTED_MESSAGE, find_roman_token
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,6 @@ NO_SERIES_MESSAGE = N_("This provider has no series")
 PROVIDER_LOADING_MESSAGE = N_("The provider is still loading")
 GROUP_UNAVAILABLE_MESSAGE = N_("This group isn't available")
 SECTION_UNAVAILABLE_MESSAGE = N_("This provider doesn't offer this section")
-NO_STREAM_MESSAGE = N_("This item has no stream address")
 EMPTY_LINK_MESSAGE = N_("The portal returned an empty link")
 # Catalog network jobs (sections, groups, seasons, episodes) running at once per service:
 # portals rate-limit, and some ban a MAC that opens many connections.
