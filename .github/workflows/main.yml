@@ -193,10 +193,16 @@ jobs:
           path: C:\vlc-cache
           key: vlc-windows-${{ steps.vlc-version.outputs.version }}
       - name: Install VLC using Chocolatey
-        # Chocolatey's community feed is down at times (503): the next step installs VLC's
-        # own build from VideoLAN then.
-        continue-on-error: true
-        run: choco install vlc -y --cache-location=C:\vlc-cache
+        # Chocolatey's community feed is down at times (503, or "Unable to resolve dependency
+        # 'vlc.install'"): the next step installs VLC's own build from VideoLAN then, so a
+        # failure here is a notice, not an error.
+        shell: pwsh
+        run: |
+          choco install vlc -y --cache-location=C:\vlc-cache
+          if ($LASTEXITCODE -ne 0) {
+            echo "::notice::Chocolatey could not install VLC (exit $LASTEXITCODE); VideoLAN's build is installed next"
+          }
+          exit 0
       - name: Install VLC from VideoLAN when Chocolatey could not
         shell: pwsh
         env:
@@ -539,6 +545,15 @@ jobs:
           ")
           echo "VERSION=$version" >> $GITHUB_ENV
       - name: Download all artifacts
+        id: download
+        # It took 4-11 s; once it hung 16 minutes (the artifact service), so it gets a bound
+        # and a second try.
+        timeout-minutes: 5
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download all artifacts again
+        if: steps.download.outcome != 'success'
+        timeout-minutes: 10
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3

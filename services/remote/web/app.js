@@ -315,14 +315,64 @@ function bindButtons() {
 export function openSheet(id) {
   $("veil").hidden = false;
   $(id).hidden = false;
+  document.body.classList.add("sheet-open"); // the page under it holds still (app.css)
 }
 
 export function closeSheets() {
   $("veil").hidden = true;
-  for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
+  for (const sheet of document.querySelectorAll(".sheet")) {
+    sheet.hidden = true;
+    sheet.style.transform = "";
+  }
+  document.body.classList.remove("sheet-open");
+}
+
+// 2.8.10: a sheet dragged down from its top follows the finger and closes past a quarter of its
+// height (or a flick); short of that it springs back. A drag never starts on a key (its press
+// went to the TV at the touch), and a sheet scrolled down scrolls first.
+const SHEET_FLICK = 0.5; // px per ms
+function bindSheetSwipe(sheet) {
+  let drag = null; // {y, t, dy}
+  sheet.addEventListener(
+    "touchstart",
+    (event) => {
+      const onKey = event.target.closest && event.target.closest("[data-key]");
+      drag = event.touches.length === 1 && !onKey && sheet.scrollTop <= 0 ? { y: event.touches[0].clientY, t: performance.now(), dy: 0 } : null;
+    },
+    { passive: true },
+  );
+  sheet.addEventListener(
+    "touchmove",
+    (event) => {
+      if (!drag) return;
+      const dy = event.touches[0].clientY - drag.y;
+      if (dy <= 0) {
+        if (drag.dy > 0) sheet.style.transform = "";
+        drag.dy = 0;
+        return; // up: the sheet scrolls, if it can
+      }
+      event.preventDefault();
+      drag.dy = dy;
+      sheet.style.transition = "none";
+      sheet.style.transform = `translateY(${dy}px)`;
+    },
+    { passive: false },
+  );
+  const end = () => {
+    if (!drag) return;
+    const { dy, t } = drag;
+    drag = null;
+    sheet.style.transition = "";
+    const flick = dy > 30 && dy / Math.max(1, performance.now() - t) > SHEET_FLICK;
+    if (dy > sheet.offsetHeight / 4 || flick) closeSheets();
+    else sheet.style.transform = "";
+  };
+  sheet.addEventListener("touchend", end);
+  sheet.addEventListener("touchcancel", end);
 }
 
 function bindChrome() {
+  for (const sheet of document.querySelectorAll(".sheet")) bindSheetSwipe(sheet);
   $("moreButton").addEventListener("click", () => openSheet("moreSheet"));
   $("veil").addEventListener("click", closeSheets);
   for (const el of document.querySelectorAll("[data-close]")) el.addEventListener("click", closeSheets);

@@ -2611,6 +2611,55 @@ class HeardEdgeTests(unittest.TestCase):
         self.assertEqual(heard, [False, True])
         self.assertFalse(states[-1])
 
+    def test_a_reconnect_answered_with_a_recording_is_dropped_and_asked_again(self):
+        # 2.8.10: a provider answered the reconnect with 600 s of a "connection limit" clip in
+        # 2.4 s; the timeline took it as the channel. Now it is dropped, the source is told
+        # (it asks again later), and the next connection's media runs on from the buffer.
+        from services.live.source import Discontinuity, Reconnecting
+
+        before, clip, after = make_stream(8), make_stream(120), make_stream(8)
+        helper = SimpleNamespace(
+            root="",
+            send=lambda message, session=None: None,
+            server=SimpleNamespace(add_session=lambda *args: None),
+        )
+        session = worker._Session(helper, "r", "http://provider.test/r.ts", {}, True, RAM, 6.0)
+        told = []
+
+        def reads(data):
+            return (data[at : at + 65536] for at in range(0, len(data), 65536))
+
+        class Source:
+            hls = False
+            burst_s = 0.0
+            user_agent = "test"
+
+            def not_live(self):
+                told.append(True)
+
+            def chunks(self):
+                yield from reads(before)
+                yield Reconnecting()
+                yield Discontinuity()
+                for block in reads(clip):  # far faster than it plays
+                    yield block
+                    if told:
+                        break  # the source closes that connection
+                yield Reconnecting()
+                yield Discontinuity()
+                yield from reads(after)
+
+            def close(self):
+                pass
+
+            def wait_closed(self, timeout):
+                return True
+
+        with patch.object(source_module, "open_source", lambda *args, **kwargs: Source()):
+            session._ingest()
+        self.assertEqual(told, [True])
+        self.assertLess(session._timeline.end, 20.0)  # the two connections' 16 s, not 136
+
     def test_a_reconnect_onto_a_clock_far_behind_reaches_the_buffer_running_on(self):
         # A new connection's muxer started over, 2.4 hours back: VLC would read its time as 0
         # for hours while it played on (2.4.2). What the buffer holds runs on by a frame.
