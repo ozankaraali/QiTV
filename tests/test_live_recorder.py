@@ -321,9 +321,12 @@ class RecorderTests(RecorderCase):
         fallback = RamRing(64 * SEGMENT)
         fallback.open_segment(5, header(5))
         fallback.append(payload(5, 0, 4000))
-        current = [failing]
-        recorder = self.record(0, ring_of=lambda: current[0])
-        current[0] = fallback  # the session went on in RAM after its disk failed
+        # The recording starts on the disk ring; by its failed read the session went on in RAM
+        # after its disk failed. Asked in that order whatever the threads' timing (swapped
+        # after the start, the recorder's thread could read the disk ring before the swap and
+        # read it again: CI saw it give up with nothing written).
+        first = [failing]
+        recorder = self.record(0, ring_of=lambda: first.pop() if first else fallback)
         expected = header(5) + payload(5, 0, 4000)
         self.wait_written(recorder, len(expected))
         recorder.stop()
@@ -331,11 +334,46 @@ class RecorderTests(RecorderCase):
         self.assertEqual(reason, STOPPED)
         self.assertEqual(Path(path).read_bytes(), expected)
 
-    def test_a_read_that_fails_twice_stops_it_and_keeps_what_it_wrote(self):
+    def test_a_session_that_moves_to_ram_a_while_after_the_failed_read_is_followed(self):
+        # 2.8.12: the session moves on in RAM once its own next write fails, which a quiet
+        # source may bring seconds after the recorder's read failed (it asked once and gave up).
+        failing = FailingRing(64 * SEGMENT, after=0, failures=99)
+        self.ring, self.writer = failing, Writer(failing)
+        self.segments(1)
+        fallback = RamRing(64 * SEGMENT)
+        fallback.open_segment(5, header(5))
+        fallback.append(payload(5, 0, 4000))
+        asked = []
+
+        def ring_of():
+            asked.append(True)
+            return failing if len(asked) <= 4 else fallback  # the start and three failed reads
+
+        recorder = self.record(0, ring_of=ring_of)
+        expected = header(5) + payload(5, 0, 4000)
+        self.wait_written(recorder, len(expected))
+        recorder.stop()
+        reason, path, _ = self.finish(recorder)
+        self.assertEqual(reason, STOPPED)
+        self.assertEqual(Path(path).read_bytes(), expected)
+
+    def test_a_read_that_fails_a_moment_goes_on(self):
         flaky = FailingRing(64 * SEGMENT, after=2, failures=2)
         self.ring, self.writer = flaky, Writer(flaky)
         self.segments(3)
-        with self.assertLogs("services.live.recorder", "WARNING") as logs:
+        recorder = self.record(0)
+        self.wait_written(recorder, 3 * SEGMENT)  # all of it, the reads that failed again too
+        recorder.stop()
+        self.assertEqual(self.finish(recorder)[0], STOPPED)
+
+    def test_a_read_that_keeps_failing_stops_it_and_keeps_what_it_wrote(self):
+        flaky = FailingRing(64 * SEGMENT, after=2, failures=10**9)
+        self.ring, self.writer = flaky, Writer(flaky)
+        self.segments(3)
+        with (
+            mock.patch.object(recorder_module, "_FOLLOW_S", 0.3),
+            self.assertLogs("services.live.recorder", "WARNING") as logs,
+        ):
             recorder = self.record(0)
             reason, path, written = self.finish(recorder)
         self.assertEqual(reason, FAILED)  # it could not go on: no write failed
