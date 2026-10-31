@@ -12,6 +12,7 @@ import subprocess
 import sys
 from typing import Any, Mapping, Optional, Tuple
 
+from services import vlc_bundle
 from services.i18n import N_, tr, translate
 from services.vlc_bundle import ENV_LIB, ENV_MODULES, ENV_PLUGINS
 
@@ -63,13 +64,16 @@ def player_env(
     VLC_PLUGIN_PATH (and python-vlc's two variables) point at the bundled libVLC, and an
     installed VLC would scan those plugins as well as its own. In a frozen Linux app,
     LD_LIBRARY_PATH points into the bundle: the value from before QiTV started comes back
-    (PyInstaller's LD_LIBRARY_PATH_ORIG), or none when there was none.
+    (PyInstaller's LD_LIBRARY_PATH_ORIG), or none when there was none; so do the hardware
+    driver folders QiTV named for its own libva (vlc_bundle.ADDED).
     """
     environ = os.environ if environ is None else environ
     system = system or platform.system()
     frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
     env = {k: v for k, v in environ.items() if k not in (ENV_LIB, ENV_MODULES, ENV_PLUGINS)}
     if system == "Linux" and frozen:
+        for name in vlc_bundle.ADDED:
+            env.pop(name, None)
         original = env.get("LD_LIBRARY_PATH_ORIG")
         if original is not None:
             env["LD_LIBRARY_PATH"] = original

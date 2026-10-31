@@ -195,6 +195,14 @@ class ExternalPlayersTest(unittest.TestCase):
                 env = external_players.player_env(bundle, system=system, frozen=frozen)
                 self.assertEqual(env["LD_LIBRARY_PATH"], "/tmp/_MEI1")
 
+    def test_a_frozen_linux_app_keeps_the_driver_folders_it_named_to_itself(self):
+        environ = {"LIBVA_DRIVERS_PATH": "/usr/lib64/dri", "VDPAU_DRIVER_PATH": "/opt/vdpau"}
+        with mock.patch.object(external_players.vlc_bundle, "ADDED", {"LIBVA_DRIVERS_PATH"}):
+            env = external_players.player_env(environ, system="Linux", frozen=True)
+            self.assertEqual(env, {"VDPAU_DRIVER_PATH": "/opt/vdpau"})  # the user's stays
+            env = external_players.player_env(environ, system="Linux", frozen=False)
+            self.assertEqual(env, environ)
+
     def test_players_start_with_that_environment(self):
         bundle = {"PATH": "/usr/bin", "VLC_PLUGIN_PATH": "/tmp/_MEI1/vlc/plugins"}
         with (
