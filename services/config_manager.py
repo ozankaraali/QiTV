@@ -4,14 +4,13 @@ import logging
 import os
 from pathlib import Path
 import platform
-import shutil
 import sys
 import time
 import tomllib
 
 import orjson as json
 
-from services.atomic_write import atomic_write
+from services.atomic_write import atomic_write, set_aside
 from services.free_channels import ALL_NAME, ALL_URL
 from services.multikeydict import MultiKeyDict
 from services.redact import safe_message
@@ -238,18 +237,36 @@ class ConfigManager:
 
     def load_config(self):
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
+            with open(self.config_path, "rb") as f:
                 self.config = json.loads(f.read())
-            if self.config is None:
-                self.config = self.default_config()
-        except FileNotFoundError, json.JSONDecodeError:
+        except FileNotFoundError:
             self.config = self.default_config()
             self._save_at_start()
+        except json.JSONDecodeError:  # cut short, or damaged
+            self._replace_unreadable_config()
+        else:
+            if self.config is None:
+                self.config = self.default_config()
+            elif not isinstance(self.config, dict):
+                self._replace_unreadable_config()
 
         if isinstance(self.xmltv_channel_map, list):
             self.xmltv_channel_map = MultiKeyDict.deserialize(self.xmltv_channel_map)
 
         self.update_patcher()
+
+    def _replace_unreadable_config(self) -> None:
+        """Start from the defaults; the config.json that cannot be read is kept beside the
+        new one as config.json.broken-<time>, so nothing in it is lost. (Where it cannot be
+        moved, the defaults cannot replace it either.)"""
+        self.config = self.default_config()
+        aside = set_aside(self.config_path)
+        if aside is not None:
+            logger.warning(
+                "The settings can't be read: they were kept as %s, and the defaults are used",
+                os.path.basename(aside),
+            )
+        self._save_at_start()
 
     def update_patcher(self):
         need_update = False
@@ -639,9 +656,9 @@ class ConfigManager:
             f.write(serialized_config)
 
     def _replace_config(self, temporary, retries):
-        """Swap the written settings in, keeping the file's permissions."""
-        if os.path.exists(self.config_path):
-            shutil.copymode(self.config_path, temporary)
+        """Swap the written settings in, readable by the user alone (they hold sign-ins and
+        keys): an older file's looser mode is not carried over."""
+        os.chmod(temporary, 0o600)
         for attempt in range(retries + 1):
             try:
                 os.replace(temporary, self.config_path)

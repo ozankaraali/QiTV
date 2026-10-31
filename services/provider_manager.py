@@ -14,7 +14,7 @@ import orjson as json
 import tzlocal
 
 from services import free_channels
-from services.atomic_write import atomic_write
+from services.atomic_write import atomic_write, set_aside
 from services.catchup import mark_stb_archives
 from services.lazy_import import lazy_module
 from services.m3u import split_cached_groups
@@ -24,7 +24,7 @@ from services.provider_api import (
     remember_http_only,
 )
 from services.provider_types import is_media_server
-from services.redact import safe_exc
+from services.redact import safe_exc, safe_message
 from services.vlc_profile import STB_USER_AGENT
 
 logger = logging.getLogger(__name__)
@@ -98,6 +98,8 @@ class ProviderManager(QObject):
         self._cache_lock = threading.Lock()
         self._cache_generations: dict[str, int] = {}
         self._pending_cache_snapshots: dict[str, tuple[int, Any]] = {}
+        # Set when index.json could not be read: the caches of the providers it listed stay.
+        self._keep_unlisted_caches = False
         if providers is not None:
             self.providers = providers
         else:
@@ -205,13 +207,36 @@ class ProviderManager(QObject):
 
     def _load_providers(self):
         try:
-            with open(self.index_file, "r", encoding="utf-8") as f:
+            with open(self.index_file, "rb") as f:
                 self.providers = json.loads(f.read())
-            if self.providers is None:
-                self.providers = self.default_providers()
-        except FileNotFoundError, json.JSONDecodeError:
+        except FileNotFoundError:
             self.providers = self.default_providers()
             self.save_providers()
+        except json.JSONDecodeError:  # cut short (an older build crashed mid-save), or damaged
+            self._replace_unreadable_index()
+        else:
+            if self.providers is None:
+                self.providers = self.default_providers()
+            elif not isinstance(self.providers, list):
+                self._replace_unreadable_index()
+
+    def _replace_unreadable_index(self):
+        """Start from the free list. The index.json that cannot be read holds every provider
+        and its sign-in: it is kept beside the new one (index.json.broken-<time>) and so are
+        the providers' caches, so putting that file back brings everything back."""
+        self.providers = self.default_providers()
+        self._keep_unlisted_caches = True  # no save this session prunes a cache
+        aside = set_aside(self.index_file)  # where it cannot be moved, nor can it be replaced
+        if aside is not None:
+            logger.warning(
+                "The provider list can't be read: it was kept as %s, and the free list is "
+                "used meanwhile",
+                os.path.basename(aside),
+            )
+        try:
+            self.save_providers()
+        except OSError as e:
+            logger.warning("Couldn't save the provider list: %s", safe_message(e))
 
     @staticmethod
     def default_providers():
@@ -313,8 +338,12 @@ class ProviderManager(QObject):
 
     def save_providers(self):
         serialized = json.dumps(self.providers, option=json.OPT_INDENT_2)
-        with open(self.index_file, "w", encoding="utf-8") as f:
-            f.write(serialized.decode("utf-8"))
+        # Written whole or not at all, and (as atomic_write writes) readable by the user alone:
+        # it holds every sign-in.
+        with atomic_write(self.index_file) as f:
+            f.write(serialized)
+        if self._keep_unlisted_caches:
+            return
 
         # Delete stale cache files not matching any known provider name hash
         # (malformed provider entries without a string name are ignored).
