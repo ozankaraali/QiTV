@@ -9,7 +9,14 @@ import unittest
 
 from services.live import ts
 from services.live.ts import PACKET, ClockJoiner, pts_delta
-from tests.ts_fixtures import AUDIO_FRAME_TICKS, AUDIO_PID, CLOCK, VIDEO_PID, make_stream
+from tests.ts_fixtures import (
+    AUDIO_FRAME_TICKS,
+    AUDIO_PID,
+    CLOCK,
+    VIDEO_PID,
+    audio_only,
+    make_stream,
+)
 
 FRAME = CLOCK // 25
 WRAP = 1 << 33
@@ -275,6 +282,19 @@ class ClockJoinerTests(unittest.TestCase):
                 out += b"".join(joiner.feed(after))
                 out += b"".join(joiner.feed(later, junction=True)) + joiner.finish()
                 self.assertEqual(list(joiner.junctions), [(40 - 3 + FRAME / CLOCK, FRAME / CLOCK)])
+
+    def test_a_junction_without_a_picture_before_it_passes_on_at_once(self):
+        # A radio channel's restart (AAC, its PCR on the sound's PID): no picture to re-base
+        # onto, none to wait for. Waiting held its sound until 4096 packets came (28 s of a
+        # 27 kB/s channel): it passes on with its feed, as it came.
+        for clock in (None, lambda: 0.0):
+            with self.subTest(watching=clock is not None):
+                joiner = ClockJoiner(program=lambda: (None, None), clock=clock)
+                old, new = audio_only(5, pcr=True), audio_only(5, pcr=True)
+                out = b"".join(joiner.feed(old))
+                self.assertEqual(joiner.feed(new, junction=True), [new])
+                self.assertEqual(out + joiner.finish(), old)
+                self.assertEqual(list(joiner.junctions), [])
 
     def test_pes_without_the_optional_header_carry_no_time(self):
         # A padding stream (0xBE): its header has no flags byte to read as one.

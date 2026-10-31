@@ -270,9 +270,14 @@ def make_stream(
     return b"".join(pkts)
 
 
-def audio_only(seconds, *, pid=AUDIO_PID, pts_start=900000) -> bytes:
+def audio_only(
+    seconds, *, pid=AUDIO_PID, pts_start=900000, pcr=False, resets: tuple[float, ...] = ()
+) -> bytes:
     """An audio-only TS segment, as a separate HLS audio rendition's: PAT, a PMT listing one
-    AAC stream (its own PCR PID), then one ADTS-tagged PES per AAC frame from `pts_start`."""
+    AAC stream (its own PCR PID), then one ADTS-tagged PES per AAC frame from `pts_start`.
+
+    `pcr`: each PES carries a PCR (its PTS), as a radio channel's does. `resets`: from each of
+    these media times on, the clock starts over from `pts_start` (a muxer that restarted)."""
     body = (0xE000 | pid).to_bytes(2, "big") + b"\xf0\x00"
     body += bytes([0x0F]) + (0xE000 | pid).to_bytes(2, "big") + b"\xf0\x00"
     head = bytes([0x02]) + (0xB000 | (5 + len(body) + 4)).to_bytes(2, "big")
@@ -280,9 +285,13 @@ def audio_only(seconds, *, pid=AUDIO_PID, pts_start=900000) -> bytes:
         pat(),
         _psi_packet(PMT_PID, head + (1).to_bytes(2, "big") + bytes([0xC1, 0, 0]) + body, 0),
     ], 0
+    reset_ticks = sorted(round(r * CLOCK) for r in resets)
     for j in range(int(seconds * CLOCK) // AUDIO_FRAME_TICKS):
+        t = j * AUDIO_FRAME_TICKS
+        past = [r for r in reset_ticks if t >= r]
+        pts = pts_start + (t - past[-1] if past else t)
         ps, cc = pes_packets(
-            pid, 0xC0, b"\xff\xf1" + b"\xaa" * 200, pts_start + j * AUDIO_FRAME_TICKS, cc_start=cc
+            pid, 0xC0, b"\xff\xf1" + b"\xaa" * 200, pts, cc_start=cc, pcr=pts if pcr else None
         )
         pkts.extend(ps)
     return b"".join(pkts)

@@ -1436,7 +1436,8 @@ class Trim:
     beyond R's reach because stay-live asked (2.8.5, `RepeatTrimmer.extra`). `reason`:
     "dropped", "small" (R and what was asked below `_TRIM_MIN_S`), "no keyframe" (none in
     reach), "no burst" (none came: released early), "first" (no media before it to measure
-    from), "reconnect" or "end" (released before its burst settled, untouched).
+    from), "no pictures" (a program without pictures: released at once), "reconnect" or "end"
+    (released before its burst settled, untouched).
     """
 
     offset: int
@@ -1465,7 +1466,14 @@ class RepeatTrimmer:
     PES of any PID steps back by more than `_REORDER_TICKS` (with the flagged packets right
     before it, its first tables): from there it is held. It is a restart once both the PCR and
     the video PTS stepped back from the clock before it; if either goes on instead, it was
-    none and the bytes pass on as they came. A restart is held
+    none and the bytes pass on as they came, as they do when that is not known within
+    `_TRIM_HOLD_S` (judged on reads and ticks alike) or `_CLOCK_PENDING_PACKETS` (pictures
+    that stopped while the sound and the PCR restarted). A program without pictures (a radio
+    channel: AAC with its PCR on the sound's PID) has its sound's PTS judged instead, the first
+    PES that comes of a PID that had one before; such a restart has no media to measure R by,
+    and passes on at once, untouched, as a run of its own ("no pictures"; once it was never
+    confirmed, and the sound was held until the new PCR caught up with the old one or 4096
+    packets were held: up to a minute of silence on a low-rate AAC channel). A restart is held
     until its burst settled (a second brought at most `_TRIM_BURST_RATE` s of media),
     `_TRIM_HOLD_S` passed or `_TRIM_HOLD_BYTES` are held, all judged as input arrives, and
     while a source sends nothing on the caller's `tick()`. R, how far the
@@ -1542,13 +1550,15 @@ class RepeatTrimmer:
         self._held_pos = 0
         self._held_at = 0.0
         self._held_counters: dict[int, int] = {}
-        # Until it is a restart: the clock before it (each PID's PCR, the video PTS) and what
-        # stepped back so far.
+        # Until it is a restart: the clock before it (each PID's PCR, the video PTS; without
+        # pictures each PES PID's PTS) and what stepped back so far.
         self._confirmed = False
         self._ref_pcrs: dict[int, int] = {}
         self._ref_video: int | None = None
+        self._ref_sound: dict[int, int] | None = None  # without pictures: each PES PID's
         self._pcr_back = False
-        self._video_back: int | None = None  # the new run's first video PTS, once it stepped back
+        # The new run's first video PTS (without pictures, its sound's), once it stepped back.
+        self._video_back: int | None = None
         self._release_now: str | None = None  # released at the end of this read, untouched
         self._keys: list[tuple[int, int]] = []  # (offset in the held bytes, PTS) of keyframes
         self._samples: list[tuple[float, float]] = []  # (clock, media held)
@@ -1646,7 +1656,9 @@ class RepeatTrimmer:
             reason = self._release_now or self._due(now)
             if reason is not None:
                 self._release(now, pieces, reason or None)
-        elif self._held is None and self._first is not None:
+        elif self._held is not None:
+            self._unjudged(now, pieces)
+        elif self._first is not None:
             self._note(now)
         return pieces
 
@@ -1691,8 +1703,10 @@ class RepeatTrimmer:
                     self._pcr_back = True
                 else:  # the PCR goes on: no restart after all
                     return self._abandon(data, off, start, pieces)
-            if pid == video_pid and pts is not None and self._video_back is None:
-                ref = self._ref_video
+            sound = self._ref_sound
+            judged = pid == video_pid or (sound is not None and pid in sound)
+            if judged and pts is not None and self._video_back is None:
+                ref = self._ref_video if sound is None else sound[pid]  # (without pictures)
                 if ref is None or pts_delta(ref, pts) >= -_REORDER_TICKS:
                     return self._abandon(data, off, start, pieces)
                 self._video_back = pts
@@ -1725,6 +1739,7 @@ class RepeatTrimmer:
         self._confirmed = False
         self._ref_pcrs = dict(self._pcrs)
         self._ref_video = self._pts.get(video_pid) if video_pid is not None else None
+        self._ref_sound = dict(self._pts) if video_pid is None else None
         # From here each PID's steps are the new run's own (its first PES steps back from the
         # old run's, as expected).
         self._pcrs.clear()
@@ -1742,10 +1757,22 @@ class RepeatTrimmer:
         self._counters.update(self._held_counters)
         return off
 
+    def _unjudged(self, now: float, pieces: list[bytes]) -> None:
+        """A held run not yet judged a restart: held `_TRIM_HOLD_S`, as long as a restart may
+        be, it passes on as it came (a picture that never came to judge it by)."""
+        if now - self._held_at >= _TRIM_HOLD_S:
+            logger.debug("a held run passed on unjudged after %.1f s", now - self._held_at)
+            self._abandon(b"", 0, 0, pieces)
+
     def _confirm(self, now: float) -> None:
         """A restart: the old run ends where the new one began."""
         assert self._video_back is not None
         self._confirmed = True
+        if self._ref_sound is not None:  # without pictures there is no R to measure
+            self._before, self._quick_held = None, False
+            self._samples, self._settle = [(self._held_at, 0.0)], None
+            self._release_now = "no pictures"
+            return
         self._before = self._ahead  # as noted at an earlier read's end: before the silence
         silence = math.inf if self._noted_at is None else self._held_at - self._noted_at
         self._quick_held = silence <= _TRIM_QUICK_S + 1e-9
@@ -1773,11 +1800,15 @@ class RepeatTrimmer:
     def tick(self) -> list[bytes]:
         """Time passed without input (a source that pauses): a held restart is judged as a
         read would judge it, so one whose hold is due (settled: its media stood still, or the
-        cap) passes on now, not with the next read or the reconnect after the pause."""
+        cap) passes on now, not with the next read or the reconnect after the pause; and so
+        does a held run not yet judged a restart once it was held `_TRIM_HOLD_S`."""
         pieces = [b""]
-        if self._held is None or not self._confirmed:
+        if self._held is None:
             return pieces
         now = self._clock()
+        if not self._confirmed:
+            self._unjudged(now, pieces)
+            return pieces
         self._samples.append((now, self._run_media()))
         reason = self._release_now or self._due(now)
         if reason is not None:
@@ -1897,7 +1928,7 @@ class RepeatTrimmer:
         """Pass the held run on as a piece of its own: from its last keyframe in reach when R
         allows, else whole."""
         held, first = self._held, self._first
-        assert held is not None and first is not None
+        assert held is not None
         self._held = None
         excess = None
         if self._before is not None:
@@ -1907,6 +1938,7 @@ class RepeatTrimmer:
         extra = self._extra() if reason is None else 0.0
         repeat = max(0.0, min(excess or 0.0, sum(self._runs)))  # what R's reach is
         if reason is None:
+            assert first is not None  # (a run without pictures has none: it goes untouched)
             reach = repeat + extra
             keys = [
                 (at, pts) for at, pts in self._keys if 0 < pts_delta(first, pts) <= reach * _CLOCK
@@ -1936,7 +1968,7 @@ class RepeatTrimmer:
         if joiner is not None:
             kept = joiner.feed(kept)
         pieces.append(kept)  # a new run starts here
-        dropped_s = pts_delta(first, drop[1]) / _CLOCK if drop is not None else 0.0
+        dropped_s = 0.0 if drop is None or first is None else pts_delta(first, drop[1]) / _CLOCK
         # Where the run last brought media, as passed on: the baseline for the next restart.
         final = self._samples[-1][1] if self._samples else 0.0
         arrived = next((at for at, media in self._samples if media >= final), now)
@@ -2671,7 +2703,10 @@ class ClockJoiner:
     run's last (its furthest PTS, and its last DTS) by a frame: the new run keeps its own audio
     to video alignment, and the offsets add up over restarts. The junction's bytes wait for its
     first picture (`_CLOCK_PENDING_PACKETS` at most), so the tables, PCRs and sound before it
-    move with it. An offset that moves the clock by two frames or less leaves the junction be
+    move with it; with no picture before the junction (a program without pictures) there is
+    nothing to re-base onto, and they pass on at once, as they came (waiting, a radio
+    channel's sound stood still until 4096 packets came). An offset that moves the clock by
+    two frames or less leaves the junction be
     (the clock runs on already). Otherwise it leaves no trace: each PID's first
     discontinuity_indicator after it is cleared, and the counters run on
     (`ContinuityJoiner`). The ring then holds rewritten bytes after a restart (or a jump,
@@ -2790,7 +2825,10 @@ class ClockJoiner:
         if junction:
             self._flush_pending(out)  # one that never met its picture passes on as it came
             self._settle = None  # the junction re-bases what follows on its own
-            self._pending = []
+            if self._top is not None or self._before is not None:
+                self._pending = []
+            else:  # no picture before it to re-base onto (a radio channel): it passes on
+                self._watch = _Watch()
         data = self._buf + data if self._buf else data
         n = len(data)
         off = run = 0  # the next packet; the first byte not yet passed on or pending

@@ -15,7 +15,18 @@ from unittest import mock
 
 from services.live import ts
 from services.live.ts import PACKET, ClockJoiner, RepeatTrimmer, pts_delta
-from tests.ts_fixtures import AUDIO_PID, CLOCK, PMT_PID, VIDEO_PID, pat, pes_packets, pmt
+from tests.ts_fixtures import (
+    AUDIO_FRAME_TICKS,
+    AUDIO_PID,
+    CLOCK,
+    PMT_PID,
+    VIDEO_PID,
+    audio_only,
+    make_stream,
+    pat,
+    pes_packets,
+    pmt,
+)
 
 FPS = 25
 TICKS = CLOCK // FPS
@@ -192,7 +203,92 @@ def repeat_runs(repeat: float, silence: float, *, gop: int = FPS, new: float = 1
     ]
 
 
+def radio(seconds: float, *, start: float = 0.0, **options) -> list[tuple[float, bytes]]:
+    """(arrival, packet) of a radio channel (AAC, its PCR on the sound's PID; `options` as
+    `audio_only`'s): each frame arrives at its media time from `start`, in real time across a
+    restart of its clock."""
+    timed, frame = [], 0
+    for p in packets(audio_only(seconds, pcr=True, **options)):
+        if pid_of(p) == AUDIO_PID and p[1] & 0x40:
+            frame += 1
+        timed.append((start + max(0, frame - 1) * AUDIO_FRAME_TICKS / CLOCK, p))
+    return timed
+
+
+class Paced:
+    """Feed a timed stream to a trimmer in reads every `STEP` s of the clock (the source's
+    reads), ticking while it holds (the helper's ticker); `pause` (from, to) sends nothing
+    then. `silent` is the longest stretch in which nothing passed on, `holds` how long each
+    hold lasted."""
+
+    STEP = 0.1
+
+    def __init__(self, timed, *, video: bool, pause: tuple[float, float] | None = None):
+        self.trimmer = RepeatTrimmer(
+            program=lambda: (VIDEO_PID, 0x1B) if video else (None, None), clock=lambda: self.now
+        )
+        self.input = b"".join(packet for _, packet in timed)
+        out: list[bytes] = []
+        self.now, self.silent, last, k = 0.0, 0.0, 0.0, 0
+        self.holds: list[float] = []
+        since = None
+        while k < len(timed):
+            self.now = round(self.now + self.STEP, 6)
+            chunk = []
+            while k < len(timed) and timed[k][0] <= self.now:
+                if pause is not None and pause[0] < self.now < pause[1]:
+                    break
+                chunk.append(timed[k][1])
+                k += 1
+            pieces = self.trimmer.feed(b"".join(chunk)) if chunk else [b""]
+            if self.trimmer.holding:
+                since = self.now if since is None else since
+                pieces += self.trimmer.tick()
+            if since is not None and not self.trimmer.holding:
+                self.holds.append(round(self.now - since, 6))
+                since = None
+            if any(pieces):
+                self.silent = max(self.silent, self.now - last - self.STEP)
+                last = self.now
+            out.extend(pieces)
+        out.extend(self.trimmer.finish())
+        self.output = b"".join(out)
+
+
 class RepeatTrimmerTests(unittest.TestCase):
+    def test_a_radio_channels_restart_goes_on_at_once(self):
+        # AAC with its PCR on the sound's PID: no picture to confirm a restart by. Held until
+        # the new PCR caught up (40 s) or 4096 packets came, the sound stood still for 28 s
+        # and VLC ran dry; judged by the sound, the restart goes on at once, untouched, as a
+        # run of its own.
+        run = Paced(radio(70.0, resets=(40.0,)), video=False)
+        (trim,) = run.trimmer.trims
+        self.assertEqual((trim.reason, trim.released_at, trim.dropped), ("no pictures", 40.0, ()))
+        self.assertEqual(run.output, run.input)
+        self.assertLessEqual(run.silent, Paced.STEP)
+        self.assertEqual(run.trimmer.restarts, 1)
+
+    def test_a_held_run_no_picture_comes_to_judge_goes_on_within_the_cap(self):
+        # Pictures for 20 s, then the sound alone (its PCR on its own PID), whose clock
+        # restarts at 30 s: no picture comes to tell whether it was one. Held until the new
+        # PCR caught up 10 s later (or 4096 packets came: 43 s here), it goes on as it came
+        # once held `_TRIM_HOLD_S`, on a read or, while the source pauses, on a tick.
+        stamped, at = [], 0.0
+        for p in packets(make_stream(20)):  # each PES start at its media time, the rest with it
+            pts = ts._pes_times(p, 0)[0] if p[1] & 0x40 else None
+            at = at if pts is None else (pts - 900000) / CLOCK
+            stamped.append((at, p))
+        stamped += radio(40.0, start=20.0, pts_start=900000 + 20 * CLOCK, resets=(10.0,))
+        for pause in (None, (30.15, 40.0)):
+            with self.subTest(pause=pause):
+                run = Paced(stamped, video=True, pause=pause)
+                self.assertEqual(list(run.trimmer.trims), [])  # no restart was confirmed
+                self.assertEqual(run.output, run.input)
+                (held,) = run.holds
+                self.assertAlmostEqual(held, ts._TRIM_HOLD_S, delta=Paced.STEP + 1e-6)
+                if pause is None:
+                    self.assertLessEqual(run.silent, ts._TRIM_HOLD_S + Paced.STEP)
+
     def test_a_repeat_is_dropped_up_to_the_last_keyframe_in_reach(self):
         run = Run(stream(repeat_runs(5.0, 1.0)))
         (trim,) = run.trimmer.trims
