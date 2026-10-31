@@ -298,9 +298,14 @@ mark { background: none; color: var(--accent); font-weight: 600; }
 .tabs button.on { color: var(--accent); }
 
 /* ---- sheets ---- */
-.veil { position: fixed; inset: 0; background: rgba(5, 8, 12, 0.6); z-index: 10; }
+/* 2.8.10: a swipe on the veil or on a sheet that cannot scroll went through to the page under it
+   (an iPhone scrolls what lies beneath): the page holds still while a sheet is open. */
+.veil { position: fixed; inset: 0; background: rgba(5, 8, 12, 0.6); z-index: 10; touch-action: none; }
+body.sheet-open #app { overflow: hidden; touch-action: none; }
+body.sheet-open .remote, body.sheet-open .rows, body.sheet-open .chips { overflow: hidden; }
 .sheet {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 11; max-height: 86dvh; overflow-y: auto;
+  overscroll-behavior: contain; transition: transform 0.18s ease-out;
   display: flex; flex-direction: column; gap: 12px; padding: 10px 20px calc(16px + env(safe-area-inset-bottom));
   border-radius: 26px 26px 0 0; background: var(--sheet); box-shadow: 0 -1px 0 var(--line), 0 -20px 40px rgba(0, 0, 0, 0.5);
 }

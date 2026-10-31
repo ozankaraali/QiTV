@@ -1286,6 +1286,57 @@ def scenario_touchpad(rig: Rig) -> None:
     rig.page.wait_for_selector("#touchpad:not([hidden])")
 
 
+def touch_drag(rig: Rig, x: float, y: float, dy: float, *, steps: int = 6, ms: int = 120) -> None:
+    """A finger at (x, y) moved `dy` down and lifted (Chrome's touch emulation)."""
+    cdp = rig.page.context.new_cdp_session(rig.page)
+    cdp.send("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 1})
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]})
+    for k in range(1, steps + 1):
+        point = {"x": x, "y": y + dy * k / steps}
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [point]})
+        rig.page.wait_for_timeout(ms / steps)
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+    cdp.detach()
+
+
+def scenario_sheet_swipe(rig: Rig) -> None:
+    """2.8.10: More's sheet dragged down from its top closes, and a short drag springs back; a
+    drag that starts on a key leaves it open; while it is open the remote under it holds still
+    (an iPhone scrolled the page under a sheet a swipe could not scroll)."""
+    paired_sid(rig)
+    sheet = "#moreSheet"
+    rig.page.click("#moreButton")
+    rig.page.wait_for_selector(f"{sheet}:not([hidden])")
+    held = rig.page.evaluate(
+        "() => [document.body.classList.contains('sheet-open'),"
+        " getComputedStyle(document.querySelector('.remote')).overflowY]"
+    )
+    assert held == [True, "hidden"], held
+    grab = rig.page.locator(f"{sheet} .grab").bounding_box()
+    assert grab is not None
+    x, y = grab["x"] + grab["width"] / 2, grab["y"] + grab["height"] / 2
+    touch_drag(rig, x, y, 40)  # short: it springs back
+    rig.page.wait_for_timeout(300)
+    state = rig.page.evaluate(
+        "s => [document.querySelector(s).hidden, document.querySelector(s).style.transform]", sheet
+    )
+    assert state == [False, ""], state
+    key = rig.page.locator(f"{sheet} [data-key=d5]").bounding_box()
+    assert key is not None
+    touch_drag(rig, key["x"] + key["width"] / 2, key["y"] + key["height"] / 2, 300)
+    rig.page.wait_for_timeout(300)
+    assert rig.page.evaluate("s => document.querySelector(s).hidden", sheet) is False
+    rig.shot("sheet-open")
+    touch_drag(rig, x, y, 320)  # down from its top: it closes
+    rig.page.wait_for_selector(sheet, state="hidden")
+    after = rig.page.evaluate(
+        "() => [document.body.classList.contains('sheet-open'),"
+        " getComputedStyle(document.querySelector('.remote')).overflowY,"
+        " document.getElementById('veil').hidden]"
+    )
+    assert after == [False, "auto", True], after
+
+
 def scenario_forget_clean(rig: Rig) -> None:
     paired_sid(rig)
     rig.page.click("#menuButton")
@@ -1450,6 +1501,7 @@ SCENARIOS.update(
         "add-home": scenario_add_home,
         "guide-follows-tv": scenario_guide_follows_tv,
         "touchpad": scenario_touchpad,
+        "sheet-swipe": scenario_sheet_swipe,
     }
 )
 

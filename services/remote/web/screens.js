@@ -1252,8 +1252,7 @@ function bindHere() {
   const watch = $("watchHere");
   pressable(watch);
   watch.addEventListener("click", () => {
-    document.getElementById("veil").hidden = true;
-    for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
+    closeSheets();
     if (!here) startHere();
   });
   const video = $("video");
@@ -1315,8 +1314,7 @@ app.menuExtras.push(() => {
   item.type = "button";
   item.addEventListener("click", () => {
     useTouchpad(!on);
-    document.getElementById("veil").hidden = true;
-    for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
+    closeSheets();
   });
   return item;
 });
