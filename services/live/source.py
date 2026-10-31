@@ -728,10 +728,17 @@ class TsSource:
         self._capture = capture
         self._archive = archive
         self._hold = hold
+        self._not_live = False  # the connection answered with a recording (`not_live`)
 
     @property
     def burst_s(self) -> float:
         return 0.0
+
+    def not_live(self) -> None:
+        """The connection read now is no live channel (2.8.10, `NotLiveGuard`: a reconnect
+        answered with a file): it is closed, and the channel asked again every
+        `_REFUSED_RETRY_S` for up to `_REFUSED_PATIENCE_S`, as a refused reconnect is."""
+        self._not_live = True
 
     @property
     def secure(self) -> bool:
@@ -758,6 +765,7 @@ class TsSource:
             return
         backoff = _Backoff()
         connected, received, reconnected = time.monotonic(), 0, False
+        not_live_since: float | None = None  # answered with recordings since (2.8.10)
         if prefix:
             if capture is not None:
                 capture.write(prefix, self._prefix_at)
@@ -774,14 +782,20 @@ class TsSource:
                     if (
                         received >= _HEALTHY_BYTES
                         and time.monotonic() - connected >= _HEALTHY_SECONDS
+                        and not self._not_live
                     ):
                         backoff.reset()
+                        not_live_since = None
                     yield block
-                if _sized(response) or self._archive:
-                    return  # a finite body reached its declared end (an archive: any end)
-                # Any other end of a live body is a disconnect, also a clean one: a FIN, or
-                # a chunked body's last chunk (nginx when the channel's upstream restarts).
-                log.info("The channel closed its stream; reconnecting.")
+                    if self._not_live:
+                        break
+                else:
+                    if _sized(response) or self._archive:
+                        return  # a finite body reached its declared end (an archive: any end)
+                    # Any other end of a live body is a disconnect, also a clean one: a FIN,
+                    # or a chunked body's last chunk (nginx when the channel's upstream
+                    # restarts).
+                    log.info("The channel closed its stream; reconnecting.")
             except _ReadError as error:
                 if self._archive:
                     log.info("The archive's connection broke off (%s).", error.kind)
@@ -790,6 +804,21 @@ class TsSource:
             finally:
                 http.release(response)
             yield Reconnecting()  # before the backoff: the helper says so at once
+            if self._not_live:
+                self._not_live = False
+                now = time.monotonic()
+                if not_live_since is None:
+                    not_live_since = now
+                    log.info(
+                        "The channel answered the reconnect with a recording, not the channel;"
+                        " asking again every %.0f s for %.0f minutes.",
+                        _REFUSED_RETRY_S,
+                        _REFUSED_PATIENCE_S / 60,
+                    )
+                if now - not_live_since >= _REFUSED_PATIENCE_S:
+                    raise SourceError("http", STREAM_LIMIT)
+                if http.wait(_REFUSED_RETRY_S):
+                    return
             response = http.retry(lambda: http.get(self._url), backoff, patient=True)
             if capture is not None:
                 capture.mark("reconnect")

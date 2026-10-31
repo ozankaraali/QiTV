@@ -143,6 +143,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+from services.live.not_live import NotLiveGuard
 from services.live.timeline import Span, StartQuality, Timeline
 from services.live.ts import (
     ClockJoiner,
@@ -559,6 +560,7 @@ class _Session:
         self._join_after: int | None = None
         # Raw TS only (`_ingest`): drops what a reconnect sends again in the old timebase.
         self._rejoiner: ReconnectTrimmer | None = None
+        self._guard: NotLiveGuard | None = None  # 2.8.10: a reconnect's bytes until live
         # Raw TS only: drops what a restart inside the connection sends twice.
         self._trimmer: RepeatTrimmer | None = None
         self._junction = 0.0  # what stay-live asks the next restart to take (`set_junction`)
@@ -946,7 +948,10 @@ class _Session:
             return segmenter.video_pid, segmenter.video_type
 
         trimmer = rejoiner = None
+        self._guard = None
         if not source.hls:  # HLS has its own discontinuities and no such restarts
+            # 2.8.10: a reconnect answered with a recording, not the channel, is dropped.
+            self._guard = NotLiveGuard(program, time.monotonic)
             rejoiner = self._rejoiner = ReconnectTrimmer(program=program)
             # Its clock is the arrival a forward jump is measured against.
             self._clock_joiner = kept_clock or ClockJoiner(program=program, clock=time.monotonic)
@@ -978,6 +983,9 @@ class _Session:
                 self._raise_tick_failure()
                 self._check()
                 if trimmer is not None and rejoiner is not None:
+                    if self._guard is not None:
+                        for piece in self._guard.finish():
+                            self._pass_on(trimmer.feed(rejoiner.feed(piece)))
                     self._pass_on(trimmer.feed(rejoiner.finish()))
                     self._pass_on(trimmer.finish())
                 self._clock_end(reconnect=False)
@@ -1224,6 +1232,8 @@ class _Session:
                 self._pass_on(trimmer.discontinuity())
             self._clock_end(reconnect=True)  # (HLS: a discontinuity)
             self._discontinuity()
+            if self._guard is not None:
+                self._guard.reconnect()  # its bytes are held until they prove live
         elif isinstance(item, CaughtUp):
             # The batch's end, which the throttle may have held back, and the start's
             # backlog has landed: the parent chooses where to start on this.
@@ -1235,7 +1245,22 @@ class _Session:
             if trimmer is None or rejoiner is None:
                 self._rebase([item])
             else:
-                self._pass_on(trimmer.feed(rejoiner.feed(item)))
+                guard = self._guard
+                pieces = [item] if guard is None else guard.feed(item)
+                if guard is not None and guard.not_live and guard.last is not None:
+                    media, seconds = guard.last
+                    guard.last = None
+                    _LOG.info(
+                        "A reconnect brought %.0f s of media in %.1f s: a recording, not the"
+                        " channel; dropped.",
+                        media,
+                        seconds,
+                    )
+                    stop = getattr(source, "not_live", None)
+                    if callable(stop):
+                        stop()
+                for piece in pieces:
+                    self._pass_on(trimmer.feed(rejoiner.feed(piece)))
             self._measure()
             if not self._ready:
                 self._notify()  # bytes flow, nothing playable yet: say so
@@ -1252,14 +1277,23 @@ class _Session:
         session ends the way it would have (`_fail`)."""
         stop = threading.Event()
 
+        def held() -> bool:
+            guard = self._guard
+            return trimmer.holding or (guard is not None and guard.holding)
+
         def tick() -> None:
             while not stop.wait(_HOLD_TICK_S):
-                if not trimmer.holding:
+                if not held():
                     continue  # nothing held: the pipeline is left to the session thread
                 with self._moving:
-                    if stop.is_set() or self.cancelled or not trimmer.holding:
+                    if stop.is_set() or self.cancelled or not held():
                         continue
                     try:
+                        guard, rejoiner = self._guard, self._rejoiner
+                        if guard is not None and guard.holding and rejoiner is not None:
+                            # 2.8.10: a reconnect's bytes the guard held (`NotLiveGuard`).
+                            for piece in guard.tick():
+                                self._pass_on(trimmer.feed(rejoiner.feed(piece)))
                         self._pass_on(trimmer.tick())
                         self._measure()
                     except _Cancelled:
