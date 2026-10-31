@@ -168,12 +168,16 @@ def h264_access_unit(idr: bool, sei: int = 0) -> bytes:
     return au
 
 
-def _presented(i: int, gop: int) -> int:
+def _presented(i: int, gop: int, pyramid: bool = False) -> int:
     """The presentation index of the picture decoded `i`-th, in IBBP order: each P picture
-    comes before the two B pictures shown ahead of it (a GOP of 3k + 1 pictures)."""
+    comes before the two B pictures shown ahead of it (a GOP of 3k + 1 pictures). `pyramid`:
+    hierarchical B pictures, P4 B2 B1 B3 (a GOP of 4k + 1 pictures)."""
     k = i % gop
     if k == 0:
         return i
+    if pyramid:
+        group, r = divmod(k - 1, 4)
+        return i - k + 4 * group + (4, 2, 1, 3)[r]
     group, r = divmod(k - 1, 3)
     return i - k + 3 * group + (3 if r == 0 else r)
 
@@ -196,12 +200,15 @@ def make_stream(
     audio_ahead_s=0.0,
     rai_all=False,
     sei=0,
+    pyramid=False,
 ) -> bytes:
     """`seconds` of H.264-tagged video (PCR on each picture) and AAC-tagged sound.
 
     `bframes`: the pictures carry DTS too, in IBBP order (PTS a frame after the presentation
-    time, DTS the decode time; PCR the DTS). `jumps`: (at, by) seconds: from media time `at`
-    on, every timestamp is `by` later, as an encoder's clock that leapt ahead (with B pictures
+    time, DTS the decode time; PCR the DTS); with `pyramid`, hierarchical B pictures in the
+    order P4 B2 B1 B3 (`gop_s` of 4k + 1 pictures; PTS two frames after). `jumps`: (at, by)
+    seconds: from media time `at` on, every timestamp is `by` later, as an encoder's clock
+    that leapt ahead (with B pictures
     the PTS follows the presentation time, the DTS the decode time: a P picture decoded before
     the leap but shown after it has its PTS ahead already). `video_gaps`: (from, to) seconds
     without pictures, the sound going on. `audio_ahead_s`: each sound frame is muxed this much
@@ -251,7 +258,8 @@ def make_stream(
             dts = None
             if bframes:
                 dts = pts
-                pts = pts_at(_presented(idx, gop_frames) * frame_ticks) + frame_ticks
+                shown = _presented(idx, gop_frames, pyramid)
+                pts = pts_at(shown * frame_ticks) + (2 if pyramid else 1) * frame_ticks
             ps, ccs[VIDEO_PID] = pes_packets(
                 VIDEO_PID,
                 0xE0,

@@ -2269,8 +2269,12 @@ class LoopTrimmer:
         self._reading: dict[int, _Unit] = {}  # the sound PES being read, by PID
         self._pes_pids: set[int] = set()  # the PIDs that carried a PES other than the picture
         self._since = 0  # their PES begun since the picture being read began
-        self._last_pts: int | None = None  # the latest picture's PTS
-        self._frame: int | None = None  # the shortest forward PTS step seen: a picture
+        # The latest picture's DTS (its PTS without one), and the shortest forward step of
+        # those seen: a picture. In decode order the DTS rises a frame a picture; the PTS of
+        # hierarchical B pictures (P4 B2 B1 B3) never steps on by less than two, which halved
+        # the window and `_LOOP_MIN_S`.
+        self._last_time: int | None = None
+        self._frame: int | None = None
         # The windows: digests by number in a ring, and each digest's latest number.
         self._pictures: list[int | None] = [None] * _LOOP_WINDOW_PICTURES
         self._picture_at: dict[int, int] = {}
@@ -2410,12 +2414,14 @@ class LoopTrimmer:
             at, pts, _trim_key(pkt, rai, es, video_type), [pkt[es:]] if es < PACKET else []
         )
         self._since = 0
-        if pts is not None:
-            if self._last_pts is not None:
-                step = pts_delta(self._last_pts, pts)
+        dts = _pes_times(pkt, 0)[1] if pts is not None else None
+        decoded = pts if dts is None else dts
+        if decoded is not None:
+            if self._last_time is not None:
+                step = pts_delta(self._last_time, decoded)
                 if 0 < step < _CLOCK and (self._frame is None or step < self._frame):
                     self._frame = step
-            self._last_pts = pts
+            self._last_time = decoded
         if previous is not None:
             self._judge(previous, hash(b"".join(previous.parts)), at, out)
 
@@ -2627,7 +2633,7 @@ class LoopTrimmer:
         self._reading.clear()
         self._scan = self._base
         self._searching = True
-        self._last_pts = None
+        self._last_time = None
         self._rejected = None
         if self._gate is not None:
             self._gate = None
@@ -2636,7 +2642,7 @@ class LoopTrimmer:
     # -- the windows -----------------------------------------------------------------------
 
     def _ticks(self) -> int:
-        """A picture's duration (the shortest forward PTS step seen; 25 fps before one)."""
+        """A picture's duration (the shortest forward DTS step seen; 25 fps before one)."""
         return self._frame or _CLOCK // 25
 
     def _window(self) -> int:

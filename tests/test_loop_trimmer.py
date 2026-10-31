@@ -15,7 +15,16 @@ from unittest import mock
 
 from services.live import ts
 from services.live.ts import PACKET, ClockJoiner, LoopTrimmer, pts_delta
-from tests.ts_fixtures import AUDIO_PID, CLOCK, PMT_PID, VIDEO_PID, pat, pes_packets, pmt
+from tests.ts_fixtures import (
+    AUDIO_PID,
+    CLOCK,
+    PMT_PID,
+    VIDEO_PID,
+    make_stream,
+    pat,
+    pes_packets,
+    pmt,
+)
 
 FPS = 25
 FRAME = CLOCK // FPS
@@ -435,6 +444,17 @@ class LoopTrimmerTests(unittest.TestCase):
         loops.finish()
         (loop,) = loops.loops
         self.assertEqual((loop.found_at, loop.ended_at), (22.0, 30.0))
+
+    def test_a_picture_is_a_frame_on_hierarchical_b_pictures_too(self):
+        # In decode order the DTS rises a frame a picture; the PTS of P4 B2 B1 B3 never steps
+        # on by less than two: measured by it, the window held 30 s and a replay counted
+        # double against `_LOOP_MIN_S`.
+        for options in ({}, {"bframes": True}, {"bframes": True, "pyramid": True}):
+            with self.subTest(**options):
+                loops = trimmer()
+                loops.feed([make_stream(4, **options)])
+                self.assertEqual(loops._ticks(), FRAME)
+                self.assertEqual(loops._window(), round(ts._LOOP_WINDOW_S * FPS))
 
     def test_a_packet_takes_a_few_microseconds_at_most(self):
         w = Writer()
