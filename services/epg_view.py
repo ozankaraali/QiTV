@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import logging
 from typing import Any, Iterable, Optional
 
-from services.epg_time import parse_stb, parse_xmltv, parse_xmltv_naive
+from services.epg_time import parse_stb, parse_xmltv_local
 from services.i18n import tr
 
 logger = logging.getLogger(__name__)
@@ -90,18 +90,16 @@ def _text(value: Any) -> str:
 
 
 def _aware(moment: datetime) -> datetime:
-    # Naive times (STB portals, offset-less XMLTV) are local wall-clock times.
+    # Naive times (STB portals; offset-less XMLTV, see parse_xmltv_local) are local
+    # wall-clock times.
     return moment if moment.tzinfo else moment.astimezone()
 
 
 def _parse_xmltv_time(value: Any) -> Optional[datetime]:
-    text = str(value).strip()
-    for parse in (parse_xmltv, parse_xmltv_naive):
-        try:
-            return _aware(parse(text))
-        except ValueError:
-            continue
-    return None
+    try:
+        return parse_xmltv_local(str(value))  # without an offset: local wall-clock time
+    except ValueError:
+        return None
 
 
 def _parse_stb_time(value: Any) -> Optional[datetime]:

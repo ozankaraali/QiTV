@@ -19,7 +19,13 @@ import tzlocal  # the GUI thread's guide lookups use it: loaded with the window
 from services.atomic_write import atomic_write
 from services.content_loader import ContentLoader
 from services.epg_store import PackedGuide, read_guide, write_guide
-from services.epg_time import parse_stb, parse_xmltv, parse_xmltv_as
+from services.epg_time import (
+    offset_less,
+    parse_stb,
+    parse_xmltv,
+    parse_xmltv_as,
+    parse_xmltv_local,
+)
 from services.epg_view import guide_offset
 from services.jobs import Cancelled, cancel_requested
 from services.lazy_import import lazy_module
@@ -76,6 +82,15 @@ def _file_stamp(path: str) -> tuple[int, int, int]:
 
 
 _XMLTV_FORMATS = ("%Y%m%d%H%M%S %z", "%Y%m%d%H%M%S")
+
+
+def _as_written(moment: datetime, text: str) -> str:
+    """`moment` as the guide writes the XMLTV time `text`, so the two compare as strings:
+    "YYYYmmddHHMMSS +HHMM" at its offset, or for a time without one, "YYYYmmddHHMMSS" in
+    local wall-clock time."""
+    if offset_less(text):
+        return moment.astimezone().strftime(_XMLTV_FORMATS[1])
+    return moment.astimezone(parse_xmltv(text.strip()).tzinfo).strftime(_XMLTV_FORMATS[0])
 
 
 def _stop_not_before(start: str, stop: str) -> bool:
@@ -316,6 +331,8 @@ class EpgManager:
         # The guide last read from or written to its file: (path, file stamp, guide). While
         # it is still the one shown and the file is unchanged, it is not read again.
         self._saved: Optional[tuple[str, tuple[int, int, int], Any]] = None
+        # The guide whose times without a UTC offset were last noted in the log (once each).
+        self._offset_less_noted: Optional[str] = None
         self._load_index()
 
     def _cache_dir(self):
@@ -867,9 +884,16 @@ class EpgManager:
         entries = self._xmltv_entries(epg, channel_data)
         if not entries:
             return []
-        # The timezone of the programmes, by the first and the last.
-        ref_timezone = parse_xmltv(entries[0]["@start"]).tzinfo
-        need_check_tz = parse_xmltv(entries[-1]["@start"]).tzinfo != ref_timezone
+        # The timezone of the programmes, by the first and the last (a time without an offset
+        # is local wall-clock time, as the guide shows it: epg_view.parse_programme).
+        first, last = entries[0]["@start"], entries[-1]["@start"]
+        if offset_less(first) and self._offset_less_noted != self._epg_source:
+            self._offset_less_noted = self._epg_source
+            logger.info("The guide's times carry no UTC offset: they are read as local time")
+        need_check_tz = (
+            offset_less(first) != offset_less(last)
+            or parse_xmltv_local(first).tzinfo != parse_xmltv_local(last).tzinfo
+        )
         window_hours = self.config_manager.epg_list_window_hours
         if window_hours <= 0:
             return sorted(entries, key=lambda program: program["@start"])
@@ -879,15 +903,14 @@ class EpgManager:
             start_time = datetime.now()
         start_time -= self.guide_offset()  # in the guide's own times
         end_time = start_time + timedelta(hours=window_hours)
-        start_time_str = start_time.astimezone(ref_timezone).strftime("%Y%m%d%H%M%S %z")
+        start_time_str = _as_written(start_time, first)
         programs = []
         for entry in entries:
             if need_check_tz:
-                tz = parse_xmltv(entry["@start"]).tzinfo
-                start_time_str = start_time.astimezone(tz).strftime("%Y%m%d%H%M%S %z")
+                start_time_str = _as_written(start_time, entry["@start"])
             if entry["@start"] >= start_time_str or entry["@stop"] > start_time_str:
-                entry_start = parse_xmltv(entry["@start"])  # the window's end in its timezone
-                if entry_start < end_time.astimezone(entry_start.tzinfo):
+                entry_start = parse_xmltv_local(entry["@start"])
+                if entry_start < end_time.astimezone(entry_start.tzinfo):  # naive: local
                     programs.append(entry)
         programs.sort(key=lambda program: program["@start"])
         return programs

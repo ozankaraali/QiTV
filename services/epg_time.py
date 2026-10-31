@@ -74,6 +74,22 @@ def parse_xmltv_naive(text: str) -> datetime:
     return datetime.strptime(text, XMLTV_NAIVE_FORMAT)
 
 
+def offset_less(text: str) -> bool:
+    """Whether an XMLTV time is written without a UTC offset ("20261015203000"): strptime
+    reads XMLTV_FORMAT's space as one or more, so a time with an offset has a space."""
+    return " " not in text.strip()
+
+
+def parse_xmltv_local(text: str) -> datetime:
+    """An XMLTV time as an aware datetime: at its offset ("20261015203000 +0200"), and one
+    written without an offset ("20261015203000") as local wall-clock time; ValueError when
+    it is neither."""
+    text = text.strip()
+    if offset_less(text):
+        return parse_xmltv_naive(text).astimezone()
+    return parse_xmltv(text)
+
+
 _XMLTV_PARSERS = {XMLTV_FORMAT: parse_xmltv, XMLTV_NAIVE_FORMAT: parse_xmltv_naive}
 
 
