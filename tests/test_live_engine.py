@@ -68,6 +68,8 @@ STATE_KEYS = {
     "secure",  # 2.7.1: its source's address is HTTPS
     "restarts",  # 2.8.5: raw TS restarts, and those that took stay-live's ask
     "steered",
+    "not_live",  # 2.8.11
+    "settled_s",  # 2.8.11
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024

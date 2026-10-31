@@ -735,9 +735,10 @@ class TsSource:
         return 0.0
 
     def not_live(self) -> None:
-        """The connection read now is no live channel (2.8.10, `NotLiveGuard`: a reconnect
-        answered with a file): it is closed, and the channel asked again every
-        `_REFUSED_RETRY_S` for up to `_REFUSED_PATIENCE_S`, as a refused reconnect is."""
+        """The connection read now is no live channel (2.8.10, `NotLiveGuard`: a reconnect,
+        2.8.11 the tune too, answered with a file): it is closed, and the channel asked again
+        every `_REFUSED_RETRY_S` for up to `_REFUSED_PATIENCE_S`, as a refused reconnect is;
+        then the source fails with `STREAM_LIMIT`."""
         self._not_live = True
 
     @property
@@ -810,8 +811,8 @@ class TsSource:
                 if not_live_since is None:
                     not_live_since = now
                     log.info(
-                        "The channel answered the reconnect with a recording, not the channel;"
-                        " asking again every %.0f s for %.0f minutes.",
+                        "The channel answered with a recording, not the channel; asking again"
+                        " every %.0f s for %.0f minutes.",
                         _REFUSED_RETRY_S,
                         _REFUSED_PATIENCE_S / 60,
                     )

@@ -560,7 +560,8 @@ class _Session:
         self._join_after: int | None = None
         # Raw TS only (`_ingest`): drops what a reconnect sends again in the old timebase.
         self._rejoiner: ReconnectTrimmer | None = None
-        self._guard: NotLiveGuard | None = None  # 2.8.10: a reconnect's bytes until live
+        # 2.8.10: a connection's bytes until they prove live (2.8.11: the tune's too).
+        self._guard: NotLiveGuard | None = None
         # Raw TS only: drops what a restart inside the connection sends twice.
         self._trimmer: RepeatTrimmer | None = None
         self._junction = 0.0  # what stay-live asks the next restart to take (`set_junction`)
@@ -575,6 +576,12 @@ class _Session:
         self._answered = False  # the source's response headers came (bytes may not have yet)
         self._caught_up = False  # HLS: every segment its playlist listed was delivered once
         self._reconnecting = False  # raw TS: the connection broke, a new one is being opened
+        # Raw TS (2.8.11): the connections answered with a recording, not the channel, since
+        # one last proved live (`NotLiveGuard`): the source asks again meanwhile.
+        self._not_live = 0
+        # Raw TS (2.8.11): how long the guard held the last connection it let go once its
+        # arrival settled (0.0: none was): a tune's start trusts it (`_play_first`).
+        self._settled = 0.0
         self._segment = (0, 0.0)  # HLS: the segment being fetched (serial), the edge it began at
         self._measured = (0.0, 0.0)  # HLS: media and EXTINF seconds of the whole segments
         self._pending: list[_Addition] = []
@@ -891,6 +898,7 @@ class _Session:
         self._new_part = self._open_junction = self._junction_next = True
         self._received, self._answered, self._caught_up = 0, False, False
         self._reconnecting = self._skipping = False
+        self._not_live, self._settled = 0, 0.0
         self._segment, self._measured = (0, 0.0), (0.0, 0.0)
         self._bursts = BurstMeter()
         self._rejoiner = self._trimmer = self._loop_trimmer = None
@@ -950,8 +958,11 @@ class _Session:
         trimmer = rejoiner = None
         self._guard = None
         if not source.hls:  # HLS has its own discontinuities and no such restarts
-            # 2.8.10: a reconnect answered with a recording, not the channel, is dropped.
-            self._guard = NotLiveGuard(program, time.monotonic)
+            if not isinstance(window, dict):  # a provider archive is a recording (2.7)
+                # 2.8.10: a connection answered with a recording, not the channel, is
+                # dropped; 2.8.11: the tune's as each reconnect's.
+                self._guard = NotLiveGuard(time.monotonic)
+                self._guard.connected()
             rejoiner = self._rejoiner = ReconnectTrimmer(program=program)
             # Its clock is the arrival a forward jump is measured against.
             self._clock_joiner = kept_clock or ClockJoiner(program=program, clock=time.monotonic)
@@ -984,8 +995,7 @@ class _Session:
                 self._check()
                 if trimmer is not None and rejoiner is not None:
                     if self._guard is not None:
-                        for piece in self._guard.finish():
-                            self._pass_on(trimmer.feed(rejoiner.feed(piece)))
+                        self._passed_held(self._guard.finish(), trimmer, rejoiner)
                     self._pass_on(trimmer.feed(rejoiner.finish()))
                     self._pass_on(trimmer.finish())
                 self._clock_end(reconnect=False)
@@ -1227,13 +1237,17 @@ class _Session:
         if isinstance(item, Discontinuity):
             self._relabeler.reconnect()
             if trimmer is not None and rejoiner is not None:
+                if self._guard is not None:
+                    # The last connection's bytes still held go first (2.8.11: a tune's, say,
+                    # that broke off before its arrival settled).
+                    self._passed_held(self._guard.finish(), trimmer, rejoiner)
                 # A reconnect: what they hold passes on untouched.
                 self._pass_on(trimmer.feed(rejoiner.reconnect()))
                 self._pass_on(trimmer.discontinuity())
             self._clock_end(reconnect=True)  # (HLS: a discontinuity)
             self._discontinuity()
             if self._guard is not None:
-                self._guard.reconnect()  # its bytes are held until they prove live
+                self._guard.connected()  # its bytes are held until they prove live
         elif isinstance(item, CaughtUp):
             # The batch's end, which the throttle may have held back, and the start's
             # backlog has landed: the parent chooses where to start on this.
@@ -1251,19 +1265,33 @@ class _Session:
                     media, seconds = guard.last
                     guard.last = None
                     _LOG.info(
-                        "A reconnect brought %.0f s of media in %.1f s: a recording, not the"
+                        "A connection brought %.0f s of media in %.1f s: a recording, not the"
                         " channel; dropped.",
                         media,
                         seconds,
                     )
+                    self._not_live += 1
+                    self._notify(force=True)
                     stop = getattr(source, "not_live", None)
                     if callable(stop):
                         stop()
-                for piece in pieces:
-                    self._pass_on(trimmer.feed(rejoiner.feed(piece)))
+                self._passed_held(pieces, trimmer, rejoiner)
             self._measure()
             if not self._ready:
                 self._notify()  # bytes flow, nothing playable yet: say so
+
+    def _passed_held(
+        self, pieces: list[bytes], trimmer: RepeatTrimmer, rejoiner: ReconnectTrimmer
+    ) -> None:
+        """What the guard let pass, down the pipeline: a connection proved live (2.8.11: the
+        state stops saying an answer was a recording)."""
+        if pieces and self._guard is not None and not self._guard.holding:
+            self._settled = self._guard.settled
+        if pieces and self._not_live:
+            self._not_live = 0
+            self._notify(force=True)
+        for piece in pieces:
+            self._pass_on(trimmer.feed(rejoiner.feed(piece)))
 
     def _hold_ticker(self, trimmer: RepeatTrimmer) -> threading.Event:
         """Raw TS: while the session thread waits on a silent source (it reads with a 20 s
@@ -1291,9 +1319,8 @@ class _Session:
                     try:
                         guard, rejoiner = self._guard, self._rejoiner
                         if guard is not None and guard.holding and rejoiner is not None:
-                            # 2.8.10: a reconnect's bytes the guard held (`NotLiveGuard`).
-                            for piece in guard.tick():
-                                self._pass_on(trimmer.feed(rejoiner.feed(piece)))
+                            # 2.8.10: a connection's bytes the guard held (`NotLiveGuard`).
+                            self._passed_held(guard.tick(), trimmer, rejoiner)
                         self._pass_on(trimmer.tick())
                         self._measure()
                     except _Cancelled:
@@ -1578,6 +1605,12 @@ class _Session:
             # Raw TS: the connection broke and a new one is being opened (a silent but open
             # connection is waited out first: a stall is not a reconnect).
             "reconnecting": self._reconnecting,
+            # Raw TS (2.8.11): the connections answered with a recording, not the channel
+            # (`NotLiveGuard`), since one last proved live: the source asks again meanwhile.
+            "not_live": self._not_live,
+            # Raw TS (2.8.11): how long the guard held the last connection it let go once its
+            # arrival settled (its backlog landed; 0.0: none was).
+            "settled_s": self._settled,
             # 2.6: the buffer's parts, [first_seq, start, wall] each (`services.live.parts`).
             "parts": [[p.first_seq, p.start, p.wall] for p in timeline.parts()],
             # 2.8.5, raw TS: restarts in the connection so far (stay-live steers while they
