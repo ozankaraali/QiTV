@@ -97,6 +97,9 @@ _OPEN_RETRIES = 3
 # Spent reconnect tries come back only once a new connection has carried this much.
 _HEALTHY_SECONDS = 2.0
 _HEALTHY_BYTES = 256 * 1024
+# 2.8.12: a connection that lasted this long passed the recording check (`NotLiveGuard` holds a
+# connection's bytes at most 4 s): only then do answers that were recordings stop counting.
+_PROVED_LIVE_S = 6.0
 _STOP_POLL = 0.1
 _PLAYLIST_HOPS = 4
 _KEY_CACHE = 16
@@ -767,6 +770,10 @@ class TsSource:
         backoff = _Backoff()
         connected, received, reconnected = time.monotonic(), 0, False
         not_live_since: float | None = None  # answered with recordings since (2.8.10)
+        # 2.8.12: only a stream whose first answer declared its length is finite: a live
+        # channel's reconnect answered with one (empty, an error page, a short clip) is not
+        # its end.
+        finite = _sized(response)
         if prefix:
             if capture is not None:
                 capture.write(prefix, self._prefix_at)
@@ -780,18 +787,20 @@ class TsSource:
                         reconnected = False
                         yield Discontinuity()
                     received += len(block)
+                    lasted = time.monotonic() - connected
                     if (
                         received >= _HEALTHY_BYTES
-                        and time.monotonic() - connected >= _HEALTHY_SECONDS
+                        and lasted >= _HEALTHY_SECONDS
                         and not self._not_live
                     ):
                         backoff.reset()
-                        not_live_since = None
+                        if lasted >= _PROVED_LIVE_S:
+                            not_live_since = None  # 2.8.12: not a recording's own bytes
                     yield block
                     if self._not_live:
                         break
                 else:
-                    if _sized(response) or self._archive:
+                    if (finite and _sized(response)) or self._archive:
                         return  # a finite body reached its declared end (an archive: any end)
                     # Any other end of a live body is a disconnect, also a clean one: a FIN,
                     # or a chunked body's last chunk (nginx when the channel's upstream
@@ -820,6 +829,9 @@ class TsSource:
                     raise SourceError("http", STREAM_LIMIT)
                 if http.wait(_REFUSED_RETRY_S):
                     return
+                # 2.8.12: the provider answered: the reconnect schedule is for connections
+                # that fail (six recordings used it up, and the source gave up in 2 minutes).
+                backoff.reset()
             response = http.retry(lambda: http.get(self._url), backoff, patient=True)
             if capture is not None:
                 capture.mark("reconnect")
@@ -2230,9 +2242,11 @@ def open_source(
 
     ``https_first`` (2.7.1): HTTPS first, HTTP when it does not open. An ``http://`` address
     is opened over HTTPS first, the same host and port (`_HTTPS_CONNECT_S` to connect); when
-    that fails for any reason but a stop, over HTTP, and that host is asked over HTTP at once
-    from then on (`_HTTPS_FAILED`, for the helper's run). An ``https://`` one (an Xtream
-    panel's that answered over HTTPS) that fails so is opened over HTTP, the same host.
+    that fails for any reason but a stop or a refusal for the provider's limit (2.8.12: it
+    stands, as it would over HTTP), over HTTP; a host that did not answer over HTTPS at all
+    (not an HTTP status) is asked over HTTP at once from then on (`_HTTPS_FAILED`, for the
+    helper's run). An ``https://`` one (an Xtream panel's that answered over HTTPS) that fails
+    so is opened over HTTP, the same host.
 
     ``max_height`` (2.8, the live ⚙): an HLS master plays its best variant of at most that
     many lines (`_within`); 0 its best. The source's ``heights`` are the master's sizes.
@@ -2268,16 +2282,17 @@ def open_source(
             secure = "https://" + url[len("http://") :]
             return _open_url(secure, connect_timeout=_HTTPS_CONNECT_S, **opening)
         except SourceError as error:
-            if stop.is_set():
-                raise
-            _HTTPS_FAILED.add(host)
+            if stop.is_set() or str(error) == STREAM_LIMIT:
+                raise  # 2.8.12: the channel's server refused for its limit, over HTTPS
+            if error.kind != "http":
+                _HTTPS_FAILED.add(host)  # no HTTPS there (an answer over it is not that)
             log.info("The channel did not open over HTTPS (%s); opening it over HTTP.", error.kind)
     elif https_first and scheme == "https":
         try:
             return _open_url(url, **opening)
         except SourceError as error:
-            if stop.is_set():
-                raise
+            if stop.is_set() or str(error) == STREAM_LIMIT:
+                raise  # 2.8.12: a refusal for the limit stands; asked over HTTP, it adds one
             log.info("The channel did not open over HTTPS (%s); opening it over HTTP.", error.kind)
             plain = urlsplit(url)
             netloc = plain.netloc[: -len(":443")] if plain.netloc.endswith(":443") else plain.netloc

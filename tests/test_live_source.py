@@ -93,6 +93,21 @@ def drain(source, *, caught_up=False, reconnecting=False):
     return parts
 
 
+def drain_into(source, parts, *, reconnecting=False):
+    """`drain`, into `parts` as the items come (what came before a failure stays there)."""
+    try:
+        for item in source.chunks():
+            if isinstance(item, CaughtUp) or (isinstance(item, Reconnecting) and not reconnecting):
+                continue
+            if isinstance(item, bytes) and parts and isinstance(parts[-1], bytes):
+                parts[-1] += item
+            else:
+                parts.append(item)
+    finally:
+        source.close()
+    return parts
+
+
 def ts_fixtures_has_audio(data):
     from services.live.ts import program_has_audio
 
@@ -1004,6 +1019,70 @@ video.m3u8
         self.assertTrue(any("over HTTP" in line for line in logs))
         self.assertFalse(any("secret" in line or "127.0.0.1" in line for line in logs))
 
+    def test_https_first_keeps_a_limit_refusal_over_https(self):
+        # 2.8.12: the channel's server refused over a working HTTPS connection (its limit):
+        # the refusal stands (asked over HTTP it adds a request and loses the refusal), and
+        # the host keeps HTTPS for its next channels.
+        source_module._HTTPS_FAILED.clear()
+        with self.tls_context() as context:
+            server = self.server({"/user/secret.ts": (458, {}, b"")}, tls=context)
+            plain = server.url.replace("https://", "http://", 1) + "/user/secret.ts"
+            with insecure(), self.assertRaises(SourceError) as failure:
+                open_source(
+                    plain, headers={}, verify_ssl=False, stop=threading.Event(), https_first=True
+                )
+            self.assertEqual(str(failure.exception), STREAM_LIMIT)
+            self.assertEqual(source_module._HTTPS_FAILED, set())
+            self.assertEqual(server.counts["/user/secret.ts"], 1)
+
+    def test_https_first_does_not_take_an_https_answer_for_no_https(self):
+        # Another HTTP status over HTTPS: this open tries HTTP, but the host had HTTPS.
+        source_module._HTTPS_FAILED.clear()
+        with self.tls_context() as context:
+            server = self.server({"/user/secret.ts": (404, {}, b"")}, tls=context)
+            plain = server.url.replace("https://", "http://", 1) + "/user/secret.ts"
+            with insecure(), self.assertRaises(SourceError):
+                open_source(
+                    plain, headers={}, verify_ssl=False, stop=threading.Event(), https_first=True
+                )
+            self.assertEqual(source_module._HTTPS_FAILED, set())
+
+    def test_recordings_answered_again_and_again_are_asked_for_the_whole_patience(self):
+        # 2.8.12: each answer that was a recording (`not_live`) took a step of the reconnect
+        # schedule: after six the source failed "network" in about 2 minutes, not the 7 it
+        # promised, and the session played the provider directly: the recording.
+        clip = ts_fixtures.make_stream(2)
+
+        def answer(_request, _count):
+            def body(request):
+                request.wfile.write(clip)
+
+            return 200, {}, body  # close-delimited, as a live channel
+
+        server = self.server({"/live.ts": answer})
+        with patch.multiple(
+            source_module,
+            _RECONNECT_DELAYS=FAST_RETRIES,
+            _REFUSED_RETRY_S=0.02,
+            _REFUSED_PATIENCE_S=1.0,
+        ):
+            source = open_source(
+                server.url + "/live.ts", headers={}, verify_ssl=True, stop=threading.Event()
+            )
+            fresh = True
+            with self.assertRaises(SourceError) as failure:
+                try:
+                    for item in source.chunks():
+                        if isinstance(item, Discontinuity):
+                            fresh = True
+                        elif isinstance(item, bytes) and fresh:
+                            fresh = False
+                            source.not_live()  # the guard: a recording, not the channel
+                finally:
+                    source.close()
+        self.assertEqual(str(failure.exception), STREAM_LIMIT)  # not "network"
+        self.assertGreater(server.counts["/live.ts"], len(FAST_RETRIES) + 1)
+
     def test_http_redirect_to_tls_obeys_verification_setting(self):
         with self.tls_context() as context:
             secure = self.server({"/video.ts": (200, {}, self.video)}, tls=context)
@@ -1384,6 +1463,8 @@ video.m3u8
             marks = {}
 
             def live(_request, count, release=release, marks=marks, keep_alive=keep_alive):
+                if count > 2:
+                    return 404, {}, b""  # what ends a live channel's input here (2.8.12)
                 if count > 1:
                     marks.setdefault("reconnected", time.monotonic())
                     return 200, {"Content-Length": str(len(rest))}, rest
@@ -1406,10 +1487,21 @@ video.m3u8
                 server = self.server({"/live.ts": live}, tls=context, keep_alive=keep_alive)
                 fast = {"_TS_STALL_TIMEOUT": 0.3, "_RECONNECT_DELAYS": FAST_RETRIES}
                 with patch.multiple(source_module, **fast):
-                    parts = media(server.url + "/live.ts", verify_ssl=not tls, reconnecting=True)
+                    source = open_source(
+                        server.url + "/live.ts",
+                        headers={},
+                        verify_ssl=not tls,
+                        stop=threading.Event(),
+                    )
+                    parts = []
+                    if keep_alive:  # its first answer declared a length: a finite body
+                        drain_into(source, parts, reconnecting=True)
+                    else:  # a live channel's: the reconnect's sized end is no end (2.8.12)
+                        with self.assertRaises(SourceError):
+                            drain_into(source, parts, reconnecting=True)
                 # The helper hears that a new connection opens before it waits for one.
-                self.assertEqual(parts, [head, Reconnecting(), Discontinuity(), rest])
-                self.assertEqual(server.counts["/live.ts"], 2)
+                self.assertEqual(parts[:4], [head, Reconnecting(), Discontinuity(), rest])
+                self.assertEqual(server.counts["/live.ts"], 2 if keep_alive else 3)
                 waited = marks["reconnected"] - marks["stalled"]
                 self.assertGreaterEqual(waited, 0.25)
                 self.assertLess(waited, 1.3, "the stalled connection was kept too long")
@@ -1783,7 +1875,9 @@ video.m3u8
             def route(_request, count):
                 if count == 1:
                     return 200, headers, body
-                return 200, {}, self.video[half:]  # sized: the end of the input
+                if count == 2:
+                    return 200, {}, self.video[half:]  # sized, but this one is live
+                return 404, {}, b""  # what ends the test
 
             return route
 
@@ -1797,10 +1891,51 @@ video.m3u8
         with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
             for path in ("/fin.ts", "/chunked.ts"):
                 with self.subTest(path):
-                    parts = media(server.url + path)
-                    self.assertEqual(parts, [self.video[:half], Discontinuity(), self.video[half:]])
+                    source = open_source(
+                        server.url + path, headers={}, verify_ssl=True, stop=threading.Event()
+                    )
+                    parts = []
+                    with self.assertRaises(SourceError) as failure:  # the 404, not an end
+                        parts = drain_into(source, parts)
+                    self.assertEqual(failure.exception.status, 404)
+                    self.assertEqual(
+                        parts,
+                        (
+                            [self.video[:half], Discontinuity(), self.video[half:], Discontinuity()]
+                            if parts[-1:] == [Discontinuity()]
+                            else [self.video[:half], Discontinuity(), self.video[half:]]
+                        ),
+                    )
             self.assertEqual(media(server.url + "/sized.ts"), [self.video])
-        self.assertEqual(server.counts, {"/fin.ts": 2, "/chunked.ts": 2, "/sized.ts": 1})
+        self.assertEqual(server.counts, {"/fin.ts": 3, "/chunked.ts": 3, "/sized.ts": 1})
+
+    def test_a_live_channels_reconnect_answered_with_an_empty_sized_body_is_no_end(self):
+        # 2.8.12: a reconnect answered "200, Content-Length: 0" (or an error page, a short
+        # clip) ended a live channel's input for good: playback stopped at the buffer's end.
+        half = len(self.video) // 2 // 188 * 188
+
+        def first_half(request):
+            request.wfile.write(self.video[:half])
+
+        def route(_request, count):
+            if count == 1:
+                return 200, {}, first_half
+            if count == 2:
+                return 200, {"Content-Length": "0"}, b""
+            if count == 3:
+                return 200, {}, self.video[half:]
+            return 404, {}, b""
+
+        server = self.server({"/live.ts": route})
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            source = open_source(
+                server.url + "/live.ts", headers={}, verify_ssl=True, stop=threading.Event()
+            )
+            parts = []
+            with self.assertRaises(SourceError):
+                drain_into(source, parts)
+        self.assertIn(self.video[half:], [p for p in parts if isinstance(p, bytes)])
+        self.assertGreaterEqual(server.counts["/live.ts"], 3)
 
     def test_http_errors_carry_their_status_and_429_is_never_retried(self):
         def limited(_request, _count):
