@@ -106,10 +106,10 @@ _CLOCK_PENDING_PACKETS = 4096
 # of one 10 s segment, which VLC 3 sat out as a 15 s still, its clock gap limit being 60 s):
 # - a picture whose DTS (its PTS without one) steps more than `JUMP_S` past the last picture's,
 #   and more than twice the step before it (a slideshow's stills seconds apart are its cadence),
-#   jumped when arrival leaves more than `JUMP_S` of the step unexplained: the pictures' media
-#   less the arrival (raw TS: the wall clock; HLS: each segment's EXTINF as it begins) is
-#   measured against its highest within this much arrival (a raw TS burst of 10 s every 10 s,
-#   or a whole HLS segment's EXTINF, raised to 1.5 times it for longer segments);
+#   jumped (since 2.8.8 also where arrival explains it); what arrival leaves unexplained, for
+#   the log: the pictures' media less the arrival (raw TS: the wall clock; HLS: each segment's
+#   EXTINF as it begins) against its highest within this much arrival (a raw TS burst of 10 s
+#   every 10 s, or a whole HLS segment's EXTINF, raised to 1.5 times it for longer segments);
 _JUMP_WINDOW_S = 15.0
 # - no step is judged before the pictures went on this much since the window began (the start,
 #   a junction, a discontinuity, a step back): their cadence is known by then, and the window
@@ -2682,11 +2682,14 @@ class ClockJoiner:
     segment, no discontinuity tag near. VLC 3 resets its clock only past a 60 s gap, so it
     waited for the timestamps: a 15 s still. With an arrival clock (`clock`, raw TS) or once
     HLS segments `arrive`, such a jump is looked for (the `_JUMP_*` constants say how), once
-    the pictures went on 10 s: a picture whose DTS steps on by more than `JUMP_S` that arrival
-    does not explain (raw TS: by the wall clock, as after a stalled source whose timestamps
-    went on in real time; HLS: by the EXTINF of the segments begun) is re-based like a
-    junction, onto the last picture by a frame, by its DTS (a picture's PTS may sit seconds
-    ahead of it). Where a timestamp leaps
+    the pictures went on 10 s: a picture whose DTS steps on by more than `JUMP_S` (and twice
+    its cadence) while nothing else went on through the gap is re-based like a junction, onto
+    the last picture by a frame, by its DTS (a picture's PTS may sit seconds ahead of it).
+    Since 2.8.8 also where arrival explains the step (raw TS: by the wall clock, a source
+    silent as long whose timestamps went on in real time; HLS: by the EXTINF of the segments
+    begun): VLC plays from a cushion behind the live edge, so it met such a step with media
+    ahead and sat it out as a still (6 s on one channel); how much arrival did not explain is
+    logged. Where a timestamp leaps
     before that picture (a PCR, sound, the PTS of pictures decoded before the jump and shown
     after it), what follows is held until a picture jumps (or the pictures moved on
     `_JUMP_WAIT_TICKS` without one: then it passes on as it came). For a while after the jump
@@ -3063,8 +3066,8 @@ class ClockJoiner:
         return (_LEAP if leapt else _PASS), b""
 
     def _unexplained(self, step: int) -> float | None:
-        """Of a picture's step, in seconds, what arrival does not explain, when that makes it a
-        jump (see `_JUMP_WINDOW_S`); else None."""
+        """Of a picture's step that makes it a jump, in seconds, what arrival does not explain
+        (see `_JUMP_WINDOW_S`); None: no jump."""
         watch = self._watch
         if not self._seasoned():
             return None
@@ -3078,8 +3081,10 @@ class ClockJoiner:
         while len(leads) > 1 and leads[0][0] < horizon:
             leads.popleft()
         highest = leads[0][1] if leads else watch.progress / _CLOCK - self._credit
-        unexplained = lead - highest
-        return unexplained if unexplained > JUMP_S else None
+        # 2.8.8: a step arrival explains (a source silent as long, its clock going on) jumps
+        # too. VLC plays from a cushion behind the live edge and reaches it with media
+        # ahead: it sat such a 6 s step out as a still. What arrival explains is for the log.
+        return max(0.0, lead - highest)
 
     def _seasoned(self) -> bool:
         """Whether the pictures went on long enough for a step to be judged (see
