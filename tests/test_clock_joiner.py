@@ -444,20 +444,29 @@ class ForwardJumpTests(unittest.TestCase):
                 self.assert_runs_on(out)
                 self.assertEqual(len(joiner.jumps), 1)
 
-    def test_a_step_its_arrival_explains_passes_as_it_came(self):
-        # The same 4 s step: within the segment's EXTINF (it lists 8 s, with 4 s of media)
-        # it stays, and so it does where a raw TS source paused as long; in one raw burst
-        # nothing explains it, and it runs on.
+    def test_a_step_its_arrival_explains_runs_on_too(self):
+        # 2.8.8: the same 4 s step within the segment's EXTINF (it lists 8 s, with 4 s of
+        # media), or where a raw TS source paused as long, passed as it came: VLC plays from a
+        # cushion behind the live edge, met it with media ahead and sat it out as a still. It
+        # runs on, as in one raw burst, where nothing explains it; the log says how much
+        # arrival did not explain.
         data = make_stream(20, jumps=((14.0, 4.0),))
         segments = at_seconds(data, 4.0, 8.0, 12.0, 16.0)
-        out, joiner, _ = watched(segments, extinf=[4.0, 4.0, 4.0, 8.0, 4.0])
-        self.assertEqual((out, list(joiner.jumps)), (data, []))
         before, after = at_seconds(data, 14.0)
-        out, joiner, _ = watched([before, after], chunk=5000, times=[14.0, 22.0])
-        self.assertEqual((out, list(joiner.jumps)), (data, []))
-        out, joiner, _ = watched([data], chunk=5000)
-        self.assertEqual(len(joiner.jumps), 1)
-        self.assert_runs_on(out)
+        cases = {
+            "EXTINF": lambda: watched(segments, extinf=[4.0, 4.0, 4.0, 8.0, 4.0]),
+            "paused as long": lambda: watched([before, after], chunk=5000, times=[14.0, 22.0]),
+            "one burst": lambda: watched([data], chunk=5000),
+        }
+        for name, replay in cases.items():
+            with self.subTest(name):
+                out, joiner, _ = replay()
+                self.assertEqual([round(step, 1) for step, _ in joiner.jumps], [4.0])  # and a frame
+                self.assert_runs_on(out)
+        _, joiner, _ = cases["paused as long"]()
+        self.assertLess(joiner.jumps[0][1], 1.0)  # arrival explained it
+        _, joiner, _ = cases["one burst"]()
+        self.assertGreater(joiner.jumps[0][1], 3.0)
 
     def test_ordinary_streams_pass_byte_for_byte(self):
         # B pictures, 29.97 fps, a slideshow (a still every 5 s, its sound going on), a 4 s
