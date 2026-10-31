@@ -100,6 +100,89 @@ class ParseM3uUnicodeTests(unittest.TestCase):
             self.assertEqual(item["group"], f"G{ch}x")
 
 
+class ParseM3uCommonPlaylistTests(unittest.TestCase):
+    """Playlists as they are commonly written (fictional ones)."""
+
+    def channels(self, *lines):
+        return [(item["name"], item["cmd"]) for item in parse_m3u("\n".join(lines))]
+
+    def test_a_name_keeps_its_commas(self):
+        self.assertEqual(
+            self.channels(
+                "#EXTM3U",
+                '#EXTINF:-1 tvg-id="n" group-title="News, Weather",News, Weather & Sport',
+                "http://a.invalid/n.ts",
+                "#EXTINF:-1,Plain",
+                "http://a.invalid/p.ts",
+            ),
+            [
+                ("News, Weather & Sport", "http://a.invalid/n.ts"),
+                ("Plain", "http://a.invalid/p.ts"),
+            ],
+        )
+
+    def test_a_quote_that_never_closes_reads_the_name_after_the_last_comma(self):
+        self.assertEqual(
+            self.channels('#EXTINF:-1 tvg-name="Broken,Name', "http://a.invalid/1.ts"),
+            [("Name", "http://a.invalid/1.ts")],
+        )
+
+    def test_a_second_link_is_a_backup_and_the_first_plays(self):
+        self.assertEqual(
+            self.channels(
+                "#EXTM3U",
+                "#EXTINF:-1,Channel One",
+                "http://a.invalid/main.ts",
+                "http://b.invalid/backup.ts",
+                "#EXTINF:-1,Channel Two",
+                "http://a.invalid/two.ts",
+            ),
+            [
+                ("Channel One", "http://a.invalid/main.ts"),
+                ("Channel Two", "http://a.invalid/two.ts"),
+            ],
+        )
+
+    def test_links_alone_are_a_channel_each_named_by_its_link(self):
+        items = parse_m3u(
+            "#EXTM3U\nhttp://a.invalid/live/news%20one.ts\nhttp://a.invalid/2.m3u8\n"
+            "udp://@239.0.0.1:1234\n"
+        )
+        self.assertEqual(
+            [(item["id"], item["name"], item["cmd"]) for item in items],
+            [
+                (1, "news one.ts", "http://a.invalid/live/news%20one.ts"),
+                (2, "2.m3u8", "http://a.invalid/2.m3u8"),
+                (3, "239.0.0.1:1234", "udp://@239.0.0.1:1234"),
+            ],
+        )
+        [group] = [
+            g
+            for g in parse_m3u("http://a.invalid/1.ts", categorize=True)["categories"]
+            if g["id"] != "*"
+        ]
+        self.assertEqual(group["id"], "Uncategorized")
+
+    def test_any_scheme_vlc_plays_is_a_link(self):
+        self.assertEqual(
+            self.channels(
+                "#EXTINF:-1,Multicast",
+                "udp://@239.0.0.1:1234",
+                "#EXTINF:-1,Camera",
+                "  rtsp://cam.invalid/live  ",
+                "#EXTINF:-1,Relay",
+                "rtmp://relay.invalid/app/key",
+                "#EXTINF:-1,Not a link",
+                "news.invalid/1.ts",
+            ),
+            [
+                ("Multicast", "udp://@239.0.0.1:1234"),
+                ("Camera", "rtsp://cam.invalid/live"),
+                ("Relay", "rtmp://relay.invalid/app/key"),
+            ],
+        )
+
+
 class _Resp:
     def __init__(self, content, content_type=None):
         self.content = content

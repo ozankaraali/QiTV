@@ -1,6 +1,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -25,6 +26,7 @@ from services.exporter import (
     write_items,
 )
 from services.jobs import JobRunner
+from services.m3u import parse_m3u
 
 
 def live_content(n=3):
@@ -294,6 +296,53 @@ class ExporterTests(unittest.TestCase):
         )
         self.assertIsNone(out["finished"])
         self.assertEqual(out["error"], "Export failed: couldn\u2019t write the file")
+
+    def test_an_exported_playlist_reads_back_as_it_was(self):
+        items = [
+            {
+                "name": "News, Weather & Sport",
+                "group": "News",
+                "xmltv_id": "n",
+                "cmd": "http://a/1",
+            },
+            {"name": "Bare", "xmltv_id": None, "logo": None, "group": None, "cmd": "udp://@1:2"},
+        ]
+        write_items({"type": "M3U"}, items, self.path)
+        back = parse_m3u(self.read())
+        self.assertEqual(
+            [(i["name"], i["group"], i["xmltv_id"], i["cmd"]) for i in back],
+            [
+                ("News, Weather & Sport", "News", "n", "http://a/1"),
+                ("Bare", None, None, "udp://@1:2"),
+            ],
+        )
+
+    def test_a_providers_values_cannot_add_lines_or_attributes(self):
+        items = [
+            {
+                "name": 'Evil\n#EXTINF:-1,Injected\u2028http://x/2',
+                "group": 'G" tvg-logo="http://x/logo',
+                "logo": "l\r\nhttp://x/3",
+                "cmd": "http://a/1\nhttp://x/4",
+            }
+        ]
+        write_items({"type": "M3U"}, items, self.path)
+        lines = self.read().splitlines()
+        self.assertEqual(len(lines), 3)  # the header, one #EXTINF line and its link
+        [item] = parse_m3u(self.read())
+        self.assertEqual(item["group"], "G' tvg-logo='http://x/logo")
+        self.assertEqual(item["name"], "Evil #EXTINF:-1,Injected http://x/2")
+        self.assertEqual(item["cmd"], "http://a/1http://x/4")
+        self.assertEqual(item["logo"], "l  http://x/3")
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes")
+    def test_the_file_is_the_users_alone(self):  # its links carry the sign-in
+        with open(self.path, "w") as f:
+            f.write("older")
+        os.chmod(self.path, 0o644)
+        for provider in ({"type": "M3U"}, {"type": "STB", "url": "http://p.test/c/"}):
+            write_items(provider, [{"name": "a", "cmd": "http://a/1"}], self.path)
+            self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
 
     def test_write_items_counts_written_and_tolerates_none_cmd(self):
         items = [{"name": "a", "cmd": "u"}, {"name": "b", "cmd": None}, {"name": "c"}]

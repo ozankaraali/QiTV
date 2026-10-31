@@ -1,7 +1,7 @@
 import re
 import sys
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse, urlsplit
 
 from services.catchup import SOURCE_KEY, TYPE_KEY, m3u_archive_fields, playlist_fields
 from services.i18n import N_
@@ -19,6 +19,39 @@ _CATCHUP_ATTRIBUTES = (
     "tvg-rec",
 )
 PLAYLIST_SOURCE_KEY = "catchup_source"  # the #EXTM3U line's template, beside the channels
+
+
+# A channel's link: any "scheme://" line (http, udp, rtp, rtsp, rtmp, mms…).
+_LINK = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+
+
+def _extinf_name(line: str) -> Optional[str]:
+    """An #EXTINF line's channel name: all after the first comma outside quoted attribute
+    values (`group-title="News, Sport",News, Weather & Sport` names "News, Weather & Sport").
+    A line whose quotes never close is read after its last comma. None without a name."""
+    quoted = False
+    for at, char in enumerate(line):
+        if char == '"':
+            quoted = not quoted
+        elif char == "," and not quoted:
+            return line[at + 1 :] or None
+    last = re.search(r",([^,]+)$", line)
+    return last.group(1) if last else None
+
+
+def _link_name(link: str) -> str:
+    """The name of a channel listed by its link alone: its path's last part
+    ("http://host/live/news.ts" → "news.ts"), else its host and port."""
+    parts = urlsplit(link)
+    last = unquote(parts.path.rstrip("/").rsplit("/", 1)[-1])
+    if last:
+        return last
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    host = parts.hostname or ""
+    return f"{host}:{port}" if host and port else host or link
 
 
 def _attributes(line: str) -> Dict[str, str]:
@@ -55,7 +88,10 @@ def parse_m3u(data: str, categorize: bool = False):
     """
     lines = re.split(r"\r\n|\r|\n", data.lstrip("\ufeff"))
     items = []
-    item = {}
+    item: Dict[str, Any] = {}
+    # After an #EXTINF line: "link" until its link is read, then "backup" (more links are
+    # its backups) until the next #EXTINF line. Before any, a link is a channel of its own.
+    expecting = ""
     id_counter = 0
     defaults: Dict[str, str] = {}  # the #EXTM3U line's catch-up attributes
 
@@ -69,15 +105,15 @@ def parse_m3u(data: str, categorize: bool = False):
             group_title_match = re.search(r'group-title="([^"]+)"', line)
             user_agent_match = re.search(r'user-agent="([^"]+)"', line)
             referrer_match = re.search(r'http-referrer="([^"]+)"', line)
-            item_name_match = re.search(r",([^,]+)$", line)
 
             tvg_id = tvg_id_match.group(1) if tvg_id_match else None
             tvg_logo = tvg_logo_match.group(1) if tvg_logo_match else None
             group_title = group_title_match.group(1) if group_title_match else None
             user_agent = user_agent_match.group(1) if user_agent_match else None
-            item_name = item_name_match.group(1) if item_name_match else None
+            item_name = _extinf_name(line)
 
             id_counter += 1
+            expecting = "link"
             item = {
                 "id": id_counter,
                 "group": group_title,
@@ -108,10 +144,29 @@ def parse_m3u(data: str, categorize: bool = False):
             # VLC's own option name; requests and VLC send it as the Referer header.
             item["referrer"] = line.split("=", 1)[1].strip()
 
-        elif line.startswith("http"):
-            # Round-trip through urlparse: it drops stray tabs and other control whitespace.
-            item["cmd"] = urlparse(line).geturl()
-            items.append(item)
+        elif _LINK.match(line.strip()):
+            # Any scheme VLC opens (udp://, rtsp://…): the player sends what the time-shift
+            # pipeline cannot read (http(s) only) to VLC directly. Round-trip through
+            # urlparse: it drops stray tabs and other control whitespace.
+            link = urlparse(line.strip()).geturl()
+            if expecting == "link":
+                item["cmd"] = link
+                items.append(item)
+                expecting = "backup"
+            elif expecting != "backup":
+                # A link without an #EXTINF line is a channel of its own, named by its link.
+                id_counter += 1
+                item = {
+                    "id": id_counter,
+                    "group": None,
+                    "xmltv_id": None,
+                    "name": _link_name(link),
+                    "logo": None,
+                    "user_agent": None,
+                    "cmd": link,
+                }
+                items.append(item)
+            # else another link for the channel just read (a backup): its first one plays
 
     # Return flat list if not categorizing
     if not categorize:
