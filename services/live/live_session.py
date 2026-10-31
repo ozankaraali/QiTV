@@ -682,6 +682,10 @@ class LiveSession(QObject):
         # The newest point asked while a part is on its way (it opens one part at a time), and
         # a closed part whose connection a provider with a limit must see closed first.
         self._part_next: Optional[float] = None
+        # 2.8.12, one stream: a closed part whose close is not confirmed yet; the parked live
+        # upstream resumes only then (`_resume_owed`), as a new part opens only then.
+        self._resume_held: Optional[str] = None
+        self._resume_owed = False
         self._part_closing: Optional[str] = None
         self._resume_retried = False  # a refused resume after a part was tried again
         self._part_retry_ms = 3000  # a refused part is tried once more after this (tests: 0)
@@ -802,6 +806,12 @@ class LiveSession(QObject):
         self._kept = kept
         self._one_stream = one_stream
         self._resuming = self._kept_only = self._live_after_resume = self._from_kept = False
+        # 2.8.12: an earlier channel's part resuming (a refusal of this tune was taken for its)
+        # and its dry runs at the edge (this one's first gap was held) are not this one's.
+        self._part_resuming = False
+        self._resume_held, self._resume_owed = None, False
+        self._dry_before = self._dry_seen = -math.inf
+        self._dry_now = False
         self._back = self._late = None
         self._disk_failures = 0
         self._on_disk = disk
@@ -1060,10 +1070,8 @@ class LiveSession(QObject):
             # 2.7: a live upstream parked for a server part opens again; live once its new
             # run comes (as a kept buffer's), not at the parked ring's stale edge.
             self._close_part(resume=False)
-            self._live_parked = False
-            self._resuming = self._live_after_resume = self._part_resuming = True
-            self._resume_retried = False
-            self._send_resume(self._sid)
+            self._resuming = self._live_after_resume = True
+            self._resume_parked()
             return
         self._close_part()  # 2.7: the server part goes
         if (
@@ -1687,6 +1695,7 @@ class LiveSession(QObject):
         self._land_check = None  # a landing measured on the old filter measures nothing
         self._settled.reset()
         self._was_stalled = False
+        self._not_live_said = 0  # the reopened session counts its own (`_say_not_live`)
         self._recovery_timer.start(_RECOVERY_MS)
 
     def _stop_timers(self) -> None:
@@ -1979,8 +1988,15 @@ class LiveSession(QObject):
         return edge - past <= _SETTLE_GROWTH_S + 1e-9
 
     def _on_recovery_timeout(self) -> None:
-        if self._phase is _Phase.RECOVERING:
-            self._fall_back(LOST)
+        if self._phase is not _Phase.RECOVERING:
+            return
+        if self._not_live_said > 0:
+            # 2.8.12: the reopened session's channel answered with a recording (`NOT_LIVE`)
+            # and the helper asks again; played directly, it would answer the same. It plays
+            # once an answer is live, or is refused once the helper gives up (`STREAM_LIMIT`).
+            self._recovery_timer.start(_RECOVERY_MS)
+            return
+        self._fall_back(LOST)
 
     def _on_failed(self, sid: str, kind: str, message: str) -> None:
         part = self._part
@@ -2077,6 +2093,8 @@ class LiveSession(QObject):
             self._ended = True
 
     def _on_closed(self, sid: str) -> None:
+        if sid == self._resume_held:
+            self._release_resume()
         if sid == self._part_closing:
             self._part_closing = None  # 2.7: the old part's connection closed
             self._open_pending_part()
@@ -2090,11 +2108,20 @@ class LiveSession(QObject):
             self._close_timer.stop()
             self._all_closed()
 
+    def _release_resume(self) -> None:
+        """The part a resume waited for closed (or its close cap passed): resume now."""
+        self._resume_held = None
+        if self._resume_owed:
+            self._resume_owed = False
+            self._resume_parked()
+
     def _on_close_cap(self) -> None:
         if not self._unclosed:
             return
         _LOG.warning("The live buffer did not confirm a close in time; going on without it.")
         self._unclosed.clear()
+        if self._resume_held is not None:
+            self._release_resume()
         if self._part_closing is not None:
             self._part_closing = None
             self._open_pending_part()
@@ -3359,6 +3386,8 @@ class LiveSession(QObject):
         self._part_pending = self._part_again = self._part_next = None
         if part is not None:
             self._close(part.sid)
+            if self._one_stream and not self._dead:
+                self._resume_held = part.sid  # 2.8.12: a resume waits for its close
         if resume:
             self._resume_parked()
 
@@ -3376,6 +3405,11 @@ class LiveSession(QObject):
 
     def _resume_parked(self) -> None:
         if self._live_parked and self._sid is not None:
+            if self._resume_held is not None:
+                # 2.8.12, one stream: the part's connection may still be open (the helper says
+                # "closed" once it let go): resumed then (`_on_closed`), or at the close cap.
+                self._resume_owed = True
+                return
             self._live_parked = False
             self._part_resuming = True
             self._resume_retried = False
