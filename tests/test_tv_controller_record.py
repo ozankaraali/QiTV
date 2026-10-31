@@ -442,6 +442,94 @@ class RecSignAndQuitTests(_RecordCase):
         self.assertEqual(self.controller.quit_note(), "")
 
 
+SCHEDULED = "sched:a@1"  # a scheduled recording's REC sign name, its stream's budget purpose
+SCHEDULED_CHANNEL = {**CHANNELS[2], "_provider": "Home"}
+
+
+class ScheduledRecordingQuestionTests(_RecordCase):
+    """Audit 1b, 1d: a recording on schedule (no player: a stream of its own) is asked about as
+    a player's is: before a tune needs its stream, before Go back to its channel, at Quit."""
+
+    def overlays(self, column):
+        overlays = super().overlays(column)
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.question = QuestionCard(self.host)
+        overlays.question = self.question
+        return overlays
+
+    def setUp(self):
+        super().setUp()
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+        # As RecordingScheduler holds it: under its REC sign name, no player of its own.
+        self.ticket = self.budget.request("Home", 1, purpose=SCHEDULED, queue=False)
+        self.stopped = []
+        self.controller.scheduled_now = lambda: (
+            [(SCHEDULED, "Three", 5.0, SCHEDULED_CHANNEL)] if self.ticket is not None else []
+        )
+        self.controller.stop_scheduled = self.stopped.append
+
+    def scheduler_lets_go(self):
+        """Its airing stopped: its session closed, its stream goes back (sessionClosed)."""
+        ticket, self.ticket = self.ticket, None
+        self.budget.release(ticket)
+
+    def test_a_tune_asks_to_stop_it_and_tunes_once_its_stream_is_back(self):
+        links = len(self.catalog.links)
+        self.tune(1)
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.assertEqual(
+            self.question.question(), "No stream is free: Three is recording. Stop the recording?"
+        )
+        self.assertEqual(len(self.catalog.links), links)  # nothing asked of the provider yet
+        self.controller.handle(Action.SEEK_FWD)  # to Stop recording
+        self.controller.handle(Action.OK)
+        self.assertEqual(self.stopped, [SCHEDULED])
+        self.assertEqual(len(self.catalog.links), links)  # its stream is not back yet
+        self.scheduler_lets_go()
+        self.assertEqual(self.requested()[-1], "Two")
+
+    def test_keep_recording_tunes_nothing(self):
+        links = len(self.catalog.links)
+        self.tune(1)
+        self.controller.handle(Action.OK)  # Keep recording, focused first
+        self.assertEqual(self.stopped, [])
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertNotIn(
+            ("Your provider allows 1 stream at a time", "error"), self.toast.messages()
+        )
+
+    def test_go_back_to_its_channel_asks_too(self):
+        self.controller.go_back_to_recording(SCHEDULED)
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.controller.handle(Action.SEEK_FWD)
+        self.controller.handle(Action.OK)
+        self.scheduler_lets_go()
+        self.assertEqual(self.requested()[-1], "Three")
+
+    def test_quit_asks_and_leaves_it_to_the_scheduler(self):
+        quits = []
+        self.assertEqual(
+            self.controller.quit_note(), "Three is recording. Quit and stop the recording?"
+        )
+        self.assertTrue(self.controller.asks_before_quit(lambda: quits.append(True)))
+        self.assertEqual(
+            self.question.question(), "Three is recording. Quit and stop the recording?"
+        )
+        self.controller.handle(Action.SEEK_FWD)  # to Quit
+        self.controller.handle(Action.OK)
+        self.assertEqual(quits, [True])
+        # Its shutdown keeps what it recorded and the rest for a QiTV opened while it airs.
+        self.assertEqual(self.stopped, [])
+
+    def test_quit_counts_it_with_a_players_recording(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 3}
+        self.record_large(0)
+        self.assertEqual(
+            self.controller.quit_note(), "2 channels are recording. Quit and stop the recordings?"
+        )
+
+
 class RecordGuardWiringTests(_RecordCase):
     """Task 14: a provider with no known limit that closes the recording's stream as
     another opens: the other stops, and the provider allows one for the run."""

@@ -139,7 +139,7 @@ from ui.quality_controls import SIZE_WHILE_RECORDING, QualityControls
 # i18n: a toast: the multiview cannot open while a picture is cast to a TV
 MULTIVIEW_WHILE_CASTING = N_("Stop casting to show the multiview")
 from ui.record_guard import RecordGuard
-from ui.stream_question import StreamQuestion, quit_text
+from ui.stream_question import ScheduledRecording, StreamQuestion, quit_text
 from ui.subtitle_search import OnlineSetup, OnlineSubtitles
 from ui.track_controls import TrackControls
 
@@ -506,7 +506,7 @@ class TVController(QObject):
             )
         self._question = StreamQuestion(
             budget=self.budget,
-            recordings=self._recordings,
+            recordings=self._all_recordings,  # 2.8: those on schedule too
             large=lambda: self.sessions.large() if self.sessions is not None else None,
             card=self._question_card,
             stop=self._stop_for_stream,
@@ -2151,8 +2151,9 @@ class TVController(QObject):
         return self._question.quit(then)
 
     def quit_note(self) -> str:
-        """The quit question while channels record ("" while none does): the self-update's."""
-        recording = self._recordings()
+        """The quit question while channels record ("" while none does): the self-update's.
+        2.8: those that record on schedule count too."""
+        recording = self._all_recordings()
         return quit_text(recording) if recording else ""
 
     def _refresh_rec_sign(self) -> None:
@@ -2206,6 +2207,19 @@ class TVController(QObject):
             return []
         recording = [slot for slot in sessions.slots() if records(slot)]
         return sorted(recording, key=lambda slot: slot.live.recording_since() or 0.0)
+
+    def _all_recordings(self) -> list[Any]:
+        """Every player that records and every recording on schedule (2.8: no player, a
+        stream of its own), the oldest first: what the stream question and Quit count."""
+        recording: list[tuple[float, Any]] = [
+            (slot.live.recording_since() or 0.0, slot) for slot in self._recordings()
+        ]
+        if not self._closed:
+            recording += [
+                (since, ScheduledRecording(name, dict(channel or {}), since))
+                for name, _channel, since, channel in self.scheduled_now()
+            ]
+        return [entry for _since, entry in sorted(recording, key=lambda pair: pair[0])]
 
     def _question_card(self) -> Any:
         """The question's card on the page that shows (the Library's while it shows, the
@@ -2267,10 +2281,14 @@ class TVController(QObject):
         sessions = self.sessions
         return sessions is not None and self._question.confirm(sessions.slot(name), then)
 
-    def _stop_for_stream(self, slot: Slot, replaced: bool) -> None:
+    def _stop_for_stream(self, slot: Any, replaced: bool) -> None:
         """Stop recording: the user said so for a stream. Unless the open that asked takes
         its stream over (`replaced`), its player lets the stream go: a background one by
-        itself, a small picture closes, a tile closes."""
+        itself, a small picture closes, a tile closes. 2.8: a scheduled recording's airing
+        stops (as the REC sign's Stop), its stream going back once its session closed."""
+        if isinstance(slot, ScheduledRecording):
+            self.stop_scheduled(slot.name)
+            return
         sessions = self.sessions
         background = sessions is not None and slot in sessions.background()
         slot.live.stop_recording()

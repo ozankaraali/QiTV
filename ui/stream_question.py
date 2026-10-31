@@ -12,6 +12,11 @@ only when the open replaces it (the picture in picture never takes the big pictu
 `confirm` asks the same of one recording that would stop anyway (a multiview tile's channel
 change or ✕: a tile has no background to go to), and `quit` before QiTV closes while any
 records ("{channel} is recording. Quit and stop the recording?"; Quit or Keep recording).
+
+A scheduled recording (2.8) records with no player, on a stream of its own held under its REC
+sign name: `recordings()` lists it as a `ScheduledRecording`, asked about as any other (Stop
+recording ends this airing's file); Quit leaves it to the scheduler's own shutdown, which keeps
+the rest to record should QiTV open again while it airs.
 """
 
 from __future__ import annotations
@@ -43,11 +48,24 @@ QUIT = N_("Quit")  # i18n: the quit question's button: QiTV closes, the recordin
 RELEASE_WAIT_MS = 8000  # a stopped recording's stream not back by then: go on anyway
 
 
+@dataclass(frozen=True)
+class ScheduledRecording:
+    """A scheduled recording that records now: no player of its own; its stream is held under
+    its REC sign name (`RecordingScheduler.recording_now`), which `name` is."""
+
+    name: str
+    channel: Optional[dict]
+    since: float  # when it began (time.monotonic, as the REC sign counts)
+
+
+Recording = Any  # a Slot that records, or a ScheduledRecording
+
+
 @dataclass
 class _Question:
     provider: str
     then: Callable[[], object]
-    stop: list[Slot]
+    stop: list[Recording]
     replaced: str  # the purpose whose stream the open takes over (none to wait for)
     ask_on: Optional[str] = None
     waiting: set[str] = field(default_factory=set)  # purposes whose streams must go back
@@ -62,14 +80,15 @@ class StreamQuestion(QObject):
         self,
         *,
         budget,
-        recordings: Callable[[], list[Slot]],
+        recordings: Callable[[], list[Recording]],
         large: Callable[[], Optional[Slot]],
         card: Callable[[], Any],
-        stop: Callable[[Slot, bool], None],
+        stop: Callable[[Recording, bool], None],
         closed: Callable[[], bool],
         parent: Optional[QObject] = None,
     ) -> None:
-        """`recordings()` every player that records, `large()` the big picture's, `card()` the
+        """`recordings()` every player that records and every scheduled recording that does
+        (oldest first), `large()` the big picture's, `card()` the
         QuestionCard of the page that shows (None: none to ask on), `stop(slot, replaced)`
         stops a recording and, unless `replaced` (the open takes its stream over), lets its
         stream go; `closed()` whether the shell closes."""
@@ -146,7 +165,8 @@ class StreamQuestion(QObject):
         recording = self._recordings()
         if self._closed() or not recording:
             return False
-        question = _Question("", then, recording, "")
+        players = [r for r in recording if not isinstance(r, ScheduledRecording)]
+        question = _Question("", then, players, "")  # the scheduler stops its own as QiTV goes
         question.replaced = "*"  # no stream to wait for: QiTV closes
         return self._ask(question, quit_text(recording), yes=translate(QUIT))
 
@@ -249,7 +269,7 @@ class StreamQuestion(QObject):
             self._going = False
 
 
-def quit_text(recording: list[Slot]) -> str:
+def quit_text(recording: list[Recording]) -> str:
     """The quit question for the players that record."""
     if len(recording) == 1:
         return translate(QUIT_ONE, channel=_name(recording[0]))
@@ -261,10 +281,12 @@ def quit_text(recording: list[Slot]) -> str:
     )
 
 
-def _purpose(slot: Slot) -> str:
+def _purpose(slot: Recording) -> str:
+    if isinstance(slot, ScheduledRecording):
+        return slot.name  # its stream's budget purpose
     return str(getattr(slot.tuner, "purpose", slot.name))
 
 
-def _name(slot: Slot) -> str:
+def _name(slot: Recording) -> str:
     channel = slot.channel or {}
     return str(channel.get("name") or "")
