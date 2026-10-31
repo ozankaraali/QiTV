@@ -36,9 +36,11 @@ from typing import Any, Callable, Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from services import recording, recording_schedule as rs
+from services.catalog import EMPTY_LINK_MESSAGE, NO_STREAM_MESSAGE, PROVIDER_LOADING_MESSAGE
 from services.connection_budget import DENIED
 from services.i18n import N_, translate
 from services.live.recorder import FAILED, LIMIT, MAX_SECONDS, MIN_FREE_BYTES, STOPPED
+from services.live.refusals import STREAM_LIMIT, STREAM_REFUSED
 from services.provider_api import known_http_only, portal_http_only
 from services.vlc_profile import user_agent_for
 
@@ -60,6 +62,65 @@ FAILED_TEXT = N_("“{title}” could not be recorded ({why}).")
 MISSED_TEXT = N_("Missed while QiTV was closed: {titles}")
 # i18n: a toast: QiTV's time-shift helper is not running, so a scheduled recording can't start
 NO_HELPER = N_("the time-shift helper is not running")
+
+# Why a scheduled recording failed, as FAILED_TEXT's {why} says it: by the code the scheduler,
+# the helper (a session's failure kind, the recorder's end) or the catalog gives.
+# i18n: why a scheduled recording failed, in "“{title}” could not be recorded ({why})."
+_HELPER_STOPPED = N_("the time-shift helper stopped")
+# i18n: why a scheduled recording failed, in "“{title}” could not be recorded ({why})."
+_UNREACHABLE = N_("the channel could not be reached")
+# i18n: why a scheduled recording failed, in "“{title}” could not be recorded ({why})."
+_STREAM_FAILED = N_("the channel's stream failed")
+FAILURE_REASONS = {
+    # i18n: why a scheduled recording failed: its provider was removed from the list
+    "provider": N_("its provider is no longer in your list"),
+    # i18n: why a scheduled recording failed: the provider gave no address for the channel
+    "link": N_("the provider gave no address for the channel"),
+    # i18n: why a scheduled recording failed: the channel opened, but no picture came
+    "no picture": N_("no picture came from the channel"),
+    # i18n: why a scheduled recording failed: nothing arrived to be written to the file
+    "empty": N_("nothing came to record"),
+    # i18n: why a scheduled recording failed: no stream of its provider was free
+    "stream": N_("no stream of its provider was free"),
+    # i18n: why a scheduled recording failed: the channel can't be recorded by QiTV's buffer
+    "unsupported": N_("the channel can't be recorded"),
+    # i18n: why a scheduled recording failed: the channel's certificate was not trusted
+    "tls": N_("the channel's certificate could not be verified"),
+    # i18n: why a scheduled recording failed: the channel's server did not answer in time
+    "timeout": N_("the channel did not answer in time"),
+    # i18n: why a scheduled recording failed: the channel's stream ended
+    "ended": N_("the channel's stream ended"),
+    "network": _UNREACHABLE,
+    "http": _UNREACHABLE,
+    "helper": _HELPER_STOPPED,
+    "crashed": _HELPER_STOPPED,
+    "internal": _HELPER_STOPPED,
+    "unavailable": _HELPER_STOPPED,
+    "failed": _STREAM_FAILED,
+}
+# What else reaches {why} and says it well: the catalog's link failures and the provider's
+# refusals (N_ texts), and the helper not running (said translated already).
+_REASON_TEXTS = (
+    PROVIDER_LOADING_MESSAGE,
+    NO_STREAM_MESSAGE,
+    EMPTY_LINK_MESSAGE,
+    STREAM_LIMIT,
+    STREAM_REFUSED,
+)
+
+
+def failure_reason(why: str) -> str:
+    """A scheduled recording's failure, translated, as FAILED_TEXT's {why}: a code's short
+    reason; a catalog's or a refusal's own text; anything else (a helper's English message,
+    an exception's text) as the channel's stream failing: it is in the log already."""
+    reason = FAILURE_REASONS.get(why)
+    if reason is not None:
+        return translate(reason)
+    if why in _REASON_TEXTS:
+        return translate(why)
+    if why == translate(NO_HELPER):
+        return why
+    return translate(_STREAM_FAILED)
 
 
 @dataclass
@@ -535,7 +596,7 @@ class RecordingScheduler(QObject):
         if state == rs.MISSED:
             self._toast(translate(NO_STREAM_TEXT, title=job.title, channel=name), "error")
         else:
-            self._toast(translate(FAILED_TEXT, title=job.title, why=why), "error")
+            self._toast(translate(FAILED_TEXT, title=job.title, why=failure_reason(why)), "error")
 
     def _on_closed(self, sid: str) -> None:
         run = self._run_by(sid=sid)
