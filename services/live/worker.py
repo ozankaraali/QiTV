@@ -180,6 +180,9 @@ _FLUSH_GRACE = 0.25  # for the writer to deliver what is queued
 _RELEASE_WAIT = 0.5  # for a closed session to close its upstream before "closed" is sent
 _OWNER_GRACE = 1.0  # after the owner died: for the shutdown to remove the disk buffers
 _RECORD_GRACE = 2.0  # at a session's teardown: for its recording to reach the live edge
+# 2.8.12: ... and then, its upstream closed, for one still copying what the buffer holds (one
+# started far back may have gigabytes to write): its buffer stays until then, at most this long.
+_RECORD_FINISH_S = 900.0
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # as the stream server requires
 _INTERNAL = "The live buffer stopped unexpectedly."
 _UNSUPPORTED = "The channel's stream cannot be time-shifted."
@@ -1671,12 +1674,16 @@ class _Session:
         with self.lock:
             recorders = [r for r in (self._recorder, *self._finishing) if r is not None]
         # A recording writes what the ring holds up to its live edge before the ring goes.
-        deadline = time.monotonic() + _RECORD_GRACE
+        started = time.monotonic()
+        deadline, finish_by = started + _RECORD_GRACE, started + _RECORD_FINISH_S
         for recorder in recorders:
             recorder.stop()
         for recorder in recorders:
-            if not recorder.join(max(0.0, deadline - time.monotonic())):
-                _LOG.info("A recording is still finishing as its buffer closes.")
+            if recorder.join(max(0.0, deadline - time.monotonic())):
+                continue
+            _LOG.info("A recording is still finishing; its buffer waits for it.")
+            if not recorder.join(max(0.0, finish_by - time.monotonic())):
+                _LOG.warning("A recording did not finish in time; its buffer closes.")
         with self.lock:
             ring, self._ring = self._ring, None
         if ring is not None:

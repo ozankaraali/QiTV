@@ -212,6 +212,8 @@ class Recorder:
         offset = 0
         self._ring = ring
         failing_since: float | None = None  # reads have failed since (`_FOLLOW_S`)
+        closed_since: float | None = None  # its ring closed, the session's next not come yet
+        begun = -1  # 2.8.12: the segment whose own bytes (past its header) were written
         while True:
             if self._clock() - started >= self._max_s:
                 return LIMIT
@@ -228,9 +230,11 @@ class Recorder:
                 # disk failed only with its next write, after this read).
                 following = self._next_ring(ring)
                 if following is not None:
-                    at_least = number + 1 if offset else number
+                    at_least = number + 1 if begun == number else number
                     ring, number, offset = following, self._oldest(following, at_least), 0
                     self._ring = ring
+                elif ended or stopping:
+                    return ENDED if ended else STOPPED  # 2.8.12: it spun on a stop till 30 s
                 else:
                     self._stop.wait(_RETRY_S)
                 continue
@@ -246,11 +250,13 @@ class Recorder:
                         return ENDED if ended else STOPPED
                     self._wait(ring, before)
                 else:  # closed: the session's next ring, or the end
-                    following = self._next_ring(ring)
+                    following, closed_since = self._after_closed(ring, closed_since, stopping)
                     if following is None:
-                        return STOPPED
+                        if closed_since is None:
+                            return STOPPED
+                        continue  # asked again (`_after_closed`)
                     # A segment begun in the old ring is not written twice.
-                    at_least = number + 1 if offset else number
+                    at_least = number + 1 if begun == number else number
                     ring, number, offset = following, self._oldest(following, at_least), 0
                     self._ring = ring
                 continue
@@ -262,6 +268,8 @@ class Recorder:
                 # 2.8: noted once written (a reader of the file never meets bytes not there).
                 self._place(number, offset, header_len, len(data), ring, at)
                 offset += len(data)
+                if offset > header_len:
+                    begun = number
                 self._progress()
                 if self._short_of_space():
                     return SPACE
@@ -281,6 +289,8 @@ class Recorder:
                     # As any failed read (2.8.12: it ended the recording at once): this
                     # segment's end is read again, which follows the session's next ring.
                     failing_since = self._still_failing(failing_since, error)
+                    if ended or stopping:
+                        return ENDED if ended else STOPPED
                     self._stop.wait(_RETRY_S)
                     continue
                 if following_header is not None:
@@ -293,9 +303,11 @@ class Recorder:
                     return ENDED if ended else STOPPED
                 self._wait(ring, before)
             else:
-                following = self._next_ring(ring)
+                following, closed_since = self._after_closed(ring, closed_since, stopping)
                 if following is None:
-                    return STOPPED
+                    if closed_since is None:
+                        return STOPPED
+                    continue  # asked again (`_after_closed`)
                 ring, number, offset = following, self._oldest(following, number + 1), 0
                 self._ring = ring
 
@@ -370,6 +382,26 @@ class Recorder:
         if oldest > at_least:
             _LOG.info("A recording skipped what the buffer no longer held.")
         return max(oldest, at_least)
+
+    def _after_closed(
+        self, closed: Ring, since: float | None, stopping: bool
+    ) -> tuple[Ring | None, float | None]:
+        """Its ring closed: (the session's next ring, None), or (None, since when it is waited
+        for) once `_RETRY_S` passed, or (None, None): the end. 2.8.12: a ring closed under the
+        session (a disk budget's trim) before it moved on in RAM, which it does with its next
+        write, is waited for up to `_FOLLOW_S`; a session torn down (no ring) is the end."""
+        following = self._next_ring(closed)
+        if following is not None:
+            return following, None
+        if stopping or self._ring_of() is None:
+            return None, None
+        now = self._clock()
+        if since is None:
+            since = now
+        elif now - since >= _FOLLOW_S:
+            return None, None
+        self._stop.wait(_RETRY_S)
+        return None, since
 
     def _still_failing(self, since: float | None, error: RingError) -> float:
         """A read failed: since when reads have failed; `error` once that is `_FOLLOW_S`."""

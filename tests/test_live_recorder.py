@@ -366,6 +366,59 @@ class RecorderTests(RecorderCase):
         recorder.stop()
         self.assertEqual(self.finish(recorder)[0], STOPPED)
 
+    def test_a_stop_while_reads_fail_ends_it_at_once(self):
+        # 2.8.12 (review of the 30 s follow): a stop while the disk's reads failed and no RAM
+        # ring had come made it retry without a pause till 30 s, and end "failed".
+        failing = FailingRing(64 * SEGMENT, after=1, failures=10**9)
+        self.ring, self.writer = failing, Writer(failing)
+        self.segments(2)
+        recorder = self.record(0)
+        time.sleep(0.3)
+        reads = failing.reads
+        recorder.stop()
+        reason, _, written = self.finish(recorder, timeout=2)
+        self.assertEqual(reason, STOPPED)
+        self.assertGreater(written, 0)
+        self.assertLess(failing.reads - reads, 50)  # no spin
+
+    def test_a_ring_closed_before_the_session_moved_to_ram_is_followed(self):
+        # 2.8.12: a disk budget's trim closed the session's ring (its oldest file could not go)
+        # before the session moved on in RAM, which it does with its next write: the recording
+        # ended "stopped" at once.
+        self.segments(1)
+        session = [self.ring]
+        recorder = self.record(0, ring_of=lambda: session[0])
+        self.wait_written(recorder, SEGMENT)
+        self.ring.close()
+        time.sleep(0.3)  # the session's next write comes later
+        fallback = RamRing(64 * SEGMENT)
+        fallback.open_segment(5, header(5))
+        fallback.append(payload(5, 0, 4000))
+        session[0] = fallback
+        self.wait_written(recorder, recorder.written + len(header(5)) + 4000)
+        recorder.stop()
+        self.assertEqual(self.finish(recorder)[0], STOPPED)
+
+    def test_a_segment_the_ram_ring_holds_whole_is_not_skipped(self):
+        # 2.8.12: the disk failed on a new segment's first write (its header only was there):
+        # the session opens that segment afresh in RAM, and the recording went on after it, a
+        # segment short (its header taken for begun).
+        self.segments(1)  # 0 complete, 1 open: its header only
+        session = [self.ring]
+        recorder = self.record(0, ring_of=lambda: session[0])
+        self.wait_written(recorder, SEGMENT)
+        fallback = RamRing(64 * SEGMENT)
+        session[0] = fallback
+        self.ring.close()
+        fallback.open_segment(1, header(1))
+        fallback.append(payload(1, 0, 5000))
+        fallback.open_segment(2, header(2))
+        fallback.append(payload(2, 0, 3000))
+        self.wait_written(recorder, recorder.written + 5000 + len(header(2)) + 3000)
+        recorder.stop()
+        _, path, _ = self.finish(recorder)
+        self.assertIn(payload(1, 0, 5000), Path(path).read_bytes())
+
     def test_a_read_that_keeps_failing_stops_it_and_keeps_what_it_wrote(self):
         flaky = FailingRing(64 * SEGMENT, after=2, failures=10**9)
         self.ring, self.writer = flaky, Writer(flaky)

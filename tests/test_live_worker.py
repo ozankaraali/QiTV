@@ -2373,6 +2373,42 @@ class StartQualityTests(unittest.TestCase):
         )
 
 
+class TeardownTests(unittest.TestCase):
+    """2.8.12: a session's buffer stays until a recording still copying from it finished."""
+
+    def test_a_teardown_keeps_the_buffer_till_a_late_recording_finished(self):
+        # A recording started far back may have gigabytes to copy when the channel changes:
+        # the buffer closed 2 s after the stop and the recording ended where it had got to.
+        helper = SimpleNamespace(
+            root="",
+            send=lambda message, session=None: None,
+            server=SimpleNamespace(add_session=lambda *args: None),
+            forget_ring=lambda ring: None,
+        )
+        session = worker._Session(helper, "t", "http://provider.test/t.ts", {}, True, RAM, 6.0)
+        session._ring = RamRing(1024 * 1024)
+        done = threading.Event()
+
+        class Late:
+            def stop(self):
+                threading.Timer(0.4, done.set).start()
+
+            def join(self, timeout):
+                return done.wait(timeout)
+
+        session._recorder = Late()
+        closed = []
+        with (
+            patch.object(worker, "_RECORD_GRACE", 0.05),
+            patch.object(
+                worker, "_close_ring", lambda ring, keep=False: closed.append(done.is_set())
+            ),
+            self.assertLogs("services.live.worker", "INFO"),
+        ):
+            session._teardown()
+        self.assertEqual(closed, [True])
+
+
 class ClosedAfterReleaseTests(unittest.TestCase):
     """The connection budget takes "closed" for "the old stream is closed" (spec §4.2)."""
 
