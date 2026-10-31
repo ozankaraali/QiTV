@@ -66,6 +66,8 @@ STATE_KEYS = {
     "secure",
     "restarts",  # 2.8.5
     "steered",
+    "not_live",  # 2.8.11
+    "settled_s",  # 2.8.11
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -2307,6 +2309,12 @@ class RecordedReadTests(unittest.TestCase):
     """2.6: while a recording runs, what the buffer let go of plays back from its file."""
 
     def test_recorded_segments_serve_from_the_file_after_eviction(self):
+        # Its upstream sends at six times real time throughout, as no live channel does: the
+        # tune's guard (2.8.11) would hold it its longest, and the small ring let segment 0 go
+        # before the recording began. The guard is not what this is about: it passes all.
+        guard = patch.object(worker.NotLiveGuard, "connected", lambda self: None)
+        guard.start()
+        self.addCleanup(guard.stop)
         stop, hung_up = threading.Event(), threading.Event()
         self.addCleanup(stop.set)
         upstream = LocalSource({SECRET_PATH: paced_route(make_stream(60), stop, hung_up)})
@@ -2528,10 +2536,11 @@ class HeardEdgeTests(unittest.TestCase):
 
         data = make_stream(30, gop_s=10.0)  # 10 s segments: their closes are 10 s apart
         second = len(data) // 30
-        reads = [(0.0, data[: 2 * second]), (0.3, data[2 * second : 3 * second])]
+        # The tune's arrival settles first (2.8.11: `NotLiveGuard` holds it till then).
+        reads = [(0.0, data[: 2 * second]), (1.3, data[2 * second : 3 * second])]
         rest = data[3 * second :]
         step = len(rest) // 3 + 1  # 27 s of media in three reads, 10 ms apart
-        reads += [(0.35 + 0.01 * k, rest[k * step : (k + 1) * step]) for k in range(3)]
+        reads += [(1.35 + 0.01 * k, rest[k * step : (k + 1) * step]) for k in range(3)]
         clock = SimpleNamespace(now=0.0)
         sent = []
         behind = []
@@ -2554,7 +2563,8 @@ class HeardEdgeTests(unittest.TestCase):
                     yield chunk
                     # The read is in: what the GUI heard last, against the pipeline's edge.
                     heard = [m[2]["live_edge"] for m in sent if m[0] == "state"]
-                    behind.append(session._live_edge() - heard[-1])
+                    if session._guard is not None and not session._guard.holding:
+                        behind.append(session._live_edge() - heard[-1])
 
             def close(self):
                 pass
@@ -2568,7 +2578,10 @@ class HeardEdgeTests(unittest.TestCase):
         ):
             session._ingest()
         self.assertGreater(session._live_edge(), 25.0)
+        self.assertEqual(len(behind), 4)  # the tune's second read and the burst's three
         self.assertLess(max(behind), worker._EDGE_STEP_S)
+        # Let go once its arrival settled: the state says how long it was held.
+        self.assertEqual([m[2]["settled_s"] for m in sent if m[0] == "state"][-1], 1.3)
 
     def test_the_state_says_a_new_connection_opens_until_it_delivers(self):
         # A silent connection is no reconnect; the source's `Reconnecting` is, said at once
@@ -2660,6 +2673,59 @@ class HeardEdgeTests(unittest.TestCase):
         self.assertEqual(told, [True])
         self.assertLess(session._timeline.end, 20.0)  # the two connections' 16 s, not 136
 
+    def test_a_tune_answered_with_a_recording_is_dropped_and_asked_again(self):
+        # 2.8.11: zapping, the provider answered a tune with the same clip ("573 s behind"
+        # before a picture played). It is dropped, the state says so until a connection is
+        # live, and the channel's own media is all the buffer holds.
+        from services.live.source import Discontinuity, Reconnecting
+
+        clip, channel = make_stream(120), make_stream(8)
+        sent = []
+        helper = SimpleNamespace(
+            root="",
+            send=lambda message, session=None: sent.append(message),
+            server=SimpleNamespace(add_session=lambda *args: None),
+        )
+        session = worker._Session(helper, "t", "http://provider.test/t.ts", {}, True, RAM, 6.0)
+        told, heard = [], []
+
+        def reads(data):
+            return (data[at : at + 65536] for at in range(0, len(data), 65536))
+
+        def not_live():
+            return [m[2]["not_live"] for m in sent if m[0] == "state"][-1]
+
+        class Source:
+            hls = False
+            burst_s = 0.0
+            user_agent = "test"
+
+            def not_live(self):
+                told.append(True)
+
+            def chunks(self):
+                for block in reads(clip):  # far faster than it plays
+                    yield block
+                    if told:
+                        break  # the source closes that connection
+                heard.append(not_live())
+                yield Reconnecting()
+                yield Discontinuity()
+                yield from reads(channel)
+
+            def close(self):
+                pass
+
+            def wait_closed(self, timeout):
+                return True
+
+        with patch.object(source_module, "open_source", lambda *args, **kwargs: Source()):
+            session._ingest()
+        self.assertEqual(told, [True])
+        self.assertEqual(heard, [1])
+        self.assertEqual(not_live(), 0)  # the channel's own answer passed
+        self.assertLess(session._timeline.end, 10.0)  # its 8 s, not the clip's 120
+
     def test_a_reconnect_onto_a_clock_far_behind_reaches_the_buffer_running_on(self):
         # A new connection's muxer started over, 2.4 hours back: VLC would read its time as 0
         # for hours while it played on (2.4.2). What the buffer holds runs on by a frame.
@@ -2748,6 +2814,11 @@ class HeardEdgeTests(unittest.TestCase):
             def chunks(self):
                 yield before[: 188 * 20]  # the tables: the segmenter knows the picture's PID
                 yield before[188 * 20 :]
+                # 2.8.11: the tune's bytes are held until its arrival settled (`NotLiveGuard`);
+                # the hold ticker lets them go once it did.
+                deadline = time.monotonic() + 5.0
+                while session._guard.holding and time.monotonic() < deadline:
+                    time.sleep(0.02)
                 if burst:
                     yield burst
                 seen["held"] = session._trimmer.holding
@@ -2786,7 +2857,11 @@ class HeardEdgeTests(unittest.TestCase):
     def test_a_tick_that_fails_ends_the_session_with_its_failure(self):
         # What a tick failed with is logged and raised in the session thread with
         # its next item: the session ends as that item would have ended it.
-        def failing(_self):
+        ticking = worker.RepeatTrimmer.tick
+
+        def failing(trimmer):
+            if not trimmer.holding:  # the tune's guard let go (2.8.11): ticked, nothing held
+                return ticking(trimmer)
             raise Unsupported("scrambled")
 
         with (

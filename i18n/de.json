@@ -903,6 +903,7 @@
   "The provider refused the stream: it may limit connections.": "Der Anbieter hat den Stream abgelehnt: Er begrenzt möglicherweise die Verbindungen.",
   "The provider refused the stream: its connection limit is reached.": "Der Anbieter hat den Stream abgelehnt: Sein Verbindungslimit ist erreicht.",
   "The provider rejected this device (check the MAC address or subscription)": "Der Anbieter hat dieses Gerät abgelehnt (prüfen Sie die MAC-Adresse oder das Abo)",
+  "The provider sent a recording, not the channel. Trying again…": "Der Anbieter hat eine Aufzeichnung statt des Senders geschickt. Neuer Versuch…",
   "The provider sent an unexpected answer": "Der Anbieter hat eine unerwartete Antwort gesendet",
   "The provider took too long to answer": "Der Anbieter hat zu lange nicht geantwortet",
   "The provider's archive didn't answer": "Das Archiv des Anbieters hat nicht geantwortet",

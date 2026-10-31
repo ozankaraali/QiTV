@@ -42,6 +42,7 @@ DISK = "Disk time-shift isn't available; using memory"
 REWOUND = "Rewound past the buffer"
 LOADING = "Still loading…"
 RECONNECTING = "Reconnecting…"
+NOT_LIVE = "The provider sent a recording, not the channel. Trying again…"
 KEPT_ONLY = "This channel can't open right now. Playing what was kept."
 KEPT_END = "That's all that was kept. The channel can't open right now."
 KEPT_DISK = "The disk buffer failed. Playing what was kept; Go live plays the channel again."
@@ -196,6 +197,7 @@ class FakeEngine(QObject):
         height=0,
         restarts=None,
         steered=None,
+        settled=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -243,6 +245,8 @@ class FakeEngine(QObject):
             self._snapshots[sid].update(heights=list(heights), height=height)
         if restarts is not None:  # 2.8.5: raw TS restarts so far, those that took an ask
             self._snapshots[sid].update(restarts=restarts, steered=steered or 0)
+        if settled is not None:  # 2.8.11: the guard held the tune until its arrival settled
+            self._snapshots[sid]["settled_s"] = settled
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def receive(self, sid, count):
@@ -1616,6 +1620,37 @@ class StartPolicyTests(LiveSessionCase):
         self.assertEqual(self.playback.plays, [])
         self.step(0.25)  # 0.6 s more in the last second: it landed
         self.assertEqual(self.playback.plays, [self.stream(sid, 1)])  # 1.1 s from 20.0: short
+
+    def test_a_backlog_the_helper_held_till_it_settled_is_started_from_at_once(self):
+        # 2.8.11: the helper held the tune's bytes until their arrival settled (a second at
+        # about real time after the backlog): they land at once, and that is their landing.
+        sid = self.start()
+        self.engine.receive(sid, 188 * 20)  # its bytes held: nothing in the buffer yet
+        self.clock.now += 1.6
+        self.engine.buffer(
+            sid, segments(0, 2, length=10.0), live_edge=20.6, open_seq=2, settled=1.6
+        )
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 1)])
+
+    def test_a_tune_held_till_it_settled_counts_that_as_its_steady_wait(self):
+        sid = self.start()
+        self.engine.receive(sid, 188 * 20)
+        self.clock.now += 1.0
+        self.engine.buffer(sid, [], open_seq=0, live_edge=1.4, settled=1.0)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 0)])  # from the oldest
+
+    def test_a_tune_the_helper_let_go_unsettled_waits_for_its_own_landing(self):
+        sid = self.start()
+        self.engine.buffer(sid, [], open_seq=0, live_edge=0.0, settled=0.0)
+        self.engine.sessionReady.emit(sid)
+        self.clock.now += 0.1
+        self.engine.buffer(
+            sid, segments(0, 2, length=10.0), live_edge=20.0, open_seq=2, settled=0.0
+        )
+        self.step(0.25)
+        self.assertEqual(self.playback.plays, [])
 
     def test_a_steady_source_with_nothing_far_enough_back_starts_within_a_second(self):
         sid = self.start()
@@ -5095,6 +5130,43 @@ class StreamLimitTests(LiveSessionCase):
         sid = self.start()
         self.engine.sessionFailed.emit(sid, "http", "The channel could not be reached over HTTP.")
         self.assert_falls_back(sid, UNAVAILABLE, 0)
+
+    def not_live(self, sid, count):
+        """The helper dropped `count` answers as recordings since one was live (2.8.11)."""
+        self.engine.receive(sid, 188 * 20)
+        self.engine._snapshots[sid]["not_live"] = count
+        self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid]))
+
+    def test_a_tune_answered_with_a_recording_waits_while_the_helper_asks_again(self):
+        # 2.8.11: played directly, the provider would answer with its clip too.
+        self.live = self.make(ready_timeout_ms=50, ready_max_ms=250)
+        sid = self.start()
+        self.not_live(sid, 1)
+        self.assertEqual(self.notices, [NOT_LIVE])
+        QTest.qWait(600)  # past the longest wait for a start
+        self.assertEqual((self.engine.closed, self.playback.plays), ([], []))
+        self.not_live(sid, 2)  # asked again: the same answer
+        self.assertEqual(self.notices, [NOT_LIVE, NOT_LIVE])
+        self.not_live(sid, 0)  # then the channel itself
+        self.engine.buffer(sid, [], open_seq=0, live_edge=2.0)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 0)])
+        self.assertEqual(self.notices, [NOT_LIVE, NOT_LIVE])
+
+    def test_a_tune_answered_with_recordings_till_the_helper_gives_up_is_refused(self):
+        sid = self.start()
+        self.not_live(sid, 1)
+        self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
+        self.assertEqual(self.notices, [NOT_LIVE])
+        self.assert_refused(sid, 0)
+
+    def test_a_reconnect_answered_with_a_recording_is_said_while_playing(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        snapshot = dict(self.engine._snapshots[sid], not_live=1)
+        self.engine.sessionUpdated.emit(sid, snapshot)
+        self.engine.sessionUpdated.emit(sid, snapshot)  # said once per answer
+        self.assertEqual(self.notices, [NOT_LIVE])
 
 
 class HelperDeathTests(LiveSessionCase):

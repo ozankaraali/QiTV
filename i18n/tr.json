@@ -893,6 +893,7 @@
   "The provider refused the stream: it may limit connections.": "Sağlayıcı yayını reddetti: bağlantıları sınırlıyor olabilir.",
   "The provider refused the stream: its connection limit is reached.": "Sağlayıcı yayını reddetti: bağlantı sınırına ulaşıldı.",
   "The provider rejected this device (check the MAC address or subscription)": "Sağlayıcı bu cihazı reddetti (MAC adresini veya aboneliği denetleyin)",
+  "The provider sent a recording, not the channel. Trying again…": "Sağlayıcı kanal yerine bir kayıt gönderdi. Yeniden deneniyor…",
   "The provider sent an unexpected answer": "Sağlayıcı beklenmedik bir yanıt gönderdi",
   "The provider took too long to answer": "Sağlayıcının yanıt vermesi çok uzun sürdü",
   "The provider's archive didn't answer": "Sağlayıcının arşivi yanıt vermedi",

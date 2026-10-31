@@ -34,7 +34,11 @@ starting up, say), or a raw-TS one that answered and holds its body back (2.1: h
 once, the body seconds later; an HLS channel only once segment bytes flow), gets until
 `ready_max_ms` from the start, with "Still loading…" at `ready_timeout_ms`; one that did not
 answer (or an HLS one without segment bytes) falls back at `ready_timeout_ms`. Each such
-fallback logs why (no URL; the engine logs an HTTP status).
+fallback logs why (no URL; the engine logs an HTTP status). A raw-TS channel that answered
+with a recording, not the channel (2.8.11: `not_live` in the helper's state, a provider's
+"connection limit" clip, say), says so (`NOT_LIVE`, at each such answer, also while playing)
+and is waited for while the helper asks again: played directly, it would answer the same. It
+plays once an answer is live, or is refused once the helper gives up (`STREAM_LIMIT`).
 
 Position (spec §6.3; 2.1): the start of the opened segment plus VLC's clock as
 `VlcClock` follows its `get_time()` readings: a clock at the rate set while VLC plays,
@@ -315,6 +319,8 @@ KEPT_DISK = N_("The disk buffer failed. Playing what was kept; Go live plays the
 _DIRECT_RETRIES_MS = (3000, 5000, 10000)  # a fallback's direct play, failing at once ...
 _DIRECT_QUICK_S = 5.0  # ... within this of its play call (a timeout is reported at once)
 LOADING = N_("Still loading…")  # i18n: toast: a channel takes long to start
+# i18n: toast: the provider answered with a recording (its connection limit, say), not live TV
+NOT_LIVE = N_("The provider sent a recording, not the channel. Trying again…")
 _CLOSE_CAP_MS = 2000  # a close not confirmed by then counts as done
 _RECOVERY_MS = 10_000  # a helper restart must bring the session back by then
 _EXPIRED_S = 0.5  # a position this far before the oldest buffered point is gone
@@ -606,6 +612,7 @@ class LiveSession(QObject):
         self._ready_at = 0.0  # when it was
         self._edges: list[tuple[float, float]] = []  # (when, live edge) while the start waits
         self._held_said = False  # "Still loading…" was said while the start waited
+        self._not_live_said = 0  # 2.8.11: the answers dropped as recordings said so far
         self._reland_until = -math.inf  # a backlog step before this is part of the landing
         self._reland_edge = 0.0  # the live edge at the last tick, meanwhile
         self._repick_until = -math.inf  # a backlog step before this re-picks the tune's start
@@ -1410,6 +1417,7 @@ class LiveSession(QObject):
             self._engine.keep_session(self._sid, {"channel": self._channel})  # 2.6: whose
         self._phase = _Phase.WAITING
         self._ready_seen = self._loading = self._held_said = False
+        self._not_live_said = 0
         self._edges = []
         self._ready_timer.start(self._ready_timeout_ms)
 
@@ -1426,6 +1434,7 @@ class LiveSession(QObject):
         self._send_resume(kept.sid, join=self._back is not None)
         self._phase = _Phase.WAITING
         self._ready_seen = self._loading = self._held_said = False
+        self._not_live_said = 0
         self._edges = []
         self._ready_timer.start(self._ready_timeout_ms)
 
@@ -1713,6 +1722,15 @@ class LiveSession(QObject):
         self._said_scheme = self._sid
         _LOG.info("The channel's stream comes over %s.", "HTTPS" if secure else "HTTP")
 
+    def _say_not_live(self, snapshot: Mapping[str, Any]) -> None:
+        """2.8.11: each answer the helper dropped as a recording, not the channel (a
+        provider's "connection limit" clip, say), is said; the helper asks again meanwhile."""
+        count = snapshot.get("not_live")
+        count = count if type(count) is int else 0
+        if count > self._not_live_said:
+            self.notice.emit(NOT_LIVE)
+        self._not_live_said = count
+
     def _on_ready(self, sid: str) -> None:
         if self._part is not None and sid == self._part.sid:
             self._part_ready = True
@@ -1742,6 +1760,7 @@ class LiveSession(QObject):
         if sid != self._sid:
             return
         self._say_scheme(snapshot)
+        self._say_not_live(snapshot)
         self._keep_heights(snapshot)
         if part is not None:
             self._follow_buffer_start(part)
@@ -1764,6 +1783,11 @@ class LiveSession(QObject):
             return
         if self._ready_seen and self._oldest_seq() is not None:
             self._play_first(waited=True)  # held for a start that did not come in time
+        elif not self._ready_seen and not self._resuming and self._not_live_said > 0:
+            # 2.8.11: the channel answered with a recording (`NOT_LIVE`) and the helper asks
+            # again; played directly, it would answer the same. It plays once an answer is
+            # live, or the helper gives up (`STREAM_LIMIT`).
+            self._ready_timer.start(self._ready_timeout_ms)
         elif not self._ready_seen and not self._loading and self._receiving():
             # Bytes flow but nothing is playable yet (an on-demand restream starting up,
             # say): wait up to `ready_max_ms` in all before playing directly (2.6: or what
@@ -1815,7 +1839,9 @@ class LiveSession(QObject):
         media is still to come (`backlog_s`, its EXTINF scaled by the media measured): the
         starts are judged against the live edge it will reach (`_hls_ready`). Any other
         source is held, on each state and tick, until the backlog it sent at connect landed
-        (`_landed`), at most `_SETTLE_MAX_S` after ready. With nothing far enough back, a
+        (`_landed`), at most `_SETTLE_MAX_S` after ready (2.8.11: a raw TS tune the helper
+        held until its arrival settled, `settled_s`, has landed, and that hold counts as
+        waited). With nothing far enough back, a
         steady source starts at the oldest after `_STEADY_WAIT_S`; a bursty or HLS source (or
         Stable, the cushion for jittery providers) waits for one. A start held longer than
         `_LOADING_AFTER_S` (but a raw TS backlog's) says "Still loading…". `waited`: the ready
@@ -1832,7 +1858,9 @@ class LiveSession(QObject):
         ahead = self._ahead(snapshot)
         pick = self._live_start(cushion=True, ahead=ahead)
         if not waited:
-            held = self._clock() - self._ready_at
+            # 2.8.11: the helper held a raw TS tune's bytes until their arrival settled (its
+            # backlog landed): that wait counts as this one's.
+            held = self._clock() - self._ready_at + _number(snapshot.get("settled_s"))
             if pick is None:
                 if self._waits_for_cushion(snapshot):
                     self._say_loading(held)
@@ -1940,6 +1968,8 @@ class LiveSession(QObject):
         """A source other than HLS: the backlog it sent at connect has landed, its live edge
         grew by at most `_SETTLE_GROWTH_S` over the last `_SETTLE_S` (about real time; one
         provider's 20 s came as two keyframe intervals a second apart)."""
+        if _number(snapshot.get("settled_s")) > 0:
+            return True  # 2.8.11: the helper let the tune's bytes go once they had (`settled`)
         edge, since = self._live_edge(snapshot), self._clock() - _SETTLE_S
         past = self._edges[0][1] if self._edges else edge
         for at, seen in self._edges:
