@@ -19,10 +19,10 @@ import logging
 import os
 from typing import Any, Iterator, Optional
 
-from PySide6.QtCore import QObject, QPoint, QThread, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QObject, QPoint, QThread
 from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QWidget
 
+from services import system_open
 from services.exporter import ExportKind
 from services.failure_reasons import shown_message
 from services.i18n import tr
@@ -383,7 +383,7 @@ class TVPages(QObject):
         menu.popup(global_pos)
 
     def _show_in_folder(self, path: str) -> None:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
+        system_open.open_folder(os.path.dirname(path))
 
     def _delete_recording(self, item: dict) -> None:
         window = self._window

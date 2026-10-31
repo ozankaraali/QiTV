@@ -2564,7 +2564,7 @@ class HelpAndAboutTests(WindowCase):
     def test_check_for_updates_and_report_an_issue(self):
         with (
             mock.patch("ui.tv_menus.check_for_updates") as check,
-            mock.patch("ui.tv_menus.QDesktopServices.openUrl") as open_url,
+            mock.patch("services.system_open.QDesktopServices.openUrl") as open_url,
         ):
             actions = self.menu_actions()
             actions["Check for Updates…"].trigger()

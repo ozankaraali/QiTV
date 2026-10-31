@@ -41,13 +41,11 @@ from PySide6.QtCore import (
     QRect,
     Qt,
     QTimer,
-    QUrl,
 )
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
     QCursor,
-    QDesktopServices,
     QDragEnterEvent,
     QDragMoveEvent,
     QDropEvent,
@@ -65,7 +63,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from services import favorites, free_channels, thread_cleanup
+from services import favorites, free_channels, system_open, thread_cleanup
 from services.account_check import AccountChecks
 from services.browsed_catalog import BrowsedCatalog
 from services.casting import CastDevices, LibVlcDiscovery
@@ -1072,7 +1070,7 @@ class TVWindow(QMainWindow):
     def open_url(self, url: str) -> None:
         """A web page in the browser (OpenSubtitles' sign-up and API key page)."""
         if not self._closing:
-            QDesktopServices.openUrl(QUrl(url))
+            system_open.open_url(url)
 
     def pick_subtitle_file(self, folder: str) -> str:
         """The Subtitles panel's "Load a file…": a subtitle file, from `folder` ("": none)."""

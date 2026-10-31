@@ -575,15 +575,3 @@ def _launch_failed(downloaded_path: str, release_url: str, ui: Optional[UpdateUI
     _undo_before_update()  # QiTV goes on: restart what the update stopped
     if ui is not None:
         ui.launch_failed(downloaded_path, release_url)
-
-
-def open_downloads_folder() -> None:
-    """Show the folder the update was saved to (best effort; `get_downloads_folder`)."""
-    downloads_folder = get_downloads_folder()
-    try:
-        if platform.system() == "Darwin":
-            subprocess.run(["open", str(downloads_folder)], check=False)
-        else:
-            subprocess.run(["xdg-open", str(downloads_folder)], check=False)
-    except OSError:
-        pass  # Folder opening is best-effort

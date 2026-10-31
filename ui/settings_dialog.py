@@ -3,8 +3,8 @@ import logging
 import os
 import sys
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices, QGuiApplication
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -39,6 +39,7 @@ from services import (
     log_file,
     provider_link,
     recording,
+    system_open,
 )
 from services.account_check import check_account
 from services.config_manager import ConfigManager
@@ -871,7 +872,7 @@ class OptionsDialog(QDialog):
 
     def open_recordings_folder(self) -> None:
         """The folder shown, in the system's file manager (saved or not)."""
-        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(recording.folder(self)))
+        opened = system_open.open_folder(recording.folder(self))
         self.recordings_status.setText("" if opened else translate(recording.NO_RECORDINGS))
 
     def _update_ram_estimate(self, *_args) -> None:

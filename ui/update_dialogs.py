@@ -6,13 +6,13 @@ the service checks on a QThread and reports to `DIALOGS`.
 """
 
 import logging
+import os
 import sys
 from typing import Optional
-import webbrowser
 
 from PySide6.QtWidgets import QCheckBox, QGridLayout, QMessageBox, QProgressDialog
 
-from services import i18n, update_checker
+from services import i18n, system_open, update_checker
 from services.config_manager import ConfigManager, get_app_version
 from services.i18n import tr, translate
 
@@ -62,7 +62,7 @@ class _Dialogs:
 
         error_dialog.exec_()
         if error_dialog.clickedButton() == open_btn:
-            webbrowser.open(release_url)
+            system_open.open_url(release_url)
 
     def confirm_quit_and_open(self) -> bool:
         """macOS: QiTV closes and opens the downloaded disk image (Update Now), or not now."""
@@ -116,7 +116,7 @@ class _Dialogs:
         )
         _polish_msgbox(msg)
         msg.exec_()
-        update_checker.open_downloads_folder()
+        system_open.open_folder(os.path.dirname(downloaded_path))
 
 
 DIALOGS = _Dialogs()
@@ -224,7 +224,7 @@ def show_update_dialog(
             update_checker.save_settings(config_manager)  # a locked file does not stop it
         start_download(download_url, file_size, release_url)
     elif clicked == browser_btn:
-        webbrowser.open(release_url)
+        system_open.open_url(release_url)
     elif clicked == skip_btn:
         if mute_checkbox and mute_checkbox.isChecked():
             update_checker.disable_update_reminders(config_manager)
@@ -293,4 +293,4 @@ def _show_download_error(error_msg: str, release_url: str):
 
     error_dialog.exec_()
     if error_dialog.clickedButton() == open_btn:
-        webbrowser.open(release_url)
+        system_open.open_url(release_url)

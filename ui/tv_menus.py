@@ -18,11 +18,10 @@ from functools import partial
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
-    QDesktopServices,
     QFontMetricsF,
     QKeySequence,
     QPainter,
@@ -30,7 +29,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLayout, QWidget
 
-from services import log_file, recording
+from services import log_file, recording, system_open
 from services.config_manager import get_app_version
 from services.exporter import ExportKind
 from services.i18n import N_, tr, translate
@@ -108,7 +107,7 @@ _SHORTCUT_MODIFIERS = (
 def open_folder(path: str) -> bool:
     """`path` in the system's file manager; False when it could not be opened (a folder
     that does not exist yet). Nothing is read here: the system opens it."""
-    return QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+    return system_open.open_folder(path)
 
 
 def about_text() -> str:
@@ -400,7 +399,7 @@ class TVMenus(QObject):
             ShortcutsDialog(self._window).exec()
 
     def report_issue(self) -> None:
-        QDesktopServices.openUrl(QUrl(ISSUES_URL))
+        system_open.open_url(ISSUES_URL)
 
     def show_log(self) -> None:
         """The folder of QiTV's log file (qitv.log), in the system's file manager (2.8.2)."""
