@@ -47,6 +47,7 @@ def focus_qss() -> str:
         f"QTabBar::tab:selected:focus:enabled {{background: {tint}}}"
         f"QToolButton:focus {{background: {tint}}}"
         f"QSlider:focus {{background: {tint}; border-radius: 4px}}"
+    )
 
 
 def accent_button_style() -> str:
