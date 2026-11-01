@@ -2059,9 +2059,9 @@ class XtreamLibraryTests(TwoProviderCase):
     def test_choosing_movies_in_the_drawer_opens_the_library(self):
         self.show()
         self.wait_ready(XTREAM)
-        drawer = self.wait_for_drawer()  # no channels here: it opens on the idle player
-        for key in (Qt.Key.Key_Left, Qt.Key.Key_Down):  # the sections, then Movies
-            QTest.keyClick(self.window, key)
+        # No live channels here: no "Live TV" either, and the drawer opens on the sections.
+        drawer = self.wait_for_drawer()
+        self.assertEqual(drawer.highlighted().layer, "section")
         self.assertEqual(drawer.highlighted().title, "Movies")
         QTest.keyClick(self.window, Qt.Key.Key_Return)
         self.assertIs(self.window.pages.currentWidget(), self.window.library_page)
