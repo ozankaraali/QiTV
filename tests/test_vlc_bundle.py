@@ -74,6 +74,27 @@ class UseBundledVlcTests(unittest.TestCase):
         self.assertEqual(self.environ[ENV_MODULES], plugins)
         self.assertEqual(self.environ[ENV_PLUGINS], plugins)  # never an installed VLC's too
 
+    def test_on_windows_and_linux_libvlc_scans_its_own_plugin_folder_once(self):
+        # The bundled libvlccore scans <its folder>/plugins (Windows), <its folder>/vlc/plugins
+        # (Linux) by itself; VLC_PLUGIN_PATH made it scan that folder a second time, and
+        # python-vlc sets VLC_PLUGIN_PATH from PYTHON_VLC_MODULE_PATH.
+        for system in ("Windows", "Linux"):
+            with self.subTest(system):
+                top = self.top / system
+                top.mkdir()
+                make_bundle(top, system)
+                environ = {ENV_PLUGINS: "/usr/lib/vlc/plugins", ENV_MODULES: "/usr/lib/vlc"}
+                self.assertTrue(
+                    use_bundled_vlc(
+                        top=str(top),
+                        system=system,
+                        environ=environ,
+                        load=self.load,
+                        drivers=dict,
+                    )
+                )
+                self.assertEqual(environ, {ENV_LIB: str(bundled_vlc(top, system)[1])})
+
     def test_a_source_run_leaves_python_vlc_alone(self):
         self.assertFalse(self.use(top=None))
         self.assertEqual(self.loaded, [])
