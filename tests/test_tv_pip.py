@@ -4,6 +4,7 @@ The controller's fakes are tests/test_tv_controller.py's; here the two players a
 sessions and live sessions with real LiveTuners, under the real SessionManager and budget.
 """
 
+from datetime import timedelta
 import os
 from unittest import mock
 
@@ -14,18 +15,20 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMenu
 
 from services.connection_budget import ConnectionBudget
+from services.epg_view import Programme
 from services.live.live_session import CRAWLING, LOADING, RECONNECTING, UNAVAILABLE
 from services.live.refusals import STREAM_LIMIT
 from services.live.tuning import channel_key
 from services.provider_ids import with_provider
 from services.sessions import PIP_FAILED, SessionManager, Slot
-from services.vlc_profile import STB_USER_AGENT
+from services.vlc_profile import STB_USER_AGENT, PlayKind
 from tests.test_tv_controller import (
     CHANNELS,
     HARBOR_ONE,
     HOME_ONE,
     MIB,
     NO_MODS,
+    NOW,
     ControllerTestCase,
     FakeLiveSession,
     FakeOverlay,
@@ -57,6 +60,19 @@ GROUP_B = [
     {"id": i, "name": name, "number": str(i), "cmd": f"ffrt http://tv/{i}"}
     for i, name in ((5, "Five"), (6, "Six"))
 ]
+# Channels whose provider keeps an archive (catch-up) and a programme past the buffer.
+ARCH_TWO = {**CHANNELS[1], "cmd": "http://panel.test/live/viewer/secret/2.ts", "archive_days": 3}
+HARBOR_THREE = {
+    "id": 3,
+    "name": "Three",
+    "number": "3",
+    "cmd": "http://panel.test/live/viewer/secret/3.ts",
+    "archive_days": 3,
+    "_provider": "Harbor IPTV",
+}
+SHOW = Programme(
+    "Morning", NOW - timedelta(hours=2, minutes=30), NOW - timedelta(hours=1, minutes=30)
+)
 SHIFTED = {
     "start": 0.0,
     "end": 300.0,
@@ -1476,6 +1492,25 @@ class MixedProviderPipTests(PipCase):
         self.assertEqual(self.budget.holders("Harbor IPTV"), ["pip"])
         self.assertEqual(self.budget.holders("Home"), ["main"])
 
+    def test_an_archive_is_refused_as_a_live_tune_while_the_small_picture_holds_the_only_one(
+        self,
+    ):
+        # The guide's Watch from the start opened a second stream at Harbor (1 allowed).
+        self.start_large(0)
+        self.open_small(HARBOR_TWO)
+        self.controller._guide.catchupRequested.emit(HARBOR_THREE, SHOW, "10", [HARBOR_THREE])
+        self.ready(HARBOR_THREE["cmd"])
+        QTest.qWait(10)
+        self.assertEqual(
+            self.toast.messages()[-1], ("Your provider allows 1 stream at a time", "error")
+        )
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["pip"])
+        self.assertNotIn(("stop",), self.live.calls[-1:])  # the large picture plays on
+        self.assertEqual(
+            [u for u, kw in self.session.plays if kw.get("kind") is PlayKind.VOD_STREAM], []
+        )
+        self.assertTrue(self.sessions.pip_open())
+
     def test_a_full_providers_channel_is_refused_whatever_the_browsed_one_allows(self):
         self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 2}
         self.budget.request("Harbor IPTV", 1, purpose="main")  # Harbor's only stream is taken
@@ -1566,6 +1601,67 @@ class OneStreamPipTests(PipCase):
         self.assertEqual(self.session.plays, [])
         self.assertEqual(self.budget.holders("Home"), ["pip"])
         self.assertTrue(self.sessions.pip_open())  # the small picture plays on
+
+
+class PipArchiveTests(PipCase):
+    """The provider archive (catch-up) of the small picture's channel, and one swapped small."""
+
+    def setUp(self):
+        super().setUp()
+        self.channels = [CHANNELS[0], ARCH_TWO, CHANNELS[2], CHANNELS[3]]
+        self.catalog.live["10"] = self.channels
+
+    @staticmethod
+    def vod_plays(session):
+        return [url for url, kw in session.plays if kw.get("kind") is PlayKind.VOD_STREAM]
+
+    def archive_after_swap(self):
+        """Two small, then the guide's Watch from the start on it: the pictures swap and its
+        archive opens in its player, large now."""
+        self.start_large(0)
+        small = self.open_small(ARCH_TWO)
+        links = len(self.catalog.links)
+        self.controller._guide.catchupRequested.emit(ARCH_TWO, SHOW, "10", self.channels)
+        self.assertIs(self.sessions.large(), small)  # swapped: never a second stream of it
+        self.assertEqual(small.live.calls[-1], ("stop",))  # its live stream lets go first
+        small.live.released.emit()
+        [url] = self.vod_plays(small.playback)
+        self.assertIn("/timeshift/viewer/secret/", url)
+        self.assertIn("/2026-10-15:18-00/2.ts", url)
+        self.assertEqual(len(self.catalog.links), links)  # the channel plays: no new link
+        return small
+
+    def test_watch_from_the_start_on_its_channel_swaps_then_opens_the_archive(self):
+        # Only the pictures swapped: the archive asked for was lost.
+        self.archive_after_swap()
+        self.assertTrue(self.controller._live_controls.catchup.active())
+        self.assertEqual(self.budget.holders("Home"), ["main", "pip"])
+
+    def test_an_archive_that_ends_small_says_so_and_goes_on_once_large_again(self):
+        small = self.archive_after_swap()
+        small.playback.stateChanged.emit("playing")  # it played large
+        self.controller.handle(Action.SWAP)  # One large again, the archive small
+        self.assertIs(self.sessions.small(), small)
+        self.assertEqual(self.label.info, ("Two", ""))  # its title alone, not LIVE
+        small.playback.now_ms = 20 * 60 * 1000  # 20 minutes into its address
+        small.playback.stateChanged.emit("ended")
+        self.assertEqual(self.label.info, ("Two", FINISHED_TEXT))
+        self.assertIn(("Two: The stream ended", "info"), self.toast.messages())
+        self.controller.handle(Action.SWAP)  # large again: on from where it ended
+        self.assertIs(self.sessions.large(), small)
+        plays = self.vod_plays(small.playback)
+        self.assertEqual(len(plays), 2)
+        self.assertIn("/2026-10-15:18-20/2.ts", plays[-1])
+        self.assertTrue(self.controller._live_controls.catchup.active())
+
+    def test_an_archive_that_fails_small_says_so(self):
+        small = self.archive_after_swap()
+        small.playback.stateChanged.emit("playing")
+        self.controller.handle(Action.SWAP)
+        small.playback.errorOccurred.emit("VLC could not open the stream")
+        small.playback.stateChanged.emit("error")
+        self.assertIn(("Two: VLC could not open the stream", "error"), self.toast.messages())
+        self.assertEqual(self.label.info, ("Two", ""))
 
 
 class MixerTests(PipCase):

@@ -1384,6 +1384,10 @@ class TVController(QObject):
         if stay and archive is not None and self._large_records():
             stay = False  # its archive opens beside the recording, which records on (2.6)
         if not stay and self._shown_elsewhere(channel, group_key, channels):
+            if archive is not None:
+                # The small picture's channel swapped in (or the background player recording
+                # it is large again): its archive opens there now, as on the channel playing.
+                self._tune(channel, group_key, channels, from_zap=from_zap, archive=archive)
             return
         if not stay and self._asks_first(channel, group_key, channels, archive):
             return  # 2.6: no stream is free while a recording holds one: asked
@@ -1837,7 +1841,10 @@ class TVController(QObject):
         self._phone_slot.give_back()  # it plays here again: the phone's was its stream
         if target.live and target.archive_at is not None:
             # Catch-up (2.2): the channel's archive from that moment, when it offers one now;
-            # else the channel plays live.
+            # else the channel plays live. Either is one more stream at its provider: refused,
+            # as a live tune is, when the other pictures take its whole limit.
+            if self._live_controls.refuse_over_limit(target):
+                return
             kept = self._current, self._cid
             self._current, self._cid = target, None
             if self._live_controls.open_archive(target, url):
@@ -2795,6 +2802,7 @@ class TVController(QObject):
             if current is not None:
                 # Recent and the next start's channel: a swap's, and a tile's taking the focus.
                 self._record_watched(current, view.url)
+                self._archive_after_small()
                 # The transport takes the large picture's last timeline at once; the banner
                 # then announces the channel (they share the bottom of the video).
                 self._live_controls.show_live_transport(current)
@@ -2821,6 +2829,17 @@ class TVController(QObject):
         pip.after_swap()
         if self._tuner_of(old).idle():
             pip.close()  # the old large picture was between two channels: nothing to show
+
+    def _archive_after_small(self) -> None:
+        """A swap: a channel's archive that ended, or failed, while it was small goes on as at
+        its end now that it is large (its next stretch, or live), never a dead archive bar."""
+        catchup = self._live_controls.catchup
+        if not catchup.active():
+            return
+        if self._state == "ended":
+            catchup.on_ended()
+        elif self._state == "error":
+            catchup.on_error("")
 
     def _use_slot(self, slot: Slot) -> None:
         """Act on `slot`'s player, live session and tuner (it is large now)."""
@@ -3294,9 +3313,11 @@ class TVController(QObject):
             self._media.position(position_ms, url=url)
 
     def _on_small_error(self, name: str, message: str) -> None:
-        """A movie or an episode swapped small failed to play: said as the large picture says
-        it (a channel's player errors are its live session's to recover or report)."""
-        target = self._pip.small_title(name) if self._pip is not None else None
+        """A movie, an episode or a channel's archive swapped small failed to play: said as
+        the large picture says it (a channel's player errors are its live session's to recover
+        or report)."""
+        pip = self._pip
+        target = (pip.small_title(name) or pip.small_archive(name)) if pip is not None else None
         if not self._closed and target is not None:
             self._error(self._named(target.title, message))
             self._explain_item(target.item, target.title)
