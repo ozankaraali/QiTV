@@ -1844,6 +1844,21 @@ class TVWindow(QMainWindow):
 
     # ---- lifecycle ----------------------------------------------------------------------------
 
+    def come_to_front(self) -> None:
+        """QiTV was started again with these settings (2.8.12, services.single_instance):
+        this window shows in front instead, restored when it was minimized (fullscreen or
+        maximized as it was)."""
+        if self._closing:
+            return
+        state = self.windowState()
+        if state & Qt.WindowState.WindowMinimized:
+            self.setWindowState(state & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
+        if sys.platform == "darwin":
+            macos_window.activate_app()  # another app is in front: QiTV comes forward
+        self.activateWindow()
+
     def showEvent(self, event) -> None:
         super().showEvent(event)
         if not self._started:

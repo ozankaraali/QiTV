@@ -92,6 +92,14 @@ def _migrate_favorites(config_manager) -> None:
         logging.getLogger(__name__).warning("The migrated favorites were not saved; will retry")
 
 
+def settings_dir() -> str:
+    """The settings folder this run uses (QITV_CONFIG_DIR, portable, or the system's), found
+    as ConfigManager finds it, without reading or writing anything there."""
+    from services.config_manager import ConfigManager
+
+    return str(os.path.dirname(ConfigManager.__new__(ConfigManager)._get_config_path()))
+
+
 def main() -> int:
     from PySide6 import QtGui
     from PySide6.QtCore import QLocale, QLoggingCategory, qInstallMessageHandler
@@ -135,6 +143,15 @@ def main() -> int:
     # the window responsive while it works.
     sys.setswitchinterval(0.0005)
     app = QiTVApplication(sys.argv)  # notes a quit request the system sends (2.8)
+    # 2.8.12: one QiTV per settings folder (a second start would record and stream twice and
+    # save over the first's settings): it brings the first to the front and quits.
+    from services.single_instance import claim
+
+    instance = claim(settings_dir(), replacing="--replace" in sys.argv)
+    if instance is None:
+        log.info("Another QiTV runs with these settings; this start ends here.")
+        log_file.close()
+        return 0
     # Why QiTV ended, in its log: the window closed (tv_window says how), or its last one.
     app.lastWindowClosed.connect(lambda: log.info("The last window closed."))
     app.aboutToQuit.connect(lambda: log.info("QiTV quits."))
@@ -192,6 +209,7 @@ def main() -> int:
     control = None
     try:
         window = TVWindow(app, config_manager, provider_manager, image_manager, epg_manager)
+        instance.activated.connect(window.come_to_front)
         window.show()
         # 2.8.3: a developer's tools read and drive this QiTV (loopback only, token-guarded).
         from services import control as control_port
@@ -213,6 +231,7 @@ def main() -> int:
         log.info("QiTV's event loop ended (%d).", code)
         return code
     finally:
+        instance.close()
         if control is not None:
             control.stop()
         allow_sleep()

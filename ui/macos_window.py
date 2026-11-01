@@ -158,3 +158,22 @@ def join_all_spaces(widget) -> bool:
     except Exception as e:  # never let a Cocoa detail break the player
         logger.debug("Could not show the window on every desktop: %s", e)
         return False
+
+
+def activate_app() -> bool:
+    """macOS: QiTV comes to the front as an app ([NSApp activateIgnoringOtherApps:YES]), as
+    when another start of QiTV hands over to it (2.8.12). Nothing happens elsewhere (False)."""
+    if QGuiApplication.platformName() != "cocoa":
+        return False
+    try:
+        objc = _objc()
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        app = _send(objc.objc_getClass(b"NSApplication"), b"sharedApplication")
+        if not app:
+            return False
+        _send(app, b"activateIgnoringOtherApps:", None, (ctypes.c_bool, True))
+        return True
+    except Exception as e:  # never let a Cocoa detail break the player
+        logger.debug("QiTV could not come to the front: %s", e)
+        return False
