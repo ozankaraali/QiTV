@@ -46,8 +46,10 @@ from services.catchup import ARCHIVE_KEY, programme_in_archive
 from services.epg_view import Programme, now_next, timeline
 from services.i18n import N_, tr, translate
 from services.navigation import item_key
+from services.zapping import ZapContext
 from ui.keymap import key_hint
 from ui.overlays.base import Overlay
+from ui.overlays.channel_rows import draw_playing_mark
 from ui.overlays.painting import Units, draw_icon, draw_logo, elided, fill_round, fmt_clock
 from ui.pointer import PointerInput
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
@@ -280,6 +282,7 @@ class Guide(Overlay):
         self._picked: tuple[int, Programme] | None = None  # a past programme clicked on
         self._scheduled = scheduled
         self._upcoming: tuple[int, Programme] | None = None  # 2.8: one to come, clicked on
+        self._playing: Callable[[], dict | None] = lambda: None  # its row has a ▶
         self._window_start = slot_start(now())
         self._cache: dict[_Key, list[Programme]] = {}
         self._failed: set[_Key] = set()  # lookups that raised: logged once, retried
@@ -324,6 +327,10 @@ class Guide(Overlay):
     def _each_reach(self, channels: list[dict], beyond: timedelta) -> timedelta:
         reach = max((self._archive_reach(c) for c in channels), default=timedelta(0))
         return reach if reach > beyond else timedelta(0)
+
+    def set_playing(self, playing: Callable[[], dict | None]) -> None:
+        """What plays large (asked at each paint): its row has a small accent ▶."""
+        self._playing = playing
 
     def close_guide(self) -> None:
         self._repaint.stop()
@@ -966,6 +973,8 @@ class Guide(Overlay):
             p, QRectF(x, rect.top() + (rect.height() - size) / 2, size, size), name, pixmap, 0.7 * u
         )
         x += size + 0.9 * u
+        if ZapContext.same(channel, self._playing()):  # the channel playing: a small ▶
+            x += draw_playing_mark(p, x, rect.center().y(), 0.9 * u) + 0.5 * u
         width = rect.right() - 0.8 * u - x
         p.setFont(units.font(1.1, QFont.Weight.DemiBold))
         p.setPen(qcolor(PALETTE.text))

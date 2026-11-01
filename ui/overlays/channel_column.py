@@ -66,6 +66,15 @@ class ChannelColumn(Overlay):
         self.raise_()
         self.highlight(index)
 
+    def set_playing(self, playing) -> None:
+        """What plays large (asked at each paint, `() -> dict | None`): its row has a ▶."""
+        self._model.playing = playing
+
+    def playing_changed(self) -> None:
+        """Another channel plays: the open list moves its ▶."""
+        if self.isVisible():
+            self._view.viewport().update()
+
     def current_index(self) -> int:
         return self._view.currentIndex().row()
 

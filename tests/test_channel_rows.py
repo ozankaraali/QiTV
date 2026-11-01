@@ -25,6 +25,7 @@ from ui.overlays.channel_rows import (
     tag_layout,
 )
 from ui.overlays.painting import Units
+from ui.theme import PALETTE
 
 
 class FakeLogos(QObject):
@@ -335,6 +336,62 @@ class RowFocusTests(unittest.TestCase):
 
     def test_a_view_without_columns_counts_as_focused(self):
         self.assertEqual(self.highlight_red(None), self.highlight_red(True))  # the zap column
+
+
+class PlayingMarkTests(unittest.TestCase):
+    """The channel playing has a small accent ▶ before its name (the phone says "Watching")."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_only_the_playing_channels_row_says_so(self):
+        model = ChannelRowsModel(None, now_provider)
+        model.set_channels(items(3))
+        self.assertFalse(model.index(1).data(ChannelRowsModel.PlayingRole))  # nothing plays
+        model.playing = lambda: dict(items(3)[1])
+        marked = [model.index(row).data(ChannelRowsModel.PlayingRole) for row in range(3)]
+        self.assertEqual(marked, [False, True, False])
+
+    def accent_pixels(self, playing):
+        view = ChannelListView()
+        view.units_width = 1000
+        model = ChannelRowsModel(None, now_provider)
+        model.set_channels(items(1))
+        if playing:
+            model.playing = lambda: items(1)[0]
+        option = QStyleOptionViewItem()
+        option.rect = QRect(0, 0, 600, 66)
+        option.widget = view
+        image = QImage(600, 66, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor("black"))
+        painter = QPainter(image)
+        ChannelRowDelegate(1.0, view).paint(painter, option, model.index(0))
+        painter.end()
+        view.deleteLater()
+        accent = QColor(PALETTE.accent)
+        return sum(
+            1
+            for x in range(600)
+            for y in range(66)
+            if abs(image.pixelColor(x, y).red() - accent.red()) < 8
+            and abs(image.pixelColor(x, y).green() - accent.green()) < 8
+            and abs(image.pixelColor(x, y).blue() - accent.blue()) < 8
+        )
+
+    def test_the_playing_row_paints_its_accent_mark(self):
+        self.assertGreater(self.accent_pixels(True), self.accent_pixels(False) + 20)
+
+    def test_the_fast_zap_list_marks_what_plays(self):
+        host = QWidget()
+        host.resize(1280, 720)
+        self.addCleanup(host.deleteLater)
+        column = ChannelColumn(None, now_provider, host)
+        column.set_playing(lambda: items(3)[2])
+        column.open("All", items(3), 0)
+        model = column._view.model()
+        self.assertTrue(model.index(2).data(ChannelRowsModel.PlayingRole))
+        self.assertFalse(model.index(0).data(ChannelRowsModel.PlayingRole))
 
 
 class ColumnTests(unittest.TestCase):

@@ -46,6 +46,9 @@ FREE_CHANNELS_ROW = "free_channels"  # iptv-org's free lists, in a menu at the r
 OPEN_FILE_ROW = "open_file"  # File → Open File… without the menu bar (fullscreen hides it)
 FAVORITES_GROUP = "@favorites"
 RECENT_GROUP = "@recent"
+OTHER_FAVORITES_ROW = "@favorites:others"  # ★ Favorites' label over the other providers' stars
+# i18n: a small label in ★ Favorites over the stars at the providers other than the one shown
+OTHER_PROVIDERS_TEXT = N_("Other providers")
 _RECENT_LIMIT = 20
 _MEMO_LIMIT = 64  # memoized child lists kept (least recently used are dropped)
 LAZY_ROWS = 2000  # a list of items this long gets its nodes made on demand (see NodeSeq)
@@ -256,6 +259,20 @@ def payloads(nodes: Sequence) -> list[dict]:
     return [n.payload for n in nodes if isinstance(n.payload, dict)]
 
 
+def _live_items_of(catalog) -> list[dict]:
+    """Every live channel a provider's catalog holds now, once (its All, else its groups)."""
+    every = catalog.items("live", ALL_GROUP_ID)
+    if every is not None:
+        return list(every)
+    seen, result = set(), []
+    for group in catalog.groups("live"):
+        for item in catalog.items("live", group.id) or []:
+            if item_key(item) not in seen:
+                seen.add(item_key(item))
+                result.append(item)
+    return result
+
+
 def _item_nodes(items: list[dict]) -> "Sequence[NavNode]":
     """Nodes for a group's items: a long list makes them on demand."""
     if len(items) >= LAZY_ROWS:
@@ -332,7 +349,10 @@ class NavModel(QObject):
                 sources.insert(0, NavNode("source", ALL_PROVIDERS, title, ALL_PROVIDERS))
             return sources + action_rows()
         if parent.layer == "source":
-            return [NavNode("section", s, section_title(s), s) for s in self.catalog.sections()]
+            sections = self.catalog.sections()
+            if parent.key == self.catalog.current_provider_name() and self._without_live():
+                sections = [s for s in sections if s != "live"]  # films and series only
+            return [NavNode("section", s, section_title(s), s) for s in sections]
         section = self.section_of(parent)
         state = (self._data_version(), self._events)
         if parent.layer == "section":
@@ -342,7 +362,13 @@ class NavModel(QObject):
             )
         if parent.layer == "group":
             if parent.key == FAVORITES_GROUP:
-                return [_item_node(i) for i in self._favorite_items()]
+                own, others = self._favorite_parts()
+                nodes = [_item_node(i) for i in own]
+                if others:  # the shown provider's stars first, then the others' (labelled)
+                    label = translate(OTHER_PROVIDERS_TEXT)
+                    nodes.append(NavNode("header", OTHER_FAVORITES_ROW, label))
+                    nodes += [_item_node(i) for i in others]
+                return nodes
             if parent.key == RECENT_GROUP:
                 return [_item_node(i) for i in self._recent_items()]
             return self._cached(
@@ -362,12 +388,25 @@ class NavModel(QObject):
             if not g.header:
                 groups.append(NavNode("group", g.id, shown_label(g.title), g, g.count))
                 continue
-            groups.append(NavNode("header", g.id, g.title, g))  # a provider's heading
+            heading = NavNode("header", g.id, g.title, g)  # a provider's heading
             if at + 1 == len(listed) or listed[at + 1].header:  # none of its groups yet
                 notice = self._provider_notice(g.provider, parent.key)
                 if notice:
-                    groups.append(NavNode("notice", f"{g.id}notice", notice, g))
+                    groups += [heading, NavNode("notice", f"{g.id}notice", notice, g)]
+                continue  # loaded without any (films only): no heading over nothing
+            groups.append(heading)
         return pinned + groups
+
+    def _without_live(self) -> bool:
+        """Whether the shown provider has films or series but its live list, loaded, holds no
+        channel: its sources skip "Live TV" (one provider's, not "All providers")."""
+        sections = self.catalog.sections()
+        if "live" not in sections or len(sections) < 2 or self.all_mode():
+            return False
+        has_content = getattr(self.catalog, "has_content", None)
+        if has_content is None or not has_content("live") or self.catalog.is_loading():
+            return False
+        return not any(not g.header for g in self.catalog.groups("live"))
 
     def _provider_notice(self, name: str, section: str) -> str:
         """All providers: the row under the heading of a provider without groups: why its
@@ -435,6 +474,7 @@ class NavModel(QObject):
             self._favorites_fingerprint(),
             self._history_fingerprint(),
             self.catalog.current_provider_name(),
+            self._others_deps(),
         )
 
     def _cached(
@@ -557,9 +597,85 @@ class NavModel(QObject):
         return result
 
     def _favorite_items(self) -> list[dict]:
+        """★ Favorites' channels in its order: the shown provider's, then the others'."""
+        own, others = self._favorite_parts()
+        return own + others
+
+    def _favorite_parts(self) -> tuple[list[dict], list[dict]]:
+        """The stars at the provider shown (every provider's in "All providers"), and, with
+        two providers or more, those at the others: stars follow the user, not the list."""
         # Scanning every live channel is the expensive part: a zap (history) must not redo it.
         deps = (self._data_version(), self._favorites_fingerprint())
-        return cast(list[dict], self._cached(("@favorites",), deps, self._compute_favorites))
+        own = cast(list[dict], self._cached(("@favorites",), deps, self._compute_favorites))
+        return own, self._other_favorites()
+
+    def _other_catalogs(self) -> dict[str, Any]:
+        """The ready catalogs of the providers other than the one shown, by name (none in
+        "All providers", with one provider, or without a hub of catalogs)."""
+        hub = getattr(self.catalog, "catalogs", None)
+        names = self.catalog.provider_names()
+        if hub is None or len(names) < 2 or self.all_mode():
+            return {}
+        shown = self.catalog.current_provider_name()
+        made = set(hub.created())
+        return {n: hub.catalog(n) for n in names if n != shown and n in made and hub.is_ready(n)}
+
+    def _others_deps(self) -> tuple:
+        """What the other providers' stars depend on but the stars: their lists' versions."""
+        return tuple((n, c.content_version()) for n, c in self._other_catalogs().items())
+
+    def _other_favorites(self) -> list[dict]:
+        """The starred channels of the providers other than the one shown (Settings order):
+        from their lists when loaded, else as last watched there (as ⟲ Recent has them)."""
+        names = self.catalog.provider_names()
+        if len(names) < 2 or self.all_mode():
+            return []
+        from services import parental  # parental reads navigation's item keys
+
+        guard = parental.installed()
+        state = guard.state_version() if guard is not None else 0
+        loaded = self._other_catalogs()
+        deps = (
+            self.catalog.current_provider_name(),
+            tuple((n, c.content_version()) for n, c in loaded.items()),
+            self._favorites_fingerprint(),
+            self._history_fingerprint() if len(loaded) < len(names) - 1 else (),
+            state,
+        )
+        return cast(
+            list[dict],
+            self._cached(("@favorites:others",), deps, lambda: self._compute_others(loaded)),
+        )
+
+    def _compute_others(self, loaded: dict[str, Any]) -> list[dict]:
+        from services import parental
+
+        is_kept = favorites.matcher(self.config)
+        if is_kept is None:
+            return []
+        guard = parental.installed()
+        shown = self.catalog.current_provider_name()
+        watched: dict[str, list[dict]] = {}
+        for entry in self.config.watch_history or []:
+            channel = recent_channel(entry)
+            if channel is not None and channel[0] != shown and channel[0] not in loaded:
+                watched.setdefault(channel[0], []).append(entry.get("item_data") or {})
+        result: list[dict] = []
+        for name in self.catalog.provider_names():
+            if name == shown:
+                continue
+            catalog = loaded.get(name)
+            seen: set[str] = set()
+            for item in _live_items_of(catalog) if catalog is not None else watched.get(name, []):
+                stamped = item if provider_of(item) == name else with_provider(item, name)
+                key = item_key(stamped)
+                if key in seen or not is_kept(stamped):
+                    continue
+                if guard is not None and guard.hides_item("live", stamped):
+                    continue  # hidden by parental controls while locked
+                seen.add(key)
+                result.append(stamped)
+        return result
 
     def _recent_items(self) -> list[dict]:
         from services import parental  # parental reads navigation's item keys
@@ -682,6 +798,10 @@ class NavModel(QObject):
         section_node = NavNode("section", section, title, section)
         self._path = [source, section_node]
         self._pending_group = None
+        if section == "live" and group_id is None and self._without_live():
+            self._path = [source]  # films and series only: its sections, not an empty Live TV
+            self.changed.emit()
+            return
         self._request_section(section)
         if group_id is not None and not self._resolve_group(section, group_id):
             self._pending_group = (section, group_id)
@@ -805,6 +925,9 @@ class NavModel(QObject):
             if not self._resolve_group(*self._pending_group):
                 logger.debug("Group %s not found in section %s", self._pending_group[1], section)
             self._pending_group = None
+        at_live = [n.layer for n in self._path] == ["source", "section"] and section == "live"
+        if at_live and self._path[1].key == "live" and self._without_live():
+            self._path = self._path[:1]  # films and series only: its sections show instead
         self.changed.emit()
 
     def _on_section_failed(self, section: str, message: str) -> None:

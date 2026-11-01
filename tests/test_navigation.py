@@ -638,3 +638,32 @@ class NavModelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FilmsOnlyProviderTests(unittest.TestCase):
+    """A provider of films and series without live channels has no empty "Live TV" level."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def nav(self, live_groups):
+        catalog = FakeCatalog()
+        films = Group("movies", "5", "Films", None)
+        catalog.groups = lambda section: live_groups if section == "live" else [films]
+        catalog.has_content = lambda section: True
+        return NavModel(catalog, SimpleNamespace(favorites=[], watch_history=[]))
+
+    def test_its_sections_skip_live_tv_and_the_list_opens_on_them(self):
+        nav = self.nav([])
+        home = NavNode("source", "Home", "Home", "Home")
+        self.assertEqual([n.key for n in nav.children(home)], ["movies", "series"])
+        nav.reset_to("live")
+        self.assertEqual([n.layer for n in nav.path], ["source"])
+
+    def test_a_provider_with_channels_keeps_live_tv(self):
+        nav = self.nav([Group("live", "10", "News", 2)])
+        home = NavNode("source", "Home", "Home", "Home")
+        self.assertEqual([n.key for n in nav.children(home)], ["live", "movies", "series"])
+        nav.reset_to("live")
+        self.assertEqual([n.key for n in nav.path], ["Home", "live"])

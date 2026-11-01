@@ -515,6 +515,9 @@ class TVWindow(QMainWindow):
         def now_provider(channel: dict):
             return controller.now_title(channel)
 
+        def playing() -> Optional[dict]:
+            return controller.playing_channel()  # its rows' ▶
+
         catalog = self.catalog
 
         def guide_programmes(channel: dict, start: datetime, limit: int):
@@ -597,6 +600,8 @@ class TVWindow(QMainWindow):
         )
         # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
         self.rec_sign.cover_with(self.overlays.drawer, self.overlays.guide, self.grid_tiles)
+        for listing in (self.overlays.column, self.overlays.drawer, self.overlays.guide):
+            listing.set_playing(playing)
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
         # bottom corner's PiP: its pill, ⇄, speaker and × stay within reach; elsewhere on the
         # PiP the transport keeps only its own buttons and bar, and other clicks reach the

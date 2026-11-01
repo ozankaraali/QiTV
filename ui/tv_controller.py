@@ -1395,6 +1395,7 @@ class TVController(QObject):
             self.zap.note_request(channel)  # ↑/↓ move on from it while its link is pending
         self.overlays.column.close()
         self._channel = channel
+        self._playing_moved()
         self._update_guides()
         self._show_banner(channel)
         if stay and archive is not None and playing is not None:
@@ -1809,6 +1810,18 @@ class TVController(QObject):
         """After a failed tune, INFO and the drawer follow the channel still playing."""
         current = self._current
         self._channel = current.item if current is not None and current.live else None
+        self._playing_moved()
+
+    def playing_channel(self) -> Optional[dict]:
+        """The channel tuned last (playing, or on its way): its row in the channel list, the
+        guide and the fast-zap list has a small accent ▶."""
+        return self._channel
+
+    def _playing_moved(self) -> None:
+        self.overlays.drawer.playing_changed()
+        self.overlays.column.playing_changed()
+        if self.overlays.guide.isVisible():
+            self.overlays.guide.update()
 
     def _deliver(self, target: Target, url: str) -> None:
         item = target.item

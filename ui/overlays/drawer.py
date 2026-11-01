@@ -299,7 +299,10 @@ def _numbers(group):
             (ZapContext.number_of(n.payload) or None) if isinstance(n.payload, dict) else None
             for n in group
         ]
-    return [str(row + 1) for row in range(len(group))]
+    if len(channels) == len(group):
+        return [str(row + 1) for row in range(len(group))]
+    positions = iter(range(1, len(channels) + 1))  # a label among the rows has none
+    return [str(next(positions)) if isinstance(n.payload, dict) else None for n in group]
 
 
 def _shown_rows(
@@ -566,6 +569,31 @@ class _FoundGenreDelegate(_SimpleRowDelegate):
         p.restore()
 
 
+class _LabelledChannelDelegate(ChannelRowDelegate):
+    """A live list's channels, and a label among them (★ Favorites' "Other providers" over
+    the other providers' stars) as the groups column paints a provider's heading."""
+
+    def __init__(self, label: _SimpleRowDelegate, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._label = label
+
+    @staticmethod
+    def _is_label(index) -> bool:
+        node = index.data(NodeRole)
+        return isinstance(node, NavNode) and node.layer == "header"
+
+    def sizeHint(self, option, index) -> QSize:
+        if self._is_label(index):
+            return self._label.sizeHint(option, index)
+        return super().sizeHint(option, index)
+
+    def paint(self, p: QPainter, option, index) -> None:
+        if self._is_label(index):
+            self._label.paint(p, option, index)
+        else:
+            super().paint(p, option, index)
+
+
 class _RowIndex:
     """Each node's row in a column; a long list of channels makes its nodes on demand."""
 
@@ -597,8 +625,10 @@ class _Column:
         self.view.setModel(self.model)
         # A list that mixes providers names each row's below its name (as the find does), so
         # a long name keeps the row's width; one provider's rows are drawn as before.
-        self.channel_delegate = ChannelRowDelegate(0.9, self.view, provider_below=True)
         self.simple_delegate = _SimpleRowDelegate(self.view)
+        self.channel_delegate = _LabelledChannelDelegate(
+            self.simple_delegate, 0.9, self.view, provider_below=True
+        )
         self.found_delegate = _FoundRowDelegate(
             self.simple_delegate,
             ChannelRowDelegate(FOUND_CHANNEL_SCALE, self.view, provider_below=True),
@@ -696,6 +726,17 @@ class Drawer(Overlay):
         self._refresh()
         self.show()
         self.raise_()
+
+    def set_playing(self, playing: Callable[[], dict | None]) -> None:
+        """What plays large (asked at each paint): its row has a small accent ▶."""
+        for col in self._columns.values():
+            col.model.playing = playing
+
+    def playing_changed(self) -> None:
+        """Another channel plays: the open lists move its ▶."""
+        if self.isVisible():
+            for col in self._columns.values():
+                col.view.viewport().update()
 
     def set_drag_enabled(self, enabled: Callable[[], bool]) -> None:
         """Whether a channel row may be dragged out now (the multiview's grid shows)."""
@@ -1110,7 +1151,9 @@ class Drawer(Overlay):
             col.view.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
         else:
             col.view.viewport().unsetCursor()
-        live = bool(nodes) and _is_live_item(self._nav, nodes[0])
+        # (★ Favorites may start with its "Other providers" label: the shown provider has none)
+        first = next((n for n in nodes[:2] if _selectable(n)), None) if nodes else None
+        live = first is not None and _is_live_item(self._nav, first)
         numbers = _numbers(nodes) if live else None
         # The same rows again (e.g. the section reported ready once more): the list keeps its
         # model, so it is neither laid out nor repainted from scratch.
@@ -1126,7 +1169,10 @@ class Drawer(Overlay):
             col.shown = shown
             col.nodes = nodes
             col.rows = _RowIndex(nodes)
-            col.view.setUniformItemSizes(True)  # (a find's rows are of two heights)
+            # (a find's rows are of two heights, as a live list with a label among its rows)
+            labelled = live and not isinstance(nodes, NodeSeq)
+            labelled = labelled and any(n.layer == "header" for n in nodes)
+            col.view.setUniformItemSizes(not labelled)
             col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
             col.model.set_nodes(nodes, live, numbers, tagged)
             if moved:
