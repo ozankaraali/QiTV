@@ -196,6 +196,10 @@ APP_LOG = "app.log"
 FAULTS = "faults.txt"  # Python stacks of a hang or crash when there is no stderr (Windows app)
 
 # ---- the live time-shift pipeline (--pipeline) ----
+# 2.8.13: the system lists QiTV in its media panel with what plays, and the system's own ⏯ (as
+# the system delivers it: macOS's command center, Windows's ButtonPressed, a desktop's MPRIS call
+# through the session bus) pauses and plays it.
+MEDIA_KEYS_CHECK = "the system's media panel lists QiTV playing Channel 2; its ⏯ pauses and plays"
 PIPELINE_PREFIX = "pipeline: "
 PIPELINE_SCREENSHOTS = ("04-timeshift.png", "05-catching-up.png")
 PIPELINE_VIDEO = "04-video.png"
@@ -1222,6 +1226,43 @@ class Driver:
         session = self.window.session
         return lambda: session.url == url and session.state() is PlaybackState.PLAYING
 
+    def _check_media_keys(self) -> Generator[int, None, None]:
+        session, keys = self.window.session, self.window.media_keys
+        system = keys.system
+        listed = keys.listening() and system is not None
+        held: dict = {}
+        paused = played = False
+        problem = ""
+        try:
+            if system is not None and listed:
+                held = system.report()
+                system.simulate("toggle")
+                paused = yield from self._wait(
+                    lambda: session.state() is PlaybackState.PAUSED, STATE_CHANGE_MS
+                )
+                system.simulate("toggle")  # Windows: Play now (its panel says paused)
+                played = yield from self._wait(
+                    lambda: session.state() is PlaybackState.PLAYING, STATE_CHANGE_MS
+                )
+        except Exception as e:
+            problem = f"{type(e).__name__}: {e}"
+        self.report.data["media_keys"] = {
+            "listening": listed,
+            "system": held,
+            "paused": paused,
+            "played": played,
+            "problem": problem,
+        }
+        self.report.check(
+            MEDIA_KEYS_CHECK,
+            listed
+            and held.get("state") == "playing"
+            and held.get("title") == "Channel 2"
+            and paused
+            and played,
+            problem or f"listed {listed}, system {held}, paused {paused}, played again {played}",
+        )
+
     def _check_glued(self, when: str, since: Optional[float] = None, quiet: bool = True) -> None:
         """The host sits exactly over the surface, and no overlay re-synced it since `since`."""
         host, surface = self.window.host, self.window.surface
@@ -1374,6 +1415,9 @@ class Driver:
                     video["informational"] = reason
                     shown, detail = True, f"informational on CI macOS: {video}"
             report.check("VLC shows the video in the surface", shown, detail)
+
+        report.step("the system's media keys")
+        yield from self._check_media_keys()
 
         # The transport: a mouse move over the playing video shows it over the whole host.
         report.step("show the transport")
