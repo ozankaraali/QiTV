@@ -727,13 +727,14 @@ class TVWindow(QMainWindow):
         # Wired before the Library connects to the catalog: on providerReady the controller
         # settles the provider change before a Library play waiting for it runs.
         controller.wire()
-        # 2.8.13: the system's media keys (macOS gives them only to the app it lists as Now
-        # Playing): each acts as the keyboard's, and the system hears what the large picture
-        # plays (after the controller hears the state: it knows what plays by then).
+        # 2.8.13: the system's media keys (the player listed in the system's media panel gets
+        # them: macOS only so): each acts as the keyboard's, and the system hears what the
+        # large picture plays (after the controller hears the state: it knows what plays by
+        # then). It listens once the window is on screen (_start: Windows lists the window).
         self.media_keys = MediaKeys(self)
         self.media_keys.pressed.connect(self.remote_key)
+        self.media_keys.raiseRequested.connect(self.come_to_front)
         self.session.stateChanged.connect(self._show_now_playing)
-        self.media_keys.start()
         self.screens = TVPages(self, self)  # the Library's controller and the page moves
         if self.engine is not None:  # 2.8: scheduled recordings, by the time-shift helper
             self.attach_scheduler(
@@ -1189,6 +1190,7 @@ class TVWindow(QMainWindow):
             return
         action, payload = resolved
         event.accept()
+        self.media_keys.keyboard(as_int(event.key()))  # its copy from the system is this press
         with self.screens.from_keys():  # a page a key shows gets no second click
             self._act(action, payload, key=as_int(event.key()))
 
@@ -1901,6 +1903,7 @@ class TVWindow(QMainWindow):
         self._fit_restored()
         self._bind_video()
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+        self.media_keys.start(int(self.winId()))
         self.controller.start()
         self.epg_refresh.start()
         if self.scheduler is not None:

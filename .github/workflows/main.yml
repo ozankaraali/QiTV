@@ -79,7 +79,7 @@ jobs:
         run: |
           apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
           sudo apt-get $apt update
-          sudo apt-get $apt install -y vlc libxcb-cursor0 xvfb openbox xcompmgr x11-utils
+          sudo apt-get $apt install -y vlc libxcb-cursor0 xvfb openbox xcompmgr x11-utils dbus
       - name: Silence ALSA
         run: |
           printf 'pcm.!default { type null }\n' > ~/.asoundrc
@@ -119,9 +119,10 @@ jobs:
       - name: Smoke test the packaged app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         # The same scenario through main.py's --smoke entry: the live helper must spawn from
-        # the bundle. The fixtures come from the checkout; the app has none.
+        # the bundle. The fixtures come from the checkout; the app has none. A session bus, as
+        # on a desktop: the media keys' MPRIS player (2.8.13) lives on it.
         run: |
-          xvfb-run -a -s "-screen 0 1920x1080x24" sh -c '
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1920x1080x24" sh -c '
             openbox &
             xcompmgr &
             for i in $(seq 50); do

@@ -4,10 +4,12 @@
 computer, or from [Releases](https://github.com/ozankaraali/QiTV/releases). Please don't use
 others' distributions, which may have malware.**
 
-## Media keys on the Mac
+## Media keys
 
-- **⏯, ⏭ and ⏮ work on the Mac:** the keyboard's keys, and those of headphones, the Touch
-  Bar and Control Centre. macOS gives these keys only to the app it lists as playing, and QiTV
-  never listed itself, so they went to another app or did nothing. QiTV now shows in Now
-  Playing with the channel or film it plays: ⏯ pauses and plays, ⏭ and ⏮ change channel, and
-  in a film they skip forward and back, as they do in QiTV's own window on Windows.
+- **⏯, ⏭ and ⏮ reach QiTV on every computer:** the keyboard's keys, and those of headphones,
+  the Touch Bar, Control Centre on the Mac and the media panel on Windows and Linux. Each
+  system gives these keys to the player it lists as playing, and QiTV never listed itself: on
+  the Mac they never reached QiTV at all, and elsewhere often only while its window was in
+  front. QiTV now shows in the system's media panel with the channel or film it plays, and the
+  keys work while it is in the background too: ⏯ pauses and plays, ⏭ and ⏮ change channel,
+  and in a film they skip forward and back.
