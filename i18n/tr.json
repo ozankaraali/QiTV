@@ -1166,6 +1166,8 @@
   "{subtitles} in {languages}": "{subtitles}, {languages}",
   "{time} left": "{time} kaldı",
   "{time} watched": "{time} izlendi",
+  "“{name}” could not be deleted: {error}": "“{name}” silinemedi: {error}",
+  "“{name}” is open in another program: close it there, then delete it again.": "“{name}” başka bir programda açık: orada kapatın, sonra yeniden silin.",
   "“{title}” can't start recording: no stream of {channel}'s provider is free. QiTV tries again every minute while it airs.": "“{title}” kaydı başlayamıyor: {channel} kanalının sağlayıcısında boş akış yok. QiTV, yayın sürerken her dakika yeniden dener.",
   "“{title}” could not be recorded ({why}).": "“{title}” kaydedilemedi ({why}).",
   "“{title}” has ended.": "“{title}” sona erdi.",

@@ -1192,6 +1192,8 @@
   "{subtitles} in {languages}": "{subtitles} en {languages}",
   "{time} left": "quedan {time}",
   "{time} watched": "Visto: {time}",
+  "“{name}” could not be deleted: {error}": "No se pudo eliminar «{name}»: {error}",
+  "“{name}” is open in another program: close it there, then delete it again.": "«{name}» está abierto en otro programa: ciérralo allí y vuelve a eliminarlo.",
   "“{title}” can't start recording: no stream of {channel}'s provider is free. QiTV tries again every minute while it airs.": "«{title}» no puede empezar a grabarse: el proveedor de {channel} no tiene ninguna transmisión libre. QiTV lo vuelve a intentar cada minuto mientras se emite.",
   "“{title}” could not be recorded ({why}).": "No se pudo grabar «{title}» ({why}).",
   "“{title}” has ended.": "«{title}» ya terminó.",

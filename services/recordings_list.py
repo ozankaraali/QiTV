@@ -45,6 +45,12 @@ TIMER_WEEKENDS = N_("Records {channel} {time}, Saturday and Sunday")
 # i18n: a timer recording's details in the Library ({days}: short day names, as "Mon, Wed")
 TIMER_DAYS = N_("Records {channel} {time}, {days}")
 SCHEDULED_PREFIX = "scheduled:"
+# i18n: a toast: a recording was not deleted, as another program (a player) has its file open
+DELETE_IN_USE = N_("“{name}” is open in another program: close it there, then delete it again.")
+# i18n: a toast: a recording's file could not be deleted ({error}: the system's reason)
+DELETE_FAILED = N_("“{name}” could not be deleted: {error}")
+# Windows refuses to delete a file another program has open: a sharing or a lock violation.
+_IN_USE_WINERRORS = (32, 33)
 
 
 def day_names(days: list[int]) -> str:
@@ -173,8 +179,10 @@ class RecordingsList(QObject):
     `writing()` names the files recordings are writing now (marked `_writing`)."""
 
     changed = Signal()
+    delete_failed = Signal(str)  # why a recording's file stayed, in the active language
     _scanned = Signal(object, object)  # (signature, items), from the reading thread
-    _deleted = Signal()  # a file went (or could not), from the deleting thread
+    # (name, why it stayed: "" when it went), from the deleting thread
+    _deleted = Signal(str, object)
 
     def __init__(
         self,
@@ -195,7 +203,7 @@ class RecordingsList(QObject):
         self._again = False
         self.version = 0
         self._scanned.connect(self._on_scanned)
-        self._deleted.connect(self.refresh)
+        self._deleted.connect(self._on_deleted)
 
     def items(self) -> list[dict[str, Any]]:
         return self._scheduled + self._items
@@ -230,11 +238,24 @@ class RecordingsList(QObject):
         ).start()
 
     def _remove(self, path: str) -> None:
+        failure: Optional[OSError] = None
         try:
             os.remove(path)
         except OSError as e:
             logger.warning("A recording could not be deleted: %s", type(e).__name__)
-        self._deleted.emit()
+            failure = e
+        self._deleted.emit(os.path.basename(path), failure)
+
+    def _on_deleted(self, name: str, failure: Optional[OSError]) -> None:
+        """A file went, or could not (the user is told why); either way the folder is read
+        again."""
+        if failure is not None:
+            if getattr(failure, "winerror", None) in _IN_USE_WINERRORS:
+                self.delete_failed.emit(translate(DELETE_IN_USE, name=name))
+            else:
+                reason = failure.strerror or type(failure).__name__
+                self.delete_failed.emit(translate(DELETE_FAILED, name=name, error=reason))
+        self.refresh()
 
     def refresh(self) -> None:
         """Read the folder again (once more after a reading under way, when asked meanwhile)."""

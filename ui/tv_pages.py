@@ -77,6 +77,8 @@ class TVPages(QObject):
             # one still written can't be deleted (2.8)
             writing=(lambda: set(writing())) if writing is not None else None,
         )
+        # A recording's file another program holds (Windows) stays: the user is told why.
+        self.recordings.delete_failed.connect(lambda text: self.notify(text, "error", ERROR_MS))
         self.library_model = LibraryModel(
             window.library_catalog,
             window.config_manager,
