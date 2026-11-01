@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
+from services.body_limits import TooLarge
 from services.epg_manager import EpgManager, _cache_key, _open_xmltv, write_xmltv_body
 from services.multikeydict import MultiKeyDict
 
@@ -83,6 +84,15 @@ class WriteXmltvBodyTests(_Directory):
         with self.assertRaises(OSError):
             write_xmltv_body(SimpleNamespace(iter_content=broken), self.path)
         self.assertEqual(os.listdir(self.directory), [])
+
+    def test_a_guide_larger_than_the_limit_never_fills_the_disk(self):
+        with (
+            patch("services.epg_manager.XMLTV_MAX", 15),
+            self.assertRaises(TooLarge),
+            self.assertLogs("services.epg_manager", "WARNING"),
+        ):
+            write_xmltv_body(fake_response(XML), self.path)  # 10 bytes, then the rest
+        self.assertEqual(os.listdir(self.directory), [])  # no part of it is kept
 
 
 class OpenXmltvTests(_Directory):

@@ -904,6 +904,7 @@
   "The provider sent a recording, not the channel. Trying again…": "Sağlayıcı kanal yerine bir kayıt gönderdi. Yeniden deneniyor…",
   "The provider sent an unexpected answer": "Sağlayıcı beklenmedik bir yanıt gönderdi",
   "The provider took too long to answer": "Sağlayıcının yanıt vermesi çok uzun sürdü",
+  "The provider's answer is too large to load": "Sağlayıcının yanıtı yüklenemeyecek kadar büyük",
   "The provider's archive didn't answer": "Sağlayıcının arşivi yanıt vermedi",
   "The provider's server has a problem ({status})": "Sağlayıcının sunucusunda bir sorun var ({status})",
   "The recording didn't open. Tap TV to watch it there.": "Kayıt açılamadı. TV'de izlemek için TV'ye dokunun.",

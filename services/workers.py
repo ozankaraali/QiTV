@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from PySide6.QtCore import QObject, Qt, Signal
 
+from services.body_limits import LIST_MAX, TooLarge, capped
 from services.catchup import (
     Answer,
     mark_stb_archives,
@@ -125,13 +126,20 @@ class M3ULoaderWorker(QObject):
         try:
             if not self.url.startswith(("http://", "https://")):
                 with open(self.url, encoding="utf-8-sig", errors="replace") as file:
-                    self.finished.emit(parse_m3u(file.read(), categorize=True))
+                    text = file.read(LIST_MAX + 1)  # characters: at least as many bytes
+                    if len(text) > LIST_MAX:
+                        raise TooLarge(LIST_MAX)
+                    self.finished.emit(parse_m3u(text, categorize=True))
                 return
             last_exc = None
             for u in https_fallback_candidates(self.url, self.prefer_https):
                 try:
-                    response = requests.get(
-                        u, timeout=10, headers=CLIENT_HEADERS, verify=self.verify_ssl
+                    response = requests.get(  # read up to LIST_MAX: TooLarge past it
+                        u,
+                        timeout=10,
+                        headers=CLIENT_HEADERS,
+                        verify=self.verify_ssl,
+                        hooks=capped(LIST_MAX),
                     )
                     response.raise_for_status()
                     self.finished.emit(parse_m3u(decode_playlist(response), categorize=True))
@@ -376,8 +384,9 @@ class XtreamLoaderWorker(QObject):
         # against providers with strict connection limits).
         session = requests.Session()
         session.headers.update(CLIENT_HEADERS)
+        get = partial(session.get, hooks=capped(LIST_MAX))  # each answer up to LIST_MAX
         try:
-            user_info, resolved_base, server_info = _xtream_sign_in(session.get, self)
+            user_info, resolved_base, server_info = _xtream_sign_in(get, self)
             # Select from provider metadata only. Opening a media URL here consumes
             # a playback connection before the user has selected anything.
             allowed_formats = user_info.get("allowed_output_formats", []) or []
@@ -392,12 +401,12 @@ class XtreamLoaderWorker(QObject):
             if actions is None:
                 raise ValueError(f"Unknown content type: {self.content_type}")
             cat_action, streams_action, kind = actions
-            categories = _xtream_categories(session.get, self, resolved_base, cat_action)
+            categories = _xtream_categories(get, self, resolved_base, cat_action)
 
             streams_url = xtream_player_api_url(
                 resolved_base, self.username, self.password, action=streams_action
             )
-            streams_resp = session.get(streams_url, timeout=15, verify=self.verify_ssl)
+            streams_resp = get(streams_url, timeout=15, verify=self.verify_ssl)
             streams_resp.raise_for_status()
             streams = streams_resp.json() or []
             if not isinstance(streams, list):
@@ -474,7 +483,7 @@ class XtreamSeriesInfoWorker(QObject):
         try:
             # Use resolved_base if provided, otherwise determine from base_url
             if not self.resolved_base:
-                get = partial(requests.get, headers=CLIENT_HEADERS)
+                get = partial(requests.get, headers=CLIENT_HEADERS, hooks=capped(LIST_MAX))
                 _user_info, self.resolved_base, _server = _xtream_sign_in(get, self)
 
             # Fetch series info
@@ -486,7 +495,11 @@ class XtreamSeriesInfoWorker(QObject):
                 extra={"series_id": self.series_id},
             )
             info_resp = requests.get(
-                info_url, timeout=15, headers=CLIENT_HEADERS, verify=self.verify_ssl
+                info_url,
+                timeout=15,
+                headers=CLIENT_HEADERS,
+                verify=self.verify_ssl,
+                hooks=capped(LIST_MAX),
             )
             info_resp.raise_for_status()
             series_data = info_resp.json() or {}
@@ -584,7 +597,13 @@ class STBCategoriesWorker(QObject):
             # Use correct action based on content type
             action = "get_genres" if self.content_type == "itv" else "get_categories"
             fetchurl = stb_request_url(base, self.content_type, action)
-            resp = requests.get(fetchurl, headers=self.headers, timeout=10, verify=self.verify_ssl)
+            resp = requests.get(
+                fetchurl,
+                headers=self.headers,
+                timeout=10,
+                verify=self.verify_ssl,
+                hooks=capped(LIST_MAX),
+            )
             resp.raise_for_status()
             categories = resp.json()["js"]
 
@@ -621,6 +640,7 @@ class STBCategoriesWorker(QObject):
                     headers=self.headers,
                     timeout=ALL_CHANNELS_TIMEOUT_S,
                     verify=self.verify_ssl,
+                    hooks=capped(LIST_MAX),
                 )
             except requests.Timeout:
                 if attempt == 2:

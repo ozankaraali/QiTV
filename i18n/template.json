@@ -1613,6 +1613,7 @@
   "The provider sent a recording, not the channel. Trying again…": "",
   "The provider sent an unexpected answer": "",
   "The provider took too long to answer": "",
+  "The provider's answer is too large to load": "",
   "The provider's archive didn't answer": "",
   "The provider's server has a problem ({status})": "",
   "The recording didn't open. Tap TV to watch it there.": "",

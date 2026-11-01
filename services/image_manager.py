@@ -7,9 +7,11 @@ import os
 import random
 import threading
 import time
+from urllib.parse import urlsplit
 
 import orjson as json
 
+from services.body_limits import LOGO_MAX, MB, TooLarge, read_capped_async
 from services.lazy_import import lazy_module
 from services.redact import redact_url, safe_exc
 
@@ -29,6 +31,13 @@ def _too_old(url: str, path: str) -> bool:
     try:
         return time.time() - os.path.getmtime(path) > TMDB_IMAGE_MAX_AGE_S
     except OSError:
+        return False
+
+
+def _fetchable(url: object) -> bool:
+    try:
+        return isinstance(url, str) and urlsplit(url).scheme.lower() in ("http", "https")
+    except ValueError:
         return False
 
 
@@ -53,6 +62,9 @@ class ImageManager:
         Returns absolute cache file path or None.
         Safe to call from worker threads (no GUI objects created).
         """
+        if not _fetchable(url):  # a list's logo may name any address: a file, a share
+            logger.info("Not fetching an image in another scheme than http(s)")
+            return None
         ext = "png" if iconified else "jpg"
         url_hash = self._hash_string(url + ext)
         cache_path = os.path.join(self.cache_dir, f"{url_hash}.{ext}")
@@ -69,7 +81,11 @@ class ImageManager:
         for attempt in range(max_retries):
             try:
                 async with session.get(url, timeout=timeout) as response:
-                    content = await response.read()
+                    try:  # a picture: up to LOGO_MAX, from whatever host a list names
+                        content = await read_capped_async(response, LOGO_MAX)
+                    except TooLarge:
+                        logger.info("Image larger than %d MB: %s", LOGO_MAX // MB, redact_url(url))
+                        return None
                     if response.status == 503 or not content:
                         if attempt == max_retries - 1:
                             break

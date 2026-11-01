@@ -17,6 +17,7 @@ import orjson as json
 import tzlocal  # the GUI thread's guide lookups use it: loaded with the window
 
 from services.atomic_write import atomic_write
+from services.body_limits import MB, XMLTV_MAX, TooLarge
 from services.content_loader import ContentLoader
 from services.epg_store import PackedGuide, read_guide, write_guide
 from services.epg_time import (
@@ -249,11 +250,16 @@ def write_xmltv_body(response, path: str) -> None:
     with Cancelled.
     """
     chunks = response.iter_content(_CHUNK) if hasattr(response, "iter_content") else response
+    written = 0  # up to XMLTV_MAX: a guide larger than that never fills the disk (TooLarge)
     try:
         with open(path, "wb") as f:
             for chunk in chunks:
                 if cancel_requested():
                     raise Cancelled()
+                written += len(chunk)
+                if written > XMLTV_MAX:
+                    logger.warning("A guide larger than %d MB was cut off", XMLTV_MAX // MB)
+                    raise TooLarge(XMLTV_MAX)
                 f.write(chunk)
     except BaseException:
         _remove_quietly(path)  # a part of it, which the caller must not read

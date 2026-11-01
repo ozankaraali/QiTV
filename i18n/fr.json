@@ -914,6 +914,7 @@
   "The provider sent a recording, not the channel. Trying again…": "Le fournisseur a envoyé un enregistrement, pas la chaîne. Nouvel essai…",
   "The provider sent an unexpected answer": "Le fournisseur a envoyé une réponse inattendue",
   "The provider took too long to answer": "Le fournisseur a mis trop de temps à répondre",
+  "The provider's answer is too large to load": "La réponse du fournisseur est trop volumineuse pour être chargée",
   "The provider's archive didn't answer": "Les archives du fournisseur n’ont pas répondu",
   "The provider's server has a problem ({status})": "Le serveur du fournisseur rencontre un problème ({status})",
   "The recording didn't open. Tap TV to watch it there.": "L'enregistrement ne s'est pas ouvert. Touchez TV pour le regarder sur la télé.",

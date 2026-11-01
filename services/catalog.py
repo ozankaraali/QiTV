@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from services.body_limits import TOO_LARGE_MESSAGE
 from services.catchup import known_zone
 from services.epg_view import Programme, programmes_for_channel
 from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as before)
@@ -74,6 +75,7 @@ _SAFE_MESSAGES = frozenset(
         NO_SERIES_MESSAGE,
         NO_STREAM_MESSAGE,
         EMPTY_LINK_MESSAGE,
+        TOO_LARGE_MESSAGE,
         NO_PORTAL_DATA_MESSAGE,
         STB_DEVICE_REJECTED_MESSAGE,
         FAILED_MESSAGE,
