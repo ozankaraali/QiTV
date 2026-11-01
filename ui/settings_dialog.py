@@ -4,8 +4,9 @@ import os
 import sys
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QIntValidator
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QTableWidget,
@@ -121,6 +124,8 @@ REMOVE_QUESTION = N_("Remove the provider “{name}”?")
 # i18n: added to "Remove the provider …?" when it has scheduled recordings
 REMOVE_RECORDINGS_NOTE = N_("Its scheduled recordings will be cancelled.")
 PLAYLIST_TYPES = ("M3UPLAYLIST", "M3USTREAM")
+# i18n: under Settings' Apply Change: this provider's edits are kept until Save uses them
+APPLIED_TEXT = N_("Changes kept. Press Save to use them.")
 GUIDE_OFFSET_TIP = N_(
     "When this provider's guide is off by whole hours, move its programmes here: with +1 h,"
     " a programme the guide lists at 20:00 shows at 21:00 (the guide, the banner, now and next"
@@ -397,11 +402,15 @@ class OptionsDialog(QDialog):
 
         self.save_button = QPushButton(tr("Save"), self)  # i18n: a button (verb)
         self.save_button.clicked.connect(self.save_settings)
+        # Enter in a field saves: without a default the dialog would make the first button
+        # after the focus one (Clear Image Cache, or Paste link beside the address).
+        self.save_button.setDefault(True)
 
         self.main_layout.addWidget(self.options_tab)
         self.main_layout.addWidget(self.save_button)
 
         self.load_providers()
+        self._mark_saved()
 
     def create_options_ui(self):
         self.options_tab = QTabWidget(self)
@@ -447,8 +456,7 @@ class OptionsDialog(QDialog):
         # Add check button to allow checking for updates
         self.check_updates_checkbox = QCheckBox(tr("Allow Check for Updates"), self.settings_tab)
         self.check_updates_checkbox.setChecked(self.config_manager.check_updates)
-        self.check_updates_checkbox.stateChanged.connect(self.on_check_updates_toggled)
-        self.settings_layout.addRow(self.check_updates_checkbox)
+        self.settings_layout.addRow(self.check_updates_checkbox)  # (turned on: checks at Save)
 
         # 2.8.2: QiTV's own debug lines in its log too, for a report (Help → Show the Log File).
         # i18n: a setting: write more to QiTV's log file, to find out why something went wrong
@@ -473,6 +481,7 @@ class OptionsDialog(QDialog):
         # Add cache options
         self.cache_image_size_label = QLabel(self._cache_image_size_text(), self.settings_tab)
         self.cache_image_size_input = QLineEdit(self.settings_tab)
+        self.cache_image_size_input.setValidator(QIntValidator(0, 1_000_000, self))  # MB
         self.cache_image_size_input.setText(str(self.config_manager.max_cache_image_size))
         self.settings_layout.addRow(self.cache_image_size_label, self.cache_image_size_input)
 
@@ -703,9 +712,17 @@ class OptionsDialog(QDialog):
         self.opensubtitles_password_input.clear()
 
     def create_timeshift_ui(self):
-        tab = QWidget(self)
+        # Its wrapped notes need more height than the tabs' common one at the dialog's opening
+        # size (with the Mac's font they overlapped): the page scrolls instead.
+        scroll = QScrollArea(self)
+        scroll.setObjectName("timeshiftScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        tab = QWidget(scroll)
         tab.setObjectName("timeshiftSettings")
-        self.options_tab.addTab(tab, tr("Time-shift"))  # i18n: a tab of the Settings window
+        scroll.setWidget(tab)
+        self.options_tab.addTab(scroll, tr("Time-shift"))  # i18n: a tab of the Settings window
         layout = QVBoxLayout(tab)
         self.timeshift_checkbox = QCheckBox(
             tr(
@@ -836,6 +853,7 @@ class OptionsDialog(QDialog):
         box.addLayout(buttons)
         self.recordings_status = QLabel("", group)  # why Open folder could not open it
         self.recordings_status.setObjectName("recordingsStatus")
+        self.recordings_status.hide()  # (an empty line's height until it has something to say)
         box.addWidget(self.recordings_status)
         note = QLabel(
             tr(
@@ -854,7 +872,11 @@ class OptionsDialog(QDialog):
         self._recordings_dir = path
         self.recordings_folder.setText(recording.folder(self))
         self.recordings_default_button.setEnabled(bool(path))
-        self.recordings_status.setText("")
+        self._recordings_status("")
+
+    def _recordings_status(self, text: str) -> None:
+        self.recordings_status.setText(text)
+        self.recordings_status.setVisible(bool(text))
 
     @property
     def recordings_dir(self) -> str:
@@ -873,7 +895,7 @@ class OptionsDialog(QDialog):
     def open_recordings_folder(self) -> None:
         """The folder shown, in the system's file manager (saved or not)."""
         opened = system_open.open_folder(recording.folder(self))
-        self.recordings_status.setText("" if opened else translate(recording.NO_RECORDINGS))
+        self._recordings_status("" if opened else translate(recording.NO_RECORDINGS))
 
     def _update_ram_estimate(self, *_args) -> None:
         mib = (
@@ -1363,6 +1385,7 @@ class OptionsDialog(QDialog):
         self.options_tab.setCurrentWidget(self.providers_tab)
         self.add_new_provider()
         self.name_input.setFocus()
+        self._mark_saved()  # the empty form alone is nothing to ask about at ✕ (a link is)
 
     def remove_provider(self):
         """Remove Provider: asked first (and the parental PIN, when one is set, for a provider
@@ -1539,10 +1562,14 @@ class OptionsDialog(QDialog):
         )
         self._save_provider_list(renames, removed)
         self.config_manager.language = self.language_combo.currentData() or None
+        # Turned on here: QiTV checks once Save keeps it, as at a start (never while ticking).
+        check_now = (
+            self.check_updates_checkbox.isChecked() and not self.config_manager.check_updates
+        )
         self.config_manager.check_updates = self.check_updates_checkbox.isChecked()
         self.config_manager.detailed_log = self.detailed_log_checkbox.isChecked()
         log_file.set_detailed(self.config_manager.detailed_log)  # at once (the helper: anew)
-        self.config_manager.max_cache_image_size = int(self.cache_image_size_input.text())
+        self.config_manager.max_cache_image_size = self.image_cache_mb()
         self.config_manager.ssl_verify = self.ssl_verify_checkbox.isChecked()
         self.config_manager.live_latency = self.live_latency_combo.currentData()
         self.config_manager.hardware_decoding = self.hardware_decoding_checkbox.isChecked()
@@ -1602,6 +1629,8 @@ class OptionsDialog(QDialog):
         save_remote_settings(self)
         # Save the configuration
         self.parent().save_config()
+        if check_now:
+            check_for_updates(config_manager=self.config_manager)  # says only when there is one
 
         for name in changed_names:
             # The selected provider is invalidated after setup is serialized by the parent.
@@ -1877,12 +1906,25 @@ class OptionsDialog(QDialog):
             follow(renames, removed)
 
     def apply_provider(self):
+        """Apply Change: the form's edits are kept for this provider (Save writes them and
+        loads its lists again); the line under the buttons says so."""
         self._store_provider_edits()
         self._refresh_provider_ids.add(id(self.edited_provider))
+        self.verify_result.setText(translate(APPLIED_TEXT))
+        self.verify_result.setStyleSheet("")
 
     def clear_image_cache(self):
         self.parent().image_manager.clear_cache()
-        self.cache_image_size_label = QLabel(self._cache_image_size_text(), self.settings_tab)
+        self.cache_image_size_label.setText(self._cache_image_size_text())
+
+    def image_cache_mb(self) -> int:
+        """The image cache's limit typed (MB); an empty field is the default (the validator
+        lets digits only through)."""
+        try:
+            size = int(self.cache_image_size_input.text().strip())
+        except ValueError:
+            return ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE
+        return size if size >= 0 else ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE
 
     def _cache_image_size_text(self):
         return tr(
@@ -1895,9 +1937,69 @@ class OptionsDialog(QDialog):
         total_size = self.parent().image_manager.current_cache_size
         return total_size / (1024 * 1024)  # Convert to MB
 
-    def on_check_updates_toggled(self):
-        if self.check_updates_checkbox.isChecked():
-            check_for_updates(config_manager=self.config_manager, manual=True)
+    # ---- closing with changes Save has not kept -------------------------------------------------
+
+    def _applied_at_once(self) -> list[QWidget]:
+        """The pages whose controls act as they are used (Parental controls), not at Save."""
+        adult = getattr(self, "parental_widgets", {}).get("adult")
+        return [adult.parentWidget()] if adult is not None else []
+
+    def _inputs(self) -> dict:
+        """What this window's controls hold, for Save: each field's text, each box's tick,
+        each list's choice, each slider's value."""
+        skip = self._applied_at_once()
+        state: dict = {}
+        for widget in self.findChildren(QWidget):
+            if widget.window() is not self or any(page.isAncestorOf(widget) for page in skip):
+                continue  # (a window of its own: an XMLTV mapping's, a message)
+            if isinstance(widget, QLineEdit):
+                if not widget.isReadOnly():
+                    state[widget] = widget.text()
+            elif isinstance(widget, QAbstractButton):
+                if widget.isCheckable():
+                    state[widget] = widget.isChecked()
+            elif isinstance(widget, QComboBox):
+                state[widget] = widget.currentIndex()
+            elif isinstance(widget, (QSlider, QSpinBox)):
+                state[widget] = widget.value()
+        return state
+
+    def _mark_saved(self) -> None:
+        """What the window holds now is what closing keeps without asking (at its opening,
+        and once Add provider has its new provider in the form)."""
+        self._saved_inputs = self._inputs()
+        self._saved_providers = deepcopy(self.providers)
+        self._saved_recordings_dir = self._recordings_dir
+
+    def has_unsaved_changes(self) -> bool:
+        """Whether Save would keep anything closing would throw away."""
+        now = self._inputs()
+        return (
+            any(now.get(widget, value) != value for widget, value in self._saved_inputs.items())
+            or self.providers != self._saved_providers
+            or self._recordings_dir != self._saved_recordings_dir
+            or self.xmltv_mapping_modified
+        )
+
+    def reject(self) -> None:
+        """✕ or Esc: with changes Save has not kept, asks first: Save, Discard or Cancel."""
+        if self.isVisible() and self.has_unsaved_changes():
+            answer = QMessageBox.question(
+                self,
+                tr("Settings"),
+                # i18n: asked when Settings closes (✕ or Esc) with changes not saved yet
+                tr("Save the changes you made in Settings?"),
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if answer == QMessageBox.StandardButton.Save:
+                self.save_settings()  # closes the window
+                return
+            if answer != QMessageBox.StandardButton.Discard:
+                return  # Cancel (or the question closed): Settings stays open
+        super().reject()
 
     def load_xmltv_channel_mapping(self):
         self.xmltv_mapping_table.setRowCount(len(self.config_manager.xmltv_channel_map))

@@ -4,8 +4,8 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QScrollArea
 
 from services import recording
 from services.config_manager import ConfigManager
@@ -122,9 +122,38 @@ class TimeshiftSettingsTests(base.WindowCase):
             dialog.recordings_open_button.click()
         self.assertEqual(opened.call_args.args[0].toLocalFile(), recording.default_folder())
         self.assertEqual(dialog.recordings_status.text(), "")
+        group = dialog.recordings_status.parentWidget()
+        self.assertFalse(dialog.recordings_status.isVisibleTo(group))  # no empty line's height
         with mock.patch.object(QDesktopServices, "openUrl", return_value=False):
             dialog.recordings_open_button.click()
         self.assertEqual(dialog.recordings_status.text(), "There are no recordings yet")
+        self.assertTrue(dialog.recordings_status.isVisibleTo(group))
+
+    def test_the_tab_scrolls_rather_than_squeezing_its_rows(self):
+        # With a Mac's font the page needed more height than the tabs' common one at the
+        # dialog's opening size: the estimates' rows overlapped and the note was cut.
+        dialog = self.dialog()
+        scroll = dialog.findChild(QScrollArea, "timeshiftScroll")
+        page = dialog.timeshift_checkbox.parentWidget()
+        self.assertIs(scroll.widget(), page)
+        dialog.options_tab.setCurrentWidget(scroll)
+        font = QFont(dialog.font())
+        font.setPointSizeF(font.pointSizeF() * 1.3)  # a larger font than the platform's
+        dialog.setFont(font)
+        dialog.show()  # offscreen: nothing shows on a screen
+        self.addCleanup(dialog.done, 0)
+        for height in (dialog.height(), 420):  # its opening size, and a short window
+            dialog.resize(dialog.width(), height)
+            QApplication.processEvents()
+            for label in page.findChildren(QLabel):
+                if not label.isVisibleTo(page) or not label.text():
+                    continue
+                if label.wordWrap():
+                    needed = label.heightForWidth(label.width())
+                else:
+                    needed = label.minimumSizeHint().height()
+                with self.subTest(height=height, label=label.text()[:30]):
+                    self.assertGreaterEqual(label.height(), needed)
 
     def test_fresh_install_gets_the_defaults(self):
         defaults = ConfigManager.default_config()
