@@ -125,7 +125,15 @@ class ExportFlowTests(unittest.TestCase):
         self.assertEqual(ask.call_args[0][1], "Export Home's channels")  # whose, named
         self.assertTrue(ask.call_args[0][2].endswith("Home-all_live.m3u"))
         self.runner.jobs[0][1](None, 2)
-        self.assertEqual(self.toasts[-1], ("Exported 2 items from Home to home.m3u", "info", 3000))
+        self.assertEqual(
+            self.toasts[-1],
+            (
+                "Exported 2 items from Home to home.m3u "
+                "The file may hold your sign-in: keep it private.",
+                "info",
+                RESULT_MS,
+            ),
+        )
 
     def test_all_live_says_plainly_when_the_provider_has_no_channels(self):
         films = SimpleNamespace(
