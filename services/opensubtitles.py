@@ -52,6 +52,7 @@ from services.jobs import cancel_requested
 from services.lazy_import import lazy_module
 from services.next_episode import season_and_episode
 from services.redact import safe_exc, safe_message
+from services.surrogates import response_json
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
@@ -983,7 +984,7 @@ def _refuses_the_key(response: Any) -> bool:
 
 def _json(response: Any) -> Any:
     try:
-        return response.json()
+        return response_json(response)
     except ValueError:
         return None
 

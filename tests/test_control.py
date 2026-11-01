@@ -92,6 +92,31 @@ class ServerTests(unittest.TestCase):
                 self.assertEqual(status, 401)
         self.assertEqual(self.threads, [])
 
+    def raw_post(self, length, token=None):
+        """A POST declaring a `length` byte body and sending a few: the status line read back
+        (b"" when none came within 3 s, the server reading on)."""
+        import socket
+
+        auth = f"Authorization: Bearer {token}\r\n" if token else ""
+        head = f"POST /status HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: {length}\r\n\r\n"
+        with socket.create_connection(("127.0.0.1", self.server.port), timeout=3) as sock:
+            sock.sendall(head.encode() + b'{"args": {')
+            try:
+                return sock.recv(64).split(b"\r\n", 1)[0]
+            except TimeoutError:
+                return b""
+
+    def test_a_strangers_body_is_never_read(self):
+        self.assertEqual(self.raw_post(100_000_000), b"HTTP/1.0 401 Unauthorized")
+        self.assertEqual(self.threads, [])
+
+    def test_a_body_too_large_is_refused_unread(self):
+        for length in (control.MAX_BODY + 1, -5):
+            with self.subTest(length=length):
+                status = self.raw_post(length, self.server.token)
+                self.assertTrue(status.startswith(b"HTTP/1.0 413 "), status)
+        self.assertEqual(self.threads, [])
+
     def test_a_command_runs_on_the_gui_thread_and_answers(self):
         status, answer = self.ask("status", self.server.token, {"x": 1})
         self.assertEqual((status, answer), (200, {"version": "test", "args": {"x": 1}}))

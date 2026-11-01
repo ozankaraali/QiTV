@@ -26,17 +26,13 @@ class LanguageSettingTests(base.WindowCase):
     def test_the_choices_are_the_system_s_english_and_each_catalog_s(self):
         with mock.patch.object(i18n, "_system_preferences", return_value=["tr"]):
             dialog = self.dialog()
-        self.assertEqual(
-            self.choices(dialog),
-            [
-                ("", "System default (Türkçe)"),
-                ("en", "English"),
-                ("de", "Deutsch"),
-                ("es", "Español"),
-                ("fr", "Français"),
-                ("tr", "Türkçe"),
-            ],
-        )
+        choices = self.choices(dialog)
+        # The system's, then English, then each catalog by its own name (2.8.12: 47 of them).
+        self.assertEqual(choices[0], ("", "System default (Türkçe)"))
+        self.assertEqual(choices[1:], i18n.available_languages())
+        self.assertEqual(choices[1], ("en", "English"))
+        for shown in (("de", "Deutsch"), ("es", "Español"), ("fr", "Français"), ("tr", "Türkçe")):
+            self.assertIn(shown, choices)
         self.assertEqual(dialog.language_combo.currentData(), "")  # no key: the system's
         self.assertIn("starts again", dialog.language_note.text())
 

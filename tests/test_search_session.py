@@ -8,6 +8,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
+from timer_fixtures import wait_until
 
 from services.library import LibraryModel
 from services.provider_ids import provider_of
@@ -155,6 +156,24 @@ class SearchSessionTests(unittest.TestCase):
             self.session.poster_url(item, lambda url: "logo:" + url), "logo:http://logos.invalid/1"
         )
 
+    def test_the_section_and_provider_shown_come_first(self):
+        where = ["movies", "Q"]
+        session = SearchSession(
+            self.providers, self.runner, self.model, self.watch, where=lambda: tuple(where)
+        )
+        self.addCleanup(session.shutdown)
+        session.set_query("salt")
+        session.run_now()
+        self.runner.finish(0)
+        titles = [title for title, _items in session.sections()]
+        self.assertEqual(titles, ["Q · Movies (1)", "P · Movies (1)", "P · Live TV (1)"])
+        self.assertEqual(session.hit_at(0).provider, "Q")  # the grid's order
+        where[:] = ["live", "P"]
+        session.rerun()
+        self.runner.finish(1)
+        titles = [title for title, _items in session.sections()]
+        self.assertEqual(titles, ["P · Live TV (1)", "P · Movies (1)", "Q · Movies (1)"])
+
     def test_hits_are_stamped_with_their_provider(self):
         self.session.set_query("salt")
         self.session.run_now()
@@ -211,6 +230,36 @@ class SearchSessionTests(unittest.TestCase):
             on_error(context, "The background task failed")
         self.assertTrue(self.session.message().startswith("Couldn't search"))
         self.assertEqual(self.session.hits, [])
+
+    def test_a_snapshot_no_search_used_for_a_while_goes(self):
+        # Every provider's titles (400,000 rows) were kept for the rest of the run: each full
+        # garbage collection walked them, long after the search was left.
+        session = SearchSession(self.providers, self.runner, self.model, self.watch, idle_ms=200)
+        self.addCleanup(session.shutdown)
+        session.set_query("salt")
+        session.run_now()
+        QTest.qWait(300)  # still searching: nothing goes
+        self.runner.finish(0)
+        self.assertIsNotNone(session._index)
+        session.set_query("salt r")
+        session.run_now()
+        QTest.qWait(150)
+        self.runner.finish(1)  # (with the index kept: the catalogs were read once)
+        QTest.qWait(100)
+        self.assertIsNotNone(session._index)  # used 0.1 s ago
+        self.assertTrue(wait_until(lambda: session._index is None))
+        self.assertIsNone(session._caches)
+        self.assertEqual(self.names_of(session), ["Salt Roads"])  # what was found stays shown
+        session.set_query("sand")
+        session.run_now()
+        self.assertIsNone(self.runner.jobs[2][0]._index)  # made again
+        self.runner.finish(2)
+        self.assertEqual(self.providers.loads, 2)
+        self.assertEqual(self.names_of(session), ["Sand Castle"])
+
+    @staticmethod
+    def names_of(session):
+        return [item["name"] for _title, items in session.sections() for item in items]
 
 
 if __name__ == "__main__":

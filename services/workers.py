@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from PySide6.QtCore import QObject, Qt, Signal
 
+from services.body_limits import LIST_MAX, TooLarge, capped
 from services.catchup import (
     Answer,
     mark_stb_archives,
@@ -34,6 +35,7 @@ from services.provider_api import (
     https_fallback_candidates,
     remember_http_only,
     remember_xtream_root,
+    stb_api_base,
     stb_archive_link_url,
     stb_command_link,
     stb_command_shape,
@@ -41,7 +43,6 @@ from services.provider_api import (
     stb_create_link_url,
     stb_link_names_no_stream,
     stb_link_shape,
-    stb_portal_base,
     stb_request_url,
     xtream_base,
     xtream_choose_resolved_base,
@@ -53,6 +54,7 @@ from services.provider_api import (
 )
 from services.provider_manager import HANDSHAKE_UNEXPECTED, HANDSHAKE_UNREACHABLE
 from services.redact import safe_exc, safe_traceback
+from services.surrogates import mended, response_json
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
@@ -60,6 +62,15 @@ requests = lazy_module("requests")
 # Sent from the worker's thread in English (a catalog message), shown with translate().
 NO_PORTAL_DATA_MESSAGE = N_("The portal returned no data")
 STB_DEVICE_REJECTED_MESSAGE = DEVICE_MESSAGE
+# A link request's error when its portal answered as portals answer a session they no longer
+# know (its token expired: a sleep, the same MAC signing in on a box): a 401, or a body that
+# is no JSON ("Authorization failed."). Never shown: the catalogs sign the portal in again
+# and ask once more (services.catalogs), and say UNEXPECTED_ANSWER_MESSAGE if that fails too.
+STB_SESSION_REFUSED = "The portal no longer knows the session"
+
+
+class _SessionRefused(Exception):
+    """An STB portal answered a request as one whose session it no longer knows."""
 
 
 def _resolve_xtream_base(server_info: dict, base_url: str) -> str:
@@ -125,23 +136,57 @@ class M3ULoaderWorker(QObject):
         try:
             if not self.url.startswith(("http://", "https://")):
                 with open(self.url, encoding="utf-8-sig", errors="replace") as file:
-                    self.finished.emit(parse_m3u(file.read(), categorize=True))
+                    text = file.read(LIST_MAX + 1)  # characters: at least as many bytes
+                    if len(text) > LIST_MAX:
+                        raise TooLarge(LIST_MAX)
+                    self.finished.emit(parse_m3u(text, categorize=True))
                 return
-            last_exc = None
+            last_exc: Optional[Exception] = None
             for u in https_fallback_candidates(self.url, self.prefer_https):
                 try:
-                    response = requests.get(
-                        u, timeout=10, headers=CLIENT_HEADERS, verify=self.verify_ssl
+                    response = requests.get(  # read up to LIST_MAX: TooLarge past it
+                        u,
+                        timeout=10,
+                        headers=CLIENT_HEADERS,
+                        verify=self.verify_ssl,
+                        hooks=capped(LIST_MAX),
                     )
                     response.raise_for_status()
-                    self.finished.emit(parse_m3u(decode_playlist(response), categorize=True))
+                    text = decode_playlist(response)
+                    playlist = parse_m3u(text, categorize=True)
+                    if not_a_playlist(text, playlist):
+                        last_exc = _NotAPlaylist()
+                        continue
+                    self.finished.emit(mended(playlist))  # a charset it names may cut a pair
                     return
                 except requests.RequestException as e:
                     last_exc = e
+            if isinstance(last_exc, _NotAPlaylist):
+                # 2.8.12: as an Xtream panel's answer that is no list: the saved list stays.
+                logger.info("The playlist's address answered with no playlist")
+                self.error.emit(UNEXPECTED_ANSWER_MESSAGE)
+                return
             # If we got here, all attempts failed
             raise last_exc or Exception("Failed to load M3U")
         except (requests.RequestException, OSError, ValueError) as e:
             self.error.emit(str(e))
+
+
+class _NotAPlaylist(Exception):
+    """A playlist's address answered with something that is no playlist."""
+
+
+def not_a_playlist(text: str, playlist: Any) -> bool:
+    """Whether a server's answer to a playlist's address is no playlist: an HTML page (an
+    expired account's, a sign-in page), or a text with no channel, no #EXTM3U and no #EXTINF
+    line (an empty answer). Stored, it would replace the saved channels with none; a playlist
+    whose header says it is one but lists nothing still is one."""
+    head = text.lstrip("﻿ \t\r\n")
+    if head.startswith("<"):
+        return True
+    if isinstance(playlist, dict) and playlist.get("contents"):
+        return False
+    return not any(line.startswith(("#EXTM3U", "#EXTINF")) for line in head.splitlines())
 
 
 # Player API actions (categories, streams) and stream URL prefix per content type.
@@ -187,7 +232,7 @@ def _xtream_https_base(get: Callable[..., Any], worker: Any, base: str, server_i
         try:
             response = get(url, timeout=(_HTTPS_CONNECT_S, 10), verify=worker.verify_ssl)
             try:
-                body = response.json() if response.ok and response.content else None
+                body = response_json(response) if response.ok and response.content else None
             finally:
                 response.close()
         except requests.RequestException, ValueError:
@@ -233,7 +278,7 @@ def _xtream_sign_in_at(get: Callable[..., Any], worker: Any) -> Tuple[Any, str, 
         if at + 1 < len(bases) and xtream_elsewhere(response):
             continue  # the next is the root: no further one
         response.raise_for_status()
-        body = response.json() if response.content else {}
+        body = response_json(response) if response.content else {}
         if not isinstance(body, dict):
             body = {}
         if at:
@@ -254,7 +299,7 @@ def _xtream_categories(
     try:
         response = get(url, timeout=10, verify=worker.verify_ssl)
         if response.ok and response.content:
-            listed = response.json()
+            listed = response_json(response)
             # Anything but a list (an expired account's panel answers its account): none.
             for c in listed if isinstance(listed, list) else []:
                 name = c.get("category_name") or N_("Unknown")
@@ -376,8 +421,9 @@ class XtreamLoaderWorker(QObject):
         # against providers with strict connection limits).
         session = requests.Session()
         session.headers.update(CLIENT_HEADERS)
+        get = partial(session.get, hooks=capped(LIST_MAX))  # each answer up to LIST_MAX
         try:
-            user_info, resolved_base, server_info = _xtream_sign_in(session.get, self)
+            user_info, resolved_base, server_info = _xtream_sign_in(get, self)
             # Select from provider metadata only. Opening a media URL here consumes
             # a playback connection before the user has selected anything.
             allowed_formats = user_info.get("allowed_output_formats", []) or []
@@ -392,14 +438,14 @@ class XtreamLoaderWorker(QObject):
             if actions is None:
                 raise ValueError(f"Unknown content type: {self.content_type}")
             cat_action, streams_action, kind = actions
-            categories = _xtream_categories(session.get, self, resolved_base, cat_action)
+            categories = _xtream_categories(get, self, resolved_base, cat_action)
 
             streams_url = xtream_player_api_url(
                 resolved_base, self.username, self.password, action=streams_action
             )
-            streams_resp = session.get(streams_url, timeout=15, verify=self.verify_ssl)
+            streams_resp = get(streams_url, timeout=15, verify=self.verify_ssl)
             streams_resp.raise_for_status()
-            streams = streams_resp.json() or []
+            streams = response_json(streams_resp) or []
             if not isinstance(streams, list):
                 raise ValueError(_xtream_refusal(streams, user_info))
 
@@ -474,7 +520,7 @@ class XtreamSeriesInfoWorker(QObject):
         try:
             # Use resolved_base if provided, otherwise determine from base_url
             if not self.resolved_base:
-                get = partial(requests.get, headers=CLIENT_HEADERS)
+                get = partial(requests.get, headers=CLIENT_HEADERS, hooks=capped(LIST_MAX))
                 _user_info, self.resolved_base, _server = _xtream_sign_in(get, self)
 
             # Fetch series info
@@ -486,10 +532,14 @@ class XtreamSeriesInfoWorker(QObject):
                 extra={"series_id": self.series_id},
             )
             info_resp = requests.get(
-                info_url, timeout=15, headers=CLIENT_HEADERS, verify=self.verify_ssl
+                info_url,
+                timeout=15,
+                headers=CLIENT_HEADERS,
+                verify=self.verify_ssl,
+                hooks=capped(LIST_MAX),
             )
             info_resp.raise_for_status()
-            series_data = info_resp.json() or {}
+            series_data = response_json(info_resp) or {}
 
             # Extract seasons and episodes with safety checks
             if not isinstance(series_data, dict):
@@ -579,14 +629,20 @@ class STBCategoriesWorker(QObject):
 
     def run(self):
         try:
-            base = stb_portal_base(self.base_url, self.prefer_https)
+            base = stb_api_base(self.base_url, self.prefer_https)
 
             # Use correct action based on content type
             action = "get_genres" if self.content_type == "itv" else "get_categories"
             fetchurl = stb_request_url(base, self.content_type, action)
-            resp = requests.get(fetchurl, headers=self.headers, timeout=10, verify=self.verify_ssl)
+            resp = requests.get(
+                fetchurl,
+                headers=self.headers,
+                timeout=10,
+                verify=self.verify_ssl,
+                hooks=capped(LIST_MAX),
+            )
             resp.raise_for_status()
-            categories = resp.json()["js"]
+            categories = response_json(resp)["js"]
 
             result = {"categories": categories, "contents": {}}
             # Live channels come as one list; VOD/series are fetched per category later.
@@ -621,6 +677,7 @@ class STBCategoriesWorker(QObject):
                     headers=self.headers,
                     timeout=ALL_CHANNELS_TIMEOUT_S,
                     verify=self.verify_ssl,
+                    hooks=capped(LIST_MAX),
                 )
             except requests.Timeout:
                 if attempt == 2:
@@ -628,7 +685,7 @@ class STBCategoriesWorker(QObject):
                 logger.info("The portal's live list timed out; asking again.")
                 continue
             resp.raise_for_status()
-            return list(resp.json()["js"]["data"])
+            return list(response_json(resp)["js"]["data"])
         return []
 
 
@@ -698,7 +755,7 @@ class LinkCreatorWorker(QObject):
 
     def run(self):
         try:
-            base = stb_portal_base(self.base_url, self.prefer_https)
+            base = stb_api_base(self.base_url, self.prefer_https)
             if self.programme:
                 fetchurl = stb_archive_link_url(base, self.programme)
             else:
@@ -712,8 +769,13 @@ class LinkCreatorWorker(QObject):
             response = requests.get(
                 fetchurl, headers=self.headers, timeout=10, verify=self.verify_ssl
             )
+            if response.status_code == 401:
+                raise _SessionRefused()
             response.raise_for_status()
-            result = response.json()
+            try:
+                result = response_json(response)
+            except ValueError:
+                raise _SessionRefused() from None
             if self.programme:
                 link = stb_archive_link(result)  # "": no recording (EMPTY_LINK_MESSAGE)
             else:
@@ -732,6 +794,9 @@ class LinkCreatorWorker(QObject):
                 )
                 link = own
             self.finished.emit({"link": link})
+        except _SessionRefused:
+            logger.info("The portal no longer knows its session")
+            self.error.emit(STB_SESSION_REFUSED)
         except Exception as e:
             self.error.emit(str(e))
 

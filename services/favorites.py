@@ -186,3 +186,23 @@ def save(config) -> bool:
         logger.warning("Couldn't save the favorites: %s", safe_message(e))
         return False
     return True
+
+
+def rename_providers(config, renames) -> bool:
+    """A renamed provider's stars move to its new name (`services.provider_rename.Renames`);
+    True when they changed (the caller saves). Old stars ("*") are no provider's: they stay."""
+    if getattr(config, "provider_favorites", None) is None:
+        return False  # bare names only: they match at every provider, whatever its name
+    raw = entries(config)
+    if not any(e["provider"] in renames.names for e in raw):
+        return False
+    moved: list[dict] = []
+    seen: set[tuple] = set()
+    for e in raw:
+        renamed = dict(e, provider=renames.of(e["provider"]))
+        mark = (renamed["name"], renamed["provider"], bool(renamed.get("off")))
+        if mark not in seen:  # one already there under the new name stays one
+            seen.add(mark)
+            moved.append(renamed)
+    _store(config, moved)
+    return True

@@ -29,7 +29,7 @@ from PySide6.QtWidgets import QMenu
 
 from services import i18n
 from services.catalog import PROVIDER_LOADING_MESSAGE
-from services.failure_reasons import shown_message
+from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE, shown_message
 from services.i18n import N_, tr, tr_n, translate
 from services.library import (
     PINNED_TITLES,
@@ -40,6 +40,7 @@ from services.library import (
     history_episode,
     history_season,
 )
+from services.media_server import server_length
 from services.navigation import episode_key
 from services.pending_action import LOAD, RUN, Pending, PendingAction
 from services.provider_ids import (
@@ -76,11 +77,16 @@ def _no_section_text(source: str, section: str) -> str:
     return tr("{source} has no live TV", source=source)  # i18n: {source}: a provider's name
 
 
+# i18n: under "{source} has no movies" in the Library, beside an Add provider button
+WHERE_FILMS_TEXT = N_("Films and series come from Xtream, STB, Jellyfin and Emby providers.")
+ADD_PROVIDER_TEXT = N_("Add provider")
+
+
 SEARCH_DEBOUNCE_MS = DEBOUNCE_MS
 # What the grid or a toast shows: shown with translate().
 LOADING_TEXT = N_("Loading…")
 EMPTY_TEXT = N_("Nothing here")  # i18n: a Library genre without titles
-RETRY_TEXT = N_("Couldn't load — press Enter to retry")
+RETRY_TEXT = N_("Couldn't load — click or press Enter to retry")
 SERIES_FAILED_NOTICE = N_("Couldn't load that series")
 UNKNOWN_PROVIDER_NOTICE = N_("That title's provider is no longer in your list")
 REFRESHING_TEXT = N_("Refreshing films and series…")  # i18n: a toast (2.8: the Library's ↻)
@@ -107,6 +113,7 @@ def _context(**values) -> dict:
 
 class LibraryController(QObject):
     notice = Signal(str)  # a message for the window's toast
+    addProviderRequested = Signal()  # the Add provider under "… has no movies" (or Enter)
     searchChanged = Signal()  # the search's hits changed (the phone remote mirrors them)
 
     def __init__(
@@ -124,10 +131,13 @@ class LibraryController(QObject):
         back_to_tv: Callable[[], None],
         context_menu: Optional[Callable[[dict, str, QPoint], None]] = None,
         tmdb=None,
+        cancel_scheduled: Optional[Callable[[str], None]] = None,
         parent: Optional[QObject] = None,
     ):
-        """`tmdb` (2.8, a ui.tmdb_fill.TmdbFill) fills titles' gaps from TMDB; None: never."""
+        """`tmdb` (2.8, a ui.tmdb_fill.TmdbFill) fills titles' gaps from TMDB; None: never.
+        `cancel_scheduled(id)` cancels a scheduled recording (its strip's Cancel, 2.8.12)."""
         super().__init__(parent)
+        self._cancel_scheduled = cancel_scheduled
         self._config = config
         self._tmdb = tmdb
         self._catalog = catalog
@@ -151,6 +161,7 @@ class LibraryController(QObject):
         self._grid_content = ""  # what the grid holds: "browse", "search" or nothing yet
         self._grid_signature: Optional[tuple] = None  # (provider, section, genre, sort) shown
         self._failed = False
+        self._failure = ""  # what the list that failed said (its catalog message)
         self._restore_item: Optional[dict] = None  # the browse title to make current again
         # the series view
         self._series: Optional[dict] = None
@@ -166,6 +177,8 @@ class LibraryController(QObject):
             watch,
             self,
             loaded=getattr(catalog, "loaded_contents", None),
+            # The results of the section and the provider shown first.
+            where=lambda: (self._section, str(self._catalog.current_provider_name())),
         )
         self._pending = PendingAction()
         self._ran_for = ""  # the shown provider whose ready just ran the pending action
@@ -197,10 +210,13 @@ class LibraryController(QObject):
         grid.activated.connect(self._activate_index)
         grid.startOverRequested.connect(lambda i: self._activate_index(i, start_over=True))
         grid.favoriteToggled.connect(self._toggle_favorite)
+        grid.cancelRequested.connect(self._cancel_index)
         grid.sortRequested.connect(lambda value: model.set_sort(Sort(value)))
         grid.leftEdge.connect(self._on_left_edge)
         grid.upEdge.connect(self._on_up_edge)
         grid.contextRequested.connect(self._on_grid_context)
+        grid.messageClicked.connect(self._on_grid_message_clicked)
+        grid.messageAction.connect(self.addProviderRequested)
         series.seasonSelected.connect(self._load_episodes)
         series.episodeActivated.connect(self._activate_episode)
         series.startOverRequested.connect(
@@ -387,6 +403,15 @@ class LibraryController(QObject):
             self._search.set_query("")
         self.open_search(query)
 
+    def close_search(self) -> None:
+        """The phone remote's search is done: the search it showed here closes as Esc closes an
+        empty one (back to the section it came from, or to the TV); any other view stays."""
+        if self._closed or self._mode != "search":
+            return
+        self._search.clear()
+        self._screen.search_field.set_query("")
+        self._leave_search()
+
     def search_hits(self) -> list[Hit]:
         """What the search shows now (none while it has no query or is still searching)."""
         return list(self._search.hits or [])
@@ -493,6 +518,8 @@ class LibraryController(QObject):
         elif action is Action.NAV_ACTIVATE:
             if self._failed and self._grid_content == "browse":
                 self._retry()
+            elif grid.message_button().isVisible():
+                self.addProviderRequested.emit()  # "… has no movies": its Add provider
             else:
                 grid.activate()
         elif action is Action.FAVORITE:
@@ -776,7 +803,12 @@ class LibraryController(QObject):
             grid.set_header("", "", [], "")
             grid.set_sections([])
             grid.set_letter_index(None)
-            grid.set_message(_no_section_text(self._source_title(), model.section))
+            text = _no_section_text(self._source_title(), model.section)
+            if model.section in ("movies", "series"):  # where they come from, and the way
+                text += "\n" + translate(WHERE_FILMS_TEXT)
+                grid.set_message(text, translate(ADD_PROVIDER_TEXT))
+            else:
+                grid.set_message(text)
             return
         sorts: list[tuple[str, str]] = []
         if model.genre_id not in PINNED_TITLES:
@@ -787,7 +819,7 @@ class LibraryController(QObject):
             grid.set_sections([])
             grid.set_letter_index(None)
             if items is None:
-                grid.set_message(translate(RETRY_TEXT if self._failed else LOADING_TEXT))
+                grid.set_message(self._failed_text() if self._failed else translate(LOADING_TEXT))
             else:
                 grid.set_message(translate(EMPTY_TEXT))
             return
@@ -806,11 +838,23 @@ class LibraryController(QObject):
         if self._model.items() is not None:
             return  # about titles not on screen (another genre)
         logger.info("Library content failed to load (%s)", message)
-        self._failed = True
+        self._failed, self._failure = True, message
         if self._grid_content == "browse":
             grid = self._screen.grid
             grid.set_sections([])
-            grid.set_message(translate(RETRY_TEXT))
+            grid.set_message(self._failed_text())
+
+    def _failed_text(self) -> str:
+        """Why the list is not shown: a media server's ask to sign in again as it says it (2.8:
+        where to sign in), else "Couldn't load — press Enter to retry"."""
+        if self._failure == SIGN_IN_AGAIN_MESSAGE:
+            return shown_message(self._failure)
+        return translate(RETRY_TEXT)
+
+    def _on_grid_message_clicked(self) -> None:
+        """A click on "Couldn't load" retries, as Enter does."""
+        if self._failed and self._grid_content == "browse":
+            self._retry()
 
     def _retry(self) -> None:
         self._failed = False
@@ -891,6 +935,16 @@ class LibraryController(QObject):
         provider = provider_of(item) or self._browse_provider()
         kind = self._model.item_kind(item)
         self._activate_item(item, provider, kind, start_over, self._model.items())
+
+    def _cancel_index(self, index: int) -> None:
+        """A scheduled recording's Cancel on the strip (2.8.12): as its right-click's."""
+        if self._closed or self._grid_content == "search":
+            return
+        item = self._screen.grid.item(index)
+        if item is None or self._model.item_kind(item) != "scheduled":
+            return
+        if self._cancel_scheduled is not None:
+            self._cancel_scheduled(str(item.get("_item_id") or ""))
 
     def _activate_item(
         self, item: dict, provider: str, kind: str, start_over: bool, genre_items
@@ -1156,16 +1210,17 @@ class LibraryController(QObject):
         self._request(provider, lambda: self._play(episode, "episode", context))
 
     def _episode_progress(self, episode: dict) -> Optional[float]:
-        """Resume progress, or the watched share (≥ 90%) that shows the check mark."""
+        """Resume progress, or the watched share (≥ 90%) that shows the check mark; without
+        QiTV's own, where its media server says it stopped (2.8)."""
         cid = WatchState.content_id(self._series_owner(), episode, item_type="episode")
         saved = (self._config.playback_positions or {}).get(cid) or {}
         position, duration = int(saved.get("position") or 0), int(saved.get("duration") or 0)
-        if position <= 0 or duration <= 0:
-            return None
-        share = min(1.0, position / duration)
-        if share >= RESUME_MAX_RATIO or self._watch.resume_position(cid) is not None:
-            return share
-        return None
+        if position > 0 and duration > 0:
+            share = min(1.0, position / duration)
+            if share >= RESUME_MAX_RATIO or self._watch.resume_position(cid) is not None:
+                return share
+        resume, length = self._watch.resume_from(cid, episode), server_length(episode)
+        return min(1.0, resume / length) if resume and length > 0 else None
 
     def _leave_series(self) -> None:
         back = self._series_back

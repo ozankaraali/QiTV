@@ -4,8 +4,8 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QScrollArea
 
 from services import recording
 from services.config_manager import ConfigManager
@@ -26,11 +26,12 @@ class TimeshiftSettingsTests(base.WindowCase):
         dialog = self.dialog()
         self.assertIn("Time-shift", self.tab_titles(dialog))
         self.assertEqual(
-            dialog.timeshift_checkbox.text(),
+            dialog.timeshift_checkbox.text() + "\n" + dialog.timeshift_note.text(),
             "Use disk for a longer time-shift buffer.\nA channel you leave keeps its buffer "
             "for up to 24 hours, after a restart too; when the cache fills, the oldest goes "
             "first.",
         )
+        self.assertTrue(dialog.timeshift_note.wordWrap())
         self.assertEqual(dialog.timeshift_size_slider.minimum(), 256)
         self.assertEqual(dialog.timeshift_size_slider.maximum(), 16384)
         # The time-shift tab's copy (Settings names MPV for the external players).
@@ -46,6 +47,22 @@ class TimeshiftSettingsTests(base.WindowCase):
         self.assertNotIn("the only history limit", texts)
         self.assertNotIn("MPV", texts)
         self.assertNotIn("MPV", dialog.timeshift_checkbox.text())
+
+    def test_the_page_fits_the_window_at_its_opening_size(self):
+        # The box's long line made the page wider than the window: "Disk cache" was cut.
+        dialog = self.dialog()
+        # A box's text never wraps: one line only, the rest in a label that wraps.
+        self.assertNotIn("\n", dialog.timeshift_checkbox.text())
+        dialog.options_tab.setCurrentIndex(self.tab_titles(dialog).index("Time-shift"))
+        dialog.show()
+        QApplication.processEvents()
+        scroll = dialog.findChild(QScrollArea, "timeshiftScroll")
+        page = scroll.widget()
+        self.assertLessEqual(page.width(), scroll.viewport().width())
+        self.assertLessEqual(page.minimumSizeHint().width(), scroll.viewport().width())
+        group = dialog.timeshift_size_slider.parentWidget()
+        self.assertLessEqual(group.geometry().right(), scroll.viewport().width())
+        dialog.done(0)
 
     def test_the_slider_follows_consent(self):
         dialog = self.dialog()
@@ -122,9 +139,38 @@ class TimeshiftSettingsTests(base.WindowCase):
             dialog.recordings_open_button.click()
         self.assertEqual(opened.call_args.args[0].toLocalFile(), recording.default_folder())
         self.assertEqual(dialog.recordings_status.text(), "")
+        group = dialog.recordings_status.parentWidget()
+        self.assertFalse(dialog.recordings_status.isVisibleTo(group))  # no empty line's height
         with mock.patch.object(QDesktopServices, "openUrl", return_value=False):
             dialog.recordings_open_button.click()
         self.assertEqual(dialog.recordings_status.text(), "There are no recordings yet")
+        self.assertTrue(dialog.recordings_status.isVisibleTo(group))
+
+    def test_the_tab_scrolls_rather_than_squeezing_its_rows(self):
+        # With a Mac's font the page needed more height than the tabs' common one at the
+        # dialog's opening size: the estimates' rows overlapped and the note was cut.
+        dialog = self.dialog()
+        scroll = dialog.findChild(QScrollArea, "timeshiftScroll")
+        page = dialog.timeshift_checkbox.parentWidget()
+        self.assertIs(scroll.widget(), page)
+        dialog.options_tab.setCurrentWidget(scroll)
+        font = QFont(dialog.font())
+        font.setPointSizeF(font.pointSizeF() * 1.3)  # a larger font than the platform's
+        dialog.setFont(font)
+        dialog.show()  # offscreen: nothing shows on a screen
+        self.addCleanup(dialog.done, 0)
+        for height in (dialog.height(), 420):  # its opening size, and a short window
+            dialog.resize(dialog.width(), height)
+            QApplication.processEvents()
+            for label in page.findChildren(QLabel):
+                if not label.isVisibleTo(page) or not label.text():
+                    continue
+                if label.wordWrap():
+                    needed = label.heightForWidth(label.width())
+                else:
+                    needed = label.minimumSizeHint().height()
+                with self.subTest(height=height, label=label.text()[:30]):
+                    self.assertGreaterEqual(label.height(), needed)
 
     def test_fresh_install_gets_the_defaults(self):
         defaults = ConfigManager.default_config()

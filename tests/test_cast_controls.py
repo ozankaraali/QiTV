@@ -3,12 +3,15 @@
 import os
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
 from services.casting import CastDevices
+from services.playback import PlaybackSession
+from services.vlc_profile import PlayKind
 from ui.cast_controls import CastControls
 
 app = QApplication.instance() or QApplication([])
@@ -188,6 +191,106 @@ class CastControlsTests(unittest.TestCase):
     def test_an_unknown_device_casts_nothing(self):
         self.controls.cast_to("Nowhere")
         self.assertEqual(self.session.renderers, [])
+
+
+class _Media:
+    def __init__(self, url):
+        self.url = url
+
+    def add_option(self, option):
+        pass
+
+    def release(self):
+        pass
+
+
+class _Player:
+    """libVLC's player, as far as an open, a stop and a renderer go: what it opened."""
+
+    def __init__(self):
+        self.opened = []
+
+    def media_new(self, url):  # (the instance's)
+        return _Media(url)
+
+    def media_player_new(self):
+        return self
+
+    def video_set_mouse_input(self, on):
+        pass
+
+    video_set_key_input = video_set_mouse_input
+
+    def set_media(self, media):
+        if media is not None:
+            self.opened.append(media.url)
+
+    def set_renderer(self, renderer):
+        return 0
+
+    def play(self):
+        return 0
+
+    def stop(self):
+        pass
+
+    def release(self):
+        pass
+
+
+class _Runner:
+    """Ends libVLC's input at once (the session runs it on a worker)."""
+
+    def run_worker(self, worker, on_finished, on_error=None, context=None):
+        worker.run()
+        on_finished(context, None)
+
+
+class HandedOnTests(unittest.TestCase):
+    """2.8 review: a channel handed to a phone's Watch (or Play in VLC) is stopped here, its
+    stream's budget slot given back. A cast begun, stopped, or ended by its device going away
+    then reopened the old stream in QiTV: a second stream on a one-stream provider, and the
+    phone was told to stop."""
+
+    def setUp(self):
+        for name in ("hold", "release"):
+            patched = mock.patch(f"services.casting.{name}", side_effect=lambda handle: handle)
+            patched.start()
+            self.addCleanup(patched.stop)
+        self.player = _Player()
+        self.session = PlaybackSession(self.player, runner=_Runner(), poll_ms=60_000)
+        self.addCleanup(self.session.release)
+        self.discovery = FakeDiscovery()
+        self.devices = CastDevices(self.discovery)
+        stopped_buffer = SimpleNamespace(reopen_player=lambda: False)  # its tune stopped too
+        self.controls = CastControls(
+            devices=self.devices,
+            session=lambda: self.session,
+            live=lambda: stopped_buffer,
+            current=lambda: SimpleNamespace(live=True),  # what was handed on
+            one_picture=lambda: None,
+            transport=None,
+            notice=None,
+            toast=lambda *_args, **_kwargs: None,
+        )
+        self.devices.start()
+        self.discovery.found("Den", "chromecast", "handle:Den")
+        app.processEvents()
+
+    def test_nothing_opens_here_after_a_hand_off(self):
+        self.session.play("http://provider.test/live/u/p/1.ts", kind=PlayKind.LIVE)
+        self.session.stop()  # handed on: the tuner let go of it
+        self.controls.cast_to("Den")
+        self.controls.stop()
+        self.controls.cast_to("Den")
+        self.discovery.lost("Den")  # the device turned off
+        app.processEvents()
+        self.assertEqual(self.player.opened, ["http://provider.test/live/u/p/1.ts"])
+
+    def test_what_plays_here_opens_again_with_the_device(self):
+        self.session.play("http://provider.test/live/u/p/1.ts", kind=PlayKind.LIVE)
+        self.controls.cast_to("Den")
+        self.assertEqual(self.player.opened, ["http://provider.test/live/u/p/1.ts"] * 2)
 
 
 if __name__ == "__main__":

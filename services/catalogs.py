@@ -18,12 +18,13 @@ from typing import Any, Callable, Iterator, Optional, cast
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services.catalog import CatalogService, WorkerFactory
+from services.catalog import UNEXPECTED_ANSWER_MESSAGE, CatalogService, WorkerFactory
 from services.epg_manager import EpgManager
 from services.epg_view import Programme
 from services.i18n import N_
 from services.provider_ids import provider_of
 from services.provider_manager import ProviderManager
+from services.workers import STB_SESSION_REFUSED
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,11 @@ class Catalogs(QObject):
         self._renewing: set[str] = set()
         # Link requests waiting for a catalog's setup: (request id, the request to make of it)
         self._waiting: dict[str, list[tuple[int, Callable[[CatalogService], int]]]] = {}
+        # Link requests asked of a ready catalog, until answered: (provider, the request).
+        # One its portal answers as a session it no longer knows is asked again, once, after
+        # a new sign-in (`_signed_again`): the browsed provider's as any other's.
+        self._asked: dict[int, tuple[str, Callable[[CatalogService], int]]] = {}
+        self._signed_again: set[int] = set()
         # The providers whose guides are in use (None: nobody said yet, every guide loads).
         self._guides: Optional[set[str]] = None
         self._closed = False
@@ -155,8 +161,10 @@ class Catalogs(QObject):
         catalog.providerReady.connect(lambda *_: self._on_ready(name))
         catalog.providerFailed.connect(lambda _name, message: self._on_failed(name, message))
         catalog.epgReady.connect(lambda: self.epgReady.emit(name))
-        catalog.linkReady.connect(self.linkReady)
-        catalog.linkFailed.connect(self.linkFailed)
+        catalog.linkReady.connect(self._on_link_ready)
+        catalog.linkFailed.connect(
+            lambda request_id, message: self._on_link_failed(name, request_id, message)
+        )
         for signal in (
             catalog.sectionReady,
             catalog.groupReady,
@@ -217,6 +225,8 @@ class Catalogs(QObject):
     def forget(self, request_id: int) -> None:
         """Drop link request `request_id` held for its provider's setup (a newer choice was
         asked instead): it is never asked of the portal, and never answered."""
+        self._signed_again.discard(request_id)
+        self._asked.pop(request_id, None)  # its refusal no longer signs the portal in again
         for name, waiting in list(self._waiting.items()):
             kept = [held for held in waiting if held[0] != request_id]
             if kept:
@@ -239,23 +249,60 @@ class Catalogs(QObject):
     def _on_ready(self, name: str) -> None:
         self._ready.add(name)
         self._renewing.discard(name)
+        self._forget_asked(name)  # the setup dropped what was asked of it before
         self._freeze_heap()
         self.providerReady.emit(name)  # the links held for it are still held (see holds)
         self.contentChanged.emit(name)
         catalog = self._by_name.get(name)
         for request_id, ask in self._waiting.pop(name, []):
             if catalog is not None:
-                self._ids.reserve(request_id)
-                ask(catalog)
+                self._ask(name, request_id, ask)
 
     def _on_failed(self, name: str, message: str) -> None:
         self._ready.discard(name)
         self._started.discard(name)  # the next request tries again
         self._renewing.discard(name)
+        self._forget_asked(name)
         held = self._waiting.pop(name, [])  # no longer held: they fail with the setup
         self.providerFailed.emit(name, message)
         for request_id, *_ in held:
+            self._signed_again.discard(request_id)
             self.linkFailed.emit(request_id, message)
+
+    def _forget_asked(self, name: str) -> None:
+        for request_id in [rid for rid, (owner, _ask) in self._asked.items() if owner == name]:
+            del self._asked[request_id]
+
+    def _ask(self, name: str, request_id: int, ask: Callable[[CatalogService], int]) -> None:
+        """Make link request `request_id` (`ask`) of provider `name`'s ready catalog."""
+        self._asked[request_id] = (name, ask)
+        self._ids.reserve(request_id)
+        ask(self.catalog(name))
+
+    def _on_link_ready(self, request_id: int, url: str) -> None:
+        self._asked.pop(request_id, None)
+        self._signed_again.discard(request_id)
+        self.linkReady.emit(request_id, url)
+
+    def _on_link_failed(self, name: str, request_id: int, message: str) -> None:
+        """A link failed. One the portal answered as a session it no longer knows (asleep,
+        or the same MAC signed in on a box) is held while the portal signs in again, and is
+        asked once more: the browsed provider's too, which nothing else signs in again."""
+        asked = self._asked.pop(request_id, None)
+        if message == STB_SESSION_REFUSED:
+            first = request_id not in self._signed_again
+            if asked is not None and first and not self._closed and name in self.names():
+                logger.info("The portal's session expired: signing in again for the link")
+                self._signed_again.add(request_id)
+                self._waiting.setdefault(name, []).append((request_id, asked[1]))
+                if name in self._ready:
+                    self.sign_in_again(name)
+                else:
+                    self.ensure(name)  # (its new sign-in is under way already)
+                return
+            message = UNEXPECTED_ANSWER_MESSAGE  # signed in again, and still refused
+        self._signed_again.discard(request_id)
+        self.linkFailed.emit(request_id, message)
 
     # --- links and guides ---------------------------------------------------------------
     def _route(self, item: dict) -> str:
@@ -297,10 +344,11 @@ class Catalogs(QObject):
                 0, self, lambda: self.linkFailed.emit(request_id, UNKNOWN_PROVIDER_MESSAGE)
             )
             return request_id
-        if name in self._ready:
-            return ask(self.catalog(name))
-        # Never set up (or still signing in): the request runs once the catalog is ready.
         request_id = next(self._ids)
+        if name in self._ready:
+            self._ask(name, request_id, ask)
+            return request_id
+        # Never set up (or still signing in): the request runs once the catalog is ready.
         self._waiting.setdefault(name, []).append((request_id, ask))
         self.ensure(name)
         return request_id
@@ -406,7 +454,9 @@ class Catalogs(QObject):
         self._started.discard(name)
         self._ready.discard(name)
         self._renewing.discard(name)
+        self._forget_asked(name)
         for request_id, *_ in self._waiting.pop(name, []):
+            self._signed_again.discard(request_id)
             self.linkFailed.emit(request_id, UNKNOWN_PROVIDER_MESSAGE)
         self._stop(catalog)
         # Its guide and its lists (57,000 channels, say) go now, whoever still holds it.
@@ -427,5 +477,7 @@ class Catalogs(QObject):
     def shutdown(self) -> None:
         self._closed = True
         self._waiting.clear()
+        self._asked.clear()
+        self._signed_again.clear()
         for catalog in self._by_name.values():
             self._stop(catalog)

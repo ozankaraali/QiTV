@@ -9,7 +9,7 @@ session there (`LiveSession.start(kept=...)`).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Optional
 
 
@@ -87,9 +87,11 @@ class KeptBuffers:
         if snapshot.get("oldest") is None and any(r.sid == sid for r in self._rings.values()):
             self.drop(sid)  # nothing of it is left
 
-    def put(self, ring: KeptRing, *, coming_back: bool = False) -> None:
+    def put(self, ring: KeptRing, *, coming_back: bool = False, next_channel: str = "") -> None:
         """Keep `ring`; `coming_back`: its channel is tuned again at once (it is taken back
-        next), so the memory ring kept before stays."""
+        next), so the memory ring kept before stays. `next_channel` (2.8.12): the channel
+        tuned next; its memory ring stays too (zapping back to a channel paused a moment ago
+        found its buffer gone: leaving the channel between kept that one instead)."""
         old = self._rings.pop(ring.channel, None)
         if old is not None and old.sid != ring.sid:
             self._engine.close_session(old.sid)
@@ -98,7 +100,8 @@ class KeptBuffers:
             return
         if not ring.disk and not coming_back:
             for other in [r for r in self._rings.values() if not r.disk]:
-                self.drop(other.sid)
+                if other.channel != next_channel:
+                    self.drop(other.sid)
         self._rings[ring.channel] = ring
 
     def take(self, channel: str) -> Optional[KeptRing]:
@@ -134,6 +137,16 @@ class KeptBuffers:
         self._engine = engine
         self._rings.clear()
         self._listen(engine)
+
+    def rekey(self, keys: dict[str, str]) -> None:
+        """A renamed provider's channels have new keys (`keys`: old -> new): their kept
+        buffers are taken back under them."""
+        self._rings = {
+            keys.get(channel, channel): (
+                ring if channel not in keys else replace(ring, channel=keys[channel])
+            )
+            for channel, ring in self._rings.items()
+        }
 
     def rings(self) -> list[KeptRing]:
         return list(self._rings.values())

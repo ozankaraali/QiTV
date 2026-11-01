@@ -42,12 +42,22 @@ from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
 from services import i18n
 from services.i18n import N_, tr, translate
 from services.sound_sync import LIMIT_MS, STEP_MS, SoundSync, clamp
+from services.zapping import ZapContext
 from ui.keymap import Action, key_hint
 from ui.link_lanes import Target
 from ui.overlays.track_panel import PanelModel, PanelRow, PanelSync
 from ui.player_keys import PlayerKeys
 
 logger = logging.getLogger(__name__)
+
+
+def _same_series(previous: Optional[Target], target: Target) -> bool:
+    """`target` is another episode of the series `previous` was one of (its next, mostly)."""
+    if previous is None or previous.section != "series" or target.section != "series":
+        return False
+    before, now = (dict(t.context or {}).get("series") for t in (previous, target))
+    return ZapContext.same(before, now)
+
 
 AUDIO, SUBTITLES = "audio", "subtitles"  # the transport's buttons, and their panels
 # The panels' titles (English: sync_text() tells them apart; translate() shows them).
@@ -176,7 +186,8 @@ class TrackControls(QObject):
     def prepare(self, session, target: Target, previous: Optional[Target]) -> None:
         """`target` is about to open in `session` (the large picture's player, its old stream
         stopped): its sound as the viewer set it last, no subtitle file and the subtitles in
-        sync. The same title or channel again (a retry) keeps what the player has."""
+        sync. The same title or channel again (a retry, a quality change) keeps what the player
+        has, the tracks chosen too; the next episode of a series keeps their language."""
         if self._online is not None:
             self._online.follow(target)  # the OpenSubtitles search was for the title before
         if previous is not None and previous.same_as(target):
@@ -187,11 +198,13 @@ class TrackControls(QObject):
         else:
             session.set_audio_delay(self._store.audio_ms(self._keys.opens(session, target.item)))
         session.clear_subtitles()
+        session.forget_tracks(keep_language=_same_series(previous, target))
 
     def prepare_small(self, session, channel: dict) -> None:
         """A channel opens in the small picture's player: its sound as set last."""
         session.set_audio_delay(self._store.audio_ms(self._keys.opens(session, channel)))
         session.clear_subtitles()
+        session.forget_tracks()
 
     # ---- the keys -----------------------------------------------------------------------------
 

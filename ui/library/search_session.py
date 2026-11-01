@@ -3,7 +3,8 @@
 Each query change restarts a debounce. Then a SearchWorker runs through the JobRunner. Only
 one runs at a time: a query typed meanwhile waits, and only the latest one runs, with the
 index the first search built. The first search loads every provider's cached catalog and folds
-its titles; the caches and the folded index are kept (a snapshot) until `drop_snapshot()`.
+its titles; the caches and the folded index are kept (a snapshot) until `drop_snapshot()`, or
+until no search ran for IDLE_DROP_MS (the next search makes them again).
 Every search carries a generation, so `clear()` and `shutdown()` make a running one count
 for nothing.
 """
@@ -21,7 +22,7 @@ from services import i18n, parental
 from services.i18n import N_, tr, tr_n, translate
 from services.library import Details, LibraryModel
 from services.provider_ids import with_provider
-from services.search import MIN_CHARS, Hit, SearchWorker
+from services.search import MIN_CHARS, Hit, SearchIndex, SearchWorker
 from services.text_fold import fold
 from services.watch_state import WatchState
 from ui.library.poster_grid import poster_url
@@ -29,6 +30,8 @@ from ui.library.poster_grid import poster_url
 logger = logging.getLogger(__name__)
 
 DEBOUNCE_MS = 250
+# A snapshot no search used for this long goes (every provider's titles: 400,000, tens of MB).
+IDLE_DROP_MS = 5 * 60 * 1000
 # What the grid shows instead of hits: shown with translate().
 SEARCH_PROMPT = N_("Type to search every provider's movies, series and channels")
 SEARCHING_TEXT = N_("Searching…")
@@ -58,9 +61,14 @@ class SearchSession(QObject):
         parent=None,
         *,
         loaded: Optional[Callable[[], dict]] = None,
+        idle_ms: int = IDLE_DROP_MS,
+        where: Optional[Callable[[], tuple[Optional[str], str]]] = None,
     ) -> None:
+        """`where()`: the section and the provider the Library shows ((None, "") for none):
+        their results come first."""
         super().__init__(parent)
         self._provider_manager = provider_manager
+        self._where = where or (lambda: (None, ""))
         self._loaded = loaded  # the content the catalogs hold: searched without a re-read
         self._jobs = jobs
         self._model = model
@@ -70,7 +78,7 @@ class SearchSession(QObject):
         self._generation = 0
         self._snapshot = 0
         self._caches: Optional[list] = None
-        self._index: Optional[list] = None
+        self._index: Optional[SearchIndex] = None
         self._running = False
         self._queued = False  # a newer query waits for the running search
         self._hits: Optional[list[Hit]] = None  # None: nothing searched (the prompt)
@@ -82,6 +90,10 @@ class SearchSession(QObject):
         self._timer.setSingleShot(True)
         self._timer.setInterval(DEBOUNCE_MS)
         self._timer.timeout.connect(self._start)
+        self._idle = QTimer(self)
+        self._idle.setSingleShot(True)
+        self._idle.setInterval(idle_ms)
+        self._idle.timeout.connect(self._on_idle)
 
     # ---- state --------------------------------------------------------------------------------
 
@@ -153,6 +165,7 @@ class SearchSession(QObject):
         self._generation += 1  # a running search no longer counts
         self._queued = False
         self._query = ""
+        self._idle.start()  # a snapshot unused for a while goes
         self._set_hits(None)
 
     def drop_snapshot(self) -> None:
@@ -160,9 +173,14 @@ class SearchSession(QObject):
         self._snapshot += 1
         self._caches = self._index = None
 
+    def _on_idle(self) -> None:
+        if not (self._running or self._queued or self._timer.isActive()):
+            self.drop_snapshot()  # (what was found stays shown)
+
     def shutdown(self) -> None:
         self._closed = True
         self._timer.stop()
+        self._idle.stop()
         self._generation += 1
         self._queued = False
 
@@ -178,8 +196,10 @@ class SearchSession(QObject):
         self._queued = False
         text = self._query
         if not searchable(text):
+            self._idle.start()
             self._set_hits(None)
             return
+        self._idle.stop()
         self._running = True
         if self._hits is None:
             self.changed.emit()  # "Searching…"
@@ -199,6 +219,7 @@ class SearchSession(QObject):
             self._caches, self._index = caches, index  # titles are folded once per snapshot
         if self._closed:
             return
+        self._idle.start()  # (a newer search stops it again)
         if self._queued:
             self._queued = False
             self._start()  # a newer query: these hits would only flash
@@ -211,6 +232,7 @@ class SearchSession(QObject):
         logger.warning("Search failed (%s)", message)
         if self._closed:
             return
+        self._idle.start()
         if self._queued:
             self._queued = False
             self._start()
@@ -225,10 +247,15 @@ class SearchSession(QObject):
         self._failed = failed
         sections: list[tuple[str, list[dict]]] = []
         flat: list[Hit] = []
-        for (provider, section), group in itertools.groupby(
-            hits or [], key=lambda h: (h.provider, h.section)
-        ):
-            found = list(group)
+        groups = [
+            (key, list(group))
+            for key, group in itertools.groupby(hits or [], key=lambda h: (h.provider, h.section))
+        ]
+        shown_section, shown_provider = self._where()
+        # The section the Library shows first, the provider it shows first in each (the
+        # others keep their order).
+        groups.sort(key=lambda g: (g[0][1] != shown_section, g[0][0] != shown_provider))
+        for (provider, section), found in groups:
             label = translate(SECTION_LABELS.get(section, section))
             sections.append(
                 (f"{provider} · {label} ({i18n.number(len(found))})", [h.item for h in found])
@@ -260,7 +287,7 @@ class SearchSession(QObject):
         resume = None
         if hit is not None and section == "movies":
             cid = WatchState.content_id(hit.provider, item, item_type="movie")
-            resume = self._watch.resume_position(cid)
+            resume = self._watch.resume_from(cid, item)  # 2.8: or its media server's
         kind = self.kind_of(item)
         filled = self._model.filled(item, kind)  # 2.8: TMDB's details where the provider's lack
         return replace(

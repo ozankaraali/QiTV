@@ -6,7 +6,7 @@ import zlib
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QContextMenuEvent, QFont, QFontMetricsF, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
@@ -14,11 +14,13 @@ from timer_fixtures import elapse, timeline
 
 from services.library import Details
 from ui.library.poster_grid import (
+    CANCEL,
     FAVORITE,
     HOVER_DWELL_MS,
     PLAY,
     REQUEST_DELAY_MS,
     START_OVER,
+    WHEN,
     PosterGrid,
     _outward,
     _wrap,
@@ -166,7 +168,8 @@ class PosterGridTests(unittest.TestCase):
     def buttons(self):
         """The strip buttons left to right, each with a point inside it, found via button_at."""
         strip = self.grid.strip_rect()
-        y = strip.center().y()
+        row = self.grid._strip_buttons(QRectF(strip))  # the buttons' row, under the title
+        y = round(row[0][3].center().y()) if row else strip.center().y()
         spans = {}
         for x in range(strip.left(), strip.right() + 1):
             name = self.grid.button_at(QPoint(x, y))
@@ -276,6 +279,19 @@ class PosterGridTests(unittest.TestCase):
         self.assertEqual(self.named("activated"), [9])
         self.assertEqual(self.grid.current_index(), 9)
 
+    def test_strip_buttons_sit_at_the_left_under_the_title(self):
+        # The corner player sits at the bottom right, over the strip's right end.
+        self.grid.set_sections([("", titles(30))])
+        self.grid.set_details_provider(lambda item: details())
+        self.grid.set_current_index(9)
+        strip = QRectF(self.grid.strip_rect())
+        row = [rect for _name, _label, _style, rect in self.grid._strip_buttons(strip)]
+        self.assertEqual(len(row), 3)
+        self.assertLess(row[-1].right(), strip.center().x())
+        self.assertGreater(row[0].top(), strip.top() + strip.height() / 4)  # under the title
+        self.assertLessEqual(row[0].bottom(), strip.bottom())
+        self.assertEqual(len({rect.top() for rect in row}), 1)  # one row
+
     def test_strip_buttons_by_kind(self):
         self.grid.set_sections([("", titles(30))])
         cases = {
@@ -290,6 +306,40 @@ class PosterGridTests(unittest.TestCase):
         self.grid.set_details_provider(lambda item: None)
         self.assertEqual([n for n, _ in self.buttons()], [PLAY])
         self.assertFalse(self.grid.grab().isNull())
+
+    def test_a_scheduled_recording_shows_its_time_and_cancel_instead_of_play(self):
+        # 2.8.12: ★ and a Play that only repeated its details; Cancel was right-click only.
+        items = [{"name": "Late Show", "_scheduled": True, "_when": "Sun 1 Nov 21:30"}]
+        self.grid.set_sections([("", items + titles(3))])
+        self.grid.set_details_provider(
+            lambda item: details("scheduled" if item.get("_scheduled") else "movie", None)
+        )
+        cancels = []
+        self.grid.cancelRequested.connect(cancels.append)
+        self.grid.set_current_index(0)
+        self.assertEqual(
+            self.grid.button_labels(), [(CANCEL, "Cancel Recording"), (WHEN, "Sun 1 Nov 21:30")]
+        )
+        self.assertFalse(self.grid.grab().isNull())  # painted: the time as a label
+        buttons = dict(self.buttons())
+        QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, buttons[WHEN])
+        self.assertEqual((cancels, self.named("activated")), ([], []))  # a label
+        QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, buttons[CANCEL])
+        self.assertEqual(cancels, [0])
+        self.assertEqual(self.named("startOverRequested"), [])
+        items[0]["_when"] = ""  # a series: every airing, no one time
+        self.grid.set_sections([("", items + titles(3))])
+        self.grid.set_current_index(0)
+        self.assertEqual(self.grid.button_labels(), [(CANCEL, "Cancel Recording")])
+        self.grid.set_current_index(1)
+        self.assertEqual([n for n, _ in self.grid.button_labels()], [FAVORITE, PLAY])
+
+    def test_a_recording_has_no_star(self):
+        self.grid.set_sections([("", titles(3))])
+        self.grid.set_details_provider(lambda item: details("recording", None))
+        self.assertEqual(self.grid.button_labels(), [(PLAY, "Play")])
+        self.grid.set_details_provider(lambda item: details("recording", 60_000))
+        self.assertEqual([n for n, _ in self.grid.button_labels()], [START_OVER, PLAY])
 
     def test_clicks_select_then_activate(self):
         self.grid.set_sections([("", titles(30))])

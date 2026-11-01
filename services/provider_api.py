@@ -206,6 +206,26 @@ def stb_portal_base(url: str, prefer_https: bool = False) -> str:
     return f"{scheme}://{parts.netloc}"
 
 
+_STALKER_PATH = "/stalker_portal"
+
+
+def stb_api_base(url: str, prefer_https: bool = False) -> str:
+    """Where an STB portal's API is (`<base>/portal.php`, `<base>/server/load.php`): the
+    sign-in and every later request (lists, links, guide) ask there (2.8.12: the sign-in
+    asked under the address as saved, "…/c//portal.php" for a pasted "…/c/" link, and the
+    rest at the server's root). It is `stb_portal_base`, with the path up to a
+    "/stalker_portal" in it kept (where such a portal is installed); a "/c/" (the box's
+    page) and any other path are not part of it. An address without a scheme stays as it
+    is, its trailing slashes dropped."""
+    text = url.strip()
+    if "://" not in text:
+        return text.rstrip("/")
+    path = urlsplit(text).path
+    found = path.lower().find(_STALKER_PATH)
+    kept = path[: found + len(_STALKER_PATH)] if found >= 0 else ""
+    return stb_portal_base(text, prefer_https) + kept
+
+
 def stb_endpoint(base: str) -> str:
     """Return the STB load.php endpoint given a base host URL."""
     return f"{base}/server/load.php"

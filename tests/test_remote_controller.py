@@ -16,6 +16,7 @@ from services.remote.protocol import (
     Answered,
     CastTo,
     Closed,
+    CloseSearch,
     Code,
     Get,
     Held,
@@ -32,6 +33,7 @@ from services.remote.protocol import (
     WatchHere,
 )
 from services.search import Hit
+from ui import remote_controller
 from ui.keymap import Action
 from ui.library.search_session import SearchSession
 from ui.link_lanes import Target
@@ -254,6 +256,19 @@ class ReviewFixControllerTests(WindowCase):
         self.assertEqual((saved["enabled"], saved["relay"]), (True, False))
         self.assertEqual(saved["relay_url"], "https://relay.example")
         self.assertEqual(saved["devices"], [device])
+
+    def test_turning_it_off_never_waits_for_its_close_but_quitting_does_briefly(self):
+        # Settings or Quit froze the window for up to 4 s while a phone was sent a film.
+        remote, hub = self.window.remote, mock.Mock()
+        remote.hub = hub
+        remote.shutdown()
+        hub.stop_soon.assert_called_once_with()
+        hub.stop.assert_not_called()  # stop() waits for the close
+        self.assertIsNone(remote.hub)
+        remote.wait_stopped(4.0)  # the window's close, step 3
+        hub.stop_soon.return_value.join.assert_called_once_with(4.0)
+        remote.wait_stopped(4.0)  # once
+        hub.stop_soon.return_value.join.assert_called_once_with(4.0)
 
     def test_removal_toast_waits_for_the_hub(self):
         from unittest import mock as _mock
@@ -594,6 +609,23 @@ class WatchHereTests(WindowCase):
             self.window.remote.bridge.post(RefreshLists("s8"))
             self.assertTrue(wait_until(lambda: refresh.called))
 
+    def test_the_phones_search_done_closes_the_tvs_search(self):
+        self.connect()
+        screens = self.window.screens
+        controller = screens.library_controller
+        with (
+            mock.patch.object(controller, "close_search") as close,
+            mock.patch.object(controller, "refresh_lists") as refresh,
+        ):
+            with mock.patch.object(screens, "library_shown", return_value=False):
+                self.window.remote.bridge.post(CloseSearch("s8"))
+                self.window.remote.bridge.post(RefreshLists("s8"))  # after it: it was handled
+                self.assertTrue(wait_until(lambda: refresh.called))
+            self.assertFalse(close.called)  # no Library on the TV: nothing to close
+            with mock.patch.object(screens, "library_shown", return_value=True):
+                self.window.remote.bridge.post(CloseSearch("s8"))
+                self.assertTrue(wait_until(lambda: close.called))
+
     def test_back_to_the_tv_tunes_what_the_phone_played(self):
         row = self.listed_row(1)
         self.hand_off("http://p.test/two.m3u8", handle=row["id"])
@@ -603,6 +635,79 @@ class WatchHereTests(WindowCase):
         channel = tune.call_args.args[0]
         self.assertEqual(channel["name"], "Channel 2")
         self.assertEqual(self.sent("stop"), [])  # the phone let go itself
+
+    def watch(self, sid, url):
+        """Phone `sid`'s Watch of what the TV plays, handed on as the controller's _launch
+        hands it: the link to the phone, then `handedOn` once it took it."""
+        target = Target({"name": "News", "cmd": url}, "live", "News")
+        controller, results = self.window.controller, []
+
+        def play_elsewhere(launch, chosen=None, **_kwargs):
+            results.append(launch(chosen or target, url))
+            if results[-1][0]:
+                controller.handedOn.emit()
+            return True
+
+        with (
+            mock.patch.object(controller, "play_elsewhere", side_effect=play_elsewhere),
+            mock.patch.object(self.window.screens, "notify"),
+        ):
+            self.window.remote.bridge.post(WatchHere(sid, ""))
+            self.assertTrue(wait_until(lambda: results))
+
+    def stops_to(self, sid):
+        calls = self.hub.send.call_args_list
+        return [c.args[1] for c in calls if c.args[0] == sid and c.args[1]["t"] == "stop"]
+
+    def test_another_phones_watch_stops_this_one(self):  # audit 2: one screen at a time
+        self.connect()
+        remote = self.window.remote
+        remote._phones.add("s9")
+        self.addCleanup(remote._phones.discard, "s9")
+        self.watch("s8", "http://p.test/news.m3u8")
+        self.assertEqual(self.stops_to("s8"), [])
+        self.watch("s9", "http://p.test/two.m3u8")
+        self.assertEqual(self.stops_to("s8"), [{"t": "stop"}])  # as when the TV plays again
+        self.assertEqual(self.stops_to("s9"), [])
+        self.assertEqual(list(remote._watching), ["s9"])
+        self.hub.forget_film.assert_any_call("s8")
+        self.watch("s9", "http://p.test/three.m3u8")  # a zap on the same phone stops nothing
+        self.assertEqual(self.stops_to("s9"), [])
+
+    def test_a_watching_phone_gone_a_while_gives_its_stream_back(self):  # 2.8.12
+        self.connect()
+        remote, controller = self.window.remote, self.window.controller
+        self.watch("s8", "http://p.test/news.m3u8")
+        with (
+            mock.patch.object(remote_controller, "PHONE_GONE_S", 0.05),
+            mock.patch.object(controller, "phone_stopped") as stopped,
+        ):
+            remote._on_event(Closed("s8", None))
+            self.assertTrue(wait_until(lambda: stopped.called))
+        self.assertEqual(remote._watching, {})
+
+    def test_a_watching_phone_back_in_time_keeps_its_stream(self):  # 2.8.12
+        self.connect()
+        remote, controller = self.window.remote, self.window.controller
+        self.watch("s8", "http://p.test/news.m3u8")
+        device = remote._device("s8")
+        with (
+            mock.patch.object(remote_controller, "PHONE_GONE_S", 0.2),
+            mock.patch.object(controller, "phone_stopped") as stopped,
+        ):
+            remote._on_event(Closed("s8", None))
+            remote._on_event(Opened("s10", device, "home"))  # a reload: the same phone
+            self.addCleanup(remote._phones.discard, "s10")
+            QTest.qWait(400)
+        self.assertFalse(stopped.called)
+        self.assertIn(device, remote._watching)
+
+    def test_play_in_vlc_stops_the_phone(self):  # audit 2: the TV's own outside player
+        self.connect()
+        self.watch("s8", "http://p.test/news.m3u8")
+        self.window.controller.handedOn.emit()  # Play in VLC took over
+        self.assertEqual(self.stops_to("s8"), [{"t": "stop"}])
+        self.assertEqual(self.window.remote._watching, {})
 
     def test_the_tv_playing_again_stops_the_phone(self):
         self.connect()
@@ -675,10 +780,16 @@ class WatchHereTests(WindowCase):
         handle = remote._library("s8").handles.issue("title", (film, "movie", None))
         self.hand_off("http://p.test/movie/u/p/7.mp4", handle=handle)
         key = self.window.controller.resume_key(self.window.controller.title_target(film, "movie"))
-        with mock.patch.object(self.window.watch, "update_position") as update:
+        with (
+            mock.patch.object(self.window.watch, "update_position") as update,
+            mock.patch.object(self.window.controller, "phone_position") as told,
+        ):
             remote.bridge.post(Position("s8", 61000, 5400000, self.plays()[-1]["p"]))
             self.assertTrue(wait_until(lambda: update.called))
         update.assert_called_once_with(key, 61000, 5400000)
+        # 2.8 review: its media server hears it too (the reporter takes only the stream it
+        # heard start, the link handed to this phone)
+        told.assert_called_once_with("http://p.test/movie/u/p/7.mp4", 61000)
 
     def test_a_report_made_for_the_title_before_is_not_the_new_ones(self):
         """The phone zapped to another film: a report of the first still on its way when the

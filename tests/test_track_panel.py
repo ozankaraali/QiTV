@@ -14,7 +14,7 @@ from PySide6.QtCore import QObject, QPoint, QPointF, Qt, Signal
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
-from timer_fixtures import elapse
+from timer_fixtures import elapse, timeline, wait_until
 
 from services.sound_sync import SoundSync
 from ui.keymap import Action, key_hint
@@ -46,6 +46,7 @@ class FakePlayer(QObject):
         self.files = []  # what add_subtitle_file() was given
         self.loads = True  # whether libVLC takes a file
         self.clears = 0
+        self.forgets = []  # forget_tracks(): keep_language each time
 
     def audio_tracks(self):
         return list(self.audio)
@@ -89,6 +90,9 @@ class FakePlayer(QObject):
     def clear_subtitles(self):
         self.clears += 1
         self.spu_delay = 0
+
+    def forget_tracks(self, *, keep_language=False):
+        self.forgets.append(keep_language)
 
 
 class TextTests(unittest.TestCase):
@@ -275,15 +279,20 @@ class SoundPanelTests(PanelCase):
         self.panel = TrackPanel(self.host, idle_ms=300)
         self.controls = self.make_controls()
         self.click_button("audio")
-        elapse(150)
-        self.controls.nudge_sound(1)  # a touch: the wait starts again
-        elapse(200)
-        self.assertTrue(self.panel.isVisible())
-        elapse(200)
-        self.assertFalse(self.panel.isVisible())
-        self.assertTrue(self.transport.isVisible())
-        elapse(300)
-        self.assertFalse(self.transport.isVisible())
+        at_close = []  # the controls as the panel closes (after TrackControls heard it)
+        self.panel.closed.connect(
+            lambda: at_close.append((self.transport.isVisible(), self.transport.held()))
+        )
+        # Read as each step fires, never after the wait returned: a loaded runner found the
+        # panel closed, or the controls gone, at a "not yet" read (timer_fixtures).
+        _touched, open_then = timeline(
+            (150, lambda: self.controls.nudge_sound(1)),  # a touch: the wait starts again
+            (350, self.panel.isVisible),  # past the first wait's end
+        )
+        self.assertTrue(open_then)
+        self.assertTrue(wait_until(lambda: not self.panel.isVisible()))  # on its own
+        self.assertEqual(at_close, [(True, "")])  # the controls shown, their fade begun
+        self.assertTrue(wait_until(lambda: not self.transport.isVisible()))  # then they fade
 
     def test_it_closes_with_the_player_controls(self):
         self.click_button("audio")
@@ -537,6 +546,26 @@ class SubtitlesPanelTests(PanelCase):
         self.assertEqual(self.player.clears, 1)
         self.controls.prepare_small(self.player, OTHER.item)
         self.assertEqual(self.player.clears, 2)
+
+    def test_the_tracks_chosen_stay_with_the_title_and_their_language_with_its_series(self):
+        series = {"id": "s1", "name": "Harbour Lights"}
+        first, second = (
+            Target({"id": f"e{n}", "name": f"Episode {n}"}, "series", f"E{n}", context=context)
+            for n, context in ((1, {"series": series}), (2, {"series": dict(series)}))
+        )
+        other = Target(
+            {"id": "e9", "name": "Episode 1"},
+            "series",
+            "E1",
+            context={"series": {"id": "s2", "name": "Coastline"}},
+        )
+        self.controls.prepare(self.player, FILM, FILM)  # its quality changed, a retry
+        self.assertEqual(self.player.forgets, [])  # kept
+        self.controls.prepare(self.player, second, first)  # the next episode: their language
+        self.controls.prepare(self.player, other, second)  # another series: forgotten
+        self.controls.prepare(self.player, FILM, other)
+        self.controls.prepare_small(self.player, OTHER.item)
+        self.assertEqual(self.player.forgets, [True, False, False, False])
 
 
 class ManyTracksTests(PanelCase):

@@ -305,9 +305,16 @@ def paced(payload, stop, hung_up, *, block=188 * 20, interval=0.02):
     return body
 
 
-def paced_route(payload, stop, hung_up):
-    """A route answering every request, reconnects included, with a fresh paced body."""
-    return lambda _request, _count: (200, {}, paced(payload, stop, hung_up))
+def paced_route(payload, stop, hung_up, **pace):
+    """A route answering every request, reconnects included, with a fresh paced body (`pace`:
+    `paced`'s block and interval)."""
+    return lambda _request, _count: (200, {}, paced(payload, stop, hung_up, **pace))
+
+
+# make_stream's media comes at about 32 kB a second: five packets every 20 ms bring it at some
+# 1.5 times real time, as a live channel after its backlog. At the default pace (6 times) a
+# tune's not-live guard (2.8.11) holds the bytes its longest, 4 s, before the session is ready.
+LIVE_PACE = {"block": 188 * 5}
 
 
 class StalledUpstream:
@@ -407,7 +414,9 @@ class LiveWorkerTests(unittest.TestCase):
             self.addCleanup(upstream.close)
             return [upstream.url, RAM], upstream.hung_up
         hung_up = threading.Event()
-        source = self.source({SECRET_PATH: paced_route(make_stream(60), self.stop, hung_up)})
+        source = self.source(
+            {SECRET_PATH: paced_route(make_stream(60), self.stop, hung_up, **LIVE_PACE)}
+        )
         directory = ".qitv-timeshift-" + secrets.token_hex(16)
         ring = {"kind": "disk", "root": str(self.root), "dir": directory, "max_bytes": 1 << 30}
         return [source.url + SECRET_PATH, ring], hung_up
@@ -834,7 +843,9 @@ class LiveWorkerTests(unittest.TestCase):
         payload = make_stream(60)
         hung_up = {name: threading.Event() for name in "ab"}
         sources = {
-            name: self.source({SECRET_PATH: paced_route(payload, self.stop, hung_up[name])})
+            name: self.source(
+                {SECRET_PATH: paced_route(payload, self.stop, hung_up[name], **LIVE_PACE)}
+            )
             for name in "ab"
         }
         helper = self.helper()
@@ -1131,7 +1142,7 @@ class LiveWorkerTests(unittest.TestCase):
     def test_a_disk_session_removes_its_directory_once_closed(self):
         payload = make_stream(60)
         hung_up = threading.Event()
-        source = self.source({SECRET_PATH: paced_route(payload, self.stop, hung_up)})
+        source = self.source({SECRET_PATH: paced_route(payload, self.stop, hung_up, **LIVE_PACE)})
         helper = self.helper()
         directory = ".qitv-timeshift-" + secrets.token_hex(16)
         ring = {"kind": "disk", "root": str(self.root), "dir": directory, "max_bytes": 1 << 30}
@@ -2371,6 +2382,42 @@ class StartQualityTests(unittest.TestCase):
                 (False, "key"),
             ],
         )
+
+
+class TeardownTests(unittest.TestCase):
+    """2.8.12: a session's buffer stays until a recording still copying from it finished."""
+
+    def test_a_teardown_keeps_the_buffer_till_a_late_recording_finished(self):
+        # A recording started far back may have gigabytes to copy when the channel changes:
+        # the buffer closed 2 s after the stop and the recording ended where it had got to.
+        helper = SimpleNamespace(
+            root="",
+            send=lambda message, session=None: None,
+            server=SimpleNamespace(add_session=lambda *args: None),
+            forget_ring=lambda ring: None,
+        )
+        session = worker._Session(helper, "t", "http://provider.test/t.ts", {}, True, RAM, 6.0)
+        session._ring = RamRing(1024 * 1024)
+        done = threading.Event()
+
+        class Late:
+            def stop(self):
+                threading.Timer(0.4, done.set).start()
+
+            def join(self, timeout):
+                return done.wait(timeout)
+
+        session._recorder = Late()
+        closed = []
+        with (
+            patch.object(worker, "_RECORD_GRACE", 0.05),
+            patch.object(
+                worker, "_close_ring", lambda ring, keep=False: closed.append(done.is_set())
+            ),
+            self.assertLogs("services.live.worker", "INFO"),
+        ):
+            session._teardown()
+        self.assertEqual(closed, [True])
 
 
 class ClosedAfterReleaseTests(unittest.TestCase):

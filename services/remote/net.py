@@ -8,6 +8,7 @@ import socket
 import struct
 import sys
 from typing import Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -111,3 +112,27 @@ def ipv6_prefixes() -> list[str]:
     if not ip.is_global:
         return []
     return [":".join(ip.exploded.split(":")[:4])]
+
+
+def own_page(origin: Optional[str], host: str) -> bool:
+    """Whether a WebSocket upgrade with this Origin header may use the home door: none (no
+    browser sends it: a tool, a test), or the door's own page's, served at `host` (the Host
+    header: the address the phone opened), over http, by an IP address or localhost as QiTV's
+    links give it. Another site's page in a browser on the network may not hold the pairing
+    slots, nor a name of its own pointed at this computer (DNS rebinding)."""
+    if origin is None:
+        return True
+    try:
+        parts = urlsplit(origin.strip())
+        name = parts.hostname or ""
+    except ValueError:
+        return False
+    if parts.scheme != "http" or parts.netloc.lower() != host.strip().lower():
+        return False
+    if name == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return True

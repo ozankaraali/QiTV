@@ -15,8 +15,9 @@ chosen speed); a drag keeps the bar.
 Left of fullscreen sit the mini player (the whole window small in a corner, Alt+P), on live
 TV while the window offers picture in picture the second channel (P) and the multiview (V;
 while its grid shows it shows the way back, one picture, as fullscreen's does, and the
-second channel gives way), then "Open in external player" (the shell's VLC/MPV menu for what
-plays now). Hovering those names them and their keys. While the grid shows, the layout chip
+second channel's button is dim: it keeps its place, so the multiview's stays under the
+pointer), then "Open in external player" (the shell's VLC/MPV menu for what plays now).
+Hovering those names them and their keys. While the grid shows, the layout chip
 sits just left of the multiview's button: the layout's picture, its name ("2×2") and ⌄, drawn
 as a button (a click opens the layouts to pick from: the shell's; lit while they show). While
 the last grid's channels can come back, a "Last grid" chip left of the other buttons brings
@@ -33,6 +34,12 @@ edge has ◀10 beside play; on live TV the channel's name (and logo) shows its i
 after the name adds or removes it from the favorites. Each names its key when hovered. A movie
 or an episode played from the Library has "‹ Library" at the left of the right-hand buttons:
 back to where it came from, as Esc.
+The buttons keep their places (2.8.12), so a second click on the same spot does the same thing:
+play comes first in every mode, and what the time-shift bar adds comes after the live edge's
+buttons (▶ ■ ◀10 at the live edge; ▶ ⏮ ◀10 ▶10 +60 ■ behind it: ◀10 stays put, and the
+steps forward lie where the live edge shows only its indicator); the right-hand buttons keep
+one order. A channel that failed to open (`show_failed`) keeps live TV's controls: ▶ tries it
+again, with no LIVE badge, and the record button says nothing plays.
 At a small width (or in a longer language) the Stay live indicator first leaves out "adjusted",
 then its name (the LIVE badge beside it says live), then its text is cut short, or the
 indicator left out, so it never runs under the play button. A row whose LIVE, Go live or
@@ -108,7 +115,7 @@ from ui.overlays.painting import (
     fmt_duration,
     volume_icon,
 )
-from ui.pointer import NAV_BUTTONS
+from ui.pointer import NAV_BUTTONS, PointerHider
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)  # − and + step through these
@@ -117,6 +124,14 @@ BOTTOM_FRACTION = 0.42
 TICK_LABEL_MAX_U = 25.0
 GAP_PX = 14.0  # 2.6: the break in the bar where nothing was kept between two parts
 _ICON_GAP_U = 1.8  # between the icon buttons
+# 2.8.12: an icon button takes clicks over this square where its neighbours leave room (half
+# the gap to each), and at least this tall: the 28 px icons (11 px in a mini player) were small
+# targets. Only the hit area grows; the icon is drawn as before.
+_HIT_PX = 44.0
+_HIT_FLOOR_PX = 28.0
+# 2.8.12: the top shade, deeper and flat over the title row's half (the name read 2.8:1, the
+# programme 2.2:1 over a white picture; now about 11:1 and 7:1), then fading out.
+_TOP_SHADE = 0.8
 _TIGHT_GAP_U = 1.0  # in a crowded row
 MINUS = "−"
 # The source stalled, its connection still open (the texts are shown with translate()).
@@ -139,7 +154,17 @@ TOOLTIPS = {
     "slower": N_("Slower"),  # i18n: tooltip of the playback speed's − button
     "speed": N_("Normal speed"),  # i18n: tooltip of the playback speed chip (back to 1x)
     "faster": N_("Faster"),  # i18n: tooltip of the playback speed's + button
+    # i18n: tooltip of ⏮ on the time-shift bar: back to the start of the programme on now
+    "start": N_("Programme start"),
+    "fwd60": N_("Forward 60 seconds"),  # i18n: tooltip of the time-shift bar's +60 button
 }
+# i18n: tooltip of the second channel's button, dim while the multiview's grid shows (V: key)
+PIP_IN_GRID = N_("Leave the multiview first (V)")
+# A live channel that failed to open (`show_failed`): play tries it again, nothing records.
+# i18n: tooltip of the play button over a channel that failed to open: open it again
+TRY_AGAIN = N_("Try again")
+# i18n: tooltip of the record button (and a toast) while nothing plays (it failed to open)
+NOTHING_PLAYING = N_("Nothing playing")
 LIBRARY_LABEL = N_("‹ Library")  # i18n: chip on the player bar: back to the Library; short
 # The multiview's chip: the last grid's channels again.
 RESTORE_LABEL = N_("Last grid")  # i18n: chip on the player bar (multiview); short
@@ -331,6 +356,8 @@ class _Timeline:
 
 
 class Transport(Overlay):
+    # i18n: what a screen reader calls the player controls (seek bar and buttons on the video)
+    accessible_name = N_("Player controls")
     pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
 
     playPauseRequested = Signal()
@@ -409,6 +436,7 @@ class Transport(Overlay):
         self._casting = False  # ... and casts now (the button is lit)
         self._favorite = False  # the live channel is a favorite: its star is lit
         self._library = False  # the title came from the Library: ‹ Library shows
+        self._failed = False  # a live channel that failed to open (show_failed)
         self._quality = False  # 2.8: its server offers versions or conversions: ⚙ shows
         self._held = ""  # the button whose panel is open: no fade meanwhile, and it is lit
         self._hand = False  # the pointer is over the title row's controls
@@ -425,10 +453,12 @@ class Transport(Overlay):
         # A bar fraction, not a time: the knob stays under the cursor while the buffer slides.
         self._drag: float | None = None
         self._last_move = QPointF(-1, -1)
+        self._poked_at: Optional[QPointF] = None  # where the last real move poked
+        self._pointer: QPointF | None = None  # where the pointer rests over it (None: away)
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
         self._idle.setInterval(idle_ms)
-        self._idle.timeout.connect(self.dismiss)
+        self._idle.timeout.connect(self._on_idle)
         self._clock = QTimer(self)  # repaint so the clock stays current while shown
         self._clock.setInterval(30_000)
         self._clock.timeout.connect(self._tick)
@@ -450,6 +480,20 @@ class Transport(Overlay):
     def show_timeshift(self, title: str, subtitle: str, logo: QPixmap | None = None) -> None:
         """Show a pipeline live channel. A different title (a zap) forgets the old timeline."""
         self._set_mode(True, title, subtitle, timeshift=True, logo=logo)
+
+    def show_failed(self, title: str, subtitle: str, logo: QPixmap | None = None) -> None:
+        """A live channel that failed to open (2.8.12): live TV's controls, so a mouse reaches
+        the guide, the previous channel and Search; play (▶) tries it again, the LIVE badge
+        stays away and the record button says nothing plays. Any other mode ends it."""
+        self._set_mode(True, title, subtitle, logo=logo)
+        self._failed = True
+        self._paused = True  # ▶: nothing plays
+        self.update()
+        self._controls_changed()
+
+    def failed(self) -> bool:
+        """It shows a channel that failed to open (`show_failed`)."""
+        return self._failed
 
     def set_logo(self, logo: QPixmap | None) -> None:
         """The channel's logo arrived after the channel was shown."""
@@ -678,7 +722,7 @@ class Transport(Overlay):
         on live TV the channel's name and star. Over the multiview's grid (the whole picture)
         also what it only says (LIVE, the times, the subtitle, the clock), so it shows whole."""
         region = QRegion()
-        for name, rect in self._layout().items():
+        for name, rect in self._hits(self._layout()).items():
             if name in _LABELS and not self._grid_shown:
                 continue
             if name == "seek":
@@ -740,7 +784,7 @@ class Transport(Overlay):
 
     def tooltip_at(self, pos: QPointF) -> str:
         """What hovering `pos` says: a control's name and key, or nothing."""
-        for name, rect in (*self.title_rects().items(), *self._layout().items()):
+        for name, rect in (*self.title_rects().items(), *self._hits(self._layout()).items()):
             text = self._tooltip(name)
             if text and rect.contains(pos):
                 return text
@@ -750,10 +794,16 @@ class Transport(Overlay):
         if name == "record":
             if self._rec_since is not None:
                 return key_hint(tr("Stop recording"), RECORD_KEY)  # i18n: tooltip (verb)
+            if self._failed:
+                return translate(NOTHING_PLAYING)
             if not self._timeshift:
                 return translate(NO_RECORDING)
             # i18n: tooltip of the record button: record the channel being watched (verb)
             return key_hint(tr("Record"), RECORD_KEY)
+        if name == "play" and self._failed:
+            return key_hint(translate(TRY_AGAIN), KEY_HINTS["play"][1])
+        if name == "pip" and self._grid_shown:
+            return translate(PIP_IN_GRID)
         if name == "grid":
             if self._grid_shown:
                 what = tr("Back to one picture")  # i18n: tooltip: leave the multiview's grid
@@ -805,6 +855,27 @@ class Transport(Overlay):
             return  # a drag in progress keeps the bar until release
         self._idle.stop()
         self.hide()
+
+    def _on_idle(self) -> None:
+        """The idle time is up: the controls go, unless the pointer rests on them (2.8.12: they
+        went from under a resting pointer, though they stay while hovered): the wait starts
+        again then."""
+        if self._pointer is not None and self.hovers_controls(self._pointer):
+            self._idle.start()
+            return
+        self.dismiss()
+
+    def hovers_controls(self, pos: QPointF) -> bool:
+        """`pos` (this widget's coordinates) is on the controls: the bottom band from the bar's
+        time bubble (or the row) down, or the title row's band. Not the rest of the shades
+        (the bottom one reaches 42% up the picture: a pointer left there keeps nothing up)."""
+        un = Units(self.width())
+        top = self.controls_top() - self.geometry().top()
+        title_bottom = max(
+            (r.bottom() for r in self.title_rects().values()),
+            default=float(un.px(5.7)),
+        )
+        return pos.y() >= top or pos.y() <= max(title_bottom, float(un.px(5.7))) + un.px(1.0)
 
     def _tick(self) -> None:
         if self.isVisible():
@@ -1084,28 +1155,35 @@ class Transport(Overlay):
         """The controls' rects; in a row too crowded for them (a small window, a longer
         language, every button of the multiview and the second channel), the icons sit closer
         before a text gives way: the multiview's chips, the Stay live indicator or the speed
-        chip's − and +."""
-        rects, crowded = self._layout_at(_ICON_GAP_U)
-        if not (crowded or self._grid_chips_short(rects) or self._squeezed(rects)):
-            return rects
-        rects, crowded = self._layout_at(_TIGHT_GAP_U)
-        if "quality" in rects and (
-            crowded or self._grid_chips_short(rects) or self._squeezed(rects)
-        ):
+        chip's − and +. A time-shifted channel spaces them for both its rows, the live edge's
+        and the bar's (2.8.12): the icons keep their places when the bar comes or goes."""
+        rows: tuple[Optional[bool], ...] = (False, True) if self._timeshift else (None,)
+        if all(self._fits(_ICON_GAP_U, True, row) for row in rows):
+            return self._layout_at(_ICON_GAP_U)[0]
+        rects = self._layout_at(_TIGHT_GAP_U)[0]
+        if "quality" in rects and not all(self._fits(_TIGHT_GAP_U, True, row) for row in rows):
             # 2.8: the ⚙ gives way first (the speed and the other buttons keep their room).
             return self._layout_at(_TIGHT_GAP_U, extras=False)[0]
         return rects
 
-    def _squeezed(self, rects: dict[str, QRectF]) -> bool:
+    def _fits(self, icon_gap: float, extras: bool, row: Optional[bool]) -> bool:
+        """The row (`_layout_at`'s) has room for its chips and texts with `icon_gap`."""
+        rects, crowded = self._layout_at(icon_gap, extras, row)
+        return not (crowded or self._grid_chips_short(rects) or self._squeezed(rects, row))
+
+    def _squeezed(self, rects: dict[str, QRectF], row: Optional[bool] = None) -> bool:
         """The Stay live indicator has no room for its settled text (`_steady_width`), or the
         speed chip went without its − and + (or altogether, under the bar: 2.8, the ⚙ gives
         way). 2.8.2: the settled text, not the one shown, so the icons keep their places while
-        "Reconnecting…", "adjusted" or a rate come and go: the text gives way instead."""
-        if ("speed" in rects or self._shows_bar()) and "slower" not in rects:
+        "Reconnecting…", "adjusted" or a rate come and go: the text gives way instead. `row`:
+        the bar's (True) or the live edge's (False) whichever shows now, as `_layout_at`."""
+        bar = self._shows_bar() if row is None else row
+        if ("speed" in rects or bar) and "slower" not in rects:
             return True
-        variants = self._indicator_variants() if self._timeshift and not self._shows_bar() else []
-        if not variants:
+        if not self._timeshift or bar:
             return False
+        if self._edge_lag is None and (row is None or self._timeline is None):
+            return False  # no indicator (yet): nothing to make room for
         un = Units(self.width())
         live, back = rects.get("live"), rects.get("back10")
         if live is None or back is None:
@@ -1142,10 +1220,13 @@ class Transport(Overlay):
             return True
         return self._grid_restorable and "restore" not in rects
 
-    def _layout_at(self, icon_gap: float, extras: bool = True) -> tuple[dict[str, QRectF], bool]:
+    def _layout_at(
+        self, icon_gap: float, extras: bool = True, row: Optional[bool] = None
+    ) -> tuple[dict[str, QRectF], bool]:
         """The rects with `icon_gap` (u) between the icons (without the ⚙ unless `extras`), and
         whether the chips at their left (LIVE, Go live, ‹ Library) run into the buttons at the
-        row's left."""
+        row's left. `row`: the bar's row (True, with Go live on a time-shifted channel) or the
+        live edge's (False) whichever shows now; None: the one that shows."""
         un = Units(self.width())
         left, right = un.px(3), self.width() - un.px(3)
         bottom = self.height() - un.px(3)
@@ -1153,7 +1234,7 @@ class Transport(Overlay):
         big = un.px(4.6)
         row_top = bottom - big
         rects: dict[str, QRectF] = {}
-        bar = self._shows_bar()
+        bar = self._shows_bar() if row is None else row
         shifted = bar and self._timeshift
         if bar:
             seek_h = un.px(1.9)
@@ -1179,10 +1260,13 @@ class Transport(Overlay):
             else:
                 put("stop", skip, un.px(1.5))
             left_end = x  # the left buttons and their gap
+            buttons = self._right_buttons(extras=extras)
+            if self._failed:  # nothing plays: no LIVE badge (2.8.12)
+                x = self._put_right(rects, un, buttons, cy, left_end, icon_gap)
+                return rects, x < left_end
             # As wide as its word in a longer language ("EN VIVO"), never narrower than LIVE's.
             badge = QFontMetricsF(self._live_font(un)).horizontalAdvance(_live_label())
             pill_w = max(float(un.px(5.2)), badge + un.px(1.6))
-            buttons = self._right_buttons("picture", "subtitles", "audio", "volume", extras=extras)
             floor = left_end + pill_w + un.px(0.4)  # the LIVE badge keeps its room
             x = self._put_right(rects, un, buttons, cy, floor, icon_gap)
             rects["live"] = QRectF(x - pill_w - un.px(0.4), cy - un.px(1.1), pill_w, un.px(2.2))
@@ -1197,29 +1281,22 @@ class Transport(Overlay):
                         right_edge - width, cy - un.px(1.1), width, un.px(2.2)
                     )
         else:
+            # Play first, as at the live edge (2.8.12): it keeps its place when the bar comes
+            # or goes, ⏮ takes ■'s and ◀10 keeps its own; the steps forward lie where the
+            # live edge shows only its indicator, ■ after them.
+            put("play", big, un.px(0.6))
             if shifted:
                 put("start", skip, un.px(0.6))
             put("back10", skip, un.px(0.6))
-            put("play", big, un.px(0.6))
-            if shifted:
-                put("fwd10", skip, un.px(0.6))
-                put("fwd60", skip, un.px(1.0))
-            else:
-                put("fwd10", skip, un.px(0.6) if self._next_available else un.px(1.0))
-                if self._next_available:
-                    put("next", skip, un.px(1.0))
+            ahead = "fwd60" if shifted else "next" if self._next_available else ""
+            put("fwd10", skip, un.px(0.6) if ahead else un.px(1.0))
+            if ahead:
+                put(ahead, skip, un.px(1.0))
             put("stop", skip, un.px(1.0))
             speed_x = x  # the chip goes in once the right side has taken its room
-            side = self._side_chip(un)
+            side = self._side_chip(un, None if row is None else shifted)
             room = speed_x + (side[1] if side is not None else 0.0) + un.px(0.8)
-            x = self._put_right(
-                rects,
-                un,
-                self._right_buttons("picture", "audio", "volume", "subtitles", extras=extras),
-                cy,
-                room,
-                icon_gap,
-            )
+            x = self._put_right(rects, un, self._right_buttons(extras=extras), cy, room, icon_gap)
             if side is not None:
                 h = self._chip_h(un)
                 rects[side[0]] = QRectF(x - side[1], cy - h / 2, side[1], h)
@@ -1228,11 +1305,12 @@ class Transport(Overlay):
             rects.update(self._speed_rects(un, speed_x, cy, min(chips, default=x)))
         return rects, crowded
 
-    def _side_chip(self, un: Units) -> Optional[tuple[str, float]]:
+    def _side_chip(self, un: Units, behind: Optional[bool] = None) -> Optional[tuple[str, float]]:
         """The chip left of the right-hand buttons under the bar, and its width: Go live while
-        a time-shifted channel plays behind live, ‹ Library for a title from the Library."""
+        a time-shifted channel plays behind live (`behind`: as if it did, or not), ‹ Library
+        for a title from the Library."""
         fm = QFontMetricsF(self._chip_font(un))
-        if self._timeshift and self._behind():
+        if self._timeshift and (self._behind() if behind is None else behind):
             label = _go_live_label()
             return "golive", 2 * un.px(1.0) + un.px(0.7) + un.px(0.5) + fm.horizontalAdvance(label)
         if self._library and not self._live:
@@ -1328,16 +1406,19 @@ class Transport(Overlay):
             return False
         return chip.width() >= self._layout_chip_width(Units(self.width()), True) - 0.5
 
-    def _right_buttons(self, *rest: str, extras: bool = True) -> tuple[str, ...]:
+    def _right_buttons(self, extras: bool = True) -> tuple[str, ...]:
         """The icon buttons from the right edge inwards: the window's and the picture's, the
-        sound's (`rest`), the ⚙ quality menu (2.8, with `extras`), then Search and, on live
-        TV, the guide and the previous channel."""
+        Picture panel's, the subtitles', the sound's (♫ and the speaker: one order in every
+        mode, 2.8.12), the ⚙ quality menu (2.8, with `extras`), then Search and, on live TV,
+        the guide and the previous channel. The second channel's stays (dim) while the grid
+        shows: the multiview's own keeps its place."""
         grid = ("grid",) if self._grid_available and self._live else ()
-        pip = ("pip",) if self._pip_available and self._live and not self._grid_shown else ()
+        pip = ("pip",) if self._pip_available and self._live else ()
         tv = ("search", "guide", "previous") if self._live else ("search",)
         cast = ("cast",) if self._cast_available else ()
         quality = ("quality",) if self._quality and extras else ()
-        return ("fullscreen", "mini", *pip, *grid, *cast, "external", *rest, *quality, *tv)
+        sound = ("picture", "subtitles", "audio", "volume")
+        return ("fullscreen", "mini", *pip, *grid, *cast, "external", *sound, *quality, *tv)
 
     def seek_rect(self) -> QRectF:
         return self._layout()["seek"]
@@ -1407,7 +1488,10 @@ class Transport(Overlay):
                     or (name == "cast" and self._casting)
                     or name == self._held
                 )
-                draw_icon(p, self.icon(name), rects[name], qcolor(PALETTE.accent) if lit else text)
+                color = qcolor(PALETTE.accent) if lit else text
+                if name == "pip" and self._grid_shown:
+                    color = qcolor(PALETTE.text, 0.35)  # the grid's tiles are the pictures
+                draw_icon(p, self.icon(name), rects[name], color)
         chip = rects.get("layout")
         if chip is not None:
             self._paint_layout_chip(p, un, chip, text)
@@ -1490,7 +1574,11 @@ class Transport(Overlay):
     def _paint_scrim_bands(self, p: QPainter) -> None:
         top_h = self.height() * TOP_FRACTION
         grad = QLinearGradient(0, 0, 0, top_h)
-        grad.setColorAt(0, qcolor("#000000", 0.62))
+        # Flat behind the title row (its logo ends near 5.7u, wider windows run lower in the
+        # band), then fading out.
+        flat = min(0.85, max(0.5, Units(self.width()).px(6.2) / top_h)) if top_h > 0 else 0.5
+        grad.setColorAt(0, qcolor("#000000", _TOP_SHADE))
+        grad.setColorAt(flat, qcolor("#000000", _TOP_SHADE))
         grad.setColorAt(1, qcolor("#000000", 0.0))
         p.fillRect(QRectF(0, 0, self.width(), top_h), grad)
         bottom_h = self.height() * BOTTOM_FRACTION
@@ -1561,7 +1649,7 @@ class Transport(Overlay):
             ("start", "prev", un.px(2.4)),
             ("back10", "back10", un.px(3.0)),
             ("fwd10", "fwd10", un.px(3.0)),
-            ("fwd60", "next", un.px(2.4)),
+            ("fwd60", "fwd60", un.px(3.0)),  # ⟳ with 60 in it (2.8.12; it drew Next's ⏭)
             ("next", "next", un.px(2.4)),
             ("stop", "stop", un.px(2.0)),
         ):
@@ -1743,7 +1831,9 @@ class Transport(Overlay):
     def _paint_live(self, p: QPainter, un: Units, rects: dict[str, QRectF], text: QColor) -> None:
         self._paint_play(p, rects["play"], qcolor(PALETTE.canvas))
         self._paint_skips(p, un, rects, text)  # ◀10 at a time-shifted channel's live edge
-        pill = rects["live"]
+        pill = rects.get("live")
+        if pill is None:
+            return  # a channel that failed to open: nothing is live
         fill_round(p, pill, qcolor(PALETTE.live), pill.height() / 2)
         p.setFont(self._live_font(un))
         p.setPen(qcolor("#ffffff"))
@@ -1815,18 +1905,50 @@ class Transport(Overlay):
         for name, rect in self.title_rects().items():
             if rect.contains(pos):
                 return name
-        for name, rect in self._layout().items():
+        for name, rect in self._hits(self._layout()).items():
             if name == "seek":
                 rect = rect.adjusted(0, -rect.height(), 0, rect.height())
             if name not in _LABELS and rect.contains(pos):
                 return name
         return None
 
+    def _hits(self, rects: dict[str, QRectF]) -> dict[str, QRectF]:
+        """Where the controls take clicks (2.8.12): each icon button grows towards a _HIT_PX
+        square, sideways no further than half the gap to its neighbours in the row (the
+        window's edge for the last), and at least _HIT_FLOOR_PX tall; the rest as laid out.
+        Only the hit area grows: the icons are drawn as before."""
+        hits = dict(rects)
+        row = [(n, r) for n, r in rects.items() if n not in ("seek", "times")]
+        for name in _ICON_BUTTONS:
+            rect = rects.get(name)
+            if rect is None:
+                continue
+            beside = [
+                r
+                for n, r in row
+                if n != name and r.bottom() > rect.top() and r.top() < rect.bottom()
+            ]
+            lefts = [rect.left() - r.right() for r in beside if r.right() <= rect.left()]
+            rights = [r.left() - rect.right() for r in beside if r.left() >= rect.right()]
+            want = max(0.0, (_HIT_PX - rect.width()) / 2)
+            left = min([want, *(gap / 2 for gap in lefts)]) if lefts else min(want, rect.left())
+            room = self.width() - rect.right()
+            right = min([want, *(gap / 2 for gap in rights)]) if rights else min(want, room)
+            tall = max(_HIT_FLOOR_PX, min(_HIT_PX, rect.height() * 2))
+            grow = max(0.0, (tall - rect.height()) / 2)
+            hits[name] = rect.adjusted(-max(0.0, left), -grow, max(0.0, right), grow)
+        return hits
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         pos = event.position()
+        self._pointer = QPointF(pos)
         if pos != self._last_move:  # ignore synthetic moves from layout changes
             self._last_move = pos
-            self.poke()
+            # 2.8.12: a pointer trembling by a pixel or two keeps nothing up (as PointerHider).
+            poked = self._poked_at
+            if poked is None or (pos - poked).manhattanLength() >= PointerHider.JITTER_PX:
+                self._poked_at = QPointF(pos)
+                self.poke()
             self._point_at(pos)
         if self._drag is not None:
             if not event.buttons() & Qt.LeftButton:
@@ -1844,6 +1966,10 @@ class Transport(Overlay):
                 self.setCursor(Qt.PointingHandCursor)
             else:
                 self.unsetCursor()
+
+    def leaveEvent(self, event: QEvent) -> None:
+        self._pointer = None  # it left (onto the picture, the PiP, another window)
+        super().leaveEvent(event)
 
     def hideEvent(self, event: QHideEvent) -> None:
         # Hidden mid-drag (the host hides with a minimized window): no release will come.
@@ -1875,6 +2001,8 @@ class Transport(Overlay):
                 self.seekRequested.emit(target_ms)
 
     def _click(self, rects: dict[str, QRectF], pos: QPointF) -> None:
+        """A press at `pos` on a control (by its hit area, `_hits`); `rects` as laid out (a
+        menu opens from the button as drawn)."""
         title_signals = {
             "title": self.infoRequested,
             "favorite": self.favoriteRequested,
@@ -1884,9 +2012,10 @@ class Transport(Overlay):
             if rect.contains(pos):
                 title_signals[name].emit()
                 return
-        for name, rect in rects.items():
-            if not rect.contains(pos):
+        for name, hit in self._hits(rects).items():
+            if not hit.contains(pos):
                 continue
+            rect = rects[name]
             if name == "play":
                 self.playPauseRequested.emit()
             elif name == "stop":
@@ -1921,7 +2050,8 @@ class Transport(Overlay):
             elif name == "picture":
                 self.pictureRequested.emit()
             elif name == "pip":
-                self.pipRequested.emit()
+                if not self._grid_shown:  # dim over the grid: its tooltip says why
+                    self.pipRequested.emit()
             elif name == "grid":
                 self.gridRequested.emit()
             elif name == "layout":
@@ -1964,6 +2094,7 @@ class Transport(Overlay):
     ) -> None:
         if not (timeshift and self._timeshift and title == self._title):
             self._clear_timeline()
+        self._failed = False
         self._live = live
         self._timeshift = timeshift
         self._title = title

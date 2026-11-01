@@ -9,6 +9,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
+    QFontMetricsF,
     QPainter,
     QPainterPath,
     QPen,
@@ -252,6 +253,15 @@ def draw_refresh(p: QPainter, rect: QRectF, color: QColor) -> None:
     p.restore()
 
 
+def draw_field_icon(p: QPainter, inner: QRectF, color: QColor) -> QRectF:
+    """A find field's magnifier at the left of `inner`, as high as the painter's font; the
+    room left for the text beside it."""
+    size = QFontMetricsF(p.font()).height() * 0.85
+    icon = QRectF(inner.left(), inner.center().y() - size / 2, size, size)
+    draw_icon(p, "search", icon, color)
+    return inner.adjusted(size + 0.45 * size, 0, 0, 0)
+
+
 def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
     p.save()
     p.setRenderHint(QPainter.Antialiasing, True)
@@ -288,8 +298,8 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
         elif name == "next":
             fill(_rrect(0.7, 0.18, 0.1, 0.64, 0.03))
             fill(_poly([(0.2, 0.18), (0.2, 0.82), (0.65, 0.5)]))
-        elif name in ("back10", "fwd10"):
-            arc, head = _skip_arrow(name == "fwd10")
+        elif name in ("back10", "fwd10", "fwd60"):  # ⟲ and ⟳ with their seconds in them
+            arc, head = _skip_arrow(name != "back10")
             line(arc)
             fill(head)
             p.setTransform(base)  # text is sized in device pixels, not the unit box
@@ -306,7 +316,7 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
                     rect.height() * 0.5,
                 ),
                 Qt.AlignCenter,
-                "10",
+                name[-2:],
             )
         elif name in _SPEAKER_WAVES:
             fill(_speaker())

@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -37,6 +38,7 @@ class InstallTests(unittest.TestCase):
         before = list(root.handlers)
         hook = sys.excepthook
         self.addCleanup(setattr, sys, "excepthook", hook)
+        self.addCleanup(setattr, threading, "excepthook", threading.excepthook)
         self.addCleanup(faulthandler.disable)
         self.addCleanup(self.drop_handlers, before)
         self.addCleanup(log_file.close)
@@ -64,6 +66,23 @@ class InstallTests(unittest.TestCase):
         text = self.text()
         self.assertIn("[INFO] services.anything: Retrying", text)
         for secret in ("secret", "panel.test", "username="):
+            self.assertNotIn(secret, text)
+
+    def test_the_console_masks_its_lines_as_the_file_does(self):  # a privacy review
+        import io
+
+        handler = log_file.console_handler()
+        stream = io.StringIO()
+        handler.setStream(stream)
+        logging.getLogger().addHandler(handler)
+        self.addCleanup(logging.getLogger().removeHandler, handler)
+        logging.getLogger("urllib3.connectionpool").warning(
+            "Retrying after Max retries exceeded with url: /live/quser/qpass/1.ts"
+        )
+        logging.getLogger("services.anything").info("Cookie: mac=00:1A:79:12:34:56")
+        text = stream.getvalue()
+        self.assertIn("[WARNING] urllib3.connectionpool: Retrying", text)
+        for secret in ("quser", "qpass", "12:34:56"):
             self.assertNotIn(secret, text)
 
     def test_the_detailed_log_adds_qitvs_own_debug_lines(self):  # 2.8.2, Settings
@@ -102,6 +121,26 @@ class InstallTests(unittest.TestCase):
         self.assertIn("Unhandled ValueError", text)
         self.assertIn("test_an_unhandled_exception_is_logged_without_its_message", text)
         self.assertNotIn("secret", text)
+
+    def test_an_exception_that_ends_a_thread_is_logged_too(self):
+        # The recording schedule's writer died on text no UTF-8 file can hold: only the
+        # console (none, in a packaged app) heard of it.
+        log_file.install(self.directory)
+
+        def write():
+            raise UnicodeError("http://panel.test/get.php?username=u&password=secret")
+
+        thread = threading.Thread(target=write, name="schedule-save")
+        thread.start()
+        thread.join()
+        quiet = threading.Thread(target=sys.exit, name="quiet")  # SystemExit: no error
+        quiet.start()
+        quiet.join()
+        text = self.text()
+        self.assertIn("Unhandled UnicodeError in the thread schedule-save", text)
+        self.assertIn("in write", text)  # its frames
+        self.assertNotIn("secret", text)
+        self.assertNotIn("quiet", text)
 
     def test_a_place_that_cannot_be_written_leaves_the_console_log(self):
         with patch.object(Path, "mkdir", side_effect=PermissionError(13, "denied")):

@@ -13,6 +13,7 @@ from job_fixtures import ImmediateRunner
 from mixed_fixtures import live_content
 from timer_fixtures import elapse, wait_until
 
+from services import navigation as navigation_module
 from services.catalog import PROVIDER_LOADING_MESSAGE, Group
 from services.navigation import (
     ADD_PROVIDER_ROW,
@@ -210,12 +211,40 @@ class DrawerTests(unittest.TestCase):
         self.drawer.open_drawer()
         self.catalog.groupFailed.emit("live", "10", "boom")
         self.assertTrue(self.nav.load_error(self.nav.path[-1]))
-        self.assertEqual(self.drawer.message_for("right"), "Couldn't load — press Enter to retry")
+        self.assertEqual(
+            self.drawer.message_for("right"), "Couldn't load — click or press Enter to retry"
+        )
         self.assertFalse(self.drawer.grab().isNull())
         before = self.catalog.requests.count(("group", "live", "10"))
         self.drawer.activate()
         self.assertEqual(self.catalog.requests.count(("group", "live", "10")), before + 1)
         self.assertIsNone(self.nav.load_error(self.nav.path[-1]))
+
+    def test_a_click_on_the_error_notice_retries(self):
+        # The notice says "click or press Enter": a click on the list it fills retries too.
+        self.catalog.live = {}
+        self.nav.changed.emit()
+        self.drawer.open_drawer()
+        self.drawer.focus_side = "left"  # the click also brings the focus over
+        self.catalog.groupFailed.emit("live", "10", "boom")
+        viewport = self.drawer._columns["right"].view.viewport()
+        self.assertEqual(viewport.cursor().shape(), Qt.CursorShape.PointingHandCursor)
+        before = self.catalog.requests.count(("group", "live", "10"))
+        QTest.mouseClick(viewport, Qt.MouseButton.LeftButton, Qt.NoModifier, QPoint(40, 20))
+        self.assertEqual(self.catalog.requests.count(("group", "live", "10")), before + 1)
+        self.assertIsNone(self.nav.load_error(self.nav.path[-1]))
+        self.assertEqual(self.drawer.focus_side, "right")
+        self.assertNotEqual(viewport.cursor().shape(), Qt.CursorShape.PointingHandCursor)
+
+    def test_a_click_on_a_list_without_the_notice_retries_nothing(self):
+        self.catalog.live = {"10": []}  # an empty group: "Nothing here"
+        self.nav.changed.emit()
+        self.drawer.open_drawer()
+        self.assertEqual(self.drawer.message_for("right"), EMPTY_TEXT)
+        before = list(self.catalog.requests)
+        viewport = self.drawer._columns["right"].view.viewport()
+        QTest.mouseClick(viewport, Qt.MouseButton.LeftButton, Qt.NoModifier, QPoint(40, 20))
+        self.assertEqual(self.catalog.requests, before)
 
     def test_a_pending_section_shows_loading_until_it_settles(self):
         self.catalog.loaded = False  # no groups yet
@@ -256,6 +285,15 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.highlighted().key, "Home")
         self.assertEqual(self.drawer.message_for("right"), PROVIDER_ERROR_TEXT)
         self.drawer.activate()
+        self.assertEqual(self.catalog.selected, ["Home"])
+
+    def test_a_click_on_the_connect_notice_retries(self):
+        self.catalog.providerFailed.emit("Home", "Couldn't reach the provider")
+        self.nav.focus_source("Home")
+        self.drawer.open_drawer()
+        self.assertEqual(self.drawer.message_for("right"), PROVIDER_ERROR_TEXT)
+        viewport = self.drawer._columns["right"].view.viewport()
+        QTest.mouseClick(viewport, Qt.MouseButton.LeftButton, Qt.NoModifier, QPoint(40, 20))
         self.assertEqual(self.catalog.selected, ["Home"])
 
     def test_enter_on_the_connect_row_retries(self):
@@ -451,6 +489,30 @@ class DrawerTests(unittest.TestCase):
         self.click(self.drawer.settings_gear_rect().center())
         self.assertEqual(self.actions, [SETTINGS_ROW])
 
+    def test_the_sources_have_a_title_and_a_rule_above_their_action_rows(self):
+        drawn, elided = [], drawer_module.elided
+
+        def spy(p, text, width):
+            drawn.append(text)
+            return elided(p, text, width)
+
+        col = self.open_on_the_sources()
+        with mock.patch.object(drawer_module, "elided", spy):
+            self.drawer.grab()
+        self.assertIn("Providers", drawn)  # the column's title, where a path has its names
+        settings = next(r for r, n in enumerate(col.nodes) if n.key == SETTINGS_ROW)
+        rect = col.view.visualRect(col.model.index(settings))
+        image = col.view.viewport().grab().toImage()
+        above = image.pixelColor(rect.center().x(), rect.top())
+        below = image.pixelColor(rect.center().x(), rect.top() + 3)
+        self.assertGreater(above.lightness(), below.lightness())  # the rule
+        drawn.clear()
+        self.nav.reset_to("live", "10")
+        self.drawer.open_drawer("1")  # Home › Live TV: its names instead
+        with mock.patch.object(drawer_module, "elided", spy):
+            self.drawer.grab()
+        self.assertNotIn("Providers", drawn)
+
     # ---- the header row's left end: ‹ back and the names (2.0.1) -----------------------------
 
     def crumb(self, index):
@@ -523,22 +585,55 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual([n.title for n in self.nav.path], ["Home", "Series", "Films"])
         self.assertEqual(self.drawer.highlighted().title, "Films")
 
-    def test_the_names_never_run_under_the_buttons_and_an_elided_head_goes_up(self):
-        self.catalog.provider = "A provider whose name is far too long for the column"
+    def test_a_long_providers_name_keeps_its_start_and_still_switches_provider(self):
+        # Cut from its start ("…o TV") a name is hard to know, and its click went a layer up
+        # only: it keeps its start, ends with "…", and shows the sources as when it is whole.
+        name = "A provider whose name is far too long for the column"
+        self.catalog.provider = name
         self.nav.reset_to("live", "10")
         self.drawer.open_drawer("1")
         d = self.drawer
-        back, search, text = d.back_rect(), d.search_rect(), d.breadcrumb_text_rect()
+        back, library, text = d.back_rect(), d.library_rect(), d.breadcrumb_text_rect()
         self.assertLessEqual(back.right(), text.left())
-        self.assertLessEqual(text.right(), search.left())
+        self.assertLessEqual(text.right(), library.left())  # never under the buttons
         parts = d.breadcrumb_parts()
-        self.assertEqual([i for i, _t, _r in parts], [None, 1])  # the head is elided
-        self.assertTrue(parts[0][1].startswith("…"), parts[0][1])
-        self.assertEqual(parts[1][1], "Live TV")
+        self.assertEqual([i for i, _t, _r in parts], [0, 1])
+        self.assertTrue(name.startswith(parts[0][1][:-1]), parts[0][1])
+        self.assertTrue(parts[0][1].endswith("…"), parts[0][1])
+        self.assertEqual(parts[1][1], "Live TV")  # a short last name stays whole
         for _i, _t, rect in parts:
             self.assertTrue(text.contains(rect), rect)
-        self.click(parts[0][2].center())  # a layer up
-        self.assertEqual([n.layer for n in self.nav.path], ["source", "section"])
+        self.assertEqual(d.tooltip_at(parts[0][2].center()), f"{name}\nChoose another provider")
+        self.click(parts[0][2].center())
+        self.assertEqual([(n.layer, n.key) for n in self.nav.path], [("source", name)])
+
+    def test_the_provider_and_a_long_last_name_share_the_row(self):
+        self.catalog.provider = "A provider whose name is far too long for the column"
+        genre = "A genre whose name is far too long for the column as well"
+        self.catalog.groups = lambda section: [Group(section, "5", genre, None)]
+        self.catalog.movies = {"5": [{"id": "s1", "name": "Show"}]}
+        self.nav.reset_to("series", "5")
+        self.nav.open(self.nav.children(self.nav.path[-1])[0])  # Home › Series › genre › Show
+        self.drawer.open_drawer()
+        parts = self.drawer.breadcrumb_parts()
+        self.assertEqual([i for i, _t, _r in parts], [0, None, 2])
+        self.assertTrue(parts[0][1].endswith("…") and parts[2][1].endswith("…"), parts)
+        first, last = parts[0][2].width(), parts[2][2].width()
+        self.assertGreater(min(first, last), 0.3 * (first + last))  # neither crowds the other
+
+    def test_the_names_between_fold_into_one_that_goes_up(self):
+        self.catalog.provider = "A provider whose name is far too long for the column"
+        self.catalog.movies = {"5": [{"id": "s1", "name": "Show"}]}
+        self.nav.reset_to("series", "5")
+        self.nav.open(self.nav.children(self.nav.path[-1])[0])  # Home › Series › Films › Show
+        self.drawer.open_drawer()
+        d = self.drawer
+        parts = d.breadcrumb_parts()
+        self.assertEqual([i for i, _t, _r in parts], [0, None, 2])
+        self.assertEqual(parts[1][1], "… › ")
+        self.assertLessEqual(d.breadcrumb_text_rect().right(), d.library_rect().left())
+        self.click(parts[1][2].center())  # a layer up
+        self.assertEqual([n.layer for n in self.nav.path], ["source", "section", "group"])
 
     def test_a_click_on_a_name_hands_nothing_to_the_shell(self):
         self.drawer.open_drawer("1")
@@ -1316,6 +1411,39 @@ class FindTests(unittest.TestCase):
         self.type("n")
         channels = [title for layer, title in self.rows() if layer == "item"]
         self.assertEqual(channels[:3], ["Evening News", "Morning News", "Northwind Sport 1"])
+
+    def test_a_long_groups_channels_come_first_from_the_finds_worker(self):
+        # All of every provider: 264,000 channels' keys froze the first letter for 0.3 s on
+        # the GUI thread. A long group's come from the find's worker, with what it finds.
+        scopes = []
+        worker = drawer_module.own_keys
+
+        def counted(items, shown):
+            scopes.append(len(items))
+            return worker(items, shown)
+
+        with (
+            mock.patch.object(drawer_module, "OWN_AT_ONCE", 100),
+            mock.patch.object(navigation_module, "LAZY_ROWS", 100),  # (its rows made on demand)
+            mock.patch.object(drawer_module, "own_keys", counted),
+        ):
+            self.nav.reset_to("live", "Sports")  # 300 channels: long here
+            self.drawer.open_drawer()
+            self.type("n")
+            channels = [title for layer, title in self.rows() if layer == "item"]
+            self.assertEqual(scopes, [])  # not made here
+            news = channels.index("Evening News")
+            self.assertEqual(channels[:news], [f"Northwind Sport {n}" for n in range(1, news + 1)])
+            self.assertEqual(channels[news : news + 2], ["Evening News", "Morning News"])
+            self.type("o")  # "no", narrowed: the group's keys are kept
+            channels = [title for layer, title in self.rows() if layer == "item"]
+            self.assertEqual(channels[0], "Northwind Sport 1")
+            self.nav.reset_to("live", "News")  # 2 channels: made here, at once
+            self.drawer.open_drawer()
+            self.type("n")
+            channels = [title for layer, title in self.rows() if layer == "item"]
+            self.assertEqual(channels[:3], ["Evening News", "Morning News", "Northwind Sport 1"])
+            self.assertEqual(set(scopes), {2})  # (a short list's, here)
 
     def test_typing_with_the_focus_on_the_genres_finds_there_too(self):
         self.drawer.left()  # the genre column: no ← first, no filter of that column alone

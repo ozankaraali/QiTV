@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import logging
 from typing import Any, Iterable, Optional
 
-from services.epg_time import parse_stb, parse_xmltv, parse_xmltv_naive
+from services.epg_time import parse_stb, parse_xmltv_local
 from services.i18n import tr
 
 logger = logging.getLogger(__name__)
@@ -90,18 +90,16 @@ def _text(value: Any) -> str:
 
 
 def _aware(moment: datetime) -> datetime:
-    # Naive times (STB portals, offset-less XMLTV) are local wall-clock times.
+    # Naive times (STB portals; offset-less XMLTV, see parse_xmltv_local) are local
+    # wall-clock times.
     return moment if moment.tzinfo else moment.astimezone()
 
 
 def _parse_xmltv_time(value: Any) -> Optional[datetime]:
-    text = str(value).strip()
-    for parse in (parse_xmltv, parse_xmltv_naive):
-        try:
-            return _aware(parse(text))
-        except ValueError:
-            continue
-    return None
+    try:
+        return parse_xmltv_local(str(value))  # without an offset: local wall-clock time
+    except ValueError:
+        return None
 
 
 def _parse_stb_time(value: Any) -> Optional[datetime]:
@@ -238,9 +236,10 @@ def programmes_for_channel(
 ) -> list[Programme]:
     """The channel's timeline (see timeline) without what has ended by `now` (the guide's grid
     passes its window's start), oldest first, moved by its provider's guide time offset (the
-    manager's `guide_offset`); [] if the EPG is unavailable."""
+    manager's `guide_offset`); [] if the EPG is unavailable. A `now` in the past is asked of
+    the manager: its list window starts there then, not at the present."""
     try:
-        raw = epg_manager.get_programs_for_channel(channel)
+        raw = epg_manager.get_programs_for_channel(channel, since=now)
         offset_of = getattr(epg_manager, "guide_offset", None)
         offset = offset_of() if callable(offset_of) else None
         if not isinstance(offset, timedelta):

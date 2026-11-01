@@ -14,7 +14,15 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QFont, QFontMetrics, QFontMetricsF, QMouseEvent, QPainter, QPixmap
+from PySide6.QtGui import (
+    QFont,
+    QFontMetrics,
+    QFontMetricsF,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPixmap,
+)
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QStyle, QStyledItemDelegate
 
 from services.catalog import shown_label
@@ -43,6 +51,24 @@ LogoRole = Qt.UserRole + 2
 NowRole = Qt.UserRole + 3
 ProgressRole = Qt.UserRole + 4
 ProviderRole = Qt.UserRole + 5  # the provider's name, in the lists that mix providers
+PlayingRole = Qt.UserRole + 6  # the channel playing (a small accent ▶ before its name)
+
+
+def draw_playing_mark(p: QPainter, x: float, center_y: float, size: float) -> float:
+    """The playing channel's small accent ▶, `size` high, from `x`; the width it takes."""
+    path = QPainterPath()
+    half = size / 2
+    path.moveTo(x, center_y - half)
+    path.lineTo(x + size * 0.87, center_y)
+    path.lineTo(x, center_y + half)
+    path.closeSubpath()
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.setPen(Qt.NoPen)
+    p.setBrush(qcolor(PALETTE.accent))
+    p.drawPath(path)
+    p.restore()
+    return size * 0.87
 
 
 def tag_font(units) -> QFont:
@@ -92,6 +118,7 @@ class ChannelRowsModel(QAbstractListModel):
     NowRole = NowRole
     ProgressRole = ProgressRole
     ProviderRole = ProviderRole
+    PlayingRole = PlayingRole
 
     def __init__(
         self,
@@ -102,6 +129,8 @@ class ChannelRowsModel(QAbstractListModel):
         super().__init__(parent)
         self._logos = logos
         self._now_provider = now_provider
+        # The channel playing large (None: none), asked at each paint: its row has a ▶.
+        self.playing: Callable[[], dict | None] = lambda: None
         self._items: list[dict] = []
         self._numbers: Sequence[str | None] | None = None
         self.show_provider = False  # rows name their provider (a list that mixes providers)
@@ -187,6 +216,8 @@ class ChannelRowsModel(QAbstractListModel):
             return self._numbers[row] if self._numbers is not None else item.get("number")
         if role == ProviderRole:
             return provider_of(item) if self.show_provider else ""
+        if role == PlayingRole:
+            return ZapContext.same(item, self.playing())
         if role == NowRole:
             return self._now(row)[0]
         if role == ProgressRole:
@@ -290,6 +321,10 @@ class ChannelRowDelegate(QStyledItemDelegate):
         if has_bar:
             total += gap + bar_h
         y = rect.y() + (rect.height() - total) / 2
+        text_x, text_w = x, width  # the lines under the name start where it would
+        if index.data(PlayingRole):  # the channel playing: a small accent ▶ before its name
+            mark = draw_playing_mark(p, x, y + name_h / 2, 1.0 * u) + 0.6 * u
+            x, width = x + mark, max(0.0, width - mark)
         name_font = units.font(1.6, QFont.Weight.DemiBold)
         p.setFont(name_font)
         p.setPen(qcolor(PALETTE.text))
@@ -319,6 +354,7 @@ class ChannelRowDelegate(QStyledItemDelegate):
                 elided(p, name, width),
             )
         y += name_h
+        x, width = text_x, text_w
         if now:
             p.setFont(units.font(1.25))
             p.setPen(qcolor(PALETTE.text, 0.65))

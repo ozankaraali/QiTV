@@ -6,6 +6,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QWidget
+from test_catchup_playback import ARCHIVED, STATE as ARCHIVED_STATE
 from test_multiview import MIB, MultiviewCase
 from test_tv_controller import (
     BACKUP_TWO,
@@ -17,7 +18,9 @@ from test_tv_controller import (
 from test_tv_pip import MOVIE, PipCase
 from timer_fixtures import wait_until
 
+from services.connection_budget import DENIED
 from services.sessions import Slot
+from services.vlc_profile import PlayKind
 from ui.keymap import Action
 from ui.live_tuner import LiveTuner
 from ui.overlays.question_card import QuestionCard
@@ -440,6 +443,236 @@ class RecSignAndQuitTests(_RecordCase):
         self.start_large(0)
         self.assertFalse(self.controller.asks_before_quit(lambda: None))
         self.assertEqual(self.controller.quit_note(), "")
+
+
+class RewindBesideRecordingTests(_RecordCase):
+    """A rewind past the buffer (←, ⏮, the bar's dashed part) into the archive of the channel
+    that records large opens it as the guide's "Watch from the start" does: the recording
+    goes on in the background, or QiTV asks first when no stream is free; never stopped
+    unasked (the archive plays directly: one-stream accounts never play it through the
+    buffer while it records)."""
+
+    def overlays(self, column):
+        overlays = super().overlays(column)
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.question = QuestionCard(self.host)
+        overlays.question = self.question
+        return overlays
+
+    def setUp(self):
+        super().setUp()
+        self.channels = [ARCHIVED, *CHANNELS[1:]]
+        self.catalog.live["10"] = self.channels
+
+    def record_archived(self):
+        self.controller.tune(ARCHIVED, group_key="10", channels=self.channels)
+        self.ready(ARCHIVED["cmd"])
+        live = self.controller.live
+        self.assertTrue(wait_until(lambda: len(live.named("start")) == 1))
+        live.play_pipeline()
+        live.timelineChanged.emit(dict(ARCHIVED_STATE))
+        self.assertTrue(live.start_recording("/tmp/x.ts"))
+        return live
+
+    @staticmethod
+    def archive_plays(slot):
+        return [url for url, kw in slot.playback.plays if kw.get("kind") is PlayKind.VOD_STREAM]
+
+    def test_it_records_on_in_the_background(self):
+        recording = self.record_archived()
+        links = len(self.catalog.links)
+        self.controller.handle(Action.SEEK_BACK)  # 10 s back from 5 s after the buffer's start
+        self.assertEqual(len(self.catalog.links), links + 1)  # its link, as the guide's start
+        self.ready(ARCHIVED["cmd"])
+        self.assertTrue(recording.recording())
+        self.assertNotIn(("stop",), self.since_recording(recording))
+        self.assertEqual([s.name for s in self.sessions.background()], ["main"])
+        stand_in = self.sessions.large()
+        self.assertEqual(stand_in.name, "b1")
+        [url] = self.archive_plays(stand_in)
+        self.assertIn("/timeshift/viewer/secret/", url)
+        self.assertEqual(sorted(self.budget.holders("Home")), ["b1", "main"])
+
+    def test_with_no_stream_free_it_asks_first(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+        recording = self.record_archived()
+        links = len(self.catalog.links)
+        self.controller.handle(Action.SEEK_BACK)
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.assertEqual(
+            self.question.question(),
+            "No stream is free: Harbour News is recording. Stop the recording?",
+        )
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertTrue(recording.recording())
+        self.assertNotIn(("stop",), self.since_recording(recording))
+        self.controller.handle(Action.SEEK_FWD)  # to Stop recording
+        self.controller.handle(Action.OK)
+        self.assertIn(("stop_recording",), recording.calls)
+        self.assertEqual(recording.calls[-1], ("stop",))  # then the archive takes its stream
+        recording.released.emit()
+        [url] = self.archive_plays(self.sessions.large())
+        self.assertIn("/timeshift/viewer/secret/", url)
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+
+SCHEDULED = "sched:a@1"  # a scheduled recording's REC sign name, its stream's budget purpose
+SCHEDULED_CHANNEL = {**CHANNELS[2], "_provider": "Home"}
+
+
+class ScheduledRecordingQuestionTests(_RecordCase):
+    """Audit 1b, 1d: a recording on schedule (no player: a stream of its own) is asked about as
+    a player's is: before a tune needs its stream, before Go back to its channel, at Quit."""
+
+    def overlays(self, column):
+        overlays = super().overlays(column)
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.question = QuestionCard(self.host)
+        overlays.question = self.question
+        return overlays
+
+    def setUp(self):
+        super().setUp()
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+        # As RecordingScheduler holds it: under its REC sign name, no player of its own.
+        self.ticket = self.budget.request("Home", 1, purpose=SCHEDULED, queue=False)
+        self.stopped = []
+        self.controller.scheduled_now = lambda: (
+            [(SCHEDULED, "Three", 5.0, SCHEDULED_CHANNEL)] if self.ticket is not None else []
+        )
+        self.controller.stop_scheduled = self.stopped.append
+
+    def scheduler_lets_go(self):
+        """Its airing stopped: its session closed, its stream goes back (sessionClosed)."""
+        ticket, self.ticket = self.ticket, None
+        self.budget.release(ticket)
+
+    def test_a_tune_asks_to_stop_it_and_tunes_once_its_stream_is_back(self):
+        links = len(self.catalog.links)
+        self.tune(1)
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.assertEqual(
+            self.question.question(), "No stream is free: Three is recording. Stop the recording?"
+        )
+        self.assertEqual(len(self.catalog.links), links)  # nothing asked of the provider yet
+        self.controller.handle(Action.SEEK_FWD)  # to Stop recording
+        self.controller.handle(Action.OK)
+        self.assertEqual(self.stopped, [SCHEDULED])
+        self.assertEqual(len(self.catalog.links), links)  # its stream is not back yet
+        self.scheduler_lets_go()
+        self.assertEqual(self.requested()[-1], "Two")
+
+    def test_keep_recording_tunes_nothing(self):
+        links = len(self.catalog.links)
+        self.tune(1)
+        self.controller.handle(Action.OK)  # Keep recording, focused first
+        self.assertEqual(self.stopped, [])
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertNotIn(
+            ("Your provider allows 1 stream at a time", "error"), self.toast.messages()
+        )
+
+    def test_go_back_to_its_channel_asks_too(self):
+        self.controller.go_back_to_recording(SCHEDULED)
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.controller.handle(Action.SEEK_FWD)
+        self.controller.handle(Action.OK)
+        self.scheduler_lets_go()
+        self.assertEqual(self.requested()[-1], "Three")
+
+    def test_quit_asks_and_leaves_it_to_the_scheduler(self):
+        quits = []
+        self.assertEqual(
+            self.controller.quit_note(), "Three is recording. Quit and stop the recording?"
+        )
+        self.assertTrue(self.controller.asks_before_quit(lambda: quits.append(True)))
+        self.assertEqual(
+            self.question.question(), "Three is recording. Quit and stop the recording?"
+        )
+        self.controller.handle(Action.SEEK_FWD)  # to Quit
+        self.controller.handle(Action.OK)
+        self.assertEqual(quits, [True])
+        # Its shutdown keeps what it recorded and the rest for a QiTV opened while it airs.
+        self.assertEqual(self.stopped, [])
+
+    def test_quit_counts_it_with_a_players_recording(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 3}
+        self.record_large(0)
+        self.assertEqual(
+            self.controller.quit_note(), "2 channels are recording. Quit and stop the recordings?"
+        )
+
+
+class PhoneStreamTests(_RecordCase):
+    """2.8.12: what a phone's Watch plays holds one of its provider's streams, as the large
+    picture's own play does, until the TV plays again: a scheduled recording coming due
+    meanwhile finds none free. A player outside QiTV (VLC) holds none: QiTV can't tell what it
+    does (the owner)."""
+
+    def setUp(self):
+        super().setUp()
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+        self.launched = []
+
+    def launch(self, target, url):
+        self.launched.append(url)
+        return True, ""
+
+    def target(self, index):
+        from ui.link_lanes import Target
+
+        channel = CHANNELS[index]
+        return Target(channel, "live", channel["name"], group_key="10")
+
+    def watch_on_phone(self, index, launch=None):
+        """Channel `index` handed to a phone (nothing plays here before)."""
+        self.controller.play_elsewhere(launch or self.launch, self.target(index))
+        self.ready(f"http://stream/{CHANNELS[index]['id']}")
+
+    def scheduled_due(self):
+        """RecordingScheduler._attempt's ask: never queued."""
+        return self.budget.request("Home", 1, purpose="sched:a@1", queue=False)
+
+    def test_a_scheduled_recording_finds_no_stream_while_a_phone_watches(self):
+        self.watch_on_phone(1)
+        self.assertEqual(self.launched, ["http://stream/2"])
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.assertEqual(self.scheduled_due(), DENIED)
+
+    def test_the_tv_playing_again_takes_that_stream_over(self):
+        self.watch_on_phone(1)
+        self.start_large(2)
+        self.assertEqual(self.budget.holders("Home"), ["main"])  # one stream, the TV's
+        self.assertEqual(self.controller.live.named("start")[-1][0], "http://stream/3")
+
+    def test_a_newer_phone_watch_holds_one_in_its_place(self):
+        self.watch_on_phone(1)
+        self.watch_on_phone(2)
+        self.assertEqual(self.launched, ["http://stream/2", "http://stream/3"])
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_one_that_failed_to_start_holds_none(self):
+        self.watch_on_phone(1, launch=lambda target, url: (False, "The phone left."))
+        self.assertEqual(self.budget.holders("Home"), [])
+
+    def test_a_player_outside_qitv_holds_none(self):
+        self.watch_on_phone(1)
+        self.controller._play_external(
+            self.target(2), "http://stream/3", lambda url, **_: (True, "")
+        )
+        self.ready("http://stream/3")
+        self.assertEqual(self.budget.holders("Home"), [])  # VLC: what it does is its own
+
+    def test_a_recordings_file_holds_none(self):
+        from ui.link_lanes import Target
+
+        recording = {"path": "/rec/a.ts", "_recording": True, "name": "A"}
+        target = Target(recording, "movies", "A", local=True)
+        self.controller.play_elsewhere(self.launch, target, recordings=True)
+        self.assertEqual(self.launched[-1], "file:///rec/a.ts")
+        self.assertEqual(self.budget.holders("Home"), [])
 
 
 class RecordGuardWiringTests(_RecordCase):

@@ -14,12 +14,27 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import logging
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import orjson as json
 
 from services.atomic_write import atomic_write
 from services.redact import safe_message
+
+
+def rekeyed(entries: Mapping[str, Any], keys: Mapping[str, str]) -> Optional[dict[str, Any]]:
+    """`entries` with each key of `keys` moved to its new key, in their order (a moved entry
+    takes the place of one already under the new key); None when nothing moves."""
+    if not keys or not any(key in keys for key in entries):
+        return None
+    targets = {keys[key] for key in entries if key in keys}
+    out: dict[str, Any] = {}
+    for key, value in entries.items():
+        if key in keys:
+            out[keys[key]] = value
+        elif key not in targets:
+            out[key] = value
+    return out
 
 
 class ChannelStore:
@@ -56,6 +71,20 @@ class ChannelStore:
 
     def _trim(self) -> None:
         raise NotImplementedError
+
+    def rekey(self, keys: dict[str, str]) -> int:
+        """Entries moved to new keys (`keys`: old -> new; a renamed provider's channels,
+        `services.provider_rename`); how many moved (written then)."""
+        moved = rekeyed(self._entries, keys)
+        if moved is None:
+            return 0
+        count = sum(1 for key in self._entries if key in keys)
+        self._entries = moved
+        self._save()
+        return count
+
+    def keys(self) -> set[str]:
+        return set(self._entries)
 
     def flush(self, timeout: float = 5.0) -> None:
         """Wait for the writes asked for so far (tests; at exit the pool waits by itself)."""

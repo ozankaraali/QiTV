@@ -8,7 +8,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QStyleOptionViewItem, QWidget
 from job_fixtures import ImmediateRunner
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config, shut_hub
 from test_browsed_catalog import FakeEpg, ScriptedFactory
@@ -19,7 +19,14 @@ from services.browsed_catalog import BrowsedCatalog
 from services.catalog import ALL_GROUP_ID
 from services.catalogs import Catalogs
 from services.m3u import parse_m3u
-from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode, item_key
+from services.navigation import (
+    FAVORITES_GROUP,
+    RECENT_GROUP,
+    NavModel,
+    NavNode,
+    item_key,
+    payloads,
+)
 from services.provider_ids import (
     ALL_PROVIDERS,
     ALL_PROVIDERS_TITLE,
@@ -317,6 +324,108 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertEqual(config.watch_history[0]["item_data"], {"id": 5, "name": "Demo 5"})
         self.assertFalse(nav.shows_provider(recent))  # one provider: nothing to tell apart
 
+    # ---- ★ Favorites follow the user, not the provider shown -----------------------------------
+
+    def star(self, provider, item_id, name):
+        from services import favorites
+
+        favorites.toggle(self.config, with_provider({"id": item_id, "name": name}, provider))
+
+    def browse(self, provider):
+        """The channel list on one provider, its live groups open."""
+        self.nav.open(next(n for n in self.nav.children(None) if n.key == provider))
+        self.nav.reset_to("live")
+        return self.nav.children(self.nav.path[-1])
+
+    def favorite_rows(self, groups):
+        group = next(n for n in groups if n.key == FAVORITES_GROUP)
+        rows = self.nav.children(group)
+        return group, [
+            (n.layer, provider_of(n.payload) if n.payload else "", n.title) for n in rows
+        ]
+
+    def test_favorites_list_the_shown_providers_stars_then_the_others(self):
+        self.open_all()  # both providers' lists are loaded
+        self.star("Harbor IPTV", 5, "Harbor 5")
+        self.star("Demo TV", 3, "Demo 3")
+        group, rows = self.favorite_rows(self.browse("Demo TV"))
+        self.assertEqual(
+            rows,
+            [
+                ("item", "Demo TV", "Demo 3"),
+                ("header", "", "Other providers"),
+                ("item", "Harbor IPTV", "Harbor 5"),
+            ],
+        )
+        self.assertEqual(group.count, 2)
+        self.assertTrue(self.nav.shows_provider(group))  # each row names its provider
+        # Zapping in ★ Favorites follows its rows (the label is no channel).
+        channels = payloads(self.nav.children(group))
+        self.assertEqual([c["name"] for c in channels], ["Demo 3", "Harbor 5"])
+        _group, rows = self.favorite_rows(self.browse("Harbor IPTV"))
+        self.assertEqual([r[2] for r in rows], ["Harbor 5", "Other providers", "Demo 3"])
+
+    def test_favorites_show_the_others_stars_when_the_shown_provider_has_none(self):
+        self.star("Harbor IPTV", 5, "Harbor 5")
+        self.config.watch_history = [  # Harbor's list is not loaded: as last watched there
+            {
+                "provider_name": "Harbor IPTV",
+                "item_type": "channel",
+                "item_data": {"id": 5, "name": "Harbor 5", "cmd": "http://h.test/5"},
+            }
+        ]
+        group, rows = self.favorite_rows(self.browse("Demo TV"))
+        self.assertEqual(
+            rows, [("header", "", "Other providers"), ("item", "Harbor IPTV", "Harbor 5")]
+        )
+        self.assertEqual(group.count, 1)
+
+    def test_all_providers_and_one_provider_list_the_favorites_as_before(self):
+        self.star("Harbor IPTV", 5, "Harbor 5")
+        self.star("Demo TV", 3, "Demo 3")
+        _group, rows = self.favorite_rows(self.live_groups())  # All providers: no label
+        self.assertEqual(rows, [("item", "Demo TV", "Demo 3"), ("item", "Harbor IPTV", "Harbor 5")])
+        config, _view, nav = self.build([DEMO], {"Demo TV": demo_content()})
+        config.favorites = ["Demo 3"]
+        nav.open(nav.children(None)[0])
+        nav.reset_to("live")
+        group = next(n for n in nav.children(nav.path[-1]) if n.key == FAVORITES_GROUP)
+        self.assertEqual([(n.layer, n.title) for n in nav.children(group)], [("item", "Demo 3")])
+
+    def test_the_channel_list_shows_the_label_as_a_heading_and_marks_what_plays(self):
+        self.open_all()
+        self.star("Harbor IPTV", 5, "Harbor 5")
+        self.star("Demo TV", 3, "Demo 3")
+        groups = self.browse("Demo TV")
+        drawer = self.drawer()
+        self.nav.open(next(n for n in groups if n.key == FAVORITES_GROUP))
+        drawer.open_drawer()
+        col = drawer._columns["right"]
+        self.assertEqual([n.layer for n in col.nodes], ["item", "header", "item"])
+        self.assertEqual(col.current.title, "Demo 3")
+        playing = col.nodes[2].payload
+        drawer.set_playing(lambda: playing)
+        model = col.view.model()
+        marked = [bool(model.index(r).data(ChannelRowsModel.PlayingRole)) for r in range(3)]
+        self.assertEqual(marked, [False, False, True])
+        delegate = col.view.itemDelegate()
+        option = QStyleOptionViewItem()
+        option.widget = col.view
+        label = delegate.sizeHint(option, model.index(1)).height()
+        self.assertLess(label, delegate.sizeHint(option, model.index(0)).height())
+
+    # ---- a provider of films and series only --------------------------------------------------
+
+    def test_a_provider_without_live_channels_has_no_heading_in_all_providers(self):
+        _config, _view, nav = self.build(
+            [DEMO, EMPTY_LIST], {"Demo TV": demo_content(), "Empty list": live_content([], {})}
+        )
+        nav.open(nav.children(None)[0])
+        nav.reset_to("live")
+        QTest.qWait(10)
+        headings = [n.title for n in nav.children(nav.path[1]) if n.layer == "header"]
+        self.assertEqual(headings, ["Demo TV"])
+
     # ---- where a channel names its provider ------------------------------------------------------
 
     def test_the_mixed_lists_show_their_providers_names(self):
@@ -473,7 +582,7 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertEqual([n.title for n in self.rows_under(nav, "Empty list")], ["Loading…"])
         runner.release("Empty list")  # set up: its playlist has no channels
         QTest.qWait(10)
-        self.assertEqual(self.rows_under(nav, "Empty list"), [])
+        self.assertNotIn("Empty list", self.headings(nav))  # no heading over nothing
         self.assertEqual([n.layer for n in self.rows_under(nav, "Harbor IPTV")][:1], ["notice"])
 
     def test_a_provider_set_up_while_anothers_list_downloads_is_asked_for_its_own(self):
@@ -494,7 +603,7 @@ class MixedNavigationTests(unittest.TestCase):
         QTest.qWait(10)
         runner.release("Demo TV")
         QTest.qWait(10)
-        self.assertEqual(self.rows_under(nav, "Empty list"), [])
+        self.assertNotIn("Empty list", self.headings(nav))  # asked, and without channels
         self.assertIn("News", [n.title for n in nav.children(nav.path[1])])
 
     def test_sections_refused_in_all_mode_do_not_outlive_it(self):
@@ -510,6 +619,10 @@ class MixedNavigationTests(unittest.TestCase):
         nav.open(nav.children(None)[1])  # leaves All for one provider
         QTest.qWait(10)
         self.assertEqual(nav._refused_sections, set())
+
+    @staticmethod
+    def headings(nav):
+        return [n.title for n in nav.children(nav.path[1]) if n.layer == "header"]
 
     @staticmethod
     def rows_under(nav, provider):

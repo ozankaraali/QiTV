@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -125,6 +126,34 @@ class RecordingsListTests(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertEqual(shelf.items(), [])
 
+    def test_a_file_that_cannot_go_says_why_and_stays_listed(self):
+        # Windows refuses to delete a file another program (a player) has open.
+        path = touch(self.folder, "News 2026-10-19 21.30.ts")
+        in_use = PermissionError(13, "The process cannot access the file")
+        setattr(in_use, "winerror", 32)  # ERROR_SHARING_VIOLATION (a Windows error)
+        denied = PermissionError(13, "Access is denied")
+        for error, words in ((in_use, "open in another program"), (denied, "Access is denied")):
+            with self.subTest(words):
+                shelf = RecordingsList(self.config)
+                shelf.refresh()
+                self.wait_for(shelf, 0)
+                said = []
+                shelf.delete_failed.connect(said.append)
+                with (
+                    mock.patch.object(recordings_list.os, "remove", side_effect=error),
+                    self.assertLogs("services.recordings_list", "WARNING"),
+                ):
+                    shelf.delete(str(path))
+                    deadline = time.monotonic() + 5
+                    while not said and time.monotonic() < deadline:
+                        app.processEvents()
+                        time.sleep(0.01)
+                self.assertEqual(len(said), 1)
+                self.assertIn("“News 2026-10-19 21.30.ts”", said[0])
+                self.assertIn(words, said[0])
+                self.assertTrue(path.exists())
+                self.assertEqual(len(shelf.items()), 1)
+
     def test_a_recording_still_being_written_is_not_deleted(self):  # 2.8 review M10
         path = touch(self.folder, "News 2026-10-19 21.30.ts")
         shelf = RecordingsList(self.config, writing=lambda: {str(path)})
@@ -172,6 +201,11 @@ class RecordingsListTests(unittest.TestCase):
         self.assertTrue(shelf.items()[0]["_scheduled"])
         self.assertEqual(shelf.items()[1]["_item_id"], "b2")
         self.assertEqual(names[2], "News")
+        # 2.8.12: the Library's strip shows a programme's time where Play is; a series none.
+        start = recordings_list.short_when(1_800_000_000.0)
+        self.assertEqual(shelf.items()[0]["_when"], start)
+        self.assertRegex(start, r"\d{2}:\d{2}$")
+        self.assertEqual(shelf.items()[1]["_when"], "")
 
     def test_a_timer_says_its_time_and_days(self):  # 2.8 (owner): recorded at a time
         from PySide6.QtCore import QLocale
@@ -191,6 +225,7 @@ class RecordingsListTests(unittest.TestCase):
         )
         items = {i["_item_id"]: i for i in shelf.items()}
         self.assertEqual(items["t1"]["name"], "21:00–22:30")  # no name: its time
+        self.assertEqual(items["t2"]["_when"], "21:00–22:30")  # on the strip, where Play is
         self.assertEqual(items["t2"]["name"], "Late film")
         self.assertEqual(items["t1"]["description"], "Records Two 21:00–22:30, every day")
         self.assertEqual(items["t2"]["description"], "Records Two 21:00–22:30, Monday to Friday")

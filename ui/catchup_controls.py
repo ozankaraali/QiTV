@@ -34,7 +34,10 @@ moment ago), and an archive that plays opens again once.
 The archive plays in the large picture's player as an on-demand stream through the tuner's
 `open(direct=True)`: the live stream is stopped first and its connection released before
 the archive's opens (the budget's slot passes from one to the other), so a 1-stream account
-never has both. Go live (L, the chip) tunes the channel again (`request`), which opens its
+never has both. A rewind's that would open there while the channel records (stopping the live
+stream would stop the recording) opens as the guide's "Watch from the start" does instead
+(`beside_recording`): the recording goes on in the background, or QiTV asks first when no
+stream is free. Go live (L, the chip) tunes the channel again (`request`), which opens its
 live stream once the archive's is let go (the tuner stops the archive first, an archive
 still waiting to open included). While it plays, the transport shows its own bar
 (`timeline`): timeline seconds are Unix seconds, from `EXTEND_S` before the moment asked (at
@@ -144,6 +147,7 @@ class _Ask:
     programme: str = ""  # an STB portal's: the programme whose recording plays (its guide id)
     fresh: bool = False  # an STB portal's: its link was made again after a new sign-in
     link: str = ""  # the channel's live link, its addresses' base when its item has no cmd
+    until: Optional[float] = None  # the end asked for (a programme's), as `open` took it
 
 
 @dataclass
@@ -176,6 +180,7 @@ class CatchUp(QObject):
         limit: Callable[[dict], Optional[int]],
         prepare: Callable[[Any, Target], None] = lambda session, target: None,
         allowed: Callable[[], bool] = lambda: True,
+        beside_recording: Optional[Callable[[Target, float, Optional[float]], None]] = None,
         runner: Any = None,
         lanes: Any = None,
         clock: Callable[[], float] = time.monotonic,
@@ -186,7 +191,10 @@ class CatchUp(QObject):
         provider's streams at a time (None: no limit); `prepare(session, target)` readies the
         player for the channel (its sound sync) before the archive opens there; `lanes` (the
         LinkLanes) asks an STB portal for its recordings' links (None: STB archives don't
-        open)."""
+        open). `beside_recording(target, moment, until)` opens a rewind's archive as the
+        guide's "Watch from the start" does while the large picture's channel records (its
+        recording goes on in the background, or QiTV asks when no stream is free; None: it
+        opens here, as before)."""
         super().__init__(parent)
         self._tuner, self._session = tuner, session
         self.catalog = catalog
@@ -199,6 +207,7 @@ class CatchUp(QObject):
         self._limit = limit
         self._prepare = prepare
         self._allowed = allowed
+        self._beside_recording = beside_recording
         self._runner = runner if runner is not None else JobRunner(self)
         self._lanes = lanes
         self._clock = clock
@@ -435,6 +444,7 @@ class CatchUp(QObject):
             guessed,
             retried,
             link=link,
+            until=until,
         )
 
     # ---- an STB portal's recordings --------------------------------------------------------
@@ -457,6 +467,8 @@ class CatchUp(QObject):
         begins, ends = recording.start.timestamp(), recording.stop.timestamp()
         ask = _Ask(target, archive, key, moment, begins, ends, [], live_playing, False, retried)
         ask = replace(ask, programme=recording.id)
+        if self._open_beside(ask):
+            return True  # its link is asked for there (never through the buffer anyway)
         linking = self._linking
         if linking is not None and linking.key == key and linking.programme == recording.id:
             # Its link is on its way: it serves this newer moment (← held down asks once).
@@ -649,8 +661,28 @@ class CatchUp(QObject):
         self._toast(translate(ARCHIVE_TEXT))
         return True
 
+    def _open_beside(self, ask: _Ask) -> bool:
+        """A rewind's archive (the live stream plays meanwhile) that would open here while
+        the channel records would stop the recording with its live stream: it opens as the
+        guide's "Watch from the start" does instead (`beside_recording`). True when it
+        went there."""
+        if not ask.live_playing or self._beside_recording is None or not self._records():
+            return False
+        logger.info("Opening the archive of %s beside its recording", ask.target.title)
+        self._beside_recording(ask.target, ask.moment, ask.until)
+        return True
+
+    def _records(self) -> bool:
+        """The large picture's live session records (2.2)."""
+        live = getattr(self._tuner, "live", None)
+        recording = getattr(live, "recording", None)
+        return bool(recording()) if recording is not None else False
+
     def _play_direct(self, ask: _Ask, form: int, *, probed: bool) -> None:
-        """Open the archive in the large picture once the stream before it is let go."""
+        """Open the archive in the large picture once the stream before it is let go (a
+        rewind's beside a recording: `_open_beside`)."""
+        if self._open_beside(ask):
+            return
         url = ask.urls[form]
         target, session = ask.target, self._session
         offset_ms = int(round((ask.moment - ask.begins) * 1000))

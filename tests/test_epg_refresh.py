@@ -181,9 +181,9 @@ class EpgRefreshTests(_GuideCase):
         seen = []
         real_load = manager._load_cached_epg
 
-        def load_cached(cache_key):
+        def load_cached(cache_key, touch=True):
             seen.append(self.titles(manager))
-            return real_load(cache_key)
+            return real_load(cache_key, touch)
 
         with patch.object(manager, "_load_cached_epg", side_effect=load_cached):
             manager.set_current_epg()  # not expired: reloads the saved guide
@@ -293,12 +293,42 @@ class EpgRefreshTests(_GuideCase):
         self.assertEqual(restarted.index[self.key]["last_access"], checked)
 
     # --- unchanged: no previous guide, or another source -----------------------------------
-    def test_a_failure_without_any_guide_marks_the_source_unavailable(self):
+    def test_a_failure_without_any_guide_is_tried_again_after_its_back_off(self):
+        # Before 2.8.12 it marked the source as having no guide: never asked again, not by
+        # the window's refresh nor after a restart.
         manager = self.manager()
         with patch("services.epg_manager.requests.get", side_effect=failing):
             manager.set_current_epg()
-        self.assertIsNone(manager.index[self.key])
+        self.assertNotIn(self.key, manager.index)
         self.assertEqual(self.titles(manager), [])
+        clock = [time.monotonic()]
+        with (
+            patch("services.epg_manager._monotonic", lambda: clock[0]),
+            patch("services.epg_manager.requests.get", side_effect=failing) as get,
+        ):
+            manager.set_current_epg()  # a load right after (a provider set up again): waits
+            self.assertEqual(get.call_count, 0)
+            clock[0] += epg_manager_module._RETRY_FIRST_S  # the window's next refresh
+            manager.set_current_epg()
+            self.assertGreater(get.call_count, 0)
+            asked = get.call_count
+            clock[0] += epg_manager_module._RETRY_FIRST_S  # it failed again: twice as long
+            manager.set_current_epg()
+            self.assertEqual(get.call_count, asked)
+        with patch("services.epg_manager.requests.get", side_effect=serving(xmltv("Back"))):
+            restarted = self.manager()  # a restart tries it at once
+            restarted.set_current_epg()
+        self.assertEqual(self.titles(restarted), ["Back"])
+
+    def test_a_source_older_builds_marked_as_having_no_guide_is_asked_again(self):
+        first = self.manager()
+        first.index[self.key] = None  # what 2.8.11 and older saved after a failed load
+        first.save_index()
+        with patch("services.epg_manager.requests.get", side_effect=serving(xmltv("Back"))):
+            restarted = self.manager()
+            restarted.set_current_epg()
+        self.assertEqual(self.titles(restarted), ["Back"])
+        self.assertIsInstance(restarted.index[self.key], dict)
 
     def test_another_providers_guide_is_not_kept(self):
         manager = self.manager()
@@ -342,13 +372,15 @@ class SourceTests(_GuideCase):
                 manager = self.manager()
                 self.assertEqual(manager._source(), (kind, key, args))
                 manager.set_current_epg()
-                manager.index[key] = None  # a source without a guide is not fetched again
+                # 2.8.11 and older marked a failed load so: fetched again, as never loaded
+                manager.index[key] = None
                 manager.set_current_epg()
-                manager.force_refresh_current_epg()  # unless asked to
+                manager.force_refresh_current_epg()
                 # A URL's fetch also gets how many guides of it were stored when the load began
                 # (None: when the fetch begins).
                 seen, now = ((0,), (None,)) if kind == "url" else ((), ())
-                self.assertEqual(self.fetched, [(kind, args + seen), (kind, args + now)])
+                fetches = [(kind, args + seen), (kind, args + seen), (kind, args + now)]
+                self.assertEqual(self.fetched, fetches)
                 self.fetched.clear()
 
     def test_without_a_source_nothing_is_fetched(self):
@@ -665,6 +697,34 @@ class SharedUrlGuideTests(_GuideCase):
             second.set_current_epg()
         self.assertEqual(get.call_count, 1)
         self.assertEqual(self.titles(second), ["New"])
+
+
+class UrlGuideOfflineTests(_GuideCase):
+    """A URL guide saved before, at a start while its server can't be reached (offline, or
+    slower than the check's 5 s): its saved guide shows, as a provider's does, and the server
+    is checked behind it (2.8.12: the check ran first, and its error left no guide at all)."""
+
+    def setUp(self):
+        super().setUp()
+        self.config.epg_source = "URL"
+        self.config.epg_url = "http://127.0.0.1:9/guide.xml"
+        self.key = _cache_key(self.config.epg_url)
+
+    def test_the_saved_guide_shows_and_is_checked_again_next_time(self):
+        first = self.manager()
+        self.load(first)
+        old = (datetime.now() - timedelta(days=2)).strftime(_INDEX_TIME_FORMAT)
+        first.index[self.key]["last_access"] = old  # its check is due
+        first.save_index()
+        epg_manager_module._STORED.pop(first._where(self.key))  # a new process: none stored
+        restarted = self.manager()
+        shown = []
+        with patch("services.epg_manager.requests.get", side_effect=failing) as get:
+            restarted.set_current_epg(on_shown=lambda: shown.append(self.titles(restarted)))
+        self.assertEqual(get.call_count, 1)  # the check, behind the saved guide
+        self.assertEqual(shown, [["Old"]])
+        self.assertEqual(self.titles(restarted), ["Old"])
+        self.assertEqual(restarted.index[self.key]["last_access"], old)
 
 
 class UrlGuideDateTests(_GuideCase):

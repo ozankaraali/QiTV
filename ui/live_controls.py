@@ -4,12 +4,13 @@ Which live links play through the time-shift pipeline, and with which budget slo
 transport's time-shift controls (seek, speed, Go live, ⏮ to the programme start, the bar's
 programme ticks); and LiveSession's reports: its mode and timeline, its notices (time-shift
 unavailable, once per channel and run) and its failures. An STB channel that fails gets a
-fresh link once per tune (its play token may have expired) before the error shows; a
-refusal for the provider's connection limit is never retried and says so. A live channel
-played directly whose stream ends (an on-demand restream may show a placeholder and end)
-opens again in the same player, so in the same budget slot, twice per tune at most, after
-RECONNECT_MS: "Reconnecting…", and only then "The stream ended"; once it has played for
-HEALTHY_S since it last opened, it may open again twice more.
+fresh link once per tune (its play token may have expired) before the error shows, and once
+more each time that link then played for HEALTHY_S; a refusal for the provider's connection
+limit is never retried and says so. A live channel played directly whose stream ends (an
+on-demand restream may show a placeholder and end) opens again in the same player, so in the
+same budget slot, twice per tune at most, after RECONNECT_MS: "Reconnecting…", and only then
+"The stream ended"; once it has played for HEALTHY_S since it last opened, it may open again
+twice more.
 
 Kept buffers (2.6): coming back to a channel whose buffer was kept, it plays live and the
 session offers where the user was (`LiveSession.backOffered`): the Resume pill
@@ -41,10 +42,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from itertools import compress, count, repeat
 import logging
 import math
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence, cast
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QTimer, SignalInstance
@@ -58,6 +60,7 @@ from services.live import parts as live_parts
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
+from services.playback import PlaybackState
 from services.provider_api import known_http_only, portal_http_only
 from services.vlc_profile import PlayKind
 from ui import item_provider
@@ -66,7 +69,7 @@ from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, LiveTuner
 from ui.overlays.back_notice import LEFT_OFF
 from ui.overlays.painting import fmt_clock
-from ui.overlays.transport import NO_RECORDING, Transport
+from ui.overlays.transport import NO_RECORDING, NOTHING_PLAYING, Transport
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +148,21 @@ def _named(title: str, message: str) -> str:
     return tr("{name}: {message}", name=title, message=message) if title else message
 
 
+def _identities(items: list[dict]) -> dict[str, set[str]]:
+    """What `channel_key` tells each channel by, by field: its address, else its id, else its
+    name (the provider aside)."""
+    found: dict[str, set[str]] = {"cmd": set(), "id": set(), "name": set()}
+    for item in items:
+        cmd = str(item.get("cmd") or "").strip()
+        if cmd:
+            found["cmd"].add(cmd)
+        elif item.get("id") is not None:
+            found["id"].add(str(item["id"]))
+        elif item.get("name"):
+            found["name"].add(str(item["name"]))
+    return found
+
+
 class LiveControls(QObject):
     def __init__(
         self,
@@ -172,6 +190,8 @@ class LiveControls(QObject):
         memory: Optional[CatchupMemory] = None,
         prepare: Callable[[Any, Target], None] = lambda session, target: None,
         archive_allowed: Callable[[], bool] = lambda: True,
+        beside_recording: Optional[Callable[[Target, float, Optional[float]], None]] = None,
+        gave_up: Callable[[], None] = lambda: None,
         runner: Any = None,
         back_notice: Callable[[], Any] = lambda: None,
         on_sizes: Callable[[], None] = lambda: None,
@@ -182,11 +202,15 @@ class LiveControls(QObject):
         direct stream may open again (a multiview tile's checks its provider's slot
         first). Catch-up: `memory` keeps whether each channel's archive answered (None: for
         this run only), `prepare(session, target)` readies the player for a channel before
-        its archive opens, `archive_allowed()` says whether archives may play now, `runner`
-        runs the archive probes (a JobRunner by default). `on_sizes()`: the channel's picture
+        its archive opens, `archive_allowed()` says whether archives may play now,
+        `beside_recording(target, moment, until)` opens a rewind's archive while the channel
+        records (CatchUp's), `runner` runs the archive probes (a JobRunner by default).
+        `gave_up()`: the channel's live session failed for good (said; a multiview's focused
+        tile then stops and shows its card). `on_sizes()`: the channel's picture
         sizes came, or an archive started or ended (2.8: the ⚙ may show or go)."""
         super().__init__(parent)
         self._on_sizes = on_sizes
+        self._gave_up = gave_up
         # 2.8: each channel's picture sizes as last seen this run (by its key), and whether the
         # next place offered is played on at once (a size chosen in the ⚙).
         self._sizes: dict[str, dict] = {}
@@ -222,6 +246,7 @@ class LiveControls(QObject):
         # 2.7: how far back each channel's own server keeps it (seconds, as last seen this
         # run, by the channel's key), and a guide's start waiting for its window to show.
         self._windows: dict[str, float] = {}
+        self._window_items: dict[str, dict] = {}  # the channel each window was seen on
         self._window_seek: Optional[tuple[str, float, float]] = None  # key, moment, asked at
         self._wired = False
         self._reconnects = 0  # reopens of the current tune's ended stream so far
@@ -242,6 +267,7 @@ class LiveControls(QObject):
             limit=self.limit,
             prepare=prepare,
             allowed=archive_allowed,
+            beside_recording=beside_recording,
             runner=runner,
             lanes=lanes,  # an STB portal makes its recordings' links
             parent=self,
@@ -356,6 +382,30 @@ class LiveControls(QObject):
         0.0 when unknown."""
         return self._windows.get(self.catchup.key(Target(channel, "live", "")), 0.0)
 
+    def deepest_window(self, channels: Sequence[dict], beyond: float = 0.0) -> float:
+        """The longest own server window (seconds, as seen this run: 2.7) of any of
+        `channels` when longer than `beyond`, else 0.0. As the longest `window_reach`, without
+        a key (a SHA-256) for each channel of a list (the guide's: up to 264,000): only one with
+        the address, else id, else name of a channel whose window was seen gets one."""
+        longer = {key: seconds for key, seconds in self._windows.items() if seconds > beyond}
+        if not longer:
+            return 0.0
+        seen = [self._window_items.get(key) for key in longer]
+        if any(item is None for item in seen):  # (each window is noted with its channel)
+            return max((r for r in map(self.window_reach, channels) if r > beyond), default=0.0)
+        rows: set[int] = set()
+        for field, values in _identities(cast(list[dict], seen)).items():
+            if values:  # (in C: 264,000 channels in a few tens of milliseconds)
+                texts = map(str, map(dict.get, channels, repeat(field), repeat("")))
+                if field == "cmd":
+                    texts = map(str.strip, texts)
+                rows.update(compress(count(), map(values.__contains__, texts)))
+        best = 0.0
+        for row in rows:
+            key = self.catchup.key(Target(channels[row], "live", ""))
+            best = max(best, longer.get(key, 0.0))
+        return best
+
     def watch_from(self, channel: dict, moment: float) -> bool:
         """The guide's "Watch from the start" within the channel's own server window (2.7):
         the live session plays from `moment` (Unix seconds), at once when the channel plays,
@@ -441,14 +491,13 @@ class LiveControls(QObject):
         self._tuner.tune(self.live_start(target, url), name, self.limit(target.item))
         return True
 
-    def refuse_over_limit(self, target: Target, *, direct: bool = False) -> bool:
+    def refuse_over_limit(self, target: Target) -> bool:
         """Other players' streams (picture in picture, tiles) take the whole limit of
-        `target`'s provider: True, the toast says so and the running channel goes on.
-        `direct`: a channel played directly, whose open waits for a closing picture's
-        stream (that one does not count)."""
+        `target`'s provider: True, the toast says so and the running channel goes on. A
+        closing picture's stream does not count: what opens waits for it."""
         name = item_provider.provider_name(self.catalog, target.item)
         limit = self.limit(target.item)
-        if not self._tuner.refused(name, limit, direct=direct):
+        if not self._tuner.refused(name, limit):
             return False
         logger.info("Not opening %s: the provider allows %s streams", target.title, limit)
         self._restore_channel()
@@ -484,14 +533,21 @@ class LiveControls(QObject):
         self._ticks = []
 
     def may_retry(self, current: Optional[Target]) -> bool:
-        """An STB channel's link may be made again once per tune (its play token expires)."""
+        """An STB channel's link may be made again once per tune (its play token expires),
+        and once more each time its fresh link played for `HEALTHY_S` (its token expired
+        again), as an ended direct stream gets its reopens back."""
         return (
             current is not None
             and current.live
-            and not current.retried
+            and (not current.retried or self._played_well())
             and item_provider.provider_type(self.catalog, current.item) == "STB"
             and not self._lanes.busy()
         )
+
+    def _played_well(self) -> bool:
+        """The player played for `HEALTHY_S` since it last started playing."""
+        since = self._playing_since
+        return since is not None and time.monotonic() - since >= HEALTHY_S
 
     def reconnect(self, current: Target) -> bool:
         """`current`'s live stream, played directly, ended: open it again after a back-off.
@@ -623,7 +679,9 @@ class LiveControls(QObject):
         if "window_start" in state and not state.get("archive_part"):
             now = self._now().timestamp()
             wall = live_parts.wall_in(state, float(state["window_start"]), now)
-            self._windows[self.catchup.key(current)] = max(0.0, now - wall)
+            key = self.catchup.key(current)
+            self._windows[key] = max(0.0, now - wall)
+            self._window_items[key] = current.item
             self._seek_window(state)
         state = self.catchup.extend(state, current)  # the bar reaches into an archive
         transport = self._transport
@@ -683,6 +741,7 @@ class LiveControls(QObject):
             self.stop_tune()  # nothing plays: its slot goes back
             self._toast(self._refusal_text(message), "error", ERROR_MS)
             self._explain_failure(current)
+            self._gave_up()
             return
         if current is not None and self.may_retry(current):
             self.retry(current)  # STB play tokens expire: a fresh link before the error
@@ -692,10 +751,12 @@ class LiveControls(QObject):
             self.stop_tune()  # nothing plays: its slot goes back
             self._toast(self._refusal_text(message), "error", ERROR_MS)
             self._explain_failure(current)
+            self._gave_up()
             return
         message = translate(message)  # the player's, or LiveSession's N_ texts
         self._error(_named(title, message))
         self._explain_failure(current)
+        self._gave_up()
 
     def _explain_failure(self, current: Optional[Target]) -> None:
         if current is not None:
@@ -731,12 +792,21 @@ class LiveControls(QObject):
             self._toast(translate(NO_RECORDING_TEXT))
             return
         if live is None or not live.recordable() or not self.pipeline_live():
-            opening = live is not None and self._tuner.opening()
-            self._toast(translate(NOT_YET_TEXT if opening else NO_RECORDING))
+            if live is not None and self._tuner.opening():
+                self._toast(translate(NOT_YET_TEXT))
+            elif self._nothing_plays():
+                self._toast(translate(NOTHING_PLAYING))  # it failed: not time-shift's fault
+            else:
+                self._toast(translate(NO_RECORDING))
             return
         when = self._now().astimezone()
         if live.start_recording(recording.path_for(self.config, current.title, when)):
             self._show_transport()
+
+    def _nothing_plays(self) -> bool:
+        """The channel's player failed or ended (2.8.12): nothing plays to record."""
+        state = getattr(self.session, "state", None)
+        return callable(state) and state() in (PlaybackState.ERROR, PlaybackState.ENDED)
 
     def _on_recording_changed(self, *_args: Any) -> None:
         live = self.live

@@ -26,9 +26,11 @@ from services.find import (
     find_channels,
     find_genres,
     live_genres,
+    own_keys,
     preferences_for,
     words,
 )
+from services.navigation import item_key
 from services.parental import Parental
 from services.provider_ids import ALL_PROVIDERS, provider_of, with_provider
 from ui.find_session import DEBOUNCE_MS, FindSession
@@ -268,6 +270,21 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(providers.reads), 1)  # the index was given: nothing read again
         self.assertEqual([h.title for h in got[1][2]], ["Harbor Kids"])
 
+    def test_given_a_scope_the_worker_makes_its_own_keys_too(self):
+        group = demo()["itv"]["contents"][:2]
+        stamped = [with_provider(group[0], "Harbor IPTV")]  # a channel stamped elsewhere
+        worker = FindWorker(FakeProviders(caches()), "news", scope=(group + stamped, "Demo TV"))
+        got = []
+        worker.finished.connect(got.append)
+        worker.run()
+        _index, _genres, _hits, own = got[0]
+        self.assertEqual(own, own_keys(group + stamped, "Demo TV"))
+        self.assertEqual(
+            own,
+            {("Demo TV", item_key(group[0])), ("Demo TV", item_key(group[1]))}
+            | {("Harbor IPTV", item_key(group[0]))},
+        )
+
 
 class HeldRunner(ImmediateRunner):
     """Runs a worker when released: a find still running while the user types on."""
@@ -315,6 +332,37 @@ class SessionTests(unittest.TestCase):
         self.session.set_query("news")
         elapse(WAIT)
         self.assertEqual([h.title for h in self.session.channels], ["Evening News"])
+
+    def test_a_long_groups_own_keys_come_with_the_next_find(self):
+        group = demo()["itv"]["contents"]
+        session = self.session
+        session.set_query("n")
+        self.assertIsNone(session.own_keys("list 1", group, "Demo TV"))  # asked of the worker
+        elapse(WAIT)
+        self.assertEqual(session.own_keys("list 1", group, "Demo TV"), own_keys(group, "Demo TV"))
+        changes = len(self.changes)
+        self.assertIsNone(session.own_keys("list 2", group[:1], "Demo TV"))  # another list
+        elapse(WAIT)  # found again (the index kept), with the new list's keys
+        self.assertGreater(len(self.changes), changes)
+        own = session.own_keys("list 2", group[:1], "Demo TV")
+        self.assertEqual(own, own_keys(group[:1], "Demo TV"))
+        self.assertEqual(len(self.providers.reads), 1)
+        session.clear()  # the find ended: the keys go with it
+        self.assertIsNone(session.own_keys("list 2", group[:1], "Demo TV"))
+
+    def test_a_scope_asked_while_a_find_runs_comes_with_the_next(self):
+        runner = HeldRunner()
+        session = FindSession(self.providers, runner)
+        group = demo()["itv"]["contents"]
+        session.set_query("n")
+        elapse(WAIT)  # the find runs (held)
+        self.assertIsNone(session.own_keys("list", group, "Demo TV"))
+        elapse(WAIT)
+        runner.release()  # without the keys: another find follows, with them
+        self.assertIsNone(session.own_keys("list", group, "Demo TV"))
+        self.assertEqual(len(runner.held), 1)
+        runner.release()
+        self.assertEqual(session.own_keys("list", group, "Demo TV"), own_keys(group, "Demo TV"))
 
     def test_typing_on_narrows_what_was_found_at_once_and_the_index_is_kept(self):
         self.session.set_query("n")

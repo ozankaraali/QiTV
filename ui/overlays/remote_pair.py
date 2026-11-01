@@ -37,6 +37,7 @@ LOGO_SHARE = 0.22  # the logo's side, as a share of the code's
 
 
 class PairOverlay(Overlay):
+    accessible_name = N_("Pair a phone")
     opened = Signal()
     closed = Signal()
 

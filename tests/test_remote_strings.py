@@ -16,14 +16,27 @@ LANGUAGES = ("tr", "de", "es", "fr")
 
 
 def page_texts() -> dict[str, str]:
-    """Every data-t / data-tp key of index.html with the English it shows."""
+    """Every data-t / data-tp / data-tl key of index.html with the English it shows (data-tl:
+    an icon button's aria-label, what a screen reader says)."""
     page = (WEB / "index.html").read_text(encoding="utf-8")
     found: dict[str, str] = {}
     for key, text in re.findall(r'data-t="([a-z_]+)"[^>]*>([^<]*)<', page):
         found.setdefault(key, html.unescape(text))
     for text, key in re.findall(r'placeholder="([^"]*)" data-tp="([a-z_]+)"', page):
         found.setdefault(key, html.unescape(text))
+    for text, key in re.findall(r'aria-label="([^"]*)" data-tl="([a-z0-9_]+)"', page):
+        found.setdefault(key, html.unescape(text))
     return found
+
+
+class IconButtonTests(unittest.TestCase):
+    def test_every_icon_button_is_named_in_the_tvs_language(self):
+        """An aria-label in English alone would be read in English on a Turkish phone."""
+        page = (WEB / "index.html").read_text(encoding="utf-8")
+        for tag in re.findall(r"<button[^>]*aria-label=[^>]*>", page):
+            with self.subTest(tag):
+                self.assertIn("data-tl=", tag)
+        self.assertGreaterEqual(len(re.findall(r"data-tl=", page)), 15)
 
 
 def script_texts(name: str, table: str) -> dict[str, str]:

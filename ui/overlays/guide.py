@@ -14,13 +14,18 @@ programme within its archive can be watched from its start (`programmeRequested`
 clicked on (a programme that has ended), else, with the window moved back from now, the one
 at the window's left edge. It is outlined, the footer describes it, and its "▶ Watch from the
 start" button and Enter (a double-click on its box) play it; the footer's button also shows
-for the programme on now (from its start). Otherwise Enter tunes the channel, as before. On
-an STB portal's channel only a programme its guide does not mark as not recorded can play.
+for the programme on now (from its start). Otherwise Enter tunes the channel, as before, and
+so does the footer's accented "▶ Watch". On an STB portal's channel only a programme its guide
+does not mark as not recorded can play.
+
+The footer's accented button is what Enter does ("▶ Watch", or "▶ Watch from the start" for a
+past programme chosen); the others, Record (its red dot) among them, are outlined.
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from itertools import repeat
 import logging
 import math
 from typing import NamedTuple
@@ -45,8 +50,10 @@ from services.catchup import ARCHIVE_KEY, programme_in_archive
 from services.epg_view import Programme, now_next, timeline
 from services.i18n import N_, tr, translate
 from services.navigation import item_key
+from services.zapping import ZapContext
 from ui.keymap import key_hint
 from ui.overlays.base import Overlay
+from ui.overlays.channel_rows import draw_playing_mark
 from ui.overlays.painting import Units, draw_icon, draw_logo, elided, fill_round, fmt_clock
 from ui.pointer import PointerInput
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
@@ -71,6 +78,8 @@ TIME_DETAIL_U = 8.0  # boxes at least this wide show their time under the title
 NO_INFO_TEXT = N_("No programme information")  # i18n: a channel's guide is empty
 # i18n: the guide's button: a past programme from the provider's archive, from its beginning
 WATCH_TEXT = N_("Watch from the start")
+# i18n: the guide's footer button: tune the highlighted channel live (Enter does it too)
+LIVE_TEXT = N_("Watch")
 # 2.8: the footer's recording buttons for a programme still to come (or on now)
 # i18n: the guide's footer button: record this programme (QiTV records it at its time)
 RECORD_TEXT = N_("Record")
@@ -210,14 +219,25 @@ class _Layout:
         return max(1, math.ceil(self.rows.height() / self.row_h))
 
 
-def _archive_depth(channel: dict) -> int:
-    """The days of archive the loaders kept on a channel (0: none); read cheaply, for every
-    listed channel (`services.catchup.archive_of` reads the rest)."""
-    days = channel.get(ARCHIVE_KEY)
-    return days if isinstance(days, int) and not isinstance(days, bool) and days > 0 else 0
+def _deepest_archive(channels: list[dict]) -> int:
+    """The most days of archive the loaders kept on any of `channels` (0: none); read cheaply,
+    for every listed channel (`services.catchup.archive_of` reads the rest): the values in C
+    first (264,000 channels, most without one), each kept one then."""
+    kept = filter(None, map(dict.get, channels, repeat(ARCHIVE_KEY)))
+    return max(
+        (d for d in kept if isinstance(d, int) and not isinstance(d, bool) and d > 0), default=0
+    )
+
+
+def _number_digits(channels: list[dict]) -> int:
+    """The longest number listed (a provider's own run past 9999): its characters, in C."""
+    numbers = filter(None, map(dict.get, channels, repeat("number")))  # (none: "")
+    return max(map(len, map(str.strip, map(str, numbers))), default=0)
 
 
 class Guide(Overlay):
+    # i18n: what a screen reader calls the guide (channels as rows, time as columns)
+    accessible_name = N_("Programme guide")
     tuneRequested = Signal(object)  # channel dict
     programmeRequested = Signal(object, object)  # channel dict, Programme: from its start
     closed = Signal()
@@ -239,11 +259,16 @@ class Guide(Overlay):
         archive_days: Callable[[dict], int] = lambda channel: 0,
         archive_reach: Callable[[dict], timedelta] | None = None,
         scheduled: Callable[[dict, Programme], bool] | None = None,
+        deepest_window: Callable[[list[dict], timedelta], timedelta] | None = None,
     ) -> None:
         """`archive_days(channel)`: the days of the channel's archive that may play now (0:
         none); `archive_reach(channel)` (2.7): how far back its past programmes play, its
         own server window's included (`archive_days` when not given). `scheduled(channel,
-        programme)` (2.8): whether it is to be recorded; None: the guide records nothing."""
+        programme)` (2.8): whether it is to be recorded; None: the guide records nothing.
+        `deepest_window(channels, beyond)`: the longest reach `archive_reach` gives any of the
+        channels when longer than `beyond` (their deepest archive), else none: worked out for
+        the whole list at once (each channel's reach, when not given: a list of 264,000 took
+        seconds)."""
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
@@ -258,10 +283,12 @@ class Guide(Overlay):
         self._archive_reach = archive_reach or (
             lambda channel: timedelta(days=archive_days(channel))
         )
+        self._deepest_window = deepest_window or self._each_reach
         self._back = timedelta(0)  # how far back the window goes (the deepest archive listed)
         self._picked: tuple[int, Programme] | None = None  # a past programme clicked on
         self._scheduled = scheduled
         self._upcoming: tuple[int, Programme] | None = None  # 2.8: one to come, clicked on
+        self._playing: Callable[[], dict | None] = lambda: None  # its row has a ▶
         self._window_start = slot_start(now())
         self._cache: dict[_Key, list[Programme]] = {}
         self._failed: set[_Key] = set()  # lookups that raised: logged once, retried
@@ -284,15 +311,14 @@ class Guide(Overlay):
     def open_guide(self, channels: list[dict], current: int) -> None:
         self._channels = list(channels)
         # The number column fits the longest number listed (a provider's own run past 9999).
-        self._digits = max(
-            (len(str(c.get("number") or "").strip()) for c in self._channels), default=0
-        )
+        self._digits = _number_digits(self._channels)
         self._current = min(max(current, 0), len(self._channels) - 1)
         self._window_start = slot_start(self._now())
         self._picked = self._upcoming = None
-        deepest = max((_archive_depth(c) for c in self._channels), default=0)
-        windows = max((self._archive_reach(c) for c in self._channels), default=timedelta(0))
-        self._back = min(MAX_BACK, max(timedelta(days=deepest), windows))
+        deepest = timedelta(days=_deepest_archive(self._channels))
+        # (2.7: a server window seen this run may reach further; an archive's days that may
+        # play now never reach further than the days kept on the channel)
+        self._back = min(MAX_BACK, max(deepest, self._deepest_window(self._channels, deepest)))
         self._forget_lookups()
         self._requested.clear()  # a reopened guide retries logos that failed
         self._relayout()
@@ -303,6 +329,19 @@ class Guide(Overlay):
         self.raise_()
         self.update()
         self.rowsMoved.emit()
+
+    def _each_reach(self, channels: list[dict], beyond: timedelta) -> timedelta:
+        reach = max((self._archive_reach(c) for c in channels), default=timedelta(0))
+        return reach if reach > beyond else timedelta(0)
+
+    def set_playing(self, playing: Callable[[], dict | None]) -> None:
+        """What plays large (asked at each paint): its row has a small accent ▶."""
+        self._playing = playing
+
+    def playing_changed(self) -> None:
+        """Another channel plays: the open guide moves its ▶."""
+        if self.isVisible():
+            self.update()
 
     def close_guide(self) -> None:
         self._repaint.stop()
@@ -338,6 +377,21 @@ class Guide(Overlay):
         earliest = now - self._back
         return min(max(self._window_start + delta * SLOT, earliest), now + MAX_AHEAD)
 
+    @property
+    def _window_start(self) -> datetime:
+        """The window's first half-hour: the current one while the window is at now (opened,
+        or moved back to it), so it moves on with the clock; else where it was moved
+        (2.8.12: one opened at 20:29 stayed at 20:00, and at 20:31 Enter played the
+        programme on at 20:00 from its start instead of tuning)."""
+        if self._window_follows:
+            return slot_start(self._now())
+        return self._window_at
+
+    @_window_start.setter
+    def _window_start(self, start: datetime) -> None:
+        self._window_at = start
+        self._window_follows = start == slot_start(self._now())
+
     def header_buttons(self) -> dict[str, QRectF]:
         """The header's buttons, left to right: ‹ › at the right of the channels' column, then
         ⌕ ⛶ × at the header's right end."""
@@ -367,6 +421,8 @@ class Guide(Overlay):
         for name, rect in self.footer_buttons().items():
             if not rect.contains(point):
                 continue
+            if name == "live":
+                return key_hint(translate(LIVE_TEXT), "Return")
             if name == "watch":
                 what = translate(WATCH_TEXT)
                 return key_hint(what, "Return") if self.chosen() is not None else what
@@ -454,21 +510,24 @@ class Guide(Overlay):
         return bool(channel is not None and self._scheduled and self._scheduled(channel, programme))
 
     def footer_buttons(self) -> dict[str, QRectF]:
-        """The footer's buttons, right to left: Record and Record series (or Cancel recording
-        for a scheduled one, 2.8), "Record at a time…" (whatever the guide lists, none too),
-        then "▶ Watch from the start"; only those that show."""
+        """The footer's buttons, right to left: what Enter does, accented ("▶ Watch" the
+        channel live, or "▶ Watch from the start" a past programme chosen), Record and Record
+        series (or Cancel recording for a scheduled one, 2.8), "Record at a time…" (whatever
+        the guide lists, none too), then "Watch from the start" for the programme on now;
+        only those that show."""
         if self.isHidden() or self.current_channel() is None:
             return {}
         layout = self._layout()
         units, footer = layout.units, layout.footer
         u = units.u
-        names: list[str] = []
+        past = self.chosen() is not None
+        names: list[str] = ["watch" if past else "live"]
         target = self.record_target()
         if target is not None:
             names += ["cancel"] if self._target_scheduled(target) else ["record", "series"]
         if self._scheduled is not None:
             names.append("timer")
-        if self._footer_choice()[1]:
+        if not past and self._footer_choice()[1]:
             names.append("watch")
         fm = QFontMetrics(units.font(1.05, QFont.Weight.DemiBold))
         height = max(2.6 * u, fm.height() + 0.8 * u)
@@ -483,6 +542,7 @@ class Guide(Overlay):
     @staticmethod
     def _button_text(name: str) -> str:
         return {
+            "live": "▶  " + translate(LIVE_TEXT),
             "watch": "▶  " + translate(WATCH_TEXT),
             "record": "●  " + translate(RECORD_TEXT),
             "series": translate(SERIES_TEXT),
@@ -509,7 +569,10 @@ class Guide(Overlay):
 
     def _press_footer(self, name: str) -> None:
         channel, programme = self.current_channel(), self.record_target()
-        if name == "watch":
+        if name == "live":
+            if channel is not None:
+                self.tuneRequested.emit(channel)
+        elif name == "watch":
             self._watch_chosen()
         elif name == "timer":
             if channel is not None:
@@ -930,6 +993,8 @@ class Guide(Overlay):
             p, QRectF(x, rect.top() + (rect.height() - size) / 2, size, size), name, pixmap, 0.7 * u
         )
         x += size + 0.9 * u
+        if ZapContext.same(channel, self._playing()):  # the channel playing: a small ▶
+            x += draw_playing_mark(p, x, rect.center().y(), 0.9 * u) + 0.5 * u
         width = rect.right() - 0.8 * u - x
         p.setFont(units.font(1.1, QFont.Weight.DemiBold))
         p.setPen(qcolor(PALETTE.text))
@@ -957,7 +1022,7 @@ class Guide(Overlay):
         u = units.u
         if programme is None:
             p.setFont(units.font(1.0))
-            p.setPen(qcolor(PALETTE.text, 0.45))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             inner = box.adjusted(0.9 * u, 0, -0.9 * u, 0)
             p.drawText(
                 inner,
@@ -992,21 +1057,38 @@ class Guide(Overlay):
             )
 
     def _paint_button(self, p: QPainter, units: Units, name: str, button: QRectF) -> None:
-        """A footer chip: "▶ Watch from the start" and "● Record" filled, the others outlined."""
-        p.setFont(units.font(1.05, QFont.Weight.DemiBold))
-        if name in ("watch", "record"):
-            color = PALETTE.accent if name == "watch" else PALETTE.live
-            fill_round(p, button, qcolor(color), button.height() / 2)
+        """A footer chip: what Enter does filled with the accent ("▶ Watch", or "▶ Watch from
+        the start" for a past programme), the others outlined, Record with its red dot."""
+        font = units.font(1.05, QFont.Weight.DemiBold)
+        p.setFont(font)
+        text = self._button_text(name)
+        if name == "live" or (name == "watch" and self.chosen() is not None):
+            fill_round(p, button, qcolor(PALETTE.accent), button.height() / 2)
             p.setPen(qcolor(PALETTE.canvas))
-        else:
-            p.save()
-            p.setPen(QPen(qcolor(PALETTE.text, 0.5), 1.0))
-            p.setBrush(Qt.NoBrush)
-            half = button.height() / 2
-            p.drawRoundedRect(button.adjusted(0.5, 0.5, -0.5, -0.5), half, half)
-            p.restore()
-            p.setPen(qcolor(PALETTE.text))
-        p.drawText(button, Qt.AlignCenter, self._button_text(name))
+            p.drawText(button, Qt.AlignCenter, text)
+            return
+        p.save()
+        p.setPen(QPen(qcolor(PALETTE.text, 0.5), 1.0))
+        p.setBrush(Qt.NoBrush)
+        half = button.height() / 2
+        p.drawRoundedRect(button.adjusted(0.5, 0.5, -0.5, -0.5), half, half)
+        p.restore()
+        p.setPen(qcolor(PALETTE.text))
+        if name != "record":
+            p.drawText(button, Qt.AlignCenter, text.removeprefix("▶  "))
+            return
+        dot, label = "●  ", translate(RECORD_TEXT)  # the red dot, then the word
+        fm = QFontMetrics(font)
+        dot_w = fm.horizontalAdvance(dot)
+        left = button.center().x() - (dot_w + fm.horizontalAdvance(label)) / 2
+        p.setPen(qcolor(PALETTE.live))
+        p.drawText(QRectF(left, button.top(), dot_w, button.height()), Qt.AlignVCenter, dot)
+        p.setPen(qcolor(PALETTE.text))
+        p.drawText(
+            QRectF(left + dot_w, button.top(), button.right() - left - dot_w, button.height()),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            label,
+        )
 
     def _paint_now_line(self, p: QPainter, layout: _Layout, now: datetime, bottom: float) -> None:
         now_x = self._now_x(layout, now)
@@ -1036,7 +1118,7 @@ class Guide(Overlay):
             self._paint_button(p, units, name, button)
         if programme is None:
             p.setFont(units.font(1.0))
-            p.setPen(qcolor(PALETTE.text, 0.45))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             p.drawText(
                 QRectF(left, footer.top(), width, footer.height()),
                 Qt.AlignLeft | Qt.AlignVCenter,

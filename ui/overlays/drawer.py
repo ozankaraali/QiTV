@@ -73,9 +73,10 @@ from PySide6.QtWidgets import (
 
 from services import i18n
 from services.catalog import shown_label
-from services.find import FoundChannel, FoundGenre, by_scope
+from services.find import FoundChannel, FoundGenre, by_scope, own_keys
 from services.i18n import N_, tr, tr_n, translate
 from services.navigation import (
+    ACTION_ROWS,
     ADD_PROVIDER_ROW,
     FAVORITES_GROUP,
     FREE_CHANNELS_ROW,
@@ -133,12 +134,16 @@ SEPARATOR = " › "
 # The texts below stay English (the code compares them); translate() shows them, and the
 # tooltips naming a key are made where they show.
 PROVIDER_TOOLTIP = N_("Choose another provider")  # i18n: tooltip of the provider's name
+# i18n: the channel list's title over its providers (the top layer, Settings and Add under them)
+PROVIDERS_TITLE = N_("Providers")
 CRUMB_FONT_U = 1.15
 PREVIEW_DEBOUNCE_MS = 200
+OWN_AT_ONCE = 20_000  # an open group this long or shorter is scoped here, at once (~20 ms)
 LOADING_TEXT = N_("Loading…")
 EMPTY_TEXT = N_("Nothing here")  # i18n: an empty list in the channel list
-ERROR_TEXT = N_("Couldn't load — press Enter to retry")
-PROVIDER_ERROR_TEXT = N_("Couldn't connect — press Enter to retry")
+ERROR_TEXT = N_("Couldn't load — click or press Enter to retry")
+PROVIDER_ERROR_TEXT = N_("Couldn't connect — click or press Enter to retry")
+_RETRY_TEXTS = (ERROR_TEXT, PROVIDER_ERROR_TEXT)  # a click on the list, or Enter, retries
 FIND_ACTION = "find"  # the ⌕ Find box above the right column
 FIND_CLEAR = "find_clear"  # its ✕
 
@@ -297,7 +302,10 @@ def _numbers(group):
             (ZapContext.number_of(n.payload) or None) if isinstance(n.payload, dict) else None
             for n in group
         ]
-    return [str(row + 1) for row in range(len(group))]
+    if len(channels) == len(group):
+        return [str(row + 1) for row in range(len(group))]
+    positions = iter(range(1, len(channels) + 1))  # a label among the rows has none
+    return [str(next(positions)) if isinstance(n.payload, dict) else None for n in group]
 
 
 def _shown_rows(
@@ -465,7 +473,7 @@ class _SimpleRowDelegate(QStyledItemDelegate):
         if isinstance(node, NavNode) and node.layer == "header":
             # A provider's heading: small, quiet, with a rule; it is never highlighted.
             p.setFont(units.font(1.1, QFont.Weight.DemiBold))
-            p.setPen(qcolor(PALETTE.text, 0.5))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             left = rect.x() + 1.2 * u
             width = max(0.0, rect.right() - 1.2 * u - left)
             p.drawText(
@@ -478,7 +486,7 @@ class _SimpleRowDelegate(QStyledItemDelegate):
         if isinstance(node, NavNode) and node.layer == "notice":
             # Under a provider's heading: it loads, or why it failed; never highlighted.
             p.setFont(units.font(1.2))
-            p.setPen(qcolor(PALETTE.text, 0.5))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             left = rect.x() + 1.2 * u
             width = max(0.0, rect.right() - 1.2 * u - left)
             p.drawText(
@@ -488,6 +496,12 @@ class _SimpleRowDelegate(QStyledItemDelegate):
             )
             p.restore()
             return
+        if isinstance(node, NavNode) and node.layer == "action" and node.key == ACTION_ROWS[0].key:
+            # A rule between the providers and the action rows under them (Settings first).
+            p.fillRect(
+                QRectF(rect.x() + 1.2 * u, rect.y(), rect.width() - 2.4 * u, 1),
+                qcolor(PALETTE.text, 0.12),
+            )
         if selected:
             _paint_highlight(p, rect, u, focused)
         x = rect.x() + 0.9 * u + 0.3 * u
@@ -507,7 +521,7 @@ class _SimpleRowDelegate(QStyledItemDelegate):
         count = index.data(CountRole)
         if count is not None:
             p.setFont(units.font(1.1))
-            p.setPen(qcolor(PALETTE.text, 0.45))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             text = str(count)
             width = p.fontMetrics().horizontalAdvance(text)
             p.drawText(
@@ -555,13 +569,38 @@ class _FoundGenreDelegate(_SimpleRowDelegate):
         )
         if label:
             p.setFont(label_font)
-            p.setPen(qcolor(PALETTE.text, 0.5))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             p.drawText(
                 QRectF(left, y + title_h, width, label_h),
                 Qt.AlignLeft | Qt.AlignVCenter,
                 elided(p, label, width),
             )
         p.restore()
+
+
+class _LabelledChannelDelegate(ChannelRowDelegate):
+    """A live list's channels, and a label among them (★ Favorites' "Other providers" over
+    the other providers' stars) as the groups column paints a provider's heading."""
+
+    def __init__(self, label: _SimpleRowDelegate, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._label = label
+
+    @staticmethod
+    def _is_label(index) -> bool:
+        node = index.data(NodeRole)
+        return isinstance(node, NavNode) and node.layer == "header"
+
+    def sizeHint(self, option, index) -> QSize:
+        if self._is_label(index):
+            return self._label.sizeHint(option, index)
+        return super().sizeHint(option, index)
+
+    def paint(self, p: QPainter, option, index) -> None:
+        if self._is_label(index):
+            self._label.paint(p, option, index)
+        else:
+            super().paint(p, option, index)
 
 
 class _RowIndex:
@@ -595,8 +634,10 @@ class _Column:
         self.view.setModel(self.model)
         # A list that mixes providers names each row's below its name (as the find does), so
         # a long name keeps the row's width; one provider's rows are drawn as before.
-        self.channel_delegate = ChannelRowDelegate(0.9, self.view, provider_below=True)
         self.simple_delegate = _SimpleRowDelegate(self.view)
+        self.channel_delegate = _LabelledChannelDelegate(
+            self.simple_delegate, 0.9, self.view, provider_below=True
+        )
         self.found_delegate = _FoundRowDelegate(
             self.simple_delegate,
             ChannelRowDelegate(FOUND_CHANNEL_SCALE, self.view, provider_below=True),
@@ -622,6 +663,7 @@ class _Column:
 
 
 class Drawer(Overlay):
+    accessible_name = N_("Channel list")
     playRequested = Signal(object, object, object)
     contextRequested = Signal(object, QPoint)  # node, global position
     # An action row (SETTINGS_ROW, ADD_PROVIDER_ROW, OPEN_FILE_ROW) or a header button
@@ -655,8 +697,8 @@ class Drawer(Overlay):
         self._finder: FindSession | None = None  # (set_finder) without one nothing is found
         self._before_find: tuple[_Place, str] | None = None  # the right column, the focus
         # The open group's channels (provider, item key), which the find lists first: worked
-        # out once per list (its identity and length).
-        self._own: tuple[int, int, frozenset[tuple[str, str]]] = (0, -1, frozenset())
+        # out once per list (its identity and length, and the provider shown).
+        self._own: tuple[tuple, frozenset[tuple[str, str]]] = ((), frozenset())
         self._restore: _Place | None = None  # where the right column goes back to (_refresh)
         self._pending_key: str | tuple[str, str] | None = None
         self._left_choice: NavNode | None = None  # the left highlight, which may lead the path
@@ -693,6 +735,17 @@ class Drawer(Overlay):
         self._refresh()
         self.show()
         self.raise_()
+
+    def set_playing(self, playing: Callable[[], dict | None]) -> None:
+        """What plays large (asked at each paint): its row has a small accent ▶."""
+        for col in self._columns.values():
+            col.model.playing = playing
+
+    def playing_changed(self) -> None:
+        """Another channel plays: the open lists move its ▶."""
+        if self.isVisible():
+            for col in self._columns.values():
+                col.view.viewport().update()
 
     def set_drag_enabled(self, enabled: Callable[[], bool]) -> None:
         """Whether a channel row may be dragged out now (the multiview's grid shows)."""
@@ -1103,7 +1156,13 @@ class Drawer(Overlay):
         nodes = children or []
         if col.message is None and not nodes:
             col.message = EMPTY_TEXT
-        live = bool(nodes) and _is_live_item(self._nav, nodes[0])
+        if col.message in _RETRY_TEXTS:  # a click retries (_retry_click)
+            col.view.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            col.view.viewport().unsetCursor()
+        # (★ Favorites may start with its "Other providers" label: the shown provider has none)
+        first = next((n for n in nodes[:2] if _selectable(n)), None) if nodes else None
+        live = first is not None and _is_live_item(self._nav, first)
         numbers = _numbers(nodes) if live else None
         # The same rows again (e.g. the section reported ready once more): the list keeps its
         # model, so it is neither laid out nor repainted from scratch.
@@ -1119,7 +1178,10 @@ class Drawer(Overlay):
             col.shown = shown
             col.nodes = nodes
             col.rows = _RowIndex(nodes)
-            col.view.setUniformItemSizes(True)  # (a find's rows are of two heights)
+            # (a find's rows are of two heights, as a live list with a label among its rows)
+            labelled = live and not isinstance(nodes, NodeSeq)
+            labelled = labelled and any(n.layer == "header" for n in nodes)
+            col.view.setUniformItemSizes(not labelled)
             col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
             col.model.set_nodes(nodes, live, numbers, tagged)
             if moved:
@@ -1234,16 +1296,26 @@ class Drawer(Overlay):
     def _own_channels(
         self, group: NavNode | None, listed: Sequence[NavNode] | None, shown: str
     ) -> frozenset[tuple[str, str]]:
-        """The open group's channels as (provider, item key); none when no group is open."""
+        """The open group's channels as (provider, item key); none when no group is open. A
+        long group's are made by the find's worker (All of every provider: 264,000 channels
+        froze the first letter typed for 0.3 s), and come with the channels it finds: none
+        until then."""
         if group is None or group.layer != "group" or not listed:
             return frozenset()
         items = getattr(listed, "items", None)  # a long list's dicts, without making its rows
+        long_list = isinstance(items, list)  # (a NodeSeq: the same one while its group is)
         if not isinstance(items, list):
             items = [n.payload for n in listed if isinstance(n.payload, dict)]
-        if self._own[:2] != (id(listed), len(items)):
-            own = frozenset((provider_of(c) or shown, item_key(c)) for c in items)
-            self._own = (id(listed), len(items), own)
-        return self._own[2]
+        token = (id(listed), len(items), shown)
+        if self._own[0] != token:
+            if not long_list or len(items) <= OWN_AT_ONCE or self._finder is None:
+                own: frozenset[tuple[str, str]] | None = own_keys(items, shown)
+            else:
+                own = self._finder.own_keys(token, items, shown)
+            if own is None:
+                return frozenset()
+            self._own = (token, own)
+        return self._own[1]
 
     # ---- mouse: consumed here, so it never reaches the video behind -------------------------
 
@@ -1314,6 +1386,9 @@ class Drawer(Overlay):
         if button == BACK_BUTTON:
             return key_hint(tr("Back"), "Left")  # i18n: tooltip of ‹: a layer up (verb)
         if button == _crumb_key(0):
+            path, shown = self._nav.path, self.breadcrumb_parts()
+            if path and shown and shown[0][1] != path[0].title:  # elided: its whole name too
+                return f"{path[0].title}\n{translate(PROVIDER_TOOLTIP)}"
             return translate(PROVIDER_TOOLTIP)
         return ""
 
@@ -1377,6 +1452,8 @@ class Drawer(Overlay):
             self._relayout()
         elif isinstance(event, QMouseEvent) and self._drag_event(obj, event):
             return True  # a channel row dragged out: neither a selection nor a click
+        elif isinstance(event, QMouseEvent) and self._retry_click(obj, event):
+            return True
         elif (
             event.type() in _RIGHT_PRESSES
             and isinstance(event, QMouseEvent)
@@ -1385,6 +1462,25 @@ class Drawer(Overlay):
         ):
             return True  # not a selection: the context menu follows, the highlight stays
         return False
+
+    def _retry_click(self, obj: QObject, event: QMouseEvent) -> bool:
+        """A click on a list that says "Couldn't load" (or "Couldn't connect"): it retries, as
+        Enter does there. True when it did."""
+        if (
+            event.type() != QEvent.Type.MouseButtonRelease
+            or event.button() != Qt.MouseButton.LeftButton
+        ):
+            return False
+        side = next((s for s, c in self._columns.items() if obj is c.view.viewport()), None)
+        if side is None:
+            return False
+        col = self._columns[side]
+        if col.nodes or col.message not in _RETRY_TEXTS:
+            return False
+        if side != self.focus_side:
+            self.focus_side = side
+            self._refresh()
+        return self._retry(col)
 
     def _drag_event(self, obj: QObject, event: QMouseEvent) -> bool:
         """A list's mouse event, as a drag of a channel row out of the list; True when the
@@ -1499,9 +1595,9 @@ class Drawer(Overlay):
     def _header(self) -> _Header:
         """The left column's top row: ‹ at its left (but on the sources), then the names of
         the left column's path, then the Library (2.8), Search, the refresh button and the
-        Settings gear at its right end. The names elide before they reach the buttons: the
-        last one at its end, the others ("the head") from their start, into one name that goes
-        a layer up."""
+        Settings gear at its right end. The names elide before they reach the buttons, each at
+        its end: the provider's (the first, which shows the sources to switch provider) and the
+        last share the room, and any names between them fold into "…", which goes a layer up."""
         units = self._units
         col = self._columns["left"]
         side = units.px(PAD_SIDE_U)
@@ -1526,23 +1622,33 @@ class Drawer(Overlay):
         names: list[tuple[int | None, str, QRectF]] = []
         start = x
         if titles:
-            last = fm.elidedText(titles[-1], Qt.ElideRight, int(room))
-            last_w = fm.horizontalAdvance(last)
             sep_w = fm.horizontalAdvance(SEPARATOR)
             head = titles[:-1]
-            if sum(fm.horizontalAdvance(t) + sep_w for t in head) <= room - last_w:
-                for index, title in enumerate(head):
-                    width = fm.horizontalAdvance(title)
-                    names.append((index, title, QRectF(x, row.y(), width, row.height())))
+            head_w = sum(fm.horizontalAdvance(t) + sep_w for t in head)
+            if head and head_w > room - min(fm.horizontalAdvance(titles[-1]), room):
+                # Too long together: the provider's name keeps its start (and its click, to
+                # switch provider) in at least half the room the last leaves; the names between
+                # them fold into "… › ", a layer up.
+                fold = "…" + SEPARATOR if len(head) > 1 else ""
+                share = max(0.0, room - sep_w - fm.horizontalAdvance(fold))
+                first_room = max(share / 2, share - fm.horizontalAdvance(titles[-1]))
+                first = fm.elidedText(head[0], Qt.ElideRight, int(first_room))
+                if first and first != "…":
+                    width = fm.horizontalAdvance(first)
+                    names.append((0, first, QRectF(x, row.y(), width, row.height())))
                     x += width + sep_w
-            elif head:
-                cut = fm.elidedText(
-                    SEPARATOR.join(head) + SEPARATOR, Qt.ElideLeft, max(0, int(room - last_w))
-                )
-                width = fm.horizontalAdvance(cut)
-                if cut:
-                    names.append((None, cut, QRectF(x, row.y(), width, row.height())))
-                x += width
+                if fold:
+                    width = fm.horizontalAdvance(fold)
+                    names.append((None, fold, QRectF(x, row.y(), width, row.height())))
+                    x += width
+                head = []
+            for index, title in enumerate(head):
+                width = fm.horizontalAdvance(title)
+                names.append((index, title, QRectF(x, row.y(), width, row.height())))
+                x += width + sep_w
+            last_room = max(0.0, library.left() - gap - x)
+            last = fm.elidedText(titles[-1], Qt.ElideRight, int(last_room))
+            last_w = fm.horizontalAdvance(last)
             names.append((len(titles) - 1, last, QRectF(x, row.y(), last_w, row.height())))
             x += last_w
         text = QRectF(start, row.y(), x - start, row.height())
@@ -1581,6 +1687,12 @@ class Drawer(Overlay):
         header = self._header()
         align = Qt.AlignLeft | Qt.AlignVCenter
         last = header.names[-1] if header.names else None
+        if not header.names:  # the sources: the column's title (no path to name, no link)
+            p.setFont(self._units.font(CRUMB_FONT_U, QFont.Weight.DemiBold))
+            p.setPen(qcolor(PALETTE.text, 0.6))
+            room = header.library.left() - self._units.px(GEAR_GAP_U) - header.text.left()
+            title = QRectF(header.text.left(), header.text.top(), room, header.text.height())
+            p.drawText(title, align, elided(p, translate(PROVIDERS_TITLE), room))
         for name in header.names:
             index, text, rect = name
             hovered = self._hover == _crumb_key(index)
@@ -1652,7 +1764,7 @@ class Drawer(Overlay):
             p.setPen(qcolor(PALETTE.text))
             text = elided(p, self.find_text + "▏", inner.width())
         else:
-            p.setPen(qcolor(PALETTE.text, 0.5))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             text = elided(p, translate(FIND_PLACEHOLDER), inner.width())
         p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, text)
         if not clear.isEmpty():
@@ -1670,9 +1782,9 @@ class Drawer(Overlay):
     def _paint_column(self, p: QPainter, col: _Column, units: Units) -> None:
         u = units.u
         if col.message:
-            error = col.message in (ERROR_TEXT, PROVIDER_ERROR_TEXT)
+            error = col.message in _RETRY_TEXTS
             p.setFont(units.font(1.35))
-            p.setPen(qcolor(PALETTE.text, 0.75 if error else 0.5))
+            p.setPen(qcolor(PALETTE.text, 0.75 if error else PALETTE.text_muted_alpha))
             view = col.view.geometry()
             p.drawText(
                 QRectF(view.x(), view.y(), view.width(), 6.0 * u),

@@ -18,7 +18,7 @@ from services import i18n
 from services.i18n import tr
 from services.library import CONTINUE, MY_LIST, NEW, RECORDINGS, Genre
 from ui.overlays.channel_rows import ChannelListView
-from ui.overlays.painting import Units, draw_icon, elided, fill_round
+from ui.overlays.painting import Units, draw_field_icon, draw_icon, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 WIDTH_U = 18.0
@@ -117,7 +117,7 @@ class _GenreDelegate(QStyledItemDelegate):
             font = units.font(0.85)
             font.setLetterSpacing(QFont.AbsoluteSpacing, 0.08 * font.pixelSize())
             p.setFont(font)
-            p.setPen(qcolor(PALETTE.text, 0.45))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             p.drawText(
                 rect.adjusted(pad, 0.6 * u, -pad, 0),
                 Qt.AlignLeft | Qt.AlignVCenter,
@@ -140,7 +140,7 @@ class _GenreDelegate(QStyledItemDelegate):
         count_text = format_count(index.data(CountRole))
         if count_text:
             p.setFont(units.font(0.95))
-            p.setPen(qcolor(PALETTE.text, 0.45))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             width = p.fontMetrics().horizontalAdvance(count_text)
             p.drawText(
                 QRectF(right - width, rect.y(), width, rect.height()),
@@ -174,6 +174,7 @@ class GenreList(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)
+        self.setAccessibleName(tr("Genres"))  # what a screen reader calls it
         self.filter_text = ""
         self._focused = False
         self._current: str | None = None
@@ -362,10 +363,12 @@ class GenreList(QWidget):
         p.setFont(units.font(1.05))
         inner = box.adjusted(1.0 * u, 0, -1.0 * u, 0)
         if self.filter_text:
-            p.setPen(qcolor(PALETTE.text))
-            text = "⌕ " + self.filter_text + "▏"
+            tone = qcolor(PALETTE.text)
+            text = self.filter_text + "▏"
         else:
-            p.setPen(qcolor(PALETTE.text, 0.45))
-            text = "⌕ " + tr("Find a genre…")  # i18n: placeholder of the Library's genre filter
+            tone = qcolor(PALETTE.text, PALETTE.text_muted_alpha)
+            text = tr("Find a genre…")  # i18n: placeholder of the Library's genre filter
+        inner = draw_field_icon(p, inner, tone)  # the magnifier the other finds draw
+        p.setPen(tone)
         p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))
         p.end()

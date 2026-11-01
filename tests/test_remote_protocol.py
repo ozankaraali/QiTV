@@ -172,6 +172,8 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(parse_phone_message({"t": "totv"}), {"t": "totv"})
         # 2.8: the Library's Refresh
         self.assertEqual(parse_phone_message({"t": "refresh", "x": 1}), {"t": "refresh"})
+        # the phone's search Done, with Show on TV: the TV's search closes
+        self.assertEqual(parse_phone_message({"t": "closesearch", "s": "x"}), {"t": "closesearch"})
         self.assertEqual(  # how far the phone got in a film it plays
             parse_phone_message({"t": "pos", "ms": 61000, "len": 5400000}),
             {"t": "pos", "ms": 61000, "len": 5400000},

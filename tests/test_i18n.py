@@ -181,6 +181,36 @@ class PluralTests(CatalogCase):
         self.assertEqual(i18n.plural_category("pl", 25), "many")
         self.assertEqual(i18n.plural_category("cs", 3), "few")
 
+    def test_the_new_languages_plural_rules(self):  # 2.8.12, CLDR's integer rules
+        cases = {
+            "hr": {1: "one", 3: "few", 5: "other", 11: "other", 21: "one", 22: "few"},
+            "sr": {1: "one", 4: "few", 12: "other"},
+            "ru": {1: "one", 3: "few", 5: "many", 21: "one"},
+            "ar": {0: "zero", 1: "one", 2: "two", 3: "few", 11: "many", 100: "other", 103: "few"},
+            "he": {1: "one", 2: "two", 3: "other", 20: "other"},
+            "sl": {1: "one", 2: "two", 3: "few", 5: "other", 101: "one", 102: "two"},
+            "lt": {1: "one", 2: "few", 10: "other", 11: "other", 21: "one"},
+            "lv": {0: "zero", 1: "one", 2: "other", 11: "zero", 21: "one"},
+            "ro": {0: "few", 1: "one", 2: "few", 19: "few", 20: "other", 101: "few"},
+            "mk": {1: "one", 11: "other", 21: "one", 2: "other"},
+            "fil": {1: "one", 4: "other", 5: "one", 14: "other", 16: "other"},
+            "hi": {0: "one", 1: "one", 2: "other"},
+            "bn": {0: "one", 1: "one", 2: "other"},
+            "fa": {0: "one", 1: "one", 2: "other"},
+            "zh_TW": {1: "other", 5: "other"},
+            "sv": {0: "other", 1: "one", 2: "other"},
+        }
+        for code, expected in cases.items():
+            for n, category in expected.items():
+                with self.subTest(code=code, n=n):
+                    self.assertEqual(i18n.plural_category(code, n), category)
+
+    def test_traditional_chinese_is_found_before_simplified(self):
+        self.assertEqual(i18n._preference("zh-Hant-TW"), ["zh_TW", "zh"])
+        self.assertEqual(i18n._preference("zh-HK"), ["zh_TW", "zh"])
+        self.assertEqual(i18n._preference("zh-Hans-CN"), ["zh"])
+        self.assertEqual(i18n._preference("tr-TR"), ["tr"])
+
 
 class LanguageChoiceTests(CatalogCase):
     def test_each_catalog_is_read_once_until_its_file_changes(self):

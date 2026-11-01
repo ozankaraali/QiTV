@@ -5,6 +5,10 @@ import { HandshakeState, concat } from "./noise.js";
 import { sha256 } from "./vendor/crypto.js";
 
 const EMPTY = new Uint8Array(0);
+// A connection whose handshake isn't done by then has failed, and is tried again as any other:
+// a QiTV whose computer went to sleep can leave its socket open at the relay, answering nothing,
+// and an unreachable home address can hang. (QiTV itself gives a handshake 5 s.)
+const HANDSHAKE_MS = 8000;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 export const utf8 = (text) => encoder.encode(text);
@@ -33,6 +37,7 @@ export class Connection {
     this.in = null;
     this.ended = false;
     this.onclose = onclose;
+    this.deadline = setTimeout(() => this.end(4408, "no answer"), HANDSHAKE_MS);
     const ws = new WebSocket(url);
     this.ws = ws;
     ws.binaryType = "arraybuffer";
@@ -48,6 +53,7 @@ export class Connection {
           const answer = JSON.parse(decoder.decode(this.hs.readMessage(data)) || "{}");
           [this.out, this.in] = this.hs.split();
           this.hs = null;
+          clearTimeout(this.deadline);
           onopen(answer);
         } else {
           onmessage(JSON.parse(decoder.decode(this.in.decrypt(EMPTY, data))));
@@ -73,6 +79,7 @@ export class Connection {
   end(code = 1000, reason = "", closeSocket = true) {
     if (this.ended) return;
     this.ended = true;
+    clearTimeout(this.deadline);
     if (closeSocket) {
       try {
         this.ws.close(code >= 3000 || code === 1000 ? code : 1000);

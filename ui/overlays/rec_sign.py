@@ -1,11 +1,16 @@
 """The REC sign (2.6, Record as a PVR): recordings go on while something else is watched.
 
-A pill in a corner of the page that shows (the player's top left, the Library's bottom left):
-a red dot, REC, the recording channel and how long it has recorded ("● REC News 1:02:03"),
-or how many record ("● REC 2 channels"). A click opens its menu: per recording, "Go back to
-{channel}" (`goBack`) and "Stop recording" (`stop`), each naming the recording's player. The
-big picture's own recording shows on its controls and the small picture's on its label: the
-shell lists only the recordings in the background (`set_recordings`).
+A pill in a corner of the page that shows (the player's top right, under the controls'
+clock; the Library's bottom left): a red dot, REC, the recording channel and how long it has
+recorded ("● REC News 1:02:03"), or how many record ("● REC 2 channels"). A click opens its
+menu: per recording, "Go back to {channel}" (`goBack`) and "Stop recording" (`stop`), each
+naming the recording's player. The big picture's own recording shows on its controls and the
+small picture's on its label: the shell lists only the recordings in the background
+(`set_recordings`).
+2.8.12: on the player it sat at the top left, over the controls' logo and channel name (it read
+as if the recording channel played beside the one shown, its own REC chip and all); it sits
+under the clock now, and it hides while the drawer, the guide or the multiview's grid covers
+the player (`cover_with`): it showed through them, garbled.
 """
 
 from __future__ import annotations
@@ -37,7 +42,9 @@ from ui.theme import PALETTE, qcolor
 # i18n: the REC sign's menu: play the channel that records in the background again
 GO_BACK = N_("Go back to {channel}")
 _FALLBACK_HOST_WIDTH = 1280
-_EDGE_U = 2.4
+_EDGE_U = 2.4  # the Library's: from the page's bottom left corner
+_RIGHT_U = 3.0  # the player's: as the controls' clock's right edge ...
+_TOP_U = 6.8  # ... under their title row and its logo (2.4u to 5.7u), as the statistics
 _HEIGHT_U = 3.2
 _PAD_U = 1.2
 _FONT_U = 1.1
@@ -45,6 +52,7 @@ _NAME_MAX_U = 16.0  # a long channel name is cut
 
 
 class RecSign(Overlay):
+    accessible_name = N_("Recording")
     goBack = Signal(str)  # the recording's slot name
     stop = Signal(str)
 
@@ -56,7 +64,7 @@ class RecSign(Overlay):
         bottom: bool = False,
     ) -> None:
         """`clock` is what the recordings' starts are measured on (LiveSession's);
-        `bottom`: in the bottom left corner (the Library's), else the top left."""
+        `bottom`: in the bottom left corner (the Library's), else the top right."""
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMouseTracking(True)
@@ -64,6 +72,7 @@ class RecSign(Overlay):
         self._clock = clock
         self._bottom = bottom
         self._recordings: list[tuple[str, str, float]] = []
+        self._covers: list[QWidget] = []  # while one of them shows, it hides (`cover_with`)
         self._hover = False
         self._timer = QTimer(self, interval=1000)
         self._timer.timeout.connect(self._tick)
@@ -80,10 +89,33 @@ class RecSign(Overlay):
             self.hide()
             return
         self._layout()
-        self.show()
-        self.raise_()
-        self.update()
         self._timer.start()
+        self._follow_covers()
+
+    def cover_with(self, *widgets: QWidget) -> None:
+        """It hides while one of `widgets` shows (the drawer, the guide, the multiview's tiles:
+        they cover the player), and shows again after them while recordings go on."""
+        for widget in widgets:
+            self._covers.append(widget)
+            widget.installEventFilter(self)
+        self._follow_covers()
+
+    def covered(self) -> bool:
+        """One of its covers shows (`cover_with`)."""
+        return any(widget.isVisible() for widget in self._covers)
+
+    def _follow_covers(self, changed: Optional[QWidget] = None, shown: bool = False) -> None:
+        """Shown while recordings go on and nothing covers it; `changed` is a cover being
+        shown (`shown`) or hidden, whatever its isVisible() says yet."""
+        covered = any(shown if widget is changed else widget.isVisible() for widget in self._covers)
+        if not self._recordings or covered:
+            if not self.isHidden():
+                self.hide()
+            return
+        if self.isHidden():
+            self.show()
+            self.raise_()
+        self.update()
 
     def text(self) -> str:
         """What it says, its dot aside: "REC News 01:23", or "REC 2 channels"."""
@@ -146,14 +178,19 @@ class RecSign(Overlay):
                 room = min(room, un.px(_NAME_MAX_U))
             width += room + (un.px(0.7) if index else 0)
         height = un.px(_HEIGHT_U)
-        x = un.px(_EDGE_U)
-        y = parent.height() - un.px(_EDGE_U) - height if self._bottom else un.px(_EDGE_U)
+        if self._bottom:
+            x, y = un.px(_EDGE_U), parent.height() - un.px(_EDGE_U) - height
+        else:
+            x, y = parent.width() - un.px(_RIGHT_U) - round(width), un.px(_TOP_U)
         self.setGeometry(x, y, round(width), height)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if watched is self.parentWidget() and event.type() == QEvent.Type.Resize:
             if not self.isHidden():
                 self._layout()
+        elif event.type() in (QEvent.Type.Show, QEvent.Type.Hide) and watched in self._covers:
+            cover = watched if isinstance(watched, QWidget) else None
+            self._follow_covers(cover, event.type() == QEvent.Type.Show)
         return False
 
     def paintEvent(self, event: QPaintEvent) -> None:

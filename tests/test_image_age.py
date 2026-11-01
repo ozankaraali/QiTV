@@ -7,6 +7,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 from services import image_manager
 from services.image_manager import ImageManager
@@ -15,14 +16,22 @@ TMDB = "https://image.tmdb.org/t/p/w342/made-up.jpg"
 OTHER = "https://posters.invalid/made-up.jpg"
 
 
-class Response:
-    status = 200
-
+class Body:
     def __init__(self, body):
         self.body = body
 
-    async def read(self):
-        return self.body
+    async def iter_chunked(self, size):
+        for start in range(0, len(self.body), size):
+            yield self.body[start : start + size]
+
+
+class Response:
+    status = 200
+
+    def __init__(self, body, length=True):
+        self.body = body
+        self.content = Body(body)
+        self.content_length = len(body) if length else None  # a chunked answer says none
 
     async def __aenter__(self):
         return self
@@ -32,12 +41,13 @@ class Response:
 
 
 class Session:
-    def __init__(self):
+    def __init__(self, body=b"fresh", length=True):
         self.asked = []
+        self.body, self.length = body, length
 
     def get(self, url, timeout=None):
         self.asked.append(url)
-        return Response(b"fresh")
+        return Response(self.body, self.length)
 
 
 class ImageAgeTests(unittest.TestCase):
@@ -69,6 +79,20 @@ class ImageAgeTests(unittest.TestCase):
         self.age(path, 400 * 24 * 3600)
         self.fetch(session, OTHER)
         self.assertEqual(len(session.asked), 1)
+
+    def test_an_image_larger_than_the_limit_is_never_kept(self):  # a list names any host
+        for length in (True, False):  # declared, or found as it comes
+            with self.subTest(length=length), mock.patch.object(image_manager, "LOGO_MAX", 4):
+                self.assertIsNone(self.fetch(Session(b"a picture", length), OTHER))
+        self.assertEqual(os.listdir(self.manager.cache_dir), [])
+        self.assertIsNotNone(self.fetch(Session(b"logo"), OTHER))
+
+    def test_only_a_web_address_is_fetched(self):
+        session = Session()
+        for url in ("file:///etc/hosts", "file://server/share/a.png", "smb://server/a.png", ""):
+            with self.subTest(url=url):
+                self.assertIsNone(self.fetch(session, url))
+        self.assertEqual(session.asked, [])
 
     def test_tmdb_s_image_age_is_within_its_terms(self):
         self.assertLessEqual(image_manager.TMDB_IMAGE_MAX_AGE_S, 183 * 24 * 3600)

@@ -14,9 +14,9 @@ Version 2.0 works like a TV: the channel fills the window, ↑ and ↓ change ch
 
 Download QiTV from [RELEASES](https://github.com/ozankaraali/QiTV/releases):
 
-- **Windows:** `qitv-windows.exe`. Run it; there is nothing to install.
+- **Windows:** `qitv-windows.exe`. Run it; there is nothing to install. QiTV is not signed, so the first time Windows may say "Windows protected your PC": choose **More info**, then **Run anyway**.
 - **macOS:** `qitv-macos-universal.dmg` for Apple silicon Macs, `qitv-macos-intel.dmg` for Intel Macs. Open it and drag QiTV onto Applications (the same app also comes as a `.zip`). To update, Help → Check for Updates downloads the new `.dmg`, opens it and closes QiTV: drag QiTV onto Applications again and choose **Replace**. QiTV needs macOS 13 or newer. QiTV is not notarized by Apple, so the first time macOS may say it cannot check the app: open System Settings → Privacy & Security and choose **Open Anyway**.
-- **Linux:** `qitv-linux`. Make it runnable with `chmod +x qitv-linux`, then start it.
+- **Linux:** `qitv-linux`. Make it runnable with `chmod +x qitv-linux`, then start it. QiTV needs glibc 2.38 or newer: Ubuntu 24.04, Debian 13, Fedora 39 or newer.
 
 VLC comes inside QiTV: you do not need to install VLC to use it.
 
@@ -40,6 +40,7 @@ cd QiTV
 This installs a desktop entry and icon so QiTV appears in your application menu. The desktop entry uses absolute paths, so it works after rebooting without needing to re-activate the virtual environment.
 
 **Troubleshooting on Linux:**
+- If the release binary does not start and says ``version `GLIBC_2.38' not found``, your Linux is older than the libraries inside QiTV need (glibc 2.38: Ubuntu 24.04, Debian 13, Fedora 39 or newer). On an older one, [run QiTV from source](#running-from-source).
 - If the release binary fails with Qt/xcb plugin errors, install xcb-cursor: `sudo apt install libxcb-cursor0` (Debian/Ubuntu) or `sudo dnf install xcb-util-cursor` (Fedora).
 - Make sure `~/.local/bin` is in your PATH. Add `export PATH="$HOME/.local/bin:$PATH"` to your `~/.bashrc` if needed.
 

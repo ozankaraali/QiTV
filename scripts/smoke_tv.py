@@ -1688,7 +1688,8 @@ class Driver:
             and size == written > 0
             and stream
             and Path(path).parent == folder
-            and toast.startswith("Recording saved: "),
+            and toast.startswith("Recording saved")
+            and Path(path).name in toast,  # 2.8.12: "Recording saved in <folder>: <name>"
             f"recording {started}, REC shown {lit}, ended {ended} ({reason}), {size} bytes "
             f"(MPEG-TS {stream}) in {Path(path).parent.name if path else None}; toast {toast!r}",
         )

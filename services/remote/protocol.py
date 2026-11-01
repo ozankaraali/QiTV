@@ -166,7 +166,9 @@ def parse_phone_message(obj: object) -> Optional[dict]:
     if not isinstance(obj, dict):
         return None
     t = obj.get("t")
-    if t in ("held", "where", "forget", "totv", "refresh"):  # 2.8: the Library's Refresh
+    # 2.8: the Library's Refresh; closesearch: the search shown on the TV closes (the phone's
+    # Done; an older QiTV ignores it)
+    if t in ("held", "where", "forget", "totv", "refresh", "closesearch"):
         return {"t": t}
     if t == "pos":  # how far the phone got in a film or an episode it plays
         ms, length = _int(obj.get("ms")), _int(obj.get("len"))
@@ -418,6 +420,13 @@ class RecAct:
 @dataclass(frozen=True)
 class RefreshLists:
     """2.8: the Library's Refresh: the films and series of the providers it shows load again."""
+
+    sid: str
+
+
+@dataclass(frozen=True)
+class CloseSearch:
+    """The phone's search is done: the search it showed on the TV (Show on TV) closes."""
 
     sid: str
 

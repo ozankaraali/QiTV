@@ -14,7 +14,7 @@ import requests
 
 from services.epg_manager import EpgManager
 from services.provider_manager import StbHandshake
-from services.redact import redact_url, safe_exc, safe_message, safe_traceback
+from services.redact import mask, redact_url, safe_exc, safe_message, safe_traceback, scrub
 from services.workers import (
     EpgLoadWorker,
     ProviderSetupWorker,
@@ -53,6 +53,57 @@ class _Response:
 
     def close(self):
         pass
+
+
+class MaskTests(unittest.TestCase):
+    """A privacy review: what the mask missed, from requests' errors, request lines, headers and
+    JSON. Each sample's account (USER, PASS, a token, a MAC) never shows."""
+
+    SAMPLES = {
+        "HTTPConnectionPool(host='h.example', port=80): Max retries exceeded with url: "
+        "/live/USER/PASS/123.ts (Caused by NewConnectionError)": "with url: … (Caused by",
+        "GET /live/USER/PASS/1.ts HTTP/1.1": "GET … HTTP/1.1",
+        "h.example:8080/movie/USER/PASS/9.mkv": "h.example:8080/movie/…",
+        "/series/USER/PASS/77.mkv and /timeshift/USER/PASS/60/2026-10-01:20-00/5.ts": (
+            "/series/… and /timeshift/…"
+        ),
+        "http%3A%2F%2Fh.example%2Flive%2FUSER%2FPASS%2F1.ts": "…",
+        '{"url":"http:\\/\\/h.example\\/live\\/USER\\/PASS\\/1.ts"}': '{"url":"…',
+        '{"user_info":{"username":"USER","password":"PASS"}}': (
+            '{"user_info":{"username":"…","password":"…"}}'
+        ),
+        "Cookie: mac=00:1A:79:AA:BB:CC; stb_lang=en": "Cookie: …",
+        "the device 00:1A:79:AA:BB:CC, 00%3A1A%3A79%3AAA%3ABB%3ACC": "the device …, …",
+        "Authorization: Bearer TOKEN123": "Authorization: …",
+        "sent Bearer TOKEN123 again": "sent Bearer … again",
+        "X-Emby-Token: TOKEN123": "X-Emby-Token: …",
+        'MediaBrowser Client="QiTV", Token="TOKEN123"': 'MediaBrowser Client="QiTV", Token=…',
+        "api_key=TOKEN123&static=true": "api_key=…&static=true",
+    }
+
+    def test_every_sample_is_masked(self):
+        for text, shown in self.SAMPLES.items():
+            with self.subTest(text=text):
+                masked = mask(text)
+                self.assertIn(shown, masked)
+                for secret in ("USER", "PASS", "TOKEN123", "AA:BB:CC", "AA%3ABB", "h.example/"):
+                    self.assertNotIn(secret, masked)
+
+    def test_what_names_no_account_stays(self):
+        for text in (
+            "HTTPConnectionPool(host='h.example', port=80): Read timed out. (read timeout=5)",
+            'File "/qitv/services/live/source.py", line 10, in chunks',
+            "Exporting 3/40 at 12:34:56, max_height=1080",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(mask(text), text)
+
+    def test_scrub_and_safe_message_mask_so_too(self):
+        error = requests.ConnectionError(
+            "HTTPConnectionPool(host='h', port=80): Max retries exceeded with url: /live/U/P/1.ts"
+        )
+        self.assertNotIn("/U/P/", safe_message(error))
+        self.assertNotIn("TOKEN123", scrub("X-Emby-Token: TOKEN123"))
 
 
 class RedactTests(unittest.TestCase):

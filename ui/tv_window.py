@@ -30,7 +30,7 @@ import os
 import platform
 import sys
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from PySide6.QtCore import (
     QElapsedTimer,
@@ -41,13 +41,11 @@ from PySide6.QtCore import (
     QRect,
     Qt,
     QTimer,
-    QUrl,
 )
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
     QCursor,
-    QDesktopServices,
     QDragEnterEvent,
     QDragMoveEvent,
     QDropEvent,
@@ -65,7 +63,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from services import favorites, free_channels, thread_cleanup
+from services import favorites, free_channels, system_open, thread_cleanup
 from services.account_check import AccountChecks
 from services.browsed_catalog import BrowsedCatalog
 from services.casting import CastDevices, LibVlcDiscovery
@@ -94,6 +92,7 @@ from services.playback import (
     default_args,
 )
 from services.provider_link import ProviderLink
+from services.provider_rename import HashedKeys, Renames, carry_over
 from services.provider_types import is_media_server
 from services.recording_schedule import (
     FILE_NAME as SCHEDULE_FILE,
@@ -170,6 +169,7 @@ CLOSE_RETRY_MS = 50
 CLOSE_THREAD_WAIT_MS = 30_000  # then quit anyway: a stuck worker must not keep QiTV open
 CLOSING_NOTICE_AFTER = 10  # close retries (half a second) before the notice shows
 CLOSING_NOTICE_MS = 60_000  # shown again only if it hides before the wait ends
+REMOTE_CLOSE_WAIT_S = 4.0  # quitting waits this long at most for the phone remote to close
 EPG_REFRESH_MS = 2 * 60 * 60 * 1000
 WATCH_SAVE_DELAY_MS = 2000  # a play is saved once the zapping settles (and on close)
 MINI_WIDTH_FRACTION = 0.25
@@ -180,6 +180,9 @@ FORWARD_WAIT_MS = 1000  # the longest wait for QiTV to come forward before a rem
 FORWARD_POLL_MS = 50
 # config.json could not be written (locked by antivirus, read-only, a full disk).
 SAVE_FAILED_TEXT = N_("Couldn't save the settings; changes will be lost when QiTV closes")
+# i18n: a toast after Settings → Save: the scheduled recordings of a provider removed there were
+# cancelled ({titles}: their programmes, comma-separated)
+DROPPED_RECORDINGS_TEXT = N_("Recordings of a removed provider were cancelled: {titles}")
 ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
 # The Qt platform whose window ids libVLC can draw into (NSView, HWND, X11 window).
 _NATIVE_PLATFORMS = {"Darwin": "cocoa", "Windows": "windows", "Linux": "xcb"}
@@ -512,6 +515,9 @@ class TVWindow(QMainWindow):
         def now_provider(channel: dict):
             return controller.now_title(channel)
 
+        def playing() -> Optional[dict]:
+            return controller.playing_channel()  # its rows' ▶
+
         catalog = self.catalog
 
         def guide_programmes(channel: dict, start: datetime, limit: int):
@@ -522,6 +528,9 @@ class TVWindow(QMainWindow):
 
         def archive_reach(channel: dict) -> timedelta:
             return controller.archive_reach(channel)  # 2.7: a server window's too
+
+        def deepest_window(channels: list[dict], beyond: timedelta) -> timedelta:
+            return controller.deepest_window(channels, beyond)
 
         host = self.host
         self.grid_tiles = GridTiles(host)  # the multiview's labels, focus ring, "+" and cards
@@ -562,6 +571,7 @@ class TVWindow(QMainWindow):
                 parent=host,
                 archive_days=archive_days,
                 archive_reach=archive_reach,
+                deepest_window=deepest_window,
                 # 2.8: QiTV records programmes at their time (with the time-shift helper)
                 scheduled=self._programme_scheduled if self._instance is not None else None,
             ),
@@ -588,6 +598,10 @@ class TVWindow(QMainWindow):
             library_toast=self.library_toast,
             layout_row=self.layout_row,
         )
+        # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
+        self.rec_sign.cover_with(self.overlays.drawer, self.overlays.guide, self.grid_tiles)
+        for listing in (self.overlays.column, self.overlays.drawer, self.overlays.guide):
+            listing.set_playing(playing)
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
         # bottom corner's PiP: its pill, ⇄, speaker and × stay within reach; elsewhere on the
         # PiP the transport keeps only its own buttons and bar, and other clicks reach the
@@ -790,6 +804,9 @@ class TVWindow(QMainWindow):
             lambda: not self.screens.library_shown() and controller.pointer_may_hide(),
             parent=self,
         )
+        # The player controls come on a real move, not on a jittering mouse (2.8.12: it kept
+        # them, and the pointer with them, up).
+        self.pointer.realMoved.connect(controller.mouse_moved)
         for source in sources:
             self._wire_source(source)
         self.epg_refresh = QTimer(self, interval=EPG_REFRESH_MS)  # the guide keeps moving
@@ -823,8 +840,7 @@ class TVWindow(QMainWindow):
         controller = self.controller
         source.clicked.connect(self._on_video_clicked)
         source.doubleClicked.connect(controller.video_double_clicked)
-        source.mouseMoved.connect(self.pointer.moved)
-        source.mouseMoved.connect(controller.mouse_moved)
+        source.mouseMoved.connect(self.pointer.moved)  # its realMoved: controller.mouse_moved
         source.wheelSteps.connect(controller.wheel)
         source.backPressed.connect(controller.mouse_back)
         source.forwardPressed.connect(controller.mouse_forward)
@@ -1068,7 +1084,7 @@ class TVWindow(QMainWindow):
     def open_url(self, url: str) -> None:
         """A web page in the browser (OpenSubtitles' sign-up and API key page)."""
         if not self._closing:
-            QDesktopServices.openUrl(QUrl(url))
+            system_open.open_url(url)
 
     def pick_subtitle_file(self, folder: str) -> str:
         """The Subtitles panel's "Load a file…": a subtitle file, from `folder` ("": none)."""
@@ -1736,10 +1752,83 @@ class TVWindow(QMainWindow):
         self.menus.rebuild_providers()
         self.controller.guides_changed()
 
+    def providers_renamed(self, renames: Renames, removed: Sequence[str] = ()) -> None:
+        """Settings saved the provider list with providers renamed or removed (called before
+        `providers_saved`, while the catalogs under the old names still hold their lists): a
+        removed provider's scheduled recordings go, said in a toast (they could never record
+        again); what is kept under a renamed one's old name moves to its new name."""
+        if removed:
+            self._drop_recordings_of(removed)
+        if not renames:
+            return
+        contents = {
+            old: self.catalogs.catalog(old).provider_manager.current_provider_content
+            for old in renames.names
+            if old in self.catalogs.created()
+        }
+        schedule: Any = self.scheduler if self.scheduler is not None else self.recording_schedule
+        hooks: list[Callable[[Renames], Any]] = [
+            self.parental.rename_providers,
+            schedule.rename_providers,  # the scheduler's: its recordings under way too
+            self.budget.rename_providers,
+            self.remote.rename_providers,
+        ]
+        carry_over(self.config_manager, renames, hooks)
+        self._rekey_hashed(renames, contents)
+        self._schedule_changed()
+
+    def _drop_recordings_of(self, removed: Sequence[str]) -> None:
+        dropped = self.recording_schedule.drop_providers(removed)
+        if not dropped:
+            return
+        if self.scheduler is not None:
+            for item in dropped:  # one recording now stops (what it has is kept)
+                self.scheduler.cancel(str(item.get("id") or ""))
+        titles = ", ".join(
+            str(item.get("title") or "")
+            or (slot_text(item["begin"], item["minutes"]) if "begin" in item else "")
+            for item in dropped
+        )
+        logger.info("%d scheduled recording(s) of a removed provider went.", len(dropped))
+        self.screens.notify(translate(DROPPED_RECORDINGS_TEXT, titles=titles), "error", ERROR_MS)
+        self._schedule_changed()
+
+    def _hashed_stores(self) -> list[Any]:
+        """The stores that key channels (and films) by a hash of their provider's name."""
+        stores = (
+            self.live_tuning,
+            self.sound_sync,
+            self.channel_pictures,
+            self.catchup_memory,
+            self.subtitle_picks,
+        )
+        return [store for store in stores if store is not None]
+
+    def _rekey_hashed(self, renames: Renames, contents: dict) -> None:
+        """The renamed providers' channels and films hashed anew off the GUI thread, for the
+        stores that key them so (a provider whose lists are not loaded keeps the old keys)."""
+        wanted: set[str] = set()
+        for store in self._hashed_stores():
+            wanted |= store.keys()
+        if self.kept is not None:
+            wanted |= {ring.channel for ring in self.kept.rings()}
+        if not contents or not wanted:
+            return
+        worker = HashedKeys(renames, contents, wanted)
+        self.jobs.run_worker(worker, self._on_hashed_keys, lambda *_args: None)
+
+    def _on_hashed_keys(self, _context: Any, keys: dict[str, str]) -> None:
+        if self._closing or not keys:
+            return
+        for store in self._hashed_stores():
+            store.rekey(keys)
+        if self.kept is not None:
+            self.kept.rekey(keys)
+
     def save_config(self) -> None:
         """Settings → Save: the new settings apply even when config.json cannot be written."""
         try:
-            self.config_manager.save_config()
+            self.config_manager.save_config(wait=True)  # its failure is said
         except Exception as e:
             logger.warning("Couldn't save the settings: %s", safe_message(e))
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
@@ -1766,6 +1855,21 @@ class TVWindow(QMainWindow):
         self.catalog.refresh_epg(force=True)
 
     # ---- lifecycle ----------------------------------------------------------------------------
+
+    def come_to_front(self) -> None:
+        """QiTV was started again with these settings (2.8.12, services.single_instance):
+        this window shows in front instead, restored when it was minimized (fullscreen or
+        maximized as it was)."""
+        if self._closing:
+            return
+        state = self.windowState()
+        if state & Qt.WindowState.WindowMinimized:
+            self.setWindowState(state & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
+        if sys.platform == "darwin":
+            macos_window.activate_app()  # another app is in front: QiTV comes forward
+        self.activateWindow()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -1862,7 +1966,8 @@ class TVWindow(QMainWindow):
            stops, the geometry is saved.
         2. Wait for running QThreads (never block the GUI), with a notice after half a second,
            for at most CLOSE_THREAD_WAIT_MS.
-        3. Save the image and EPG indexes and release libVLC. On macOS libVLC removes its
+        3. Save the image and EPG indexes, let the phone remote finish closing (stopped in
+           step 1, REMOTE_CLOSE_WAIT_S at most) and release libVLC. On macOS libVLC removes its
            video view on the run loop after a stop, and closing before that crashes.
         4. Close.
 
@@ -1908,6 +2013,8 @@ class TVWindow(QMainWindow):
             self._run_steps(
                 ("save the image cache index", self.image_manager.save_index),
                 ("save the EPG indexes", self.catalogs.save_epg_indexes),
+                # Closing since step 1 on a thread of its own (its phones hear goodbye).
+                ("let the phone remote close", self._wait_remote_closed),
                 ("release the video", self._release_video),
             )
             self._close_later(event)
@@ -2035,6 +2142,9 @@ class TVWindow(QMainWindow):
                 # The message can name a provider URL: a scrubbed one, and the frames only.
                 logger.error("Could not %s: %s", what, safe_message(e))
                 logger.debug("Could not %s:\n%s", what, safe_traceback(e))
+
+    def _wait_remote_closed(self) -> None:
+        self.remote.wait_stopped(REMOTE_CLOSE_WAIT_S)
 
     def _save_geometry(self) -> None:
         self.config_manager.save_window_settings(_Geometry(self._normal_geometry()), WINDOW_NAME)

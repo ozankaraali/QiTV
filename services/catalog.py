@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from services.body_limits import TOO_LARGE_MESSAGE
 from services.catchup import known_zone
 from services.epg_view import Programme, programmes_for_channel
 from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as before)
@@ -26,6 +27,7 @@ from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as
     LOGIN_REFUSED_MESSAGE,
     NOT_FOUND_MESSAGE,
     PROXY_MESSAGE,
+    SIGN_IN_AGAIN_MESSAGE,
     TOO_SLOW_MESSAGE,
     UNEXPECTED_ANSWER_MESSAGE,
     UNREACHABLE_MESSAGE,
@@ -34,14 +36,20 @@ from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as
 from services.i18n import N_, tr, translate
 from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
 from services.provider_api import (
+    stb_api_base,
     stb_endpoint,
-    stb_portal_base,
     xtream_stream_url,
 )
 from services.provider_ids import stamp
 from services.provider_types import is_media_server
 from services.redact import safe_message
-from services.workers import NO_PORTAL_DATA_MESSAGE, STB_DEVICE_REJECTED_MESSAGE, find_roman_token
+from services.stream_address import NO_STREAM_MESSAGE
+from services.workers import (
+    NO_PORTAL_DATA_MESSAGE,
+    STB_DEVICE_REJECTED_MESSAGE,
+    STB_SESSION_REFUSED,
+    find_roman_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +61,6 @@ NO_SERIES_MESSAGE = N_("This provider has no series")
 PROVIDER_LOADING_MESSAGE = N_("The provider is still loading")
 GROUP_UNAVAILABLE_MESSAGE = N_("This group isn't available")
 SECTION_UNAVAILABLE_MESSAGE = N_("This provider doesn't offer this section")
-NO_STREAM_MESSAGE = N_("This item has no stream address")
 EMPTY_LINK_MESSAGE = N_("The portal returned an empty link")
 # Catalog network jobs (sections, groups, seasons, episodes) running at once per service:
 # portals rate-limit, and some ban a MAC that opens many connections.
@@ -74,6 +81,7 @@ _SAFE_MESSAGES = frozenset(
         NO_SERIES_MESSAGE,
         NO_STREAM_MESSAGE,
         EMPTY_LINK_MESSAGE,
+        TOO_LARGE_MESSAGE,
         NO_PORTAL_DATA_MESSAGE,
         STB_DEVICE_REJECTED_MESSAGE,
         FAILED_MESSAGE,
@@ -87,6 +95,8 @@ _SAFE_MESSAGES = frozenset(
         PROXY_MESSAGE,
         EXPIRED_MESSAGE,
         DISABLED_MESSAGE,
+        STB_SESSION_REFUSED,  # for the catalogs, which never show it (services.catalogs)
+        SIGN_IN_AGAIN_MESSAGE,  # 2.8: a media server's (its sign-in ended)
     }
 )
 _SAFE_PREFIXES = ("Unknown section: ", "Unsupported provider: ", BLOCKED_PREFIX)
@@ -1020,7 +1030,7 @@ class CatalogService(QObject):
         section, group_id = data
         provider = self.current_provider()
         return self.factory.stb_list(
-            url=stb_endpoint(stb_portal_base(provider.get("url", ""), True)),
+            url=stb_endpoint(stb_api_base(provider.get("url", ""), True)),
             headers=self.provider_manager.headers,
             content_type=SECTION_CONTENT_TYPES[section],
             category_id=group_id,
@@ -1091,7 +1101,7 @@ class CatalogService(QObject):
                 verify_ssl=verify,
             )
         return self.factory.stb_list(
-            url=stb_endpoint(stb_portal_base(provider.get("url", ""), True)),
+            url=stb_endpoint(stb_api_base(provider.get("url", ""), True)),
             headers=self.provider_manager.headers,
             content_type="series",
             category_id=series.get("category_id") or series.get("tv_genre_id", ""),
@@ -1163,7 +1173,7 @@ class CatalogService(QObject):
         series, season = data
         provider = self.current_provider()
         return self.factory.stb_list(
-            url=stb_endpoint(stb_portal_base(provider.get("url", ""), True)),
+            url=stb_endpoint(stb_api_base(provider.get("url", ""), True)),
             headers=self.provider_manager.headers,
             content_type="series",
             category_id=series.get("category_id") or series.get("tv_genre_id", ""),

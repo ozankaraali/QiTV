@@ -175,6 +175,7 @@ class TileHits(Overlay):
 
 
 class GridTiles(Overlay):
+    accessible_name = N_("Multiview")
     tilePressed = Signal(str)  # a left press on what a tile draws: its focus, at once
     tileClicked = Signal(str)  # that press's click, unless a double-click followed
     leaveRequested = Signal(str)  # a double-click: leave the grid with this tile large

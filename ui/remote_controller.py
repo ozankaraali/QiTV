@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import logging
+import threading
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
@@ -35,6 +36,7 @@ from services.remote.protocol import (
     Answered,
     CastTo,
     Closed,
+    CloseSearch,
     Code,
     Get,
     Held,
@@ -79,6 +81,7 @@ REMOVED_TEXT = N_("{name} can no longer control QiTV")
 PLAYING_ON_TEXT = N_("Playing on {name}")
 PLAYING_ON_PHONE_TEXT = N_("Playing on the phone")  # i18n: a toast, the phone's name unknown
 # i18n: a message when a phone that asked for the stream disconnected before it was sent
+PHONE_GONE_S = 90.0  # 2.8.12: a watching phone away this long gives its stream back
 PHONE_GONE_TEXT = N_("The phone left before the stream reached it")
 # i18n: the pairing screen when the phone remote couldn't start; "Help → Show the Log File" is
 # the Help menu's "Show the Log File…"
@@ -131,6 +134,7 @@ class RemoteController(QObject):
         self.bridge = RemoteBridge(self)
         self.bridge.arrived.connect(self._on_event)
         self.hub: Optional[RemoteHub] = None
+        self._stopping: Optional[threading.Thread] = None  # the last hub closing (shutdown)
         self._repeater = KeyRepeater(self._press)
         self._clock = QElapsedTimer()
         self._clock.start()
@@ -159,12 +163,16 @@ class RemoteController(QObject):
         # The number of the "play" each phone was handed last, by device: its position reports
         # carry it back, so one made for the title before a zap is not the new one's.
         self._plays: dict[str, int] = {}
+        self._links: dict[str, str] = {}  # 2.8: the link each device was handed last
         self._play_number = 0
         self.result_handles = Handles(limit=500)  # the search's
         self._removing: dict[str, str] = {}  # device id → name, until the hub confirms
         self._phones: set[str] = set()
         self._last_state: Optional[dict] = None
         self._last_at = 0
+        # 2.8.12: a phone watching whose page closed: its stream is given back once it stayed
+        # away PHONE_GONE_S (a locked screen or a reload comes back sooner).
+        self._gone_timers: dict[str, QTimer] = {}
         self._diff = QTimer(self)
         self._diff.setInterval(DIFF_MS)
         self._diff.timeout.connect(self._push_state)
@@ -178,6 +186,9 @@ class RemoteController(QObject):
         self._ask_number = 0
         window.controller.phoneAsked.connect(self._on_phone_asked)
         window.controller.phoneSettled.connect(self._on_phone_settled)
+        # An outside player took over (a phone's Watch, Play in VLC): the other phones let go.
+        self._handed_to: Optional[str] = None  # the device a Watch was just handed to
+        window.controller.handedOn.connect(self._on_handed_on)
         cast_devices = getattr(window, "cast_devices", None)  # 2.8: the phones' Cast to…
         if cast_devices is not None:
             cast_devices.changed.connect(self._push_cast)
@@ -226,8 +237,16 @@ class RemoteController(QObject):
         self._diff.stop()
         self._phones.clear()
         if self.hub is not None:
-            self.hub.stop()
+            # Not waited for: a phone being sent a film held the window up to 4 s (Settings,
+            # Quit). Quitting waits for it later (`wait_stopped`).
+            self._stopping = self.hub.stop_soon()
             self.hub = None
+
+    def wait_stopped(self, timeout: float) -> None:
+        """Quitting: the remote's close (`shutdown`) waited for, `timeout` seconds at most."""
+        stopping, self._stopping = self._stopping, None
+        if stopping is not None:
+            stopping.join(timeout)
 
     def set_pairing(self, open_: bool) -> None:
         if self.hub is not None:
@@ -310,6 +329,7 @@ class RemoteController(QObject):
         elif isinstance(event, Held):
             self._repeater.held(event.sid, self._now())
         elif isinstance(event, Closed):
+            self._watch_gone(event.sid)
             if self._asks.pop(event.sid, None) is not None:
                 self._window.controller.answer_phone(False)  # gone: the recording stays
             self._repeater.drop(event.sid)
@@ -330,6 +350,10 @@ class RemoteController(QObject):
         elif isinstance(event, Opened):
             self._phones.add(event.sid)
             self._devices[event.sid] = event.device_id
+            away = self._gone_timers.pop(event.device_id, None)
+            if away is not None:
+                away.stop()  # back in time: it still watches
+                away.deleteLater()
             if event.door == "relay":
                 self._relayed.add(event.sid)
             self._diff.start()
@@ -346,6 +370,9 @@ class RemoteController(QObject):
             self._to_tv(event.sid)
         elif isinstance(event, RefreshLists):  # 2.8: as the Library's ↻
             self._window.screens.library_controller.refresh_lists()
+        elif isinstance(event, CloseSearch):  # the phone's Done: the TV's search closes too
+            if self._window.screens.library_shown():
+                self._window.screens.library_controller.close_search()
         elif isinstance(event, Position):
             self._position(event.sid, event.position_ms, event.length_ms, event.play)
         elif isinstance(event, Answered):
@@ -494,6 +521,16 @@ class RemoteController(QObject):
             self._phone_catalogs[device] = catalog
         return catalog
 
+    def rename_providers(self, renames: Any) -> None:
+        """A renamed provider (`services.provider_rename.Renames`): a phone that showed it
+        goes on showing it under its new name."""
+        for catalog in self._phone_catalogs.values():
+            choice = catalog.config
+            name = getattr(choice, "phone_provider_name", "")
+            if name in renames.names:
+                choice.phone_provider_name = renames.names[name]
+        self._find_source = renames.of(self._find_source)
+
     def _finder(self) -> FindSession:
         """The desktop channel list's find, for every phone: genres and channels at every
         provider from their saved lists (a worker reads them; nothing signs in), ranked as on
@@ -621,6 +658,7 @@ class RemoteController(QObject):
             self._watching[self._device(sid)] = (target, group)
             self._play_number = (self._play_number + 1) % MAX_ASK
             self._plays[self._device(sid)] = self._play_number
+            self._links[self._device(sid)] = url
             message: dict = {"t": "play", "name": target.title[:TITLE_CHARS]}
             message["p"] = self._play_number  # what its position reports carry back
             if target.live:
@@ -628,9 +666,12 @@ class RemoteController(QObject):
             else:  # a film, an episode or a recording goes on where it stopped (as on the TV)
                 key = self._resume_key(target)
                 watch = self._window.watch
-                start = None if target.start_over or not key else watch.resume_position(key)
-                if not start and not target.start_over and not target.local:
-                    start = server_resume(target.item)  # 2.8: a media server's own
+                if target.start_over:
+                    start = None
+                elif key:  # 2.8: else a media server's own, unless QiTV saw it finished
+                    start = watch.resume_from(key, target.item)
+                else:
+                    start = server_resume(target.item)
                 if start:
                     message["start"] = start // 1000
             if target.local:
@@ -645,6 +686,7 @@ class RemoteController(QObject):
                 name = self._names.get(self._devices.get(sid, ""), "")
                 text = PLAYING_ON_TEXT if name else PLAYING_ON_PHONE_TEXT
                 self._window.screens.notify(translate(text, name=name))
+            self._handed_to = self._device(sid)  # it plays: the others let go (handedOn)
             return True, ""
 
         try:
@@ -720,15 +762,19 @@ class RemoteController(QObject):
 
     def _position(self, sid: str, position_ms: int, length_ms: int, play: int) -> None:
         """How far a phone got in the film or episode it plays: kept as the TV keeps its own,
-        so the TV (and the Library's Continue) goes on from there. Only a report of the play
-        handed last: one made before a zap (on its way meanwhile) is another title's. A page
-        from before 2.8 says no number (`play` -1): its reports are kept, as 2.7 kept them."""
+        so the TV (and the Library's Continue) goes on from there, and told to its media server
+        (2.8). Only a report of the play handed last: one made before a zap (on its way
+        meanwhile) is another title's. A page from before 2.8 says no number (`play` -1): its
+        reports are kept, as 2.7 kept them."""
         watched = self._watching.get(self._device(sid))
         if watched is None or play not in (-1, self._plays.get(self._device(sid))):
             return
         key = self._resume_key(watched[0])
         if key:
             self._window.watch.update_position(key, position_ms, length_ms)
+        link = self._links.get(self._device(sid))
+        if link and not watched[0].live:
+            self._window.controller.phone_position(link, position_ms)
 
     def _to_tv(self, sid: str) -> None:
         """The phone hands back what it played: the TV plays it."""
@@ -758,6 +804,48 @@ class RemoteController(QObject):
             self._watching.clear()
             if self.hub is not None:
                 self.hub.drop_films()  # nor reads a film for them any more
+
+    def _on_handed_on(self) -> None:
+        """An outside player took over what the TV played: a phone's Watch (the one just
+        handed it plays on), or Play in VLC. Every other phone watching lets go, as when the
+        TV plays again: one screen at a time, and the stream QiTV holds for an outside player
+        is the newest one's."""
+        keep, self._handed_to = self._handed_to, None
+        gone = [device for device in self._watching if device != keep]
+        if not gone:
+            return
+        for sid in self._phones:
+            if self._device(sid) in gone:
+                self._send(sid, {"t": "stop"})
+        for device in gone:
+            del self._watching[device]
+            if self.hub is not None:
+                self.hub.forget_film(device)  # nor reads a film for it any more
+
+    def _watch_gone(self, sid: str) -> None:
+        """Session `sid` closed: if its device watched and has no other session open, its
+        stream goes back after PHONE_GONE_S unless it comes back (`Opened`)."""
+        device = self._device(sid)
+        if device not in self._watching or device in self._gone_timers:
+            return
+        if any(other != sid and self._device(other) == device for other in self._phones):
+            return
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda device=device: self._watch_ended(device))
+        self._gone_timers[device] = timer
+        timer.start(int(PHONE_GONE_S * 1000))
+
+    def _watch_ended(self, device: str) -> None:
+        timer = self._gone_timers.pop(device, None)
+        if timer is not None:
+            timer.deleteLater()
+        if self._watching.pop(device, None) is None:
+            return
+        if self.hub is not None:
+            self.hub.forget_film(device)
+        if not self._watching:
+            self._window.controller.phone_stopped()
 
     def _device(self, sid: str) -> str:
         return self._devices.get(sid) or sid

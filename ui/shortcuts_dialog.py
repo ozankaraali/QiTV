@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QKeySequence
+from PySide6.QtGui import QFont, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QDialogButtonBox,
     QHeaderView,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -22,6 +23,7 @@ from ui.theme import PALETTE, RADIUS_CARD, qcolor
 TITLE = N_("Keyboard Shortcuts")  # i18n: the window's title (Help → Keyboard Shortcuts)
 # i18n: the columns of Help → Keyboard Shortcuts: the keys, and the action they do (noun)
 HEADERS = (N_("Keys"), N_("Action"))
+MIN_WIDTH = 560
 
 
 def key_label(keys: str) -> str:
@@ -75,6 +77,10 @@ class ShortcutsDialog(QDialog):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        # A long action wraps onto a second line where the window is too narrow for it.
+        self.table.setWordWrap(True)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.setStyleSheet(
             f"QTableWidget {{ background: {PALETTE.panel_raised}; color: {PALETTE.text};"
             f" border: none; border-radius: {RADIUS_CARD}px; }}"
@@ -86,4 +92,18 @@ class ShortcutsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(self.table)
         layout.addWidget(buttons)
-        self.resize(560, 640)
+        self.resize(self._fitting_width(), 640)
+
+    def _fitting_width(self) -> int:
+        """Wide enough for the longest keys and action on one line each (at least 560 px),
+        but within nine tenths of the screen: a longer action wraps."""
+        metrics = self.table.fontMetrics()
+        pad = 4 * metrics.averageCharWidth()  # each cell's margins
+        keys = max((metrics.horizontalAdvance(k) for k, _w, h in self.rows if not h), default=0)
+        what = max((metrics.horizontalAdvance(w) for _k, w, h in self.rows if not h), default=0)
+        scrollbar = self.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+        margins = self.layout().contentsMargins()
+        width = keys + what + 2 * pad + scrollbar + margins.left() + margins.right() + 8
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        room = int(screen.availableGeometry().width() * 0.9) if screen is not None else width
+        return max(MIN_WIDTH, min(width, room))

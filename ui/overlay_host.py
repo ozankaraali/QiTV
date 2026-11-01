@@ -264,5 +264,5 @@ class OverlayHost(QWidget):
         self.mouseMoved.emit()
 
     def wheelEvent(self, event):
-        self._pointer.wheel(event.angleDelta().y(), event.modifiers())
+        self._pointer.wheel_event(event)
         event.accept()

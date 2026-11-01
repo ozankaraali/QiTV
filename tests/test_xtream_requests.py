@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
+import orjson
 import requests
 
 from services import provider_api, workers
@@ -52,6 +53,7 @@ class XtreamRequestTests(unittest.TestCase):
         self.elsewhere = 404  # what the API's file answers anywhere else: 404, or 200 (a page)
         self.account: dict = {}  # the sign-in's account fields beyond the formats
         self.refused = False  # every list asked answers the account alone (as when expired)
+        self.cut = ""  # appended to the names: half an emoji, as a panel that cut them
         roots = patch.dict(provider_api._answered_at_root, clear=True)  # this test's session
         roots.start()
         self.addCleanup(roots.stop)
@@ -101,10 +103,10 @@ class XtreamRequestTests(unittest.TestCase):
                 elif fixture.refused:
                     payload = {"user_info": dict(fixture.account), "server_info": {}}
                 elif action in ("get_live_categories", "get_vod_categories"):
-                    payload = [{"category_id": "10", "category_name": "Fixture"}]
+                    payload = [{"category_id": "10", "category_name": "Fixture" + fixture.cut}]
                 elif action == "get_live_streams":
                     payload = [
-                        {"stream_id": 7, "name": "Live", "category_id": "10"},
+                        {"stream_id": 7, "name": "Live" + fixture.cut, "category_id": "10"},
                         {
                             "stream_id": 9,
                             "name": "Archive",
@@ -179,6 +181,15 @@ class XtreamRequestTests(unittest.TestCase):
                     worker.run()
                 self.assertEqual((results, errors), ([], [EXPIRED_MESSAGE]))
                 self.assertEqual(friendly_error(errors[0]), EXPIRED_MESSAGE)  # shown as it is
+
+    def test_a_name_cut_mid_emoji_is_mended_so_the_list_can_be_saved(self):
+        # The JSON escape of half an emoji's pair: requests' json kept it, and every save of
+        # the settings failed once the channel was in the watch history.
+        self.cut = " " + chr(0xD83D)
+        catalog = self.load_catalog("itv")
+        self.assertEqual(catalog["contents"][0]["name"], "Live " + chr(0xFFFD))
+        self.assertEqual(catalog["categories"][1]["title"], "Fixture " + chr(0xFFFD))
+        orjson.dumps(catalog)  # its cache, a watch history entry: written
 
     def test_the_archive_and_the_panels_time_zone_are_kept_compactly(self):
         catalog = self.load_catalog("itv")

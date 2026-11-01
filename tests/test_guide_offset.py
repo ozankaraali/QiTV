@@ -195,7 +195,7 @@ class ListWindowTests(unittest.TestCase):
 def fake_manager(offset_minutes, raw):
     provider = {GUIDE_OFFSET_KEY: offset_minutes}
     return SimpleNamespace(
-        get_programs_for_channel=lambda channel: raw,
+        get_programs_for_channel=lambda channel, since=None: raw,
         guide_offset=lambda: guide_offset(provider),
     )
 

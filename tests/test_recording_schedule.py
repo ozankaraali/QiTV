@@ -110,6 +110,33 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(self.schedule.outcomes()[0]["state"], rs.MISSED)
         self.assertEqual(self.schedule.missed_before((T0 + timedelta(hours=4)).timestamp()), [])
 
+    def test_one_recorded_in_part_before_quitting_is_not_missed(self):  # audit: quit mid-way
+        self.schedule.add_once(CHANNEL, programme("Film", 30, 60))
+        (job,) = self.schedule.due((T0 + timedelta(minutes=40)).timestamp(), lambda c, s: [])
+        self.schedule.started(job)
+        # QiTV closes while it records (RecordingScheduler.shutdown): its file is noted, and
+        # the rest may follow should QiTV open again while it airs.
+        self.schedule.noted(job, rs.RECORDED, path="/rec/film.ts")
+        self.schedule.unstarted(job)
+        reopened = rs.Schedule(
+            str(self.folder / rs.FILE_NAME), write=rs.write_now, clock=lambda: T0.timestamp()
+        )
+        self.assertEqual(reopened.missed_before((T0 + timedelta(days=1)).timestamp()), [])
+        self.assertEqual(reopened.items(), [])  # its time is over: off the schedule
+        states = [(o["state"], o.get("path", "")) for o in reopened.outcomes()]
+        self.assertEqual(states, [(rs.RECORDED, "/rec/film.ts")])
+
+    def test_one_slept_through_while_qitv_ran_says_so(self):
+        self.schedule.add_once(CHANNEL, programme("The News", 30))
+        self.schedule.add_once(dict(CHANNEL, id="8"), programme("Quiz", 30))
+        due = self.schedule.due((T0 + timedelta(minutes=31)).timestamp(), lambda c, s: [])
+        busy = [job.key for job in due if job.title == "Quiz"]  # the scheduler still on it
+        later = (T0 + timedelta(minutes=70)).timestamp()
+        missed = self.schedule.missed_before(later, why="asleep", busy=busy)
+        self.assertEqual([m["title"] for m in missed], ["The News"])
+        self.assertEqual(self.schedule.outcomes()[0]["why"], "asleep")
+        self.assertEqual([i["title"] for i in self.schedule.items()], ["Quiz"])  # still handled
+
     def test_the_schedule_is_kept_on_disk_and_read_back(self):
         self.schedule.add_once(CHANNEL, programme("The News", 30))
         self.schedule.add_series(CHANNEL, "Weather")

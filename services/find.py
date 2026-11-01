@@ -29,7 +29,7 @@ from PySide6.QtCore import QObject, Signal
 
 from services.catalog import ALL_GROUP_ID
 from services.navigation import item_key
-from services.provider_ids import ALL_PROVIDERS
+from services.provider_ids import ALL_PROVIDERS, provider_of
 from services.search import _title, iter_items
 from services.text_fold import fold, fold_all
 
@@ -316,12 +316,19 @@ def by_scope(
     return sorted(found, key=scope)  # (stable: each keeps its rank)
 
 
+def own_keys(items: Sequence[dict], shown: str) -> frozenset[tuple[str, str]]:
+    """A group's channels as `by_scope`'s `own` takes them: (provider, item key), `shown`
+    standing for the provider of a channel not stamped with one."""
+    return frozenset((provider_of(c) or shown, item_key(c)) for c in items)
+
+
 class FindWorker(QObject):
     """JobRunner worker: makes the index unless given one (every provider's cached content,
     the catalogs' own in memory, else the disk), then finds and ranks the genres and the
-    channels."""
+    channels; given a `scope` (a group's channels and the provider shown), also its `own_keys`
+    (264,000 channels took 0.3 s, too long for the GUI thread)."""
 
-    finished = Signal(object)  # (index, genres, channel hits)
+    finished = Signal(object)  # (index, genres, channel hits[, the scope's own_keys])
     error = Signal(str)
 
     def __init__(
@@ -331,6 +338,7 @@ class FindWorker(QObject):
         index=None,
         loaded=None,
         preferences: Preferences = Preferences(),
+        scope: Optional[tuple[Sequence[dict], str]] = None,
     ):
         super().__init__()
         self._provider_manager = provider_manager
@@ -338,6 +346,7 @@ class FindWorker(QObject):
         self._index = index
         self._loaded = loaded  # provider name -> content its catalog holds (read only)
         self._preferences = preferences
+        self._scope = scope  # (a group's channels, the provider shown): read only
 
     def run(self) -> None:
         index = self._index
@@ -348,4 +357,7 @@ class FindWorker(QObject):
         genres = find_genres(index, self._text, self._preferences)
         channels = find_channels(index, self._text, self._preferences)
         logger.debug("A find took %.0f ms", (time.perf_counter() - started) * 1000)
-        self.finished.emit((index, genres, channels))
+        if self._scope is None:
+            self.finished.emit((index, genres, channels))
+        else:
+            self.finished.emit((index, genres, channels, own_keys(*self._scope)))

@@ -17,12 +17,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 import logging
 import os
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
-from PySide6.QtCore import QObject, QPoint, QThread, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QObject, QPoint, QThread
 from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QWidget
 
+from services import system_open
 from services.exporter import ExportKind
 from services.failure_reasons import shown_message
 from services.i18n import tr
@@ -77,6 +77,8 @@ class TVPages(QObject):
             # one still written can't be deleted (2.8)
             writing=(lambda: set(writing())) if writing is not None else None,
         )
+        # A recording's file another program holds (Windows) stays: the user is told why.
+        self.recordings.delete_failed.connect(lambda text: self.notify(text, "error", ERROR_MS))
         self.library_model = LibraryModel(
             window.library_catalog,
             window.config_manager,
@@ -105,9 +107,11 @@ class TVPages(QObject):
             back_to_tv=self.back_to_tv,
             context_menu=self.context_menu,
             tmdb=self.tmdb,
+            cancel_scheduled=window.cancel_scheduled,
             parent=self,
         )
         self.library_controller.notice.connect(self.notify)
+        self.library_controller.addProviderRequested.connect(lambda: window.add_provider())
         # 2.8: a Library genre's right-click hides it, as the TV list's groups.
         self.library_controller.set_hiding(
             lambda *args: window.controller.hide_group(*args),
@@ -383,7 +387,7 @@ class TVPages(QObject):
         menu.popup(global_pos)
 
     def _show_in_folder(self, path: str) -> None:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
+        system_open.open_folder(os.path.dirname(path))
 
     def _delete_recording(self, item: dict) -> None:
         window = self._window
@@ -423,13 +427,23 @@ class TVPages(QObject):
 
     # ---- messages -----------------------------------------------------------------------------
 
-    def notify(self, text: str, kind: str = "info", ms: int = INFO_MS) -> None:
+    def notify(
+        self,
+        text: str,
+        kind: str = "info",
+        ms: int = INFO_MS,
+        *,
+        action: str = "",
+        on_action: Optional[Callable[[], None]] = None,
+    ) -> None:
         """A message on whichever page shows (each page has its toast). A text marked where it
-        was written (the Library's, the exports') shows in the active language."""
+        was written (the Library's, the exports') shows in the active language. `action` and
+        `on_action`: a button on the message (a running export's Cancel)."""
         window = self._window
         text = shown_message(text)
+        button = {"action": action, "on_action": on_action} if on_action is not None else {}
         for toast in (window.overlays.toast, window.library_toast):
-            toast.show_message(text, kind, ms)
+            toast.show_message(text, kind, ms, **button)
 
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self.library_shown():  # the player's toast says it too, but its page is hidden

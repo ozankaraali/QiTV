@@ -35,6 +35,7 @@ const words = {
   movies: "Movies",
   series: "Series",
   no_results: "Nothing found",
+  searching: "Searching…",
   nothing_here: "Nothing here yet",
   loading: "Loading…",
   use_touchpad: "Use a touchpad",
@@ -152,7 +153,10 @@ function onState(message) {
   const guide = document.querySelector(".seg [data-key=guide]");
   if (guide) guide.classList.toggle("on", message.context === "guide");
   const mute = document.querySelector("[data-key=mute]");
-  if (mute) mute.classList.toggle("on", !!message.muted);
+  if (mute) {
+    mute.classList.toggle("on", !!message.muted);
+    mute.setAttribute("aria-pressed", String(!!message.muted)); // a screen reader: muted or not
+  }
   for (const [key, on] of [["record", message.recording], ["multiview", message.multiview]]) {
     for (const button of document.querySelectorAll(`[data-key=${key}]`)) button.classList.toggle("on", !!on); // lit while the TV does it
   }
@@ -236,7 +240,7 @@ function bindRec() {
   $("recLine").addEventListener("click", openRecMenu);
   $("askYes").addEventListener("click", () => answer(true));
   $("askNo").addEventListener("click", () => answer(false));
-  $("veil").addEventListener("click", () => answer(false)); // tapped away: nothing stops
+  app.ondismiss = () => answer(false); // tapped beside or swiped away: nothing stops
 }
 
 function drawNow() {
@@ -384,10 +388,11 @@ function channelList({ ids, asks, top, row, shown }) {
       ask(list, { what: asks[1], list: list.key, page, find: list.find });
     }
   };
-  const openAt = (level, key = "", title = "", source = "") => {
+  const openAt = (level, key = "", title = "", source = "", find = "") => {
     const following = level === "channels" && !key; // where the TV is
-    Object.assign(list, { level, key, title, total: null, find: "", following, switchTo: source });
-    $(ids.find).value = "";
+    if (level === "sources") find = ""; // no find box there
+    Object.assign(list, { level, key, title, total: null, find, following, switchTo: source });
+    $(ids.find).value = find;
     showLevel();
     startList(box(), list);
     askPage(0);
@@ -451,10 +456,16 @@ function channelList({ ids, asks, top, row, shown }) {
   };
   // A reconnect is a new session: what shows comes again (its groups' keys hold).
   const reopen = () => openAt(list.level, list.level === "channels" ? list.key : "", list.title);
+  // Back to the list as the phone left it, its level, group and find (asked again: the TV's
+  // lists may have changed meanwhile); never opened, or still following the TV: where the TV is.
+  const resume = () => {
+    if (!list.ask || list.following) openAt("channels");
+    else openAt(list.level, list.level === "channels" ? list.key : "", list.title, "", list.find);
+  };
   app.handlers[asks[0]] = onGroups;
   app.handlers[asks[1]] = onChannels;
   app.handlers[asks[2]] = onSources;
-  return { list, openAt, reopen, follow, bind };
+  return { list, openAt, reopen, resume, follow, bind };
 }
 
 const guide = channelList({
@@ -479,8 +490,11 @@ function followTv(live) {
   zap.follow(live);
 }
 
-function openGuide() {
-  guide.openAt("channels"); // where the TV's channel list is
+// The tab: where the phone was, its group and find, as the Library's; tapped again while it
+// shows (or at first), where the TV's channel list is.
+function openGuide(again = false) {
+  if (again) guide.openAt("channels");
+  else guide.resume();
 }
 
 let timetableFor = "";
@@ -803,6 +817,14 @@ function failedNotice(retry) {
   return box;
 }
 
+// What an empty page says: a find says Nothing found only once QiTV searched every provider
+// (until then "searching", as the desktop's search says).
+function emptyWord(message) {
+  if (message.loading) return "loading";
+  if (!message.find) return "nothing_here";
+  return message.searching ? "searching" : "no_results";
+}
+
 // A page into `box`. The view's first replaces what showed; one QiTV sends again (a list that
 // arrived, a programme guide that loaded) changes its rows in place; the next go below, the
 // earlier above without moving what shows.
@@ -817,7 +839,7 @@ function placePage(box, list, message, rows, retry) {
     list.lo = list.hi = page;
     if (rows.length) box.replaceChildren(...rows);
     else if (message.failed) box.replaceChildren(failedNotice(retry));
-    else box.replaceChildren(el("div", "empty", w(message.loading ? "loading" : message.find ? "no_results" : "nothing_here")));
+    else box.replaceChildren(el("div", "empty", w(emptyWord(message))));
     box.scrollTop = 0;
   } else if (old.length) {
     old[0].before(...rows);
@@ -918,11 +940,14 @@ function bindSearch() {
   toggle.addEventListener("click", () => {
     useSearchOnTv(!searchOnTv);
     if (searchOnTv) tap("search"); // shown on the TV from now on: its search opens
+    else send({ t: "closesearch" }); // no longer: the TV's closes
     if (input.value) sendQuery();
   });
   useSearchOnTv(searchOnTv);
   $("searchDone").addEventListener("click", () => {
     input.blur();
+    clearTimeout(queryTimer); // a text still to go would open the TV's search again
+    if (searchOnTv) send({ t: "closesearch" }); // the TV's search closes too
     show("remote");
   });
 }
@@ -944,18 +969,18 @@ function showLibraryLevel() {
   nameField($("libraryFind"));
 }
 
-function openLibraryAt(level, genre = "", title = "") {
-  Object.assign(library, { level, genre, title, total: null, find: "" });
-  $("libraryFind").value = "";
+function openLibraryAt(level, genre = "", title = "", find = "") {
+  Object.assign(library, { level, genre, title, total: null, find });
+  $("libraryFind").value = find;
   showLibraryLevel();
   startList($("libraryRows"), library);
   askLibrary(0);
 }
 
 function openLibrary() {
-  // the tab: where the phone was
-  if (library.level === "titles") openLibraryAt("titles", library.genre, library.title);
-  else openLibraryAt("genres");
+  // the tab: where the phone was, its find too (as the Guide's)
+  if (library.level === "titles") openLibraryAt("titles", library.genre, library.title, library.find);
+  else openLibraryAt("genres", "", "", library.find);
 }
 
 function askLibrary(page) {
@@ -1016,7 +1041,7 @@ function bindLibrary() {
   $("libraryUp").addEventListener("click", () => openLibraryAt("genres"));
   $("libraryRefresh").addEventListener("click", () => {  // 2.8: as the TV Library's ↻
     send({ t: "refresh" });
-    banner(w("refreshing"));
+    note(w("refreshing")); // QiTV says nothing when it's done: the lists come again as they load
   });
   const find = $("libraryFind");
   find.addEventListener("input", () => {

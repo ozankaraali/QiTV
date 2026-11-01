@@ -6,6 +6,7 @@ from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QLinearGradient, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtWidgets import QAbstractItemView
 
+from services.i18n import N_
 from ui.overlays.base import Overlay
 from ui.overlays.channel_rows import ChannelListView, ChannelRowDelegate, ChannelRowsModel
 from ui.overlays.painting import Units, elided
@@ -18,6 +19,7 @@ COLUMN_FRACTION = 0.4
 
 
 class ChannelColumn(Overlay):
+    accessible_name = N_("Channel list")
     closed = Signal()
     rowClicked = Signal(int)
 
@@ -63,6 +65,15 @@ class ChannelColumn(Overlay):
         self.show()
         self.raise_()
         self.highlight(index)
+
+    def set_playing(self, playing) -> None:
+        """What plays large (asked at each paint, `() -> dict | None`): its row has a ▶."""
+        self._model.playing = playing
+
+    def playing_changed(self) -> None:
+        """Another channel plays: the open list moves its ▶."""
+        if self.isVisible():
+            self._view.viewport().update()
 
     def current_index(self) -> int:
         return self._view.currentIndex().row()

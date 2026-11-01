@@ -15,7 +15,7 @@ from unittest import mock
 
 from PySide6.QtWidgets import QApplication
 from http_fixtures import LocalSource
-from ts_fixtures import make_stream
+from ts_fixtures import VIDEO_PID, make_stream
 
 from services.live import engine as engine_module, recorder as recorder_module, worker
 from services.live.engine import LiveEngine
@@ -33,10 +33,15 @@ from services.live.recorder import (
 from services.live.ring import RamRing, RingError
 from tests.test_live_engine import URL_FOR_RING, wait_until
 from tests.test_live_server import Writer, header, payload
-from tests.test_live_worker import RAM, SECRET_PATH, InProcessHelper, paced_route
+from tests.test_live_worker import LIVE_PACE, RAM, SECRET_PATH, InProcessHelper, paced_route
 
 SEGMENT = 64 * 1024
 MIB = 1024 * 1024
+
+
+def pids(data: bytes) -> list[int]:
+    """The PID of each whole 188-byte packet of `data`, in order."""
+    return [((data[i + 1] & 0x1F) << 8) | data[i + 2] for i in range(0, len(data) - 187, 188)]
 
 
 class Ended:
@@ -321,9 +326,12 @@ class RecorderTests(RecorderCase):
         fallback = RamRing(64 * SEGMENT)
         fallback.open_segment(5, header(5))
         fallback.append(payload(5, 0, 4000))
-        current = [failing]
-        recorder = self.record(0, ring_of=lambda: current[0])
-        current[0] = fallback  # the session went on in RAM after its disk failed
+        # The recording starts on the disk ring; by its failed read the session went on in RAM
+        # after its disk failed. Asked in that order whatever the threads' timing (swapped
+        # after the start, the recorder's thread could read the disk ring before the swap and
+        # read it again: CI saw it give up with nothing written).
+        first = [failing]
+        recorder = self.record(0, ring_of=lambda: first.pop() if first else fallback)
         expected = header(5) + payload(5, 0, 4000)
         self.wait_written(recorder, len(expected))
         recorder.stop()
@@ -331,11 +339,102 @@ class RecorderTests(RecorderCase):
         self.assertEqual(reason, STOPPED)
         self.assertEqual(Path(path).read_bytes(), expected)
 
-    def test_a_read_that_fails_twice_stops_it_and_keeps_what_it_wrote(self):
+    def test_a_session_that_moves_to_ram_a_while_after_the_failed_read_is_followed(self):
+        # 2.8.12: the session moves on in RAM once its own next write fails, which a quiet
+        # source may bring seconds after the recorder's read failed (it asked once and gave up).
+        failing = FailingRing(64 * SEGMENT, after=0, failures=99)
+        self.ring, self.writer = failing, Writer(failing)
+        self.segments(1)
+        fallback = RamRing(64 * SEGMENT)
+        fallback.open_segment(5, header(5))
+        fallback.append(payload(5, 0, 4000))
+        asked = []
+
+        def ring_of():
+            asked.append(True)
+            return failing if len(asked) <= 4 else fallback  # the start and three failed reads
+
+        recorder = self.record(0, ring_of=ring_of)
+        expected = header(5) + payload(5, 0, 4000)
+        self.wait_written(recorder, len(expected))
+        recorder.stop()
+        reason, path, _ = self.finish(recorder)
+        self.assertEqual(reason, STOPPED)
+        self.assertEqual(Path(path).read_bytes(), expected)
+
+    def test_a_read_that_fails_a_moment_goes_on(self):
         flaky = FailingRing(64 * SEGMENT, after=2, failures=2)
         self.ring, self.writer = flaky, Writer(flaky)
         self.segments(3)
-        with self.assertLogs("services.live.recorder", "WARNING") as logs:
+        recorder = self.record(0)
+        self.wait_written(recorder, 3 * SEGMENT)  # all of it, the reads that failed again too
+        recorder.stop()
+        self.assertEqual(self.finish(recorder)[0], STOPPED)
+
+    def test_a_stop_while_reads_fail_ends_it_failed_without_spinning(self):
+        # Review of 2.8.12: a stop while the disk's reads failed (no RAM ring yet) spun till
+        # 30 s, then said it stopped as if everything was written. A stop asked (a channel
+        # change: the teardown waits for it) still writes what is left; reads that keep
+        # failing end it "failed", paused between tries.
+        failing = FailingRing(64 * SEGMENT, after=1, failures=10**9)
+        self.ring, self.writer = failing, Writer(failing)
+        self.segments(2)
+        with mock.patch.object(recorder_module, "_FOLLOW_S", 0.5):
+            recorder = self.record(0)
+            time.sleep(0.2)
+            reads = failing.reads
+            recorder.stop()
+            reason, _, written = self.finish(recorder, timeout=3)
+        self.assertEqual(reason, FAILED)
+        self.assertGreater(written, 0)
+        self.assertLess(failing.reads - reads, 30)  # no spin: a pause between tries
+
+    def test_a_ring_closed_before_the_session_moved_to_ram_is_followed(self):
+        # 2.8.12: a disk budget's trim closed the session's ring (its oldest file could not go)
+        # before the session moved on in RAM, which it does with its next write: the recording
+        # ended "stopped" at once.
+        self.segments(1)
+        session = [self.ring]
+        recorder = self.record(0, ring_of=lambda: session[0])
+        self.wait_written(recorder, SEGMENT)
+        self.ring.close()
+        time.sleep(0.3)  # the session's next write comes later
+        fallback = RamRing(64 * SEGMENT)
+        fallback.open_segment(5, header(5))
+        fallback.append(payload(5, 0, 4000))
+        session[0] = fallback
+        self.wait_written(recorder, recorder.written + len(header(5)) + 4000)
+        recorder.stop()
+        self.assertEqual(self.finish(recorder)[0], STOPPED)
+
+    def test_a_segment_the_ram_ring_holds_whole_is_not_skipped(self):
+        # 2.8.12: the disk failed on a new segment's first write (its header only was there):
+        # the session opens that segment afresh in RAM, and the recording went on after it, a
+        # segment short (its header taken for begun).
+        self.segments(1)  # 0 complete, 1 open: its header only
+        session = [self.ring]
+        recorder = self.record(0, ring_of=lambda: session[0])
+        self.wait_written(recorder, SEGMENT)
+        fallback = RamRing(64 * SEGMENT)
+        session[0] = fallback
+        self.ring.close()
+        fallback.open_segment(1, header(1))
+        fallback.append(payload(1, 0, 5000))
+        fallback.open_segment(2, header(2))
+        fallback.append(payload(2, 0, 3000))
+        self.wait_written(recorder, recorder.written + 5000 + len(header(2)) + 3000)
+        recorder.stop()
+        _, path, _ = self.finish(recorder)
+        self.assertIn(payload(1, 0, 5000), Path(path).read_bytes())
+
+    def test_a_read_that_keeps_failing_stops_it_and_keeps_what_it_wrote(self):
+        flaky = FailingRing(64 * SEGMENT, after=2, failures=10**9)
+        self.ring, self.writer = flaky, Writer(flaky)
+        self.segments(3)
+        with (
+            mock.patch.object(recorder_module, "_FOLLOW_S", 0.3),
+            self.assertLogs("services.live.recorder", "WARNING") as logs,
+        ):
             recorder = self.record(0)
             reason, path, written = self.finish(recorder)
         self.assertEqual(reason, FAILED)  # it could not go on: no write failed
@@ -494,7 +593,7 @@ class HelperRecordingTests(unittest.TestCase):
         self.stop = threading.Event()
         self.hung_up = threading.Event()
         self.source = LocalSource(
-            {SECRET_PATH: paced_route(make_stream(60), self.stop, self.hung_up)}
+            {SECRET_PATH: paced_route(make_stream(60), self.stop, self.hung_up, **LIVE_PACE)}
         )
         self.addCleanup(self.source.close)
         self.addCleanup(self.stop.set)
@@ -517,33 +616,46 @@ class HelperRecordingTests(unittest.TestCase):
         # Generous: the close thread sends it once the upstream let go, on a loaded runner late.
         return self.seen(lambda m: m == ("closed", sid), timeout)
 
-    def assert_transport_stream(self, path):
+    def recording_grew(self, path, timeout=10):
+        """Waits until the recording at `path` holds some of the channel's pictures (past its
+        PAT and PMT): a fixed wait recorded nothing on a loaded runner."""
+        deadline = time.monotonic() + timeout
+        while not (os.path.exists(path) and VIDEO_PID in pids(Path(path).read_bytes())):
+            self.assertLess(time.monotonic(), deadline, "the recording did not follow the stream")
+            time.sleep(0.02)
+
+    def assert_transport_stream(self, path, size):
+        """The file a player opens: a transport stream from its first byte (the PAT, then
+        whole packets), with the channel's pictures, and all `size` bytes its end counted."""
         data = Path(path).read_bytes()
-        self.assertGreater(len(data), 188 * 100)
-        self.assertEqual(data[0], 0x47)
-        self.assertEqual(data[188], 0x47)
+        self.assertEqual(len(data), size)
+        self.assertEqual(len(data) % 188, 0)
+        self.assertEqual(data[::188], b"\x47" * (len(data) // 188))  # each packet's sync byte
+        self.assertEqual(pids(data[:188]), [0])
+        self.assertIn(VIDEO_PID, pids(data))
 
     def test_a_recording_stops_and_keeps_its_file_without_another_connection(self):
         path = str(self.folder / "One.ts")
         self.helper.parent.send(("record_start", "s", "r1", path, 0, {}))
         told = self.helper.wait_for(lambda m: m[0] == "recording" and m[2] == "r1")
         self.assertEqual(told, ("recording", "s", "r1", path, 0))  # its file, once made
-        time.sleep(1.0)
+        self.recording_grew(path)
         self.helper.parent.send(("record_stop", "s"))
         message = self.recorded("r1")
         self.assertEqual(message[:5], ("recorded", "s", "r1", STOPPED, path))
-        self.assertEqual(os.path.getsize(path), message[5])
-        self.assert_transport_stream(path)
+        self.assert_transport_stream(path, message[5])
         self.assertEqual(self.source.connections, 1)  # the session's own, nothing more
 
     def test_a_channel_change_stops_the_recording_and_keeps_the_file(self):
+        # It asserted more than 100 packets after 0.6 s: on a loaded runner the paced source
+        # had sent fewer by the close (92). What it means: the file is whole and playable.
         path = str(self.folder / "One.ts")
         self.helper.parent.send(("record_start", "s", "r1", path, 0, {}))
-        time.sleep(0.6)
+        self.recording_grew(path)
         self.helper.parent.send(("close", "s"))
         message = self.recorded("r1")  # before or after "closed": in no set order
         self.assertEqual(message[3], STOPPED)
-        self.assert_transport_stream(path)
+        self.assert_transport_stream(path, message[5])
         self.assertEqual(self.closed("s"), ("closed", "s"))
         self.assertTrue(self.hung_up.wait(3), "the session kept its upstream connection")
 
@@ -725,7 +837,9 @@ class EngineHelperRecordingTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         stop, hung_up = threading.Event(), threading.Event()
-        source = LocalSource({SECRET_PATH: paced_route(make_stream(60), stop, hung_up)})
+        source = LocalSource(
+            {SECRET_PATH: paced_route(make_stream(60), stop, hung_up, **LIVE_PACE)}
+        )
         self.addCleanup(source.close)
         self.addCleanup(stop.set)
         engine = LiveEngine(str(root / "timeshift"))

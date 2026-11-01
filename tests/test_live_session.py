@@ -42,6 +42,7 @@ DISK = "Disk time-shift isn't available; using memory"
 REWOUND = "Rewound past the buffer"
 LOADING = "Still loading…"
 RECONNECTING = "Reconnecting…"
+NO_STREAM = "This item has no stream address"
 NOT_LIVE = "The provider sent a recording, not the channel. Trying again…"
 KEPT_ONLY = "This channel can't open right now. Playing what was kept."
 KEPT_END = "That's all that was kept. The channel can't open right now."
@@ -6465,6 +6466,9 @@ class ServerWindowTests(LiveSessionCase):
         part = self.engine.opened[-1][0]
         self.live.seek_to(30.0)  # back into the buffer
         self.assertIn(part, self.engine.closed)
+        # 2.8.12: the live upstream resumes once the part's connection let go, not before.
+        self.assertEqual(self.engine.resumes, [])
+        self.engine.answer()
         self.assertEqual([resume[0] for resume in self.engine.resumes], [sid])
 
     def test_a_recording_records_the_live_session_while_a_part_plays(self):
@@ -6542,6 +6546,8 @@ class ServerWindowTests(LiveSessionCase):
         plays = len(self.playback.plays)
         self.live.go_live()
         self.assertIn(part, self.engine.closed)
+        self.assertEqual(self.engine.resumes, [])  # 2.8.12: once the part's connection let go
+        self.engine.answer()
         self.assertEqual([resume[0] for resume in self.engine.resumes], [sid])
         self.playback.ended.emit()  # the part's stream ended under VLC
         self.assertEqual(len(self.playback.plays), plays)  # not the stale edge
@@ -6579,6 +6585,7 @@ class ServerWindowTests(LiveSessionCase):
         self.live._part_retry_ms = 0
         sid, _part = self.in_part(-300.0, one_stream=True)
         self.live.seek_to(30.0)  # back into the buffer: the live upstream resumes
+        self.engine.answer()  # once the part's connection let go (2.8.12)
         for _ in range(2):  # refused, and once more (the part's connection may still count)
             self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
             QTest.qWait(20)
@@ -6788,6 +6795,7 @@ class ServerWindowFixTests(LiveSessionCase):
         self.live._part_retry_ms = 0
         sid, _part = self.in_part(-300.0, one_stream=True)
         self.live.go_live()
+        self.engine.answer()  # the part's connection let go (2.8.12: the resume waits for it)
         self.playback.ended.emit()  # the part's stream ended under VLC
         self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)  # its connection still counts
         QTest.qWait(20)
@@ -7110,7 +7118,129 @@ class SizeCapTests(LiveSessionCase):
         self.engine.sessionParked.emit(sid)
         self.assertEqual(self.engine.opened[-1][2]["max_height"], 720)
         self.live.go_live()  # the parked upstream resumes
+        self.engine.answer()  # once the part's connection let go
         self.assertEqual(self.engine.resumes[-1][2]["max_height"], 720)
+
+
+class NightAuditSessionTests(LiveSessionCase):
+    """2.8.12: what a review of the session found: a part's resume carried into the next
+    channel; a recovery that played the clip directly; a dry run remembered across tunes."""
+
+    playing = ServerWindowTests.playing
+    in_part = ServerWindowTests.in_part
+    SPANS = ServerWindowTests.SPANS
+
+    def test_a_channel_whose_address_is_gone_is_tried_directly_once(self):
+        # A missing channel (HTTP 404) failed for good at once, then three "Reconnecting…"
+        # over ~19 s before "Couldn't open the stream": its direct play is tried once.
+        self.live = self.make(retry_ms=(20, 30, 40))
+        sid = self.start()
+        self.engine.failure_status = lambda failed: 404 if failed == sid else None
+        self.engine.sessionFailed.emit(sid, "http", "The channel could not be reached over HTTP.")
+        self.engine.answer()
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.failures, ["The stream could not be opened"])
+        self.assertNotIn(RECONNECTING, self.notices)
+
+    def test_back_before_the_buffer_while_leaving_a_part_waits_for_its_close(self):
+        # Review: one stream; leaving a part makes the live resume wait for its close; going
+        # back before the buffer meanwhile opened the new part at once (two connections), and
+        # the owed resume then came under it.
+        sid, part = self.in_part(-300.0, one_stream=True)
+        opened = len(self.engine.opened)
+        self.live.seek_to(30.0)  # back into the buffer: part A closes, the resume waits
+        self.live.seek_to(-200.0)  # and before the buffer again: part B
+        self.assertEqual(len(self.engine.opened), opened)  # not while A's close is unanswered
+        self.engine.answer()  # A let go
+        self.assertEqual(len(self.engine.opened), opened + 1)  # B opens now
+        self.assertEqual(self.engine.resumes, [])  # live stays parked for B
+
+    def test_an_address_no_player_is_handed_is_reported_at_once(self):
+        # Review: a refused address (stream_address.playable) in direct play got three
+        # "Reconnecting…" over ~18 s.
+        self.live = self.make(retry_ms=(20, 30, 40))
+        self.engine.lose()
+        self.start()
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit(NO_STREAM)
+        self.assertEqual(self.failures, [NO_STREAM])
+        self.assertNotIn(RECONNECTING, self.notices)
+
+    def zap_during_part_resume(self):
+        sid, _part = self.in_part(-300.0, one_stream=True)
+        self.live.go_live()  # the parked live upstream resumes; sessionResumed not yet here
+        self.engine.answer()
+        self.start()  # another channel of the same provider meanwhile
+        self.engine.answer()
+        new = self.engine.last_sid
+        self.assertNotEqual(new, sid)
+        return new
+
+    def test_a_refusal_of_the_next_tune_is_not_taken_for_an_old_parts_resume(self):
+        self.live = self.make(ready_timeout_ms=50, ready_max_ms=120)
+        self.live._part_retry_ms = 10
+        new = self.zap_during_part_resume()
+        self.engine.sessionFailed.emit(new, "http", STREAM_LIMIT)
+        QTest.qWait(300)
+        self.engine.answer()
+        self.assertEqual(self.failures, [STREAM_LIMIT])  # said, and nothing plays directly
+        self.assertNotIn("direct", self.modes)
+
+    def test_a_later_final_failure_falls_back_as_any_channels(self):
+        new = self.zap_during_part_resume()
+        self.engine.buffer(new, self.SPANS[:10], hls=True)
+        self.engine.sessionReady.emit(new)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionFailed.emit(new, "network", "The channel could not be reached.")
+        self.assertNotIn(KEPT_ONLY, self.notices)
+
+    def test_a_recovery_answered_with_a_recording_waits_while_the_helper_asks_again(self):
+        self.patch("_RECOVERY_MS", 50)  # 10 s in the app; the helper asks again every 15 s
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        plays = len(self.playback.plays)
+        self.engine.up = False
+        self.engine.reset(sid)
+        self.engine.sessionFailed.emit(sid, "internal", "The live buffer stopped unexpectedly.")
+        self.engine.up = True
+        self.engine.available.emit(True)
+        self.engine.receive(sid, 188 * 20)  # the reopened session's first answer: the clip
+        self.engine._snapshots[sid]["not_live"] = 1
+        self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid]))
+        self.assertEqual(self.notices, [NOT_LIVE])
+        QTest.qWait(200)  # past the recovery cap, several times
+        self.engine.answer()
+        self.assertEqual(len(self.playback.plays), plays)  # not the provider directly
+        self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)  # it gave up
+        self.engine.answer()
+        self.assertEqual(self.failures, [STREAM_LIMIT])
+        self.assertNotIn("direct", self.modes)
+
+    def test_a_new_channels_first_gap_is_not_held_for_the_last_channels(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=30.0, starved=PlaybackState.PLAYING)
+        feed.ready()
+        self.live.go_live()
+        feed.sync()
+        feed.run(20.0)
+        feed.stalled = True
+        feed.run(6.0)  # channel A ran dry once
+        feed.stalled = False
+        feed.run(5.0)
+        self.live.stop()
+        self.engine.answer()
+        sid = self.start()  # channel B, healthy so far
+        feed = Feed(self, sid, burst=0.0, edge=30.0, starved=PlaybackState.PLAYING)
+        feed.ready()
+        self.live.go_live()
+        feed.sync()
+        feed.run(20.0)
+        feed.stalled = True
+        feed.run(6.0)  # its first, one-off hiccup
+        feed.stalled = False
+        self.assertEqual(self.playback.holds, [])  # plays on as data returns
 
 
 class HttpsFirstTests(LiveSessionCase):
@@ -7141,6 +7271,7 @@ class HttpsFirstTests(LiveSessionCase):
         self.engine.sessionParked.emit(sid)
         self.assertIs(self.engine.opened[-1][2]["https_first"], True)
         self.live.go_live()  # the parked upstream resumes
+        self.engine.answer()  # once the part's connection let go
         self.assertIs(self.engine.resumes[-1][2]["https_first"], True)
 
     def test_without_it_nothing_changes(self):

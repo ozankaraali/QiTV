@@ -4,11 +4,12 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, Qt, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse
 
+from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE
 from services.library import Details
 from ui.library.series_view import SEASON_DEBOUNCE_MS, SeriesView, episode_duration
 
@@ -182,6 +183,31 @@ class SeriesViewTests(unittest.TestCase):
         view.set_episodes(ss[0], episodes(3))
         self.assertIsNone(view.current_episode())
         self.assertIs(view.current_season(), ss[1])
+
+    def test_a_click_on_the_error_notice_retries(self):
+        # It says "click or press Enter to retry": a click where the episodes would be.
+        view = self.make()
+        retry = []
+        view.retryRequested.connect(lambda: retry.append(1))
+        ss = seasons()
+        view.set_seasons(ss)
+        view.set_episodes(ss[0], None, error="boom")
+        notice = QPoint(view.width() // 2, view.height() - 60)
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, notice)
+        self.assertEqual(retry, [1])
+        corner = QPoint(5, 5)  # the poster's header is not the notice
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, corner)
+        self.assertEqual(retry, [1])
+        view.set_episodes(ss[0], episodes(2))  # no error: a click there is the list's
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, notice)
+        self.assertEqual(retry, [1])
+
+    def test_a_media_servers_ask_to_sign_in_again_shows_as_it_says_it(self):  # 2.8 review
+        view = self.make()
+        view.set_seasons(None, error=SIGN_IN_AGAIN_MESSAGE)
+        self.assertEqual(view._status(), SIGN_IN_AGAIN_MESSAGE)
+        view.set_seasons(None, error="down")
+        self.assertEqual(view._status(), "Couldn't load — click or press Enter to retry")
 
     def test_seasons_error_retries(self):
         view = self.make()

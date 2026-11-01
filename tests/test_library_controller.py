@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 from timer_fixtures import elapse
 
+from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE
 from services.library import RECORDINGS, LibraryModel
 from services.provider_ids import (
     ALL_PROVIDERS,
@@ -343,6 +344,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.tuned = []
         self.backs = []
         self.menus = []  # (item, section, global position) of each right-click menu
+        self.cancelled = []  # 2.8.12: the scheduled recordings the strip's Cancel cancelled
         self.model = LibraryModel(self.catalog, self.config, self.watch)
 
     def build(self, jobs=None, logos=None, tmdb=None):
@@ -365,6 +367,7 @@ class LibraryControllerTests(unittest.TestCase):
             back_to_tv=lambda: self.backs.append(True),
             context_menu=lambda item, section, pos: self.menus.append((item, section, pos)),
             tmdb=tmdb,
+            cancel_scheduled=self.cancelled.append,
         )
         self.addCleanup(self.ctl.shutdown)
         return self.ctl
@@ -406,6 +409,22 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual((item["id"], kind), (RECORDING["id"], "recording"))
         self.assertFalse(context["start_over"])
         self.assertEqual(self.catalog.selected, [])
+
+    def test_a_scheduled_recordings_cancel_on_the_strip_cancels_it(self):
+        scheduled = {
+            "id": "scheduled:a1",
+            "name": "Late Show",
+            "_scheduled": True,
+            "_item_id": "a1",
+            "_when": "Sun 1 Nov 21:30",
+        }
+        self.recordings = FakeRecordings([scheduled, RECORDING])
+        self.model = LibraryModel(self.catalog, self.config, self.watch, recordings=self.recordings)
+        self.open_movies()
+        self.model.select_genre(RECORDINGS)
+        self.screen.grid.cancelRequested.emit(1)  # a recording: nothing to cancel
+        self.screen.grid.cancelRequested.emit(0)
+        self.assertEqual(self.cancelled, ["a1"])
 
     def test_a_recordings_right_click_is_its_own(self):
         self.with_recordings()
@@ -750,6 +769,16 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(ctl.mode, "search")
         ctl.handle(Action.ESCAPE)
         self.assertEqual(ctl.mode, "browse")
+        self.assertEqual(self.grid_names(), ["Dune Songs", "Salt Roads", "Tide Lines"])
+
+    def test_the_phones_done_closes_the_search_and_nothing_else(self):
+        ctl = self.open_movies()
+        ctl.close_search()  # browsing: stays
+        self.assertEqual(ctl.mode, "browse")
+        ctl.handle(Action.SEARCH)
+        self.type_text("salt")
+        ctl.close_search()  # the phone's Done, Show on TV on: as Esc twice
+        self.assertEqual((ctl.mode, ctl.query), ("browse", ""))
         self.assertEqual(self.grid_names(), ["Dune Songs", "Salt Roads", "Tide Lines"])
 
     def test_live_and_movie_hits_of_the_current_provider(self):
@@ -1328,6 +1357,33 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.catalog.requests.count(("group", "movies", "c")), 2)
         self.assertEqual(self.screen.grid._message, "Loading…")
 
+    def test_a_click_on_the_retry_notice_requests_the_genre_again(self):
+        self.catalog.item_map[("movies", "c")] = None
+        self.open_movies()
+        self.model.select_genre("c")
+        self.model.failed.emit("Couldn't reach the provider")
+        self.assertEqual(self.screen.grid._message, RETRY_TEXT)
+        self.assertIn("click", RETRY_TEXT)
+        grid = self.screen.grid
+        middle = grid.viewport().rect().center()
+        QTest.mouseClick(grid.viewport(), Qt.LeftButton, Qt.NoModifier, middle)
+        self.assertEqual(self.catalog.requests.count(("group", "movies", "c")), 2)
+        self.assertEqual(grid._message, "Loading…")
+        QTest.mouseClick(grid.viewport(), Qt.LeftButton, Qt.NoModifier, middle)
+        self.assertEqual(self.catalog.requests.count(("group", "movies", "c")), 2)  # loading
+
+    def test_a_media_servers_ask_to_sign_in_again_shows_as_it_says_it(self):  # 2.8 review
+        # Its sign-in ended (a token revoked or expired): "Couldn't load" hid where to go.
+        self.catalog.item_map[("movies", "c")] = None
+        ctl = self.open_movies()
+        self.model.select_genre("c")
+        self.model.failed.emit(SIGN_IN_AGAIN_MESSAGE)
+        self.assertEqual(self.screen.grid._message, SIGN_IN_AGAIN_MESSAGE)
+        self.model.changed.emit()
+        self.assertEqual(self.screen.grid._message, SIGN_IN_AGAIN_MESSAGE)
+        ctl.handle(Action.NAV_ACTIVATE)  # signed in again meanwhile: Enter asks again
+        self.assertEqual(self.catalog.requests.count(("group", "movies", "c")), 2)
+
     def test_a_loading_provider_keeps_loading_and_a_shown_genre_keeps_its_titles(self):
         self.catalog.item_map[("movies", "c")] = None
         ctl = self.open_movies()
@@ -1419,8 +1475,22 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build()
         ctl.open("movies")
         self.assertNotIn(("section", "movies"), self.catalog.requests)
-        self.assertEqual(self.screen.grid._message, "P has no movies")
+        self.assertEqual(
+            self.screen.grid._message,
+            "P has no movies\nFilms and series come from Xtream, STB, Jellyfin and Emby providers.",
+        )
         self.assertEqual(self.screen.genres.rows(), [])
+        # Where films come from, and the way there: Add provider (a click, or Enter).
+        asked = []
+        ctl.addProviderRequested.connect(lambda: asked.append(True))
+        button = self.screen.grid.message_button()
+        self.assertFalse(button.isHidden())
+        self.assertEqual(button.text(), "Add provider")
+        button.click()
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(asked, [True, True])
+        ctl.open("live")  # no button where it does not belong
+        self.assertTrue(button.isHidden())
 
 
 class SourceMixTests(unittest.TestCase):  # 2.8: the source menu's ticks mix providers

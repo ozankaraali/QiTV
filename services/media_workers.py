@@ -52,7 +52,7 @@ def _logged(error: Exception) -> str:
 
 def _failure(error: Exception) -> str:
     if isinstance(error, ms.SignInNeeded):
-        return translate(ms.SIGN_IN_AGAIN)
+        return ms.SIGN_IN_AGAIN  # a catalog message: English, shown in the active language
     reason = str(error) if isinstance(error, ms.MediaServerError) else type(error).__name__
     return translate(SERVER_FAILED, reason=reason)
 

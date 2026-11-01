@@ -11,6 +11,7 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QTimer
 
+from services.media_server import server_resume
 from services.redact import safe_message
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,21 @@ class WatchState:
             return None
         return position
 
+    def seen_finished(self, cid: str) -> bool:
+        """QiTV saw `cid` played past where a resume stops offering it (90%)."""
+        saved = (getattr(self.config, "playback_positions", None) or {}).get(cid) or {}
+        position, duration = int(saved.get("position") or 0), int(saved.get("duration") or 0)
+        return duration > 0 and position / duration >= RESUME_MAX_RATIO
+
+    def resume_from(self, cid: str, item: dict) -> Optional[int]:
+        """Where `item` (resume key `cid`) goes on from (None: its beginning): where QiTV left
+        it, else where its media server says it stopped (2.8), unless QiTV saw it finished:
+        a server's list loaded before still names its older point."""
+        position = self.resume_position(cid)
+        if position is not None or self.seen_finished(cid):
+            return position
+        return server_resume(item)
+
     def update_position(self, cid: str, position_ms: int, duration_ms: int) -> None:
         self.config.save_playback_position(cid, position_ms, duration_ms)
         self._dirty = True
@@ -146,3 +162,51 @@ class WatchState:
             self._dirty = True
             return
         self._dirty = False
+
+
+def renamed_record(record, renames, *, item_key: str):
+    """A last_live_channel / last_watched / multiview tile record (`provider_name`, the item
+    under `item_key`, maybe a `group_id`) with a renamed provider's name moved; the same
+    object when nothing changes."""
+    if not isinstance(record, dict):
+        return record
+    out = dict(record)
+    out["provider_name"] = renames.of(record.get("provider_name"))
+    out[item_key] = renames.item(record.get(item_key))
+    if "group_id" in record:
+        out["group_id"] = renames.group(record.get("group_id"))
+    if all(out[key] is record.get(key) for key in out):
+        return record
+    return out
+
+
+def rename_providers(config, renames) -> bool:
+    """The history, the resume points, the last film and the last channel of a renamed
+    provider move to its new name (`services.provider_rename.Renames`), in the format they
+    always had; True when they changed (the caller saves)."""
+    changed = False
+    history = getattr(config, "watch_history", None)
+    if isinstance(history, list):
+        moved = []
+        for entry in history:
+            if isinstance(entry, dict) and entry.get("provider_name") in renames.names:
+                entry = dict(entry, provider_name=renames.of(entry["provider_name"]))
+                entry["content_id"] = renames.prefixed(entry.get("content_id"))
+                entry["item_data"] = renames.item(entry.get("item_data"))
+                changed = True
+            moved.append(entry)
+        if changed:
+            config.watch_history = moved
+    positions = getattr(config, "playback_positions", None)
+    if isinstance(positions, dict):
+        renamed = {renames.prefixed(cid): value for cid, value in positions.items()}
+        if list(renamed) != list(positions):
+            config.playback_positions = renamed
+            changed = True
+    for name, item_key in (("last_live_channel", "item"), ("last_watched", "item_data")):
+        record = getattr(config, name, None)
+        renamed_one = renamed_record(record, renames, item_key=item_key)
+        if renamed_one is not record:
+            setattr(config, name, renamed_one)
+            changed = True
+    return changed

@@ -27,6 +27,7 @@ from services.remote.protocol import (
     Answered,
     CastTo,
     Closed,
+    CloseSearch,
     Forgot,
     Get,
     Held,
@@ -286,6 +287,8 @@ class Session:
             return Reply(events=[ToTv(sid)])
         if t == "refresh":  # 2.8
             return Reply(events=[RefreshLists(sid)])
+        if t == "closesearch":
+            return Reply(events=[CloseSearch(sid)])
         if t == "pos":
             return Reply(events=[Position(sid, m["ms"], m["len"], m.get("p", -1))])
         if t == "answer":

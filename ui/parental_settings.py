@@ -191,6 +191,21 @@ def build_parental_tab(dialog: Any) -> Optional[QWidget]:
     return tab
 
 
+def pin_allows(parent: QWidget, guard: Optional[Parental]) -> bool:
+    """Whether a change parental controls guard may go ahead (Settings: a provider renamed or
+    removed, 2.8.12): no PIN set, unlocked, or the PIN typed now (asked here, without
+    unlocking; a wrong one is said)."""
+    if guard is None or not guard.locked():
+        return True
+    pin = _ask_pin(parent, tr("Your PIN:"))
+    if pin is None:
+        return False
+    if not guard.check(pin):
+        _wrong(parent)
+        return False
+    return True
+
+
 def _wrong(parent: QWidget) -> None:
     # i18n: a message: the PIN typed is not the parental controls' PIN
     QMessageBox.warning(parent, tr("Parental controls"), tr("That PIN is not right."))

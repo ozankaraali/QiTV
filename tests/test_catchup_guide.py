@@ -21,7 +21,7 @@ from services.live.tuning import channel_key
 from services.zapping import ZapContext
 from ui.guide_controller import GuideController
 from ui.keymap import Action, key_hint
-from ui.overlays.guide import WINDOW, Guide, slot_start
+from ui.overlays.guide import WINDOW, Guide, _deepest_archive, _number_digits, slot_start
 
 NOW = datetime(2026, 10, 15, 19, 42, tzinfo=timezone.utc)
 CHANNELS = [
@@ -84,6 +84,64 @@ class GuideCatchupTests(unittest.TestCase):
         self.guide.shift(-1)
         self.assertEqual(self.guide.window_start(), slot_start(NOW))
 
+    def test_a_lists_reach_is_asked_once_for_the_whole_list(self):
+        # 2.7: a server window seen this run reaches back too; asked for the list at once
+        # (each channel's reach, for 264,000 channels, froze the guide's opening for seconds).
+        asked = []
+
+        def deepest_window(channels, beyond):
+            asked.append((len(channels), beyond))
+            return timedelta(hours=5) if beyond < timedelta(hours=5) else timedelta(0)
+
+        def per_channel(channel):
+            raise AssertionError("no channel's reach is asked on opening")
+
+        guide = Guide(
+            None,
+            lambda channel, start, limit: half_hours(channel, start),
+            lambda: NOW,
+            self.host,
+            archive_reach=per_channel,
+            deepest_window=deepest_window,
+        )
+        guide.open_guide(CHANNELS, 1)  # an archive of 2 days listed: deeper than the window
+        guide.shift(-1000)
+        self.assertEqual(guide.window_start(), slot_start(NOW) - timedelta(days=2))
+        guide.open_guide([CHANNELS[1]], 0)  # no archive: the window's 5 hours
+        guide.shift(-1000)
+        self.assertEqual(guide.window_start(), slot_start(NOW) - timedelta(hours=5))
+        self.assertEqual(asked, [(2, timedelta(days=2)), (1, timedelta(0))])
+
+    def test_a_lists_deepest_archive_and_longest_number_read_each_channel_as_before(self):
+        def depth(channel):  # each channel, as the guide read them
+            days = channel.get("archive_days")
+            return days if isinstance(days, int) and not isinstance(days, bool) and days > 0 else 0
+
+        odd = [None, 0, -2, True, "9", 3.0, 4, 2, False, ""]
+        channels = [{"archive_days": d, "number": d} for d in odd] + [{}, {"number": " 12345 "}]
+        self.assertEqual(_deepest_archive(channels), max(map(depth, channels)))
+        self.assertEqual(_deepest_archive([{}, {"archive_days": True}]), 0)
+        longest = max(len(str(c.get("number") or "").strip()) for c in channels)
+        self.assertEqual(_number_digits(channels), longest)
+        self.assertEqual(_number_digits([{"number": None}, {"number": 0}, {}]), 0)
+        self.assertEqual((_deepest_archive([]), _number_digits([])), (0, 0))
+
+    def test_without_a_lists_reach_each_channels_reach_counts(self):
+        reach = {"a": timedelta(hours=1), "b": timedelta(hours=7)}
+        guide = Guide(
+            None,
+            lambda channel, start, limit: half_hours(channel, start),
+            lambda: NOW,
+            self.host,
+            archive_reach=lambda channel: reach[channel["id"]],
+        )
+        guide.open_guide(CHANNELS, 0)
+        guide.shift(-1000)  # a's 2 days of archive reach further than b's 7 hours
+        self.assertEqual(guide.window_start(), slot_start(NOW) - timedelta(days=2))
+        guide.open_guide([CHANNELS[1]], 0)
+        guide.shift(-1000)
+        self.assertEqual(guide.window_start(), slot_start(NOW) - timedelta(hours=7))
+
     def test_enter_tunes_the_channel_at_now_and_plays_the_left_edge_back_in_time(self):
         self.guide.activate()
         self.assertEqual((self.tuned, self.asked), ([CHANNELS[0]], []))
@@ -126,6 +184,36 @@ class GuideCatchupTests(unittest.TestCase):
         self.guide.move_by(1)
         self.assertTrue(self.guide.watch_button().isEmpty())
         self.assertFalse(self.guide.grab().isNull())
+
+    def test_a_window_left_at_now_moves_on_with_the_clock(self):
+        # Opened at 19:59, Enter at 20:01: it tunes (before 2.8.12 the window stayed at 19:30
+        # and Enter played the programme on at 19:30 from its start).
+        clock = [datetime(2026, 10, 15, 19, 59, tzinfo=timezone.utc)]
+        guide = Guide(
+            None,
+            lambda channel, start, limit: half_hours(channel, start),
+            lambda: clock[0],
+            self.host,
+            archive_days=lambda channel: int(channel.get("archive_days") or 0),
+        )
+        tuned, asked = [], []
+        guide.tuneRequested.connect(tuned.append)
+        guide.programmeRequested.connect(lambda c, p: asked.append(p.start))
+        guide.open_guide(CHANNELS, 0)
+        clock[0] += timedelta(minutes=2)
+        self.assertEqual(guide.window_start(), slot_start(clock[0]))
+        self.assertIsNone(guide.chosen())
+        guide.activate()
+        self.assertEqual((tuned, asked), ([CHANNELS[0]], []))
+        guide.shift(-1)  # moved back by the viewer: it stays there
+        clock[0] += timedelta(minutes=30)
+        self.assertEqual(guide.window_start(), datetime(2026, 10, 15, 19, 30, tzinfo=timezone.utc))
+        guide.activate()
+        self.assertEqual(asked, [datetime(2026, 10, 15, 19, 30, tzinfo=timezone.utc)])
+        guide.shift(2)  # back to the current half-hour (20:30): it follows the clock again
+        clock[0] += timedelta(minutes=30)
+        self.assertEqual(guide.window_start(), datetime(2026, 10, 15, 21, 0, tzinfo=timezone.utc))
+        guide.close_guide()
 
     def test_an_archive_that_failed_lately_offers_nothing(self):
         guide = Guide(None, lambda c, s, n: half_hours(c, s), lambda: NOW, self.host)

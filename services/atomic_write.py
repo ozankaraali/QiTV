@@ -29,7 +29,8 @@ def atomic_write(
     retries a locked file, a cache skips the swap when a newer write is queued). When the
     write fails, or `replace` leaves the temporary file, it is removed and `path` stays as it
     was: a failed or interrupted write never truncates it. A process killed midway leaves the
-    temporary file: sweep_stale_temporaries removes it a day later."""
+    temporary file: sweep_stale_temporaries removes it a day later. The file written is
+    readable by the user alone (mkstemp's 0600), whatever mode the one it replaces had."""
     stem = os.path.splitext(os.path.basename(path))[0]
     fd, temporary = tempfile.mkstemp(
         dir=os.path.dirname(path) or ".", prefix=f".{stem}-", suffix=".tmp"
@@ -43,6 +44,25 @@ def atomic_write(
             os.remove(temporary)  # left by a failure, or by `replace`
         except OSError:  # swapped in (or, on Windows, still open somewhere)
             pass
+
+
+def set_aside(path: str, now: Optional[float] = None) -> Optional[str]:
+    """Move a file QiTV cannot read to "<name>.broken-<YYYYmmdd-HHMMSS>" beside it, so the
+    defaults written in its place lose nothing; where it went, or None when it could not be
+    moved (then it stays where it was). The name ends in neither ".json" nor ".tmp": no
+    cache pruning or temporary-file sweep removes it."""
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+    aside = f"{path}.broken-{stamp}"
+    count = 1
+    while os.path.exists(aside):  # two in one second: keep both
+        count += 1
+        aside = f"{path}.broken-{stamp}-{count}"
+    try:
+        os.replace(path, aside)
+    except OSError as e:
+        logger.warning("Couldn't set %s aside: %s", os.path.basename(path), e.strerror or e)
+        return None
+    return aside
 
 
 def sweep_stale_temporaries(

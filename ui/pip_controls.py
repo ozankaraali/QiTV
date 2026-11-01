@@ -21,7 +21,9 @@ The PiP frame and label follow the manager: the second surface shows at its corn
 PiP is open, and the label names the small picture's channel and state ("Connecting…" until
 it plays; "−MM:SS" once time-shifted beyond its target, else "LIVE"); a movie or an episode
 swapped small shows its title alone, and "Finished" once it ended there (swapped large
-again, the Next card offers what follows, as at its end). The label's × closes the small
+again, the Next card offers what follows, as at its end). So does a channel's provider
+archive (catch-up) swapped small: its end, or its failure, is said, and swapped large again
+it goes on as at its end there (its next stretch, or live). The label's × closes the small
 picture, its speaker mutes or unmutes it, and its ⇄, like a click on the small picture,
 swaps (the shell's `swap`).
 
@@ -83,6 +85,12 @@ NOTICE_MS = 3000  # a small picture's stream notice, after its channel's name
 # Not said for the small picture: its label says "Connecting…" while it loads, and the large
 # picture keeps "no time-shift" for a rewind too.
 _QUIET_NOTICES = (LOADING, UNAVAILABLE)
+
+
+def _plays_archive(slot: Slot) -> bool:
+    """The slot's player plays a channel's provider archive (catch-up opens it as an
+    on-demand stream; a live channel played directly is a live one)."""
+    return getattr(slot.playback, "kind", None) is PlayKind.VOD_STREAM
 
 
 @dataclass
@@ -271,6 +279,15 @@ class PipControls(QObject):
         small = self.sessions.small()
         target = self.view(name).target if small is not None and small.name == name else None
         return target if target is not None and not target.live else None
+
+    def small_archive(self, name: str) -> Optional[Target]:
+        """The channel whose provider archive slot `name` plays small (None: it is large, or
+        plays something else)."""
+        small = self.sessions.small()
+        if small is None or small.name != name or not _plays_archive(small):
+            return None
+        target = self.view(name).target
+        return target if target is not None and target.live else None
 
     def small_resume_key(self, name: str) -> Optional[str]:
         """The resume key of the movie or episode slot `name` plays small (None: it is large,
@@ -605,6 +622,7 @@ class PipControls(QObject):
         self._timelines.pop(slot.name, None)
         self._said.pop(slot.name, None)  # its new channel's notices are said again
         self._reopens.pop(slot.name, None)
+        self._playing_since.pop(slot.name, None)  # how long it played counts from its open
         self._cancel_reopen()
         # The small picture keeps its time-shift in memory: one disk ring at most.
         kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
@@ -659,9 +677,10 @@ class PipControls(QObject):
         (its play token, or its portal's session, may have expired), else it says why."""
         if self._closed():
             return
-        view = self._views.get(self.sessions.other().name) or self._closed_view
+        name = self.sessions.other().name
+        view = self._views.get(name) or self._closed_view
         self._closed_view = None
-        if view is not None and self._may_retry(view.target):
+        if view is not None and self._may_retry(view.target, name):
             self._retry(view)
             return
         self._toast(translate(message), "error", ERROR_MS)  # one kept in English shows translated
@@ -669,14 +688,17 @@ class PipControls(QObject):
         if target is not None:
             self._explain(target.item, target.title)  # why, at its provider
 
-    def _may_retry(self, target: Optional[Target]) -> bool:
-        """As the large picture (LiveControls.may_retry): once per channel opened small, never
-        for the provider's limit, nor when another channel was chosen small since."""
+    def _may_retry(self, target: Optional[Target], name: str) -> bool:
+        """As the large picture (LiveControls.may_retry): once per channel opened small (and
+        once more each time its fresh link played for HEALTHY_S in slot `name`), never for
+        the provider's limit, nor when another channel was chosen small since."""
         failure = self.sessions.failure  # "": its start raised, or the budget refused
+        since = self._playing_since.get(name)
+        healthy = since is not None and time.monotonic() - since >= live_controls.HEALTHY_S
         return (
             target is not None
             and target.live
-            and not target.retried
+            and (not target.retried or healthy)
             and bool(failure)
             and failure != STREAM_LIMIT
             and self._wanted is None
@@ -749,6 +771,11 @@ class PipControls(QObject):
         url, kind = getattr(playback, "url", None), getattr(playback, "kind", None)
         if target is None or not target.live or not url:
             return
+        if kind is PlayKind.VOD_STREAM:
+            # A channel's archive swapped small (2.2): its stretch is over; swapped large
+            # again, it goes on as at its end there (the next stretch, or live).
+            self._say(name, tr("The stream ended"))
+            return
         if kind is None or kind in live_controls.NOT_REOPENED:
             return  # the time-shift buffer reopens itself
         count = self._reopens.get(name, 0)
@@ -819,12 +846,14 @@ class PipControls(QObject):
             return
         target = self.view(small.name).target
         name = target.title if target is not None else str((small.channel or {}).get("name", ""))
-        label.set_info(name, self._state_text(small, live=target is None or target.live))
+        # A channel's archive plays as a title does: its name alone, "Finished" once it ended.
+        live = target is None or (target.live and not _plays_archive(small))
+        label.set_info(name, self._state_text(small, live=live))
         label.set_audible(not self.sessions.muted(small.name))
         label.set_level(self.sessions.level(small.name))
 
     def _state_text(self, slot: Slot, *, live: bool = True) -> str:
-        if not live:  # a movie or an episode swapped small plays on: its title alone
+        if not live:  # a movie, an episode or an archive swapped small: its title alone
             return FINISHED_TEXT if slot.name in self._ended else ""
         if slot.live.recording():
             return REC  # its recording goes on small (2.2)

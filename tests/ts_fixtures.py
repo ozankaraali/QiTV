@@ -157,8 +157,10 @@ def _nal(t: int, size: int) -> bytes:
     return b"\x00\x00\x00\x01" + bytes([0x60 | t]) + b"\x55" * (size - 5)
 
 
-def h264_access_unit(idr: bool) -> bytes:
-    au = b"\x00\x00\x00\x01\x09\xf0"
+def h264_access_unit(idr: bool, sei: int = 0) -> bytes:
+    """An IDR or P picture (`sei`: with an SEI NAL unit that long after its delimiter, as a
+    caption or HDR SEI)."""
+    au = b"\x00\x00\x00\x01\x09\xf0" + (_nal(6, sei) if sei else b"")
     if idr:
         au += _nal(7, 20) + _nal(8, 8) + _nal(5, FRAME_BYTES - len(au) - 28)
     else:
@@ -166,12 +168,16 @@ def h264_access_unit(idr: bool) -> bytes:
     return au
 
 
-def _presented(i: int, gop: int) -> int:
+def _presented(i: int, gop: int, pyramid: bool = False) -> int:
     """The presentation index of the picture decoded `i`-th, in IBBP order: each P picture
-    comes before the two B pictures shown ahead of it (a GOP of 3k + 1 pictures)."""
+    comes before the two B pictures shown ahead of it (a GOP of 3k + 1 pictures). `pyramid`:
+    hierarchical B pictures, P4 B2 B1 B3 (a GOP of 4k + 1 pictures)."""
     k = i % gop
     if k == 0:
         return i
+    if pyramid:
+        group, r = divmod(k - 1, 4)
+        return i - k + 4 * group + (4, 2, 1, 3)[r]
     group, r = divmod(k - 1, 3)
     return i - k + 3 * group + (3 if r == 0 else r)
 
@@ -192,16 +198,22 @@ def make_stream(
     jumps: tuple[tuple[float, float], ...] = (),
     video_gaps: tuple[tuple[float, float], ...] = (),
     audio_ahead_s=0.0,
+    rai_all=False,
+    sei=0,
+    pyramid=False,
 ) -> bytes:
     """`seconds` of H.264-tagged video (PCR on each picture) and AAC-tagged sound.
 
     `bframes`: the pictures carry DTS too, in IBBP order (PTS a frame after the presentation
-    time, DTS the decode time; PCR the DTS). `jumps`: (at, by) seconds: from media time `at`
-    on, every timestamp is `by` later, as an encoder's clock that leapt ahead (with B pictures
+    time, DTS the decode time; PCR the DTS); with `pyramid`, hierarchical B pictures in the
+    order P4 B2 B1 B3 (`gop_s` of 4k + 1 pictures; PTS two frames after). `jumps`: (at, by)
+    seconds: from media time `at` on, every timestamp is `by` later, as an encoder's clock
+    that leapt ahead (with B pictures
     the PTS follows the presentation time, the DTS the decode time: a P picture decoded before
     the leap but shown after it has its PTS ahead already). `video_gaps`: (from, to) seconds
     without pictures, the sound going on. `audio_ahead_s`: each sound frame is muxed this much
-    before the pictures of its time."""
+    before the pictures of its time. `rai_all`: every picture flagged RAI, as some muxers do;
+    `sei`: each picture with an SEI that long first (`h264_access_unit`)."""
     n_frames = int(round(seconds * fps))
     gop_frames = max(1, int(round(gop_s * fps)))
     frame_ticks = round(CLOCK / fps)  # fps may be fractional: 30000 / 1001 gives 3003
@@ -246,13 +258,14 @@ def make_stream(
             dts = None
             if bframes:
                 dts = pts
-                pts = pts_at(_presented(idx, gop_frames) * frame_ticks) + frame_ticks
+                shown = _presented(idx, gop_frames, pyramid)
+                pts = pts_at(shown * frame_ticks) + (2 if pyramid else 1) * frame_ticks
             ps, ccs[VIDEO_PID] = pes_packets(
                 VIDEO_PID,
                 0xE0,
-                h264_access_unit(key),
+                h264_access_unit(key, sei),
                 pts,
-                rai=rai and key,
+                rai=rai and (key or rai_all),
                 cc_start=ccs[VIDEO_PID],
                 pcr=pts if dts is None else dts,
                 scrambled=scrambled,
@@ -270,9 +283,14 @@ def make_stream(
     return b"".join(pkts)
 
 
-def audio_only(seconds, *, pid=AUDIO_PID, pts_start=900000) -> bytes:
+def audio_only(
+    seconds, *, pid=AUDIO_PID, pts_start=900000, pcr=False, resets: tuple[float, ...] = ()
+) -> bytes:
     """An audio-only TS segment, as a separate HLS audio rendition's: PAT, a PMT listing one
-    AAC stream (its own PCR PID), then one ADTS-tagged PES per AAC frame from `pts_start`."""
+    AAC stream (its own PCR PID), then one ADTS-tagged PES per AAC frame from `pts_start`.
+
+    `pcr`: each PES carries a PCR (its PTS), as a radio channel's does. `resets`: from each of
+    these media times on, the clock starts over from `pts_start` (a muxer that restarted)."""
     body = (0xE000 | pid).to_bytes(2, "big") + b"\xf0\x00"
     body += bytes([0x0F]) + (0xE000 | pid).to_bytes(2, "big") + b"\xf0\x00"
     head = bytes([0x02]) + (0xB000 | (5 + len(body) + 4)).to_bytes(2, "big")
@@ -280,9 +298,13 @@ def audio_only(seconds, *, pid=AUDIO_PID, pts_start=900000) -> bytes:
         pat(),
         _psi_packet(PMT_PID, head + (1).to_bytes(2, "big") + bytes([0xC1, 0, 0]) + body, 0),
     ], 0
+    reset_ticks = sorted(round(r * CLOCK) for r in resets)
     for j in range(int(seconds * CLOCK) // AUDIO_FRAME_TICKS):
+        t = j * AUDIO_FRAME_TICKS
+        past = [r for r in reset_ticks if t >= r]
+        pts = pts_start + (t - past[-1] if past else t)
         ps, cc = pes_packets(
-            pid, 0xC0, b"\xff\xf1" + b"\xaa" * 200, pts_start + j * AUDIO_FRAME_TICKS, cc_start=cc
+            pid, 0xC0, b"\xff\xf1" + b"\xaa" * 200, pts, cc_start=cc, pcr=pts if pcr else None
         )
         pkts.extend(ps)
     return b"".join(pkts)

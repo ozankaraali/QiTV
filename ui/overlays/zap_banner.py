@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QGraphicsOpacityEffect, QWidget
 
 from services.epg_view import Programme
 from services.i18n import tr
-from ui.overlays.base import Overlay
+from ui.overlays.base import Overlay, announce
 from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round, fmt_clock
 from ui.theme import PALETTE, qcolor
 
@@ -109,6 +109,8 @@ class ZapBanner(Overlay):
     def show_info(self, info: BannerInfo) -> None:
         self._info = info
         self._reveal()
+        name = " ".join(part for part in (info.number, info.name) if part)
+        announce(self, name, speak=name != self.accessibleName())  # a new channel is said
         if not self._digits:
             self._timer.start(self._visible_ms)
 

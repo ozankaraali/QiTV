@@ -81,15 +81,20 @@ def write_later(path: str, data: dict) -> None:
 
 def _write_pending() -> None:
     global _writer
-    while True:
+    try:
+        while True:
+            with _writing:
+                if not _pending:
+                    return
+                path = next(iter(_pending))
+                data = _pending.pop(path)
+            write_now(path, data)
+    finally:  # even if a write raised: the next save starts a writer, flush_writes returns
         with _writing:
-            if not _pending:
-                _writer = None
-                _writing.notify_all()
-                return
-            path = next(iter(_pending))
-            data = _pending.pop(path)
-        write_now(path, data)
+            _writer = None
+            _writing.notify_all()
+            if _pending:  # left by a writer that died: the next save writes them too
+                logger.warning("The recording schedule's writer stopped; the next save retries")
 
 
 def flush_writes(timeout: float = 5.0) -> None:
@@ -99,11 +104,12 @@ def flush_writes(timeout: float = 5.0) -> None:
 
 
 def write_now(path: str, data: dict) -> None:
+    """`data` to `path`; a failure is logged (a full disk, text no UTF-8 file can hold)."""
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with atomic_write(path) as out:
             out.write(json.dumps(data, ensure_ascii=False, indent=1).encode("utf-8"))
-    except OSError as e:
+    except Exception as e:  # never the writer's end: what is queued after it is written still
         logger.warning("The recording schedule could not be saved: %s", type(e).__name__)
 
 
@@ -368,6 +374,44 @@ class Schedule:
         self._save()
         return dict(item)
 
+    def rename_providers(self, renames: Any) -> int:
+        """A renamed provider's recordings record from its new name
+        (`services.provider_rename.Renames`); how many moved (the file is written then)."""
+        moved = 0
+        for item in self._items:
+            provider = item.get("provider")
+            channel = item.get("channel")
+            if provider not in renames.names and not (
+                isinstance(channel, dict) and channel.get("_provider") in renames.names
+            ):
+                continue
+            item["provider"] = renames.of(provider)
+            if isinstance(channel, dict) and "_provider" in channel:
+                item["channel"] = dict(channel, _provider=renames.of(channel["_provider"]))
+            moved += 1
+        if moved:
+            self._save()
+        return moved
+
+    def drop_providers(self, names: Iterable[str]) -> list[dict]:
+        """The recordings of removed providers go (they could never record again), each
+        noted failed ("provider removed"); what went."""
+        gone = set(names)
+        dropped = [i for i in self._items if str(i.get("provider") or "") in gone]
+        if not dropped:
+            return []
+        self._items = [i for i in self._items if i not in dropped]
+        for item in dropped:
+            self._note(
+                str(item.get("title") or ""),
+                item.get("channel") or {},
+                float(item.get("start") or 0),
+                FAILED,
+                why="provider removed",
+            )
+        self._save()
+        return [dict(item) for item in dropped]
+
     def cancel(self, item_id: str) -> None:
         before = len(self._items)
         self._items = [i for i in self._items if i.get("id") != item_id]
@@ -485,15 +529,31 @@ class Schedule:
         self._outcomes.append(outcome)
         self._outcomes = self._outcomes[-OUTCOMES:]
 
-    def missed_before(self, now: float) -> list[dict]:
+    def missed_before(
+        self, now: float, *, why: str = "closed", busy: Iterable[str] = ()
+    ) -> list[dict]:
         """The one-time recordings whose window ended before `now` without being started
-        (QiTV was closed): noted missed and taken off; what was noted."""
+        (QiTV was closed; `why` says otherwise, "asleep": QiTV ran): noted missed and taken
+        off; what was noted. One with a part recorded (QiTV closed while it recorded, its
+        file noted) is taken off, never noted missed; `busy`: job keys the caller still
+        handles (left as they are)."""
         missed = []
         kept = []
+        busy = set(busy)
+        parts = {
+            (o.get("title"), o.get("channel"), o.get("start"))
+            for o in self._outcomes
+            if o.get("path")
+        }
         for item in self._items:
-            if item.get("kind") == ONCE and window(item)[1] <= now:
-                key = f"{item['id']}@{int(float(item.get('start') or 0))}"
-                if key not in self._done:
+            key = f"{item['id']}@{int(float(item.get('start') or 0))}"
+            if item.get("kind") == ONCE and window(item)[1] <= now and key not in busy:
+                noted = (
+                    str(item.get("title") or ""),
+                    str((item.get("channel") or {}).get("name") or ""),
+                    float(item.get("start") or 0),
+                )
+                if key not in self._done and noted not in parts:
                     missed.append(item)
                 continue
             kept.append(item)
@@ -506,7 +566,7 @@ class Schedule:
                 item.get("channel") or {},
                 float(item.get("start") or 0),
                 MISSED,
-                why="closed",
+                why=why,
             )
         self._save()
         return [dict(item) for item in missed]

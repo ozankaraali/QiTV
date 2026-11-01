@@ -181,9 +181,56 @@ class TimeShiftCase(unittest.TestCase):
         play = QSignalSpy(t.playPauseRequested)
         self.click(t, t.button_rect("play").center().toPoint())
         self.assertEqual(play.count(), 1)
-        left_to_right = ["start", "back10", "play", "fwd10", "fwd60", "slower", "speed", "faster"]
+        left_to_right = [
+            "play",
+            "start",
+            "back10",
+            "fwd10",
+            "fwd60",
+            "stop",
+            "slower",
+            "speed",
+            "faster",
+        ]
         xs = [t.button_rect(name).x() for name in left_to_right]
         self.assertEqual(xs, sorted(xs))
+
+    def test_the_buttons_keep_their_places_when_the_bar_comes(self):
+        # A pause at the live edge brings the bar: a second click on the same spot resumes
+        # (it jumped to the buffer's start: ⏮ had taken play's place), ◀10 steps back again,
+        # and the right-hand buttons keep one order (2.8.12).
+        for width in (800, 1024, 1280, 1600, 1920):
+            t = self.make()
+            t.setGeometry(0, 0, width, width * 9 // 16)
+            t.show_timeshift("104 · Nature One HD", "Wild Coasts")
+            t.set_pip_state(True, False)
+            t.set_grid_state(True, False)
+            t.update_timeline(at_edge(), PROGRAMME)
+            edge = t._layout()
+            t.update_timeline(timeline(paused=True), PROGRAMME)
+            behind = t._layout()
+            self.assertIn("seek", behind)
+            for name in ("play", "back10", "previous", "guide", "search", "volume", "audio"):
+                self.assertEqual(edge[name], behind[name], (width, name))
+            for name in ("subtitles", "picture", "external", "grid", "pip", "fullscreen"):
+                self.assertEqual(edge[name], behind[name], (width, name))
+            spy = QSignalSpy(t.playPauseRequested)
+            self.click(t, edge["play"].center().toPoint())
+            self.assertEqual(spy.count(), 1)
+            # The steps forward lie where the edge row shows only labels (or nothing).
+            for name in ("fwd10", "fwd60"):
+                spot = behind[name].center()
+                self.assertFalse(
+                    any(
+                        r.contains(spot) for n, r in edge.items() if n not in ("indicator", "live")
+                    ),
+                    (width, name),
+                )
+
+    def test_the_bar_buttons_name_themselves(self):
+        t = self.shifted()
+        tips = {n: t.tooltip_at(t.button_rect(n).center()) for n in ("start", "fwd60")}
+        self.assertEqual(tips, {"start": "Programme start", "fwd60": "Forward 60 seconds"})
 
     def test_speed_chip_follows_the_session_rate(self):
         t = self.shifted()

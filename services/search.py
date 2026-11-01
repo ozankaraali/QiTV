@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any, overload
 
 from PySide6.QtCore import QObject, Signal
 
@@ -42,12 +43,68 @@ def iter_items(content: Any) -> Iterator[dict]:
                 yield from (i for i in group if isinstance(i, dict))
 
 
-# (provider, section, folded title, title, item), folded once per cache snapshot
-SearchIndex = list[tuple[str, str, str, str, dict]]
+# (provider, section, folded title, title, item)
+Row = tuple[str, str, str, str, dict]
+
+
+class SearchIndex(Sequence[Row]):
+    """The rows search_index looks through, folded once per cache snapshot, kept in columns.
+
+    A tuple a title (400,000 with every provider's films, series and channels) is an object
+    the cycle collector walks at each full collection for as long as the index is kept: a
+    full pass went from 52 to 171 ms. Five lists are five objects."""
+
+    __slots__ = ("providers", "sections", "folded", "titles", "items")
+
+    def __init__(self, rows: Iterable[Row] = ()) -> None:
+        self.providers: list[str] = []
+        self.sections: list[str] = []
+        self.folded: list[str] = []
+        self.titles: list[str] = []
+        self.items: list[dict] = []
+        for row in rows:
+            self.append(*row)
+
+    def append(self, provider: str, section: str, folded: str, title: str, item: dict) -> None:
+        self.providers.append(provider)
+        self.sections.append(section)
+        self.folded.append(folded)
+        self.titles.append(title)
+        self.items.append(item)
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __iter__(self) -> Iterator[Row]:
+        return zip(self.providers, self.sections, self.folded, self.titles, self.items)
+
+    @overload
+    def __getitem__(self, at: int) -> Row: ...
+
+    @overload
+    def __getitem__(self, at: slice) -> list[Row]: ...
+
+    def __getitem__(self, at: int | slice) -> Row | list[Row]:
+        if isinstance(at, slice):
+            return [self[i] for i in range(*at.indices(len(self)))]
+        return (
+            self.providers[at],
+            self.sections[at],
+            self.folded[at],
+            self.titles[at],
+            self.items[at],
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (SearchIndex, list, tuple)):
+            return list(self) == list(other)
+        return NotImplemented
+
+    __hash__ = None  # type: ignore[assignment]  # (equal to a list of its rows: no hash)
 
 
 def build_index(caches: list[tuple[str, dict]]) -> SearchIndex:
-    index: SearchIndex = []
+    index = SearchIndex()
     for provider, cache in caches:
         for content_type, section in CONTENT_SECTIONS.items():
             seen: set[str] = set()
@@ -57,13 +114,14 @@ def build_index(caches: list[tuple[str, dict]]) -> SearchIndex:
                 if ident in seen:
                     continue
                 seen.add(ident)
-                index.append((provider, section, fold(title), title, item))
+                index.append(provider, section, fold(title), title, item)
     return index
 
 
 def search_index(
-    index: SearchIndex, text: str, *, limit_per_section: int = LIMIT_PER_SECTION
+    index: Iterable[Row], text: str, *, limit_per_section: int = LIMIT_PER_SECTION
 ) -> list[Hit]:
+    """The hits of `text` in `index` (a SearchIndex, or its rows as tuples)."""
     words = fold(text).split()
     if sum(len(w) for w in words) < MIN_CHARS:
         return []

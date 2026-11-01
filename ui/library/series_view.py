@@ -27,6 +27,7 @@ from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QWidget
 
 from services.catalog import shown_label
+from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE, shown_message
 from services.i18n import N_, tr, translate
 from services.library import Details
 from services.navigation import episode_key, item_key
@@ -53,7 +54,7 @@ SEASON_DEBOUNCE_MS = 250
 WATCHED_AT = 0.9
 # What the series view shows instead of its episodes: shown with translate().
 LOADING_TEXT = N_("Loading…")
-ERROR_TEXT = N_("Couldn't load — press Enter to retry")
+ERROR_TEXT = N_("Couldn't load — click or press Enter to retry")
 EMPTY_SEASONS_TEXT = N_("No seasons")  # i18n: a series in the Library without seasons
 EMPTY_EPISODES_TEXT = N_("No episodes")  # i18n: a season in the Library without episodes
 
@@ -448,10 +449,11 @@ class SeriesView(QWidget):
     # ---- state ---------------------------------------------------------------------------
     def _status(self) -> str:
         """The message replacing the episodes list, or '' when the list is shown."""
-        if self._seasons_error:
-            return translate(ERROR_TEXT)
-        if self._episodes_error:
-            return translate(ERROR_TEXT)
+        for error in (self._seasons_error, self._episodes_error):
+            if error == SIGN_IN_AGAIN_MESSAGE:
+                return shown_message(error)  # 2.8: a media server's: where to sign in again
+            if error:
+                return translate(ERROR_TEXT)
         if self._seasons is None and self._episodes is None:
             return translate(LOADING_TEXT)
         if self._seasons is not None and not self._seasons and self._episodes is None:
@@ -570,6 +572,24 @@ class SeriesView(QWidget):
     def _emit_season(self) -> None:
         if self._season is not None:
             self.seasonSelected.emit(self._season)
+
+    def _on_notice(self, event: QMouseEvent) -> bool:
+        """A left click on "Couldn't load", where the episodes would be."""
+        below = event.position().y() >= self._view.y()
+        return event.button() == Qt.MouseButton.LeftButton and below and self._is_error()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._on_notice(event):
+            event.accept()  # its release retries
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._on_notice(event):  # retries, as Enter does
+            event.accept()
+            self.retryRequested.emit()
+            return
+        super().mouseReleaseEvent(event)
 
     def _on_row_clicked(self, row: int) -> None:
         self._moved = True

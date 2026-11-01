@@ -24,13 +24,13 @@ from PySide6.QtGui import (
     QPixmap,
     QTransform,
 )
-from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QFrame, QWidget
+from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QFrame, QPushButton, QWidget
 
 from services.i18n import tr
 from services.library import Details, letter_of, title_of
 from services.text_fold import fold
 from ui.overlays.painting import Units, draw_icon, draw_progress, elided, fill_round, fmt_duration
-from ui.theme import PALETTE, RADIUS_CARD, qcolor
+from ui.theme import PALETTE, RADIUS_CARD, accent_button_style, qcolor
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +64,12 @@ FOCUS_RING_PX = 1.5
 UNFOCUSED_RING_ALPHA = 0.35  # the current poster's ring while keys move another zone
 TILE_LOGO_W = 0.7  # a channel logo fits in this share of its tile's width…
 TILE_LOGO_H = 0.4  # …and of its height
-STRIP_H_U = 11.0
+# The title and its facts, the buttons under them (at the left: the corner player sits at the
+# bottom right), then the plot.
+STRIP_H_U = 15.5
 STRIP_PAD_U = 2.0
+STRIP_TOP_U = 1.4  # the title's top, and the least room under the last line
+STRIP_ROW_GAP_U = 0.8  # above and below the buttons' row
 STRIP_TINT_ALPHA = 0.2
 STRIP_TITLE_U = 2.2
 STRIP_META_U = 1.1
@@ -91,7 +95,9 @@ WRAPPED_KEPT = 2048  # card titles' wrapped lines kept (a few screens' worth)
 REQUEST_DELAY_MS = 120  # poster requests wait until the view settles
 
 PLAY, START_OVER, FAVORITE = "play", "start_over", "favorite"
-_ACCENT, _RAISED, _SQUARE = "accent", "raised", "square"
+# 2.8.12: a scheduled recording's: Cancel, and its time where Play is (a label, no button).
+CANCEL, WHEN = "cancel", "when"
+_ACCENT, _RAISED, _SQUARE, _LABEL = "accent", "raised", "square", "label"
 
 
 def card_hue(title: str) -> float:
@@ -148,17 +154,24 @@ def _wrap(fm: QFontMetricsF, text: str, width: float, max_lines: int) -> list[st
     return lines
 
 
-def _button_specs(details: Details | None) -> list[tuple[str, str, str]]:
-    """(name, label, style) left to right, per the kind of the current title."""
+def _button_specs(details: Details | None, when: str = "") -> list[tuple[str, str, str]]:
+    """(name, label, style) left to right, per the kind of the current title. A scheduled
+    recording (2.8.12: it showed ★ and a Play that only repeated its details) has Cancel and
+    its time (`when`, the item's "_when") where Play is; a recording no ★ (no provider's title
+    to star)."""
     play = tr("Play")  # i18n: button (verb) on the Library's detail strip
     if details is None:
         return [(PLAY, play, _ACCENT)]
+    if details.kind == "scheduled":
+        # i18n: a scheduled recording's right-click menu entry: it will not be recorded
+        cancel = (CANCEL, tr("Cancel Recording"), _RAISED)
+        return [cancel, (WHEN, when, _LABEL)] if when else [cancel]
     if details.kind == "series":
         # i18n: button on the Library's detail strip that opens a series' episodes
         return [(FAVORITE, "", _SQUARE), (PLAY, tr("Episodes"), _ACCENT)]
     start_over = tr("Start over")  # i18n: button: play the title from its beginning
     resume = tr("Resume")  # i18n: button: play the title from where it was left
-    if details.kind == "episode":
+    if details.kind in ("episode", "recording"):
         if details.resume_ms:
             return [(START_OVER, start_over, _RAISED), (PLAY, resume, _ACCENT)]
         return [(PLAY, play, _ACCENT)]
@@ -205,12 +218,15 @@ class PosterGrid(QAbstractScrollArea):
     activated = Signal(int)  # Enter / double-click / ▶ button (flat index)
     startOverRequested = Signal(int)
     favoriteToggled = Signal(int)
+    cancelRequested = Signal(int)  # 2.8.12: a scheduled recording's Cancel (flat index)
     focusChanged = Signal(int)
     sortRequested = Signal(str)  # a Sort value
     leftEdge = Signal()  # ← in the first column
     upEdge = Signal()  # ↑ in the first row
     # A right-click on a poster (flat index, global position): the shell's menu for it.
     contextRequested = Signal(int, QPoint)
+    messageClicked = Signal()  # a click on the message shown instead of titles ("Couldn't load")
+    messageAction = Signal()  # the button under the message (set_message's `action`)
 
     def __init__(self, posters, parent=None) -> None:
         super().__init__(parent)
@@ -228,12 +244,19 @@ class PosterGrid(QAbstractScrollArea):
         # header
         self._title = ""
         self._count_text = ""
+        self.setAccessibleName(tr("Movies and series"))  # a screen reader's (set_header)
         self._sorts: list[tuple[str, str]] = []
         self._active_sort = ""
         # content
         self._items: list[dict] = []
         self._sections: list[tuple[str, int, int]] = []  # (title, start, count), non-empty
         self._message: str | None = None
+        # The message's button (Add provider under "… has no movies"); hidden without one.
+        self._message_button = QPushButton(self.viewport())
+        self._message_button.setStyleSheet(accent_button_style())
+        self._message_button.setFocusPolicy(Qt.NoFocus)  # Enter does it (the controller)
+        self._message_button.clicked.connect(self.messageAction)
+        self._message_button.hide()
         self._letters: dict[str, int] = {}
         self._details_provider: Callable[[dict], Details | None] | None = None
         self._poster_url: Callable[[dict], str] = poster_url
@@ -285,6 +308,8 @@ class PosterGrid(QAbstractScrollArea):
     ) -> None:
         self._title = title
         self._count_text = count_text
+        self.setAccessibleName(title or tr("Movies and series"))  # a screen reader's name
+        self.setAccessibleDescription(count_text)
         self._sorts = list(sorts)
         self._active_sort = active
         self._header.update()
@@ -404,11 +429,39 @@ class PosterGrid(QAbstractScrollArea):
         self._letters = dict(index) if index else {}
         self.viewport().update()
 
-    def set_message(self, text: str | None) -> None:
-        """Paint `text` ("Loading…", an error, "Nothing here") instead of the grid."""
+    def set_message(self, text: str | None, action: str | None = None) -> None:
+        """Paint `text` ("Loading…", an error, "Nothing here") instead of the grid, with a
+        button labelled `action` under it when given (it emits messageAction)."""
         self._message = text
+        button = self._message_button
+        if text is not None and action:
+            button.setText(action)
+            button.adjustSize()
+            self._place_message_button()
+            button.show()
+        else:
+            button.hide()
         self._cancel_hover()
         self.viewport().update()
+
+    def message_button(self) -> QPushButton:
+        """The button under the message (hidden while the message has none)."""
+        return self._message_button
+
+    def _message_rect(self) -> QRectF:
+        u = self._units.u
+        return QRectF(self.viewport().rect()).adjusted(4 * u, 0, -4 * u, 0)
+
+    def _place_message_button(self) -> None:
+        """Under the message's text, centred (the text is centred in the view)."""
+        view = self._message_rect()
+        fm = QFontMetricsF(self._units.font(MESSAGE_FONT_U))
+        flags = int(Qt.AlignCenter | Qt.TextWordWrap)
+        text_h = fm.boundingRect(view, flags, self._message or "").height()
+        button = self._message_button
+        x = view.center().x() - button.width() / 2
+        y = view.center().y() + text_h / 2 + 1.6 * self._units.u
+        button.move(round(x), round(y))
 
     def columns(self) -> int:
         return self._cols
@@ -524,7 +577,12 @@ class PosterGrid(QAbstractScrollArea):
 
     def button_labels(self) -> list[tuple[str, str]]:
         """The current title's strip buttons left to right, as (name, label)."""
-        return [(name, label) for name, label, _style in _button_specs(self._details())]
+        return [(name, label) for name, label, _style in self._specs()]
+
+    def _specs(self) -> list[tuple[str, str, str]]:
+        """`_button_specs` for the current title (a scheduled recording's time with it)."""
+        item = self._items[self._cur] if 0 <= self._cur < len(self._items) else {}
+        return _button_specs(self._details(), str(item.get("_when") or ""))
 
     def strip_rect(self) -> QRect:
         """The detail strip in viewport coordinates; null when nothing is current."""
@@ -572,6 +630,8 @@ class PosterGrid(QAbstractScrollArea):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._relayout()
+        if self._message_button.isVisible():
+            self._place_message_button()
 
     def _relayout(self) -> None:
         self._units = Units(self._host_width())
@@ -835,12 +895,19 @@ class PosterGrid(QAbstractScrollArea):
         if button == FAVORITE:
             self.favoriteToggled.emit(self._cur)
             return
+        if button == CANCEL:
+            self.cancelRequested.emit(self._cur)
+            return
+        if button == WHEN:
+            return  # a label: when it records
         if button is not None:
             signal = self.activated if button == PLAY else self.startOverRequested
             self._mouse_activate((button, self._cur), signal, self._cur)
             return
         i = self.index_at(pos)
         if i < 0:
+            if self._message is not None:
+                self.messageClicked.emit()
             return
         self._pressed = i
         if i == self._cur:
@@ -1015,14 +1082,9 @@ class PosterGrid(QAbstractScrollArea):
         return first, last
 
     def _paint_message(self, p: QPainter, view: QRectF) -> None:
-        u = self._units.u
         p.setFont(self._units.font(MESSAGE_FONT_U))
         p.setPen(qcolor(PALETTE.text, MESSAGE_ALPHA))
-        p.drawText(
-            view.adjusted(4 * u, 0, -4 * u, 0),
-            Qt.AlignCenter | Qt.TextWordWrap,
-            self._message or "",
-        )
+        p.drawText(self._message_rect(), Qt.AlignCenter | Qt.TextWordWrap, self._message or "")
 
     def _paint_section_title(
         self, p: QPainter, title: str, top: float, height: float, font: QFont
@@ -1135,25 +1197,33 @@ class PosterGrid(QAbstractScrollArea):
         p.drawRoundedRect(rect.adjusted(half, half, -half, -half), RADIUS_CARD, RADIUS_CARD)
         p.restore()
 
+    def _buttons_top(self, strip: QRectF) -> float:
+        """The y of the strip's buttons: under the title and its facts."""
+        u = self._units.u
+        y = strip.top() + STRIP_TOP_U * u
+        y += QFontMetricsF(self._units.font(STRIP_TITLE_U, QFont.Weight.Bold)).height()
+        if any(self._meta_parts(self._details())):
+            y += 0.3 * u + QFontMetricsF(self._units.font(STRIP_META_U)).height()
+        return y + STRIP_ROW_GAP_U * u
+
     def _strip_buttons(self, strip: QRectF) -> list[tuple[str, str, str, QRectF]]:
-        """(name, label, style, rect) for the current title's buttons, right-aligned."""
+        """(name, label, style, rect) for the current title's buttons, left to right under
+        its title (the corner player covers the strip's right end)."""
         u = self._units.u
         fm = QFontMetricsF(self._units.font(BUTTON_FONT_U, QFont.Weight.DemiBold))
         height = BUTTON_H_U * u
-        y = strip.center().y() - height / 2
-        x = strip.right() - STRIP_PAD_U * u
+        y = self._buttons_top(strip)
+        x = strip.left() + STRIP_PAD_U * u
         out: list[tuple[str, str, str, QRectF]] = []
-        for name, label, style in reversed(_button_specs(self._details())):
+        for name, label, style in self._specs():
             if style == _SQUARE:
                 width = height
             else:
                 width = fm.horizontalAdvance(label) + 2 * BUTTON_PAD_U * u
-                if name == PLAY:
+                if name in (PLAY, WHEN):
                     width += BUTTON_ICON_U * u + 0.5 * u
-            x -= width
             out.append((name, label, style, QRectF(x, y, width, height)))
-            x -= BUTTON_GAP_U * u
-        out.reverse()
+            x += width + BUTTON_GAP_U * u
         return out
 
     def _paint_strip(self, p: QPainter, rect: QRectF) -> None:
@@ -1173,8 +1243,7 @@ class PosterGrid(QAbstractScrollArea):
         for name, label, style, button in buttons:
             self._paint_button(p, name, label, style, button, details)
         left = rect.left() + STRIP_PAD_U * u
-        right = (buttons[0][3].left() if buttons else rect.right()) - STRIP_PAD_U * u
-        width = max(0.0, right - left)
+        width = max(0.0, rect.right() - STRIP_PAD_U * u - left)
         item = self._items[self._cur]
         title = details.title if details is not None else title_of(item)
         title_font = units.font(STRIP_TITLE_U, QFont.Weight.Bold)
@@ -1187,14 +1256,13 @@ class PosterGrid(QAbstractScrollArea):
         plot = _wrap(plot_fm, details.plot, width, PLOT_LINES) if details and details.plot else []
         # i18n: on the Library's detail strip: a title's leading actors ("Cast: Ana, Bo")
         cast = tr("Cast: {names}", names=details.cast) if details and details.cast else ""
-        block = title_h
-        if meta or watched:
-            block += 0.3 * u + meta_h
-        if plot:
-            block += 0.6 * u + plot_fm.lineSpacing() * len(plot)
-        if cast:
-            block += 0.4 * u + meta_h
-        y = rect.top() + (rect.height() - block) / 2
+        y = rect.top() + STRIP_TOP_U * u
+        # Under the buttons: the plot's lines and the cast, as many as the strip holds.
+        below = (buttons[0][3].bottom() if buttons else y) + STRIP_ROW_GAP_U * u
+        room = rect.bottom() - STRIP_TOP_U * u - below
+        plot = plot[: max(0, int(room // plot_fm.lineSpacing()))]
+        if room < plot_fm.lineSpacing() * len(plot) + 0.4 * u + meta_h:
+            cast = ""  # no room left under the plot
         p.setFont(title_font)
         p.setPen(qcolor(PALETTE.text))
         p.drawText(
@@ -1205,8 +1273,8 @@ class PosterGrid(QAbstractScrollArea):
             y += 0.3 * u
             self._paint_meta(p, QRectF(left, y, width, meta_h), meta, watched, meta_font)
             y += meta_h
+        y = below
         if plot:
-            y += 0.6 * u
             p.setFont(plot_font)
             p.setPen(qcolor(PALETTE.text, 0.85))
             for text in plot:
@@ -1282,6 +1350,14 @@ class PosterGrid(QAbstractScrollArea):
         if style == _ACCENT:
             fill_round(p, rect, qcolor(PALETTE.accent), radius)
             color = qcolor(PALETTE.canvas)
+        elif style == _LABEL:  # no button: an outline round the time, in the accent
+            p.save()
+            p.setPen(QPen(qcolor(PALETTE.accent), max(1.0, 0.12 * u)))
+            p.setBrush(Qt.NoBrush)
+            inset = 0.06 * u
+            p.drawRoundedRect(rect.adjusted(inset, inset, -inset, -inset), radius, radius)
+            p.restore()
+            color = qcolor(PALETTE.accent)
         else:
             fill_round(p, rect, qcolor(PALETTE.text, BUTTON_RAISED_ALPHA), radius)
             favorite = name == FAVORITE and details is not None and details.favorite
@@ -1295,9 +1371,10 @@ class PosterGrid(QAbstractScrollArea):
         p.setFont(font)
         p.setPen(color)
         x = rect.left() + BUTTON_PAD_U * u
-        if name == PLAY:
+        if name in (PLAY, WHEN):
             size = BUTTON_ICON_U * u
-            draw_icon(p, "play", QRectF(x, rect.center().y() - size / 2, size, size), color)
+            glyph = "play" if name == PLAY else "clock"
+            draw_icon(p, glyph, QRectF(x, rect.center().y() - size / 2, size, size), color)
             x += size + 0.5 * u
         p.drawText(
             QRectF(x, rect.top(), rect.right() - x, rect.height()),

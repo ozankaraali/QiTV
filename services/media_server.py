@@ -31,9 +31,11 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import uuid
 
 from services.catalog import ALL_GROUP_ID
+from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE
 from services.i18n import N_
 from services.lazy_import import lazy_module
 from services.provider_types import EMBY, JELLYFIN, MEDIA_SERVERS, is_media_server  # noqa: F401
+from services.surrogates import response_json
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")  # the window shows before the network libraries load
@@ -67,8 +69,9 @@ NO_SOURCE = "none"
 ONLY_4K_TEXT = N_(
     "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never)."
 )
-# i18n: a Jellyfin or Emby server refused QiTV's access (its sign-in ended)
-SIGN_IN_AGAIN = N_("The server asks to sign in again: Settings → Providers → Verify Provider.")
+# A Jellyfin or Emby server refused QiTV's access (its sign-in ended): a catalog message,
+# English (shown_message shows it).
+SIGN_IN_AGAIN = SIGN_IN_AGAIN_MESSAGE
 
 
 def new_device_id() -> str:
@@ -184,7 +187,7 @@ class MediaServerClient:
                 raise SignInNeeded("401")
             if response.status_code >= 400:  # never the address: it may carry the token
                 raise MediaServerError(f"The server answered {response.status_code}")
-            return response.json() if response.content else None
+            return response_json(response) if response.content else None
         return None
 
     def _note_date(self, response: Any) -> None:
@@ -704,6 +707,14 @@ def server_resume(item: dict) -> Optional[int]:
     except TypeError, ValueError:
         return None
     return position if position > 0 else None
+
+
+def server_length(item: dict) -> int:
+    """How long a media server says `item` runs (ms; 0: not said)."""
+    try:
+        return max(0, int(item.get("duration_secs") or 0)) * 1000
+    except TypeError, ValueError:
+        return 0
 
 
 _LOOPBACK = ("localhost", "127.0.0.1", "::1", "[::1]")

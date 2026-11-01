@@ -186,6 +186,32 @@ class HomeDoorTests(HomeDoorCase):
         self.assertEqual(message.type, aiohttp.WSMsgType.CLOSE)
         self.assertEqual(code, 4429)
 
+    def test_another_sites_page_may_not_open_the_door(self):
+        """A page of another site in a browser on the home network could hold the pending
+        slots and keep phones from pairing: its Origin is refused, as a rebound name's."""
+        port = self.port
+        refused = [
+            {"Origin": "http://evil.test"},
+            {"Origin": f"https://127.0.0.1:{port}"},
+            {"Origin": "null"},
+            {"Origin": f"http://rebound.test:{port}", "Host": f"rebound.test:{port}"},
+        ]
+
+        async def status(headers):
+            async with aiohttp.ClientSession() as s:
+                try:
+                    ws = await s.ws_connect(self.url("/ws"), headers=headers)
+                except aiohttp.WSServerHandshakeError as error:
+                    return error.status
+                await ws.close()
+                return 101
+
+        for headers in refused:
+            with self.subTest(headers=headers):
+                self.assertEqual(self.run_async(status(headers)), 403)
+        self.assertEqual(self.run_async(status({"Origin": f"http://127.0.0.1:{port}"})), 101)
+        self.assertEqual(self.run_async(status({})), 101)  # no browser: no Origin
+
     def test_handshake_timeout_closes(self):
         async def go():
             async with aiohttp.ClientSession() as s:
@@ -326,6 +352,33 @@ class PortTests(unittest.TestCase):
         self.assertGreater(opened, 0)
         with self.assertRaises(ConnectionRefusedError):
             socket.create_connection(("127.0.0.1", opened), timeout=1).close()
+
+    def test_turned_off_it_closes_on_its_own_and_one_turned_on_waits_for_its_port(self):
+        # Turning the remote off waited on the GUI thread (up to 4 s while a phone was sent a
+        # film); a remote turned on again right after needs the port the old one still holds.
+        port, events = _free_port(), Recorder()
+        old = RemoteHub(events, self._web(), ports=[port], host="127.0.0.1")
+        old.start({"version": 1, "enabled": True, "relay": False})
+        self.assertTrue(old.ready.wait(3))
+        held, stop = threading.Event(), old._core.stop
+        self.addCleanup(held.set)
+
+        async def held_stop():  # a phone's film still being sent
+            await asyncio.get_running_loop().run_in_executor(None, held.wait, 5)
+            await stop()
+
+        old._core.stop = held_stop
+        stopper = old.stop_soon()
+        self.assertTrue(stopper.is_alive())  # returned while the close goes on
+        self.assertFalse(old.running)
+        new = RemoteHub(events, self._web(), ports=[port], host="127.0.0.1")
+        new.start({"version": 1, "enabled": True, "relay": False})
+        self.addCleanup(new.stop)
+        self.assertFalse(new.ready.wait(0.3))  # it waits for the old one's port
+        held.set()
+        stopper.join(5)
+        self.assertTrue(new.ready.wait(5))
+        self.assertEqual(new.port, port)
 
     def _web(self) -> Path:
         web = Path(tempfile.mkdtemp())

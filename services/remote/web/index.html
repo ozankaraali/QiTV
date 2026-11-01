@@ -104,10 +104,10 @@
       <button type="button" data-key="guide" data-t="guide">Guide</button>
     </div>
     <div class="pad" id="pad">
-      <button type="button" class="wedge up" data-key="up" aria-label="Up"><svg><use href="#i-up"/></svg></button>
-      <button type="button" class="wedge right" data-key="right" aria-label="Right"><svg><use href="#i-right"/></svg></button>
-      <button type="button" class="wedge down" data-key="down" aria-label="Down"><svg><use href="#i-down"/></svg></button>
-      <button type="button" class="wedge left" data-key="left" aria-label="Left"><svg><use href="#i-left"/></svg></button>
+      <button type="button" class="wedge up" data-key="up" aria-label="Up" data-tl="up"><svg><use href="#i-up"/></svg></button>
+      <button type="button" class="wedge right" data-key="right" aria-label="Right" data-tl="right"><svg><use href="#i-right"/></svg></button>
+      <button type="button" class="wedge down" data-key="down" aria-label="Down" data-tl="down"><svg><use href="#i-down"/></svg></button>
+      <button type="button" class="wedge left" data-key="left" aria-label="Left" data-tl="left"><svg><use href="#i-left"/></svg></button>
       <button type="button" class="ok" data-key="ok" data-t="ok">OK</button>
       <div class="touchpad" id="touchpad" hidden><span data-t="touchpad_hint">Swipe to move · tap for OK</span></div>
     </div>
@@ -118,22 +118,22 @@
     </div>
     <div class="cluster">
       <div class="rocker">
-        <button type="button" data-key="volup" aria-label="Volume up"><svg><use href="#i-plus"/></svg></button>
+        <button type="button" data-key="volup" aria-label="Volume up" data-tl="volume_up"><svg><use href="#i-plus"/></svg></button>
         <span data-t="vol">Vol</span>
-        <button type="button" data-key="voldown" aria-label="Volume down"><svg><use href="#i-minus"/></svg></button>
+        <button type="button" data-key="voldown" aria-label="Volume down" data-tl="volume_down"><svg><use href="#i-minus"/></svg></button>
       </div>
       <div class="mid">
-        <button type="button" class="sq" data-key="rew" aria-label="Back 10 seconds"><svg><use href="#i-rew"/></svg></button>
-        <button type="button" class="sq" data-key="pp" aria-label="Play or pause"><svg><use href="#i-pp"/></svg></button>
-        <button type="button" class="sq" data-key="fwd" aria-label="Forward 10 seconds"><svg><use href="#i-fwd"/></svg></button>
-        <button type="button" class="sq" data-key="mute" aria-label="Mute"><svg><use href="#i-mute"/></svg></button>
-        <button type="button" class="sq rec" data-key="record" aria-label="Record"><svg><use href="#i-rec"/></svg></button>
-        <button type="button" class="tolive" data-key="live" aria-label="Go live"><span data-t="live">LIVE</span></button>
+        <button type="button" class="sq" data-key="rew" aria-label="Back 10 seconds" data-tl="back_10"><svg><use href="#i-rew"/></svg></button>
+        <button type="button" class="sq" data-key="pp" aria-label="Play or pause" data-tl="play_pause"><svg><use href="#i-pp"/></svg></button>
+        <button type="button" class="sq" data-key="fwd" aria-label="Forward 10 seconds" data-tl="forward_10"><svg><use href="#i-fwd"/></svg></button>
+        <button type="button" class="sq" data-key="mute" aria-label="Mute" data-tl="mute" aria-pressed="false"><svg><use href="#i-mute"/></svg></button>
+        <button type="button" class="sq rec" data-key="record" aria-label="Record" data-tl="record"><svg><use href="#i-rec"/></svg></button>
+        <button type="button" class="tolive" data-key="live" aria-label="Go live" data-tl="go_live"><span data-t="live">LIVE</span></button>
       </div>
       <div class="rocker">
-        <button type="button" data-key="chup" aria-label="Channel up"><svg><use href="#i-up"/></svg></button>
+        <button type="button" data-key="chup" aria-label="Channel up" data-tl="channel_up"><svg><use href="#i-up"/></svg></button>
         <span data-t="ch">Ch</span>
-        <button type="button" data-key="chdown" aria-label="Channel down"><svg><use href="#i-down"/></svg></button>
+        <button type="button" data-key="chdown" aria-label="Channel down" data-tl="channel_down"><svg><use href="#i-down"/></svg></button>
       </div>
     </div>
   </section>
@@ -214,7 +214,7 @@
   </section>
 
   <nav class="tabs" id="tabs" hidden>
-    <button type="button" class="on" data-tab="remote"><svg><use href="#i-remote"/></svg><span data-t="remote">Remote</span></button>
+    <button type="button" class="on" data-tab="remote" aria-current="page"><svg><use href="#i-remote"/></svg><span data-t="remote">Remote</span></button>
     <button type="button" data-tab="guide"><svg><use href="#i-guide"/></svg><span data-t="guide">Guide</span></button>
     <button type="button" data-tab="library"><svg><use href="#i-lib"/></svg><span data-t="library">Library</span></button>
   </nav>

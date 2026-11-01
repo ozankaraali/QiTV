@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -333,6 +334,100 @@ class TvConfigTests(unittest.TestCase):
         config.last_live_channel = record
         config.save_config()
         self.assertEqual(ConfigManager().last_live_channel, record)
+
+
+class BackgroundSaveTests(unittest.TestCase):
+    """QiTV writes config.json on a thread of its own: a save on the GUI thread (a 6 MB config
+    every 30 s of a film, at each zap and toggle) took 20 to 60 ms, a locked file 250 ms more."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "config.json"
+        self.path.write_text(json.dumps({"favorites": ["Old"]}), encoding="utf-8")
+        patcher = patch.object(ConfigManager, "_get_config_path", return_value=str(self.path))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.config = ConfigManager()
+        self.config.write_in_background()
+        self.addCleanup(self.config.flush_saves, 5)
+
+    def saved(self):
+        return json.loads(self.path.read_text(encoding="utf-8"))["favorites"]
+
+    def held(self):
+        """os.replace held until released (a slow disk); the threads it ran on."""
+        release, threads, replace = threading.Event(), [], os.replace
+
+        def held_replace(src, dst):
+            threads.append(threading.current_thread().name)
+            release.wait(5)
+            replace(src, dst)
+
+        self.addCleanup(release.set)
+        return (
+            patch("services.config_manager.os.replace", side_effect=held_replace),
+            release,
+            threads,
+        )
+
+    def test_a_save_returns_before_the_disk_is_written_with_the_settings_of_then(self):
+        held, release, threads = self.held()
+        with held:
+            self.config.favorites = ["New"]
+            self.config.save_config()  # on the GUI thread, waited for the disk before
+            self.assertEqual(self.saved(), ["Old"])
+            self.config.favorites = ["Changed after"]  # not in that save
+            release.set()
+            self.assertTrue(self.config.flush_saves(5))
+        self.assertEqual(self.saved(), ["New"])
+        self.assertEqual(threads, ["config-save"])
+        self.assertFalse(self.config.save_failed())
+
+    def test_of_the_saves_waiting_only_the_newest_is_written(self):
+        held, release, threads = self.held()
+        with held:
+            for name in ("One", "Two", "Three"):
+                self.config.favorites = [name]
+                self.config.save_config()
+            release.set()
+            self.assertTrue(self.config.flush_saves(5))
+        self.assertEqual(self.saved(), ["Three"])
+        self.assertLessEqual(len(threads), 2)  # "One" (perhaps already under way), "Three"
+
+    def test_a_locked_file_is_waited_out_on_the_writer_and_said(self):
+        threads = []
+
+        def locked(src, dst):
+            threads.append(threading.current_thread().name)
+            raise PermissionError(13, "Access is denied", src, None, dst)
+
+        self.config.favorites = ["New"]
+        with (
+            patch("services.config_manager.os.replace", side_effect=locked),
+            self.assertLogs("services.config_manager", "WARNING") as logs,
+        ):
+            self.config.save_config()
+            self.assertTrue(self.config.flush_saves(5))
+            self.assertTrue(self.config.save_failed())  # the window says so
+            with self.assertRaises(PermissionError):
+                self.config.save_config(wait=True)  # Settings → Save waits, and says so
+        self.assertEqual(threads, ["config-save"] * 7)  # five retries, then one try (backoff)
+        self.assertNotIn(self.path.parent.name, "\n".join(logs.output))  # no paths
+        self.assertEqual(self.saved(), ["Old"])
+        self.config.save_config(wait=True)  # unlocked
+        self.assertFalse(self.config.save_failed())
+        self.assertEqual(self.saved(), ["New"])
+
+    def test_quitting_waits_for_the_last_save_but_not_for_ever(self):
+        held, release, _threads = self.held()
+        with held:
+            self.config.favorites = ["Last"]
+            self.config.save_config()
+            self.assertFalse(self.config.flush_saves(0.2))  # a disk that never answers
+            release.set()
+            self.assertTrue(self.config.flush_saves(5))
+        self.assertEqual(self.saved(), ["Last"])
 
 
 class EpgExpirationTests(unittest.TestCase):

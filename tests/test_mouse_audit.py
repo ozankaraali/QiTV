@@ -129,7 +129,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     # ---- Guide -----------------------------------------------------------------------------
     ("guide", "Up, Down"): (("guide", "rows"),),
     ("guide", "Left, Right"): (("guide", "earlier"), ("guide", "later")),
-    ("guide", "Return"): (("guide", "rows"),),  # a double-click
+    ("guide", "Return"): (("guide", "rows"), ("guide", "live")),  # a double-click, ▶ Watch
     # 2.8: the footer's ● Record (Cancel recording for a scheduled programme)
     ("guide", "R"): (("guide", "record"),),
     ("guide", "Ctrl+F"): (("guide", "search"),),

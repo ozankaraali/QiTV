@@ -21,7 +21,9 @@ one per request): when the provider's other streams take all of it, the tile sho
 to spare at <provider>" with the channel, and asks for nothing; so does a tile whose stream the
 budget then refuses (`SessionManager.slotDenied`). A tile whose stream fails says so too; the
 focused tile's direct stream reconnects as the big picture's does, and once the focus moves on
-during its back-off the tile stops and says the stream ended (`stream_ended`). A click on the
+during its back-off the tile stops and says the stream ended (`stream_ended`); past its
+reopens, or failing for good, the focused tile stops and says so too, keeping the focus
+(`focused_failed`). A click on the
 card tries again; nothing queues or asks again by itself, but for a tile without the focus
 whose STB channel failed: its link is made again once (the portal's play token may have
 expired), as the big picture's and the PiP's are. Zapping onto a channel another tile shows
@@ -41,10 +43,12 @@ does) and ✕: the tile's stream stops and gives its provider's stream back, and
 
 Esc (with nothing else open), V or a double-click leaves: the focused tile is the big
 picture, the tile focused before it stays as the picture-in-picture if it plays, and the
-other tiles stop. Leaving keeps the grid (config `multiview`, versioned; older builds ignore
-it): the next grid offers a "Last grid" chip (and View → Restore Last Multiview) that brings
-its channels back into their tiles, each once its provider is ready, and its focus. A
-channel dragged from the channel list onto a tile plays there (`drag_over`, `tile_at`). The
+other tiles stop. A focused tile that plays nothing ("+" or a card) gives the big picture to
+that one instead (never a channel small beside an empty big picture, as a swap). Leaving
+keeps the grid (config `multiview`, versioned; older builds ignore it): the next grid offers
+a "Last grid" chip (and View → Restore Last Multiview) that brings its channels back into
+their tiles, each once its provider is ready, and its focus. A channel dragged from the
+channel list onto a tile plays there (`drag_over`, `tile_at`). The
 Library, films, files, the mini player and external players leave the grid first (the shell
 calls `leave`). A smaller layout, and leaving, stop every player but the big picture and the
 PiP, and nothing still on its way for a tile that went opens there.
@@ -409,6 +413,11 @@ class GridControls(QObject):
             self._layouts.dismiss()
         sessions.end_mix()  # before the tiles stop: the big picture is heard (normal rule)
         keep = self._kept() if keep_pip else None
+        if keep is not None and self._focused_empty() and self._focus(keep):
+            # Never a channel small beside an empty big picture (as a swap): the one that
+            # plays is the big picture; the empty one goes, and another that plays stays small.
+            large = keep
+            keep = self._kept()
         aside = {slot.name for slot in sessions.background()}
         for slot in sessions.slots():  # a tile left by a smaller layout too
             if slot.name in (large, keep) or slot.name in aside:
@@ -816,14 +825,37 @@ class GridControls(QObject):
         says the stream ended."""
         self._fail(name, "", translate(STREAM_ENDED))
 
+    def focused_failed(self, *, ended: bool = False) -> None:
+        """The focused tile's stream failed for good, or (`ended`) its direct stream ended
+        past its reopens; the shell said so. As a tile beside the focus whose stream fails,
+        it stops (the shell's, as its ✕: its provider's stream goes back) and its card says
+        why; it keeps the focus, and a click on the card tries again."""
+        if not self._shown or self._tile_action is None:
+            return
+        name = self.sessions.large().name
+        channel = self._tile_channel(name)
+        if channel is None:
+            return
+        logger.info("The focused tile's stream failed: %s", channel.get("name") or "")
+        detail = translate(STREAM_ENDED if ended else TILE_FAILED)
+        self._cards[name] = _Card(FAILED, channel, detail)
+        self._wanted.pop(name, None)
+        self._tile_action(name, "close")
+        self._refresh(force=True)
+        self.changed.emit()
+
+    def _tile_channel(self, name: str) -> Optional[dict]:
+        """The channel tile `name` plays, or opens."""
+        slot = self._slot(name)
+        if slot is not None and slot.channel:
+            return slot.channel
+        wanted = self._wanted.get(name)
+        return wanted[0] if wanted is not None else None
+
     def _fail(self, name: str, message: str, detail: str) -> None:
         if not self._shown or name not in self._names:
             return
-        slot = self._slot(name)
-        wanted = self._wanted.get(name)
-        channel = slot.channel if slot is not None and slot.channel else None
-        if channel is None and wanted is not None:
-            channel = wanted[0]
+        channel = self._tile_channel(name)
         if channel is None:
             return
         logger.info("A tile's stream failed: %s", channel.get("name") or "")
@@ -902,6 +934,12 @@ class GridControls(QObject):
             if slot is not None and slot.channel is not None and self.state(name) in _SHOWING:
                 return name
         return None
+
+    def _focused_empty(self) -> bool:
+        """The focused tile plays nothing and nothing is on its way for it: "+" or a card."""
+        if self.state(self.sessions.large().name) in _SHOWING:
+            return False
+        return self._pending is None or self._pending() is None
 
     def _forget_tile(self, name: str) -> None:
         """Tile `name` left the grid: what was on its way for it never opens."""

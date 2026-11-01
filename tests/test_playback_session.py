@@ -530,6 +530,23 @@ class PlayerJobTests(unittest.TestCase):
         self.assertIn(":http-user-agent=UA/1", medias[-1].options)
         self.assertIn(":http-referrer=https://s.test/", medias[-1].options)
 
+    def test_an_address_in_no_streams_scheme_never_reaches_libvlc(self):
+        # A hostile portal's link: a share (Windows signs in to it), a capture device.
+        for url in ("file://server/share/a.ts", "smb://server/a.ts", "dshow://", "/etc/hosts"):
+            with self.subTest(url=url), self.assertLogs("services.playback", "WARNING") as log:
+                self.errors.clear()
+                self.session.play(url, kind=PlayKind.LIVE)
+                self.assertEqual(self.opened(), [])
+                self.assertEqual(self.errors, ["This item has no stream address"])
+                self.assertIs(self.session.state(), PlaybackState.ERROR)
+                self.assertIsNone(self.session.url)
+                self.assertNotIn("server", "\n".join(log.output))  # its scheme alone
+
+    def test_qitvs_own_file_plays_wherever_it_is_kept(self):
+        self.session.play("file://server/share/rec.ts", kind=PlayKind.VOD_FILE, local=True)
+        self.assertEqual(self.opened(), ["file://server/share/rec.ts"])
+        self.assertEqual(self.errors, [])
+
     def test_the_first_play_opens_on_the_gui_thread(self):
         self.play(A)
         self.assertEqual(self.runner.jobs, [])
@@ -1336,6 +1353,145 @@ class CastTests(unittest.TestCase):
         opened = [call[1] for call in self.player.calls if call[0] == "set_media" and call[1]]
         self.assertEqual(opened, [A, A])
         self.assertEqual(self.session._start_ms, 42_000)
+
+    def test_a_reopen_after_a_stop_opens_nothing(self):
+        # Handed to a phone or an outside player, the stream was stopped and its slot given
+        # back: a cast's start or end then reopened the old stream here, outside the budget.
+        self.session.play(A, kind=PlayKind.LIVE)
+        self.session.stop()
+        while self.runner.jobs:
+            self.runner.finish()
+        self.player.calls.clear()
+        self.session.reopen(None)
+        while self.runner.jobs:
+            self.runner.finish()
+        self.assertEqual([c for c in self.player.calls if c[0] in ("set_media", "play")], [])
+        self.assertIs(self.session.state(), PlaybackState.IDLE)
+
+
+class _TrackPlayer(_FakePlayer):
+    """libVLC's audio and subtitle tracks: each media comes with its own (`tracks` lists them
+    per URL), VLC's first audio track and no subtitles chosen."""
+
+    def __init__(self, tracks):
+        super().__init__()
+        self.tracks = tracks
+        self.audio, self.spus, self.audio_on, self.spu = [], [], -1, -1
+
+    def set_media(self, media):
+        super().set_media(media)
+        audio, spus = self.tracks[media.url] if media is not None else ([], [])
+        self.audio = [(-1, b"Disable"), *audio]
+        self.spus = [(-1, b"Disable"), *spus] if spus else []
+        self.audio_on, self.spu = (audio[0][0] if audio else -1), -1
+
+    def get_state(self):
+        self._call("get_state")
+        return vlc.State.Playing
+
+    def audio_get_track_description(self):
+        self._call("audio_get_track_description")
+        return list(self.audio)
+
+    def audio_get_track(self):
+        self._call("audio_get_track")
+        return self.audio_on
+
+    def audio_set_track(self, track):
+        self._call("audio_set_track", track)
+        self.audio_on = track
+
+    def video_get_spu_description(self):
+        self._call("video_get_spu_description")
+        return list(self.spus)
+
+    def video_get_spu(self):
+        self._call("video_get_spu")
+        return self.spu
+
+    def video_set_spu(self, track):
+        self._call("video_set_spu", track)
+        self.spu = track
+
+
+EN, DE = b"Track 1 - [English]", b"Track 2 - [Deutsch]"
+
+
+@unittest.skipIf(vlc is None, "python-vlc's states are needed to poll the player")
+class TrackMemoryTests(unittest.TestCase):
+    """The audio and subtitle tracks the viewer chose come back in each media the player opens
+    for the title (a time-shift step, a reconnect, a quality change, a cast), and their
+    language with the next episode; another title starts with VLC's own."""
+
+    setUpClass = PlayerJobTests.setUpClass
+
+    def setUp(self):
+        self.player = _TrackPlayer(
+            {
+                A: ([(1, EN), (2, DE)], [(5, b"Track 3 - [English]"), (6, b"Track 4 - [Deutsch]")]),
+                # The same title converted by its server: other ids, the same names.
+                B: ([(10, EN), (11, DE)], [(20, b"Track 3 - [English]")]),
+                # The next episode: its German track named and placed otherwise.
+                C: ([(3, b"Track 1 - [Deutsch]"), (4, b"Track 2 - [English]")], []),
+            }
+        )
+        self.runner = _HeldRunner(self.player)
+        self.session = PlaybackSession(
+            _FakeInstance(self.player), runner=self.runner, poll_ms=60_000
+        )
+        self.addCleanup(self.session.release)
+
+    def plays(self, url):
+        self.session.play(url, kind=PlayKind.VOD_FILE)
+        while self.runner.jobs:
+            self.runner.finish()
+        self.session._tick()
+
+    def test_a_reopen_chooses_them_again(self):
+        self.plays(A)
+        self.session.set_audio_track(2)
+        self.session.set_subtitle_track(6)
+        self.plays(A)  # a time-shift step, a reconnect, a cast's start or end
+        self.assertEqual((self.player.audio_on, self.player.spu), (2, 6))
+
+    def test_another_stream_of_the_title_finds_them_by_name(self):
+        self.plays(A)
+        self.session.set_audio_track(2)
+        self.plays(B)  # its quality changed
+        self.assertEqual(self.player.audio_on, 11)
+
+    def test_the_next_episode_takes_the_same_language(self):
+        self.plays(A)
+        self.session.set_audio_track(2)
+        self.session.forget_tracks(keep_language=True)
+        self.plays(C)
+        self.assertEqual(self.player.audio_on, 3)
+
+    def test_another_title_starts_with_vlcs_own(self):
+        self.plays(A)
+        self.session.set_audio_track(2)
+        self.session.forget_tracks()
+        self.plays(C)
+        self.assertEqual(self.player.audio_on, 3)  # VLC's first: chosen by nobody
+        self.assertNotIn(("audio_set_track", 3), self.player.calls)
+
+    def test_subtitles_turned_off_stay_off(self):
+        self.plays(A)
+        self.session.set_subtitle_track(5)
+        self.session.set_subtitle_track(-1)
+        self.plays(A)
+        self.player.spu = 5  # a default track VLC chose as it came
+        self.session._tick()
+        self.assertEqual(self.player.spu, -1)
+
+    def test_a_track_that_never_comes_leaves_vlcs_own(self):
+        self.plays(A)
+        self.session.set_subtitle_track(6)  # German subtitles
+        self.plays(B)  # none in German
+        with mock.patch("services.playback._TRACK_WAIT_MS", -1):
+            self.session._tick()
+        self.assertEqual(self.session._tracks_due, set())
+        self.assertEqual(self.player.spu, -1)
 
 
 class DefaultArgsTests(unittest.TestCase):

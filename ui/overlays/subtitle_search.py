@@ -150,6 +150,7 @@ class _Rects:
 
 
 class SubtitleSearchPage(Overlay):
+    accessible_name = N_("Subtitles from OpenSubtitles")
     pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
 
     saveKeyRequested = Signal(str)
@@ -706,7 +707,7 @@ class SubtitleSearchPage(Overlay):
             while len(label) > 1 and fm.horizontalAdvance(label) > inner.width():
                 label = label[1:]
         else:
-            p.setPen(qcolor(PALETTE.text, 0.45))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             label = ("▏" if focused else "") + placeholder
             label = self._elided(fonts["field"], label, inner.width())
         p.drawText(inner, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)

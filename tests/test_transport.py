@@ -22,7 +22,7 @@ from timer_fixtures import elapse, timeline, wait_until
 
 from ui.keymap import key_hint
 from ui.overlays.painting import Units, badge_color, draw_icon
-from ui.overlays.transport import SPEEDS, Transport
+from ui.overlays.transport import _ICON_BUTTONS as ICON_BUTTONS, SPEEDS, Transport
 
 
 class TransportCase(unittest.TestCase):
@@ -141,6 +141,77 @@ class TransportCase(unittest.TestCase):
         spy = QSignalSpy(t.stopRequested)
         self.click(t, stop.center().toPoint())
         self.assertEqual(spy.count(), 1)
+
+    def test_a_channel_that_failed_keeps_live_tvs_controls_and_play_tries_again(self):
+        # 2.8.12: a mouse was stranded after "Couldn't open the stream": nothing showed.
+        t = self.make()
+        t.set_pip_state(True, False)
+        t.show_failed("Broken", "")
+        rects = t._layout()
+        self.assertTrue(t.failed())
+        self.assertNotIn("live", rects)  # nothing is live
+        for name in ("play", "stop", "previous", "guide", "search"):
+            self.assertIn(name, rects)
+        self.assertEqual(t.tooltip_at(rects["play"].center()), key_hint("Try again", "Space"))
+        record = t.title_rects()["record"]
+        self.assertEqual(t.tooltip_at(record.center()), "Nothing playing")
+        spy = QSignalSpy(t.playPauseRequested)
+        self.click(t, rects["play"].center().toPoint())
+        self.assertEqual(spy.count(), 1)
+        self.assertFalse(t.grab().isNull())  # painted without its LIVE badge
+        t.show_live("Broken", "")  # it plays: live TV's row again
+        self.assertFalse(t.failed())
+        self.assertIn("live", t._layout())
+        self.assertEqual(t.tooltip_at(rects["play"].center()), key_hint("Play / pause", "Space"))
+
+    def test_icon_buttons_take_clicks_beyond_their_icon_without_overlapping(self):
+        # 2.8.12: the 28 px icons (11 px in a mini player) took clicks on the icon alone.
+        for width in (1920, 1280, 960, 480):
+            t = self.make()
+            t.setGeometry(0, 0, width, width * 9 // 16)
+            t.set_pip_state(True, False)
+            t.set_cast_state(True, False)
+            t.show_live("One", "")
+            rects = t._layout()
+            hits = t._hits(rects)
+            icons = [n for n in rects if n in ICON_BUTTONS]
+            self.assertGreater(len(icons), 10)
+            for name in icons:
+                hit, drawn = hits[name], rects[name]
+                self.assertTrue(hit.contains(drawn), (width, name))
+                self.assertGreaterEqual(hit.height(), min(44.0, max(28.0, drawn.height())))
+                self.assertLessEqual(hit.width(), max(44.0, drawn.width()) + 0.01)
+                for other, rect in hits.items():
+                    if other != name and other not in ("seek", "times"):
+                        self.assertFalse(hit.intersects(rect), (width, name, other))
+            if width == 1280:
+                self.assertGreaterEqual(hits["guide"].width(), 44.0 - 0.01)
+            # A click in the margin beside the icon reaches it; the drawing is unchanged.
+            guide = rects["guide"]
+            spy = QSignalSpy(t.guideRequested)
+            margin = QPointF(hits["guide"].left() + 1, guide.center().y())
+            self.click(t, margin.toPoint())
+            self.assertEqual(spy.count(), 1, width)
+            self.assertEqual(t.tooltip_at(margin), key_hint("Guide", "G"))
+
+    def test_the_top_shade_keeps_the_title_readable_over_a_white_picture(self):
+        # 2.8.12: the name read 2.8:1 over a white picture, the programme 2.2:1.
+        host = QWidget()
+        host.resize(1280, 720)
+        palette = host.palette()
+        palette.setColor(host.backgroundRole(), QColor("#ffffff"))
+        host.setPalette(palette)
+        host.setAutoFillBackground(True)
+        self.addCleanup(host.close)
+        host.show()
+        t = Transport(host)
+        t.show_live("One", "News")
+        t.poke()
+        image = host.grab().toImage()
+        title = t.title_rects()["title"]
+        for y in range(round(title.top()), round(title.bottom())):
+            shade = image.pixelColor(900, y)  # beside the title row: the shade alone
+            self.assertLessEqual(shade.red(), 60, y)  # white 255 under 0.8 black: 51
 
     def test_mini_player_and_second_channel_buttons_sit_left_of_fullscreen(self):
         # Clickable controls for both pictures-in-picture.
@@ -516,6 +587,28 @@ class TransportCase(unittest.TestCase):
         self.assertTrue(t.isVisible())
         elapse(250)
         self.assertFalse(t.isVisible())
+
+    def test_a_trembling_pointer_keeps_nothing_up(self):
+        # Review of 2.8.12: over the controls' shaded bands a 1-px jitter poked the controls
+        # on every move, so they (and the pointer) stayed up for good.
+        t = self.make(idle_ms=200)
+        t.show_vod("A", "b")
+
+        def move(i):
+            point = QPointF(300 + i % 2, 500)  # one pixel back and forth
+            event = QMouseEvent(
+                QEvent.Type.MouseMove,
+                point,
+                QPointF(t.mapToGlobal(point.toPoint())),
+                Qt.NoButton,
+                Qt.NoButton,
+                Qt.NoModifier,
+            )
+            QApplication.sendEvent(t, event)
+
+        moves = [(40 * i, lambda i=i: move(i)) for i in range(1, 15)]
+        *_, shown = timeline(*moves, (600, t.isVisible))
+        self.assertFalse(shown)
 
     def test_mouse_move_keeps_alive(self):
         t = self.make(idle_ms=200)
@@ -914,6 +1007,35 @@ class LostDragAndRepaintTests(unittest.TestCase):
         self.assertEqual(seeks.count(), 0)
         QTest.mouseRelease(transport, Qt.LeftButton, Qt.NoModifier, QPoint(10, 10))
 
+    def test_the_controls_stay_while_the_pointer_rests_on_them(self):
+        # 2.8.12: resting on Guide, they went 2.4 s later (they stay while hovered).
+        host, transport = self.make(idle_ms=60)
+        transport.show_live("One", "")
+
+        def rest(point):
+            move = QMouseEvent(
+                QEvent.Type.MouseMove,
+                QPointF(point),
+                QPointF(transport.mapToGlobal(point)),
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            QApplication.sendEvent(transport, move)
+
+        rest(transport.button_rect("guide").center().toPoint())
+        elapse(300)
+        self.assertTrue(transport.isVisible())
+        QApplication.sendEvent(transport, QEvent(QEvent.Type.Leave))  # onto the picture
+        self.assertTrue(wait_until(lambda: not transport.isVisible()))
+        # The title row's controls keep them too; the rest of the shades does not.
+        transport.poke()
+        rest(transport.title_rects()["title"].center().toPoint())
+        elapse(300)
+        self.assertTrue(transport.isVisible())
+        rest(QPoint(640, 380))  # the bottom shade, above the controls
+        self.assertTrue(wait_until(lambda: not transport.isVisible()))
+
     def test_a_move_without_the_button_ends_a_drag_whose_release_was_lost(self):
         host, transport = self.make()
         seeks = QSignalSpy(transport.seekRequested)
@@ -927,6 +1049,8 @@ class LostDragAndRepaintTests(unittest.TestCase):
             Qt.KeyboardModifier.NoModifier,
         )
         QApplication.sendEvent(transport, moved)
+        # 2.8.12: the controls stay while the pointer rests on them: it goes away here.
+        QApplication.sendEvent(transport, QEvent(QEvent.Type.Leave))
         self.assertTrue(wait_until(lambda: not transport.isVisible()))
         self.assertEqual(seeks.count(), 0)
         QTest.mouseRelease(transport, Qt.LeftButton, Qt.NoModifier, QPoint(10, 10))
@@ -1221,6 +1345,35 @@ class GridChipTests(TransportCase):
         t.set_grid_state(True, False)
         self.assertEqual(t.icon("grid"), "grid")
         self.assertNotIn("layout", t._layout())
+
+    def test_entering_the_grid_leaves_its_button_and_the_second_channels_in_place(self):
+        # A second click on the multiview's button leaves the grid: it moved one place right
+        # (into the hidden PiP button's) and the layout chip took its spot (2.8.12).
+        for width in (800, 1280, 1600):
+            t = self.make()
+            t.setGeometry(0, 0, width, width * 9 // 16)
+            t.set_pip_state(True, False)
+            t.show_live("One", "News")
+            t.set_grid_state(True, False)
+            before = t._layout()
+            t.set_grid_state(True, True, "2×2", cells=4)
+            during = t._layout()
+            for name in ("grid", "pip", "mini", "fullscreen"):
+                self.assertEqual(before[name], during[name], (width, name))
+            grid = QSignalSpy(t.gridRequested)
+            self.click(t, before["grid"].center().toPoint())
+            self.assertEqual(grid.count(), 1)
+
+    def test_over_the_grid_the_second_channels_button_is_dim_and_says_why(self):
+        t = self.grid()
+        spy = QSignalSpy(t.pipRequested)
+        pip = t.button_rect("pip")
+        self.click(t, pip.center().toPoint())
+        self.assertEqual(spy.count(), 0)
+        self.assertEqual(t.tooltip_at(pip.center()), "Leave the multiview first (V)")
+        t.set_grid_state(True, False)
+        self.click(t, t.button_rect("pip").center().toPoint())
+        self.assertEqual(spy.count(), 1)
 
     def test_a_click_on_the_chip_asks_for_the_layouts_and_it_is_lit_while_they_show(self):
         t = self.grid()

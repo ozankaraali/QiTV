@@ -154,20 +154,44 @@ class ExternalPlayersTest(unittest.TestCase):
         popen.assert_called_once_with(["/usr/bin/mpv", "--", "http://x/s"], env=mock.ANY)
 
     def test_url_that_looks_like_an_option_is_not_one(self):
-        # An untrusted URL beginning with "-" became a player option.
-        url = "--script=/tmp/evil.lua"
+        # An untrusted URL beginning with "-" became a player option: it is no stream's
+        # address, and a stream's comes after "--" all the same.
         with (
             mock.patch.dict(sys.modules, {"mpv": None}),
             mock.patch("platform.system", return_value="Linux"),
             mock.patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}"),
             mock.patch("subprocess.Popen") as popen,
+            self.assertLogs("services.external_players", "WARNING"),
         ):
-            external_players.launch_mpv(url)
-            external_players.launch_vlc(url)
+            for launch in (external_players.launch_mpv, external_players.launch_vlc):
+                ok, message = launch("--script=/tmp/evil.lua")
+                self.assertEqual((ok, message), (False, "This item has no stream address"))
+            popen.assert_not_called()
+            external_players.launch_mpv("http://x/s")
+            external_players.launch_vlc("http://x/s")
         self.assertEqual(popen.call_count, 2)
         for call in popen.call_args_list:
             argv = call.args[0]
-            self.assertEqual(argv[-2:], ["--", url])
+            self.assertEqual(argv[-2:], ["--", "http://x/s"])
+
+    def test_a_player_is_never_handed_a_share_or_a_device(self):
+        refused = ("file://server/share/a.ts", "smb://server/a.ts", "screen://", "dshow://")
+        with (
+            mock.patch.dict(sys.modules, {"mpv": mock.MagicMock()}),
+            mock.patch("subprocess.Popen") as popen,
+            mock.patch.object(external_players, "find_vlc", return_value="/usr/bin/vlc"),
+            self.assertLogs("services.external_players", "WARNING") as log,
+        ):
+            for url in refused:
+                for launch in (external_players.launch_mpv, external_players.launch_vlc):
+                    self.assertFalse(launch(url)[0], url)
+            popen.assert_not_called()
+            sys.modules["mpv"].MPV.assert_not_called()
+            # QiTV's own recording, kept on a share, goes to the player (play_file)
+            self.assertEqual(
+                external_players.launch_vlc("file://server/share/rec.ts", local=True), (True, "")
+            )
+        self.assertNotIn("server", "\n".join(log.output))
 
     def test_a_player_never_sees_the_apps_own_vlc(self):
         # VLC_PLUGIN_PATH made an installed VLC scan the bundle's plugins as well.
@@ -194,6 +218,14 @@ class ExternalPlayersTest(unittest.TestCase):
             with self.subTest(system=system, frozen=frozen):
                 env = external_players.player_env(bundle, system=system, frozen=frozen)
                 self.assertEqual(env["LD_LIBRARY_PATH"], "/tmp/_MEI1")
+
+    def test_a_frozen_linux_app_keeps_the_driver_folders_it_named_to_itself(self):
+        environ = {"LIBVA_DRIVERS_PATH": "/usr/lib64/dri", "VDPAU_DRIVER_PATH": "/opt/vdpau"}
+        with mock.patch.object(external_players.vlc_bundle, "ADDED", {"LIBVA_DRIVERS_PATH"}):
+            env = external_players.player_env(environ, system="Linux", frozen=True)
+            self.assertEqual(env, {"VDPAU_DRIVER_PATH": "/opt/vdpau"})  # the user's stays
+            env = external_players.player_env(environ, system="Linux", frozen=False)
+            self.assertEqual(env, environ)
 
     def test_players_start_with_that_environment(self):
         bundle = {"PATH": "/usr/bin", "VLC_PLUGIN_PATH": "/tmp/_MEI1/vlc/plugins"}
@@ -249,10 +281,12 @@ class ExternalPlayersTest(unittest.TestCase):
     def test_mpv_python_player_reused(self):
         fake = mock.MagicMock()
         with mock.patch.dict(sys.modules, {"mpv": fake}):
-            self.assertEqual(external_players.launch_mpv("a"), (True, ""))
-            self.assertEqual(external_players.launch_mpv("b"), (True, ""))
+            self.assertEqual(external_players.launch_mpv("http://x/a"), (True, ""))
+            self.assertEqual(external_players.launch_mpv("http://x/b"), (True, ""))
         fake.MPV.assert_called_once()
-        fake.MPV.return_value.play.assert_has_calls([mock.call("a"), mock.call("b")])
+        fake.MPV.return_value.play.assert_has_calls(
+            [mock.call("http://x/a"), mock.call("http://x/b")]
+        )
 
 
 if __name__ == "__main__":

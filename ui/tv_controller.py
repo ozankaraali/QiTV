@@ -68,10 +68,11 @@ import time
 from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QWheelEvent
 from PySide6.QtWidgets import QAbstractScrollArea
 
 from services import external_players, favorites, recording
+from services.budgeted_stream import HeldSlot
 from services.casting import CastDevices
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, shown_label
 from services.catchup import archive_of
@@ -84,7 +85,6 @@ from services.live import parts as live_parts
 from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
 from services.media_reporter import MediaReporter
-from services.media_server import server_resume
 from services.navigation import (
     FAVORITES_GROUP,
     RECENT_GROUP,
@@ -139,7 +139,7 @@ from ui.quality_controls import SIZE_WHILE_RECORDING, QualityControls
 # i18n: a toast: the multiview cannot open while a picture is cast to a TV
 MULTIVIEW_WHILE_CASTING = N_("Stop casting to show the multiview")
 from ui.record_guard import RecordGuard
-from ui.stream_question import StreamQuestion, quit_text
+from ui.stream_question import ScheduledRecording, StreamQuestion, quit_text
 from ui.subtitle_search import OnlineSetup, OnlineSubtitles
 from ui.track_controls import TrackControls
 
@@ -151,7 +151,7 @@ ERROR_MS = 6000
 SET_PIN_FIRST = N_("Set a PIN first: Settings → Parental controls.")
 # i18n: a toast: the channel or group is hidden while QiTV is locked; Settings shows it again
 HIDDEN_TEXT = N_("Hidden while locked. Settings → Parental controls shows it again.")
-RECORDING_MS = 5000  # "Recording saved: <name>" (a name to read)
+RECORDING_MS = 5000  # "Recording saved in <folder>: <name>" (a name to read)
 VOLUME_STEP = 5
 SEEK_STEP_MS = 10_000
 TUNING_KEEP_MS = 3000  # under the banner's 4 s: it is shown again while a link resolves
@@ -209,6 +209,9 @@ class TVController(QObject):
     # 2.6: QiTV's question for phone `sid` (its text, the answers' words), and that it is gone.
     phoneAsked = Signal(str, str, str, str)
     phoneSettled = Signal(str)
+    # An outside player (Play in VLC, a phone's Watch) took over what the large picture played:
+    # the phones watching before let go (one screen at a time, as when the TV plays again).
+    handedOn = Signal()
 
     def __init__(
         self,
@@ -287,6 +290,12 @@ class TVController(QObject):
         self._stopped: Optional[Target] = None  # 2.6: what Stop stopped, for play_again()
         self._page: Optional[str] = None  # the window's page ("player", "library", "corner")
         self._external_pending: Optional[tuple[Target, str]] = None
+        # 2.8.12: what a phone's Watch plays holds one of its provider's streams, as the large
+        # picture's own play would, until the TV plays again, another player shows large,
+        # another outside player takes over or QiTV stops: the phone is QiTV's own (a scheduled
+        # recording nor a picture in picture takes that stream meanwhile). A player outside
+        # QiTV (VLC, mpv) holds none: QiTV can't tell what it does.
+        self._phone_slot = HeldSlot(self.budget, self._tuner.purpose)
         self._external_settle = QTimer(self, singleShot=True)
         self._external_settle.timeout.connect(self._launch_settled)
         self._started = False
@@ -324,6 +333,8 @@ class TVController(QObject):
             prepare=lambda session, target: self._prepare(session, target, None),
             back_notice=lambda: self.overlays.back_notice,
             archive_allowed=self._archive_allowed,
+            beside_recording=self._archive_beside_recording,
+            gave_up=self._fail_focused_tile,
             on_sizes=self._offer_live_quality,
             parent=self,
         )
@@ -506,7 +517,7 @@ class TVController(QObject):
             )
         self._question = StreamQuestion(
             budget=self.budget,
-            recordings=self._recordings,
+            recordings=self._all_recordings,  # 2.8: those on schedule too
             large=lambda: self.sessions.large() if self.sessions is not None else None,
             card=self._question_card,
             stop=self._stop_for_stream,
@@ -764,6 +775,7 @@ class TVController(QObject):
         2.8: every recording ends first (its file saved), as Quit's question ends them, so its
         player parks as any other and its disk buffer is kept for the next helper (a
         self-update closed it)."""
+        self._phone_slot.give_back()
         recording = [slot.live for slot in self._recordings()]
         large = self.live
         if self.sessions is None and large is not None and self._large_records():
@@ -810,6 +822,8 @@ class TVController(QObject):
         """The sleep timer ended (2.3): what plays stops as for the Library (each stream
         closed, its budget slot back once released) and fullscreen ends; nothing plays by
         itself until the viewer chooses something."""
+        if self._media is not None:
+            self._media.stopped()  # 2.8: a server's title stopped where it was
         if self._closed:
             return
         self.leave_multiview(keep_pip=False)
@@ -991,7 +1005,7 @@ class TVController(QObject):
 
         def open_file() -> None:
             self._prepare(session, target, previous)
-            session.play(url, kind=classify(url, False), start_ms=start)
+            session.play(url, kind=classify(url, False), start_ms=start, local=True)
             self._reset_speed(session)
 
         self._tuner.open(self._guarded(target, open_file), local=True)  # no provider slot
@@ -1175,6 +1189,10 @@ class TVController(QObject):
         if self._stopped is not None and self._current is None:
             self.play_again()  # 2.6: after Stop, Play plays it again
             return
+        failed = self._failed_live()
+        if failed is not None:
+            self._retry_failed(failed)
+            return
         self._tuner.toggle_pause()
         self._show_transport()
 
@@ -1307,8 +1325,8 @@ class TVController(QObject):
             self._zap_steps(steps)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.Wheel and self.overlays.column.isVisible():
-            self._column_wheel.wheel(event.angleDelta().y(), event.modifiers())
+        if isinstance(event, QWheelEvent) and self.overlays.column.isVisible():
+            self._column_wheel.wheel_event(event)
             event.accept()
             return True
         return False
@@ -1338,7 +1356,7 @@ class TVController(QObject):
         channels: list[dict],
         *,
         from_zap: bool,
-        archive: Optional[tuple[float, float]] = None,
+        archive: Optional[tuple[float, Optional[float]]] = None,
     ) -> None:
         """`archive`: the channel's provider archive from a moment to another (Unix seconds:
         the guide's past programme) instead of live."""
@@ -1347,19 +1365,30 @@ class TVController(QObject):
         self._cancel_external()  # a newer choice: the settling external launch is dropped
         self._lanes.supersede()  # and an external play still waiting for its link
         context = self.zap.context
-        picked = item_provider.pick_source(self.catalog, channel, group_key)
         if group_key != context.group_key or context.index_of(channel) < 0:
             # Numbers reach every live channel, not only the group's (TV numbers are global).
-            self.zap.set_context(
-                ZapContext(group_key, channels, fallback=self._all_live(), source=picked)
-            )
-        elif not from_zap or not context.source:
-            context.source = picked  # a zap keeps the list its group was picked from
+            fresh = ZapContext(group_key, channels, fallback=self._all_live())
+            if fresh.index_of(channel) < 0:  # the rows it keeps for ↑/↓, built once
+                # Previous or a number outside the group: ↑/↓ walk every channel from it, as
+                # the small picture's Previous does (never the old group from the old place).
+                group_key, channels = ALL_GROUP_ID, self._all_live()
+                fresh = ZapContext(group_key, channels, fallback=channels)
+            picked = item_provider.pick_source(self.catalog, channel, group_key)
+            fresh.source = picked
+            self.zap.set_context(fresh)
+        else:
+            picked = item_provider.pick_source(self.catalog, channel, group_key)
+            if not from_zap or not context.source:
+                context.source = picked  # a zap keeps the list its group was picked from
         playing = self._playing_live()
         stay = playing is not None and ZapContext.same(channel, playing.item)
         if stay and archive is not None and self._large_records():
             stay = False  # its archive opens beside the recording, which records on (2.6)
         if not stay and self._shown_elsewhere(channel, group_key, channels):
+            if archive is not None:
+                # The small picture's channel swapped in (or the background player recording
+                # it is large again): its archive opens there now, as on the channel playing.
+                self._tune(channel, group_key, channels, from_zap=from_zap, archive=archive)
             return
         if not stay and self._asks_first(channel, group_key, channels, archive):
             return  # 2.6: no stream is free while a recording holds one: asked
@@ -1367,6 +1396,7 @@ class TVController(QObject):
             self.zap.note_request(channel)  # ↑/↓ move on from it while its link is pending
         self.overlays.column.close()
         self._channel = channel
+        self._playing_moved()
         self._update_guides()
         self._show_banner(channel)
         if stay and archive is not None and playing is not None:
@@ -1781,16 +1811,29 @@ class TVController(QObject):
         """After a failed tune, INFO and the drawer follow the channel still playing."""
         current = self._current
         self._channel = current.item if current is not None and current.live else None
+        self._playing_moved()
+
+    def playing_channel(self) -> Optional[dict]:
+        """The channel tuned last (playing, or on its way): its row in the channel list, the
+        guide and the fast-zap list has a small accent ▶."""
+        return self._channel
+
+    def _playing_moved(self) -> None:
+        for listing in (self.overlays.drawer, self.overlays.column, self.overlays.guide):
+            listing.playing_changed()
 
     def _deliver(self, target: Target, url: str) -> None:
         item = target.item
-        if self._media is not None and not (target.live and self.multiview_shown()):
-            self._media.playing(url)  # 2.8: a server's title starts (another's stops)
+        launcher = self._external_launcher()
+        multiview = target.live and self.multiview_shown()
+        if self._media is not None and launcher is None and not multiview:
+            # 2.8: a server's title starts (another's stops); one handed to an outside player
+            # is told stopped as it goes (_launch), nothing after: QiTV can't see it play.
+            self._media.playing(url)
         self._freed_for = None  # it came: the large picture is the title's
         if target is self._room_for and self._pip is not None:
             self._room_for = None
             self._pip.make_room()  # before it opens: a closing small picture is waited for
-        launcher = self._external_launcher()
         # Direct plays book the slot under the item's own provider, as pipeline tunes do.
         provider_name = item_provider.provider_name(self.catalog, item)
         self._set_recording_aside()  # 2.6: what records large records on in the background
@@ -1807,9 +1850,13 @@ class TVController(QObject):
             # The in-app stream is released first: the player opens the provider again.
             self._tuner.open(self._guarded(target, lambda: self._launch(target, url)))
             return
+        self._phone_slot.give_back()  # it plays here again: the phone's was its stream
         if target.live and target.archive_at is not None:
             # Catch-up (2.2): the channel's archive from that moment, when it offers one now;
-            # else the channel plays live.
+            # else the channel plays live. Either is one more stream at its provider: refused,
+            # as a live tune is, when the other pictures take its whole limit.
+            if self._live_controls.refuse_over_limit(target):
+                return
             kept = self._current, self._cid
             self._current, self._cid = target, None
             if self._live_controls.open_archive(target, url):
@@ -1838,7 +1885,7 @@ class TVController(QObject):
                 self._current, self._cid = target, None
                 self.overlays.transport.set_speed(1.0)  # LiveSession starts every tune at 1x
             else:
-                if self._live_controls.refuse_over_limit(target, direct=True):
+                if self._live_controls.refuse_over_limit(target):
                     return  # over the provider's stream limit: nothing opens
                 target = replace(target, max_height=None)  # 2.8: asked once (see above)
                 self._current, self._cid = target, None
@@ -1864,11 +1911,9 @@ class TVController(QObject):
             start: Optional[int]
             if target.start_ms is not None:  # 2.8: its quality changed: on from where it was
                 start = target.start_ms
-            else:
-                start = 0 if target.start_over else self.watch.resume_position(cid)
+            else:  # 2.8: or where a media server says it stopped, unless QiTV saw it finished
+                start = 0 if target.start_over else self.watch.resume_from(cid, item)
             changed = target.start_ms is not None
-            if not target.start_over and not start and not changed:
-                start = server_resume(item)  # 2.8: where a media server says it stopped
             # 2.8: a quality change's start is asked once: a later reopen of this target goes
             # where the watch state saved it, as any title's.
             target = replace(target, start_ms=None)
@@ -1915,22 +1960,35 @@ class TVController(QObject):
 
         return run
 
-    def _launch(self, target: Target, url: str, launcher: Optional[Launcher] = None) -> None:
+    def _launch(
+        self, target: Target, url: str, launcher: Optional[Launcher] = None, *, phone: bool = False
+    ) -> None:
         """Hand the link to the external player (the in-app stream is released by now).
 
-        `launcher` is the context menu's choice; by default, the settings' player.
+        `launcher` is the context menu's choice; by default, the settings' player. `phone`: a
+        phone's Watch, whose stream is counted (`_phone_slot`).
         """
         launcher = launcher or self._external_launcher()
         if launcher is None:  # the setting changed meanwhile: play it here
             self._play_link(replace(target, zapped=False), url)
             return
-        http: dict[str, str] = {}
+        http: dict[str, Any] = {"local": True}  # a file's URI: QiTV's own (play_file)
         if not target.local:  # 2.8: asked as QiTV asks it (an STB portal's box's agent)
             agent = item_provider.stream_agent(self.catalog, target.item)
             referrer = str(target.item.get("referrer") or "")
             http = {k: v for k, v in (("user_agent", agent), ("referrer", referrer)) if v}
+        if self._media is not None:
+            self._media.stopped()  # 2.8: the server's title that played stopped where it was
+        self._phone_slot.give_back()  # a newer outside play takes over (the phones stop)
+        if phone and not target.local:
+            self._phone_slot.set_purpose(self._tuner.purpose)
+            # Held when one is free (never queued: the phone already streams).
+            self._phone_slot.try_take(item_provider.provider_name(self.catalog, target.item), None)
         ok, message = launcher(url, **http)
+        if ok and phone and not target.local and self._media is not None:
+            self._media.playing(url)  # 2.8: its server hears it start; the phone says where
         if not ok:
+            self._phone_slot.give_back()
             first, _, rest = (message or "").strip().partition("\n")
             if rest.strip():
                 logger.info("External player: %s", scrub(rest))
@@ -1940,8 +1998,14 @@ class TVController(QObject):
                 translate(first) if first else tr("The external player could not start")
             )
             return
+        self.handedOn.emit()  # the phones that watched before let go
         self._current, self._cid = target, None
         self._delivered(target, url)
+
+    def phone_stopped(self) -> None:
+        """2.8.12: the phone that watched left for good (`RemoteController`): the stream it
+        held goes back."""
+        self._phone_slot.give_back()
 
     def _delivered(self, target: Target, url: str) -> None:
         """The target is playing (or opening): confirm the zap and record it in the history."""
@@ -2151,8 +2215,9 @@ class TVController(QObject):
         return self._question.quit(then)
 
     def quit_note(self) -> str:
-        """The quit question while channels record ("" while none does): the self-update's."""
-        recording = self._recordings()
+        """The quit question while channels record ("" while none does): the self-update's.
+        2.8: those that record on schedule count too."""
+        recording = self._all_recordings()
         return quit_text(recording) if recording else ""
 
     def _refresh_rec_sign(self) -> None:
@@ -2207,6 +2272,19 @@ class TVController(QObject):
         recording = [slot for slot in sessions.slots() if records(slot)]
         return sorted(recording, key=lambda slot: slot.live.recording_since() or 0.0)
 
+    def _all_recordings(self) -> list[Any]:
+        """Every player that records and every recording on schedule (2.8: no player, a
+        stream of its own), the oldest first: what the stream question and Quit count."""
+        recording: list[tuple[float, Any]] = [
+            (slot.live.recording_since() or 0.0, slot) for slot in self._recordings()
+        ]
+        if not self._closed:
+            recording += [
+                (since, ScheduledRecording(name, dict(channel or {}), since))
+                for name, _channel, since, channel in self.scheduled_now()
+            ]
+        return [entry for _since, entry in sorted(recording, key=lambda pair: pair[0])]
+
     def _question_card(self) -> Any:
         """The question's card on the page that shows (the Library's while it shows, the
         player in its corner or not)."""
@@ -2248,7 +2326,7 @@ class TVController(QObject):
         channel: dict,
         group_key: str,
         channels: list[dict],
-        archive: Optional[tuple[float, float]],
+        archive: Optional[tuple[float, Optional[float]]],
     ) -> bool:
         """A tune that would stop a recording, or needs the stream one holds: asked."""
 
@@ -2267,10 +2345,14 @@ class TVController(QObject):
         sessions = self.sessions
         return sessions is not None and self._question.confirm(sessions.slot(name), then)
 
-    def _stop_for_stream(self, slot: Slot, replaced: bool) -> None:
+    def _stop_for_stream(self, slot: Any, replaced: bool) -> None:
         """Stop recording: the user said so for a stream. Unless the open that asked takes
         its stream over (`replaced`), its player lets the stream go: a background one by
-        itself, a small picture closes, a tile closes."""
+        itself, a small picture closes, a tile closes. 2.8: a scheduled recording's airing
+        stops (as the REC sign's Stop), its stream going back once its session closed."""
+        if isinstance(slot, ScheduledRecording):
+            self.stop_scheduled(slot.name)
+            return
         sessions = self.sessions
         background = sessions is not None and slot in sessions.background()
         slot.live.stop_recording()
@@ -2446,6 +2528,12 @@ class TVController(QObject):
         grid.open_focused(
             item, self._guarded(target, play_direct), provider=provider_name, limit=limit
         )
+
+    def _fail_focused_tile(self, *, ended: bool = False) -> None:
+        """The large picture's channel failed for good (said): in the multiview, its focused
+        tile stops and shows a card, as a tile beside the focus does (GridControls)."""
+        if self._grid is not None and self.multiview_shown():
+            self._grid.focused_failed(ended=ended)
 
     def _on_tile_denied(self, name: str) -> None:
         """A tile's stream was refused (its card says so): when it has the focus, nothing
@@ -2732,6 +2820,7 @@ class TVController(QObject):
             if current is not None:
                 # Recent and the next start's channel: a swap's, and a tile's taking the focus.
                 self._record_watched(current, view.url)
+                self._archive_after_small()
                 # The transport takes the large picture's last timeline at once; the banner
                 # then announces the channel (they share the bottom of the video).
                 self._live_controls.show_live_transport(current)
@@ -2759,6 +2848,17 @@ class TVController(QObject):
         if self._tuner_of(old).idle():
             pip.close()  # the old large picture was between two channels: nothing to show
 
+    def _archive_after_small(self) -> None:
+        """A swap: a channel's archive that ended, or failed, while it was small goes on as at
+        its end now that it is large (its next stretch, or live), never a dead archive bar."""
+        catchup = self._live_controls.catchup
+        if not catchup.active():
+            return
+        if self._state == "ended":
+            catchup.on_ended()
+        elif self._state == "error":
+            catchup.on_error("")
+
     def _use_slot(self, slot: Slot) -> None:
         """Act on `slot`'s player, live session and tuner (it is large now)."""
         tuner = slot.tuner
@@ -2767,6 +2867,7 @@ class TVController(QObject):
         if self._wired:
             self._connect_session(self.session, False)
         self.session, self.live, self._tuner = slot.playback, slot.live, tuner
+        self._phone_slot.give_back()  # another player shows large: no phone plays for it
         if self._wired:
             self._connect_session(slot.playback, True)
         self._live_controls.use_slot(tuner, slot.live, slot.playback)
@@ -2903,6 +3004,10 @@ class TVController(QObject):
         return channel_key(item_provider.provider_name(self.catalog, item), item)
 
     def _toggle_pause(self) -> None:
+        failed = self._failed_live()
+        if failed is not None:
+            self._retry_failed(failed)  # ▶ over a channel that failed to open
+            return
         self._tuner.toggle_pause()
 
     def _seek_ms(self, ms: int) -> None:
@@ -3207,7 +3312,8 @@ class TVController(QObject):
 
     def _on_small_position(self, name: str, position_ms: int, length_ms: int) -> None:
         """A movie or an episode swapped small still plays: its position is saved under its
-        own resume key (and its end marks it finished), as while it was large."""
+        own resume key (and its end marks it finished), as while it was large, and its media
+        server hears where it is (2.8) while it is the title the server heard start."""
         cid = self._pip.small_resume_key(name) if self._pip is not None else None
         if self._closed or cid is None:
             return
@@ -3215,11 +3321,21 @@ class TVController(QObject):
             self.watch.update_position(cid, position_ms, length_ms)
         except Exception as e:
             self._log_failure("save the playback position", e)
+        if self._media is not None and self._pip is not None:
+            self._media.position(position_ms, url=self._pip.view(name).url)
+
+    def phone_position(self, url: str, position_ms: int) -> None:
+        """Where a phone's Watch plays `url` (2.8): its media server hears it, while that is
+        the title it heard start (QiTV handed it to the phone)."""
+        if self._media is not None and not self._closed:
+            self._media.position(position_ms, url=url)
 
     def _on_small_error(self, name: str, message: str) -> None:
-        """A movie or an episode swapped small failed to play: said as the large picture says
-        it (a channel's player errors are its live session's to recover or report)."""
-        target = self._pip.small_title(name) if self._pip is not None else None
+        """A movie, an episode or a channel's archive swapped small failed to play: said as
+        the large picture says it (a channel's player errors are its live session's to recover
+        or report)."""
+        pip = self._pip
+        target = (pip.small_title(name) or pip.small_archive(name)) if pip is not None else None
         if not self._closed and target is not None:
             self._error(self._named(target.title, message))
             self._explain_item(target.item, target.title)
@@ -3239,6 +3355,8 @@ class TVController(QObject):
         self._error(self._named(title, message))
         if current is not None:
             self._explain_item(current.item, title)
+            if current.live:
+                self._fail_focused_tile()
 
     def _give_small_channel_large(self) -> None:
         """The movie or the episode playing large failed: a channel shown small beside it
@@ -3268,6 +3386,7 @@ class TVController(QObject):
             if self._live_controls.reconnect(current):
                 return  # "Reconnecting…": the same stream opens again, in the same slot
             self._toast(tr("The stream ended"))  # i18n: a toast
+            self._fail_focused_tile(ended=True)
             return
         try:
             self.watch.flush()
@@ -3344,7 +3463,7 @@ class TVController(QObject):
         context = self.zap.context
         index = context.index_of(channel)
         # As ZapContext.by_number: list positions stand in only when nothing is numbered.
-        if index >= 0 and not any(ZapContext.number_of(c) for c in context.channels):
+        if index >= 0 and not context.numbered():
             return str(index + 1)
         return ""
 
@@ -3419,6 +3538,22 @@ class TVController(QObject):
         if not self._closed:
             self.tune(channel, group_key=group_key, channels=channels)
 
+    def _archive_beside_recording(
+        self, target: Target, moment: float, until: Optional[float]
+    ) -> None:
+        """A rewind past the buffer (←, ⏮, the bar's dashed part) into the archive of the
+        channel the large picture records: it opens as the guide's "Watch from the start"
+        does, so the recording goes on in the background, or QiTV asks first when no stream
+        is free (never stopped unasked)."""
+        if self._closed:
+            return
+        context = self.zap.context
+        if context.group_key == target.group_key and context.index_of(target.item) >= 0:
+            key, channels = context.group_key, context.channels
+        else:
+            key, channels = ALL_GROUP_ID, self._all_live()
+        self._tune(target.item, key, channels, from_zap=False, archive=(moment, until))
+
     def _on_guide_catchup(
         self, channel: dict, programme: Programme, group_key: str, channels: list[dict]
     ) -> None:
@@ -3442,6 +3577,13 @@ class TVController(QObject):
         days = timedelta(days=self.archive_days(channel))
         window = timedelta(seconds=self._live_controls.window_reach(channel))
         return max(days, window)
+
+    def deepest_window(self, channels: Sequence[dict], beyond: timedelta) -> timedelta:
+        """(2.7) The longest own server window seen this run of any of `channels`, when it
+        reaches further back than `beyond` (a list's deepest archive), else none: what
+        archive_reach adds to the guide's reach of a whole list, in one go."""
+        seconds = self._live_controls.deepest_window(channels, beyond.total_seconds())
+        return timedelta(seconds=seconds)
 
     def archive_days(self, channel: dict) -> int:
         """The days of the channel's provider archive that may play now (the guide's reach):
@@ -3511,14 +3653,50 @@ class TVController(QObject):
             self._show_grid_transport()  # the grid's button and layout chip stay in reach
             return
         if target is None or not self._has_media():
+            failed = self._failed_live()
+            if failed is not None and not self._digits:
+                self._show_failed_transport(failed)
             return
         if self._digits:
             return  # the banner shows the number being typed
         self.overlays.banner.dismiss()
-        if target.live and not self.overlays.transport.isVisible():
+        transport = self.overlays.transport
+        if target.live and (not transport.isVisible() or transport.failed()):
             self._live_controls.show_live_transport(target)
         else:
-            self.overlays.transport.poke()
+            transport.poke()
+
+    def _failed_live(self) -> Optional[Target]:
+        """The live channel that failed to open, or whose stream ended for good (2.8.12): it is
+        still current, but nothing plays or opens, Stop did not end it and no other choice is
+        on its way."""
+        target = self._current
+        if target is None or not target.live or self._has_media():
+            return None
+        if self._stopped is not None or self._lanes.busy():
+            return None
+        return target if self._state in ("error", "ended") else None
+
+    def _show_failed_transport(self, target: Target) -> None:
+        """Live TV's controls over a channel that failed to open (2.8.12): a mouse was left
+        with nothing to click but the picture (the channel list). ▶ tries it again, and the
+        guide, the previous channel and Search are in reach."""
+        self.overlays.banner.dismiss()
+        transport = self.overlays.transport
+        if transport.isVisible() and transport.failed():
+            transport.poke()
+            return
+        now = self.now_title(target.item)
+        transport.set_favorite(favorites.is_favorite(self.config, target.item))
+        transport.show_failed(target.title, now[0] if now else "", self._logo(target.item))
+
+    def _retry_failed(self, target: Target) -> None:
+        """▶ or Space over a channel that failed to open: it is asked for again, from its
+        group (as Play again after Stop)."""
+        self.overlays.transport.dismiss()
+        key = target.group_key or ALL_GROUP_ID
+        channels = list(self.catalog.items("live", key) or []) or self._all_live()
+        self.tune(target.item, group_key=key, channels=channels)
 
     def _show_grid_transport(self) -> None:
         """The player controls over a grid whose focused tile plays nothing: live TV's, named
@@ -3771,27 +3949,34 @@ class TVController(QObject):
                 return False
             uri = Path(path).absolute().as_uri()
             self._play_external(
-                chosen, uri, lambda link, **_http: launch(chosen, link), ask_on=ask_on
+                chosen, uri, lambda link, **_http: launch(chosen, link), ask_on=ask_on, phone=True
             )
             return True
 
         def play(url: str) -> None:
             self._play_external(
-                chosen, url, lambda link, **_http: launch(chosen, link), ask_on=ask_on
+                chosen, url, lambda link, **_http: launch(chosen, link), ask_on=ask_on, phone=True
             )
 
         self._lanes.request_side(target, play, play=True)
         return True
 
     def _play_external(
-        self, target: Target, url: str, launcher: Launcher, *, ask_on: Optional[str] = None
+        self,
+        target: Target,
+        url: str,
+        launcher: Launcher,
+        *,
+        ask_on: Optional[str] = None,
+        phone: bool = False,
     ) -> None:
-        """The context menu's external play: the newest choice, once the in-app stream is gone."""
+        """The context menu's external play: the newest choice, once the in-app stream is gone.
+        `phone`: a phone's Watch (its stream is counted: `_launch`)."""
         if self._closed:
             return
 
         def again() -> None:
-            self._play_external(target, url, launcher, ask_on=ask_on)
+            self._play_external(target, url, launcher, ask_on=ask_on, phone=phone)
 
         if not target.local and self._ask_for_stream(
             target.item, self._tuner.purpose, again, gives_way=True, ask_on=ask_on
@@ -3806,7 +3991,7 @@ class TVController(QObject):
         self._lanes.drop_tune()  # e.g. an STB retry still on its way would open in-app
 
         def launch() -> None:
-            self._launch(target, url, launcher)
+            self._launch(target, url, launcher, phone=phone)
             if self._current is target:
                 self._restore_channel()  # INFO, the guide and Ctrl+D follow what it plays
 

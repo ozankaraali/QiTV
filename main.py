@@ -13,11 +13,18 @@ import platform
 import shutil
 import sys
 import time
-from typing import Mapping, Optional, Sequence
+from typing import Callable, Mapping, Optional, Sequence
 import warnings
 
 SMOKE_FLAG = "--smoke"
 SMOKE_ENV = "QITV_SMOKE"
+# Windows groups a program's windows and its pinned taskbar icon by this id: one for every
+# version, so that a pinned QiTV stays one icon after an update.
+APP_USER_MODEL_ID = "com.ozankaraali.qitv"
+# How long a Windows update's new QiTV waits for the old one to quit before it gives up
+# replacing its file (Windows keeps a running program's file locked), and how often it tries.
+REPLACE_WAIT_S = 30.0
+REPLACE_RETRY_S = 0.5
 
 
 def qt_platform_override(system: str, environ: Mapping[str, str]) -> Optional[str]:
@@ -42,37 +49,70 @@ def smoke_arguments(argv: Sequence[str], environ: Mapping[str, str]) -> Optional
     return None
 
 
-def handle_replace_flag():
-    """Handle --replace flag for Windows auto-update.
+def replace_executable(
+    old: str,
+    new: str,
+    *,
+    wait_s: float = REPLACE_WAIT_S,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Put the executable `new` in the place of `old` once the old QiTV has quit.
 
-    When launched with --replace <old_exe_path>, this function:
-    1. Waits for the old process to exit
-    2. Copies this executable to the old location
-    3. Optionally cleans up the downloaded file
+    `new` is copied beside `old` first, then moved over it: retried until the old QiTV let go
+    of its file, for up to `wait_s` seconds, so that `old` is never left half-written. False
+    when it never could (the copy beside it is removed again).
     """
-    if "--replace" not in sys.argv:
-        return
-
+    if os.path.normcase(os.path.abspath(old)) == os.path.normcase(os.path.abspath(new)):
+        return True
+    staged = old + ".update"
+    deadline = clock() + wait_s
     try:
-        replace_index = sys.argv.index("--replace")
-        if replace_index + 1 >= len(sys.argv):
-            return
+        shutil.copy2(new, staged)
+        while True:
+            try:
+                os.replace(staged, old)
+                return True
+            except OSError:
+                if clock() >= deadline:
+                    raise
+                sleep(REPLACE_RETRY_S)
+    except OSError as e:
+        logging.getLogger("qitv").error(
+            "The update could not replace the old QiTV: %s (%s)",
+            type(e).__name__,
+            getattr(e, "winerror", None) or e.errno,
+        )
+        try:
+            os.remove(staged)
+        except OSError:
+            pass
+        return False
 
-        old_exe_path = sys.argv[replace_index + 1]
-        current_exe = sys.executable
 
-        # Wait for old process to exit
-        time.sleep(1.5)
+def handle_replace_flag(
+    argv: Optional[Sequence[str]] = None,
+    executable: Optional[str] = None,
+    replace: Callable[[str, str], bool] = replace_executable,
+) -> Optional[tuple[str, str]]:
+    """Windows's self-update, in the new QiTV that the old one started with
+    `--replace <old_exe_path>`: this executable takes the old one's place.
 
-        # Copy current executable to old location
-        shutil.copy2(current_exe, old_exe_path)
-        logging.info(f"Updated {old_exe_path} successfully")
-
-        # Note: We can't delete the currently running exe on Windows
-        # The downloaded file in Downloads will remain - user can delete manually
-
-    except Exception as e:
-        logging.error(f"Failed to perform update replacement: {e}")
+    (old path, this executable's path) when it could not: this version goes on from where it
+    was downloaded, and says so (ui.update_dialogs.replace_failed); else None.
+    """
+    argv = sys.argv if argv is None else argv
+    if "--replace" not in argv:
+        return None
+    index = list(argv).index("--replace")
+    if index + 1 >= len(argv):
+        return None
+    old_exe_path = argv[index + 1]
+    current_exe = sys.executable if executable is None else executable
+    if replace(old_exe_path, current_exe):
+        logging.getLogger("qitv").info("The update replaced the old QiTV.")
+        return None
+    return old_exe_path, current_exe
 
 
 def written_dirs(config_dir: str) -> list[str]:
@@ -92,12 +132,20 @@ def _migrate_favorites(config_manager) -> None:
         logging.getLogger(__name__).warning("The migrated favorites were not saved; will retry")
 
 
+def settings_dir() -> str:
+    """The settings folder this run uses (QITV_CONFIG_DIR, portable, or the system's), found
+    as ConfigManager finds it, without reading or writing anything there."""
+    from services.config_manager import ConfigManager
+
+    return str(os.path.dirname(ConfigManager.__new__(ConfigManager)._get_config_path()))
+
+
 def main() -> int:
     from PySide6 import QtGui
-    from PySide6.QtCore import QLocale, QLoggingCategory, qInstallMessageHandler
+    from PySide6.QtCore import QLocale, QLoggingCategory, QTimer, qInstallMessageHandler
     import qdarktheme
 
-    from services import i18n, log_file
+    from services import i18n, log_file, private_files
     from services.atomic_write import sweep_in_background
     from services.config_manager import ConfigManager, get_app_version
     from services.epg_manager import EpgManager
@@ -106,22 +154,20 @@ def main() -> int:
     from services.provider_manager import ProviderManager
     from services.sleep_manager import allow_sleep, prevent_sleep
     from ui.quit_reason import QiTVApplication
+    from ui.theme import focus_qss
     from ui.tv_window import TVWindow
-    from ui.update_dialogs import check_for_updates
+    from ui.update_dialogs import check_for_updates, replace_failed
 
-    # Basic logging configuration (tweak level as needed)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    # Basic logging configuration (tweak level as needed); the console's lines are masked as
+    # the file's are (addresses, Xtream paths, sign-in headers, MAC addresses).
+    logging.basicConfig(level=logging.INFO, handlers=[log_file.console_handler()])
     # A packaged app has no terminal: its log is kept in a file too, where it can be read (2.7.2).
     log_file.install()
     log = logging.getLogger("qitv")
     log.info("QiTV %s starts.", get_app_version())
 
-    # Handle Windows auto-update replacement if launched with --replace flag
-    if platform.system() == "Windows":
-        handle_replace_flag()
+    # Windows's self-update: this new version takes the old one's place, once it quit.
+    not_replaced = handle_replace_flag() if platform.system() == "Windows" else None
 
     # Suppress noisy third-party warnings
     warnings.filterwarnings("ignore", category=SyntaxWarning, module="vlc")
@@ -135,6 +181,20 @@ def main() -> int:
     # the window responsive while it works.
     sys.setswitchinterval(0.0005)
     app = QiTVApplication(sys.argv)  # notes a quit request the system sends (2.8)
+    # 2.8.12: one QiTV per settings folder (a second start would record and stream twice and
+    # save over the first's settings): it brings the first to the front and quits.
+    from services.single_instance import claim
+
+    try:
+        instance = claim(settings_dir(), replacing="--replace" in sys.argv)
+        handed_over = instance is None
+    except Exception as error:  # the check is never a reason for QiTV not to start
+        log.warning("The check for another QiTV failed (%s); starting.", type(error).__name__)
+        instance, handed_over = None, False
+    if handed_over:
+        log.info("Another QiTV runs with these settings; this start ends here.")
+        log_file.close()
+        return 0
     # Why QiTV ended, in its log: the window closed (tv_window says how), or its last one.
     app.lastWindowClosed.connect(lambda: log.info("The last window closed."))
     app.aboutToQuit.connect(lambda: log.info("QiTV quits."))
@@ -166,6 +226,12 @@ def main() -> int:
             icon_path = os.path.join(sys._MEIPASS, "assets", "qitv.png")
 
     config_manager = ConfigManager()
+    # The sign-in's files (config, provider cache, the log) are this user's only, however an
+    # older QiTV or the umask left them.
+    private_files.tighten(config_manager.get_config_dir(), log_file.log_dir())
+    # Saves from now on are written off the GUI thread (a 6 MB config.json took 20 to 60 ms
+    # there, a locked one a quarter of a second more); quitting waits for them (below).
+    config_manager.write_in_background()
     log_file.set_detailed(config_manager.detailed_log)  # 2.8.2: Settings' detailed log
     # The language, before any window: every text is looked up as it is shown.
     i18n.set_language(i18n.resolve(config_manager.language))
@@ -182,17 +248,22 @@ def main() -> int:
     )
 
     if platform.system() == "Windows":
-        myappid = f"com.ozankaraali.qitv.{get_app_version()}"
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
 
     app.setWindowIcon(QtGui.QIcon(icon_path))
-    qdarktheme.setup_theme("dark", custom_colors={"primary": "#C96B43"})
+    # The keyboard's focus shows on buttons, check boxes, tabs and sliders too (ui/theme.py).
+    qdarktheme.setup_theme("dark", custom_colors={"primary": "#C96B43"}, additional_qss=focus_qss())
 
     prevent_sleep()
     control = None
     try:
         window = TVWindow(app, config_manager, provider_manager, image_manager, epg_manager)
+        if instance is not None:
+            instance.activated.connect(window.come_to_front)
         window.show()
+        if not_replaced is not None:  # where the new version is, and where the old one stayed
+            old_path, new_path = not_replaced
+            QTimer.singleShot(0, window, lambda: replace_failed(old_path, new_path, window))
         # 2.8.3: a developer's tools read and drive this QiTV (loopback only, token-guarded).
         from services import control as control_port
 
@@ -213,9 +284,13 @@ def main() -> int:
         log.info("QiTV's event loop ended (%d).", code)
         return code
     finally:
+        if instance is not None:
+            instance.close()
         if control is not None:
             control.stop()
         allow_sleep()
+        if not config_manager.flush_saves():  # the window's last save among them
+            log.warning("QiTV quits before config.json was written: the last change is lost.")
         log_file.close()
 
 

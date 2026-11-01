@@ -15,7 +15,18 @@ from unittest import mock
 
 from services.live import ts
 from services.live.ts import PACKET, ClockJoiner, RepeatTrimmer, pts_delta
-from tests.ts_fixtures import AUDIO_PID, CLOCK, PMT_PID, VIDEO_PID, pat, pes_packets, pmt
+from tests.ts_fixtures import (
+    AUDIO_FRAME_TICKS,
+    AUDIO_PID,
+    CLOCK,
+    PMT_PID,
+    VIDEO_PID,
+    audio_only,
+    make_stream,
+    pat,
+    pes_packets,
+    pmt,
+)
 
 FPS = 25
 TICKS = CLOCK // FPS
@@ -23,10 +34,12 @@ BACKLOG = 5.0  # media the source sends at connect
 FIRST = 0.1  # when the first byte arrives
 
 
-def picture(index: int, key: bool) -> bytes:
-    """An H.264 access unit only frame `index` has: IDR or P."""
+def picture(index: int, key: bool, sei: int = 0) -> bytes:
+    """An H.264 access unit only frame `index` has: IDR or P (`sei`: an SEI that long first)."""
     tag = bytes(0x80 | ((index >> (7 * k)) & 0x7F) for k in range(3))  # never a start code
     body = b"\x00\x00\x00\x01\x09\xf0"
+    if sei:
+        body += b"\x00\x00\x00\x01\x06" + b"\xb5" * (sei - 6) + b"\x80"
     if key:
         body += b"\x00\x00\x00\x01\x67" + b"\x55" * 15 + b"\x00\x00\x00\x01\x65\x55"
     else:
@@ -35,10 +48,17 @@ def picture(index: int, key: bool) -> bytes:
 
 
 def stream(
-    runs, *, audio: bool = False, flag: bool = True, tables: bool = False
+    runs,
+    *,
+    audio: bool = False,
+    flag: bool = True,
+    tables: bool = False,
+    rai_all: bool = False,
+    sei: int = 0,
 ) -> list[tuple[float, bytes]]:
     """(arrival, packet) of `runs`: (frame indexes, first PTS, arrival, GOP in frames), where
-    arrival maps a frame's media position in its run to the second it arrives."""
+    arrival maps a frame's media position in its run to the second it arrives (`rai_all`:
+    every picture flagged RAI; `sei`: each with an SEI that long first)."""
     counters = {0: 0, PMT_PID: 0, VIDEO_PID: 0, AUDIO_PID: 0}
     timed: list[tuple[float, bytes]] = []
     for number, (indexes, first_pts, arrival, gop) in enumerate(runs):
@@ -66,7 +86,7 @@ def stream(
                 timed.extend((at, packet) for packet in sound_packets)
             key = k % gop == 0
             packets, counters[VIDEO_PID] = pes_packets(
-                VIDEO_PID, 0xE0, picture(index, key), pts, rai=key,
+                VIDEO_PID, 0xE0, picture(index, key, sei), pts, rai=key or rai_all,
                 cc_start=counters[VIDEO_PID], pcr=pts,
             )  # fmt: skip
             if restart:
@@ -192,7 +212,92 @@ def repeat_runs(repeat: float, silence: float, *, gop: int = FPS, new: float = 1
     ]
 
 
+def radio(seconds: float, *, start: float = 0.0, **options) -> list[tuple[float, bytes]]:
+    """(arrival, packet) of a radio channel (AAC, its PCR on the sound's PID; `options` as
+    `audio_only`'s): each frame arrives at its media time from `start`, in real time across a
+    restart of its clock."""
+    timed, frame = [], 0
+    for p in packets(audio_only(seconds, pcr=True, **options)):
+        if pid_of(p) == AUDIO_PID and p[1] & 0x40:
+            frame += 1
+        timed.append((start + max(0, frame - 1) * AUDIO_FRAME_TICKS / CLOCK, p))
+    return timed
+
+
+class Paced:
+    """Feed a timed stream to a trimmer in reads every `STEP` s of the clock (the source's
+    reads), ticking while it holds (the helper's ticker); `pause` (from, to) sends nothing
+    then. `silent` is the longest stretch in which nothing passed on, `holds` how long each
+    hold lasted."""
+
+    STEP = 0.1
+
+    def __init__(self, timed, *, video: bool, pause: tuple[float, float] | None = None):
+        self.trimmer = RepeatTrimmer(
+            program=lambda: (VIDEO_PID, 0x1B) if video else (None, None), clock=lambda: self.now
+        )
+        self.input = b"".join(packet for _, packet in timed)
+        out: list[bytes] = []
+        self.now, self.silent, last, k = 0.0, 0.0, 0.0, 0
+        self.holds: list[float] = []
+        since = None
+        while k < len(timed):
+            self.now = round(self.now + self.STEP, 6)
+            chunk = []
+            while k < len(timed) and timed[k][0] <= self.now:
+                if pause is not None and pause[0] < self.now < pause[1]:
+                    break
+                chunk.append(timed[k][1])
+                k += 1
+            pieces = self.trimmer.feed(b"".join(chunk)) if chunk else [b""]
+            if self.trimmer.holding:
+                since = self.now if since is None else since
+                pieces += self.trimmer.tick()
+            if since is not None and not self.trimmer.holding:
+                self.holds.append(round(self.now - since, 6))
+                since = None
+            if any(pieces):
+                self.silent = max(self.silent, self.now - last - self.STEP)
+                last = self.now
+            out.extend(pieces)
+        out.extend(self.trimmer.finish())
+        self.output = b"".join(out)
+
+
 class RepeatTrimmerTests(unittest.TestCase):
+    def test_a_radio_channels_restart_goes_on_at_once(self):
+        # AAC with its PCR on the sound's PID: no picture to confirm a restart by. Held until
+        # the new PCR caught up (40 s) or 4096 packets came, the sound stood still for 28 s
+        # and VLC ran dry; judged by the sound, the restart goes on at once, untouched, as a
+        # run of its own.
+        run = Paced(radio(70.0, resets=(40.0,)), video=False)
+        (trim,) = run.trimmer.trims
+        self.assertEqual((trim.reason, trim.released_at, trim.dropped), ("no pictures", 40.0, ()))
+        self.assertEqual(run.output, run.input)
+        self.assertLessEqual(run.silent, Paced.STEP)
+        self.assertEqual(run.trimmer.restarts, 1)
+
+    def test_a_held_run_no_picture_comes_to_judge_goes_on_within_the_cap(self):
+        # Pictures for 20 s, then the sound alone (its PCR on its own PID), whose clock
+        # restarts at 30 s: no picture comes to tell whether it was one. Held until the new
+        # PCR caught up 10 s later (or 4096 packets came: 43 s here), it goes on as it came
+        # once held `_TRIM_HOLD_S`, on a read or, while the source pauses, on a tick.
+        stamped, at = [], 0.0
+        for p in packets(make_stream(20)):  # each PES start at its media time, the rest with it
+            pts = ts._pes_times(p, 0)[0] if p[1] & 0x40 else None
+            at = at if pts is None else (pts - 900000) / CLOCK
+            stamped.append((at, p))
+        stamped += radio(40.0, start=20.0, pts_start=900000 + 20 * CLOCK, resets=(10.0,))
+        for pause in (None, (30.15, 40.0)):
+            with self.subTest(pause=pause):
+                run = Paced(stamped, video=True, pause=pause)
+                self.assertEqual(list(run.trimmer.trims), [])  # no restart was confirmed
+                self.assertEqual(run.output, run.input)
+                (held,) = run.holds
+                self.assertAlmostEqual(held, ts._TRIM_HOLD_S, delta=Paced.STEP + 1e-6)
+                if pause is None:
+                    self.assertLessEqual(run.silent, ts._TRIM_HOLD_S + Paced.STEP)
+
     def test_a_repeat_is_dropped_up_to_the_last_keyframe_in_reach(self):
         run = Run(stream(repeat_runs(5.0, 1.0)))
         (trim,) = run.trimmer.trims
@@ -212,6 +317,29 @@ class RepeatTrimmerTests(unittest.TestCase):
         first_pcr = next(p for p in packets(kept) if p[3] & 0x20 and p[4] and p[5] & 0x10)
         self.assertTrue(first_pcr[5] & 0x80)
         self.assertEqual(trim.dropped_bytes, len(run.input) - len(run.output))
+
+    def test_with_rai_on_every_picture_a_repeat_is_cut_at_a_keyframe_its_bytes_show(self):
+        # RAI on every picture, each with a 200-byte SEI first (a caption, HDR metadata): a
+        # picture's first packet ends before its slice header. R is 5.75 s and an IDR comes
+        # every 5 s; taken for a keyframe by its RAI, the P picture at 5.72 s was cut to, and
+        # the picture was broken until the next IDR. Read on, the cut is the IDR at 5 s.
+        run = Run(stream(repeat_runs(6.0, 1.0, gop=5 * FPS), rai_all=True, sei=200))
+        (trim,) = run.trimmer.trims
+        self.assertEqual((trim.reason, trim.dropped_s), ("dropped", 5.0))
+        self.assertEqual(video_pts(run.output)[20 * FPS], 5 * CLOCK)
+        self.assertEqual(cc_breaks(run.output), 0)
+
+    def test_a_rai_picture_its_first_packet_cannot_tell_is_read_on(self):
+        # As the segmenter reads on: an IDR or a P picture behind an SEI the first packet ends
+        # in; past `_LOOK_AHEAD` bytes that tell nothing, the RAI is believed.
+        for sei, key, expected in ((200, True, True), (200, False, False), (3200, False, True)):
+            with self.subTest(sei=sei, key=key):
+                data = b"".join(
+                    pes_packets(VIDEO_PID, 0xE0, picture(0, key, sei), 0, rai=True, pcr=0)[0]
+                )
+                rai, _, es = ts._pes_start(data[:PACKET])
+                self.assertIsNone(ts._trim_key(data[:PACKET], rai, es, 0x1B))
+                self.assertIs(ts._read_on(data, 0, 0x1B), expected)
 
     def test_a_burst_that_only_makes_up_its_silence_passes_untouched(self):
         silence = 3.0

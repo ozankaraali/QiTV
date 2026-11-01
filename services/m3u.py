@@ -1,7 +1,8 @@
+from functools import cmp_to_key
 import re
 import sys
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse, urlsplit
 
 from services.catchup import SOURCE_KEY, TYPE_KEY, m3u_archive_fields, playlist_fields
 from services.i18n import N_
@@ -19,6 +20,39 @@ _CATCHUP_ATTRIBUTES = (
     "tvg-rec",
 )
 PLAYLIST_SOURCE_KEY = "catchup_source"  # the #EXTM3U line's template, beside the channels
+
+
+# A channel's link: any "scheme://" line (http, udp, rtp, rtsp, rtmp, mms…).
+_LINK = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+
+
+def _extinf_name(line: str) -> Optional[str]:
+    """An #EXTINF line's channel name: all after the first comma outside quoted attribute
+    values (`group-title="News, Sport",News, Weather & Sport` names "News, Weather & Sport").
+    A line whose quotes never close is read after its last comma. None without a name."""
+    quoted = False
+    for at, char in enumerate(line):
+        if char == '"':
+            quoted = not quoted
+        elif char == "," and not quoted:
+            return line[at + 1 :] or None
+    last = re.search(r",([^,]+)$", line)
+    return last.group(1) if last else None
+
+
+def _link_name(link: str) -> str:
+    """The name of a channel listed by its link alone: its path's last part
+    ("http://host/live/news.ts" → "news.ts"), else its host and port."""
+    parts = urlsplit(link)
+    last = unquote(parts.path.rstrip("/").rsplit("/", 1)[-1])
+    if last:
+        return last
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    host = parts.hostname or ""
+    return f"{host}:{port}" if host and port else host or link
 
 
 def _attributes(line: str) -> Dict[str, str]:
@@ -55,7 +89,10 @@ def parse_m3u(data: str, categorize: bool = False):
     """
     lines = re.split(r"\r\n|\r|\n", data.lstrip("\ufeff"))
     items = []
-    item = {}
+    item: Dict[str, Any] = {}
+    # After an #EXTINF line: "link" until its link is read, then "backup" (more links are
+    # its backups) until the next #EXTINF line. Before any, a link is a channel of its own.
+    expecting = ""
     id_counter = 0
     defaults: Dict[str, str] = {}  # the #EXTM3U line's catch-up attributes
 
@@ -69,15 +106,15 @@ def parse_m3u(data: str, categorize: bool = False):
             group_title_match = re.search(r'group-title="([^"]+)"', line)
             user_agent_match = re.search(r'user-agent="([^"]+)"', line)
             referrer_match = re.search(r'http-referrer="([^"]+)"', line)
-            item_name_match = re.search(r",([^,]+)$", line)
 
             tvg_id = tvg_id_match.group(1) if tvg_id_match else None
             tvg_logo = tvg_logo_match.group(1) if tvg_logo_match else None
             group_title = group_title_match.group(1) if group_title_match else None
             user_agent = user_agent_match.group(1) if user_agent_match else None
-            item_name = item_name_match.group(1) if item_name_match else None
+            item_name = _extinf_name(line)
 
             id_counter += 1
+            expecting = "link"
             item = {
                 "id": id_counter,
                 "group": group_title,
@@ -108,10 +145,29 @@ def parse_m3u(data: str, categorize: bool = False):
             # VLC's own option name; requests and VLC send it as the Referer header.
             item["referrer"] = line.split("=", 1)[1].strip()
 
-        elif line.startswith("http"):
-            # Round-trip through urlparse: it drops stray tabs and other control whitespace.
-            item["cmd"] = urlparse(line).geturl()
-            items.append(item)
+        elif _LINK.match(line.strip()):
+            # Any scheme VLC opens (udp://, rtsp://…): the player sends what the time-shift
+            # pipeline cannot read (http(s) only) to VLC directly. Round-trip through
+            # urlparse: it drops stray tabs and other control whitespace.
+            link = urlparse(line.strip()).geturl()
+            if expecting == "link":
+                item["cmd"] = link
+                items.append(item)
+                expecting = "backup"
+            elif expecting != "backup":
+                # A link without an #EXTINF line is a channel of its own, named by its link.
+                id_counter += 1
+                item = {
+                    "id": id_counter,
+                    "group": None,
+                    "xmltv_id": None,
+                    "name": _link_name(link),
+                    "logo": None,
+                    "user_agent": None,
+                    "cmd": link,
+                }
+                items.append(item)
+            # else another link for the channel just read (a backup): its first one plays
 
     # Return flat list if not categorizing
     if not categorize:
@@ -156,6 +212,22 @@ def split_cached_groups(payload: Any) -> Any:
     return _build_categorized_structure(contents)
 
 
+def order_cached_groups(payload: Any) -> Any:
+    """A cached playlist's groups in the active language's alphabetical order (a cache made
+    before they sorted case-insensitively, or in another language), "All" first; in place."""
+    categories = payload.get("categories") if isinstance(payload, dict) else None
+    if not isinstance(categories, list) or not all(isinstance(c, dict) for c in categories):
+        return payload
+    first = [c for c in categories if str(c.get("id")) == "*"]
+    by_title: Dict[str, List[Dict]] = {}
+    for category in categories:
+        if str(category.get("id")) != "*":
+            title = str(category.get("title") or category.get("id") or "")
+            by_title.setdefault(title, []).append(category)
+    payload["categories"] = first + [c for t in group_order(by_title) for c in by_title[t]]
+    return payload
+
+
 def _build_categorized_structure(items: List[Dict]) -> Dict:
     """Build categorized structure from M3U items with group-title support.
 
@@ -191,13 +263,31 @@ def _build_categorized_structure(items: List[Dict]) -> Dict:
 
     # Build categories list
     categories = [{"id": "*", "title": N_("All")}]
-    categories.extend({"id": group, "title": group} for group in sorted(sorted_channels))
+    categories.extend({"id": group, "title": group} for group in group_order(sorted_channels))
 
     return {
         "categories": categories,
         "contents": contents,
         "sorted_channels": sorted_channels,
     }
+
+
+def group_order(names) -> List[str]:
+    """Group names in the active language's alphabetical order, upper and lower case alike
+    ("Kids" and "KIDS" side by side, "Çocuk" after "Cinema" in Turkish); names alike but for
+    their case keep a fixed order between them."""
+    listed = sorted(names)  # the fixed order of names alike in the collation
+    try:
+        from PySide6.QtCore import QCollator, Qt
+
+        from services.i18n import app_locale
+
+        collator = QCollator(app_locale())
+        collator.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        collator.setNumericMode(True)  # "Sport 2" before "Sport 10"
+        return sorted(listed, key=cmp_to_key(lambda a, b: int(collator.compare(a, b))))
+    except Exception:  # no Qt (a script): case-folded
+        return sorted(listed, key=str.casefold)
 
 
 def _repeat_key(item: Dict) -> tuple:

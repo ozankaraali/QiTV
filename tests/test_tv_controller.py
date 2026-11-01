@@ -28,6 +28,7 @@ from services.live.live_session import CRAWLING, UNAVAILABLE
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode, item_key
+from services.playback import PlaybackState
 from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of
 from services.vlc_profile import DEFAULT_USER_AGENT, STB_USER_AGENT, PlayKind
 from services.watch_state import WatchState
@@ -360,6 +361,9 @@ class FakeSession(QObject):
         self.clears += 1
         self.files, self.subtitle_ms = [], 0
 
+    def forget_tracks(self, *, keep_language=False):
+        pass
+
     def aspect(self):
         return self.shape
 
@@ -395,6 +399,9 @@ class FakeOverlay(QObject):
 
     def named(self, name):
         return [c[1:] for c in self.calls if c[0] == name]
+
+    def playing_changed(self):  # another channel plays (the lists' ▶): nothing to record
+        pass
 
 
 class FakeBanner(FakeOverlay):
@@ -578,19 +585,29 @@ class FakeTransport(FakeOverlay):
     def pos(self):
         return QPoint(0, 0)
 
+    shows_failed = False  # show_failed(): a channel that failed to open (2.8.12)
+
     def show_vod(self, title, subtitle):
         self.record("show_vod", title, subtitle)
-        self.visible = True
+        self.visible, self.shows_failed = True, False
 
     def show_live(self, title, subtitle, logo=None):
         self.record("show_live", title, subtitle)
         self.logo = logo
-        self.visible = True
+        self.visible, self.shows_failed = True, False
 
     def show_timeshift(self, title, subtitle, logo=None):
         self.record("show_timeshift", title, subtitle)
         self.logo = logo
-        self.visible = True
+        self.visible, self.shows_failed = True, False
+
+    def show_failed(self, title, subtitle, logo=None):
+        self.record("show_failed", title, subtitle)
+        self.logo = logo
+        self.visible, self.shows_failed = True, True
+
+    def failed(self):
+        return self.shows_failed
 
     def badge_rect(self):
         # The live badge is only there while a live channel shows (the test says when).
@@ -889,6 +906,9 @@ class FakeWatch:
 
     def resume_position(self, cid):
         return self.resume.get(cid)
+
+    def resume_from(self, cid, item):
+        return self.resume.get(cid) or ms.server_resume(item)
 
     def record_play(self, provider_name, item, *, item_type, link, group_id=None):
         self.plays.append((provider_name, item, item_type, link, group_id))
@@ -2005,6 +2025,58 @@ class VodTests(ControllerTestCase):
         self.assertEqual(len(self.catalog.links), 1)
 
 
+class MediaServerReportTests(ControllerTestCase):
+    """2.8 review: a media server hears where its title plays wherever QiTV plays it (a phone's
+    Watch too), and that it stopped once QiTV hands it on, the sleep timer included; of a title
+    handed to an outside player, nothing: QiTV can't see it play."""
+
+    HEAT, RONIN = "http://vod/heat.mkv", "http://vod/ronin.mkv"
+
+    def make_controller(self, column, **extra):
+        self.reported = []
+        told = self.reported.append
+        reporter = SimpleNamespace(
+            playing=lambda url: told(("playing", url)),
+            position=lambda ms, paused=False, url=None: told(("position", ms, url)),
+            stopped=lambda: told(("stopped",)),
+            shutdown=lambda: None,
+        )
+        return super().make_controller(column, media_reporter=reporter, **extra)
+
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
+        self.ready(self.HEAT)
+        self.reported.clear()
+
+    def test_a_title_handed_to_an_outside_player_is_told_stopped_and_never_started(self):
+        self.config.play_in_vlc = True
+        self.controller.play_vod({"id": "m8", "name": "Ronin", "cmd": "x"}, "movie", play_context())
+        self.ready(self.RONIN)
+        self.assertEqual(self.external.calls, [("vlc", self.RONIN)])
+        self.assertEqual(self.reported, [("stopped",)])
+
+    def test_a_phones_watch_starts_it_there_and_tells_its_positions(self):
+        handed = []
+
+        def launch(target, url):
+            handed.append(url)
+            return True, ""
+
+        self.assertTrue(self.controller.play_elsewhere(launch))
+        self.ready(self.HEAT)
+        self.controller.phone_position(self.HEAT, 61_000)
+        self.assertEqual(handed, [self.HEAT])
+        self.assertEqual(
+            self.reported, [("stopped",), ("playing", self.HEAT), ("position", 61_000, self.HEAT)]
+        )
+
+    def test_the_sleep_timer_tells_the_stop(self):
+        self.controller.stop_for_sleep()
+        self.assertEqual(self.reported, [("stopped",)])
+
+
 class GuidesInUseTests(ControllerTestCase):
     """Only the guides of the providers on screen or playing load (QiTV 2.1)."""
 
@@ -2594,6 +2666,30 @@ class TuneFailureAndKeyTests(ControllerTestCase):
         self.assertTrue(wait_until(lambda: len(self.catalog.links) == 2))
         self.assertEqual(self.requested(), ["One", "Four"])
 
+    def test_up_down_after_a_number_outside_the_group_walk_every_channel_from_it(self):
+        # ↑/↓ walked the old group from the old place (Two's next: One).
+        self.catalog.live = {"10": CHANNELS[:2], "20": CHANNELS[2:]}
+        self.controller.tune(CHANNELS[1], group_key="10", channels=CHANNELS[:2])
+        self.ready("http://stream/2")
+        self.controller.handle(Action.DIGIT, "3")
+        self.assertTrue(wait_until(lambda: len(self.catalog.links) == 2))
+        self.ready("http://stream/3")
+        self.zap._last_step = float("-inf")  # no burst: the step tunes at once
+        self.controller.handle(Action.CH_NEXT)
+        self.assertEqual(self.requested(), ["Two", "Three", "Four"])
+
+    def test_up_down_after_previous_outside_the_group_walk_every_channel_from_it(self):
+        self.catalog.live = {"10": CHANNELS[:3], "20": CHANNELS[3:]}
+        self.controller.tune(CHANNELS[2], group_key="10", channels=CHANNELS[:3])
+        self.ready("http://stream/3")
+        self.controller.tune(CHANNELS[3], group_key="20", channels=CHANNELS[3:])
+        self.ready("http://stream/4")
+        self.controller.handle(Action.PREVIOUS)  # Three, not in Four's group
+        self.ready("http://stream/3")
+        self.zap._last_step = float("-inf")
+        self.controller.handle(Action.CH_PREV)
+        self.assertEqual(self.requested(), ["Three", "Four", "Three", "Two"])
+
     def test_same_item_queued_keeps_the_link_in_flight(self):
         self.tune(0)
         self.tune(1)
@@ -2691,6 +2787,54 @@ class TuneFailureAndKeyTests(ControllerTestCase):
         self.assertEqual(self.banner.calls, [])
         self.assertEqual(self.drawer.calls, [])
         self.assertEqual(self.column.calls, [])
+
+
+class FailedChannelTests(ControllerTestCase):
+    """2.8.12: after "Couldn't open the stream" a mouse had nothing to click but the picture."""
+
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+        self.catalog.ptype = "M3UPLAYLIST"  # no link to make again on its own
+
+    def fail(self):
+        self.play(0)
+        self.session.stateChanged.emit("error")
+        self.session.errorOccurred.emit("The stream could not be opened")
+        self.transport.visible = False
+        self.transport.calls.clear()
+
+    def test_the_mouse_shows_its_controls_and_play_asks_for_it_again(self):
+        self.fail()
+        self.controller.mouse_moved()
+        self.assertEqual([c[0] for c in self.transport.named("show_failed")], ["One"])
+        self.controller.mouse_moved()  # still up: only poked
+        self.assertEqual(len(self.transport.named("show_failed")), 1)
+        self.transport.playPauseRequested.emit()
+        self.assertEqual(self.session.toggles, 0)
+        self.assertEqual(self.requested(), ["One", "One"])
+        self.ready("http://stream/1")
+        self.session.stateChanged.emit("playing")
+        self.controller.mouse_moved()  # it plays: live TV's controls again
+        self.assertEqual([c[0] for c in self.transport.named("show_live")], ["One"])
+
+    def test_space_asks_for_it_again(self):
+        self.fail()
+        self.controller.handle(Action.PLAY_PAUSE)
+        self.assertEqual(self.requested(), ["One", "One"])
+
+    def test_r_says_nothing_plays(self):
+        self.fail()
+        self.session.state = lambda: PlaybackState.ERROR
+        self.controller.handle(Action.RECORD)
+        self.assertEqual(self.toast.messages()[-1], ("Nothing playing", "info"))
+
+    def test_a_stopped_channel_keeps_its_play_again(self):
+        self.play(0)
+        self.controller.stop()
+        self.transport.calls.clear()
+        self.controller.mouse_moved()
+        self.assertEqual(self.transport.named("show_failed"), [])
 
 
 class LoadingQueueAndDrawerTests(ControllerTestCase):
@@ -3791,6 +3935,30 @@ class PipelineErrorTests(PipelineCase):
         self.start_channel(1)  # a new tune may try again
         self.live.failed.emit("The stream could not be opened")
         self.assertEqual(self.requested(), ["One", "One", "Two", "Two"])
+
+    def test_an_stb_fresh_link_that_played_a_while_is_made_again_when_it_fails(self):
+        # Its new play token expires in turn: once more after HEALTHY_S of playing, as an
+        # ended direct stream gets its reopens back.
+        self.enterContext(mock.patch("ui.live_controls.HEALTHY_S", 0.05))
+        self.start_pipeline(0)
+        self.live.failed.emit("The stream could not be opened")
+        self.ready("http://stream/1?play_token=new")
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
+        self.live.play_pipeline()
+        self.session.stateChanged.emit("playing")
+        QTest.qWait(80)  # it played HEALTHY_S on its fresh link
+        self.live.failed.emit("The stream could not be opened")
+        self.assertEqual(self.toast.messages(), [])
+        self.assertEqual(self.requested(), ["One", "One", "One"])
+        self.ready("http://stream/1?play_token=newer")
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 3))
+        self.live.play_pipeline()
+        self.session.stateChanged.emit("playing")  # too briefly this time
+        self.live.failed.emit("The stream could not be opened")
+        self.assertEqual(self.toast.messages(), [("One: The stream could not be opened", "error")])
+        self.assertEqual(len(self.catalog.links), 3)
 
     def test_an_stb_stream_that_ends_at_once_in_direct_play_is_made_again(self):
         self.start_channel(0)

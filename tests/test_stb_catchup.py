@@ -7,8 +7,10 @@ reaches a network, and everything is fictional.
 from datetime import datetime, timedelta, timezone
 import os
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -20,7 +22,14 @@ from mixed_fixtures import mixed_config, shut_hub
 import orjson
 from timer_fixtures import wait_until
 
-from services.catalog import EMPTY_LINK_MESSAGE, NO_STREAM_MESSAGE, CatalogService
+from services import epg_manager as epg_manager_module
+from services.browsed_catalog import BrowsedCatalog
+from services.catalog import (
+    EMPTY_LINK_MESSAGE,
+    NO_STREAM_MESSAGE,
+    UNEXPECTED_ANSWER_MESSAGE,
+    CatalogService,
+)
 from services.catalogs import Catalogs
 from services.catchup import (
     ARCHIVE_KEY,
@@ -48,7 +57,13 @@ from services.epg_view import (
 from services.multikeydict import MultiKeyDict
 from services.provider_api import stb_archive_link_url
 from services.provider_manager import ProviderManager, StbHandshake
-from services.workers import LinkCreatorWorker, STBCategoriesWorker, stb_archive_link
+from services.workers import (
+    ALL_CHANNELS_TIMEOUT_S,
+    STB_SESSION_REFUSED,
+    LinkCreatorWorker,
+    STBCategoriesWorker,
+    stb_archive_link,
+)
 from tests.fixtures.local_stb import ARCHIVED_ID, MAC, PLAIN_ID, StbFixture, channels
 from ui.link_lanes import LinkLanes, Target
 
@@ -344,6 +359,102 @@ class PortalLoadTests(PortalCase):
         self.assertIsNone(plain[0].recording.marked)  # the portal says nothing of it
 
 
+class PortalGuideAgainTests(PortalCase):
+    """A portal's guide that failed to load is asked again, and one running out is loaded
+    again (2.8.12). Before, a failure marked the portal as having no guide, for good (not
+    asked by the window's refresh, nor after a restart), and a guide was loaded again only
+    when "Check update every" passed, while it covers epg_stb_period_hours."""
+
+    def setUp(self):
+        super().setUp()
+        self.tries = epg_manager_module._STB_GUIDE_TRIES
+        tries = patch("services.epg_manager._STB_GUIDE_TRIES", 1)  # no wait between tries
+        tries.start()
+        self.addCleanup(tries.stop)
+        self.config = SimpleNamespace(
+            channel_epg=True,
+            epg_source="STB",
+            epg_expiration=24 * 3600,  # "Check update every" a day
+            epg_stb_period_hours=5,
+            epg_list_window_hours=0,
+            ssl_verify=True,
+            xmltv_channel_map=MultiKeyDict(),
+            get_config_dir=lambda: self.dir,
+        )
+        self.providers = SimpleNamespace(current_provider=self.portal.provider())
+        self.sign_in()
+
+    def sign_in(self):
+        handshake = StbHandshake()
+        self.assertTrue(handshake.run(self.portal.url, MAC))
+        self.providers.headers, self.providers.token = handshake.headers, handshake.token
+
+    def asked(self):
+        return len(self.portal.asked("itv", "get_epg_info"))
+
+    def test_a_guide_that_failed_once_is_asked_again(self):
+        self.portal.expire()  # the session drops while the first guide loads
+        manager = EpgManager(self.config, self.providers)
+        manager.set_current_epg()
+        self.assertEqual((self.asked(), len(manager.epg)), (1, 0))
+        self.assertNotIn(None, manager.index.values())  # not "this portal has no guide"
+        manager.set_current_epg()  # a load right after, on the same session: waits
+        self.assertEqual(self.asked(), 1)
+        clock = time.monotonic() + epg_manager_module._RETRY_FIRST_S
+        with patch("services.epg_manager._monotonic", lambda: clock):
+            manager.set_current_epg()  # the window's next refresh
+        self.assertEqual(self.asked(), 2)
+        EpgManager(self.config, self.providers).set_current_epg()  # a restart
+        self.assertEqual(self.asked(), 3)
+        self.sign_in()  # signed in again: tried at once, and the guide comes
+        manager.set_current_epg()
+        self.assertEqual(self.asked(), 4)
+        self.assertGreater(len(manager.epg), 0)
+
+    def test_the_guide_gets_the_live_lists_time_and_tries(self):
+        kwargs = {}
+
+        class Loader:
+            def __init__(self, **given):
+                kwargs.update(given)
+                self.items = []
+
+            def run(self):
+                pass
+
+        with patch("services.epg_manager.ContentLoader", Loader):
+            EpgManager(self.config, self.providers).set_current_epg()
+        self.assertEqual(kwargs["timeout"], ALL_CHANNELS_TIMEOUT_S)  # it had 15 s
+        self.assertEqual(kwargs["max_retries"], 1)  # the tries asked (setUp's)
+        self.assertEqual(self.tries, 2)  # a second try, as the live list gets
+
+    def test_a_guide_running_out_loads_again_whatever_the_update_period(self):
+        manager = EpgManager(self.config, self.providers)
+        manager.set_current_epg()
+        self.assertEqual(self.asked(), 1)
+        [key] = [k for k, v in manager.index.items() if isinstance(v, dict)]
+        for hours_ago, asked in ((1, 1), (3, 2)):  # 5 h covered: loaded again 2 h before
+            with self.subTest(hours_ago=hours_ago):
+                loaded = datetime.now() - timedelta(hours=hours_ago)
+                manager.index[key]["date"] = loaded.strftime("%Y-%m-%d %H:%M:%S")
+                manager.set_current_epg()
+                self.assertEqual(self.asked(), asked)
+
+
+    def test_a_short_guide_period_is_loaded_again_at_its_half_not_at_every_load(self):
+        self.config.epg_stb_period_hours = 2  # 2 h covered: a 2 h margin would always be due
+        manager = EpgManager(self.config, self.providers)
+        manager.set_current_epg()
+        self.assertEqual(self.asked(), 1)
+        [key] = [k for k, v in manager.index.items() if isinstance(v, dict)]
+        for minutes_ago, asked in ((10, 1), (70, 2)):
+            with self.subTest(minutes_ago=minutes_ago):
+                loaded = datetime.now() - timedelta(minutes=minutes_ago)
+                manager.index[key]["date"] = loaded.strftime("%Y-%m-%d %H:%M:%S")
+                manager.set_current_epg()
+                self.assertEqual(self.asked(), asked)
+
+
 class PortalLinkTests(PortalCase):
     def worker(self, programme, headers):
         return LinkCreatorWorker(
@@ -374,7 +485,8 @@ class PortalLinkTests(PortalCase):
         headers = self.signed_in_headers()
         self.portal.expire()
         programme = self.portal.programme(ARCHIVED_ID, self.portal.now - 3600)["id"]
-        self.assertEqual(run(self.worker(programme, headers))[0], "error")
+        # Said as such ("Authorization failed.", no JSON): the catalogs sign in again.
+        self.assertEqual(run(self.worker(programme, headers)), ("error", STB_SESSION_REFUSED))
 
 
 class PortalLiveLinkTests(PortalCase):  # 2.8.3
@@ -473,13 +585,44 @@ class CatalogLinkTests(PortalCase):
         self.assertTrue(wait_until(lambda: self.catalogs.is_ready(self.name)))
         self.portal.expire()
         first = self.catalogs.request_archive_link(self.item, self.recorded)
-        self.assertTrue(wait_until(lambda: self.failed))
-        self.assertEqual(self.failed[0][0], first)
-        self.catalogs.sign_in_again(self.name)  # what catch-up asks after a failed link
-        again = self.catalogs.request_archive_link(self.item, self.recorded)
-        self.assertTrue(wait_until(lambda: self.ready))
-        self.assertEqual(self.ready, [(again, self.portal.archive_link(self.recorded))])
+        self.assertTrue(wait_until(lambda: self.ready or self.failed))
+        self.assertEqual(self.failed, [])
+        self.assertEqual(self.ready, [(first, self.portal.archive_link(self.recorded))])
         self.assertEqual(self.portal.handshakes, 2)
+
+    def test_the_browsed_portals_expired_session_signs_in_again_for_its_link(self):
+        # Before: the page's own portal never signed in again (its retry skipped it, and
+        # picking it again only checked it was set up): every link failed until a Refresh.
+        view = BrowsedCatalog(
+            self.catalogs,
+            self.config,
+            source_key="selected_provider_name",
+            all_key="all_providers_live",
+        )
+        self.config.selected_provider_name = self.name
+        view.select_provider()
+        self.assertTrue(wait_until(lambda: self.catalogs.is_ready(self.name)))
+        self.portal.expire()
+        request = view.request_link(self.item, section="live")
+        self.assertTrue(wait_until(lambda: self.ready or self.failed))
+        self.assertEqual(self.failed, [])
+        self.assertEqual([rid for rid, _url in self.ready], [request])
+        self.assertTrue(self.ready[0][1].startswith(f"{self.portal.url}/live/{ARCHIVED_ID}.ts"))
+        self.assertEqual(self.portal.handshakes, 2)
+
+    def test_a_portal_refusing_the_new_session_too_fails_once(self):
+        self.catalogs.ensure(self.name)
+        self.assertTrue(wait_until(lambda: self.catalogs.is_ready(self.name)))
+        refusing = self.portal.answer
+        self.portal.answer = lambda query, bearer: (
+            refusing(query, bearer) if query.get("type") == "stb" else None
+        )
+        request = self.catalogs.request_link(self.item, section="live")
+        self.assertTrue(wait_until(lambda: self.failed))
+        self.assertFalse(wait_until(lambda: len(self.failed) > 1, 300))  # nothing more comes
+        self.assertEqual(self.failed, [(request, UNEXPECTED_ANSWER_MESSAGE)])
+        self.assertEqual(self.ready, [])
+        self.assertEqual(self.portal.handshakes, 2)  # signed in again once, not in a loop
 
     def test_another_kind_of_provider_makes_no_archive_link(self):
         catalog = CatalogService(

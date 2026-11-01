@@ -276,16 +276,16 @@ class LiveTuner(QObject):
         self._pending_limit = limit
         self._stream.request(provider, limit)
 
-    def refused(self, provider: str, limit: Optional[int], *, direct: bool = False) -> bool:
+    def refused(self, provider: str, limit: Optional[int]) -> bool:
         """Whether other players' streams (picture in picture, tiles) take the whole limit.
-        `direct`: for a direct open, which waits for another picture's stream that is being
-        let go of (`wait_for_each_other`), so that one does not count."""
+        Another picture's stream that is being let go of does not count: a direct open waits
+        for it (`wait_for_each_other`), and a pipeline tune's slot request queues behind it
+        (the budget grants it the slot that stream gives back)."""
         if limit is None:
             return False
+        going = {peer.purpose for peer in self._peers if peer.releasing_from(provider)}
         others = [p for p in self.budget.holders(provider) if p != self.purpose]
-        if direct:
-            going = {peer.purpose for peer in self._peers if peer.releasing_from(provider)}
-            others = [p for p in others if p not in going]
+        others = [p for p in others if p not in going]
         return limit <= 0 or len(others) >= limit
 
     def stop(self, next_channel: str = "") -> None:

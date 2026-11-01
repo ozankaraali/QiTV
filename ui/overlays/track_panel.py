@@ -183,6 +183,7 @@ class TrackPanel(Overlay):
         if fresh or (model.sync is None) != (self._model.sync is None):
             self._focus = self._hover = None  # other rows: the keys start again
         self._model = model
+        self.setAccessibleName(model.title)  # what a screen reader calls it ("Subtitles")
         if anchor is not None:
             self._anchor_x = anchor.center().x()
         self._floor = floor if anchor is not None else self._floor

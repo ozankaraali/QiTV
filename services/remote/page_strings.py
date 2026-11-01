@@ -158,7 +158,12 @@ PAGE_STRINGS: dict[str, str] = {
     "offline": N_("Can't reach QiTV. Is it open on the computer?"),
     # i18n: the phone remote: after "Can't reach QiTV…", once it stopped trying by itself
     "tap_retry": N_("Tap here to try again."),
+    # QiTV said goodbye; the phone tries again by itself, slowly.
+    # i18n: the phone remote: QiTV quit, or its phone remote was switched off in its Settings
+    "stopped": N_("QiTV was closed on the computer, or its phone remote was turned off."),
     "forget": N_("Forget this TV"),  # i18n: the phone remote's menu: unpair this phone
+    # i18n: the phone remote asks before Forget this TV; {tv}: the TV's name ("Living room")
+    "forget_ask": N_("Forget {tv}? To use it again, scan the code on the TV."),
     "pair_another": N_("Pair another TV"),  # i18n: the phone remote's menu
     "choose_tv": N_("Choose a TV"),  # i18n: the phone remote: the list of paired TVs
     # i18n: the phone remote through the relay: QiTV isn't connected to it
@@ -203,10 +208,26 @@ PAGE_STRINGS: dict[str, str] = {
     # i18n: the phone remote: a group of search results, and the button showing the channel list
     "channels": N_("Channels"),
     "no_results": N_("Nothing found"),  # i18n: the phone remote's search found nothing
+    # i18n: the phone remote's find while QiTV still searches its other providers
+    "searching": N_("Searching…"),
     "nothing_here": N_("Nothing here yet"),  # i18n: an empty list on the phone remote
     "loading": N_("Loading…"),  # i18n: the phone remote: a list on its way
     "use_touchpad": N_("Use a touchpad"),  # i18n: the phone remote's menu: the d-pad's style
     "use_buttons": N_("Use buttons"),  # i18n: the phone remote's menu: the d-pad's style
+    # The phone remote's icon buttons, as a screen reader names them (they show no words).
+    "menu": N_("Menu"),  # i18n: the phone remote: the ⋯ button opening its menu (screen reader)
+    "up": N_("Up"),  # i18n: the phone remote: an arrow button (screen reader)
+    "right": N_("Right"),  # i18n: the phone remote: an arrow button (screen reader)
+    "down": N_("Down"),  # i18n: the phone remote: an arrow button (screen reader)
+    "left": N_("Left"),  # i18n: the phone remote: an arrow button (screen reader)
+    "volume_up": N_("Volume up"),  # i18n: the phone remote: a button (screen reader)
+    "volume_down": N_("Volume down"),  # i18n: the phone remote: a button (screen reader)
+    "back_10": N_("Back 10 seconds"),  # i18n: the phone remote: a button (screen reader)
+    "play_pause": N_("Play or pause"),  # i18n: the phone remote: a button (screen reader)
+    "forward_10": N_("Forward 10 seconds"),  # i18n: the phone remote: a button (screen reader)
+    "mute": N_("Mute"),  # i18n: the phone remote: a button, pressed while muted (screen reader)
+    "channel_up": N_("Channel up"),  # i18n: the phone remote: a button (screen reader)
+    "channel_down": N_("Channel down"),  # i18n: the phone remote: a button (screen reader)
 }
 
 

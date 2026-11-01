@@ -65,6 +65,7 @@ from tests.process_fixtures import still_running, terminate
 from tests.test_keymap import resolve_text
 from tests.ts_fixtures import make_stream
 from ui.brand import logo_aspect
+from ui.export_flow import MAY_HOLD_SIGN_IN
 from ui.keymap import SHORTCUTS, Action, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT, LIBRARY_ACTION
@@ -174,9 +175,9 @@ class WindowCase(unittest.TestCase):
         toast = self.window.overlays.toast
         show_message = toast.show_message
 
-        def spy(text, kind="info", ms=3000):
+        def spy(text, kind="info", ms=3000, **button):
             self.toasts.append((text, kind))
-            show_message(text, kind, ms)
+            show_message(text, kind, ms, **button)
 
         toast.show_message = spy
         self.addCleanup(self.close_window)
@@ -1855,7 +1856,7 @@ class LibraryWindowTests(TwoProviderCase):
             self.menu_actions()["Cached Content…"].trigger()
         default = Path.home() / "Downloads" / f"{PROVIDER_NAME}-cached.m3u"
         self.assertEqual(ask.call_args[0][1:], ("Export", str(default), "M3U files (*.m3u)"))
-        done = ("Exported 2 items to channels.m3u", "info")
+        done = (f"Exported 2 items to channels.m3u {MAY_HOLD_SIGN_IN}", "info")
         self.assertTrue(wait_until(lambda: done in self.toasts), self.toasts)
         text = target.read_text(encoding="utf-8")
         self.assertEqual(text.count("#EXTINF"), 2)
@@ -2058,9 +2059,9 @@ class XtreamLibraryTests(TwoProviderCase):
     def test_choosing_movies_in_the_drawer_opens_the_library(self):
         self.show()
         self.wait_ready(XTREAM)
-        drawer = self.wait_for_drawer()  # no channels here: it opens on the idle player
-        for key in (Qt.Key.Key_Left, Qt.Key.Key_Down):  # the sections, then Movies
-            QTest.keyClick(self.window, key)
+        # No live channels here: no "Live TV" either, and the drawer opens on the sections.
+        drawer = self.wait_for_drawer()
+        self.assertEqual(drawer.highlighted().layer, "section")
         self.assertEqual(drawer.highlighted().title, "Movies")
         QTest.keyClick(self.window, Qt.Key.Key_Return)
         self.assertIs(self.window.pages.currentWidget(), self.window.library_page)
@@ -2564,7 +2565,7 @@ class HelpAndAboutTests(WindowCase):
     def test_check_for_updates_and_report_an_issue(self):
         with (
             mock.patch("ui.tv_menus.check_for_updates") as check,
-            mock.patch("ui.tv_menus.QDesktopServices.openUrl") as open_url,
+            mock.patch("services.system_open.QDesktopServices.openUrl") as open_url,
         ):
             actions = self.menu_actions()
             actions["Check for Updates…"].trigger()
@@ -2756,7 +2757,7 @@ class DiskAmountSettingTests(unittest.TestCase):
     def window(self, enabled):
         self.amounts, self.dropped = [], []
         config = SimpleNamespace(
-            save_config=lambda: None,
+            save_config=lambda **_options: None,
             timeshift_enabled=enabled,
             timeshift_max_mib=512,
             detailed_log=False,
