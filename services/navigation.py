@@ -610,8 +610,8 @@ class NavModel(QObject):
         return own, self._other_favorites()
 
     def _other_catalogs(self) -> dict[str, Any]:
-        """The ready catalogs of the providers other than the one shown, by name (none in
-        "All providers", with one provider, or without a hub of catalogs)."""
+        """The catalogs holding their channels of the providers other than the one shown, by
+        name (none in "All providers", with one provider, or without a hub of catalogs)."""
         hub = getattr(self.catalog, "catalogs", None)
         names = self.catalog.provider_names()
         created = getattr(hub, "created", None)  # (a hub that makes no catalogs: none)
@@ -619,7 +619,8 @@ class NavModel(QObject):
             return {}
         shown = self.catalog.current_provider_name()
         made = set(created())
-        return {n: hub.catalog(n) for n in names if n != shown and n in made and hub.is_ready(n)}
+        ready = [n for n in names if n != shown and n in made and hub.is_ready(n)]
+        return {n: hub.catalog(n) for n in ready if hub.catalog(n).has_content("live")}
 
     def _others_deps(self) -> tuple:
         """What the other providers' stars depend on but the stars: their lists' versions."""
