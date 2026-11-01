@@ -6,7 +6,8 @@ a lasting toast with a Cancel button, and Esc cancels it too (the window asks `c
 first). Its result says that the file may hold the account's sign-in. The worker's messages are
 fixed strings (English, shown with `translate`) or its own words for a failure. While the page
 shows "All providers" the export is still one provider's (the one the page returns to): the save
-dialog and the result name it.
+dialog and the result name it. All Live Channels from a Library whose provider has no channel
+loaded exports the channel list's provider's, named so too.
 """
 
 from __future__ import annotations
@@ -20,12 +21,15 @@ from typing import Any, Callable, Optional
 from PySide6.QtCore import QObject, Qt, Slot
 from PySide6.QtWidgets import QFileDialog, QWidget
 
+from services.catalog import ALL_GROUP_ID
 from services.exporter import (
     MSG_CANCELLED,
+    MSG_LOAD_LIVE,
     SECTION_KEYS,
     ExportKind,
     ExportWorker,
     export_available,
+    has_items,
 )
 from services.i18n import N_, tr, tr_n, translate
 
@@ -78,6 +82,22 @@ def _dialog_title(kind: ExportKind, section: str, name: str) -> str:
     return tr("Export {name}'s items", name=name)
 
 
+def _has_live(page) -> bool:
+    """Whether the page's provider has a live channel loaded."""
+    return has_items(page.provider_manager.current_provider_content or {}, "live")
+
+
+def _no_channels(content: dict) -> bool:
+    """Whether the provider's live section has loaded, with no group of channels."""
+    live = content.get(SECTION_KEYS["live"])
+    if isinstance(live, list):
+        return not live
+    if not isinstance(live, dict) or "categories" not in live:
+        return False  # not loaded yet
+    groups = [g for g in live.get("categories") or [] if isinstance(g, dict)]
+    return not any(str(g.get("id", "")) != ALL_GROUP_ID for g in groups)
+
+
 def _snapshot(value: Any) -> Any:
     """A copy the worker can read while the catalog keeps loading: dicts and lists are copied
     (cheaply: the item dicts themselves are shared and never changed by an export)."""
@@ -125,16 +145,24 @@ class ExportFlow(QObject):
             self._notify(translate(BUSY_TEXT), "info", INFO_MS)
             return
         page = catalog or self._catalog
+        if kind is ExportKind.ALL_LIVE and not _has_live(page) and _has_live(self._catalog):
+            page = self._catalog  # from a Library without channels: the channel list's, named
         manager = page.provider_manager
         provider = dict(manager.current_provider or {})
         content = manager.current_provider_content or {}
+        name = str(provider.get("name") or "")
         reason = export_available(kind, provider, section, content)
+        if reason == MSG_LOAD_LIVE and _no_channels(content):
+            # i18n: File → Export → All Live Channels, for a provider without any (films only)
+            self._notify(tr("{name} has no live channels.", name=name), "info", INFO_MS)
+            return
         if reason is not None:
             self._notify(translate(reason), "info", INFO_MS)
             return
-        name = str(provider.get("name") or "")
-        # All providers lists every provider, but the export is this one's: say whose.
-        named = name if getattr(page, "all_providers", lambda: False)() else ""
+        # All providers lists every provider, but the export is this one's: say whose (and
+        # whose channels an export from the Library's other provider took).
+        all_mode = getattr(page, "all_providers", lambda: False)()
+        named = name if all_mode or page is not (catalog or self._catalog) else ""
         path, _filter = QFileDialog.getSaveFileName(
             self._dialog_parent,
             _dialog_title(kind, section, named),

@@ -1130,6 +1130,7 @@
   "{m}m": "{m} min",
   "{name} can no longer control QiTV": "{name} kann QiTV nicht mehr steuern",
   "{name} can now control QiTV": "{name} kann QiTV jetzt steuern",
+  "{name} has no live channels.": "{name} hat keine Live-Sender.",
   "{name} is already in your providers": "{name} ist bereits bei Ihren Anbietern",
   "{name} is no longer available. Playing here again.": "{name} ist nicht mehr erreichbar. Die Wiedergabe läuft wieder hier.",
   "{name} · last used {when}": "{name} · zuletzt genutzt {when}",

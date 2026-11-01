@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from services.exporter import MSG_CANCELLED, MSG_NOTHING_LOADED, ExportKind
+from services.exporter import MSG_CANCELLED, MSG_LOAD_LIVE, MSG_NOTHING_LOADED, ExportKind
 from ui.export_flow import (
     BUSY_TEXT,
     CANCEL_TEXT,
@@ -111,6 +111,39 @@ class ExportFlowTests(unittest.TestCase):
         self.assertEqual(
             self.toasts[-1][0], f"Exported 2 items from Home to home.m3u {MAY_HOLD_SIGN_IN}"
         )
+
+    def test_all_live_from_a_library_without_channels_exports_the_channel_lists(self):
+        # The Library shows a provider of films only; the channel list's has channels.
+        films = SimpleNamespace(
+            current_provider={"type": "XTREAM", "name": "Films"},
+            current_provider_content={"vod": {"contents": [{"id": 9, "name": "A film"}]}},
+            headers={},
+        )
+        library = SimpleNamespace(provider_manager=films)
+        with mock.patch(ASK, return_value=("/exports/home.m3u", "")) as ask:
+            self.flow.export(ExportKind.ALL_LIVE, "movies", library)
+        self.assertEqual(ask.call_args[0][1], "Export Home's channels")  # whose, named
+        self.assertTrue(ask.call_args[0][2].endswith("Home-all_live.m3u"))
+        self.runner.jobs[0][1](None, 2)
+        self.assertEqual(self.toasts[-1], ("Exported 2 items from Home to home.m3u", "info", 3000))
+
+    def test_all_live_says_plainly_when_the_provider_has_no_channels(self):
+        films = SimpleNamespace(
+            current_provider={"type": "XTREAM", "name": "Films"},
+            current_provider_content={"itv": {"categories": [], "contents": {}}},
+            headers={},
+        )
+        library = SimpleNamespace(provider_manager=films)
+        self.manager.current_provider_content = {}  # the channel list has none loaded either
+        with mock.patch(ASK) as ask:
+            self.flow.export(ExportKind.ALL_LIVE, "movies", library)
+        ask.assert_not_called()
+        self.assertEqual(self.toasts, [("Films has no live channels.", "info", 3000)])
+        films.current_provider_content = {}  # not loaded yet: Live TV loads them
+        with mock.patch(ASK) as ask:
+            self.flow.export(ExportKind.ALL_LIVE, "movies", library)
+        ask.assert_not_called()
+        self.assertEqual(self.toasts[-1], (MSG_LOAD_LIVE, "info", 3000))
 
     def test_one_provider_shown_keeps_the_plain_dialog(self):
         ask = self.start()
