@@ -595,6 +595,8 @@ class TVWindow(QMainWindow):
             library_toast=self.library_toast,
             layout_row=self.layout_row,
         )
+        # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
+        self.rec_sign.cover_with(self.overlays.drawer, self.overlays.guide, self.grid_tiles)
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
         # bottom corner's PiP: its pill, ⇄, speaker and × stay within reach; elsewhere on the
         # PiP the transport keeps only its own buttons and bar, and other clicks reach the
