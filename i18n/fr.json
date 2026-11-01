@@ -701,7 +701,7 @@
   "Recording": "Enregistrement",
   "Recording can start once the channel plays": "L’enregistrement pourra commencer dès que la chaîne sera lue",
   "Recording cancelled.": "Enregistrement annulé.",
-  "Recording saved: {name}": "Enregistrement sauvegardé : {name}",
+  "Recording saved in {folder}: {name}": "Enregistrement sauvegardé dans {folder} : {name}",
   "Recording stopped after {hours} hours. Saved: {name}": "Enregistrement arrêté après {hours} heures. Sauvegardé : {name}",
   "Recording stopped unexpectedly": "L’enregistrement s’est arrêté de façon inattendue",
   "Recording stopped unexpectedly. Saved: {name}": "L’enregistrement s’est arrêté de façon inattendue. Sauvegardé : {name}",

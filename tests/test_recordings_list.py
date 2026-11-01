@@ -201,6 +201,11 @@ class RecordingsListTests(unittest.TestCase):
         self.assertTrue(shelf.items()[0]["_scheduled"])
         self.assertEqual(shelf.items()[1]["_item_id"], "b2")
         self.assertEqual(names[2], "News")
+        # 2.8.12: the Library's strip shows a programme's time where Play is; a series none.
+        start = recordings_list.short_when(1_800_000_000.0)
+        self.assertEqual(shelf.items()[0]["_when"], start)
+        self.assertRegex(start, r"\d{2}:\d{2}$")
+        self.assertEqual(shelf.items()[1]["_when"], "")
 
     def test_a_timer_says_its_time_and_days(self):  # 2.8 (owner): recorded at a time
         from PySide6.QtCore import QLocale
@@ -220,6 +225,7 @@ class RecordingsListTests(unittest.TestCase):
         )
         items = {i["_item_id"]: i for i in shelf.items()}
         self.assertEqual(items["t1"]["name"], "21:00–22:30")  # no name: its time
+        self.assertEqual(items["t2"]["_when"], "21:00–22:30")  # on the strip, where Play is
         self.assertEqual(items["t2"]["name"], "Late film")
         self.assertEqual(items["t1"]["description"], "Records Two 21:00–22:30, every day")
         self.assertEqual(items["t2"]["description"], "Records Two 21:00–22:30, Monday to Friday")

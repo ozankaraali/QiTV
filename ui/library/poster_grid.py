@@ -91,7 +91,9 @@ WRAPPED_KEPT = 2048  # card titles' wrapped lines kept (a few screens' worth)
 REQUEST_DELAY_MS = 120  # poster requests wait until the view settles
 
 PLAY, START_OVER, FAVORITE = "play", "start_over", "favorite"
-_ACCENT, _RAISED, _SQUARE = "accent", "raised", "square"
+# 2.8.12: a scheduled recording's: Cancel, and its time where Play is (a label, no button).
+CANCEL, WHEN = "cancel", "when"
+_ACCENT, _RAISED, _SQUARE, _LABEL = "accent", "raised", "square", "label"
 
 
 def card_hue(title: str) -> float:
@@ -148,17 +150,24 @@ def _wrap(fm: QFontMetricsF, text: str, width: float, max_lines: int) -> list[st
     return lines
 
 
-def _button_specs(details: Details | None) -> list[tuple[str, str, str]]:
-    """(name, label, style) left to right, per the kind of the current title."""
+def _button_specs(details: Details | None, when: str = "") -> list[tuple[str, str, str]]:
+    """(name, label, style) left to right, per the kind of the current title. A scheduled
+    recording (2.8.12: it showed ★ and a Play that only repeated its details) has Cancel and
+    its time (`when`, the item's "_when") where Play is; a recording no ★ (no provider's title
+    to star)."""
     play = tr("Play")  # i18n: button (verb) on the Library's detail strip
     if details is None:
         return [(PLAY, play, _ACCENT)]
+    if details.kind == "scheduled":
+        # i18n: a scheduled recording's right-click menu entry: it will not be recorded
+        cancel = (CANCEL, tr("Cancel Recording"), _RAISED)
+        return [cancel, (WHEN, when, _LABEL)] if when else [cancel]
     if details.kind == "series":
         # i18n: button on the Library's detail strip that opens a series' episodes
         return [(FAVORITE, "", _SQUARE), (PLAY, tr("Episodes"), _ACCENT)]
     start_over = tr("Start over")  # i18n: button: play the title from its beginning
     resume = tr("Resume")  # i18n: button: play the title from where it was left
-    if details.kind == "episode":
+    if details.kind in ("episode", "recording"):
         if details.resume_ms:
             return [(START_OVER, start_over, _RAISED), (PLAY, resume, _ACCENT)]
         return [(PLAY, play, _ACCENT)]
@@ -205,6 +214,7 @@ class PosterGrid(QAbstractScrollArea):
     activated = Signal(int)  # Enter / double-click / ▶ button (flat index)
     startOverRequested = Signal(int)
     favoriteToggled = Signal(int)
+    cancelRequested = Signal(int)  # 2.8.12: a scheduled recording's Cancel (flat index)
     focusChanged = Signal(int)
     sortRequested = Signal(str)  # a Sort value
     leftEdge = Signal()  # ← in the first column
@@ -525,7 +535,12 @@ class PosterGrid(QAbstractScrollArea):
 
     def button_labels(self) -> list[tuple[str, str]]:
         """The current title's strip buttons left to right, as (name, label)."""
-        return [(name, label) for name, label, _style in _button_specs(self._details())]
+        return [(name, label) for name, label, _style in self._specs()]
+
+    def _specs(self) -> list[tuple[str, str, str]]:
+        """`_button_specs` for the current title (a scheduled recording's time with it)."""
+        item = self._items[self._cur] if 0 <= self._cur < len(self._items) else {}
+        return _button_specs(self._details(), str(item.get("_when") or ""))
 
     def strip_rect(self) -> QRect:
         """The detail strip in viewport coordinates; null when nothing is current."""
@@ -836,6 +851,11 @@ class PosterGrid(QAbstractScrollArea):
         if button == FAVORITE:
             self.favoriteToggled.emit(self._cur)
             return
+        if button == CANCEL:
+            self.cancelRequested.emit(self._cur)
+            return
+        if button == WHEN:
+            return  # a label: when it records
         if button is not None:
             signal = self.activated if button == PLAY else self.startOverRequested
             self._mouse_activate((button, self._cur), signal, self._cur)
@@ -1146,12 +1166,12 @@ class PosterGrid(QAbstractScrollArea):
         y = strip.center().y() - height / 2
         x = strip.right() - STRIP_PAD_U * u
         out: list[tuple[str, str, str, QRectF]] = []
-        for name, label, style in reversed(_button_specs(self._details())):
+        for name, label, style in reversed(self._specs()):
             if style == _SQUARE:
                 width = height
             else:
                 width = fm.horizontalAdvance(label) + 2 * BUTTON_PAD_U * u
-                if name == PLAY:
+                if name in (PLAY, WHEN):
                     width += BUTTON_ICON_U * u + 0.5 * u
             x -= width
             out.append((name, label, style, QRectF(x, y, width, height)))
@@ -1285,6 +1305,14 @@ class PosterGrid(QAbstractScrollArea):
         if style == _ACCENT:
             fill_round(p, rect, qcolor(PALETTE.accent), radius)
             color = qcolor(PALETTE.canvas)
+        elif style == _LABEL:  # no button: an outline round the time, in the accent
+            p.save()
+            p.setPen(QPen(qcolor(PALETTE.accent), max(1.0, 0.12 * u)))
+            p.setBrush(Qt.NoBrush)
+            inset = 0.06 * u
+            p.drawRoundedRect(rect.adjusted(inset, inset, -inset, -inset), radius, radius)
+            p.restore()
+            color = qcolor(PALETTE.accent)
         else:
             fill_round(p, rect, qcolor(PALETTE.text, BUTTON_RAISED_ALPHA), radius)
             favorite = name == FAVORITE and details is not None and details.favorite
@@ -1298,9 +1326,10 @@ class PosterGrid(QAbstractScrollArea):
         p.setFont(font)
         p.setPen(color)
         x = rect.left() + BUTTON_PAD_U * u
-        if name == PLAY:
+        if name in (PLAY, WHEN):
             size = BUTTON_ICON_U * u
-            draw_icon(p, "play", QRectF(x, rect.center().y() - size / 2, size, size), color)
+            glyph = "play" if name == PLAY else "clock"
+            draw_icon(p, glyph, QRectF(x, rect.center().y() - size / 2, size, size), color)
             x += size + 0.5 * u
         p.drawText(
             QRectF(x, rect.top(), rect.right() - x, rect.height()),

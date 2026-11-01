@@ -41,8 +41,9 @@ _RESERVED = re.compile(r"(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\..*)?", re.IGNOREC
 LOST = "lost"  # the engine's: the helper went before it said how the recording ended
 
 # The texts are kept in English and shown translated (`ended_text`).
-# i18n: a toast: a recording of the channel was saved as this file
-SAVED = N_("Recording saved: {name}")
+# i18n: a toast: a recording of the channel was saved as this file in this folder ({folder}:
+# the Recordings folder, as "~/Movies/QiTV")
+SAVED = N_("Recording saved in {folder}: {name}")
 # i18n: a toast: the recording reached its time limit and was saved as this file
 LIMIT_TEXT = N_("Recording stopped after {hours} hours. Saved: {name}")
 # i18n: a toast: the disk is nearly full, so the recording stopped; it was saved as this file
@@ -107,6 +108,16 @@ def path_for(config: Any, channel: str, when: datetime) -> str:
     return os.path.join(folder(config), file_name(channel, when))
 
 
+def shown_folder(path: str) -> str:
+    """The folder of `path` as a toast names it: from the home folder ("~/Movies/QiTV") when it
+    is in it (not on Windows, whose users don't write "~"), else in full."""
+    folder = os.path.dirname(path)
+    home = os.path.expanduser("~")
+    if os.name != "nt" and (folder == home or folder.startswith(home + os.sep)):
+        return "~" + folder[len(home) :]
+    return folder
+
+
 def ended_text(reason: str, path: str, written: int) -> tuple[str, str]:
     """What a recording's end says (translated) and the toast's kind ("info" or "error"):
     the file it kept by name; the folder is blamed only when it could not take the file
@@ -126,8 +137,8 @@ def ended_text(reason: str, path: str, written: int) -> tuple[str, str]:
         return translate(LOST_TEXT), "error"
     if not name:
         return translate(NOTHING_TEXT), "info" if reason in (STOPPED, ENDED) else "error"
-    if reason in (STOPPED, ENDED):
-        return translate(SAVED, name=name), "info"
+    if reason in (STOPPED, ENDED):  # 2.8.12: and where, so it can be found
+        return translate(SAVED, folder=shown_folder(path), name=name), "info"
     if reason == LIMIT:
         return translate(LIMIT_TEXT, hours=round(MAX_SECONDS / 3600), name=name), "info"
     if reason == WRITE:

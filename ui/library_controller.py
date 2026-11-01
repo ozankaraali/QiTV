@@ -124,10 +124,13 @@ class LibraryController(QObject):
         back_to_tv: Callable[[], None],
         context_menu: Optional[Callable[[dict, str, QPoint], None]] = None,
         tmdb=None,
+        cancel_scheduled: Optional[Callable[[str], None]] = None,
         parent: Optional[QObject] = None,
     ):
-        """`tmdb` (2.8, a ui.tmdb_fill.TmdbFill) fills titles' gaps from TMDB; None: never."""
+        """`tmdb` (2.8, a ui.tmdb_fill.TmdbFill) fills titles' gaps from TMDB; None: never.
+        `cancel_scheduled(id)` cancels a scheduled recording (its strip's Cancel, 2.8.12)."""
         super().__init__(parent)
+        self._cancel_scheduled = cancel_scheduled
         self._config = config
         self._tmdb = tmdb
         self._catalog = catalog
@@ -197,6 +200,7 @@ class LibraryController(QObject):
         grid.activated.connect(self._activate_index)
         grid.startOverRequested.connect(lambda i: self._activate_index(i, start_over=True))
         grid.favoriteToggled.connect(self._toggle_favorite)
+        grid.cancelRequested.connect(self._cancel_index)
         grid.sortRequested.connect(lambda value: model.set_sort(Sort(value)))
         grid.leftEdge.connect(self._on_left_edge)
         grid.upEdge.connect(self._on_up_edge)
@@ -906,6 +910,16 @@ class LibraryController(QObject):
         provider = provider_of(item) or self._browse_provider()
         kind = self._model.item_kind(item)
         self._activate_item(item, provider, kind, start_over, self._model.items())
+
+    def _cancel_index(self, index: int) -> None:
+        """A scheduled recording's Cancel on the strip (2.8.12): as its right-click's."""
+        if self._closed or self._grid_content == "search":
+            return
+        item = self._screen.grid.item(index)
+        if item is None or self._model.item_kind(item) != "scheduled":
+            return
+        if self._cancel_scheduled is not None:
+            self._cancel_scheduled(str(item.get("_item_id") or ""))
 
     def _activate_item(
         self, item: dict, provider: str, kind: str, start_over: bool, genre_items

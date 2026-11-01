@@ -89,9 +89,16 @@ class NamingTests(unittest.TestCase):
 
     def test_each_end_says_what_became_of_the_file(self):
         path = os.path.join("/rec", "One 2026-10-19 21.30.ts")
-        saved = ("Recording saved: One 2026-10-19 21.30.ts", "info")
+        # 2.8.12: where it went, so it can be found.
+        saved = ("Recording saved in /rec: One 2026-10-19 21.30.ts", "info")
         self.assertEqual(recording.ended_text(STOPPED, path, 10), saved)
         self.assertEqual(recording.ended_text(ENDED, path, 10), saved)
+        home = os.path.join(os.path.expanduser("~"), "Movies", "QiTV", "One.ts")
+        if os.name != "nt":
+            self.assertEqual(
+                recording.ended_text(STOPPED, home, 10)[0],
+                "Recording saved in ~/Movies/QiTV: One.ts",
+            )
         self.assertEqual(
             recording.ended_text(LIMIT, path, 10),
             ("Recording stopped after 24 hours. Saved: One 2026-10-19 21.30.ts", "info"),
@@ -271,7 +278,7 @@ class ControllerRecordTests(PipelineCase):
         self.assertIsNone(self.transport.recording_since)
         self.live.recordingEnded.emit(STOPPED, "/rec/One 2026-10-15 20.30.ts", 4096)
         self.assertEqual(
-            self.toast.messages()[-1], ("Recording saved: One 2026-10-15 20.30.ts", "info")
+            self.toast.messages()[-1], ("Recording saved in /rec: One 2026-10-15 20.30.ts", "info")
         )
         self.live.recordingEnded.emit(SPACE, "/rec/Two.ts", 4096)
         self.assertEqual(self.toast.messages()[-1][1], "error")

@@ -107,6 +107,7 @@ class TVPages(QObject):
             back_to_tv=self.back_to_tv,
             context_menu=self.context_menu,
             tmdb=self.tmdb,
+            cancel_scheduled=window.cancel_scheduled,
             parent=self,
         )
         self.library_controller.notice.connect(self.notify)

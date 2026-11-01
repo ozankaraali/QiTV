@@ -75,20 +75,36 @@ def timer_text(entry: dict) -> str:
     return translate(TIMER_DAYS, channel=channel, time=when, days=day_names(days))
 
 
+def short_when(start: float) -> str:
+    """A moment as the Library's strip shows a scheduled recording's ("Sun 1 Nov 21:30", in
+    the app's language); "" without one."""
+    if not start:
+        return ""
+    from PySide6.QtCore import QDateTime
+
+    moment = QDateTime.fromSecsSinceEpoch(int(start))
+    return str(app_locale().toString(moment, "ddd d MMM HH:mm"))
+
+
 def scheduled_item(entry: dict) -> dict[str, Any]:
     """A scheduled recording (services.recording_schedule's item) as a Library title: shown
-    first, not playable (its right-click cancels it)."""
+    first, not playable (its strip's Cancel or its right-click cancels it). `_when` is the
+    time the strip shows where Play is (2.8.12): a programme's start, a timer's hours; none
+    for a series (every airing)."""
     channel = str((entry.get("channel") or {}).get("name") or "")
     start = float(entry.get("start") or entry.get("created") or 0)
     name = str(entry.get("title") or "")
+    shown = ""
     if entry.get("kind") == "series":
         description = translate(SCHEDULED_SERIES, channel=channel)
     elif entry.get("kind") == "timer":
         description = timer_text(entry)
-        name = name or slot_text(int(entry.get("begin") or 0), int(entry.get("minutes") or 0))
+        shown = slot_text(int(entry.get("begin") or 0), int(entry.get("minutes") or 0))
+        name = name or shown
     else:
         when = datetime.fromtimestamp(start).strftime("%Y-%m-%d %H:%M") if start else ""
         description = translate(SCHEDULED_ONCE, when=when, channel=channel)
+        shown = short_when(float(entry.get("start") or 0))
     return {
         "id": SCHEDULED_PREFIX + str(entry.get("id") or ""),
         "name": name,
@@ -98,6 +114,7 @@ def scheduled_item(entry: dict) -> dict[str, Any]:
         "_scheduled": True,
         "_item_id": str(entry.get("id") or ""),
         "_channel": channel,
+        "_when": shown,
     }
 
 

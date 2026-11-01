@@ -343,6 +343,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.tuned = []
         self.backs = []
         self.menus = []  # (item, section, global position) of each right-click menu
+        self.cancelled = []  # 2.8.12: the scheduled recordings the strip's Cancel cancelled
         self.model = LibraryModel(self.catalog, self.config, self.watch)
 
     def build(self, jobs=None, logos=None, tmdb=None):
@@ -365,6 +366,7 @@ class LibraryControllerTests(unittest.TestCase):
             back_to_tv=lambda: self.backs.append(True),
             context_menu=lambda item, section, pos: self.menus.append((item, section, pos)),
             tmdb=tmdb,
+            cancel_scheduled=self.cancelled.append,
         )
         self.addCleanup(self.ctl.shutdown)
         return self.ctl
@@ -406,6 +408,22 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual((item["id"], kind), (RECORDING["id"], "recording"))
         self.assertFalse(context["start_over"])
         self.assertEqual(self.catalog.selected, [])
+
+    def test_a_scheduled_recordings_cancel_on_the_strip_cancels_it(self):
+        scheduled = {
+            "id": "scheduled:a1",
+            "name": "Late Show",
+            "_scheduled": True,
+            "_item_id": "a1",
+            "_when": "Sun 1 Nov 21:30",
+        }
+        self.recordings = FakeRecordings([scheduled, RECORDING])
+        self.model = LibraryModel(self.catalog, self.config, self.watch, recordings=self.recordings)
+        self.open_movies()
+        self.model.select_genre(RECORDINGS)
+        self.screen.grid.cancelRequested.emit(1)  # a recording: nothing to cancel
+        self.screen.grid.cancelRequested.emit(0)
+        self.assertEqual(self.cancelled, ["a1"])
 
     def test_a_recordings_right_click_is_its_own(self):
         self.with_recordings()

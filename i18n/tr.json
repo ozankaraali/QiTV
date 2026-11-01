@@ -693,7 +693,7 @@
   "Recording": "Kayıt",
   "Recording can start once the channel plays": "Kayıt, kanal oynamaya başlayınca başlatılabilir",
   "Recording cancelled.": "Kayıt iptal edildi.",
-  "Recording saved: {name}": "Kayıt saklandı: {name}",
+  "Recording saved in {folder}: {name}": "Kayıt {folder} klasörüne saklandı: {name}",
   "Recording stopped after {hours} hours. Saved: {name}": "Kayıt {hours} saat sonra durdu. Saklandı: {name}",
   "Recording stopped unexpectedly": "Kayıt beklenmedik şekilde durdu",
   "Recording stopped unexpectedly. Saved: {name}": "Kayıt beklenmedik şekilde durdu. Saklandı: {name}",
