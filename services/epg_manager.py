@@ -387,7 +387,8 @@ class EpgManager:
         "Check update every" passed, and set to a day the portal's channels went blank)."""
         epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
         span = timedelta(hours=self.config_manager.epg_stb_period_hours)
-        return datetime.now() - epg_date >= span - _STB_GUIDE_MARGIN
+        # A span of 2 h or less is reloaded at its half, not at every load.
+        return datetime.now() - epg_date >= span - min(_STB_GUIDE_MARGIN, span / 2)
 
     def _session(self) -> str:
         """The provider's session now (an STB portal's token; "" for any other)."""

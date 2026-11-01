@@ -226,6 +226,7 @@ class Catalogs(QObject):
         """Drop link request `request_id` held for its provider's setup (a newer choice was
         asked instead): it is never asked of the portal, and never answered."""
         self._signed_again.discard(request_id)
+        self._asked.pop(request_id, None)  # its refusal no longer signs the portal in again
         for name, waiting in list(self._waiting.items()):
             kept = [held for held in waiting if held[0] != request_id]
             if kept:

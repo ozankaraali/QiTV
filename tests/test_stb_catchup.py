@@ -441,6 +441,20 @@ class PortalGuideAgainTests(PortalCase):
                 self.assertEqual(self.asked(), asked)
 
 
+    def test_a_short_guide_period_is_loaded_again_at_its_half_not_at_every_load(self):
+        self.config.epg_stb_period_hours = 2  # 2 h covered: a 2 h margin would always be due
+        manager = EpgManager(self.config, self.providers)
+        manager.set_current_epg()
+        self.assertEqual(self.asked(), 1)
+        [key] = [k for k, v in manager.index.items() if isinstance(v, dict)]
+        for minutes_ago, asked in ((10, 1), (70, 2)):
+            with self.subTest(minutes_ago=minutes_ago):
+                loaded = datetime.now() - timedelta(minutes=minutes_ago)
+                manager.index[key]["date"] = loaded.strftime("%Y-%m-%d %H:%M:%S")
+                manager.set_current_epg()
+                self.assertEqual(self.asked(), asked)
+
+
 class PortalLinkTests(PortalCase):
     def worker(self, programme, headers):
         return LinkCreatorWorker(

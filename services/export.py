@@ -44,7 +44,9 @@ def _extinf(item: dict, group: bool = True) -> str:
 def _open_private(file_path: str):
     """The export file to write, readable by the user alone: its links carry the account's
     sign-in. A file it replaces keeps no looser mode."""
-    descriptor = os.open(file_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O_BINARY (Windows): a text-mode descriptor under the text wrapper wrote "\r\r\n".
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(file_path, flags, 0o600)
     try:
         os.chmod(file_path, 0o600)  # an older file of another mode
         return os.fdopen(descriptor, "w", encoding="utf-8")
