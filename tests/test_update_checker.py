@@ -353,20 +353,29 @@ class DiskImageDownloadTests(unittest.TestCase):
     def test_a_disk_image_downloads_to_a_new_file(self):
         self.assertEqual(self.download("qitv-macos-universal.dmg"), b"old")
 
-    def test_other_downloads_rewrite_the_file_as_before(self):
-        self.assertEqual(self.download("qitv-macos-universal.zip"), b"new")
+    def test_every_download_is_a_new_file(self):
+        # Written under another name, then renamed over the last one: never rewritten.
+        for name in ("qitv-macos-universal.zip", "qitv-windows.exe", "qitv-linux"):
+            with self.subTest(name):
+                self.assertEqual(self.download(name), b"old")
 
 
 class DownloadFolderTests(unittest.TestCase):
     """2.7.1: macOS asks before an app touches the Downloads folder, and an ad-hoc signed
     app's Allow may not stick (a friend's Mac asked again and again): there an update
-    downloads to QiTV's own cache folder, which macOS does not guard."""
+    downloads to QiTV's own cache folder, which macOS does not guard. Elsewhere the Downloads
+    folder is the system's: a Linux desktop in another language names it in that language."""
 
-    def folder(self, system):
+    def folder(self, system, downloads="Downloads"):
         with (
             tempfile.TemporaryDirectory() as home,
             mock.patch.object(update_checker.Path, "home", return_value=Path(home)),
             mock.patch.object(update_checker.platform, "system", return_value=system),
+            mock.patch.object(
+                update_checker.QStandardPaths,
+                "writableLocation",
+                return_value=str(Path(home, downloads)) if downloads else "",
+            ),
         ):
             folder = update_checker.get_downloads_folder()
             return folder.relative_to(home), folder.is_dir()
@@ -374,10 +383,97 @@ class DownloadFolderTests(unittest.TestCase):
     def test_on_macos_an_update_downloads_to_qitvs_cache(self):
         self.assertEqual(self.folder("Darwin"), (Path("Library/Caches/QiTV/Updates"), True))
 
-    def test_elsewhere_to_the_downloads_folder_as_before(self):
+    def test_elsewhere_to_the_systems_downloads_folder_made_when_missing(self):
         for system in ("Windows", "Linux"):
-            with self.subTest(system):
-                self.assertEqual(self.folder(system)[0], Path("Downloads"))
+            for name in ("Downloads", "İndirilenler", "Téléchargements"):
+                with self.subTest(system=system, folder=name):
+                    self.assertEqual(self.folder(system, name), (Path(name), True))
+
+    def test_without_one_to_the_home_folder(self):
+        self.assertEqual(self.folder("Linux", downloads=""), (Path("."), True))
+        with tempfile.TemporaryDirectory() as home:
+            blocker = Path(home, "file")
+            blocker.write_bytes(b"")  # a file where the folder would be: it cannot be made
+            with (
+                mock.patch.object(update_checker.Path, "home", return_value=Path(home)),
+                mock.patch.object(update_checker.platform, "system", return_value="Linux"),
+                mock.patch.object(
+                    update_checker.QStandardPaths,
+                    "writableLocation",
+                    return_value=str(blocker / "Downloads"),
+                ),
+                self.assertLogs("services.update_checker", "WARNING"),
+            ):
+                self.assertEqual(update_checker.get_downloads_folder(), Path(home))
+
+
+class RunningCopyTests(unittest.TestCase):
+    """A browser saves QiTV in Downloads and it runs from there: the update never writes over
+    the running program (Windows: permission denied; Linux: text file busy)."""
+
+    URL = "https://github.invalid/QiTV/releases/download/v9.9.9/qitv-windows.exe"
+
+    def setUp(self):
+        self.folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.running = self.folder / "qitv-windows.exe"
+        self.running.write_bytes(b"running")
+
+    def test_the_running_programs_name_takes_the_version(self):
+        target = update_checker.download_target(
+            self.folder, "qitv-windows.exe", self.URL, running=str(self.running)
+        )
+        self.assertEqual(target, self.folder / "qitv-windows-9.9.9.exe")
+        url = "https://release.invalid/qitv-linux"
+        (self.folder / "qitv-linux").write_bytes(b"")
+        target = update_checker.download_target(
+            self.folder, "qitv-linux", url, running=str(self.folder / "qitv-linux")
+        )
+        self.assertEqual(target, self.folder / "qitv-linux-new")  # no version in the address
+
+    def test_another_file_of_that_name_is_replaced(self):
+        elsewhere = self.folder / "Apps"
+        elsewhere.mkdir()
+        target = update_checker.download_target(
+            self.folder, "qitv-windows.exe", self.URL, running=str(elsewhere / "qitv.exe")
+        )
+        self.assertEqual(target, self.running)
+
+    def test_a_packaged_qitv_downloads_beside_itself(self):
+        response = mock.MagicMock(headers={"content-length": "3"})
+        response.iter_content.return_value = [b"new"]
+        downloader = update_checker.UpdateDownloader(self.URL, 3)
+        done = []
+        downloader.finished.connect(done.append)
+        with (
+            mock.patch.object(update_checker, "get_downloads_folder", return_value=self.folder),
+            mock.patch.object(update_checker, "requests") as requests,
+            mock.patch.object(update_checker.sys, "frozen", True, create=True),
+            mock.patch.object(update_checker.sys, "executable", str(self.running)),
+        ):
+            requests.get.return_value = response
+            downloader.run()
+        self.assertEqual(done, [str(self.folder / "qitv-windows-9.9.9.exe")])
+        self.assertEqual(self.running.read_bytes(), b"running")
+        self.assertEqual(Path(done[0]).read_bytes(), b"new")
+        self.assertEqual(
+            sorted(p.name for p in self.folder.iterdir()),
+            sorted(["qitv-windows.exe", "qitv-windows-9.9.9.exe"]),
+        )  # nothing half-written beside them
+
+    def test_a_linux_download_can_start(self):
+        response = mock.MagicMock(headers={"content-length": "3"})
+        response.iter_content.return_value = [b"new"]
+        downloader = update_checker.UpdateDownloader("https://release.invalid/qitv-linux", 3)
+        done = []
+        downloader.finished.connect(done.append)
+        with (
+            mock.patch.object(update_checker, "get_downloads_folder", return_value=self.folder),
+            mock.patch.object(update_checker, "requests") as requests,
+            mock.patch.object(update_checker.platform, "system", return_value="Linux"),
+        ):
+            requests.get.return_value = response
+            downloader.run()
+        self.assertTrue(os.access(done[0], os.X_OK))
 
 
 class ShortDownloadTests(unittest.TestCase):
@@ -399,7 +495,33 @@ class ShortDownloadTests(unittest.TestCase):
             ):
                 requests.get.return_value = response
                 downloader.run()
+            others = [path.name for path in Path(folder).iterdir() if path.name != name]
+            self.assertEqual(others, [])  # nothing half-written stays
             return bool(done), bool(failed), Path(folder, name).exists()
+
+    def test_a_cancelled_download_leaves_nothing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            downloader = update_checker.UpdateDownloader("https://release.invalid/qitv-linux", 6)
+
+            def chunks(**_options):
+                yield b"abc"
+                downloader.cancel()  # Cancel, halfway
+                yield b"def"
+
+            response = mock.MagicMock(headers={"content-length": "6"})
+            response.iter_content.side_effect = chunks
+            failed = []
+            downloader.error.connect(failed.append)
+            with (
+                mock.patch.object(
+                    update_checker, "get_downloads_folder", return_value=Path(folder)
+                ),
+                mock.patch.object(update_checker, "requests") as requests,
+            ):
+                requests.get.return_value = response
+                downloader.run()
+            self.assertEqual(failed, [update_checker.DOWNLOAD_CANCELLED])
+            self.assertEqual(list(Path(folder).iterdir()), [])
 
     def test_a_disk_image_a_byte_short_fails_and_is_removed(self):
         self.assertEqual(

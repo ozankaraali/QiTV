@@ -122,6 +122,26 @@ class _Dialogs:
 DIALOGS = _Dialogs()
 
 
+def replace_failed(old_path: str, new_path: str, parent=None) -> None:
+    """Windows: the new version runs, but could not take the old one's place (the old QiTV
+    still held its file after a while, or it cannot be written): where each one is."""
+    msg = QMessageBox(parent)
+    msg.setIcon(QMessageBox.Warning)
+    msg.setWindowTitle(tr("Update Failed"))
+    msg.setText(tr("The update could not replace the old version of QiTV."))
+    msg.setInformativeText(
+        tr(
+            # i18n: {new} and {old} are file paths, each on a line of its own
+            "This version runs from:\n{new}\n\n"
+            "Use that file from now on, or close QiTV and copy it over the old one:\n{old}",
+            new=new_path,
+            old=old_path,
+        )
+    )
+    _polish_msgbox(msg)
+    msg.exec_()
+
+
 def _polish_msgbox(msg: QMessageBox):
     """Reduce icon-to-text spacing and ensure buttons are not truncated.
 

@@ -10,6 +10,7 @@ caller passes: ui/update_dialogs.py's dialogs.
 """
 
 import logging
+import os
 from pathlib import Path
 import platform
 import re
@@ -19,7 +20,16 @@ import time
 from typing import Callable, List, Optional, Protocol, Tuple, TypeAlias
 import weakref
 
-from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import (
+    QCoreApplication,
+    QObject,
+    QStandardPaths,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+    Slot,
+)
 from packaging.version import parse
 
 from services.config_manager import ConfigManager, get_app_version
@@ -293,12 +303,53 @@ def is_disk_image(name: str) -> bool:
 def get_downloads_folder() -> Path:
     """Where an update downloads: on macOS QiTV's own cache folder (2.7.1: macOS asks before an
     app touches the Downloads folder, and an ad-hoc signed app's Allow may not stick, so it
-    asked again and again), made when missing; elsewhere the user's Downloads folder."""
+    asked again and again), made when missing; elsewhere the user's Downloads folder as the
+    system names it (a Linux desktop in another language has its own name for it), made when
+    missing, else the home folder."""
     if platform.system() == "Darwin":
         folder = Path.home() / "Library" / "Caches" / "QiTV" / "Updates"
         folder.mkdir(parents=True, exist_ok=True)
         return folder
-    return Path.home() / "Downloads"
+    location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
+    if location:
+        try:
+            Path(location).mkdir(parents=True, exist_ok=True)
+            return Path(location)
+        except OSError as e:
+            logger.warning(
+                "No Downloads folder (%s): the update goes to the home folder", safe_message(e)
+            )
+    return Path.home()
+
+
+def download_target(folder: Path, filename: str, url: str, running: Optional[str] = None) -> Path:
+    """Where the update from `url` is saved: `filename` in `folder`; but never over the program
+    running now (`running`, by default a packaged QiTV's own file): a browser saves QiTV in
+    Downloads and it runs from there, and the system refuses the write (Windows: permission
+    denied; Linux: text file busy). Then the name takes the release's version, beside it
+    (qitv-windows-2.9.0.exe)."""
+    target = folder / filename
+    if running is None and getattr(sys, "frozen", False):
+        running = sys.executable
+    try:
+        clash = bool(running) and target.exists() and os.path.samefile(target, str(running))
+    except OSError:
+        clash = False
+    if not clash:
+        return target
+    # The release's tag is in its download address: .../releases/download/v2.9.0/<asset>
+    found = re.search(r"\d+\.\d+\.\d+", url.rsplit("/", 1)[0])
+    stem, suffix = os.path.splitext(filename)
+    return folder / f"{stem}-{found.group(0) if found else 'new'}{suffix}"
+
+
+def _make_runnable(path: Path) -> None:
+    """A Linux build as downloaded cannot start: it may run for whoever may read it."""
+    try:
+        mode = path.stat().st_mode
+        path.chmod(mode | (mode & 0o444) >> 2)
+    except OSError as e:
+        logger.warning("The update could not be made runnable: %s", safe_message(e))
 
 
 class UpdateDownloader(QObject):
@@ -319,10 +370,15 @@ class UpdateDownloader(QObject):
 
     @Slot()
     def run(self):
+        part: Optional[Path] = None  # the download under way, under a name of its own
         try:
             # Extract filename from URL
             filename = self.url.split("/")[-1]
-            download_path = get_downloads_folder() / filename
+            download_path = download_target(get_downloads_folder(), filename, self.url)
+            # Written under another name, then renamed: the file of that name is replaced
+            # whole, never rewritten (macOS may still have an earlier update's image mounted
+            # from it, and would not open this one; a copy of QiTV may be running from it).
+            part = download_path.with_name(f".{download_path.name}.{os.getpid()}.part")
 
             # Use longer read timeout for large files
             response = requests.get(self.url, stream=True, timeout=(30, 120))
@@ -333,15 +389,9 @@ class UpdateDownloader(QObject):
             last_progress_update = 0
             chunk_size = 65536  # 64KB chunks for better performance
 
-            if is_disk_image(filename):
-                # A new file, not the last one rewritten: macOS may still have an earlier
-                # update's image mounted from it, and would not open this one.
-                download_path.unlink(missing_ok=True)
-            with open(download_path, "wb") as f:
+            with open(part, "wb") as f:
                 for chunk in response.iter_content(chunk_size=chunk_size):
                     if self._cancelled:
-                        f.close()
-                        download_path.unlink(missing_ok=True)
                         self.error.emit(DOWNLOAD_CANCELLED)
                         return
 
@@ -365,7 +415,6 @@ class UpdateDownloader(QObject):
                 else downloaded < total_size * 0.9
             )
             if total_size > 0 and short:
-                download_path.unlink(missing_ok=True)
                 self.error.emit(
                     tr(
                         "Download incomplete: {done}/{total} bytes",
@@ -375,12 +424,22 @@ class UpdateDownloader(QObject):
                 )
                 return
 
+            os.replace(part, download_path)
+            part = None
+            if platform.system() == "Linux":
+                _make_runnable(download_path)
             self.finished.emit(str(download_path))
 
         except requests.RequestException as e:  # shown by the download dialog
             self.error.emit(tr("Download failed: {error}", error=e))
         except OSError as e:
             self.error.emit(tr("Failed to save file: {error}", error=e))
+        finally:
+            if part is not None:  # cancelled, short or failed: nothing half-written stays
+                try:
+                    part.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 # Keep reference to download jobs to avoid GC

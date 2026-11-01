@@ -1,8 +1,11 @@
 import ast
+import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 PROBE = """
@@ -61,6 +64,66 @@ class MainModuleTests(unittest.TestCase):
         self.assertNotIn(get_app_version(), main.APP_USER_MODEL_ID)
         source = (REPO / "main.py").read_text(encoding="utf-8")
         self.assertIn("SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)", source)
+
+    def test_the_new_version_replaces_the_old_once_it_quit(self):
+        # Windows keeps a running program's file locked: the move is tried again until the
+        # old QiTV has quit, and the old file is never half-written meanwhile.
+        import main
+
+        with tempfile.TemporaryDirectory() as folder:
+            old, new = Path(folder, "qitv.exe"), Path(folder, "qitv-windows-9.9.9.exe")
+            old.write_bytes(b"old")
+            new.write_bytes(b"new")
+            replace = os.replace
+            attempts = []
+
+            def locked_twice(source, target):
+                attempts.append(Path(target).read_bytes())
+                if len(attempts) < 3:
+                    raise PermissionError(13, "The file is in use")
+                replace(source, target)
+
+            slept = []
+            with mock.patch.object(main.os, "replace", side_effect=locked_twice):
+                self.assertTrue(main.replace_executable(str(old), str(new), sleep=slept.append))
+            self.assertEqual(attempts, [b"old", b"old", b"old"])
+            self.assertEqual(slept, [main.REPLACE_RETRY_S] * 2)
+            self.assertEqual(old.read_bytes(), b"new")
+            self.assertEqual(
+                sorted(p.name for p in Path(folder).iterdir()), sorted([old.name, new.name])
+            )
+
+    def test_a_replacement_that_never_can_says_where_the_new_version_is(self):
+        import main
+
+        with tempfile.TemporaryDirectory() as folder:
+            old, new = Path(folder, "qitv.exe"), Path(folder, "qitv-windows-9.9.9.exe")
+            old.write_bytes(b"old")
+            new.write_bytes(b"new")
+            now = [0.0]
+
+            def sleep(seconds):
+                now[0] += seconds
+
+            with (
+                mock.patch.object(main.os, "replace", side_effect=PermissionError(13, "in use")),
+                self.assertLogs("qitv", "ERROR"),
+            ):
+                done = main.replace_executable(
+                    str(old), str(new), sleep=sleep, clock=lambda: now[0]
+                )
+            self.assertFalse(done)
+            self.assertGreaterEqual(now[0], main.REPLACE_WAIT_S)  # it waited that long
+            self.assertEqual(old.read_bytes(), b"old")
+            self.assertEqual(
+                sorted(p.name for p in Path(folder).iterdir()), sorted([old.name, new.name])
+            )
+
+            argv = ["qitv-windows-9.9.9.exe", "--replace", str(old)]
+            failed = main.handle_replace_flag(argv, str(new), replace=lambda old, new: False)
+            self.assertEqual(failed, (str(old), str(new)))
+            self.assertIsNone(main.handle_replace_flag(argv, str(new), replace=lambda o, n: True))
+            self.assertIsNone(main.handle_replace_flag(["qitv.exe"], str(new)))
 
     def test_the_frozen_apps_bundle_the_live_helper(self):
         # The helper process is spawned from the bundle; its source imports these lazily.
