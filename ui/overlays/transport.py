@@ -115,7 +115,7 @@ from ui.overlays.painting import (
     fmt_duration,
     volume_icon,
 )
-from ui.pointer import NAV_BUTTONS
+from ui.pointer import NAV_BUTTONS, PointerHider
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)  # − and + step through these
@@ -453,6 +453,7 @@ class Transport(Overlay):
         # A bar fraction, not a time: the knob stays under the cursor while the buffer slides.
         self._drag: float | None = None
         self._last_move = QPointF(-1, -1)
+        self._poked_at: Optional[QPointF] = None  # where the last real move poked
         self._pointer: QPointF | None = None  # where the pointer rests over it (None: away)
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
@@ -1943,7 +1944,11 @@ class Transport(Overlay):
         self._pointer = QPointF(pos)
         if pos != self._last_move:  # ignore synthetic moves from layout changes
             self._last_move = pos
-            self.poke()
+            # 2.8.12: a pointer trembling by a pixel or two keeps nothing up (as PointerHider).
+            poked = self._poked_at
+            if poked is None or (pos - poked).manhattanLength() >= PointerHider.JITTER_PX:
+                self._poked_at = QPointF(pos)
+                self.poke()
             self._point_at(pos)
         if self._drag is not None:
             if not event.buttons() & Qt.LeftButton:

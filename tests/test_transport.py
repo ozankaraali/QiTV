@@ -588,6 +588,28 @@ class TransportCase(unittest.TestCase):
         elapse(250)
         self.assertFalse(t.isVisible())
 
+    def test_a_trembling_pointer_keeps_nothing_up(self):
+        # Review of 2.8.12: over the controls' shaded bands a 1-px jitter poked the controls
+        # on every move, so they (and the pointer) stayed up for good.
+        t = self.make(idle_ms=200)
+        t.show_vod("A", "b")
+
+        def move(i):
+            point = QPointF(300 + i % 2, 500)  # one pixel back and forth
+            event = QMouseEvent(
+                QEvent.Type.MouseMove,
+                point,
+                QPointF(t.mapToGlobal(point.toPoint())),
+                Qt.NoButton,
+                Qt.NoButton,
+                Qt.NoModifier,
+            )
+            QApplication.sendEvent(t, event)
+
+        moves = [(40 * i, lambda i=i: move(i)) for i in range(1, 15)]
+        *_, shown = timeline(*moves, (600, t.isVisible))
+        self.assertFalse(shown)
+
     def test_mouse_move_keeps_alive(self):
         t = self.make(idle_ms=200)
         t.show_vod("A", "b")
