@@ -1818,10 +1818,8 @@ class TVController(QObject):
         return self._channel
 
     def _playing_moved(self) -> None:
-        self.overlays.drawer.playing_changed()
-        self.overlays.column.playing_changed()
-        if self.overlays.guide.isVisible():
-            self.overlays.guide.update()
+        for listing in (self.overlays.drawer, self.overlays.column, self.overlays.guide):
+            listing.playing_changed()
 
     def _deliver(self, target: Target, url: str) -> None:
         item = target.item

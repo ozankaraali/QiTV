@@ -601,7 +601,7 @@
     "Volume up": "the phone remote: a button (screen reader)",
     "Volume {level}%": "a toast; the sound's level in percent",
     "Waiting for the channel…": "the Stay live indicator on the player bar: the channel sends nothing for now",
-    "Watch": "the phone remote's timetable: tune this channel (a verb)",
+    "Watch": "the guide's footer button: tune the highlighted channel live (Enter does it too); the phone remote's timetable: tune this channel (a verb)",
     "Watch from the start": "the guide's button: a past programme from the provider's archive, from its beginning; the phone remote's timetable: a past programme, from the provider's archive",
     "Watch on this phone": "the phone remote: plays what the TV plays in the phone's own player instead",
     "Watching": "the phone remote's guide: the channel on the TV now",

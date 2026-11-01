@@ -8,6 +8,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QColor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -15,6 +16,7 @@ from services.epg_view import Programme
 from ui.guide_controller import GuideController
 from ui.keymap import Action
 from ui.overlays.guide import WINDOW, Guide, slot_start
+from ui.theme import PALETTE
 
 NOW = datetime(2026, 10, 15, 19, 42, tzinfo=timezone.utc)
 CHANNELS = [{"id": "a", "name": "Harbour News", "number": "1"}]
@@ -72,7 +74,7 @@ class GuideRecordingTests(unittest.TestCase):
 
     def test_the_programme_on_now_can_be_recorded_from_the_footer(self):
         buttons = self.guide.footer_buttons()
-        self.assertEqual(list(buttons), ["record", "series", "timer"])
+        self.assertEqual(list(buttons), ["live", "record", "series", "timer"])
         self.click(buttons["record"])
         self.assertEqual(self.asked, [("Show 2", False)])  # 19:30–20:00, on at 19:42
 
@@ -86,7 +88,7 @@ class GuideRecordingTests(unittest.TestCase):
     def test_a_scheduled_programme_offers_its_cancel_only(self):
         self.scheduled.add("Show 2")
         buttons = self.guide.footer_buttons()
-        self.assertEqual(list(buttons), ["cancel", "timer"])
+        self.assertEqual(list(buttons), ["live", "cancel", "timer"])
         self.click(buttons["cancel"])
         self.assertEqual(self.cancelled, ["Show 2"])
 
@@ -101,7 +103,7 @@ class GuideRecordingTests(unittest.TestCase):
     def test_without_recordings_the_footer_offers_none(self):
         guide = Guide(None, lambda c, s, _hours: half_hours(c, s), lambda: NOW, self.host)
         guide.open_guide(CHANNELS, 0)
-        self.assertEqual(guide.footer_buttons(), {})
+        self.assertEqual(list(guide.footer_buttons()), ["live"])  # ▶ Watch only
         self.assertFalse(guide.record_key())
 
     def test_record_at_a_time_opens_on_the_footers_programme(self):  # 2.8 (owner)
@@ -122,12 +124,42 @@ class GuideRecordingTests(unittest.TestCase):
         guide.timerRequested.connect(lambda c, p: timers.append((c["name"], p)))
         guide.open_guide(CHANNELS, 0)
         buttons = guide.footer_buttons()
-        self.assertEqual(list(buttons), ["timer"])
+        self.assertEqual(list(buttons), ["live", "timer"])
         self.click_on(guide, buttons["timer"])
         self.assertEqual(timers, [("Harbour News", None)])
 
     def click_on(self, guide, rect):
         QTest.mouseClick(guide, Qt.MouseButton.LeftButton, pos=rect.center().toPoint())
+
+    def test_watch_tunes_the_highlighted_channel_live(self):
+        tuned = []
+        self.guide.tuneRequested.connect(lambda c: tuned.append(c["name"]))
+        button = self.guide.footer_buttons()["live"]
+        self.assertTrue(self.guide.tooltip_at(button.center()).startswith("Watch ("))  # its key
+        self.click(button)
+        self.assertEqual(tuned, ["Harbour News"])
+
+    def test_watch_is_accented_and_record_outlined_with_a_red_dot(self):
+        image = self.guide.grab().toImage()
+        buttons = self.guide.footer_buttons()
+        accent, live = QColor(PALETTE.accent), QColor(PALETTE.live)
+
+        def near(color, wanted):
+            return all(abs(a - b) < 12 for a, b in zip(color.getRgb()[:3], wanted.getRgb()[:3]))
+
+        watch = buttons["live"]
+        self.assertTrue(
+            near(image.pixelColor(round(watch.left()) + 6, round(watch.center().y())), accent)
+        )
+        record = buttons["record"]
+        inside = [
+            image.pixelColor(x, round(record.center().y()))
+            for x in range(round(record.left()) + 4, round(record.right()) - 4)
+        ]
+        self.assertFalse(
+            near(image.pixelColor(round(record.left()) + 6, round(record.center().y())), live)
+        )
+        self.assertTrue(any(near(c, live) for c in inside))  # the dot
 
     def test_the_record_buttons_name_their_key(self):
         buttons = self.guide.footer_buttons()

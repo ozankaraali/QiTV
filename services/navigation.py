@@ -614,10 +614,11 @@ class NavModel(QObject):
         "All providers", with one provider, or without a hub of catalogs)."""
         hub = getattr(self.catalog, "catalogs", None)
         names = self.catalog.provider_names()
-        if hub is None or len(names) < 2 or self.all_mode():
+        created = getattr(hub, "created", None)  # (a hub that makes no catalogs: none)
+        if created is None or len(names) < 2 or self.all_mode():
             return {}
         shown = self.catalog.current_provider_name()
-        made = set(hub.created())
+        made = set(created())
         return {n: hub.catalog(n) for n in names if n != shown and n in made and hub.is_ready(n)}
 
     def _others_deps(self) -> tuple:

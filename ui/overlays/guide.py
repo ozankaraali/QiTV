@@ -14,8 +14,12 @@ programme within its archive can be watched from its start (`programmeRequested`
 clicked on (a programme that has ended), else, with the window moved back from now, the one
 at the window's left edge. It is outlined, the footer describes it, and its "▶ Watch from the
 start" button and Enter (a double-click on its box) play it; the footer's button also shows
-for the programme on now (from its start). Otherwise Enter tunes the channel, as before. On
-an STB portal's channel only a programme its guide does not mark as not recorded can play.
+for the programme on now (from its start). Otherwise Enter tunes the channel, as before, and
+so does the footer's accented "▶ Watch". On an STB portal's channel only a programme its guide
+does not mark as not recorded can play.
+
+The footer's accented button is what Enter does ("▶ Watch", or "▶ Watch from the start" for a
+past programme chosen); the others, Record (its red dot) among them, are outlined.
 """
 
 from collections.abc import Callable
@@ -74,6 +78,8 @@ TIME_DETAIL_U = 8.0  # boxes at least this wide show their time under the title
 NO_INFO_TEXT = N_("No programme information")  # i18n: a channel's guide is empty
 # i18n: the guide's button: a past programme from the provider's archive, from its beginning
 WATCH_TEXT = N_("Watch from the start")
+# i18n: the guide's footer button: tune the highlighted channel live (Enter does it too)
+LIVE_TEXT = N_("Watch")
 # 2.8: the footer's recording buttons for a programme still to come (or on now)
 # i18n: the guide's footer button: record this programme (QiTV records it at its time)
 RECORD_TEXT = N_("Record")
@@ -332,6 +338,11 @@ class Guide(Overlay):
         """What plays large (asked at each paint): its row has a small accent ▶."""
         self._playing = playing
 
+    def playing_changed(self) -> None:
+        """Another channel plays: the open guide moves its ▶."""
+        if self.isVisible():
+            self.update()
+
     def close_guide(self) -> None:
         self._repaint.stop()
         was_open = not self.isHidden()
@@ -410,6 +421,8 @@ class Guide(Overlay):
         for name, rect in self.footer_buttons().items():
             if not rect.contains(point):
                 continue
+            if name == "live":
+                return key_hint(translate(LIVE_TEXT), "Return")
             if name == "watch":
                 what = translate(WATCH_TEXT)
                 return key_hint(what, "Return") if self.chosen() is not None else what
@@ -497,21 +510,24 @@ class Guide(Overlay):
         return bool(channel is not None and self._scheduled and self._scheduled(channel, programme))
 
     def footer_buttons(self) -> dict[str, QRectF]:
-        """The footer's buttons, right to left: Record and Record series (or Cancel recording
-        for a scheduled one, 2.8), "Record at a time…" (whatever the guide lists, none too),
-        then "▶ Watch from the start"; only those that show."""
+        """The footer's buttons, right to left: what Enter does, accented ("▶ Watch" the
+        channel live, or "▶ Watch from the start" a past programme chosen), Record and Record
+        series (or Cancel recording for a scheduled one, 2.8), "Record at a time…" (whatever
+        the guide lists, none too), then "Watch from the start" for the programme on now;
+        only those that show."""
         if self.isHidden() or self.current_channel() is None:
             return {}
         layout = self._layout()
         units, footer = layout.units, layout.footer
         u = units.u
-        names: list[str] = []
+        past = self.chosen() is not None
+        names: list[str] = ["watch" if past else "live"]
         target = self.record_target()
         if target is not None:
             names += ["cancel"] if self._target_scheduled(target) else ["record", "series"]
         if self._scheduled is not None:
             names.append("timer")
-        if self._footer_choice()[1]:
+        if not past and self._footer_choice()[1]:
             names.append("watch")
         fm = QFontMetrics(units.font(1.05, QFont.Weight.DemiBold))
         height = max(2.6 * u, fm.height() + 0.8 * u)
@@ -526,6 +542,7 @@ class Guide(Overlay):
     @staticmethod
     def _button_text(name: str) -> str:
         return {
+            "live": "▶  " + translate(LIVE_TEXT),
             "watch": "▶  " + translate(WATCH_TEXT),
             "record": "●  " + translate(RECORD_TEXT),
             "series": translate(SERIES_TEXT),
@@ -552,7 +569,10 @@ class Guide(Overlay):
 
     def _press_footer(self, name: str) -> None:
         channel, programme = self.current_channel(), self.record_target()
-        if name == "watch":
+        if name == "live":
+            if channel is not None:
+                self.tuneRequested.emit(channel)
+        elif name == "watch":
             self._watch_chosen()
         elif name == "timer":
             if channel is not None:
@@ -1037,21 +1057,38 @@ class Guide(Overlay):
             )
 
     def _paint_button(self, p: QPainter, units: Units, name: str, button: QRectF) -> None:
-        """A footer chip: "▶ Watch from the start" and "● Record" filled, the others outlined."""
-        p.setFont(units.font(1.05, QFont.Weight.DemiBold))
-        if name in ("watch", "record"):
-            color = PALETTE.accent if name == "watch" else PALETTE.live
-            fill_round(p, button, qcolor(color), button.height() / 2)
+        """A footer chip: what Enter does filled with the accent ("▶ Watch", or "▶ Watch from
+        the start" for a past programme), the others outlined, Record with its red dot."""
+        font = units.font(1.05, QFont.Weight.DemiBold)
+        p.setFont(font)
+        text = self._button_text(name)
+        if name == "live" or (name == "watch" and self.chosen() is not None):
+            fill_round(p, button, qcolor(PALETTE.accent), button.height() / 2)
             p.setPen(qcolor(PALETTE.canvas))
-        else:
-            p.save()
-            p.setPen(QPen(qcolor(PALETTE.text, 0.5), 1.0))
-            p.setBrush(Qt.NoBrush)
-            half = button.height() / 2
-            p.drawRoundedRect(button.adjusted(0.5, 0.5, -0.5, -0.5), half, half)
-            p.restore()
-            p.setPen(qcolor(PALETTE.text))
-        p.drawText(button, Qt.AlignCenter, self._button_text(name))
+            p.drawText(button, Qt.AlignCenter, text)
+            return
+        p.save()
+        p.setPen(QPen(qcolor(PALETTE.text, 0.5), 1.0))
+        p.setBrush(Qt.NoBrush)
+        half = button.height() / 2
+        p.drawRoundedRect(button.adjusted(0.5, 0.5, -0.5, -0.5), half, half)
+        p.restore()
+        p.setPen(qcolor(PALETTE.text))
+        if name != "record":
+            p.drawText(button, Qt.AlignCenter, text.removeprefix("▶  "))
+            return
+        dot, label = "●  ", translate(RECORD_TEXT)  # the red dot, then the word
+        fm = QFontMetrics(font)
+        dot_w = fm.horizontalAdvance(dot)
+        left = button.center().x() - (dot_w + fm.horizontalAdvance(label)) / 2
+        p.setPen(qcolor(PALETTE.live))
+        p.drawText(QRectF(left, button.top(), dot_w, button.height()), Qt.AlignVCenter, dot)
+        p.setPen(qcolor(PALETTE.text))
+        p.drawText(
+            QRectF(left + dot_w, button.top(), button.right() - left - dot_w, button.height()),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            label,
+        )
 
     def _paint_now_line(self, p: QPainter, layout: _Layout, now: datetime, bottom: float) -> None:
         now_x = self._now_x(layout, now)

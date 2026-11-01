@@ -400,6 +400,9 @@ class FakeOverlay(QObject):
     def named(self, name):
         return [c[1:] for c in self.calls if c[0] == name]
 
+    def playing_changed(self):  # another channel plays (the lists' ▶): nothing to record
+        pass
+
 
 class FakeBanner(FakeOverlay):
     info = None
