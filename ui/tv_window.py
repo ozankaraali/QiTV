@@ -79,6 +79,7 @@ from services.live.engine import LiveEngine
 from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
 from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
+from services.media_keys import MediaKeys
 from services.media_reporter import MediaReporter
 from services.navigation import NavModel
 from services.parental import Parental, install as install_parental
@@ -726,6 +727,13 @@ class TVWindow(QMainWindow):
         # Wired before the Library connects to the catalog: on providerReady the controller
         # settles the provider change before a Library play waiting for it runs.
         controller.wire()
+        # 2.8.13: the system's media keys (macOS gives them only to the app it lists as Now
+        # Playing): each acts as the keyboard's, and the system hears what the large picture
+        # plays (after the controller hears the state: it knows what plays by then).
+        self.media_keys = MediaKeys(self)
+        self.media_keys.pressed.connect(self.remote_key)
+        self.session.stateChanged.connect(self._show_now_playing)
+        self.media_keys.start()
         self.screens = TVPages(self, self)  # the Library's controller and the page moves
         if self.engine is not None:  # 2.8: scheduled recordings, by the time-shift helper
             self.attach_scheduler(
@@ -1138,6 +1146,15 @@ class TVWindow(QMainWindow):
         action, payload = resolved
         with self.screens.from_keys():
             self._act(action, payload, key=key)
+
+    def _show_now_playing(self, state: str) -> None:
+        if self._closing:
+            return
+        target = self.controller.now_playing()
+        if target is None:
+            self.media_keys.show(state, "", False)
+        else:
+            self.media_keys.show(state, target.title, target.live)
 
     def remote_action(self, action: Action, payload: str = "") -> None:
         """A phone remote's button that means one action wherever the TV is (Search, Fullscreen)."""
@@ -2117,6 +2134,7 @@ class TVWindow(QMainWindow):
         self._run_steps(
             ("let the next click through", self.screens.shutdown),
             ("stop the phone remote", self.remote.shutdown),
+            ("leave Now Playing", self.media_keys.stop),  # the media keys go back to others
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
             ("stop the channel list's find", self.finder.shutdown),
