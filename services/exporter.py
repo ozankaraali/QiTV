@@ -20,6 +20,7 @@ from services.lazy_import import lazy_module
 from services.provider_api import (
     https_fallback_candidates,
     remember_http_only,
+    stb_api_base,
     stb_endpoint,
     stb_portal_base,
 )
@@ -222,7 +223,7 @@ class ExportWorker(QObject):
         The request runs on a helper thread so cancelling returns at once even while the
         portal stalls; the abandoned request is aborted by closing the session.
         """
-        bases = https_fallback_candidates(stb_portal_base(self._provider.get("url", "")), True)
+        bases = https_fallback_candidates(stb_api_base(self._provider.get("url", "")), True)
         params = {
             "type": "series",
             "action": "get_ordered_list",

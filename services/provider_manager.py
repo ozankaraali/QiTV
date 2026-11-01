@@ -22,6 +22,7 @@ from services.provider_api import (
     https_fallback_candidates,
     known_http_only,
     remember_http_only,
+    stb_api_base,
 )
 from services.provider_types import is_media_server
 from services.redact import safe_exc, safe_message
@@ -476,9 +477,10 @@ class StbHandshake:
             )
             if try_https:
                 url = "https://" + url[len("http://") :]
+            api = stb_api_base(url)  # where its lists, links and guide are asked too (2.8.12)
 
             fetchurl = (
-                f"{url}{serverload}?type=stb&action=handshake&prehash={_PREHASH}"
+                f"{api}{serverload}?type=stb&action=handshake&prehash={_PREHASH}"
                 "&token=&JsHttpRequest=1-xml"
             )
             handshake = requests.get(fetchurl, timeout=5, headers=self.headers, verify=ssl_verify)
@@ -490,7 +492,7 @@ class StbHandshake:
             self.headers["Authorization"] = f"Bearer {self.token}"
 
             # Use get_profile request to detect blocked providers
-            fetchurl = self.profile_url(url, serverload, mac)
+            fetchurl = self.profile_url(api, serverload, mac)
             profile = requests.get(fetchurl, timeout=5, headers=self.headers, verify=ssl_verify)
             if profile.status_code == 200:
                 body = profile.json()
@@ -594,7 +596,7 @@ class StbHandshake:
         bind one token to a MAC). True when the portal knows the device; `statuses`,
         `timed_out` and `profile` record what came, as run() records them."""
         self.headers = dict(headers)
-        bases = https_fallback_candidates(url, self.prefer_https)
+        bases = https_fallback_candidates(stb_api_base(url), self.prefer_https)
         for base in bases:
             for serverload in ("/portal.php", "/server/load.php"):
                 try:

@@ -35,8 +35,8 @@ from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as
 from services.i18n import N_, tr, translate
 from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
 from services.provider_api import (
+    stb_api_base,
     stb_endpoint,
-    stb_portal_base,
     xtream_stream_url,
 )
 from services.provider_ids import stamp
@@ -1028,7 +1028,7 @@ class CatalogService(QObject):
         section, group_id = data
         provider = self.current_provider()
         return self.factory.stb_list(
-            url=stb_endpoint(stb_portal_base(provider.get("url", ""), True)),
+            url=stb_endpoint(stb_api_base(provider.get("url", ""), True)),
             headers=self.provider_manager.headers,
             content_type=SECTION_CONTENT_TYPES[section],
             category_id=group_id,
@@ -1099,7 +1099,7 @@ class CatalogService(QObject):
                 verify_ssl=verify,
             )
         return self.factory.stb_list(
-            url=stb_endpoint(stb_portal_base(provider.get("url", ""), True)),
+            url=stb_endpoint(stb_api_base(provider.get("url", ""), True)),
             headers=self.provider_manager.headers,
             content_type="series",
             category_id=series.get("category_id") or series.get("tv_genre_id", ""),
@@ -1171,7 +1171,7 @@ class CatalogService(QObject):
         series, season = data
         provider = self.current_provider()
         return self.factory.stb_list(
-            url=stb_endpoint(stb_portal_base(provider.get("url", ""), True)),
+            url=stb_endpoint(stb_api_base(provider.get("url", ""), True)),
             headers=self.provider_manager.headers,
             content_type="series",
             category_id=series.get("category_id") or series.get("tv_genre_id", ""),

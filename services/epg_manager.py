@@ -34,8 +34,8 @@ from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
 from services.provider_api import (
     CLIENT_HEADERS,
-    base_from_url,
     https_fallback_candidates,
+    stb_api_base,
     stb_endpoint,
     xtream_sign_in_bases,
     xtream_xmltv_url,
@@ -773,7 +773,7 @@ class EpgManager:
     def _fetch_epg_from_stb(self, provider_url):
         headers = self.provider_manager.headers
         provider_hash = _cache_key(provider_url)
-        base = base_from_url(provider_url)
+        base = stb_api_base(provider_url)  # where its sign-in asked (2.8.12)
         verify_ssl = self.provider_manager.current_provider.get(
             "ssl_verify", self.config_manager.ssl_verify
         )

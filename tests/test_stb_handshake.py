@@ -307,5 +307,78 @@ class FailedSetupSessionTests(unittest.TestCase):
         self.assertEqual(manager.token, "")
 
 
+class PortalAddressTests(unittest.TestCase):
+    """The sign-in and every later request (lists, links, guide) ask a portal at the same
+    address (2.8.12): the sign-in asked under the address as saved ("/c//portal.php" for a
+    pasted ".../c/" link) and the rest at the server's root, path dropped."""
+
+    def test_the_portals_api_base(self):
+        for url, base in (
+            ("http://portal.example:8080/c/", "http://portal.example:8080"),
+            ("http://portal.example:8080/c", "http://portal.example:8080"),
+            ("http://portal.example:8080/", "http://portal.example:8080"),
+            ("http://portal.example:8080", "http://portal.example:8080"),
+            ("http://portal.example/stalker_portal/c/", "http://portal.example/stalker_portal"),
+            ("http://portal.example/stalker_portal/", "http://portal.example/stalker_portal"),
+            (
+                "http://portal.example/stalker_portal/server/load.php",
+                "http://portal.example/stalker_portal",
+            ),
+            (" http://portal.example/c/index.html\r\n", "http://portal.example"),
+            ("portal.example:8080/", "portal.example:8080"),
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(provider_api.stb_api_base(url), base)
+
+    def test_a_pasted_portal_link_signs_in_where_its_lists_are_asked(self):
+        from services.provider_link import parse_provider_link
+        from tests.fixtures.local_stb import MAC, StbFixture
+
+        with StbFixture() as portal:
+            link = parse_provider_link(f"{portal.url}/c/?mac={MAC}")
+            self.assertEqual(link.url, f"{portal.url}/c/")  # as the form saves it
+            for url in (link.url, portal.url, f"{portal.url}/"):
+                with self.subTest(url=url[len(portal.url) :]):
+                    portal.requests.clear()
+                    handshake = StbHandshake()
+                    self.assertTrue(handshake.run(url, MAC))
+                    signed_in_at = {path for path, _query, _bearer in portal.requests}
+                    self.assertEqual(signed_in_at, {"/portal.php"})
+                    portal.requests.clear()
+                    worker = STBCategoriesWorker(url, handshake.headers, "vod")
+                    done = []
+                    worker.finished.connect(done.append)
+                    worker.run()
+                    self.assertEqual(len(done), 1)
+                    self.assertEqual({p for p, _q, _b in portal.requests}, {"/server/load.php"})
+
+    def test_a_stalker_portal_path_is_kept_for_both(self):
+        asked = []
+
+        def fake_get(url, **kwargs):
+            asked.append(urlsplit(url).path)
+            if "action=get_categories" in url:
+                return _Response({"js": [{"id": "1", "title": "Films"}]})
+            return _accepting(url)
+
+        with (
+            patch("services.provider_manager.requests.get", side_effect=fake_get),
+            patch("services.workers.requests.get", side_effect=fake_get),
+        ):
+            url = "http://portal.test/stalker_portal/c/"
+            handshake = StbHandshake()
+            self.assertTrue(handshake.run(url, "00:1A:79:00:00:01"))
+            worker = STBCategoriesWorker(url, handshake.headers, "vod")
+            worker.run()
+        self.assertEqual(
+            asked,
+            [
+                "/stalker_portal/portal.php",  # the handshake
+                "/stalker_portal/portal.php",  # its profile
+                "/stalker_portal/server/load.php",  # the films' genres
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

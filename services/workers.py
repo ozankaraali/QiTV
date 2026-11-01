@@ -35,6 +35,7 @@ from services.provider_api import (
     https_fallback_candidates,
     remember_http_only,
     remember_xtream_root,
+    stb_api_base,
     stb_archive_link_url,
     stb_command_link,
     stb_command_shape,
@@ -42,7 +43,6 @@ from services.provider_api import (
     stb_create_link_url,
     stb_link_names_no_stream,
     stb_link_shape,
-    stb_portal_base,
     stb_request_url,
     xtream_base,
     xtream_choose_resolved_base,
@@ -629,7 +629,7 @@ class STBCategoriesWorker(QObject):
 
     def run(self):
         try:
-            base = stb_portal_base(self.base_url, self.prefer_https)
+            base = stb_api_base(self.base_url, self.prefer_https)
 
             # Use correct action based on content type
             action = "get_genres" if self.content_type == "itv" else "get_categories"
@@ -755,7 +755,7 @@ class LinkCreatorWorker(QObject):
 
     def run(self):
         try:
-            base = stb_portal_base(self.base_url, self.prefer_https)
+            base = stb_api_base(self.base_url, self.prefer_https)
             if self.programme:
                 fetchurl = stb_archive_link_url(base, self.programme)
             else:
