@@ -877,10 +877,12 @@ class EpgManager:
         it (epg_view.normalize), and the lookup window below moves the other way."""
         return guide_offset(getattr(self.provider_manager, "current_provider", None))
 
-    def get_programs_for_channel(self, channel_data):
+    def get_programs_for_channel(self, channel_data, since: Optional[datetime] = None):
         """The guide's raw entries of a channel, oldest first: all of a portal's, and an XMLTV
         guide's on from now until the list window's end (epg_list_window_hours; 0: all of
-        them), now moved by the provider's guide time offset into the guide's own times."""
+        them), now moved by the provider's guide time offset into the guide's own times.
+        `since`, when earlier than now, is where they start instead (2.8.12): the guide moved
+        back over an archive, a time-shifted channel's programme, the phone's timetable."""
         epg = self.epg  # one reference: a refresh may swap in a new guide meanwhile
         provider_type = self.provider_manager.current_provider.get("type", "").upper()
         if self.config_manager.epg_source == "STB" and provider_type == "STB":
@@ -909,6 +911,10 @@ class EpgManager:
             start_time = datetime.now()
         start_time -= self.guide_offset()  # in the guide's own times
         end_time = start_time + timedelta(hours=window_hours)
+        if since is not None:
+            zone = start_time.tzinfo
+            asked = since.astimezone(zone) if zone else since.astimezone().replace(tzinfo=None)
+            start_time = min(start_time, asked - self.guide_offset())
         start_time_str = _as_written(start_time, first)
         programs = []
         for entry in entries:

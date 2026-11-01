@@ -125,5 +125,59 @@ class OffsetLessGuideTests(unittest.TestCase):
 CHANNEL = {"name": "x", "xmltv_id": "ch1"}
 
 
+class PastWindowTests(unittest.TestCase):
+    """The guide moved back over an archive (catch-up) on an XMLTV guide: with the default
+    24 h list window, the programmes from the window's start are looked up, not from now
+    (before 2.8.12 they were cut at now: a provider's or a URL guide had no past to play)."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.config = SimpleNamespace(
+            epg_source="STB",  # the provider's own guide: an Xtream panel's xmltv.php
+            epg_list_window_hours=24,
+            xmltv_channel_map=MultiKeyDict(),
+            get_config_dir=lambda: directory.name,
+        )
+        provider = {"type": "XTREAM", "name": "X", "url": "http://panel.test", "username": "u"}
+        self.manager = EpgManager(self.config, SimpleNamespace(current_provider=provider))
+        self.now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        written = "%Y%m%d%H%M%S +0000"
+        guide = MultiKeyDict()
+        guide[("ch1",)] = [
+            {
+                "@start": (self.now - timedelta(hours=h + 1)).strftime(written),
+                "@stop": (self.now - timedelta(hours=h)).strftime(written),
+                "title": f"{h}h ago",
+            }
+            for h in range(24, 0, -1)
+        ] + [
+            {
+                "@start": (self.now - timedelta(minutes=10)).strftime(written),
+                "@stop": (self.now + timedelta(minutes=50)).strftime(written),
+                "title": "On now",
+            },
+            {
+                "@start": (self.now + timedelta(hours=30)).strftime(written),
+                "@stop": (self.now + timedelta(hours=31)).strftime(written),
+                "title": "Beyond the window",
+            },
+        ]
+        self.manager.epg = guide
+
+    def test_the_guide_moved_back_lists_the_past_from_its_window(self):
+        window_start = self.now - timedelta(hours=6)
+        found = programmes_for_channel(self.manager, CHANNEL, window_start, 12)
+        titles = [p.title for p in found]
+        past = ["5h ago", "4h ago", "3h ago", "2h ago", "1h ago"]
+        self.assertEqual(titles, [*past, "On now"])
+
+    def test_now_still_starts_at_now_and_the_window_still_ends(self):
+        titles = [p.title for p in programmes_for_channel(self.manager, CHANNEL, self.now, 50)]
+        self.assertEqual(titles, ["On now"])
+        raw = self.manager.get_programs_for_channel(CHANNEL, since=self.now - timedelta(hours=2))
+        self.assertEqual([p["title"] for p in raw], ["1h ago", "On now"])
+
+
 if __name__ == "__main__":
     unittest.main()

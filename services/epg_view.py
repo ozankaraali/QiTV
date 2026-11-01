@@ -236,9 +236,10 @@ def programmes_for_channel(
 ) -> list[Programme]:
     """The channel's timeline (see timeline) without what has ended by `now` (the guide's grid
     passes its window's start), oldest first, moved by its provider's guide time offset (the
-    manager's `guide_offset`); [] if the EPG is unavailable."""
+    manager's `guide_offset`); [] if the EPG is unavailable. A `now` in the past is asked of
+    the manager: its list window starts there then, not at the present."""
     try:
-        raw = epg_manager.get_programs_for_channel(channel)
+        raw = epg_manager.get_programs_for_channel(channel, since=now)
         offset_of = getattr(epg_manager, "guide_offset", None)
         offset = offset_of() if callable(offset_of) else None
         if not isinstance(offset, timedelta):
