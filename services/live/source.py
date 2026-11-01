@@ -800,7 +800,9 @@ class TsSource:
                     if self._not_live:
                         break
                 else:
-                    if (finite and _sized(response)) or self._archive:
+                    if self._not_live:
+                        pass  # a recording that came whole (in the open's first read, say)
+                    elif (finite and _sized(response)) or self._archive:
                         return  # a finite body reached its declared end (an archive: any end)
                     # Any other end of a live body is a disconnect, also a clean one: a FIN,
                     # or a chunked body's last chunk (nginx when the channel's upstream
@@ -816,6 +818,7 @@ class TsSource:
             yield Reconnecting()  # before the backoff: the helper says so at once
             if self._not_live:
                 self._not_live = False
+                finite = False  # a recording answered: its declared length was never the channel's
                 now = time.monotonic()
                 if not_live_since is None:
                     not_live_since = now
@@ -2284,8 +2287,10 @@ def open_source(
         except SourceError as error:
             if stop.is_set() or str(error) == STREAM_LIMIT:
                 raise  # 2.8.12: the channel's server refused for its limit, over HTTPS
-            if error.kind != "http":
-                _HTTPS_FAILED.add(host)  # no HTTPS there (an answer over it is not that)
+            if str(error) != STREAM_REFUSED:
+                # No HTTPS there, or another server's answer at its port (a 404): asked over
+                # HTTP from now on. A plain 403 may be the channel's own refusal: it stays.
+                _HTTPS_FAILED.add(host)
             log.info("The channel did not open over HTTPS (%s); opening it over HTTP.", error.kind)
     elif https_first and scheme == "https":
         try:

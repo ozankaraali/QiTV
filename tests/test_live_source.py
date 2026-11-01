@@ -1035,17 +1035,24 @@ video.m3u8
             self.assertEqual(source_module._HTTPS_FAILED, set())
             self.assertEqual(server.counts["/user/secret.ts"], 1)
 
-    def test_https_first_does_not_take_an_https_answer_for_no_https(self):
-        # Another HTTP status over HTTPS: this open tries HTTP, but the host had HTTPS.
-        source_module._HTTPS_FAILED.clear()
-        with self.tls_context() as context:
-            server = self.server({"/user/secret.ts": (404, {}, b"")}, tls=context)
-            plain = server.url.replace("https://", "http://", 1) + "/user/secret.ts"
-            with insecure(), self.assertRaises(SourceError):
-                open_source(
-                    plain, headers={}, verify_ssl=False, stop=threading.Event(), https_first=True
-                )
-            self.assertEqual(source_module._HTTPS_FAILED, set())
+    def test_https_first_keeps_https_after_a_plain_403_over_it(self):
+        # A plain 403 over HTTPS may be the channel's own refusal: this open tries HTTP, but
+        # the host keeps HTTPS; another server's 404 at its port marks it (as before).
+        for status, marked in ((403, False), (404, True)):
+            with self.subTest(status=status):
+                source_module._HTTPS_FAILED.clear()
+                with self.tls_context() as context:
+                    server = self.server({"/user/secret.ts": (status, {}, b"")}, tls=context)
+                    plain = server.url.replace("https://", "http://", 1) + "/user/secret.ts"
+                    with insecure(), self.assertRaises(SourceError):
+                        open_source(
+                            plain,
+                            headers={},
+                            verify_ssl=False,
+                            stop=threading.Event(),
+                            https_first=True,
+                        )
+                    self.assertEqual(bool(source_module._HTTPS_FAILED), marked)
 
     def test_recordings_answered_again_and_again_are_asked_for_the_whole_patience(self):
         # 2.8.12: each answer that was a recording (`not_live`) took a step of the reconnect
@@ -1908,6 +1915,42 @@ video.m3u8
                     )
             self.assertEqual(media(server.url + "/sized.ts"), [self.video])
         self.assertEqual(server.counts, {"/fin.ts": 3, "/chunked.ts": 3, "/sized.ts": 1})
+
+    def test_a_tune_answered_with_a_sized_recording_leaves_the_channel_live(self):
+        # Review: the tune's first answer, a sized recording the guard dropped, made the whole
+        # source "finite": a later reconnect answered with an empty sized body ended it.
+        clip, half = ts_fixtures.make_stream(2), len(self.video) // 2 // 188 * 188
+
+        def route(_request, count):
+            if count == 1:
+                return 200, {}, clip  # sized (Content-Length): the recording
+            if count == 2:
+
+                def first_half(request):
+                    request.wfile.write(self.video[:half])
+
+                return 200, {}, first_half  # the channel, live
+            if count == 3:
+                return 200, {"Content-Length": "0"}, b""
+            if count == 4:
+                return 200, {}, self.video[half:]
+            return 404, {}, b""
+
+        server = self.server({"/live.ts": route})
+        with patch.multiple(source_module, _RECONNECT_DELAYS=FAST_RETRIES, _REFUSED_RETRY_S=0.01):
+            source = open_source(
+                server.url + "/live.ts", headers={}, verify_ssl=True, stop=threading.Event()
+            )
+            told = False
+            with self.assertRaises(SourceError):  # the 404, not an end
+                try:
+                    for item in source.chunks():
+                        if isinstance(item, bytes) and not told:
+                            told = True
+                            source.not_live()
+                finally:
+                    source.close()
+        self.assertGreaterEqual(server.counts["/live.ts"], 5)
 
     def test_a_live_channels_reconnect_answered_with_an_empty_sized_body_is_no_end(self):
         # 2.8.12: a reconnect answered "200, Content-Length: 0" (or an error page, a short
