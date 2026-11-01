@@ -22,7 +22,7 @@ from timer_fixtures import elapse, timeline, wait_until
 
 from ui.keymap import key_hint
 from ui.overlays.painting import Units, badge_color, draw_icon
-from ui.overlays.transport import SPEEDS, Transport
+from ui.overlays.transport import _ICON_BUTTONS as ICON_BUTTONS, SPEEDS, Transport
 
 
 class TransportCase(unittest.TestCase):
@@ -163,6 +163,55 @@ class TransportCase(unittest.TestCase):
         self.assertFalse(t.failed())
         self.assertIn("live", t._layout())
         self.assertEqual(t.tooltip_at(rects["play"].center()), key_hint("Play / pause", "Space"))
+
+    def test_icon_buttons_take_clicks_beyond_their_icon_without_overlapping(self):
+        # 2.8.12: the 28 px icons (11 px in a mini player) took clicks on the icon alone.
+        for width in (1920, 1280, 960, 480):
+            t = self.make()
+            t.setGeometry(0, 0, width, width * 9 // 16)
+            t.set_pip_state(True, False)
+            t.set_cast_state(True, False)
+            t.show_live("One", "")
+            rects = t._layout()
+            hits = t._hits(rects)
+            icons = [n for n in rects if n in ICON_BUTTONS]
+            self.assertGreater(len(icons), 10)
+            for name in icons:
+                hit, drawn = hits[name], rects[name]
+                self.assertTrue(hit.contains(drawn), (width, name))
+                self.assertGreaterEqual(hit.height(), min(44.0, max(28.0, drawn.height())))
+                self.assertLessEqual(hit.width(), max(44.0, drawn.width()) + 0.01)
+                for other, rect in hits.items():
+                    if other != name and other not in ("seek", "times"):
+                        self.assertFalse(hit.intersects(rect), (width, name, other))
+            if width == 1280:
+                self.assertGreaterEqual(hits["guide"].width(), 44.0 - 0.01)
+            # A click in the margin beside the icon reaches it; the drawing is unchanged.
+            guide = rects["guide"]
+            spy = QSignalSpy(t.guideRequested)
+            margin = QPointF(hits["guide"].left() + 1, guide.center().y())
+            self.click(t, margin.toPoint())
+            self.assertEqual(spy.count(), 1, width)
+            self.assertEqual(t.tooltip_at(margin), key_hint("Guide", "G"))
+
+    def test_the_top_shade_keeps_the_title_readable_over_a_white_picture(self):
+        # 2.8.12: the name read 2.8:1 over a white picture, the programme 2.2:1.
+        host = QWidget()
+        host.resize(1280, 720)
+        palette = host.palette()
+        palette.setColor(host.backgroundRole(), QColor("#ffffff"))
+        host.setPalette(palette)
+        host.setAutoFillBackground(True)
+        self.addCleanup(host.close)
+        host.show()
+        t = Transport(host)
+        t.show_live("One", "News")
+        t.poke()
+        image = host.grab().toImage()
+        title = t.title_rects()["title"]
+        for y in range(round(title.top()), round(title.bottom())):
+            shade = image.pixelColor(900, y)  # beside the title row: the shade alone
+            self.assertLessEqual(shade.red(), 60, y)  # white 255 under 0.8 black: 51
 
     def test_mini_player_and_second_channel_buttons_sit_left_of_fullscreen(self):
         # Clickable controls for both pictures-in-picture.
@@ -936,6 +985,35 @@ class LostDragAndRepaintTests(unittest.TestCase):
         self.assertEqual(seeks.count(), 0)
         QTest.mouseRelease(transport, Qt.LeftButton, Qt.NoModifier, QPoint(10, 10))
 
+    def test_the_controls_stay_while_the_pointer_rests_on_them(self):
+        # 2.8.12: resting on Guide, they went 2.4 s later (they stay while hovered).
+        host, transport = self.make(idle_ms=60)
+        transport.show_live("One", "")
+
+        def rest(point):
+            move = QMouseEvent(
+                QEvent.Type.MouseMove,
+                QPointF(point),
+                QPointF(transport.mapToGlobal(point)),
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            QApplication.sendEvent(transport, move)
+
+        rest(transport.button_rect("guide").center().toPoint())
+        elapse(300)
+        self.assertTrue(transport.isVisible())
+        QApplication.sendEvent(transport, QEvent(QEvent.Type.Leave))  # onto the picture
+        self.assertTrue(wait_until(lambda: not transport.isVisible()))
+        # The title row's controls keep them too; the rest of the shades does not.
+        transport.poke()
+        rest(transport.title_rects()["title"].center().toPoint())
+        elapse(300)
+        self.assertTrue(transport.isVisible())
+        rest(QPoint(640, 380))  # the bottom shade, above the controls
+        self.assertTrue(wait_until(lambda: not transport.isVisible()))
+
     def test_a_move_without_the_button_ends_a_drag_whose_release_was_lost(self):
         host, transport = self.make()
         seeks = QSignalSpy(transport.seekRequested)
@@ -949,6 +1027,8 @@ class LostDragAndRepaintTests(unittest.TestCase):
             Qt.KeyboardModifier.NoModifier,
         )
         QApplication.sendEvent(transport, moved)
+        # 2.8.12: the controls stay while the pointer rests on them: it goes away here.
+        QApplication.sendEvent(transport, QEvent(QEvent.Type.Leave))
         self.assertTrue(wait_until(lambda: not transport.isVisible()))
         self.assertEqual(seeks.count(), 0)
         QTest.mouseRelease(transport, Qt.LeftButton, Qt.NoModifier, QPoint(10, 10))

@@ -124,6 +124,14 @@ BOTTOM_FRACTION = 0.42
 TICK_LABEL_MAX_U = 25.0
 GAP_PX = 14.0  # 2.6: the break in the bar where nothing was kept between two parts
 _ICON_GAP_U = 1.8  # between the icon buttons
+# 2.8.12: an icon button takes clicks over this square where its neighbours leave room (half
+# the gap to each), and at least this tall: the 28 px icons (11 px in a mini player) were small
+# targets. Only the hit area grows; the icon is drawn as before.
+_HIT_PX = 44.0
+_HIT_FLOOR_PX = 28.0
+# 2.8.12: the top shade, deeper and flat over the title row's half (the name read 2.8:1, the
+# programme 2.2:1 over a white picture; now about 11:1 and 7:1), then fading out.
+_TOP_SHADE = 0.8
 _TIGHT_GAP_U = 1.0  # in a crowded row
 MINUS = "−"
 # The source stalled, its connection still open (the texts are shown with translate()).
@@ -443,10 +451,11 @@ class Transport(Overlay):
         # A bar fraction, not a time: the knob stays under the cursor while the buffer slides.
         self._drag: float | None = None
         self._last_move = QPointF(-1, -1)
+        self._pointer: QPointF | None = None  # where the pointer rests over it (None: away)
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
         self._idle.setInterval(idle_ms)
-        self._idle.timeout.connect(self.dismiss)
+        self._idle.timeout.connect(self._on_idle)
         self._clock = QTimer(self)  # repaint so the clock stays current while shown
         self._clock.setInterval(30_000)
         self._clock.timeout.connect(self._tick)
@@ -710,7 +719,7 @@ class Transport(Overlay):
         on live TV the channel's name and star. Over the multiview's grid (the whole picture)
         also what it only says (LIVE, the times, the subtitle, the clock), so it shows whole."""
         region = QRegion()
-        for name, rect in self._layout().items():
+        for name, rect in self._hits(self._layout()).items():
             if name in _LABELS and not self._grid_shown:
                 continue
             if name == "seek":
@@ -772,7 +781,7 @@ class Transport(Overlay):
 
     def tooltip_at(self, pos: QPointF) -> str:
         """What hovering `pos` says: a control's name and key, or nothing."""
-        for name, rect in (*self.title_rects().items(), *self._layout().items()):
+        for name, rect in (*self.title_rects().items(), *self._hits(self._layout()).items()):
             text = self._tooltip(name)
             if text and rect.contains(pos):
                 return text
@@ -843,6 +852,27 @@ class Transport(Overlay):
             return  # a drag in progress keeps the bar until release
         self._idle.stop()
         self.hide()
+
+    def _on_idle(self) -> None:
+        """The idle time is up: the controls go, unless the pointer rests on them (2.8.12: they
+        went from under a resting pointer, though they stay while hovered): the wait starts
+        again then."""
+        if self._pointer is not None and self.hovers_controls(self._pointer):
+            self._idle.start()
+            return
+        self.dismiss()
+
+    def hovers_controls(self, pos: QPointF) -> bool:
+        """`pos` (this widget's coordinates) is on the controls: the bottom band from the bar's
+        time bubble (or the row) down, or the title row's band. Not the rest of the shades
+        (the bottom one reaches 42% up the picture: a pointer left there keeps nothing up)."""
+        un = Units(self.width())
+        top = self.controls_top() - self.geometry().top()
+        title_bottom = max(
+            (r.bottom() for r in self.title_rects().values()),
+            default=float(un.px(5.7)),
+        )
+        return pos.y() >= top or pos.y() <= max(title_bottom, float(un.px(5.7))) + un.px(1.0)
 
     def _tick(self) -> None:
         if self.isVisible():
@@ -1541,7 +1571,11 @@ class Transport(Overlay):
     def _paint_scrim_bands(self, p: QPainter) -> None:
         top_h = self.height() * TOP_FRACTION
         grad = QLinearGradient(0, 0, 0, top_h)
-        grad.setColorAt(0, qcolor("#000000", 0.62))
+        # Flat behind the title row (its logo ends near 5.7u, wider windows run lower in the
+        # band), then fading out.
+        flat = min(0.85, max(0.5, Units(self.width()).px(6.2) / top_h)) if top_h > 0 else 0.5
+        grad.setColorAt(0, qcolor("#000000", _TOP_SHADE))
+        grad.setColorAt(flat, qcolor("#000000", _TOP_SHADE))
         grad.setColorAt(1, qcolor("#000000", 0.0))
         p.fillRect(QRectF(0, 0, self.width(), top_h), grad)
         bottom_h = self.height() * BOTTOM_FRACTION
@@ -1868,15 +1902,43 @@ class Transport(Overlay):
         for name, rect in self.title_rects().items():
             if rect.contains(pos):
                 return name
-        for name, rect in self._layout().items():
+        for name, rect in self._hits(self._layout()).items():
             if name == "seek":
                 rect = rect.adjusted(0, -rect.height(), 0, rect.height())
             if name not in _LABELS and rect.contains(pos):
                 return name
         return None
 
+    def _hits(self, rects: dict[str, QRectF]) -> dict[str, QRectF]:
+        """Where the controls take clicks (2.8.12): each icon button grows towards a _HIT_PX
+        square, sideways no further than half the gap to its neighbours in the row (the
+        window's edge for the last), and at least _HIT_FLOOR_PX tall; the rest as laid out.
+        Only the hit area grows: the icons are drawn as before."""
+        hits = dict(rects)
+        row = [(n, r) for n, r in rects.items() if n not in ("seek", "times")]
+        for name in _ICON_BUTTONS:
+            rect = rects.get(name)
+            if rect is None:
+                continue
+            beside = [
+                r
+                for n, r in row
+                if n != name and r.bottom() > rect.top() and r.top() < rect.bottom()
+            ]
+            lefts = [rect.left() - r.right() for r in beside if r.right() <= rect.left()]
+            rights = [r.left() - rect.right() for r in beside if r.left() >= rect.right()]
+            want = max(0.0, (_HIT_PX - rect.width()) / 2)
+            left = min([want, *(gap / 2 for gap in lefts)]) if lefts else min(want, rect.left())
+            room = self.width() - rect.right()
+            right = min([want, *(gap / 2 for gap in rights)]) if rights else min(want, room)
+            tall = max(_HIT_FLOOR_PX, min(_HIT_PX, rect.height() * 2))
+            grow = max(0.0, (tall - rect.height()) / 2)
+            hits[name] = rect.adjusted(-max(0.0, left), -grow, max(0.0, right), grow)
+        return hits
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         pos = event.position()
+        self._pointer = QPointF(pos)
         if pos != self._last_move:  # ignore synthetic moves from layout changes
             self._last_move = pos
             self.poke()
@@ -1897,6 +1959,10 @@ class Transport(Overlay):
                 self.setCursor(Qt.PointingHandCursor)
             else:
                 self.unsetCursor()
+
+    def leaveEvent(self, event: QEvent) -> None:
+        self._pointer = None  # it left (onto the picture, the PiP, another window)
+        super().leaveEvent(event)
 
     def hideEvent(self, event: QHideEvent) -> None:
         # Hidden mid-drag (the host hides with a minimized window): no release will come.
@@ -1928,6 +1994,8 @@ class Transport(Overlay):
                 self.seekRequested.emit(target_ms)
 
     def _click(self, rects: dict[str, QRectF], pos: QPointF) -> None:
+        """A press at `pos` on a control (by its hit area, `_hits`); `rects` as laid out (a
+        menu opens from the button as drawn)."""
         title_signals = {
             "title": self.infoRequested,
             "favorite": self.favoriteRequested,
@@ -1937,9 +2005,10 @@ class Transport(Overlay):
             if rect.contains(pos):
                 title_signals[name].emit()
                 return
-        for name, rect in rects.items():
-            if not rect.contains(pos):
+        for name, hit in self._hits(rects).items():
+            if not hit.contains(pos):
                 continue
+            rect = rects[name]
             if name == "play":
                 self.playPauseRequested.emit()
             elif name == "stop":
