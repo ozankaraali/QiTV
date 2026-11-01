@@ -189,3 +189,63 @@ class ClosingTests(OptionsDialogCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LayoutTests(OptionsDialogCase):
+    """Save is the window's accented main action with Cancel beside it; Remove Provider
+    stands apart in red; the first tab is General; the kinds of provider read most common
+    first, and a new provider starts in the address field."""
+
+    def test_cancel_sits_left_of_the_accented_save_and_closes_as_esc_does(self):
+        dialog = self.dialog()
+        self.assertIn("background", dialog.save_button.styleSheet())
+        cancel, save = dialog.close_button, dialog.save_button
+        self.assertLess(cancel.mapTo(dialog, cancel.rect().topLeft()).x(), save.x())
+        middle = cancel.geometry().center().y()
+        self.assertAlmostEqual(middle, save.geometry().center().y(), delta=2)  # one row
+        cancel.click()
+        QApplication.processEvents()
+        self.assertFalse(dialog.isVisible())  # nothing changed: closed without asking
+
+    def test_cancel_with_changes_asks_first(self):
+        dialog = self.dialog()
+        dialog.cache_image_size_input.setText("150")
+        with mock.patch(ASK, return_value=QMessageBox.StandardButton.Cancel) as asked:
+            dialog.close_button.click()
+        asked.assert_called_once()
+        self.assertTrue(dialog.isVisible())
+
+    def test_remove_provider_stands_apart_in_red_below_the_form(self):
+        dialog = self.dialog()
+        dialog.options_tab.setCurrentWidget(dialog.providers_tab)
+        QApplication.processEvents()
+        remove, add = dialog.remove_provider_button, dialog.add_provider_button
+        self.assertIn("color", remove.styleSheet())
+        self.assertGreater(remove.y(), dialog.verify_apply_group.y())  # under the form
+        self.assertLess(add.y(), dialog.name_input.y())  # Add stays at the top
+        self.assertLess(remove.width(), dialog.providers_tab.width() / 2)  # on its own, left
+
+    def test_the_first_tab_is_general(self):
+        dialog = self.dialog(shown=False)
+        self.assertEqual(dialog.options_tab.tabText(0), "General")
+
+    def test_the_kinds_read_playlist_xtream_stb_stream_then_media_servers(self):
+        dialog = self.dialog()
+        dialog.options_tab.setCurrentWidget(dialog.providers_tab)
+        QApplication.processEvents()
+        kinds = [
+            dialog.type_M3UPLAYLIST,
+            dialog.type_XTREAM,
+            dialog.type_STB,
+            dialog.type_M3USTREAM,
+            dialog.type_JELLYFIN,
+            dialog.type_EMBY,
+        ]
+        places = [(b.mapTo(dialog, b.rect().topLeft()).y(), b.x()) for b in kinds]
+        self.assertEqual(places, sorted(places))  # row by row, left to right
+
+    def test_a_new_provider_starts_in_the_address_field(self):
+        dialog = self.dialog(new_provider=True)
+        dialog.activateWindow()
+        QApplication.processEvents()
+        self.assertIs(dialog.focusWidget(), dialog.url_input)

@@ -72,7 +72,18 @@ from ui.free_channels_menu import show_menu as show_free_channels_menu
 from ui.parental_settings import build_parental_tab, pin_allows
 from ui.provider_drop import unique_name
 from ui.remote_settings import build_remote_tab, save_remote_settings
+from ui.theme import PALETTE
 from ui.update_dialogs import check_for_updates
+
+
+def accent_button_style() -> str:
+    """A window's main action (Settings' Save): filled with the accent, as the TV's ▶."""
+    return (
+        f"QPushButton {{ background: {PALETTE.accent}; color: {PALETTE.canvas}; border: none;"
+        " border-radius: 6px; padding: 6px 22px; font-weight: 600; }"
+        f" QPushButton:hover {{ background: {PALETTE.brand}; }}"
+        f" QPushButton:focus {{ border: 2px solid {PALETTE.text}; }}"
+    )
 
 
 def opensubtitles_hint() -> str:
@@ -405,9 +416,18 @@ class OptionsDialog(QDialog):
         # Enter in a field saves: without a default the dialog would make the first button
         # after the focus one (Clear Image Cache, or Paste link beside the address).
         self.save_button.setDefault(True)
+        self.save_button.setStyleSheet(accent_button_style())  # the window's main action
+        # Cancel closes as ✕ and Esc do: changes Save has not kept are asked about first.
+        self.close_button = QPushButton(tr("Cancel"), self)  # i18n: a button
+        self.close_button.setAutoDefault(False)
+        self.close_button.clicked.connect(self.reject)
 
         self.main_layout.addWidget(self.options_tab)
-        self.main_layout.addWidget(self.save_button)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(self.close_button)
+        buttons.addWidget(self.save_button)
+        self.main_layout.addLayout(buttons)
 
         self.load_providers()
         self._mark_saved()
@@ -430,8 +450,8 @@ class OptionsDialog(QDialog):
 
     def create_settings_ui(self):
         self.settings_tab = QWidget(self)
-        # i18n: the Settings window's first tab (the general settings)
-        self.options_tab.addTab(self.settings_tab, tr("Settings"))
+        # i18n: the Settings window's first tab (the general settings: language, player, …)
+        self.options_tab.addTab(self.settings_tab, tr("General"))
         self.settings_layout = QFormLayout(self.settings_tab)
 
         # The language: every text is read as it is shown, so a new one shows from the next
@@ -943,16 +963,18 @@ class OptionsDialog(QDialog):
 
         self.add_provider_button = QPushButton(tr("Add Provider"), self.providers_tab)
         self.add_provider_button.clicked.connect(self.add_new_provider)
-        self.providers_layout.addWidget(self.add_provider_button)
-
         # i18n: a Settings button beside Add Provider; opens a menu of free playlists
         self.free_channels_button = QPushButton(tr("Free channels…"), self.providers_tab)
         self.free_channels_button.clicked.connect(self.show_free_channels)
-        self.providers_layout.addWidget(self.free_channels_button)
+        adding = QHBoxLayout()
+        adding.addWidget(self.add_provider_button, 1)
+        adding.addWidget(self.free_channels_button, 1)
+        self.providers_layout.addRow(adding)
 
+        # On its own at the tab's bottom left, in red (added below, after the form).
         self.remove_provider_button = QPushButton(tr("Remove Provider"), self.providers_tab)
+        self.remove_provider_button.setStyleSheet(f"QPushButton {{ color: {PALETTE.live}; }}")
         self.remove_provider_button.clicked.connect(self.remove_provider)
-        self.providers_layout.addWidget(self.remove_provider_button)
 
         self.name_label = QLabel(tr("Name:"), self.providers_tab)  # i18n: a provider's name
         self.name_input = QLineEdit(self.providers_tab)
@@ -1044,34 +1066,35 @@ class OptionsDialog(QDialog):
         self.verify_result = QLabel("", self.providers_tab)
         self.providers_layout.addWidget(self.verify_apply_group)
         self.providers_layout.addWidget(self.verify_result)
+        removing = QHBoxLayout()
+        removing.setContentsMargins(0, 12, 0, 0)  # apart from the form above it
+        removing.addWidget(self.remove_provider_button)
+        removing.addStretch(1)
+        self.providers_layout.addRow(removing)
 
     def create_stream_type_ui(self):
         self.type_label = QLabel(tr("Stream Type:"), self)  # i18n: a provider's kind
         self.type_group = QButtonGroup(self)
-        self.type_STB = QRadioButton("STB", self)
+        # The most common kinds first (a playlist, Xtream), then the media servers (2.8).
         self.type_M3UPLAYLIST = QRadioButton(tr("M3U Playlist"), self)
-        self.type_M3USTREAM = QRadioButton(tr("M3U Stream"), self)
         self.type_XTREAM = QRadioButton("Xtream", self)
+        self.type_STB = QRadioButton("STB", self)
+        self.type_M3USTREAM = QRadioButton(tr("M3U Stream"), self)
         self.type_JELLYFIN = QRadioButton("Jellyfin", self)  # 2.8: media servers
         self.type_EMBY = QRadioButton("Emby", self)
-        for button in (
-            self.type_STB,
+        kinds = (
             self.type_M3UPLAYLIST,
-            self.type_M3USTREAM,
             self.type_XTREAM,
+            self.type_STB,
+            self.type_M3USTREAM,
             self.type_JELLYFIN,
             self.type_EMBY,
-        ):
+        )
+        grid_layout = QGridLayout()
+        for at, button in enumerate(kinds):  # read row by row, two to a row
             self.type_group.addButton(button)
             button.toggled.connect(self.update_inputs)
-
-        grid_layout = QGridLayout()
-        grid_layout.addWidget(self.type_STB, 0, 0)
-        grid_layout.addWidget(self.type_M3UPLAYLIST, 0, 1)
-        grid_layout.addWidget(self.type_M3USTREAM, 1, 0)
-        grid_layout.addWidget(self.type_XTREAM, 1, 1)
-        grid_layout.addWidget(self.type_JELLYFIN, 2, 0)
-        grid_layout.addWidget(self.type_EMBY, 2, 1)
+            grid_layout.addWidget(button, at // 2, at % 2)
         self.providers_layout.addRow(self.type_label, grid_layout)
 
     def create_epg_ui(self):
@@ -1386,7 +1409,7 @@ class OptionsDialog(QDialog):
         """Open on the Providers tab with a new, empty provider to fill in (TV: Add provider)."""
         self.options_tab.setCurrentWidget(self.providers_tab)
         self.add_new_provider()
-        self.name_input.setFocus()
+        self.url_input.setFocus()  # a link pasted or typed there fills the rest
         self._mark_saved()  # the empty form alone is nothing to ask about at ✕ (a link is)
 
     def remove_provider(self):
