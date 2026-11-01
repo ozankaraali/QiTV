@@ -20,7 +20,10 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, RADIUS_CARD, RADIUS_PANEL, qcolo
 
 # English (tests read them); translate() shows them.
 TITLE_TEXT = N_("Welcome to QiTV")
-BODY_TEXT = N_("Add your IPTV provider (STB portal, Xtream or M3U playlist) to start watching.")
+BODY_TEXT = N_(
+    "Add your IPTV provider (STB portal, Xtream or M3U playlist) or your Jellyfin or Emby server"
+    " to start watching."
+)
 BUTTON_TEXT = N_("Add provider")  # i18n: the welcome card's main button
 FREE_TEXT = N_("Free channels…")  # i18n: the welcome card's second button; opens a menu
 WIDTH_U = 44.0

@@ -27,7 +27,7 @@
   "Add to Home Screen": "Ana Ekrana Ekle",
   "Add to favorites": "Favorilere ekle",
   "Add to or remove from My list": "Listeme ekle veya listemden kaldır",
-  "Add your IPTV provider (STB portal, Xtream or M3U playlist) to start watching.": "İzlemeye başlamak için IPTV sağlayıcınızı (STB portalı, Xtream veya M3U oynatma listesi) ekleyin.",
+  "Add your IPTV provider (STB portal, Xtream or M3U playlist) or your Jellyfin or Emby server to start watching.": "İzlemeye başlamak için IPTV sağlayıcınızı (STB portalı, Xtream veya M3U oynatma listesi) ya da Jellyfin veya Emby sunucunuzu ekleyin.",
   "Add/Edit XMLTV Mapping": "XMLTV eşlemesi ekle/düzenle",
   "Added to favorites": "Favorilere eklendi",
   "Added {names} to your providers": "Sağlayıcılarınıza eklendi: {names}",

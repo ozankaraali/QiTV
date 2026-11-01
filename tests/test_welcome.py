@@ -40,7 +40,8 @@ class WelcomeCardTests(unittest.TestCase):
         self.assertEqual(TITLE_TEXT, "Welcome to QiTV")
         self.assertEqual(
             BODY_TEXT,
-            "Add your IPTV provider (STB portal, Xtream or M3U playlist) to start watching.",
+            "Add your IPTV provider (STB portal, Xtream or M3U playlist) or your Jellyfin or Emby"
+            " server to start watching.",
         )
         self.assertEqual(BUTTON_TEXT, "Add provider")
         self.assertEqual((WIDTH_U, TITLE_U, BODY_U, BODY_OPACITY), (44.0, 2.4, 1.2, 0.7))
