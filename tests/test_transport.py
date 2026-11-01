@@ -142,6 +142,28 @@ class TransportCase(unittest.TestCase):
         self.click(t, stop.center().toPoint())
         self.assertEqual(spy.count(), 1)
 
+    def test_a_channel_that_failed_keeps_live_tvs_controls_and_play_tries_again(self):
+        # 2.8.12: a mouse was stranded after "Couldn't open the stream": nothing showed.
+        t = self.make()
+        t.set_pip_state(True, False)
+        t.show_failed("Broken", "")
+        rects = t._layout()
+        self.assertTrue(t.failed())
+        self.assertNotIn("live", rects)  # nothing is live
+        for name in ("play", "stop", "previous", "guide", "search"):
+            self.assertIn(name, rects)
+        self.assertEqual(t.tooltip_at(rects["play"].center()), key_hint("Try again", "Space"))
+        record = t.title_rects()["record"]
+        self.assertEqual(t.tooltip_at(record.center()), "Nothing playing")
+        spy = QSignalSpy(t.playPauseRequested)
+        self.click(t, rects["play"].center().toPoint())
+        self.assertEqual(spy.count(), 1)
+        self.assertFalse(t.grab().isNull())  # painted without its LIVE badge
+        t.show_live("Broken", "")  # it plays: live TV's row again
+        self.assertFalse(t.failed())
+        self.assertIn("live", t._layout())
+        self.assertEqual(t.tooltip_at(rects["play"].center()), key_hint("Play / pause", "Space"))
+
     def test_mini_player_and_second_channel_buttons_sit_left_of_fullscreen(self):
         # Clickable controls for both pictures-in-picture.
         t = self.make()
@@ -1221,6 +1243,35 @@ class GridChipTests(TransportCase):
         t.set_grid_state(True, False)
         self.assertEqual(t.icon("grid"), "grid")
         self.assertNotIn("layout", t._layout())
+
+    def test_entering_the_grid_leaves_its_button_and_the_second_channels_in_place(self):
+        # A second click on the multiview's button leaves the grid: it moved one place right
+        # (into the hidden PiP button's) and the layout chip took its spot (2.8.12).
+        for width in (800, 1280, 1600):
+            t = self.make()
+            t.setGeometry(0, 0, width, width * 9 // 16)
+            t.set_pip_state(True, False)
+            t.show_live("One", "News")
+            t.set_grid_state(True, False)
+            before = t._layout()
+            t.set_grid_state(True, True, "2×2", cells=4)
+            during = t._layout()
+            for name in ("grid", "pip", "mini", "fullscreen"):
+                self.assertEqual(before[name], during[name], (width, name))
+            grid = QSignalSpy(t.gridRequested)
+            self.click(t, before["grid"].center().toPoint())
+            self.assertEqual(grid.count(), 1)
+
+    def test_over_the_grid_the_second_channels_button_is_dim_and_says_why(self):
+        t = self.grid()
+        spy = QSignalSpy(t.pipRequested)
+        pip = t.button_rect("pip")
+        self.click(t, pip.center().toPoint())
+        self.assertEqual(spy.count(), 0)
+        self.assertEqual(t.tooltip_at(pip.center()), "Leave the multiview first (V)")
+        t.set_grid_state(True, False)
+        self.click(t, t.button_rect("pip").center().toPoint())
+        self.assertEqual(spy.count(), 1)
 
     def test_a_click_on_the_chip_asks_for_the_layouts_and_it_is_lit_while_they_show(self):
         t = self.grid()

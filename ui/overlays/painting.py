@@ -288,8 +288,8 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
         elif name == "next":
             fill(_rrect(0.7, 0.18, 0.1, 0.64, 0.03))
             fill(_poly([(0.2, 0.18), (0.2, 0.82), (0.65, 0.5)]))
-        elif name in ("back10", "fwd10"):
-            arc, head = _skip_arrow(name == "fwd10")
+        elif name in ("back10", "fwd10", "fwd60"):  # ⟲ and ⟳ with their seconds in them
+            arc, head = _skip_arrow(name != "back10")
             line(arc)
             fill(head)
             p.setTransform(base)  # text is sized in device pixels, not the unit box
@@ -306,7 +306,7 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
                     rect.height() * 0.5,
                 ),
                 Qt.AlignCenter,
-                "10",
+                name[-2:],
             )
         elif name in _SPEAKER_WAVES:
             fill(_speaker())
