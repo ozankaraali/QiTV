@@ -81,7 +81,12 @@ export function show(name) {
   const tabbed = ["remote", "guide", "timetable", "library", "search"].includes(name);
   $("tabs").hidden = !tabbed;
   const under = name === "timetable" ? "guide" : name; // a channel's timetable is the Guide's
-  for (const tab of document.querySelectorAll("[data-tab]")) tab.classList.toggle("on", tab.dataset.tab === under);
+  for (const tab of document.querySelectorAll("[data-tab]")) {
+    const on = tab.dataset.tab === under;
+    tab.classList.toggle("on", on);
+    if (on) tab.setAttribute("aria-current", "page"); // a screen reader says which tab is open
+    else tab.removeAttribute("aria-current");
+  }
 }
 
 export function banner(text, kind = "") {
@@ -108,6 +113,8 @@ function applyStrings(table) {
   Object.assign(strings, table || {});
   for (const el of document.querySelectorAll("[data-t]")) if (strings[el.dataset.t]) el.textContent = strings[el.dataset.t];
   for (const el of document.querySelectorAll("[data-tp]")) if (strings[el.dataset.tp]) el.placeholder = strings[el.dataset.tp];
+  // An icon button's name for a screen reader (its aria-label) in the TV's language too.
+  for (const el of document.querySelectorAll("[data-tl]")) if (strings[el.dataset.tl]) el.setAttribute("aria-label", strings[el.dataset.tl]);
   for (const el of document.querySelectorAll("[data-tp]")) nameField(el);
 }
 

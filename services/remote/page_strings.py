@@ -214,6 +214,20 @@ PAGE_STRINGS: dict[str, str] = {
     "loading": N_("Loading…"),  # i18n: the phone remote: a list on its way
     "use_touchpad": N_("Use a touchpad"),  # i18n: the phone remote's menu: the d-pad's style
     "use_buttons": N_("Use buttons"),  # i18n: the phone remote's menu: the d-pad's style
+    # The phone remote's icon buttons, as a screen reader names them (they show no words).
+    "menu": N_("Menu"),  # i18n: the phone remote: the ⋯ button opening its menu (screen reader)
+    "up": N_("Up"),  # i18n: the phone remote: an arrow button (screen reader)
+    "right": N_("Right"),  # i18n: the phone remote: an arrow button (screen reader)
+    "down": N_("Down"),  # i18n: the phone remote: an arrow button (screen reader)
+    "left": N_("Left"),  # i18n: the phone remote: an arrow button (screen reader)
+    "volume_up": N_("Volume up"),  # i18n: the phone remote: a button (screen reader)
+    "volume_down": N_("Volume down"),  # i18n: the phone remote: a button (screen reader)
+    "back_10": N_("Back 10 seconds"),  # i18n: the phone remote: a button (screen reader)
+    "play_pause": N_("Play or pause"),  # i18n: the phone remote: a button (screen reader)
+    "forward_10": N_("Forward 10 seconds"),  # i18n: the phone remote: a button (screen reader)
+    "mute": N_("Mute"),  # i18n: the phone remote: a button, pressed while muted (screen reader)
+    "channel_up": N_("Channel up"),  # i18n: the phone remote: a button (screen reader)
+    "channel_down": N_("Channel down"),  # i18n: the phone remote: a button (screen reader)
 }
 
 

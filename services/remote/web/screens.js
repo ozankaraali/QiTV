@@ -153,7 +153,10 @@ function onState(message) {
   const guide = document.querySelector(".seg [data-key=guide]");
   if (guide) guide.classList.toggle("on", message.context === "guide");
   const mute = document.querySelector("[data-key=mute]");
-  if (mute) mute.classList.toggle("on", !!message.muted);
+  if (mute) {
+    mute.classList.toggle("on", !!message.muted);
+    mute.setAttribute("aria-pressed", String(!!message.muted)); // a screen reader: muted or not
+  }
   for (const [key, on] of [["record", message.recording], ["multiview", message.multiview]]) {
     for (const button of document.querySelectorAll(`[data-key=${key}]`)) button.classList.toggle("on", !!on); // lit while the TV does it
   }

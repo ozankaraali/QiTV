@@ -571,6 +571,43 @@ def scenario_now_playing(rig: Rig) -> None:
     rig.events.wait(Press, where=lambda e: e.button == "info" and not e.down, after=mark)
 
 
+def scenario_screen_reader(rig: Rig) -> None:
+    """What a screen reader says on the phone: the icon buttons in QiTV's language, Mute
+    pressed while muted, and which bottom tab is open."""
+    from services import i18n
+
+    i18n.set_language("tr")
+    try:
+        sid = paired_sid(rig)
+        menu = i18n.translate("Menu")
+        rig.page.wait_for_selector(f'#menuButton[aria-label="{menu}"]', timeout=5000)
+        for selector, english in (
+            ("#menuButton", "Menu"),
+            ("[data-key=up]", "Up"),
+            ("[data-key=volup]", "Volume up"),
+            ("[data-key=pp]", "Play or pause"),
+            ("[data-key=chdown]", "Channel down"),
+        ):
+            label = rig.page.get_attribute(selector, "aria-label")
+            assert label == i18n.translate(english) != english, (selector, label)
+    finally:
+        i18n.set_language(None)
+    mute = "[data-key=mute]"
+    assert rig.page.get_attribute(mute, "aria-pressed") == "false"
+    rig.hub.send(sid, {**STATE, "muted": True})
+    rig.page.wait_for_selector(f"{mute}[aria-pressed=true]", timeout=5000)
+    rig.hub.send(sid, STATE)
+    rig.page.wait_for_selector(f"{mute}[aria-pressed=false]", timeout=5000)
+    assert rig.page.get_attribute("[data-tab=remote]", "aria-current") == "page"
+    rig.page.click("[data-tab=guide]")
+    rig.page.wait_for_selector("[data-tab=guide][aria-current=page]", timeout=5000)
+    assert rig.page.get_attribute("[data-tab=remote]", "aria-current") is None
+    faint = rig.page.evaluate(
+        "getComputedStyle(document.documentElement).getPropertyValue('--faint').trim()"
+    )
+    assert faint == "rgba(238, 242, 246, 0.6)", faint
+
+
 def scenario_back_to(rig: Rig) -> None:
     """2.6: while the TV offers where a channel come back to was left, the phone shows Resume
     with when; a tap asks the TV to go back; it goes once the TV no longer offers it."""
@@ -1686,6 +1723,7 @@ SCENARIOS.update(
         "forget-clean": scenario_forget_clean,
         "hello-keeps-now": scenario_hello_keeps_now,
         "now-playing": scenario_now_playing,
+        "screen-reader": scenario_screen_reader,
         "back-to": scenario_back_to,
         "ask": scenario_ask,
         "stop": scenario_stop,

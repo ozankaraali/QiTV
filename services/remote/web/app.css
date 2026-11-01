@@ -7,7 +7,7 @@
   --line: rgba(238, 242, 246, 0.08);
   --text: #eef2f6;
   --muted: rgba(238, 242, 246, 0.62);
-  --faint: rgba(238, 242, 246, 0.4);
+  --faint: rgba(238, 242, 246, 0.6); /* small grey words: at least 5.9:1 on every surface */
   --accent: #e08a5f;
   --accent-fill: rgba(224, 138, 95, 0.22);
   --live: #d6453a;
