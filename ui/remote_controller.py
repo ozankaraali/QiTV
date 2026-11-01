@@ -353,6 +353,7 @@ class RemoteController(QObject):
             away = self._gone_timers.pop(event.device_id, None)
             if away is not None:
                 away.stop()  # back in time: it still watches
+                away.deleteLater()
             if event.door == "relay":
                 self._relayed.add(event.sid)
             self._diff.start()
