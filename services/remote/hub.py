@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 
 Emit = Callable[[object], None]
 _STOP_S = 2.0
+# The remotes closing on threads of their own (RemoteHub.stop_soon): one that starts waits for
+# them, on its own thread, before it opens its port.
+_closing: set[threading.Thread] = set()
+_closing_lock = threading.Lock()
 _GOODBYE_S = 0.3  # a goodbye to a phone that doesn't answer stops waiting after this
 SHELF_READS = 4  # films read from their providers at once (each film reads once at a time)
 # With the relay on, the pairing screen waits this long for it before showing the home door's
@@ -525,8 +529,18 @@ async def _quietly(awaitable: Awaitable[Any]) -> None:
         logger.debug("Phone remote: a send or close failed: %s", error)
 
 
+def _wait_closed(timeout: float) -> None:
+    """Wait, `timeout` seconds at most in all, for the remotes closing (`_closing`)."""
+    deadline = time.monotonic() + timeout
+    with _closing_lock:
+        closing = list(_closing)
+    for stopper in closing:
+        stopper.join(max(0.0, deadline - time.monotonic()))
+
+
 class RemoteHub:
-    """The GUI's handle on the remote's thread. Thread-safe; nothing here blocks."""
+    """The GUI's handle on the remote's thread. Thread-safe; nothing here blocks (`stop`
+    waits for the close: quitting, tests)."""
 
     def __init__(
         self,
@@ -573,6 +587,7 @@ class RemoteHub:
 
     def _run(self, loop: asyncio.AbstractEventLoop, config: dict) -> None:
         asyncio.set_event_loop(loop)
+        _wait_closed(2 * _STOP_S)  # the remote turned off just before still has the port
         try:
             loop.run_until_complete(self._core.start(config))
             self.port = self._core.port
@@ -595,17 +610,41 @@ class RemoteHub:
             loop.close()
 
     def stop(self) -> None:
+        """Stop the remote and wait until it closed (`stop_soon`), 2 × _STOP_S at most."""
+        stopper = self.stop_soon()
+        if stopper is not None:
+            stopper.join()
+
+    def stop_soon(self) -> Optional[threading.Thread]:
+        """Stop the remote without waiting: the GUI thread waited up to 2 × _STOP_S while a
+        phone was sent a film. The close runs on a thread of its own, returned (to wait for
+        when QiTV quits); a remote that starts meanwhile waits for it before opening its port."""
         loop, thread = self._loop, self._thread
         if loop is None or thread is None or not thread.is_alive():
-            return
-        future = asyncio.run_coroutine_threadsafe(self._core.stop(), loop)
+            return None
+        self._thread = None  # nothing more is sent to it
+        stopper = threading.Thread(
+            target=self._stop, args=(loop, thread), name="qitv-remote-stop", daemon=True
+        )
+        with _closing_lock:
+            _closing.add(stopper)
+        stopper.start()
+        return stopper
+
+    def _stop(self, loop: asyncio.AbstractEventLoop, thread: threading.Thread) -> None:
         try:
-            future.result(_STOP_S)
-        except Exception as error:  # a stuck close must not keep QiTV from quitting
+            future = asyncio.run_coroutine_threadsafe(self._core.stop(), loop)
+            try:
+                future.result(_STOP_S)
+            except Exception as error:  # a stuck close must not keep QiTV from quitting
+                logger.debug("Phone remote stop: %s", error)
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(_STOP_S)
+        except RuntimeError as error:  # its loop closed meanwhile: a start that failed
             logger.debug("Phone remote stop: %s", error)
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(_STOP_S)
-        self._thread = None
+        finally:
+            with _closing_lock:
+                _closing.discard(threading.current_thread())
 
     def _call(self, fn: Callable[..., Any], *args: Any) -> None:
         if self._loop is not None and self.running:

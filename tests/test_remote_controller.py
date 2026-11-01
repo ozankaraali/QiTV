@@ -256,6 +256,19 @@ class ReviewFixControllerTests(WindowCase):
         self.assertEqual(saved["relay_url"], "https://relay.example")
         self.assertEqual(saved["devices"], [device])
 
+    def test_turning_it_off_never_waits_for_its_close_but_quitting_does_briefly(self):
+        # Settings or Quit froze the window for up to 4 s while a phone was sent a film.
+        remote, hub = self.window.remote, mock.Mock()
+        remote.hub = hub
+        remote.shutdown()
+        hub.stop_soon.assert_called_once_with()
+        hub.stop.assert_not_called()  # stop() waits for the close
+        self.assertIsNone(remote.hub)
+        remote.wait_stopped(4.0)  # the window's close, step 3
+        hub.stop_soon.return_value.join.assert_called_once_with(4.0)
+        remote.wait_stopped(4.0)  # once
+        hub.stop_soon.return_value.join.assert_called_once_with(4.0)
+
     def test_removal_toast_waits_for_the_hub(self):
         from unittest import mock as _mock
 

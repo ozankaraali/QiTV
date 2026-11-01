@@ -169,6 +169,7 @@ CLOSE_RETRY_MS = 50
 CLOSE_THREAD_WAIT_MS = 30_000  # then quit anyway: a stuck worker must not keep QiTV open
 CLOSING_NOTICE_AFTER = 10  # close retries (half a second) before the notice shows
 CLOSING_NOTICE_MS = 60_000  # shown again only if it hides before the wait ends
+REMOTE_CLOSE_WAIT_S = 4.0  # quitting waits this long at most for the phone remote to close
 EPG_REFRESH_MS = 2 * 60 * 60 * 1000
 WATCH_SAVE_DELAY_MS = 2000  # a play is saved once the zapping settles (and on close)
 MINI_WIDTH_FRACTION = 0.25
@@ -1952,7 +1953,8 @@ class TVWindow(QMainWindow):
            stops, the geometry is saved.
         2. Wait for running QThreads (never block the GUI), with a notice after half a second,
            for at most CLOSE_THREAD_WAIT_MS.
-        3. Save the image and EPG indexes and release libVLC. On macOS libVLC removes its
+        3. Save the image and EPG indexes, let the phone remote finish closing (stopped in
+           step 1, REMOTE_CLOSE_WAIT_S at most) and release libVLC. On macOS libVLC removes its
            video view on the run loop after a stop, and closing before that crashes.
         4. Close.
 
@@ -1998,6 +2000,8 @@ class TVWindow(QMainWindow):
             self._run_steps(
                 ("save the image cache index", self.image_manager.save_index),
                 ("save the EPG indexes", self.catalogs.save_epg_indexes),
+                # Closing since step 1 on a thread of its own (its phones hear goodbye).
+                ("let the phone remote close", self._wait_remote_closed),
                 ("release the video", self._release_video),
             )
             self._close_later(event)
@@ -2125,6 +2129,9 @@ class TVWindow(QMainWindow):
                 # The message can name a provider URL: a scrubbed one, and the frames only.
                 logger.error("Could not %s: %s", what, safe_message(e))
                 logger.debug("Could not %s:\n%s", what, safe_traceback(e))
+
+    def _wait_remote_closed(self) -> None:
+        self.remote.wait_stopped(REMOTE_CLOSE_WAIT_S)
 
     def _save_geometry(self) -> None:
         self.config_manager.save_window_settings(_Geometry(self._normal_geometry()), WINDOW_NAME)

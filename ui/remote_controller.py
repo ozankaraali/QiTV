@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import logging
+import threading
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
@@ -132,6 +133,7 @@ class RemoteController(QObject):
         self.bridge = RemoteBridge(self)
         self.bridge.arrived.connect(self._on_event)
         self.hub: Optional[RemoteHub] = None
+        self._stopping: Optional[threading.Thread] = None  # the last hub closing (shutdown)
         self._repeater = KeyRepeater(self._press)
         self._clock = QElapsedTimer()
         self._clock.start()
@@ -230,8 +232,16 @@ class RemoteController(QObject):
         self._diff.stop()
         self._phones.clear()
         if self.hub is not None:
-            self.hub.stop()
+            # Not waited for: a phone being sent a film held the window up to 4 s (Settings,
+            # Quit). Quitting waits for it later (`wait_stopped`).
+            self._stopping = self.hub.stop_soon()
             self.hub = None
+
+    def wait_stopped(self, timeout: float) -> None:
+        """Quitting: the remote's close (`shutdown`) waited for, `timeout` seconds at most."""
+        stopping, self._stopping = self._stopping, None
+        if stopping is not None:
+            stopping.join(timeout)
 
     def set_pairing(self, open_: bool) -> None:
         if self.hub is not None:
