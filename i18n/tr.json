@@ -879,6 +879,8 @@
   "The code expired. Scan the new code on the TV.": "Kodun süresi doldu. TV'deki yeni kodu tarayın.",
   "The disk buffer failed. Playing what was kept; Go live plays the channel again.": "Disk arabelleği çalışmadı. Saklanan kısım oynatılıyor; “Canlıya dön” kanalı yeniden oynatır.",
   "The external player could not start": "Harici oynatıcı başlatılamadı",
+  "The file holds your sign-in: keep it private.": "Dosya oturum açma bilgilerinizi içerir: kimseyle paylaşmayın.",
+  "The file may hold your sign-in: keep it private.": "Dosya oturum açma bilgilerinizi içerebilir: kimseyle paylaşmayın.",
   "The film didn't open. Tap TV to watch it there.": "Film açılamadı. TV'de izlemek için TV'ye dokunun.",
   "The mixer's other row (while it shows)": "Mikserin diğer satırı (göründüğü sürece)",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Yeni sürüm şuraya kaydedildi:\n{path}\n\nLütfen mevcut uygulamayı indirilen dosyayla değiştirin.",

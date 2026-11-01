@@ -2,7 +2,8 @@
 
 An export first checks that it can run (`export_available`), then asks where to save, then runs
 ExportWorker off the GUI thread on a snapshot of the provider's loaded content. Its progress is
-a lasting toast; Esc cancels it (the window asks `cancel()` first). The worker's messages are
+a lasting toast with a Cancel button, and Esc cancels it too (the window asks `cancel()`
+first). Its result says that the file may hold the account's sign-in. The worker's messages are
 fixed strings (English, shown with `translate`) or its own words for a failure. While the page
 shows "All providers" the export is still one provider's (the one the page returns to): the save
 dialog and the result name it.
@@ -31,13 +32,21 @@ from services.i18n import N_, tr, tr_n, translate
 logger = logging.getLogger(__name__)
 
 BUSY_TEXT = N_("An export is already running")
+CANCEL_TEXT = N_("Cancel")  # i18n: the button on an export's progress message (verb)
+# i18n: said after "Exported 20 items to file.m3u": its links name the account (Xtream, STB)
+HOLDS_SIGN_IN = N_("The file holds your sign-in: keep it private.")
+# i18n: said after "Exported 20 items to file.m3u": a playlist's links may name the account
+MAY_HOLD_SIGN_IN = N_("The file may hold your sign-in: keep it private.")
+SIGNED_LINKS = ("XTREAM", "STB")  # every link of theirs carries the sign-in (or the MAC)
 _WHAT = {"live": "channels", "movies": "movies", "series": "series"}
 INFO_MS = 3000
 ERROR_MS = 6000
+RESULT_MS = 6000  # the result and its word on the sign-in: read twice as long
 PROGRESS_MS = 10 * 60 * 1000  # stays up between progress reports; the last report replaces it
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
 
-Notify = Callable[[str, str, int], None]  # text, kind ("info" | "error"), ms
+# text, kind ("info" | "error"), ms; and `action`, `on_action`: a button on the message
+Notify = Callable[..., None]
 
 
 def default_path(provider_name: str, kind: ExportKind) -> str:
@@ -99,6 +108,8 @@ class ExportFlow(QObject):
         self._cancel: Optional[threading.Event] = None  # set while an export runs
         self._path = ""
         self._named = ""  # the provider the result names (All providers), else ""
+        self._signed = False  # the provider's links carry its sign-in (SIGNED_LINKS)
+        self._progress = ""  # the progress message shown last
         self._closed = False
 
     def running(self) -> bool:
@@ -144,16 +155,25 @@ class ExportFlow(QObject):
             cancel=cancel,
         )
         self._cancel, self._path, self._named = cancel, path, named
+        self._signed = str(provider.get("type") or "") in SIGNED_LINKS
         worker.progress.connect(self._on_progress, Qt.ConnectionType.QueuedConnection)
-        self._notify(tr("Exporting…"), "info", PROGRESS_MS)
+        self._show_progress(tr("Exporting…"))
         self._runner.run_worker(worker, self._on_finished, self._on_error)
 
+    def _show_progress(self, text: str) -> None:
+        """The lasting progress message, with its Cancel button (Esc does the same)."""
+        self._progress = text
+        self._notify(text, "info", PROGRESS_MS, action=CANCEL_TEXT, on_action=self.cancel)
+
     def cancel(self) -> bool:
-        """Esc while exporting: True when this cancelled a running export."""
+        """Esc, or the progress message's Cancel, while exporting: True when this cancelled a
+        running export. The message stays, without its button, until the export has stopped."""
         cancel = self._cancel
         if cancel is None or cancel.is_set():
             return False
         cancel.set()
+        if not self._closed:
+            self._notify(self._progress, "info", PROGRESS_MS)
         return True
 
     def shutdown(self) -> None:
@@ -167,7 +187,7 @@ class ExportFlow(QObject):
         if self._closed or self._cancel is None or self._cancel.is_set():
             return
         # i18n: an export's progress: done of total (series, for a complete series)
-        self._notify(tr("Exporting… {done}/{total}", done=done, total=total), "info", PROGRESS_MS)
+        self._show_progress(tr("Exporting… {done}/{total}", done=done, total=total))
 
     def _on_finished(self, _context, count) -> None:
         path, self._cancel = self._path, None
@@ -189,7 +209,12 @@ class ExportFlow(QObject):
                 count,
                 filename=filename,
             )
-        self._notify(text, "info", INFO_MS)
+        if not count:
+            self._notify(text, "info", INFO_MS)
+            return
+        # The file's links reach the provider as this account: said where it is saved.
+        note = translate(HOLDS_SIGN_IN if self._signed else MAY_HOLD_SIGN_IN)
+        self._notify(f"{text} {note}", "info", RESULT_MS)
 
     def _on_error(self, _context, message: str) -> None:
         self._cancel = None

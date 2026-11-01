@@ -65,6 +65,7 @@ from tests.process_fixtures import still_running, terminate
 from tests.test_keymap import resolve_text
 from tests.ts_fixtures import make_stream
 from ui.brand import logo_aspect
+from ui.export_flow import MAY_HOLD_SIGN_IN
 from ui.keymap import SHORTCUTS, Action, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT, LIBRARY_ACTION
@@ -174,9 +175,9 @@ class WindowCase(unittest.TestCase):
         toast = self.window.overlays.toast
         show_message = toast.show_message
 
-        def spy(text, kind="info", ms=3000):
+        def spy(text, kind="info", ms=3000, **button):
             self.toasts.append((text, kind))
-            show_message(text, kind, ms)
+            show_message(text, kind, ms, **button)
 
         toast.show_message = spy
         self.addCleanup(self.close_window)
@@ -1855,7 +1856,7 @@ class LibraryWindowTests(TwoProviderCase):
             self.menu_actions()["Cached Content…"].trigger()
         default = Path.home() / "Downloads" / f"{PROVIDER_NAME}-cached.m3u"
         self.assertEqual(ask.call_args[0][1:], ("Export", str(default), "M3U files (*.m3u)"))
-        done = ("Exported 2 items to channels.m3u", "info")
+        done = (f"Exported 2 items to channels.m3u {MAY_HOLD_SIGN_IN}", "info")
         self.assertTrue(wait_until(lambda: done in self.toasts), self.toasts)
         text = target.read_text(encoding="utf-8")
         self.assertEqual(text.count("#EXTINF"), 2)

@@ -888,6 +888,8 @@
   "The code expired. Scan the new code on the TV.": "Le code a expiré. Scannez le nouveau code sur la TV.",
   "The disk buffer failed. Playing what was kept; Go live plays the channel again.": "Le tampon sur disque a échoué. Lecture de ce qui a été gardé ; « Au direct » relance la chaîne.",
   "The external player could not start": "Le lecteur externe n’a pas pu démarrer",
+  "The file holds your sign-in: keep it private.": "Le fichier contient vos identifiants : gardez-le pour vous.",
+  "The file may hold your sign-in: keep it private.": "Le fichier peut contenir vos identifiants : gardez-le pour vous.",
   "The film didn't open. Tap TV to watch it there.": "Le film ne s'est pas ouvert. Touchez TV pour le regarder sur la télé.",
   "The mixer's other row (while it shows)": "L’autre ligne du mixeur (tant qu’il est affiché)",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "La nouvelle version a été enregistrée ici :\n{path}\n\nRemplacez l’application actuelle par le fichier téléchargé.",

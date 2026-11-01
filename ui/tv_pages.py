@@ -17,7 +17,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import logging
 import os
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from PySide6.QtCore import QObject, QPoint, QThread
 from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QWidget
@@ -425,13 +425,23 @@ class TVPages(QObject):
 
     # ---- messages -----------------------------------------------------------------------------
 
-    def notify(self, text: str, kind: str = "info", ms: int = INFO_MS) -> None:
+    def notify(
+        self,
+        text: str,
+        kind: str = "info",
+        ms: int = INFO_MS,
+        *,
+        action: str = "",
+        on_action: Optional[Callable[[], None]] = None,
+    ) -> None:
         """A message on whichever page shows (each page has its toast). A text marked where it
-        was written (the Library's, the exports') shows in the active language."""
+        was written (the Library's, the exports') shows in the active language. `action` and
+        `on_action`: a button on the message (a running export's Cancel)."""
         window = self._window
         text = shown_message(text)
+        button = {"action": action, "on_action": on_action} if on_action is not None else {}
         for toast in (window.overlays.toast, window.library_toast):
-            toast.show_message(text, kind, ms)
+            toast.show_message(text, kind, ms, **button)
 
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self.library_shown():  # the player's toast says it too, but its page is hidden
