@@ -9,7 +9,7 @@ scenario prints PASS or FAIL; the exit code is 1 if any failed. Needs Google Chr
 against tests/fixtures/noise_vectors.json), pair-home, scan-again, hold, hidden-releases and the
 second screen's; with --relay (a local `wrangler dev` of the QiTV relay, e.g. http://127.0.0.1:8787,
 or the deployed one): pair-relay, hop, hop-once, hop-memory, hop-back-on-loss, relay-banner,
-two-tvs, scan-again-relay, and page-versions when QITV_KEPT_PAGE names a page the relay keeps
+silent-tv, two-tvs, scan-again-relay, and page-versions when QITV_KEPT_PAGE names a page the relay keeps
 beside the newest (a copy of its public/p/<id>/ at public/p/<another id>/, that id added to
 public/pages.json's "kept").
 """
@@ -1756,16 +1756,47 @@ def scenario_relay_banner(rig: Rig) -> None:
     mark = rig.events.mark()
     rig.page.goto(f"{rig.relay}/#b.")
     rig.events.wait(Opened, where=lambda e: e.door == "relay", after=mark, timeout=10)
-    rig.hub.stop()  # QiTV quits: the relay tells the phone it's offline
-    rig.page.locator("#banner", has_text="reachable").wait_for(timeout=8000)
+    rig.hub.stop()  # QiTV quits: its goodbye reaches the phone through the relay too
+    rig.page.locator("#banner", has_text="closed on the computer").wait_for(timeout=3000)
+    # The next try (5 s on) finds no QiTV in the room: the relay's word, which says the same.
+    rig.page.locator("#banner", has_text="reachable").wait_for(timeout=10000)
     rig.page.wait_for_timeout(1500)
     assert "reachable" in rig.page.inner_text("#banner"), rig.page.inner_text("#banner")
+
+
+def scenario_silent_tv(rig: Rig) -> None:
+    """A QiTV whose computer went to sleep leaves its socket open at the relay and answers
+    nothing: the phone gives up on a handshake after 8 s and tries again as after any failure
+    (never "Connecting…" for good), and is back once QiTV answers."""
+    scenario_pair_relay(rig)
+    client = rig.hub._core.relay
+
+    async def asleep(data: bytes) -> None:
+        return None
+
+    client._on_frame = asleep  # frames reach the TV's socket and go nowhere
+    sockets: list[float] = []
+    rig.page.on("websocket", lambda ws: sockets.append(time.monotonic()))
+    started = time.monotonic()
+    rig.page.goto(f"{rig.relay}/#b.")  # the relay page without hopping
+    rig.page.locator("#banner", has_text="Reconnecting").wait_for(timeout=12000)
+    waited = time.monotonic() - started
+    assert 7 < waited < 11, f"gave up after {waited:.1f} s"
+    deadline = time.monotonic() + 5
+    while len(sockets) < 2 and time.monotonic() < deadline:
+        rig.page.wait_for_timeout(100)
+    assert len(sockets) >= 2, "no second try"
+    mark = rig.events.mark()
+    del client._on_frame  # QiTV wakes up: the try under way or the next one gets through
+    rig.events.wait(Opened, where=lambda e: e.door == "relay", after=mark, timeout=20)
+    rig.page.locator("#banner").wait_for(state="hidden", timeout=5000)
 
 
 RELAY_SCENARIOS: dict[str, Callable[[Rig], None]] = {
     "hop-once": scenario_hop_once,
     "hop-memory": scenario_hop_memory,
     "relay-banner": scenario_relay_banner,
+    "silent-tv": scenario_silent_tv,
     "pair-relay": scenario_pair_relay,
     "hop": scenario_hop,
     "page-versions": scenario_page_versions,

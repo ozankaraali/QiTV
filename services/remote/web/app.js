@@ -227,7 +227,8 @@ function onClose(code, reason, mode) {
     forget(t("removed"));
     return;
   }
-  if (code === 1001 && reason === "stopped") app.stopped = true; // as its goodbye says
+  // As its goodbye says; QiTV closes with 1001, which the relay passes on as 1000.
+  if ((code === 1001 || code === 1000) && reason === "stopped") app.stopped = true;
   if (app.stopped) {
     // Until QiTV is back its message stays (or the relay's, which says the same), and the
     // tries go slower: through the relay each costs a request of its quota.

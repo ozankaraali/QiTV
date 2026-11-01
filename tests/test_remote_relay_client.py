@@ -391,6 +391,29 @@ class ReviewFixRelayTests(RelayCase):
         self.assertGreaterEqual(attempts, 2)
         self.assertNotIn("resting", states)
 
+    def test_stopping_says_goodbye_through_the_relay_too(self):
+        """A phone on the relay hears QiTV's goodbye "stopped" and its close, as a phone at home
+        does: before the relay client stops and lets its phones go."""
+
+        async def go():
+            relay = FakeRelay()
+            base = await relay.start()
+            try:
+                hub = self.hub(base)
+                phone, _, _ = await self.pair(relay, hub)
+                await asyncio.to_thread(hub.stop)
+                kind, bye = await relay.tv_says(1)
+                self.assertEqual(kind, BINARY)
+                self.assertEqual(phone.open(bye), {"t": "bye", "reason": "stopped"})
+                return await relay.tv_says(1)
+            finally:
+                await relay.stop()
+
+        kind, close = self.run_async(go())
+        self.assertEqual(kind, CLOSED)
+        self.assertEqual(int.from_bytes(close[:2], "big"), 1001)
+        self.assertEqual(close[2:], b"stopped")
+
     def test_backoff_starts_over_only_after_a_minute_up(self):
         from services.remote.relay_client import next_backoff
 

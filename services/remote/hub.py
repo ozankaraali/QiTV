@@ -178,13 +178,13 @@ class HubCore:
 
     async def stop(self) -> None:
         self.set_pairing(False)
+        # Every phone hears the goodbye, all at once (a quit waits _STOP_S at most), those
+        # through the relay too: so before the relay client stops, which lets its phones go.
+        # (The relay passes 1001 on as 1000; the page goes by the reason.)
+        await asyncio.gather(*(self._goodbye(conn) for conn in list(self.conns.values())))
         if self.relay is not None:
             await self.relay.stop()
             self.relay = None
-        for conn in list(self.conns.values()):
-            if conn.session.established:
-                await _briefly(conn.send(conn.session.bye("stopped")))
-            await _briefly(conn.close(1001, "stopped"))
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
@@ -192,6 +192,11 @@ class HubCore:
         if self._http is not None:
             await _quietly(self._http.close())
             self._http = None
+
+    async def _goodbye(self, conn: _Conn) -> None:
+        if conn.session.established:
+            await _briefly(conn.send(conn.session.bye("stopped")))
+        await _briefly(conn.close(1001, "stopped"))
 
     # ---- films -----------------------------------------------------------------------------
 
