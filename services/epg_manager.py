@@ -9,6 +9,7 @@ import logging
 import os
 import pickle
 import threading
+import time
 from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, Set, Tuple, cast
 import xml.etree.ElementTree as ET
 import zipfile
@@ -321,6 +322,26 @@ def _note_stored(where: tuple[str, str], entry: Dict[str, Any]) -> None:
         _STORED[where] = (_STORED.get(where, (0, None))[0] + 1, dict(entry))
 
 
+# A source whose load failed with no guide to show is tried again once this long has passed,
+# doubling with each failure in a row up to _RETRY_MAX_S (2.8.12: it was marked as having
+# none, for good). The window's refresh (every 2 h) and a restart try it again; the loads in
+# between (a provider set up again, a guide in use again) wait, unless its portal signed in
+# again since.
+_RETRY_FIRST_S = 5 * 60
+_RETRY_MAX_S = 60 * 60
+# A portal's guide (get_epg_info) is one large answer, as its whole live list is: the same
+# time and tries (workers.ALL_CHANNELS_TIMEOUT_S, a second try).
+_STB_GUIDE_TIMEOUT_S = 30
+_STB_GUIDE_TRIES = 2
+# A portal's guide covers epg_stb_period_hours from its load: it loads again once less than
+# this is left, whatever "Check update every" says (the window refreshes guides this often).
+_STB_GUIDE_MARGIN = timedelta(hours=2)
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
 class EpgManager:
     def __init__(self, config_manager, provider_manager):
         self.config_manager = config_manager
@@ -339,6 +360,9 @@ class EpgManager:
         self._saved: Optional[tuple[str, tuple[int, int, int], Any]] = None
         # The guide whose times without a UTC offset were last noted in the log (once each).
         self._offset_less_noted: Optional[str] = None
+        # Sources whose last load failed, by cache key: (failures in a row, when the next
+        # load may try it (_monotonic), the portal session it failed with).
+        self._failures: Dict[str, Tuple[int, float, str]] = {}
         self._load_index()
 
     def _cache_dir(self):
@@ -356,6 +380,33 @@ class EpgManager:
         epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
         age = datetime.now() - epg_date
         return age.total_seconds() > self.config_manager.epg_expiration
+
+    def _stb_guide_running_out(self, epg_info) -> bool:
+        """Whether a portal's guide has less than _STB_GUIDE_MARGIN of its span left (it
+        covers epg_stb_period_hours from its load; 2.8.12: it was loaded again only when
+        "Check update every" passed, and set to a day the portal's channels went blank)."""
+        epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
+        span = timedelta(hours=self.config_manager.epg_stb_period_hours)
+        return datetime.now() - epg_date >= span - _STB_GUIDE_MARGIN
+
+    def _session(self) -> str:
+        """The provider's session now (an STB portal's token; "" for any other)."""
+        return str(getattr(self.provider_manager, "token", "") or "")
+
+    def _retry_due(self, cache_key) -> bool:
+        """Whether a load may fetch the source: it has not failed lately, its back-off is
+        over, or its portal signed in again since it failed (a new session)."""
+        failed = self._failures.get(cache_key)
+        if failed is None:
+            return True
+        _count, due, session = failed
+        return _monotonic() >= due or session != self._session()
+
+    def _note_failure(self, cache_key) -> None:
+        count = self._failures.get(cache_key, (0, 0.0, ""))[0] + 1
+        wait = min(_RETRY_FIRST_S * 2 ** (count - 1), _RETRY_MAX_S)
+        self._failures[cache_key] = (count, _monotonic() + wait, self._session())
+        logger.info("The guide couldn't be loaded; it is tried again in %d min", wait // 60)
 
     def _publish(self, cache_key, guide):
         """Swap in a fully built guide with one assignment.
@@ -420,6 +471,7 @@ class EpgManager:
             "date": (source_date or now).strftime(_INDEX_TIME_FORMAT),
             "last_access": now.strftime(_INDEX_TIME_FORMAT),
         }
+        self._failures.pop(cache_key, None)
         _note_stored(self._where(cache_key), self.index[cache_key])
 
     def _where(self, cache_key: str) -> tuple[str, str]:
@@ -429,8 +481,9 @@ class EpgManager:
         """Loading this source failed or found no guide.
 
         A refresh keeps the guide it has (in memory, else the one saved on disk) and leaves
-        the index entry alone, so the next refresh tries again. Only a source without any
-        guide is marked unavailable.
+        the index entry alone, so the next refresh tries again. A source without any guide
+        to show is tried again once its back-off is over (_retry_due): at the window's next
+        refresh, or the next start (2.8.12: it was marked as having none, never asked again).
         """
         if self._epg_source == cache_key and len(self.epg):
             logger.info("Couldn't refresh the EPG; keeping the current guide")
@@ -438,7 +491,7 @@ class EpgManager:
         if self.index.get(cache_key) and self._load_cached_epg(cache_key):
             logger.info("Couldn't refresh the EPG; showing the saved guide")
             return
-        self.index[cache_key] = None
+        self._note_failure(cache_key)
         self._publish(cache_key, MultiKeyDict())
 
     def _source(self) -> Optional[tuple[str, str, tuple]]:
@@ -611,10 +664,13 @@ class EpgManager:
             self.index.setdefault(key, value)
 
     def set_current_epg(self, on_shown: Optional[Callable[[], None]] = None):
-        """Show the configured source's guide: a source indexed as None has none; an outdated
-        one is fetched again, its saved guide shown meanwhile (`on_shown` says when, so the
-        catalog reads it before the download ends); otherwise its saved guide is shown. A
-        source never indexed, or whose guide file is gone, is fetched."""
+        """Show the configured source's guide: its saved guide first, then an outdated one is
+        fetched again while it shows (`on_shown` says when, so the catalog reads it before the
+        download ends; a URL guide's server is asked whether it changed behind it, and one
+        that can't be reached keeps it). A source never indexed, or whose guide file is
+        gone, is fetched. A source whose load failed lately is not fetched before its back-off
+        is over (see _retry_due); an entry of None (2.8.11 and older: a load failed) is
+        fetched as one never indexed."""
         if not self.config_manager.channel_epg:
             self._publish(None, MultiKeyDict())
             return
@@ -626,20 +682,32 @@ class EpgManager:
         if kind in ("file", "url"):  # every provider's: another's manager may have stored it
             seen = _stored(self._where(key))[0]  # before the entry is taken: none is missed
             self._take_shared_entry(key)
-        if key in self.index:
-            epg_info = self.index[key]
-            if epg_info is None:
-                return
-            if epg_info and self._out_of_date(kind, args, epg_info):
-                # The saved guide shows while the fresh one loads (a large one takes minutes);
-                # a failed fetch keeps it (see _source_failed). Its last check stays as it
-                # was, so a URL guide whose fetch fails is checked again next time.
-                if self._load_cached_epg(key, touch=False) and on_shown is not None:
-                    on_shown()
+        epg_info = self.index.get(key)
+        due = self._retry_due(key)
+        if not isinstance(epg_info, dict):
+            if due:
                 self._fetch(kind, args, seen)
-                return
-            if self._load_cached_epg(key):
-                return
+            return
+        # The saved guide shows while the fresh one loads (a large one takes minutes); a
+        # failed fetch keeps it (see _source_failed). Its last check stays as it was, so a URL
+        # guide whose fetch fails is checked again next time.
+        shown = self._load_cached_epg(key, touch=False)
+        if not due:
+            return
+        if shown and on_shown is not None and kind == "url" and self._url_check_due(epg_info):
+            on_shown()  # its server is asked below (up to 5 s): the saved guide is up meanwhile
+            on_shown = None
+        try:
+            outdated = not shown or (bool(epg_info) and self._out_of_date(kind, args, epg_info))
+        except requests.RequestException as e:
+            name = type(e).__name__
+            logger.info("Couldn't check the guide's address (%s): the saved one shows", name)
+            return
+        if not outdated:
+            epg_info["last_access"] = datetime.now().strftime(_INDEX_TIME_FORMAT)
+            return
+        if shown and on_shown is not None:
+            on_shown()
         self._fetch(kind, args, seen)
 
     def _fetch(self, kind, args, seen=None):
@@ -656,21 +724,29 @@ class EpgManager:
 
     def _out_of_date(self, kind, args, epg_info):
         """Whether a cached source's guide is fetched again: a provider's once it is older
-        than the update period, a local file's once the file changed, a URL's once the period
-        passed since it was last checked and the server has a newer one."""
+        than the update period (a portal's also before its span runs out), a local file's once
+        the file changed, a URL's once the period passed since it was last checked and the
+        server has a newer one (requests' errors when it can't be asked)."""
         if kind == "file":
             epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
             modified = datetime.fromtimestamp(os.path.getmtime(args[0]))
             return (modified - epg_date).total_seconds() > 2
         if kind == "url":
             return self._url_changed(args[0], epg_info)
+        if kind == "stb" and self._stb_guide_running_out(epg_info):
+            return True
         return self._is_expired(epg_info)
 
-    def _url_changed(self, url, epg_info) -> bool:
+    def _url_check_due(self, epg_info) -> bool:
+        """Whether the update period passed since a URL guide was last checked."""
         last_access = datetime.strptime(epg_info["last_access"], _INDEX_TIME_FORMAT)
-        current_time = datetime.now()
-        if (current_time - last_access).total_seconds() <= self.config_manager.epg_expiration:
+        age = datetime.now() - last_access
+        return bool(age.total_seconds() > self.config_manager.epg_expiration)
+
+    def _url_changed(self, url, epg_info) -> bool:
+        if not self._url_check_due(epg_info):
             return False
+        current_time = datetime.now()
         epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
         headers = {**CLIENT_HEADERS, "If-Modified-Since": _http_date(epg_date)}
         # Only the status is read: a server that ignores the header sends the whole guide,
@@ -715,6 +791,8 @@ class EpgManager:
                 content_type="itv",
                 action="get_epg_info",
                 period=period,
+                max_retries=_STB_GUIDE_TRIES,
+                timeout=_STB_GUIDE_TIMEOUT_S,
                 verify_ssl=verify_ssl,
             )
             content_loader.run()
