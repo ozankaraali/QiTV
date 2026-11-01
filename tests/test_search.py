@@ -1,3 +1,4 @@
+import gc
 import os
 import tempfile
 import time
@@ -122,6 +123,20 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(len(index), 1)
         self.assertEqual(index[0][2], "istanbul film")
         self.assertEqual(titles(search_index(index, "istanbul")), ["İstanbul Film"])
+
+    def test_the_index_adds_a_few_objects_to_the_collector_not_one_a_title(self):
+        # Kept for a while after a search: each full garbage collection walks what it holds.
+        items = [{"id": str(i), "name": f"Film {i}"} for i in range(5000)]
+        gc.collect()
+        before = len(gc.get_objects())
+        index = build_index([("P", {"vod": items})])
+        gc.collect()
+        self.assertLess(len(gc.get_objects()) - before, 50)
+        self.assertEqual(len(index), 5000)
+        self.assertEqual(index[4999][3], "Film 4999")
+        self.assertEqual(index[:1], [("P", "movies", "film 0", "Film 0", items[0])])
+        self.assertEqual(list(index)[1], ("P", "movies", "film 1", "Film 1", items[1]))
+        self.assertEqual(titles(search_index(index, "film 4999")), ["Film 4999"])
 
     def test_large_index_no_match_is_fast(self):
         items = [{"id": str(i), "name": f"Night Road Salt Film {i}"} for i in range(75000)]
