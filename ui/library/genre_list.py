@@ -18,7 +18,7 @@ from services import i18n
 from services.i18n import tr
 from services.library import CONTINUE, MY_LIST, NEW, RECORDINGS, Genre
 from ui.overlays.channel_rows import ChannelListView
-from ui.overlays.painting import Units, draw_icon, elided, fill_round
+from ui.overlays.painting import Units, draw_field_icon, draw_icon, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 WIDTH_U = 18.0
@@ -363,10 +363,12 @@ class GenreList(QWidget):
         p.setFont(units.font(1.05))
         inner = box.adjusted(1.0 * u, 0, -1.0 * u, 0)
         if self.filter_text:
-            p.setPen(qcolor(PALETTE.text))
-            text = "⌕ " + self.filter_text + "▏"
+            tone = qcolor(PALETTE.text)
+            text = self.filter_text + "▏"
         else:
-            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
-            text = "⌕ " + tr("Find a genre…")  # i18n: placeholder of the Library's genre filter
+            tone = qcolor(PALETTE.text, PALETTE.text_muted_alpha)
+            text = tr("Find a genre…")  # i18n: placeholder of the Library's genre filter
+        inner = draw_field_icon(p, inner, tone)  # the magnifier the other finds draw
+        p.setPen(tone)
         p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))
         p.end()

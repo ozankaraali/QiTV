@@ -1475,8 +1475,22 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build()
         ctl.open("movies")
         self.assertNotIn(("section", "movies"), self.catalog.requests)
-        self.assertEqual(self.screen.grid._message, "P has no movies")
+        self.assertEqual(
+            self.screen.grid._message,
+            "P has no movies\nFilms and series come from Xtream, STB, Jellyfin and Emby providers.",
+        )
         self.assertEqual(self.screen.genres.rows(), [])
+        # Where films come from, and the way there: Add provider (a click, or Enter).
+        asked = []
+        ctl.addProviderRequested.connect(lambda: asked.append(True))
+        button = self.screen.grid.message_button()
+        self.assertFalse(button.isHidden())
+        self.assertEqual(button.text(), "Add provider")
+        button.click()
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(asked, [True, True])
+        ctl.open("live")  # no button where it does not belong
+        self.assertTrue(button.isHidden())
 
 
 class SourceMixTests(unittest.TestCase):  # 2.8: the source menu's ticks mix providers

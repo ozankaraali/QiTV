@@ -315,6 +315,7 @@
   "Filled in from the link ({kind}). Check the details, then press Verify Provider.": "Aus dem Link übernommen ({kind}). Prüfen Sie die Angaben und klicken Sie dann auf „Anbieter prüfen“.",
   "Film and series details from TMDB": "Film- und Serieninfos von TMDB",
   "Film or series title": "Film- oder Serientitel",
+  "Films and series come from Xtream, STB, Jellyfin and Emby providers.": "Filme und Serien kommen von Xtream-, STB-, Jellyfin- und Emby-Anbietern.",
   "Find a channel": "Sender suchen",
   "Find a genre or a channel at every provider: type its name": "Genre oder Sender bei jedem Anbieter finden: Namen eingeben",
   "Find a genre or channel": "Genre oder Sender suchen",

@@ -76,6 +76,7 @@ from services.catalog import shown_label
 from services.find import FoundChannel, FoundGenre, by_scope, own_keys
 from services.i18n import N_, tr, tr_n, translate
 from services.navigation import (
+    ACTION_ROWS,
     ADD_PROVIDER_ROW,
     FAVORITES_GROUP,
     FREE_CHANNELS_ROW,
@@ -133,6 +134,8 @@ SEPARATOR = " › "
 # The texts below stay English (the code compares them); translate() shows them, and the
 # tooltips naming a key are made where they show.
 PROVIDER_TOOLTIP = N_("Choose another provider")  # i18n: tooltip of the provider's name
+# i18n: the channel list's title over its providers (the top layer, Settings and Add under them)
+PROVIDERS_TITLE = N_("Providers")
 CRUMB_FONT_U = 1.15
 PREVIEW_DEBOUNCE_MS = 200
 OWN_AT_ONCE = 20_000  # an open group this long or shorter is scoped here, at once (~20 ms)
@@ -493,6 +496,12 @@ class _SimpleRowDelegate(QStyledItemDelegate):
             )
             p.restore()
             return
+        if isinstance(node, NavNode) and node.layer == "action" and node.key == ACTION_ROWS[0].key:
+            # A rule between the providers and the action rows under them (Settings first).
+            p.fillRect(
+                QRectF(rect.x() + 1.2 * u, rect.y(), rect.width() - 2.4 * u, 1),
+                qcolor(PALETTE.text, 0.12),
+            )
         if selected:
             _paint_highlight(p, rect, u, focused)
         x = rect.x() + 0.9 * u + 0.3 * u
@@ -1678,6 +1687,12 @@ class Drawer(Overlay):
         header = self._header()
         align = Qt.AlignLeft | Qt.AlignVCenter
         last = header.names[-1] if header.names else None
+        if not header.names:  # the sources: the column's title (no path to name, no link)
+            p.setFont(self._units.font(CRUMB_FONT_U, QFont.Weight.DemiBold))
+            p.setPen(qcolor(PALETTE.text, 0.6))
+            room = header.library.left() - self._units.px(GEAR_GAP_U) - header.text.left()
+            title = QRectF(header.text.left(), header.text.top(), room, header.text.height())
+            p.drawText(title, align, elided(p, translate(PROVIDERS_TITLE), room))
         for name in header.names:
             index, text, rect = name
             hovered = self._hover == _crumb_key(index)

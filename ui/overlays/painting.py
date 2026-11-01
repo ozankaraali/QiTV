@@ -9,6 +9,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
+    QFontMetricsF,
     QPainter,
     QPainterPath,
     QPen,
@@ -250,6 +251,15 @@ def draw_refresh(p: QPainter, rect: QRectF, color: QColor) -> None:
     p.setBrush(color)
     p.drawPath(head)
     p.restore()
+
+
+def draw_field_icon(p: QPainter, inner: QRectF, color: QColor) -> QRectF:
+    """A find field's magnifier at the left of `inner`, as high as the painter's font; the
+    room left for the text beside it."""
+    size = QFontMetricsF(p.font()).height() * 0.85
+    icon = QRectF(inner.left(), inner.center().y() - size / 2, size, size)
+    draw_icon(p, "search", icon, color)
+    return inner.adjusted(size + 0.45 * size, 0, 0, 0)
 
 
 def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:

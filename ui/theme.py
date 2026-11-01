@@ -47,6 +47,16 @@ def focus_qss() -> str:
         f"QTabBar::tab:selected:focus:enabled {{background: {tint}}}"
         f"QToolButton:focus {{background: {tint}}}"
         f"QSlider:focus {{background: {tint}; border-radius: 4px}}"
+
+
+def accent_button_style() -> str:
+    """A widget button that is its window's main action (Settings' Save, the Library's Add
+    provider): filled with the accent, as the TV's ▶ buttons are."""
+    return (
+        f"QPushButton {{ background: {PALETTE.accent}; color: {PALETTE.canvas}; border: none;"
+        " border-radius: 6px; padding: 6px 22px; font-weight: 600; }"
+        f" QPushButton:hover {{ background: {PALETTE.brand}; }}"
+        f" QPushButton:focus {{ border: 2px solid {PALETTE.text}; }}"
     )
 
 

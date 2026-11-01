@@ -72,18 +72,8 @@ from ui.free_channels_menu import show_menu as show_free_channels_menu
 from ui.parental_settings import build_parental_tab, pin_allows
 from ui.provider_drop import unique_name
 from ui.remote_settings import build_remote_tab, save_remote_settings
-from ui.theme import PALETTE
+from ui.theme import PALETTE, accent_button_style
 from ui.update_dialogs import check_for_updates
-
-
-def accent_button_style() -> str:
-    """A window's main action (Settings' Save): filled with the accent, as the TV's ▶."""
-    return (
-        f"QPushButton {{ background: {PALETTE.accent}; color: {PALETTE.canvas}; border: none;"
-        " border-radius: 6px; padding: 6px 22px; font-weight: 600; }"
-        f" QPushButton:hover {{ background: {PALETTE.brand}; }}"
-        f" QPushButton:focus {{ border: 2px solid {PALETTE.text}; }}"
-    )
 
 
 def opensubtitles_hint() -> str:
@@ -746,17 +736,22 @@ class OptionsDialog(QDialog):
         scroll.setWidget(tab)
         self.options_tab.addTab(scroll, tr("Time-shift"))  # i18n: a tab of the Settings window
         layout = QVBoxLayout(tab)
-        self.timeshift_checkbox = QCheckBox(
-            tr(
-                "Use disk for a longer time-shift buffer.\n"
-                "A channel you leave keeps its buffer for up to 24 hours, after a restart too; "
-                "when the cache fills, the oldest goes first."
-            ),
-            tab,
+        consent = tr(
+            "Use disk for a longer time-shift buffer.\n"
+            "A channel you leave keeps its buffer for up to 24 hours, after a restart too; "
+            "when the cache fills, the oldest goes first."
         )
+        # The box says the first line; the rest wraps under it (a box's text does not wrap,
+        # and its long line made the page wider than the window: the right edge was cut).
+        heading, _, note = consent.partition("\n")
+        self.timeshift_checkbox = QCheckBox(heading, tab)
         self.timeshift_checkbox.setObjectName("timeshiftEnabled")
         self.timeshift_checkbox.setChecked(self.config_manager.timeshift_enabled)
         layout.addWidget(self.timeshift_checkbox)
+        self.timeshift_note = QLabel(note, tab)
+        self.timeshift_note.setWordWrap(True)
+        self.timeshift_note.setContentsMargins(24, 0, 0, 0)  # under the box's text
+        layout.addWidget(self.timeshift_note)
 
         # Every stream not on the disk ring: without disk, and the small picture always.
         memory = QGroupBox(tr("Memory per stream"), tab)  # i18n: a group's title

@@ -15,7 +15,7 @@ from ui.library.genre_list import GenreList
 from ui.library.poster_grid import HEADER_H_U, PAD_U, PosterGrid
 from ui.library.series_view import SeriesView
 from ui.library.top_nav import TopNav
-from ui.overlays.painting import Units, elided, fill_round
+from ui.overlays.painting import Units, draw_field_icon, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
@@ -144,12 +144,14 @@ class SearchField(QWidget):
         inner = box.adjusted(1.2 * u, 0, -1.2 * u, 0)
         p.setFont(units.font(FIELD_FONT_U))
         if self.query or self._focused:
-            p.setPen(qcolor(PALETTE.text))
-            text = "⌕ " + self.query + ("▏" if self._focused else "")
+            tone = qcolor(PALETTE.text)
+            text = self.query + ("▏" if self._focused else "")
         else:
-            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
+            tone = qcolor(PALETTE.text, PALETTE.text_muted_alpha)
             # i18n: placeholder of the Library's search field
-            text = "⌕ " + tr("Search movies, series and channels")
+            text = tr("Search movies, series and channels")
+        inner = draw_field_icon(p, inner, tone)  # the magnifier the other finds draw
+        p.setPen(tone)
         p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))
         if self.count_text:
             p.setFont(units.font(COUNT_FONT_U))

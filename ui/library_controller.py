@@ -77,6 +77,11 @@ def _no_section_text(source: str, section: str) -> str:
     return tr("{source} has no live TV", source=source)  # i18n: {source}: a provider's name
 
 
+# i18n: under "{source} has no movies" in the Library, beside an Add provider button
+WHERE_FILMS_TEXT = N_("Films and series come from Xtream, STB, Jellyfin and Emby providers.")
+ADD_PROVIDER_TEXT = N_("Add provider")
+
+
 SEARCH_DEBOUNCE_MS = DEBOUNCE_MS
 # What the grid or a toast shows: shown with translate().
 LOADING_TEXT = N_("Loading…")
@@ -108,6 +113,7 @@ def _context(**values) -> dict:
 
 class LibraryController(QObject):
     notice = Signal(str)  # a message for the window's toast
+    addProviderRequested = Signal()  # the Add provider under "… has no movies" (or Enter)
     searchChanged = Signal()  # the search's hits changed (the phone remote mirrors them)
 
     def __init__(
@@ -210,6 +216,7 @@ class LibraryController(QObject):
         grid.upEdge.connect(self._on_up_edge)
         grid.contextRequested.connect(self._on_grid_context)
         grid.messageClicked.connect(self._on_grid_message_clicked)
+        grid.messageAction.connect(self.addProviderRequested)
         series.seasonSelected.connect(self._load_episodes)
         series.episodeActivated.connect(self._activate_episode)
         series.startOverRequested.connect(
@@ -511,6 +518,8 @@ class LibraryController(QObject):
         elif action is Action.NAV_ACTIVATE:
             if self._failed and self._grid_content == "browse":
                 self._retry()
+            elif grid.message_button().isVisible():
+                self.addProviderRequested.emit()  # "… has no movies": its Add provider
             else:
                 grid.activate()
         elif action is Action.FAVORITE:
@@ -794,7 +803,12 @@ class LibraryController(QObject):
             grid.set_header("", "", [], "")
             grid.set_sections([])
             grid.set_letter_index(None)
-            grid.set_message(_no_section_text(self._source_title(), model.section))
+            text = _no_section_text(self._source_title(), model.section)
+            if model.section in ("movies", "series"):  # where they come from, and the way
+                text += "\n" + translate(WHERE_FILMS_TEXT)
+                grid.set_message(text, translate(ADD_PROVIDER_TEXT))
+            else:
+                grid.set_message(text)
             return
         sorts: list[tuple[str, str]] = []
         if model.genre_id not in PINNED_TITLES:

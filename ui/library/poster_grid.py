@@ -24,13 +24,13 @@ from PySide6.QtGui import (
     QPixmap,
     QTransform,
 )
-from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QFrame, QWidget
+from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QFrame, QPushButton, QWidget
 
 from services.i18n import tr
 from services.library import Details, letter_of, title_of
 from services.text_fold import fold
 from ui.overlays.painting import Units, draw_icon, draw_progress, elided, fill_round, fmt_duration
-from ui.theme import PALETTE, RADIUS_CARD, qcolor
+from ui.theme import PALETTE, RADIUS_CARD, accent_button_style, qcolor
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +226,7 @@ class PosterGrid(QAbstractScrollArea):
     # A right-click on a poster (flat index, global position): the shell's menu for it.
     contextRequested = Signal(int, QPoint)
     messageClicked = Signal()  # a click on the message shown instead of titles ("Couldn't load")
+    messageAction = Signal()  # the button under the message (set_message's `action`)
 
     def __init__(self, posters, parent=None) -> None:
         super().__init__(parent)
@@ -250,6 +251,12 @@ class PosterGrid(QAbstractScrollArea):
         self._items: list[dict] = []
         self._sections: list[tuple[str, int, int]] = []  # (title, start, count), non-empty
         self._message: str | None = None
+        # The message's button (Add provider under "… has no movies"); hidden without one.
+        self._message_button = QPushButton(self.viewport())
+        self._message_button.setStyleSheet(accent_button_style())
+        self._message_button.setFocusPolicy(Qt.NoFocus)  # Enter does it (the controller)
+        self._message_button.clicked.connect(self.messageAction)
+        self._message_button.hide()
         self._letters: dict[str, int] = {}
         self._details_provider: Callable[[dict], Details | None] | None = None
         self._poster_url: Callable[[dict], str] = poster_url
@@ -422,11 +429,39 @@ class PosterGrid(QAbstractScrollArea):
         self._letters = dict(index) if index else {}
         self.viewport().update()
 
-    def set_message(self, text: str | None) -> None:
-        """Paint `text` ("Loading…", an error, "Nothing here") instead of the grid."""
+    def set_message(self, text: str | None, action: str | None = None) -> None:
+        """Paint `text` ("Loading…", an error, "Nothing here") instead of the grid, with a
+        button labelled `action` under it when given (it emits messageAction)."""
         self._message = text
+        button = self._message_button
+        if text is not None and action:
+            button.setText(action)
+            button.adjustSize()
+            self._place_message_button()
+            button.show()
+        else:
+            button.hide()
         self._cancel_hover()
         self.viewport().update()
+
+    def message_button(self) -> QPushButton:
+        """The button under the message (hidden while the message has none)."""
+        return self._message_button
+
+    def _message_rect(self) -> QRectF:
+        u = self._units.u
+        return QRectF(self.viewport().rect()).adjusted(4 * u, 0, -4 * u, 0)
+
+    def _place_message_button(self) -> None:
+        """Under the message's text, centred (the text is centred in the view)."""
+        view = self._message_rect()
+        fm = QFontMetricsF(self._units.font(MESSAGE_FONT_U))
+        flags = int(Qt.AlignCenter | Qt.TextWordWrap)
+        text_h = fm.boundingRect(view, flags, self._message or "").height()
+        button = self._message_button
+        x = view.center().x() - button.width() / 2
+        y = view.center().y() + text_h / 2 + 1.6 * self._units.u
+        button.move(round(x), round(y))
 
     def columns(self) -> int:
         return self._cols
@@ -595,6 +630,8 @@ class PosterGrid(QAbstractScrollArea):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._relayout()
+        if self._message_button.isVisible():
+            self._place_message_button()
 
     def _relayout(self) -> None:
         self._units = Units(self._host_width())
@@ -1045,14 +1082,9 @@ class PosterGrid(QAbstractScrollArea):
         return first, last
 
     def _paint_message(self, p: QPainter, view: QRectF) -> None:
-        u = self._units.u
         p.setFont(self._units.font(MESSAGE_FONT_U))
         p.setPen(qcolor(PALETTE.text, MESSAGE_ALPHA))
-        p.drawText(
-            view.adjusted(4 * u, 0, -4 * u, 0),
-            Qt.AlignCenter | Qt.TextWordWrap,
-            self._message or "",
-        )
+        p.drawText(self._message_rect(), Qt.AlignCenter | Qt.TextWordWrap, self._message or "")
 
     def _paint_section_title(
         self, p: QPainter, title: str, top: float, height: float, font: QFont

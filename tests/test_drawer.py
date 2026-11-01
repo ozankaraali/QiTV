@@ -489,6 +489,30 @@ class DrawerTests(unittest.TestCase):
         self.click(self.drawer.settings_gear_rect().center())
         self.assertEqual(self.actions, [SETTINGS_ROW])
 
+    def test_the_sources_have_a_title_and_a_rule_above_their_action_rows(self):
+        drawn, elided = [], drawer_module.elided
+
+        def spy(p, text, width):
+            drawn.append(text)
+            return elided(p, text, width)
+
+        col = self.open_on_the_sources()
+        with mock.patch.object(drawer_module, "elided", spy):
+            self.drawer.grab()
+        self.assertIn("Providers", drawn)  # the column's title, where a path has its names
+        settings = next(r for r, n in enumerate(col.nodes) if n.key == SETTINGS_ROW)
+        rect = col.view.visualRect(col.model.index(settings))
+        image = col.view.viewport().grab().toImage()
+        above = image.pixelColor(rect.center().x(), rect.top())
+        below = image.pixelColor(rect.center().x(), rect.top() + 3)
+        self.assertGreater(above.lightness(), below.lightness())  # the rule
+        drawn.clear()
+        self.nav.reset_to("live", "10")
+        self.drawer.open_drawer("1")  # Home › Live TV: its names instead
+        with mock.patch.object(drawer_module, "elided", spy):
+            self.drawer.grab()
+        self.assertNotIn("Providers", drawn)
+
     # ---- the header row's left end: ‹ back and the names (2.0.1) -----------------------------
 
     def crumb(self, index):

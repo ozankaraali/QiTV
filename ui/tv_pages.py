@@ -111,6 +111,7 @@ class TVPages(QObject):
             parent=self,
         )
         self.library_controller.notice.connect(self.notify)
+        self.library_controller.addProviderRequested.connect(lambda: window.add_provider())
         # 2.8: a Library genre's right-click hides it, as the TV list's groups.
         self.library_controller.set_hiding(
             lambda *args: window.controller.hide_group(*args),
