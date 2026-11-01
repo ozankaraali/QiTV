@@ -60,6 +60,41 @@ class GuideStoreTests(unittest.TestCase):
         self.assertIn("channel 5", loaded)  # membership reads only the key map
         self.assertEqual(loaded.packed(), 9)
 
+    def test_only_the_channels_looked_up_last_stay_unpickled(self):
+        # Each channel looked up stayed unpickled until the guide was replaced: ~80 KiB of
+        # dicts a channel, walked by every full garbage collection.
+        loaded = self.round_trip(big_guide(channels=10))
+        with mock.patch.object(epg_store, "UNPACKED_KEPT", 3):
+            first = loaded["Channel 0"]
+            loaded.get("ch1"), loaded.get("ch2")
+            self.assertIs(loaded["channel 0"], first)  # one of the last three: the same list
+            self.assertEqual(loaded.packed(), 7)
+            loaded.get("ch3")  # ch1 goes: looked up longest ago
+            self.assertEqual(loaded.packed(), 7)
+            self.assertIs(loaded.get("ch0"), first)
+            again = loaded.get("ch1")
+            self.assertEqual(again, programmes("ch1", 30))  # unpickled again
+            self.assertIs(loaded.get("ch1"), again)
+            self.assertEqual(
+                loaded.setdefault(("ch5", "Channel 5", "channel 5")), programmes("ch5", 30)
+            )
+            self.assertEqual(loaded.packed(), 7)
+            self.assertEqual(list(loaded.items()), list(big_guide(channels=10).items()))
+            self.assertEqual(loaded.packed(), 7)  # (each read, three kept)
+        again_path = os.path.join(os.path.dirname(self.path), "again.guide")
+        write_guide(again_path, loaded)  # its blobs are saved as they are
+        self.assertEqual(list(read_guide(again_path).items()), list(big_guide(channels=10).items()))
+
+    def test_a_channel_set_or_removed_is_not_kept_unpickled(self):
+        loaded = self.round_trip(big_guide(channels=3))
+        loaded.get("ch0")
+        loaded[("ch0", "Channel 0", "channel 0")] = ["new"]
+        self.assertEqual(loaded.get("ch0"), ["new"])
+        loaded.get("ch1")
+        del loaded["ch1"]
+        self.assertIsNone(loaded.get("Channel 1"))
+        self.assertEqual(loaded.packed(), 1)  # ch2's
+
     def test_writing_returns_the_guide_as_it_loads(self):
         guide = big_guide(channels=4)
         written = write_guide(self.path, guide)

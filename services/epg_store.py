@@ -9,14 +9,17 @@ of Python objects per programme.
 Here an XMLTV guide is saved as a stream of pickles: a header, its channels in pieces of about
 PIECE_BYTES, each channel's programme list pickled on its own (a blob), then its key map and
 an end mark. Reading it builds no programme at all: the blobs load as bytes into a
-PackedGuide, which unpickles a channel's programmes the first time a lookup asks for them and
-keeps them. Between pieces the reading thread runs Python code again, so the GUI thread gets
-its turn. An STB guide (a dict) is saved in pieces of plain entries; any other guide whole.
+PackedGuide, which unpickles a channel's programmes when a lookup asks for them and keeps the
+UNPACKED_KEPT channels looked up last. Between pieces the reading thread runs Python code
+again, so the GUI thread gets its turn. An STB guide (a dict) is saved in pieces of plain
+entries; any other guide whole.
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import pickle
+import threading
 from typing import Any, Iterable, Iterator
 
 from services.atomic_write import atomic_write
@@ -29,6 +32,10 @@ _VERSION = 1
 _END = "end"
 _KINDS = ("packed", "dict", "object")
 _PROTOCOL = pickle.HIGHEST_PROTOCOL
+# The channels a PackedGuide keeps unpickled, those looked up last (a guide's rows, a phone's
+# list): each costs ~80 KiB of programme dicts the cycle collector walks, and a 73 MB guide's
+# 600 channels all looked up took a full collection from 7 to 36 ms.
+UNPACKED_KEPT = 256
 
 
 class _Packed:
@@ -41,18 +48,46 @@ class _Packed:
 
 
 class PackedGuide(MultiKeyDict):
-    """A MultiKeyDict whose values stay pickled until a lookup reads them (then kept).
+    """A MultiKeyDict whose values stay pickled until a lookup reads them; the UNPACKED_KEPT
+    channels looked up last are kept unpickled (the same list again), the others are
+    unpickled again when asked for. Its values stay pickled in `_data` throughout.
 
     Lookups from several threads may unpickle the same channel at once: each gets an equal
     list, and one of them is kept.
     """
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._unpacked: OrderedDict[tuple, Any] = OrderedDict()  # the last looked up, last
+        self._lock = threading.Lock()
+
     def _value(self, keys: tuple) -> Any:
         value = self._data[keys]
-        if isinstance(value, _Packed):
-            value = pickle.loads(value.blob)
-            self._data[keys] = value
-        return value
+        if not isinstance(value, _Packed):
+            return value
+        with self._lock:
+            kept = self._unpacked.get(keys)
+            if kept is not None:
+                self._unpacked.move_to_end(keys)
+                return kept
+        unpacked = pickle.loads(value.blob)  # (outside the lock: other lookups go on)
+        with self._lock:
+            kept = self._unpacked.setdefault(keys, unpacked)
+            self._unpacked.move_to_end(keys)
+            while len(self._unpacked) > UNPACKED_KEPT:
+                self._unpacked.popitem(last=False)  # (still pickled in _data)
+        return kept
+
+    def __setitem__(self, keys, value):
+        super().__setitem__(keys, value)
+        with self._lock:
+            self._unpacked.pop(keys if isinstance(keys, tuple) else (keys,), None)
+
+    def __delitem__(self, key):
+        keys = self._keys_map.get(key)
+        super().__delitem__(key)  # (a KeyError when there are none)
+        with self._lock:
+            self._unpacked.pop(keys or (), None)
 
     def __getitem__(self, key):
         keys = self._keys_map.get(key)
@@ -88,8 +123,9 @@ class PackedGuide(MultiKeyDict):
         return f"{self.__class__.__name__}({dict(self.items())})"
 
     def packed(self) -> int:
-        """How many channels are still pickled (for tests)."""
-        return sum(isinstance(value, _Packed) for value in self._data.values())
+        """How many channels are not kept unpickled now (for tests)."""
+        kept = sum(keys in self._data for keys in list(self._unpacked))
+        return sum(isinstance(value, _Packed) for value in self._data.values()) - kept
 
 
 def _blob(value: Any) -> bytes:
