@@ -21,6 +21,7 @@ an STB portal's channel only a programme its guide does not mark as not recorded
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from itertools import repeat
 import logging
 import math
 from typing import NamedTuple
@@ -210,11 +211,20 @@ class _Layout:
         return max(1, math.ceil(self.rows.height() / self.row_h))
 
 
-def _archive_depth(channel: dict) -> int:
-    """The days of archive the loaders kept on a channel (0: none); read cheaply, for every
-    listed channel (`services.catchup.archive_of` reads the rest)."""
-    days = channel.get(ARCHIVE_KEY)
-    return days if isinstance(days, int) and not isinstance(days, bool) and days > 0 else 0
+def _deepest_archive(channels: list[dict]) -> int:
+    """The most days of archive the loaders kept on any of `channels` (0: none); read cheaply,
+    for every listed channel (`services.catchup.archive_of` reads the rest): the values in C
+    first (264,000 channels, most without one), each kept one then."""
+    kept = filter(None, map(dict.get, channels, repeat(ARCHIVE_KEY)))
+    return max(
+        (d for d in kept if isinstance(d, int) and not isinstance(d, bool) and d > 0), default=0
+    )
+
+
+def _number_digits(channels: list[dict]) -> int:
+    """The longest number listed (a provider's own run past 9999): its characters, in C."""
+    numbers = filter(None, map(dict.get, channels, repeat("number")))  # (none: "")
+    return max(map(len, map(str.strip, map(str, numbers))), default=0)
 
 
 class Guide(Overlay):
@@ -239,11 +249,16 @@ class Guide(Overlay):
         archive_days: Callable[[dict], int] = lambda channel: 0,
         archive_reach: Callable[[dict], timedelta] | None = None,
         scheduled: Callable[[dict, Programme], bool] | None = None,
+        deepest_window: Callable[[list[dict], timedelta], timedelta] | None = None,
     ) -> None:
         """`archive_days(channel)`: the days of the channel's archive that may play now (0:
         none); `archive_reach(channel)` (2.7): how far back its past programmes play, its
         own server window's included (`archive_days` when not given). `scheduled(channel,
-        programme)` (2.8): whether it is to be recorded; None: the guide records nothing."""
+        programme)` (2.8): whether it is to be recorded; None: the guide records nothing.
+        `deepest_window(channels, beyond)`: the longest reach `archive_reach` gives any of the
+        channels when longer than `beyond` (their deepest archive), else none: worked out for
+        the whole list at once (each channel's reach, when not given: a list of 264,000 took
+        seconds)."""
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
@@ -258,6 +273,7 @@ class Guide(Overlay):
         self._archive_reach = archive_reach or (
             lambda channel: timedelta(days=archive_days(channel))
         )
+        self._deepest_window = deepest_window or self._each_reach
         self._back = timedelta(0)  # how far back the window goes (the deepest archive listed)
         self._picked: tuple[int, Programme] | None = None  # a past programme clicked on
         self._scheduled = scheduled
@@ -284,15 +300,14 @@ class Guide(Overlay):
     def open_guide(self, channels: list[dict], current: int) -> None:
         self._channels = list(channels)
         # The number column fits the longest number listed (a provider's own run past 9999).
-        self._digits = max(
-            (len(str(c.get("number") or "").strip()) for c in self._channels), default=0
-        )
+        self._digits = _number_digits(self._channels)
         self._current = min(max(current, 0), len(self._channels) - 1)
         self._window_start = slot_start(self._now())
         self._picked = self._upcoming = None
-        deepest = max((_archive_depth(c) for c in self._channels), default=0)
-        windows = max((self._archive_reach(c) for c in self._channels), default=timedelta(0))
-        self._back = min(MAX_BACK, max(timedelta(days=deepest), windows))
+        deepest = timedelta(days=_deepest_archive(self._channels))
+        # (2.7: a server window seen this run may reach further; an archive's days that may
+        # play now never reach further than the days kept on the channel)
+        self._back = min(MAX_BACK, max(deepest, self._deepest_window(self._channels, deepest)))
         self._forget_lookups()
         self._requested.clear()  # a reopened guide retries logos that failed
         self._relayout()
@@ -303,6 +318,10 @@ class Guide(Overlay):
         self.raise_()
         self.update()
         self.rowsMoved.emit()
+
+    def _each_reach(self, channels: list[dict], beyond: timedelta) -> timedelta:
+        reach = max((self._archive_reach(c) for c in channels), default=timedelta(0))
+        return reach if reach > beyond else timedelta(0)
 
     def close_guide(self) -> None:
         self._repaint.stop()

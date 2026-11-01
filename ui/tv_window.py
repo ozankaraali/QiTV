@@ -526,6 +526,9 @@ class TVWindow(QMainWindow):
         def archive_reach(channel: dict) -> timedelta:
             return controller.archive_reach(channel)  # 2.7: a server window's too
 
+        def deepest_window(channels: list[dict], beyond: timedelta) -> timedelta:
+            return controller.deepest_window(channels, beyond)
+
         host = self.host
         self.grid_tiles = GridTiles(host)  # the multiview's labels, focus ring, "+" and cards
         self.pip_label = PipLabel(host)
@@ -565,6 +568,7 @@ class TVWindow(QMainWindow):
                 parent=host,
                 archive_days=archive_days,
                 archive_reach=archive_reach,
+                deepest_window=deepest_window,
                 # 2.8: QiTV records programmes at their time (with the time-shift helper)
                 scheduled=self._programme_scheduled if self._instance is not None else None,
             ),

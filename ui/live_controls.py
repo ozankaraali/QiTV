@@ -41,10 +41,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from itertools import compress, count, repeat
 import logging
 import math
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence, cast
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QTimer, SignalInstance
@@ -145,6 +146,21 @@ def _named(title: str, message: str) -> str:
     return tr("{name}: {message}", name=title, message=message) if title else message
 
 
+def _identities(items: list[dict]) -> dict[str, set[str]]:
+    """What `channel_key` tells each channel by, by field: its address, else its id, else its
+    name (the provider aside)."""
+    found: dict[str, set[str]] = {"cmd": set(), "id": set(), "name": set()}
+    for item in items:
+        cmd = str(item.get("cmd") or "").strip()
+        if cmd:
+            found["cmd"].add(cmd)
+        elif item.get("id") is not None:
+            found["id"].add(str(item["id"]))
+        elif item.get("name"):
+            found["name"].add(str(item["name"]))
+    return found
+
+
 class LiveControls(QObject):
     def __init__(
         self,
@@ -222,6 +238,7 @@ class LiveControls(QObject):
         # 2.7: how far back each channel's own server keeps it (seconds, as last seen this
         # run, by the channel's key), and a guide's start waiting for its window to show.
         self._windows: dict[str, float] = {}
+        self._window_items: dict[str, dict] = {}  # the channel each window was seen on
         self._window_seek: Optional[tuple[str, float, float]] = None  # key, moment, asked at
         self._wired = False
         self._reconnects = 0  # reopens of the current tune's ended stream so far
@@ -355,6 +372,30 @@ class LiveControls(QObject):
         """How far back (seconds) the channel's own server keeps it, as seen this run (2.7);
         0.0 when unknown."""
         return self._windows.get(self.catchup.key(Target(channel, "live", "")), 0.0)
+
+    def deepest_window(self, channels: Sequence[dict], beyond: float = 0.0) -> float:
+        """The longest own server window (seconds, as seen this run: 2.7) of any of
+        `channels` when longer than `beyond`, else 0.0. As the longest `window_reach`, without
+        a key (a SHA-256) for each channel of a list (the guide's: up to 264,000): only one with
+        the address, else id, else name of a channel whose window was seen gets one."""
+        longer = {key: seconds for key, seconds in self._windows.items() if seconds > beyond}
+        if not longer:
+            return 0.0
+        seen = [self._window_items.get(key) for key in longer]
+        if any(item is None for item in seen):  # (each window is noted with its channel)
+            return max((r for r in map(self.window_reach, channels) if r > beyond), default=0.0)
+        rows: set[int] = set()
+        for field, values in _identities(cast(list[dict], seen)).items():
+            if values:  # (in C: 264,000 channels in a few tens of milliseconds)
+                texts = map(str, map(dict.get, channels, repeat(field), repeat("")))
+                if field == "cmd":
+                    texts = map(str.strip, texts)
+                rows.update(compress(count(), map(values.__contains__, texts)))
+        best = 0.0
+        for row in rows:
+            key = self.catchup.key(Target(channels[row], "live", ""))
+            best = max(best, longer.get(key, 0.0))
+        return best
 
     def watch_from(self, channel: dict, moment: float) -> bool:
         """The guide's "Watch from the start" within the channel's own server window (2.7):
@@ -623,7 +664,9 @@ class LiveControls(QObject):
         if "window_start" in state and not state.get("archive_part"):
             now = self._now().timestamp()
             wall = live_parts.wall_in(state, float(state["window_start"]), now)
-            self._windows[self.catchup.key(current)] = max(0.0, now - wall)
+            key = self.catchup.key(current)
+            self._windows[key] = max(0.0, now - wall)
+            self._window_items[key] = current.item
             self._seek_window(state)
         state = self.catchup.extend(state, current)  # the bar reaches into an archive
         transport = self._transport

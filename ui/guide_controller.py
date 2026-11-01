@@ -64,15 +64,16 @@ class GuideController(QObject):
         all_live: Callable[[], list[dict]],
     ) -> bool:
         """Open on `context`'s channels at `current`; False when there is nothing to list."""
+        if not context.channels:
+            context = ZapContext(ALL_GROUP_ID, all_live())
         group, channels = context.group_key, list(context.channels)
-        if not channels:
-            group, channels = ALL_GROUP_ID, list(all_live())
         if not channels:
             return False
         self._group, self._channels = group, channels
         self._end_number()
-        index = next((i for i, c in enumerate(channels) if ZapContext.same(c, current)), 0)
-        self.guide.open_guide(channels, index)
+        # (the zap's own lookup: the current row first, a list of 264,000 is not gone through)
+        index = context.index_of(current) if current is not None else -1
+        self.guide.open_guide(channels, max(index, 0))
         return True
 
     def close(self) -> None:

@@ -3483,6 +3483,13 @@ class TVController(QObject):
         window = timedelta(seconds=self._live_controls.window_reach(channel))
         return max(days, window)
 
+    def deepest_window(self, channels: Sequence[dict], beyond: timedelta) -> timedelta:
+        """(2.7) The longest own server window seen this run of any of `channels`, when it
+        reaches further back than `beyond` (a list's deepest archive), else none: what
+        archive_reach adds to the guide's reach of a whole list, in one go."""
+        seconds = self._live_controls.deepest_window(channels, beyond.total_seconds())
+        return timedelta(seconds=seconds)
+
     def archive_days(self, channel: dict) -> int:
         """The days of the channel's provider archive that may play now (the guide's reach):
         0 without one, when it did not answer lately, or while archives can't play."""

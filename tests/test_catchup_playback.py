@@ -8,6 +8,7 @@ probes run through a fake runner the tests answer. Channels and addresses are fi
 from datetime import timedelta, timezone
 import os
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -19,6 +20,7 @@ from services.catchup_memory import CatchupMemory
 from services.epg_view import Programme
 from services.live.tuning import channel_key
 from services.vlc_profile import PlayKind
+from ui import catchup_controls as catchup_controls_module
 from ui.catchup_controls import (
     ARCHIVE_TEXT,
     NO_ANSWER_TEXT,
@@ -559,6 +561,36 @@ class ServerWindowRoutingTests(CatchupCase):
         self.windowed(PLAIN)
         self.assertGreater(self.controller.archive_reach(PLAIN), timedelta(hours=23))
         self.assertEqual(self.controller.archive_reach(ARCHIVED), timedelta(days=3))  # its own
+
+    def test_a_lists_deepest_window_is_its_channels_longest(self):
+        # The guide asks it for its whole list: as the longest archive_reach, but only a
+        # channel with the address (else id, else name) of one seen with a window is keyed.
+        controller = self.controller
+        none = timedelta(0)
+        self.assertEqual(controller.deepest_window(CHANNELS, none), none)
+        self.windowed(PLAIN)
+        window = controller.archive_reach(PLAIN)
+        self.assertEqual(controller.deepest_window(CHANNELS, none), window)
+        self.assertEqual(controller.deepest_window([ARCHIVED, APPENDED], none), none)
+        self.assertEqual(controller.deepest_window(CHANNELS, window), none)  # none longer
+        self.assertEqual(controller.deepest_window(CHANNELS, window - timedelta(seconds=1)), window)
+        self.assertEqual(controller.deepest_window([dict(PLAIN)], none), window)  # an equal one
+        moved = dict(PLAIN, cmd=" " + PLAIN["cmd"] + " ", id=99)  # the same address
+        self.assertEqual(controller.deepest_window([moved], none), window)
+        others = [
+            {"id": i, "name": f"Pier {i}", "cmd": f"http://panel.test/live/viewer/secret/x{i}.ts"}
+            for i in range(3000)
+        ]
+        keys = []
+
+        def counted(provider, item):
+            keys.append(item)
+            return channel_key(provider, item)
+
+        with mock.patch.object(catchup_controls_module, "channel_key", counted):
+            listed = others + [dict(PLAIN)] + others
+            self.assertEqual(controller.deepest_window(listed, none), window)
+        self.assertEqual(keys, [PLAIN])  # one key, not 6,001
 
 
 class ArchiveThroughBufferTests(CatchupCase):
