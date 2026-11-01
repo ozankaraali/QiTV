@@ -356,6 +356,8 @@ class _Timeline:
 
 
 class Transport(Overlay):
+    # i18n: what a screen reader calls the player controls (seek bar and buttons on the video)
+    accessible_name = N_("Player controls")
     pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
 
     playPauseRequested = Signal()

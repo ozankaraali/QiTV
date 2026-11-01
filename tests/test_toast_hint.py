@@ -1,9 +1,11 @@
 import os
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QAccessible
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -114,6 +116,61 @@ class ToastButtonTests(ToastHintTests):
         self.toast.show_message("Exporting…", "info", 60, action="Cancel", on_action=lambda: None)
         self.assertTrue(wait_until(lambda: not self.toast.isVisible()))
         self.assertEqual(self.toast.action_text(), "")
+
+
+class ToastSpeechTests(unittest.TestCase):
+    """A screen reader reads each message as it shows (an error at once): the toast is named
+    after it and announces it; a hint coming back after a message is not said again, and a
+    toast the user cannot see (the other page's) says nothing."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.addCleanup(self.host.deleteLater)
+        self.addCleanup(self.host.close)
+        self.toast = Toast(self.host)
+        self.host.show()
+        patcher = mock.patch.object(QAccessible, "updateAccessibility")
+        self.posted = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def said(self) -> list[tuple[str, str]]:
+        """What was announced: (text, "assertive" or "polite")."""
+        out = []
+        for call in self.posted.call_args_list:
+            event = call.args[0]
+            if event.type() == QAccessible.Event.Announcement:
+                assertive = event.politeness() == QAccessible.AnnouncementPoliteness.Assertive
+                out.append((event.message(), "assertive" if assertive else "polite"))
+        return out
+
+    def test_a_message_names_the_toast_and_is_said(self):
+        self.toast.show_message("Recording saved", "info", 60_000)
+        self.assertEqual(self.toast.accessibleName(), "Recording saved")
+        kinds = [call.args[0].type() for call in self.posted.call_args_list]
+        self.assertIn(QAccessible.Event.NameChanged, kinds)
+        self.assertEqual(self.said(), [("Recording saved", "polite")])
+
+    def test_an_error_is_said_at_once(self):
+        self.toast.show_message("The stream failed", "error", 60_000)
+        self.assertEqual(self.said(), [("The stream failed", "assertive")])
+
+    def test_a_hint_coming_back_is_not_said_again(self):
+        self.toast.set_hint("Loading Home…")
+        self.toast.show_message("Muted", "info", 40)
+        self.assertTrue(wait_until(lambda: self.toast.text() == "Loading Home…"))
+        self.assertEqual(self.toast.accessibleName(), "Loading Home…")
+        self.assertEqual(self.said(), [("Loading Home…", "polite"), ("Muted", "polite")])
+
+    def test_a_toast_on_a_hidden_page_says_nothing(self):
+        self.host.hide()
+        self.toast.show_message("Recording saved", "info", 60_000)
+        self.assertEqual(self.toast.accessibleName(), "Recording saved")
+        self.assertEqual(self.said(), [])
 
 
 if __name__ == "__main__":

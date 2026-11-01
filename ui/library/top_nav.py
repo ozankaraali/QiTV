@@ -56,6 +56,7 @@ class TopNav(TooltipWidget):
         self.setAccessibleName(BRAND_NAME)
         self._tabs = list(ALL_TABS)
         self._active = "live"
+        self._describe()
         self._source = ""
         self._focused = False
         self._focus_item = "live"
@@ -71,7 +72,13 @@ class TopNav(TooltipWidget):
             raise ValueError(f"Unknown tab: {tab!r}")
         self._active = tab
         self._focus_item = tab
+        self._describe()
         self.update()
+
+    def _describe(self) -> None:
+        """A screen reader says the section it shows after its name: "QiTV, Movies"."""
+        label = TAB_LABELS.get(self._active)
+        self.setAccessibleDescription(translate(label) if label else tr("Search"))
 
     def set_source_name(self, name: str) -> None:
         self._source = name

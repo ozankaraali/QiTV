@@ -239,6 +239,7 @@ class PosterGrid(QAbstractScrollArea):
         # header
         self._title = ""
         self._count_text = ""
+        self.setAccessibleName(tr("Movies and series"))  # a screen reader's (set_header)
         self._sorts: list[tuple[str, str]] = []
         self._active_sort = ""
         # content
@@ -296,6 +297,8 @@ class PosterGrid(QAbstractScrollArea):
     ) -> None:
         self._title = title
         self._count_text = count_text
+        self.setAccessibleName(title or tr("Movies and series"))  # a screen reader's name
+        self.setAccessibleDescription(count_text)
         self._sorts = list(sorts)
         self._active_sort = active
         self._header.update()

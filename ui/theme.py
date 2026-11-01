@@ -29,6 +29,27 @@ RADIUS_PANEL = 14
 FOCUS_FILL_ALPHA = 0.22
 
 
+def focus_qss() -> str:
+    """The keyboard's focus, shown in Settings and the dialogs: the dark theme (qdarktheme)
+    takes the native focus ring away (QWidget:focus {outline: none}) and outlines only combo
+    boxes and text fields. Buttons get a 2 px accent ring (their size kept), check boxes and
+    radio buttons the accent underline the theme gives them on hover over a tint, the focused
+    tab, tool button and slider a tint. qdarktheme.setup_theme's additional_qss (main.py)."""
+    accent = qcolor(PALETTE.accent)
+    ring, red, green, blue = PALETTE.accent, accent.red(), accent.green(), accent.blue()
+    tint = f"rgba({red}, {green}, {blue}, {FOCUS_FILL_ALPHA})"
+    return (
+        # 1 px border + 4/8 px padding (a default button: none + 5/9): 2 px + 3/7 keeps the size
+        f"QPushButton:focus {{border: 2px solid {ring}; padding: 3px 7px}}"
+        f"QPushButton:default:focus {{border: 2px solid {PALETTE.text}; padding: 3px 7px}}"
+        f"QCheckBox:focus, QRadioButton:focus {{border-bottom: 2px solid {ring};"
+        f" background: {tint}; border-radius: 2px}}"
+        f"QTabBar::tab:selected:focus:enabled {{background: {tint}}}"
+        f"QToolButton:focus {{background: {tint}}}"
+        f"QSlider:focus {{background: {tint}; border-radius: 4px}}"
+    )
+
+
 def qcolor(value: str, alpha: float | None = None) -> QColor:
     """Build a QColor from CSS '#rgb', '#rgba', '#rrggbb', '#rrggbbaa' or 'rgba(r,g,b,a)'.
 

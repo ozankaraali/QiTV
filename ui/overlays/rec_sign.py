@@ -52,6 +52,7 @@ _NAME_MAX_U = 16.0  # a long channel name is cut
 
 
 class RecSign(Overlay):
+    accessible_name = N_("Recording")
     goBack = Signal(str)  # the recording's slot name
     stop = Signal(str)
 

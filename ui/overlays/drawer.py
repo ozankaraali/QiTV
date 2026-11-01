@@ -467,7 +467,7 @@ class _SimpleRowDelegate(QStyledItemDelegate):
         if isinstance(node, NavNode) and node.layer == "header":
             # A provider's heading: small, quiet, with a rule; it is never highlighted.
             p.setFont(units.font(1.1, QFont.Weight.DemiBold))
-            p.setPen(qcolor(PALETTE.text, 0.5))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             left = rect.x() + 1.2 * u
             width = max(0.0, rect.right() - 1.2 * u - left)
             p.drawText(
@@ -480,7 +480,7 @@ class _SimpleRowDelegate(QStyledItemDelegate):
         if isinstance(node, NavNode) and node.layer == "notice":
             # Under a provider's heading: it loads, or why it failed; never highlighted.
             p.setFont(units.font(1.2))
-            p.setPen(qcolor(PALETTE.text, 0.5))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             left = rect.x() + 1.2 * u
             width = max(0.0, rect.right() - 1.2 * u - left)
             p.drawText(
@@ -509,7 +509,7 @@ class _SimpleRowDelegate(QStyledItemDelegate):
         count = index.data(CountRole)
         if count is not None:
             p.setFont(units.font(1.1))
-            p.setPen(qcolor(PALETTE.text, 0.45))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             text = str(count)
             width = p.fontMetrics().horizontalAdvance(text)
             p.drawText(
@@ -557,7 +557,7 @@ class _FoundGenreDelegate(_SimpleRowDelegate):
         )
         if label:
             p.setFont(label_font)
-            p.setPen(qcolor(PALETTE.text, 0.5))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             p.drawText(
                 QRectF(left, y + title_h, width, label_h),
                 Qt.AlignLeft | Qt.AlignVCenter,
@@ -624,6 +624,7 @@ class _Column:
 
 
 class Drawer(Overlay):
+    accessible_name = N_("Channel list")
     playRequested = Signal(object, object, object)
     contextRequested = Signal(object, QPoint)  # node, global position
     # An action row (SETTINGS_ROW, ADD_PROVIDER_ROW, OPEN_FILE_ROW) or a header button
@@ -1702,7 +1703,7 @@ class Drawer(Overlay):
             p.setPen(qcolor(PALETTE.text))
             text = elided(p, self.find_text + "▏", inner.width())
         else:
-            p.setPen(qcolor(PALETTE.text, 0.5))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             text = elided(p, translate(FIND_PLACEHOLDER), inner.width())
         p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, text)
         if not clear.isEmpty():
@@ -1722,7 +1723,7 @@ class Drawer(Overlay):
         if col.message:
             error = col.message in _RETRY_TEXTS
             p.setFont(units.font(1.35))
-            p.setPen(qcolor(PALETTE.text, 0.75 if error else 0.5))
+            p.setPen(qcolor(PALETTE.text, 0.75 if error else PALETTE.text_muted_alpha))
             view = col.view.geometry()
             p.drawText(
                 QRectF(view.x(), view.y(), view.width(), 6.0 * u),

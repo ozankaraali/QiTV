@@ -154,6 +154,7 @@ def main() -> int:
     from services.provider_manager import ProviderManager
     from services.sleep_manager import allow_sleep, prevent_sleep
     from ui.quit_reason import QiTVApplication
+    from ui.theme import focus_qss
     from ui.tv_window import TVWindow
     from ui.update_dialogs import check_for_updates, replace_failed
 
@@ -250,7 +251,8 @@ def main() -> int:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
 
     app.setWindowIcon(QtGui.QIcon(icon_path))
-    qdarktheme.setup_theme("dark", custom_colors={"primary": "#C96B43"})
+    # The keyboard's focus shows on buttons, check boxes, tabs and sliders too (ui/theme.py).
+    qdarktheme.setup_theme("dark", custom_colors={"primary": "#C96B43"}, additional_qss=focus_qss())
 
     prevent_sleep()
     control = None

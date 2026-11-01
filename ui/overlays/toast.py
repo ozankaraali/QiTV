@@ -6,6 +6,9 @@ shows as it is.
 
 Every message and hint is logged as it shows (2.8.2), once when both pages' toasts show it.
 
+Assistive technology reads each message as it shows (an error at once): the toast is named
+after it (ui/overlays/base.announce).
+
 A message may carry a button (`show_message`'s `action`: an export's Cancel), which a click
 answers; the toast lets clicks through otherwise, and its next message or its end takes the
 button away.
@@ -20,7 +23,7 @@ from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter, QPaintEven
 from PySide6.QtWidgets import QWidget
 
 from services.i18n import translate
-from ui.overlays.base import Overlay
+from ui.overlays.base import Overlay, announce
 from ui.overlays.painting import Units, fill_round
 from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
@@ -110,11 +113,11 @@ class Toast(Overlay):
     def _message_ended(self) -> None:
         self._set_action("", None)
         if self._hint is not None:
-            self._show(self._hint, "info")
+            self._show(self._hint, "info", speak=False)  # said when it first showed
         else:
             self.hide()
 
-    def _show(self, text: str, kind: str) -> None:
+    def _show(self, text: str, kind: str, *, speak: bool = True) -> None:
         self._text = translate(text)
         self._kind = kind
         _log_shown(self._text, kind)
@@ -122,6 +125,7 @@ class Toast(Overlay):
         self.show()
         self.raise_()
         self.update()
+        announce(self, self._text, assertive=kind == "error", speak=speak)
 
     def _units(self) -> Units:
         parent = self.parentWidget()

@@ -15,6 +15,7 @@ from PySide6.QtCore import QEvent, QObject, QRect, QRectF, Qt
 from PySide6.QtGui import QFont, QFontMetricsF, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QWidget
 
+from services.i18n import N_
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units
 from ui.theme import PALETTE, qcolor
@@ -28,6 +29,8 @@ _TEXT_U = 1.05
 
 
 class StatsOverlay(Overlay):
+    accessible_name = N_("Statistics")
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)

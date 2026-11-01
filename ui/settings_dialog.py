@@ -481,6 +481,8 @@ class OptionsDialog(QDialog):
         # Add cache options
         self.cache_image_size_label = QLabel(self._cache_image_size_text(), self.settings_tab)
         self.cache_image_size_input = QLineEdit(self.settings_tab)
+        # i18n: what a screen reader calls the field of the image cache's largest size
+        self.cache_image_size_input.setAccessibleName(tr("Max size of image cache (MB)"))
         self.cache_image_size_input.setValidator(QIntValidator(0, 1_000_000, self))  # MB
         self.cache_image_size_input.setText(str(self.config_manager.max_cache_image_size))
         self.settings_layout.addRow(self.cache_image_size_label, self.cache_image_size_input)

@@ -15,7 +15,7 @@ from PySide6.QtGui import QFont, QFontMetricsF, QMouseEvent, QPainter, QPaintEve
 from PySide6.QtWidgets import QWidget
 
 from ui.keymap import Action
-from ui.overlays.base import Overlay
+from ui.overlays.base import Overlay, announce
 from ui.overlays.painting import Units, fill_round
 from ui.theme import PALETTE, RADIUS_PANEL, qcolor
 
@@ -78,6 +78,7 @@ class QuestionCard(Overlay):
         self.raise_()
         self.update()
         self._timer.start(max(1, ms))
+        announce(self, question, assertive=True)
 
     def question(self) -> str:
         return self._question

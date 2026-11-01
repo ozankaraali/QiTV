@@ -26,6 +26,7 @@ from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, QTimer, 
 from PySide6.QtGui import QFont, QFontMetricsF, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QWidget
 
+from services.i18n import N_
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, draw_icon, draw_progress, fill_round, volume_icon
 from ui.pointer import NAV_BUTTONS
@@ -74,6 +75,8 @@ class _RowRects:
 
 
 class Mixer(Overlay):
+    # i18n: what a screen reader calls the volume mixer (a level per picture)
+    accessible_name = N_("Volume mixer")
     levelRequested = Signal(int, int)  # row, level: a click or a drag on its slider
     muteRequested = Signal(int)  # row: a click on its speaker
     rowSelected = Signal(int)  # a click on a row selects it

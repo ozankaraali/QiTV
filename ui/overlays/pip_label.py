@@ -147,6 +147,7 @@ class _Layout:
 
 
 class PipLabel(Overlay):
+    accessible_name = N_("Picture in picture")
     pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
 
     closeRequested = Signal()

@@ -42,6 +42,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QFont, QFontMetricsF, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
+from services.i18n import N_
 from ui.overlays.base import Overlay
 from ui.overlays.painting import LAYOUT_ICONS, Units, draw_icon, fill_round, layout_frame
 from ui.pointer import NAV_BUTTONS
@@ -74,6 +75,8 @@ class LayoutChoice:
 
 
 class LayoutRow(Overlay):
+    # i18n: what a screen reader calls the row of multiview layouts to pick from
+    accessible_name = N_("Multiview layouts")
     pass_empty_tooltip = True  # off its layouts, the parent's tooltip shows
 
     layoutChosen = Signal(int)  # a layout offered was clicked (or Enter on it): its tiles

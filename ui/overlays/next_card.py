@@ -5,7 +5,7 @@ from PySide6.QtGui import QFont, QMouseEvent, QPainter, QPainterPath, QPaintEven
 from PySide6.QtWidgets import QWidget
 
 from services.i18n import tr, tr_n
-from ui.overlays.base import Overlay
+from ui.overlays.base import Overlay, announce
 from ui.overlays.painting import Units, elided, fill_round
 from ui.theme import PALETTE, RADIUS_PANEL, qcolor
 
@@ -43,6 +43,7 @@ class NextCard(Overlay):
         self._place()
         self.show()
         self.raise_()
+        announce(self, title)
         self.update()
         self._timer.start()
 

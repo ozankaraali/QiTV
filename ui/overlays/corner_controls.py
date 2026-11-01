@@ -47,6 +47,7 @@ TOOLTIPS = {
 
 
 class CornerControls(Overlay):
+    accessible_name = N_("Player controls")
     pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
 
     soundRequested = Signal()

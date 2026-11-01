@@ -228,6 +228,8 @@ def _number_digits(channels: list[dict]) -> int:
 
 
 class Guide(Overlay):
+    # i18n: what a screen reader calls the guide (channels as rows, time as columns)
+    accessible_name = N_("Programme guide")
     tuneRequested = Signal(object)  # channel dict
     programmeRequested = Signal(object, object)  # channel dict, Programme: from its start
     closed = Signal()
@@ -991,7 +993,7 @@ class Guide(Overlay):
         u = units.u
         if programme is None:
             p.setFont(units.font(1.0))
-            p.setPen(qcolor(PALETTE.text, 0.45))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             inner = box.adjusted(0.9 * u, 0, -0.9 * u, 0)
             p.drawText(
                 inner,
@@ -1070,7 +1072,7 @@ class Guide(Overlay):
             self._paint_button(p, units, name, button)
         if programme is None:
             p.setFont(units.font(1.0))
-            p.setPen(qcolor(PALETTE.text, 0.45))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             p.drawText(
                 QRectF(left, footer.top(), width, footer.height()),
                 Qt.AlignLeft | Qt.AlignVCenter,

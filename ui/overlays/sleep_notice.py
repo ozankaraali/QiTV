@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_, translate
 from ui.keymap import key_hint
-from ui.overlays.base import Overlay
+from ui.overlays.base import Overlay, announce
 from ui.overlays.painting import Units, fill_round
 from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
@@ -27,6 +27,7 @@ _EDGE_U = 1.0
 
 
 class SleepNotice(Overlay):
+    accessible_name = N_("Sleep timer")
     keepWatching = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -44,9 +45,11 @@ class SleepNotice(Overlay):
             self._text = text
             self._layout()
             self.update()
-        if self.isHidden():
+        appears = self.isHidden()
+        if appears:
             self.show()
         self.raise_()
+        announce(self, text, speak=appears)
 
     def text(self) -> str:
         return self._text

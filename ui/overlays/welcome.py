@@ -47,6 +47,7 @@ _TEXT_FLAGS = Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap
 
 
 class WelcomeCard(Overlay):
+    accessible_name = N_("Welcome to QiTV")
     addRequested = Signal()
     freeRequested = Signal(QPoint)  # the global point under the Free channels… button
 

@@ -92,12 +92,14 @@ class SearchField(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)
+        self.setAccessibleName(tr("Search movies, series and channels"))  # as its placeholder
         self.query = ""
         self.count_text = ""
         self._focused = False
 
     def set_query(self, text: str) -> None:
         self.query = text
+        self.setAccessibleDescription(text)  # a screen reader says what is searched
         self.update()
 
     def set_count_text(self, text: str) -> None:
@@ -145,13 +147,13 @@ class SearchField(QWidget):
             p.setPen(qcolor(PALETTE.text))
             text = "⌕ " + self.query + ("▏" if self._focused else "")
         else:
-            p.setPen(qcolor(PALETTE.text, 0.45))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             # i18n: placeholder of the Library's search field
             text = "⌕ " + tr("Search movies, series and channels")
         p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))
         if self.count_text:
             p.setFont(units.font(COUNT_FONT_U))
-            p.setPen(qcolor(PALETTE.text, 0.5))
+            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             left = box.right() + 2 * u
             right = self.width() - PAD_U * u
             p.drawText(
