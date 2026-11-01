@@ -46,5 +46,5 @@ class VideoSurface(QWidget):
         super().mouseMoveEvent(event)
 
     def wheelEvent(self, event):
-        self._pointer.wheel(event.angleDelta().y(), event.modifiers())
+        self._pointer.wheel_event(event)
         event.accept()

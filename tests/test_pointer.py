@@ -5,7 +5,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 from timer_fixtures import elapse
@@ -40,6 +40,74 @@ class PointerButtonTests(unittest.TestCase):
         self.pointer.press(Qt.MouseButton.LeftButton)
         self.pointer.double_click(Qt.MouseButton.LeftButton)
         self.assertEqual(self.got, ["doubleClicked"])
+
+
+def _wheel(angle_y: int = 0, pixel_y: int = 0, phase=Qt.ScrollPhase.NoScrollPhase) -> QWheelEvent:
+    return QWheelEvent(
+        QPointF(10, 10),
+        QPointF(10, 10),
+        QPoint(0, pixel_y),
+        QPoint(0, angle_y),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        phase,
+        False,
+    )
+
+
+class WheelStepTests(unittest.TestCase):
+    """Scrolling over the picture zaps (or sets the volume) a step at a time: a wheel's notch is
+    a step; a trackpad's swipe must go a deliberate distance, and its glide is ignored."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.pointer = PointerInput()
+        self.steps = []
+        self.pointer.wheelSteps.connect(lambda steps, modifiers: self.steps.append(steps))
+
+    def swipe(self, *pixels: int, momentum: tuple[int, ...] = ()) -> None:
+        """A trackpad swipe: its start, its moves (`pixels`), its end, then its glide."""
+        P = Qt.ScrollPhase
+        self.pointer.wheel_event(_wheel(phase=P.ScrollBegin))
+        for px in pixels:
+            self.pointer.wheel_event(_wheel(2 * px, px, P.ScrollUpdate))
+        self.pointer.wheel_event(_wheel(phase=P.ScrollEnd))
+        for px in momentum:
+            self.pointer.wheel_event(_wheel(2 * px, px, P.ScrollMomentum))
+
+    def test_a_wheel_notch_is_one_step(self):
+        self.pointer.wheel_event(_wheel(-120))  # down: the next channel
+        self.pointer.wheel_event(_wheel(120))
+        self.assertEqual(self.steps, [1, -1])
+
+    def test_a_wheel_notch_with_pixels_but_no_phase_is_still_one_step(self):
+        self.pointer.wheel_event(_wheel(-120, -20))  # macOS gives a mouse's notch pixels too
+        self.assertEqual(self.steps, [1])
+
+    def test_a_brush_on_the_trackpad_is_no_step(self):
+        self.swipe(-10, -15, -20)  # 45 px: 90 eighths of a degree, under a notch either way
+        self.swipe(-30, -40)  # 70 px: a notch's worth of angle (140) before
+        self.assertEqual(self.steps, [])
+
+    def test_a_deliberate_swipe_is_a_step_and_its_glide_is_none(self):
+        self.swipe(-40, -50, -40, momentum=(-60, -60, -40, -30, -20, -10))
+        self.assertEqual(self.steps, [1])
+
+    def test_a_long_swipe_steps_per_distance(self):
+        self.swipe(*([-30] * 8))  # 240 px: a step at 120, another at 240
+        self.assertEqual(self.steps, [1, 1])
+
+    def test_what_a_swipe_left_over_does_not_add_to_the_next(self):
+        self.swipe(-100)
+        self.swipe(-100)
+        self.assertEqual(self.steps, [])
+
+    def test_up_is_the_previous_channel(self):
+        self.swipe(60, 70)
+        self.assertEqual(self.steps, [-1])
 
 
 class _Page(QWidget):

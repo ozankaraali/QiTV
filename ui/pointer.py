@@ -5,12 +5,16 @@ pointer that hides over the video with the player controls."""
 from typing import Callable, Sequence
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QCursor, QMouseEvent, QWindow
+from PySide6.QtGui import QCursor, QMouseEvent, QWheelEvent, QWindow
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ui.macos_window import hide_pointer_until_moved, reclaim_first_responder
 
 NAV_BUTTONS = (Qt.MouseButton.BackButton, Qt.MouseButton.ForwardButton)
+WHEEL_NOTCH = 120  # a wheel's notch (angleDelta: eighths of a degree)
+# A trackpad's swipe this long (pixelDelta) is one step: a deliberate swipe zaps once, a brush
+# of the fingers resting on the trackpad does nothing.
+SWIPE_STEP_PX = 120
 POINTER_IDLE_MS = 3000  # the player controls' own wait (Transport's idle_ms)
 _SECOND_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 
@@ -27,6 +31,7 @@ class PointerInput(QObject):
         self._click = QTimer(self, singleShot=True)
         self._click.timeout.connect(self.clicked)
         self._wheel_accumulator = 0
+        self._swipe_px = 0  # a trackpad's swipe since its start, not yet a whole step
 
     def press(self, button) -> None:
         if button == Qt.MouseButton.LeftButton:
@@ -45,10 +50,30 @@ class PointerInput(QObject):
 
     def wheel(self, delta_y: int, modifiers) -> None:
         self._wheel_accumulator += delta_y
-        steps = int(self._wheel_accumulator / 120)
+        steps = int(self._wheel_accumulator / WHEEL_NOTCH)
         if steps:
-            self._wheel_accumulator -= steps * 120
+            self._wheel_accumulator -= steps * WHEEL_NOTCH
             self.wheelSteps.emit(-steps, modifiers)  # scroll down = next
+
+    def wheel_event(self, event: QWheelEvent) -> None:
+        """A wheel's or a trackpad's scroll. A wheel's notch is a step. A trackpad's swipe (a
+        gesture: it has phases) is a step each SWIPE_STEP_PX it moves, counted from its start;
+        the glide after the fingers lift (momentum) is no step, nor a brush shorter than that.
+        A touchpad that reports no phases (Windows) counts as a wheel, as before."""
+        phase = event.phase()
+        if phase == Qt.ScrollPhase.ScrollMomentum:
+            return
+        if phase == Qt.ScrollPhase.ScrollBegin:
+            self._swipe_px = 0
+        pixels = event.pixelDelta()
+        if phase == Qt.ScrollPhase.NoScrollPhase or pixels.isNull():
+            self.wheel(event.angleDelta().y(), event.modifiers())
+            return
+        self._swipe_px += pixels.y()
+        steps = int(self._swipe_px / SWIPE_STEP_PX)
+        if steps:
+            self._swipe_px -= steps * SWIPE_STEP_PX
+            self.wheelSteps.emit(-steps, event.modifiers())
 
 
 class SecondClickGuard(QObject):

@@ -68,7 +68,7 @@ import time
 from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QWheelEvent
 from PySide6.QtWidgets import QAbstractScrollArea
 
 from services import external_players, favorites, recording
@@ -1325,8 +1325,8 @@ class TVController(QObject):
             self._zap_steps(steps)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.Wheel and self.overlays.column.isVisible():
-            self._column_wheel.wheel(event.angleDelta().y(), event.modifiers())
+        if isinstance(event, QWheelEvent) and self.overlays.column.isVisible():
+            self._column_wheel.wheel_event(event)
             event.accept()
             return True
         return False
