@@ -1366,15 +1366,16 @@ class TVController(QObject):
         self._lanes.supersede()  # and an external play still waiting for its link
         context = self.zap.context
         if group_key != context.group_key or context.index_of(channel) < 0:
-            if not any(ZapContext.same(channel, other) for other in channels):
+            # Numbers reach every live channel, not only the group's (TV numbers are global).
+            fresh = ZapContext(group_key, channels, fallback=self._all_live())
+            if fresh.index_of(channel) < 0:  # the rows it keeps for ↑/↓, built once
                 # Previous or a number outside the group: ↑/↓ walk every channel from it, as
                 # the small picture's Previous does (never the old group from the old place).
                 group_key, channels = ALL_GROUP_ID, self._all_live()
+                fresh = ZapContext(group_key, channels, fallback=channels)
             picked = item_provider.pick_source(self.catalog, channel, group_key)
-            # Numbers reach every live channel, not only the group's (TV numbers are global).
-            self.zap.set_context(
-                ZapContext(group_key, channels, fallback=self._all_live(), source=picked)
-            )
+            fresh.source = picked
+            self.zap.set_context(fresh)
         else:
             picked = item_provider.pick_source(self.catalog, channel, group_key)
             if not from_zap or not context.source:
