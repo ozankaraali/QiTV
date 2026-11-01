@@ -281,6 +281,7 @@ from services.live.timeline import Span
 from services.live.tuning import LiveTuning, Tuning
 from services.live.vlc_clock import ClockMark, VlcClock
 from services.playback import PlaybackState, Session
+from services.stream_address import NO_STREAM_MESSAGE
 from services.vlc_profile import PlayKind
 
 if TYPE_CHECKING:
@@ -2115,11 +2116,14 @@ class LiveSession(QObject):
             self._all_closed()
 
     def _release_resume(self) -> None:
-        """The part a resume waited for closed (or its close cap passed): resume now."""
+        """The part a resume waited for closed (or its close cap passed): resume now, or open
+        the part asked meanwhile (the live upstream stayed parked for it)."""
         self._resume_held = None
         if self._resume_owed:
             self._resume_owed = False
             self._resume_parked()
+        else:
+            self._open_pending_part()
 
     def _on_close_cap(self) -> None:
         if not self._unclosed:
@@ -2166,6 +2170,8 @@ class LiveSession(QObject):
     def _on_error(self, message: str) -> None:
         if self._phase is _Phase.DIRECT:
             quick = self._clock() - self._direct_at <= _DIRECT_QUICK_S
+            if message == NO_STREAM_MESSAGE:
+                self._direct_retries = 0  # 2.8.12: an address no player is handed: final
             if self._direct_retries > 0 and quick:
                 # Right after a fallback the provider may still count the connection the
                 # buffer closed (one allowed stream): tried again after a while. A provider
@@ -3185,6 +3191,9 @@ class LiveSession(QObject):
         if self._one_stream:
             if old is not None:
                 self._part_closing = old.sid  # `_on_closed` opens the new one then
+            # 2.8.12: a resume still owed (the user left a part, then went back before the
+            # buffer) is not made: the live upstream stays parked for this part.
+            self._resume_owed = False
             self._part_pending = t
             if not self._live_parked:
                 self._live_parked = True
@@ -3196,10 +3205,12 @@ class LiveSession(QObject):
 
     def _open_pending_part(self) -> None:
         """The point waiting opens, once the live upstream parked and no old part's
-        connection is still closing."""
+        connection is still closing (2.8.12: one closed as the user left it, too)."""
         t = self._part_pending
         if t is None or not self._live_parked or self._part_closing is not None:
             return
+        if self._resume_held is not None:
+            return  # `_release_resume` opens it once that part's close is confirmed
         self._part_pending = None
         self._open_part_now(t)
 

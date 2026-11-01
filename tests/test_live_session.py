@@ -42,6 +42,7 @@ DISK = "Disk time-shift isn't available; using memory"
 REWOUND = "Rewound past the buffer"
 LOADING = "Still loading…"
 RECONNECTING = "Reconnecting…"
+NO_STREAM = "This item has no stream address"
 NOT_LIVE = "The provider sent a recording, not the channel. Trying again…"
 KEPT_ONLY = "This channel can't open right now. Playing what was kept."
 KEPT_END = "That's all that was kept. The channel can't open right now."
@@ -7141,6 +7142,30 @@ class NightAuditSessionTests(LiveSessionCase):
         self.playback.set_state(PlaybackState.ERROR)
         self.playback.errorOccurred.emit("The stream could not be opened")
         self.assertEqual(self.failures, ["The stream could not be opened"])
+        self.assertNotIn(RECONNECTING, self.notices)
+
+    def test_back_before_the_buffer_while_leaving_a_part_waits_for_its_close(self):
+        # Review: one stream; leaving a part makes the live resume wait for its close; going
+        # back before the buffer meanwhile opened the new part at once (two connections), and
+        # the owed resume then came under it.
+        sid, part = self.in_part(-300.0, one_stream=True)
+        opened = len(self.engine.opened)
+        self.live.seek_to(30.0)  # back into the buffer: part A closes, the resume waits
+        self.live.seek_to(-200.0)  # and before the buffer again: part B
+        self.assertEqual(len(self.engine.opened), opened)  # not while A's close is unanswered
+        self.engine.answer()  # A let go
+        self.assertEqual(len(self.engine.opened), opened + 1)  # B opens now
+        self.assertEqual(self.engine.resumes, [])  # live stays parked for B
+
+    def test_an_address_no_player_is_handed_is_reported_at_once(self):
+        # Review: a refused address (stream_address.playable) in direct play got three
+        # "Reconnecting…" over ~18 s.
+        self.live = self.make(retry_ms=(20, 30, 40))
+        self.engine.lose()
+        self.start()
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit(NO_STREAM)
+        self.assertEqual(self.failures, [NO_STREAM])
         self.assertNotIn(RECONNECTING, self.notices)
 
     def zap_during_part_resume(self):
