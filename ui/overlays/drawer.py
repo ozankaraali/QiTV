@@ -73,7 +73,7 @@ from PySide6.QtWidgets import (
 
 from services import i18n
 from services.catalog import shown_label
-from services.find import FoundChannel, FoundGenre, by_scope
+from services.find import FoundChannel, FoundGenre, by_scope, own_keys
 from services.i18n import N_, tr, tr_n, translate
 from services.navigation import (
     ADD_PROVIDER_ROW,
@@ -135,6 +135,7 @@ SEPARATOR = " › "
 PROVIDER_TOOLTIP = N_("Choose another provider")  # i18n: tooltip of the provider's name
 CRUMB_FONT_U = 1.15
 PREVIEW_DEBOUNCE_MS = 200
+OWN_AT_ONCE = 20_000  # an open group this long or shorter is scoped here, at once (~20 ms)
 LOADING_TEXT = N_("Loading…")
 EMPTY_TEXT = N_("Nothing here")  # i18n: an empty list in the channel list
 ERROR_TEXT = N_("Couldn't load — click or press Enter to retry")
@@ -656,8 +657,8 @@ class Drawer(Overlay):
         self._finder: FindSession | None = None  # (set_finder) without one nothing is found
         self._before_find: tuple[_Place, str] | None = None  # the right column, the focus
         # The open group's channels (provider, item key), which the find lists first: worked
-        # out once per list (its identity and length).
-        self._own: tuple[int, int, frozenset[tuple[str, str]]] = (0, -1, frozenset())
+        # out once per list (its identity and length, and the provider shown).
+        self._own: tuple[tuple, frozenset[tuple[str, str]]] = ((), frozenset())
         self._restore: _Place | None = None  # where the right column goes back to (_refresh)
         self._pending_key: str | tuple[str, str] | None = None
         self._left_choice: NavNode | None = None  # the left highlight, which may lead the path
@@ -1239,16 +1240,26 @@ class Drawer(Overlay):
     def _own_channels(
         self, group: NavNode | None, listed: Sequence[NavNode] | None, shown: str
     ) -> frozenset[tuple[str, str]]:
-        """The open group's channels as (provider, item key); none when no group is open."""
+        """The open group's channels as (provider, item key); none when no group is open. A
+        long group's are made by the find's worker (All of every provider: 264,000 channels
+        froze the first letter typed for 0.3 s), and come with the channels it finds: none
+        until then."""
         if group is None or group.layer != "group" or not listed:
             return frozenset()
         items = getattr(listed, "items", None)  # a long list's dicts, without making its rows
+        long_list = isinstance(items, list)  # (a NodeSeq: the same one while its group is)
         if not isinstance(items, list):
             items = [n.payload for n in listed if isinstance(n.payload, dict)]
-        if self._own[:2] != (id(listed), len(items)):
-            own = frozenset((provider_of(c) or shown, item_key(c)) for c in items)
-            self._own = (id(listed), len(items), own)
-        return self._own[2]
+        token = (id(listed), len(items), shown)
+        if self._own[0] != token:
+            if not long_list or len(items) <= OWN_AT_ONCE or self._finder is None:
+                own: frozenset[tuple[str, str]] | None = own_keys(items, shown)
+            else:
+                own = self._finder.own_keys(token, items, shown)
+            if own is None:
+                return frozenset()
+            self._own = (token, own)
+        return self._own[1]
 
     # ---- mouse: consumed here, so it never reaches the video behind -------------------------
 

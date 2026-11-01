@@ -13,6 +13,7 @@ from job_fixtures import ImmediateRunner
 from mixed_fixtures import live_content
 from timer_fixtures import elapse, wait_until
 
+from services import navigation as navigation_module
 from services.catalog import PROVIDER_LOADING_MESSAGE, Group
 from services.navigation import (
     ADD_PROVIDER_ROW,
@@ -1386,6 +1387,39 @@ class FindTests(unittest.TestCase):
         self.type("n")
         channels = [title for layer, title in self.rows() if layer == "item"]
         self.assertEqual(channels[:3], ["Evening News", "Morning News", "Northwind Sport 1"])
+
+    def test_a_long_groups_channels_come_first_from_the_finds_worker(self):
+        # All of every provider: 264,000 channels' keys froze the first letter for 0.3 s on
+        # the GUI thread. A long group's come from the find's worker, with what it finds.
+        scopes = []
+        worker = drawer_module.own_keys
+
+        def counted(items, shown):
+            scopes.append(len(items))
+            return worker(items, shown)
+
+        with (
+            mock.patch.object(drawer_module, "OWN_AT_ONCE", 100),
+            mock.patch.object(navigation_module, "LAZY_ROWS", 100),  # (its rows made on demand)
+            mock.patch.object(drawer_module, "own_keys", counted),
+        ):
+            self.nav.reset_to("live", "Sports")  # 300 channels: long here
+            self.drawer.open_drawer()
+            self.type("n")
+            channels = [title for layer, title in self.rows() if layer == "item"]
+            self.assertEqual(scopes, [])  # not made here
+            news = channels.index("Evening News")
+            self.assertEqual(channels[:news], [f"Northwind Sport {n}" for n in range(1, news + 1)])
+            self.assertEqual(channels[news : news + 2], ["Evening News", "Morning News"])
+            self.type("o")  # "no", narrowed: the group's keys are kept
+            channels = [title for layer, title in self.rows() if layer == "item"]
+            self.assertEqual(channels[0], "Northwind Sport 1")
+            self.nav.reset_to("live", "News")  # 2 channels: made here, at once
+            self.drawer.open_drawer()
+            self.type("n")
+            channels = [title for layer, title in self.rows() if layer == "item"]
+            self.assertEqual(channels[:3], ["Evening News", "Morning News", "Northwind Sport 1"])
+            self.assertEqual(set(scopes), {2})  # (a short list's, here)
 
     def test_typing_with_the_focus_on_the_genres_finds_there_too(self):
         self.drawer.left()  # the genre column: no ← first, no filter of that column alone

@@ -6,14 +6,15 @@ again) and when the find has been idle for IDLE_DROP_MS; the next find makes it 
 letter typed narrows what was found at
 once, here; the genres and channels for the new text, ranked, follow from a worker after a
 short pause (`preferences`, read here, rank the user's own first). One worker runs at a time:
-a text typed meanwhile waits, and only the latest one runs.
+a text typed meanwhile waits, and only the latest one runs. The worker also makes the keys of
+a long group the list has open (`own_keys`), for its channels to come first.
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -59,6 +60,10 @@ class FindSession(QObject):
         self._index: Optional[FindIndex] = None
         self._made_for: Any = None  # the signature the index was made for
         self._snapshot = 0
+        # A long group's own keys: (token, its channels, the provider shown) asked for, and
+        # (token, keys) made by the worker (own_keys).
+        self._scope: Optional[tuple[Any, list[dict], str]] = None
+        self._own: Optional[tuple[Any, frozenset[tuple[str, str]]]] = None
         self._generation = 0
         self._running = False
         self._queued = False
@@ -104,6 +109,7 @@ class FindSession(QObject):
         self._query = ""
         self.genres, self.channels = [], []
         self.searching = self.failed = False
+        self._scope = self._own = None  # (the list keeps the keys it took)
         self._idle.start()  # an index unused for a while goes
         self.changed.emit()
 
@@ -127,6 +133,21 @@ class FindSession(QObject):
         self.drop_snapshot()
         if self._query.strip():
             self._timer.start()
+
+    def own_keys(
+        self, token: Any, items: Sequence[dict], shown: str
+    ) -> Optional[frozenset[tuple[str, str]]]:
+        """A long group's channels as `find.by_scope`'s `own` takes them (`find.own_keys`),
+        made by the worker with the next find (the GUI thread took 0.3 s for 264,000): None
+        until then. `token` tells one list from another (the same token: the same channels).
+        """
+        if self._own is not None and self._own[0] == token:
+            return self._own[1]
+        if self._scope is None or self._scope[0] != token:
+            self._scope = (token, list(items), shown)
+            if self._query.strip():
+                self._timer.start()  # found again (with the index): the keys come with it
+        return None
 
     def group_of(self, item: dict) -> str:
         """The genre a found channel (as `channels` holds it) is first listed in, or ""."""
@@ -157,20 +178,27 @@ class FindSession(QObject):
             loaded = self._loaded() if self._loaded is not None else None
             signature = self._signature() if self._signature is not None else None
         preferences = self._preferences() if self._preferences is not None else Preferences()
+        scope, token = None, None
+        if self._scope is not None and (self._own is None or self._own[0] != self._scope[0]):
+            token, items, shown = self._scope
+            scope = (items, shown)
         worker = FindWorker(
             self._provider_manager,
             self._query,
             index=self._index,
             loaded=loaded,
             preferences=preferences,
+            scope=scope,
         )
-        context = (self._generation, self._snapshot, signature, self._query)
+        context = (self._generation, self._snapshot, signature, self._query, token)
         self._jobs.run_worker(worker, self._on_done, self._on_error, context=context)
 
     def _on_done(self, context: tuple, payload) -> None:
-        generation, snapshot, signature, text = context
+        generation, snapshot, signature, text, token = context
         self._running = False
-        index, genres, hits = payload
+        index, genres, hits, *own = payload
+        if own and self._scope is not None and self._scope[0] == token:
+            self._own = (token, own[0])
         if snapshot == self._snapshot and self._index is None:
             self._index, self._made_for = index, signature  # titles fold once per snapshot
         if self._closed:
@@ -191,7 +219,7 @@ class FindSession(QObject):
             self.changed.emit()
 
     def _on_error(self, context: tuple, message: str) -> None:
-        generation, _snapshot, _signature, text = context
+        generation, _snapshot, _signature, text, _token = context
         self._running = False
         logger.warning("Find failed (%s)", message)
         if self._closed:
