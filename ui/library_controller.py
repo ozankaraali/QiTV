@@ -80,7 +80,7 @@ SEARCH_DEBOUNCE_MS = DEBOUNCE_MS
 # What the grid or a toast shows: shown with translate().
 LOADING_TEXT = N_("Loading…")
 EMPTY_TEXT = N_("Nothing here")  # i18n: a Library genre without titles
-RETRY_TEXT = N_("Couldn't load — press Enter to retry")
+RETRY_TEXT = N_("Couldn't load — click or press Enter to retry")
 SERIES_FAILED_NOTICE = N_("Couldn't load that series")
 UNKNOWN_PROVIDER_NOTICE = N_("That title's provider is no longer in your list")
 REFRESHING_TEXT = N_("Refreshing films and series…")  # i18n: a toast (2.8: the Library's ↻)
@@ -201,6 +201,7 @@ class LibraryController(QObject):
         grid.leftEdge.connect(self._on_left_edge)
         grid.upEdge.connect(self._on_up_edge)
         grid.contextRequested.connect(self._on_grid_context)
+        grid.messageClicked.connect(self._on_grid_message_clicked)
         series.seasonSelected.connect(self._load_episodes)
         series.episodeActivated.connect(self._activate_episode)
         series.startOverRequested.connect(
@@ -820,6 +821,11 @@ class LibraryController(QObject):
             grid = self._screen.grid
             grid.set_sections([])
             grid.set_message(translate(RETRY_TEXT))
+
+    def _on_grid_message_clicked(self) -> None:
+        """A click on "Couldn't load" retries, as Enter does."""
+        if self._failed and self._grid_content == "browse":
+            self._retry()
 
     def _retry(self) -> None:
         self._failed = False

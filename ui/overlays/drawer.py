@@ -137,8 +137,9 @@ CRUMB_FONT_U = 1.15
 PREVIEW_DEBOUNCE_MS = 200
 LOADING_TEXT = N_("Loading…")
 EMPTY_TEXT = N_("Nothing here")  # i18n: an empty list in the channel list
-ERROR_TEXT = N_("Couldn't load — press Enter to retry")
-PROVIDER_ERROR_TEXT = N_("Couldn't connect — press Enter to retry")
+ERROR_TEXT = N_("Couldn't load — click or press Enter to retry")
+PROVIDER_ERROR_TEXT = N_("Couldn't connect — click or press Enter to retry")
+_RETRY_TEXTS = (ERROR_TEXT, PROVIDER_ERROR_TEXT)  # a click on the list, or Enter, retries
 FIND_ACTION = "find"  # the ⌕ Find box above the right column
 FIND_CLEAR = "find_clear"  # its ✕
 
@@ -1103,6 +1104,10 @@ class Drawer(Overlay):
         nodes = children or []
         if col.message is None and not nodes:
             col.message = EMPTY_TEXT
+        if col.message in _RETRY_TEXTS:  # a click retries (_retry_click)
+            col.view.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            col.view.viewport().unsetCursor()
         live = bool(nodes) and _is_live_item(self._nav, nodes[0])
         numbers = _numbers(nodes) if live else None
         # The same rows again (e.g. the section reported ready once more): the list keeps its
@@ -1314,6 +1319,9 @@ class Drawer(Overlay):
         if button == BACK_BUTTON:
             return key_hint(tr("Back"), "Left")  # i18n: tooltip of ‹: a layer up (verb)
         if button == _crumb_key(0):
+            path, shown = self._nav.path, self.breadcrumb_parts()
+            if path and shown and shown[0][1] != path[0].title:  # elided: its whole name too
+                return f"{path[0].title}\n{translate(PROVIDER_TOOLTIP)}"
             return translate(PROVIDER_TOOLTIP)
         return ""
 
@@ -1377,6 +1385,8 @@ class Drawer(Overlay):
             self._relayout()
         elif isinstance(event, QMouseEvent) and self._drag_event(obj, event):
             return True  # a channel row dragged out: neither a selection nor a click
+        elif isinstance(event, QMouseEvent) and self._retry_click(obj, event):
+            return True
         elif (
             event.type() in _RIGHT_PRESSES
             and isinstance(event, QMouseEvent)
@@ -1385,6 +1395,25 @@ class Drawer(Overlay):
         ):
             return True  # not a selection: the context menu follows, the highlight stays
         return False
+
+    def _retry_click(self, obj: QObject, event: QMouseEvent) -> bool:
+        """A click on a list that says "Couldn't load" (or "Couldn't connect"): it retries, as
+        Enter does there. True when it did."""
+        if (
+            event.type() != QEvent.Type.MouseButtonRelease
+            or event.button() != Qt.MouseButton.LeftButton
+        ):
+            return False
+        side = next((s for s, c in self._columns.items() if obj is c.view.viewport()), None)
+        if side is None:
+            return False
+        col = self._columns[side]
+        if col.nodes or col.message not in _RETRY_TEXTS:
+            return False
+        if side != self.focus_side:
+            self.focus_side = side
+            self._refresh()
+        return self._retry(col)
 
     def _drag_event(self, obj: QObject, event: QMouseEvent) -> bool:
         """A list's mouse event, as a drag of a channel row out of the list; True when the
@@ -1499,9 +1528,9 @@ class Drawer(Overlay):
     def _header(self) -> _Header:
         """The left column's top row: ‹ at its left (but on the sources), then the names of
         the left column's path, then the Library (2.8), Search, the refresh button and the
-        Settings gear at its right end. The names elide before they reach the buttons: the
-        last one at its end, the others ("the head") from their start, into one name that goes
-        a layer up."""
+        Settings gear at its right end. The names elide before they reach the buttons, each at
+        its end: the provider's (the first, which shows the sources to switch provider) and the
+        last share the room, and any names between them fold into "…", which goes a layer up."""
         units = self._units
         col = self._columns["left"]
         side = units.px(PAD_SIDE_U)
@@ -1526,23 +1555,33 @@ class Drawer(Overlay):
         names: list[tuple[int | None, str, QRectF]] = []
         start = x
         if titles:
-            last = fm.elidedText(titles[-1], Qt.ElideRight, int(room))
-            last_w = fm.horizontalAdvance(last)
             sep_w = fm.horizontalAdvance(SEPARATOR)
             head = titles[:-1]
-            if sum(fm.horizontalAdvance(t) + sep_w for t in head) <= room - last_w:
-                for index, title in enumerate(head):
-                    width = fm.horizontalAdvance(title)
-                    names.append((index, title, QRectF(x, row.y(), width, row.height())))
+            head_w = sum(fm.horizontalAdvance(t) + sep_w for t in head)
+            if head and head_w > room - min(fm.horizontalAdvance(titles[-1]), room):
+                # Too long together: the provider's name keeps its start (and its click, to
+                # switch provider) in at least half the room the last leaves; the names between
+                # them fold into "… › ", a layer up.
+                fold = "…" + SEPARATOR if len(head) > 1 else ""
+                share = max(0.0, room - sep_w - fm.horizontalAdvance(fold))
+                first_room = max(share / 2, share - fm.horizontalAdvance(titles[-1]))
+                first = fm.elidedText(head[0], Qt.ElideRight, int(first_room))
+                if first and first != "…":
+                    width = fm.horizontalAdvance(first)
+                    names.append((0, first, QRectF(x, row.y(), width, row.height())))
                     x += width + sep_w
-            elif head:
-                cut = fm.elidedText(
-                    SEPARATOR.join(head) + SEPARATOR, Qt.ElideLeft, max(0, int(room - last_w))
-                )
-                width = fm.horizontalAdvance(cut)
-                if cut:
-                    names.append((None, cut, QRectF(x, row.y(), width, row.height())))
-                x += width
+                if fold:
+                    width = fm.horizontalAdvance(fold)
+                    names.append((None, fold, QRectF(x, row.y(), width, row.height())))
+                    x += width
+                head = []
+            for index, title in enumerate(head):
+                width = fm.horizontalAdvance(title)
+                names.append((index, title, QRectF(x, row.y(), width, row.height())))
+                x += width + sep_w
+            last_room = max(0.0, library.left() - gap - x)
+            last = fm.elidedText(titles[-1], Qt.ElideRight, int(last_room))
+            last_w = fm.horizontalAdvance(last)
             names.append((len(titles) - 1, last, QRectF(x, row.y(), last_w, row.height())))
             x += last_w
         text = QRectF(start, row.y(), x - start, row.height())
@@ -1670,7 +1709,7 @@ class Drawer(Overlay):
     def _paint_column(self, p: QPainter, col: _Column, units: Units) -> None:
         u = units.u
         if col.message:
-            error = col.message in (ERROR_TEXT, PROVIDER_ERROR_TEXT)
+            error = col.message in _RETRY_TEXTS
             p.setFont(units.font(1.35))
             p.setPen(qcolor(PALETTE.text, 0.75 if error else 0.5))
             view = col.view.geometry()

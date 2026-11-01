@@ -1338,6 +1338,21 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.catalog.requests.count(("group", "movies", "c")), 2)
         self.assertEqual(self.screen.grid._message, "Loading…")
 
+    def test_a_click_on_the_retry_notice_requests_the_genre_again(self):
+        self.catalog.item_map[("movies", "c")] = None
+        self.open_movies()
+        self.model.select_genre("c")
+        self.model.failed.emit("Couldn't reach the provider")
+        self.assertEqual(self.screen.grid._message, RETRY_TEXT)
+        self.assertIn("click", RETRY_TEXT)
+        grid = self.screen.grid
+        middle = grid.viewport().rect().center()
+        QTest.mouseClick(grid.viewport(), Qt.LeftButton, Qt.NoModifier, middle)
+        self.assertEqual(self.catalog.requests.count(("group", "movies", "c")), 2)
+        self.assertEqual(grid._message, "Loading…")
+        QTest.mouseClick(grid.viewport(), Qt.LeftButton, Qt.NoModifier, middle)
+        self.assertEqual(self.catalog.requests.count(("group", "movies", "c")), 2)  # loading
+
     def test_a_loading_provider_keeps_loading_and_a_shown_genre_keeps_its_titles(self):
         self.catalog.item_map[("movies", "c")] = None
         ctl = self.open_movies()

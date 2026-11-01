@@ -211,6 +211,7 @@ class PosterGrid(QAbstractScrollArea):
     upEdge = Signal()  # ↑ in the first row
     # A right-click on a poster (flat index, global position): the shell's menu for it.
     contextRequested = Signal(int, QPoint)
+    messageClicked = Signal()  # a click on the message shown instead of titles ("Couldn't load")
 
     def __init__(self, posters, parent=None) -> None:
         super().__init__(parent)
@@ -841,6 +842,8 @@ class PosterGrid(QAbstractScrollArea):
             return
         i = self.index_at(pos)
         if i < 0:
+            if self._message is not None:
+                self.messageClicked.emit()
             return
         self._pressed = i
         if i == self._cur:
