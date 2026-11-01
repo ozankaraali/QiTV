@@ -799,6 +799,9 @@ class TVWindow(QMainWindow):
             lambda: not self.screens.library_shown() and controller.pointer_may_hide(),
             parent=self,
         )
+        # The player controls come on a real move, not on a jittering mouse (2.8.12: it kept
+        # them, and the pointer with them, up).
+        self.pointer.realMoved.connect(controller.mouse_moved)
         for source in sources:
             self._wire_source(source)
         self.epg_refresh = QTimer(self, interval=EPG_REFRESH_MS)  # the guide keeps moving
@@ -832,8 +835,7 @@ class TVWindow(QMainWindow):
         controller = self.controller
         source.clicked.connect(self._on_video_clicked)
         source.doubleClicked.connect(controller.video_double_clicked)
-        source.mouseMoved.connect(self.pointer.moved)
-        source.mouseMoved.connect(controller.mouse_moved)
+        source.mouseMoved.connect(self.pointer.moved)  # its realMoved: controller.mouse_moved
         source.wheelSteps.connect(controller.wheel)
         source.backPressed.connect(controller.mouse_back)
         source.forwardPressed.connect(controller.mouse_forward)
