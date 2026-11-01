@@ -59,6 +59,7 @@ from services.live import parts as live_parts
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
+from services.playback import PlaybackState
 from services.provider_api import known_http_only, portal_http_only
 from services.vlc_profile import PlayKind
 from ui import item_provider
@@ -67,7 +68,7 @@ from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, LiveTuner
 from ui.overlays.back_notice import LEFT_OFF
 from ui.overlays.painting import fmt_clock
-from ui.overlays.transport import NO_RECORDING, Transport
+from ui.overlays.transport import NO_RECORDING, NOTHING_PLAYING, Transport
 
 logger = logging.getLogger(__name__)
 
@@ -774,12 +775,21 @@ class LiveControls(QObject):
             self._toast(translate(NO_RECORDING_TEXT))
             return
         if live is None or not live.recordable() or not self.pipeline_live():
-            opening = live is not None and self._tuner.opening()
-            self._toast(translate(NOT_YET_TEXT if opening else NO_RECORDING))
+            if live is not None and self._tuner.opening():
+                self._toast(translate(NOT_YET_TEXT))
+            elif self._nothing_plays():
+                self._toast(translate(NOTHING_PLAYING))  # it failed: not time-shift's fault
+            else:
+                self._toast(translate(NO_RECORDING))
             return
         when = self._now().astimezone()
         if live.start_recording(recording.path_for(self.config, current.title, when)):
             self._show_transport()
+
+    def _nothing_plays(self) -> bool:
+        """The channel's player failed or ended (2.8.12): nothing plays to record."""
+        state = getattr(self.session, "state", None)
+        return callable(state) and state() in (PlaybackState.ERROR, PlaybackState.ENDED)
 
     def _on_recording_changed(self, *_args: Any) -> None:
         live = self.live

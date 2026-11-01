@@ -28,6 +28,7 @@ from services.live.live_session import CRAWLING, UNAVAILABLE
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode, item_key
+from services.playback import PlaybackState
 from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of
 from services.vlc_profile import DEFAULT_USER_AGENT, STB_USER_AGENT, PlayKind
 from services.watch_state import WatchState
@@ -578,19 +579,29 @@ class FakeTransport(FakeOverlay):
     def pos(self):
         return QPoint(0, 0)
 
+    shows_failed = False  # show_failed(): a channel that failed to open (2.8.12)
+
     def show_vod(self, title, subtitle):
         self.record("show_vod", title, subtitle)
-        self.visible = True
+        self.visible, self.shows_failed = True, False
 
     def show_live(self, title, subtitle, logo=None):
         self.record("show_live", title, subtitle)
         self.logo = logo
-        self.visible = True
+        self.visible, self.shows_failed = True, False
 
     def show_timeshift(self, title, subtitle, logo=None):
         self.record("show_timeshift", title, subtitle)
         self.logo = logo
-        self.visible = True
+        self.visible, self.shows_failed = True, False
+
+    def show_failed(self, title, subtitle, logo=None):
+        self.record("show_failed", title, subtitle)
+        self.logo = logo
+        self.visible, self.shows_failed = True, True
+
+    def failed(self):
+        return self.shows_failed
 
     def badge_rect(self):
         # The live badge is only there while a live channel shows (the test says when).
@@ -2691,6 +2702,54 @@ class TuneFailureAndKeyTests(ControllerTestCase):
         self.assertEqual(self.banner.calls, [])
         self.assertEqual(self.drawer.calls, [])
         self.assertEqual(self.column.calls, [])
+
+
+class FailedChannelTests(ControllerTestCase):
+    """2.8.12: after "Couldn't open the stream" a mouse had nothing to click but the picture."""
+
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+        self.catalog.ptype = "M3UPLAYLIST"  # no link to make again on its own
+
+    def fail(self):
+        self.play(0)
+        self.session.stateChanged.emit("error")
+        self.session.errorOccurred.emit("The stream could not be opened")
+        self.transport.visible = False
+        self.transport.calls.clear()
+
+    def test_the_mouse_shows_its_controls_and_play_asks_for_it_again(self):
+        self.fail()
+        self.controller.mouse_moved()
+        self.assertEqual([c[0] for c in self.transport.named("show_failed")], ["One"])
+        self.controller.mouse_moved()  # still up: only poked
+        self.assertEqual(len(self.transport.named("show_failed")), 1)
+        self.transport.playPauseRequested.emit()
+        self.assertEqual(self.session.toggles, 0)
+        self.assertEqual(self.requested(), ["One", "One"])
+        self.ready("http://stream/1")
+        self.session.stateChanged.emit("playing")
+        self.controller.mouse_moved()  # it plays: live TV's controls again
+        self.assertEqual([c[0] for c in self.transport.named("show_live")], ["One"])
+
+    def test_space_asks_for_it_again(self):
+        self.fail()
+        self.controller.handle(Action.PLAY_PAUSE)
+        self.assertEqual(self.requested(), ["One", "One"])
+
+    def test_r_says_nothing_plays(self):
+        self.fail()
+        self.session.state = lambda: PlaybackState.ERROR
+        self.controller.handle(Action.RECORD)
+        self.assertEqual(self.toast.messages()[-1], ("Nothing playing", "info"))
+
+    def test_a_stopped_channel_keeps_its_play_again(self):
+        self.play(0)
+        self.controller.stop()
+        self.transport.calls.clear()
+        self.controller.mouse_moved()
+        self.assertEqual(self.transport.named("show_failed"), [])
 
 
 class LoadingQueueAndDrawerTests(ControllerTestCase):

@@ -1186,6 +1186,10 @@ class TVController(QObject):
         if self._stopped is not None and self._current is None:
             self.play_again()  # 2.6: after Stop, Play plays it again
             return
+        failed = self._failed_live()
+        if failed is not None:
+            self._retry_failed(failed)
+            return
         self._tuner.toggle_pause()
         self._show_transport()
 
@@ -2943,6 +2947,10 @@ class TVController(QObject):
         return channel_key(item_provider.provider_name(self.catalog, item), item)
 
     def _toggle_pause(self) -> None:
+        failed = self._failed_live()
+        if failed is not None:
+            self._retry_failed(failed)  # ▶ over a channel that failed to open
+            return
         self._tuner.toggle_pause()
 
     def _seek_ms(self, ms: int) -> None:
@@ -3558,14 +3566,50 @@ class TVController(QObject):
             self._show_grid_transport()  # the grid's button and layout chip stay in reach
             return
         if target is None or not self._has_media():
+            failed = self._failed_live()
+            if failed is not None and not self._digits:
+                self._show_failed_transport(failed)
             return
         if self._digits:
             return  # the banner shows the number being typed
         self.overlays.banner.dismiss()
-        if target.live and not self.overlays.transport.isVisible():
+        transport = self.overlays.transport
+        if target.live and (not transport.isVisible() or transport.failed()):
             self._live_controls.show_live_transport(target)
         else:
-            self.overlays.transport.poke()
+            transport.poke()
+
+    def _failed_live(self) -> Optional[Target]:
+        """The live channel that failed to open, or whose stream ended for good (2.8.12): it is
+        still current, but nothing plays or opens, Stop did not end it and no other choice is
+        on its way."""
+        target = self._current
+        if target is None or not target.live or self._has_media():
+            return None
+        if self._stopped is not None or self._lanes.busy():
+            return None
+        return target if self._state in ("error", "ended") else None
+
+    def _show_failed_transport(self, target: Target) -> None:
+        """Live TV's controls over a channel that failed to open (2.8.12): a mouse was left
+        with nothing to click but the picture (the channel list). ▶ tries it again, and the
+        guide, the previous channel and Search are in reach."""
+        self.overlays.banner.dismiss()
+        transport = self.overlays.transport
+        if transport.isVisible() and transport.failed():
+            transport.poke()
+            return
+        now = self.now_title(target.item)
+        transport.set_favorite(favorites.is_favorite(self.config, target.item))
+        transport.show_failed(target.title, now[0] if now else "", self._logo(target.item))
+
+    def _retry_failed(self, target: Target) -> None:
+        """▶ or Space over a channel that failed to open: it is asked for again, from its
+        group (as Play again after Stop)."""
+        self.overlays.transport.dismiss()
+        key = target.group_key or ALL_GROUP_ID
+        channels = list(self.catalog.items("live", key) or []) or self._all_live()
+        self.tune(target.item, group_key=key, channels=channels)
 
     def _show_grid_transport(self) -> None:
         """The player controls over a grid whose focused tile plays nothing: live TV's, named
