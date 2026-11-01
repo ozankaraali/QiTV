@@ -291,12 +291,15 @@ def plural_category(code: str, n: int) -> str:
         return "other"
     if base in _ONE_FOR_0_1:  # French: "0 chaîne", "1 chaîne", "2 chaînes"
         return "one" if n in (0, 1) else "other"
-    if base in _SLAVIC:
+    if base in _SLAVIC or base in _SOUTH_SLAVIC:
         if n % 10 == 1 and n % 100 != 11:
             return "one"
         if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
             return "few"
-        return "many"
+        return "many" if base in _SLAVIC else "other"
+    rule = _RULES.get(base)
+    if rule is not None:
+        return rule(n)
     if base == "pl":
         if n == 1:
             return "one"
@@ -337,9 +340,56 @@ def pseudo(text: str) -> str:
 # --- inside --------------------------------------------------------------------------------
 
 _NO_PLURALS = {"ja", "ko", "zh", "vi", "th", "id", "ms"}
-_ONE_FOR_0_1 = {"fr", "pt"}  # CLDR: 0 and 1 are "one" (Brazilian Portuguese too)
+# CLDR: 0 and 1 are "one" (Brazilian Portuguese too; Hindi, Bengali, Persian, Armenian)
+_ONE_FOR_0_1 = {"fr", "pt", "hi", "bn", "fa", "hy"}
 _DOTTED_I = {"tr", "az"}  # i/İ and ı/I are two letters
-_SLAVIC = {"ru", "uk", "be"}
+_SLAVIC = {"ru", "uk", "be"}  # one, few, many
+_SOUTH_SLAVIC = {"hr", "sr", "bs"}  # one, few, other
+
+
+def _lithuanian(n: int) -> str:
+    if n % 10 == 1 and not 11 <= n % 100 <= 19:
+        return "one"
+    return "few" if 2 <= n % 10 <= 9 and not 11 <= n % 100 <= 19 else "other"
+
+
+def _latvian(n: int) -> str:
+    if n % 10 == 0 or 11 <= n % 100 <= 19:
+        return "zero"
+    return "one" if n % 10 == 1 and n % 100 != 11 else "other"
+
+
+def _romanian(n: int) -> str:
+    if n == 1:
+        return "one"
+    return "few" if n == 0 or 1 <= n % 100 <= 19 else "other"
+
+
+def _slovenian(n: int) -> str:
+    return {1: "one", 2: "two", 3: "few", 4: "few"}.get(n % 100, "other")
+
+
+def _arabic(n: int) -> str:
+    if n in (0, 1, 2):
+        return ("zero", "one", "two")[n]
+    if 3 <= n % 100 <= 10:
+        return "few"
+    return "many" if 11 <= n % 100 <= 99 else "other"
+
+
+# 2.8.12: the languages whose whole numbers need more than one/other (CLDR's integer rules).
+_RULES = {
+    "lt": _lithuanian,
+    "lv": _latvian,
+    "ro": _romanian,
+    "sl": _slovenian,
+    "ar": _arabic,
+    "he": lambda n: {1: "one", 2: "two"}.get(n, "other"),
+    "mk": lambda n: "one" if n % 10 == 1 and n % 100 != 11 else "other",
+    "fil": lambda n: "one" if n in (1, 2, 3) or n % 10 not in (4, 6, 9) else "other",
+}
+# 2.8.12: catalogs for a script or region apart (the system's language names it so).
+_TRADITIONAL_CHINESE = ("hant", "tw", "hk", "mo")
 _ACCENTS = dict(zip("aceinouyAEINOUCSZsz", "àçéîñöüýÅÉÎÑÖÜÇŠŽšž"))
 
 
@@ -386,13 +436,25 @@ def _base(name: str) -> str:
     return name.replace("-", "_").split("_")[0].lower()
 
 
+def _preference(name: str) -> list[str]:
+    """A system language's codes QiTV may have a catalog for, the closest first: Traditional
+    Chinese (zh-Hant, zh-TW, zh-HK) is "zh_TW" before "zh" (2.8.12)."""
+    base = _base(name)
+    parts = name.replace("-", "_").lower().split("_")[1:]
+    if base == "zh" and any(part in _TRADITIONAL_CHINESE for part in parts):
+        return ["zh_TW", base]
+    return [base]
+
+
 def _system_preferences() -> list[str]:
-    """The system's languages, most preferred first, as base codes ("tr")."""
+    """The system's languages, most preferred first, as base codes ("tr"; "zh_TW" first for
+    Traditional Chinese)."""
     wanted: list[str] = []
     try:
         from PySide6.QtCore import QLocale
 
-        wanted += [_base(name) for name in QLocale.system().uiLanguages()]
+        for ui_name in QLocale.system().uiLanguages():
+            wanted += _preference(ui_name)
         wanted.append(_base(QLocale.system().name()))
     except Exception as e:  # Qt missing in a helper: the C library's locale still answers
         logger.debug("No system languages from Qt: %s", e)
