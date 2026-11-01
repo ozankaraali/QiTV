@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QSlider,
@@ -58,12 +59,13 @@ from services.provider_api import (
     remember_http_only,
 )
 from services.provider_link import parse_provider_link
+from services.provider_rename import removed_between, renames_between
 from services.provider_types import EMBY, JELLYFIN, is_media_server
 from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
 from services.tmdb import built_in_token as tmdb_built_in_token
 from ui.free_channels_menu import show_menu as show_free_channels_menu
-from ui.parental_settings import build_parental_tab
+from ui.parental_settings import build_parental_tab, pin_allows
 from ui.provider_drop import unique_name
 from ui.remote_settings import build_remote_tab, save_remote_settings
 from ui.update_dialogs import check_for_updates
@@ -108,6 +110,16 @@ PASTE_LINK_TIP = N_(
     " Pasting the link into the address does the same."
 )
 NO_LINK_TEXT = N_("The clipboard holds no provider link.")
+# i18n: Settings → Providers: the name typed is another provider's (QiTV finds providers by name)
+NAME_TAKEN_TEXT = N_("Another provider is named “{name}” already. Choose another name.")
+# i18n: Settings → Save: a provider added or edited lacks what it needs to connect ({field}: that
+# field's label, as "Server URL"; {name}: the provider)
+MISSING_FIELD_TEXT = N_("Fill in “{field}” for the provider “{name}”, or remove it.")
+# i18n: Settings → Providers → Remove Provider asks first ({name}: the provider)
+REMOVE_QUESTION = N_("Remove the provider “{name}”?")
+# i18n: added to "Remove the provider …?" when it has scheduled recordings
+REMOVE_RECORDINGS_NOTE = N_("Its scheduled recordings will be cancelled.")
+PLAYLIST_TYPES = ("M3UPLAYLIST", "M3USTREAM")
 GUIDE_OFFSET_TIP = N_(
     "When this provider's guide is off by whole hours, move its programmes here: with +1 h,"
     " a programme the guide lists at 20:00 shows at 21:00 (the guide, the banner, now and next"
@@ -350,6 +362,11 @@ class OptionsDialog(QDialog):
         self.epg_manager = parent.epg_manager
         self.providers = deepcopy(self.provider_manager.providers)
         self._original_providers = deepcopy(self.providers)
+        # Each provider as it opened, by identity (a rename keeps the dict, a removal drops it;
+        # the pairs keep the dicts alive, so their ids stay theirs).
+        self._original_entries = [(p, str(p.get("name") or "")) for p in self.providers]
+        self._as_opened = {id(p): o for p, o in zip(self.providers, self._original_providers)}
+        self._pin_granted = False  # the parental PIN was typed for a rename or a removal
         self._original_provider_identities = {
             provider["name"]: self.provider_manager.provider_cache_identity(provider)
             for provider in self.providers
@@ -1198,6 +1215,7 @@ class OptionsDialog(QDialog):
             self.provider_combo.addItem(f"{i + 1}: {prov}", userData=provider)
         self.provider_combo.setCurrentIndex(self.selected_provider_index)
         self.provider_combo.blockSignals(False)
+        self._set_provider_form_enabled(bool(self.providers))
         self.load_provider_settings(self.selected_provider_index)
 
     def load_provider_settings(self, index):
@@ -1346,13 +1364,134 @@ class OptionsDialog(QDialog):
         self.name_input.setFocus()
 
     def remove_provider(self):
-        if len(self.providers) == 1:
+        """Remove Provider: asked first (and the parental PIN, when one is set, for a provider
+        saved before); the last one may go too (the TV then shows its welcome card). Saved
+        with Save, as every provider edit."""
+        index = self.provider_combo.currentIndex()
+        if not 0 <= index < len(self.providers):
             return
-        del self.providers[self.provider_combo.currentIndex()]
+        provider = self.providers[index]
+        saved = id(provider) in self._as_opened
+        if saved and not self._parental_allows():
+            return
+        name = str(provider.get("name") or provider.get("url") or "")
+        text = translate(REMOVE_QUESTION, name=name)
+        if saved and name in self._scheduled_providers():
+            text = f"{text}\n\n{translate(REMOVE_RECORDINGS_NOTE)}"
+        answer = QMessageBox.question(self, tr("Remove Provider"), text)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        del self.providers[index]
         self.edited_provider = None
-        self.selected_provider_index = min(self.selected_provider_index, len(self.providers) - 1)
+        if not self.providers:
+            self.selected_provider_index = 0
+            self.selected_provider_name = ""  # none left: the TV shows its welcome card
+        else:
+            self.selected_provider_index = min(index, len(self.providers) - 1)
         self.load_providers()
         self.providers_modified = True
+
+    def _scheduled_providers(self) -> set[str]:
+        schedule = getattr(self.parent(), "recording_schedule", None)
+        return set(schedule.providers()) if schedule is not None else set()
+
+    def _parental_allows(self) -> bool:
+        """Renaming or removing a saved provider while parental controls are locked asks for
+        the PIN, once per Settings window (what they hide is kept by provider name)."""
+        guard = getattr(self.parent(), "parental", None)
+        if guard is None or not guard.locked() or self._pin_granted:
+            return True
+        self._pin_granted = pin_allows(self, guard)
+        return self._pin_granted
+
+    def _set_provider_form_enabled(self, enabled: bool) -> None:
+        """No provider left: the form shows none (Add Provider and Free channels… stay)."""
+        widgets = (
+            self.remove_provider_button,
+            self.name_input,
+            self.url_input,
+            self.paste_link_button,
+            self.mac_input,
+            self.serial_input,
+            self.device_id_input,
+            self.file_button,
+            self.username_input,
+            self.password_input,
+            self.provider_ssl_verify_checkbox,
+            self.max_streams_input,
+            self.guide_offset_combo,
+            self.verify_apply_group,
+            *self.type_group.buttons(),
+        )
+        for widget in widgets:
+            widget.setEnabled(enabled)
+        if not enabled:
+            for field in (
+                self.name_input,
+                self.url_input,
+                self.mac_input,
+                self.serial_input,
+                self.device_id_input,
+                self.username_input,
+                self.password_input,
+            ):
+                field.clear()
+            self.verify_result.clear()
+
+    def _drop_untouched_new(self) -> None:
+        """A provider added here and left empty (no name, no address) is not saved."""
+        empty = [
+            p
+            for p in self.providers
+            if id(p) not in self._as_opened
+            and not str(p.get("url") or "").strip()
+            and not str(p.get("name") or "").strip()
+        ]
+        if not empty:
+            return
+        index = self.selected_provider_index
+        shown = self.providers[index] if 0 <= index < len(self.providers) else None
+        self.providers[:] = [p for p in self.providers if all(p is not e for e in empty)]
+        self.edited_provider = None
+        if shown is not None and any(shown is p for p in self.providers):
+            self.selected_provider_index = next(
+                i for i, p in enumerate(self.providers) if p is shown
+            )
+        else:
+            self.selected_provider_index = 0
+            self.selected_provider_name = ""
+        self.load_providers()
+
+    def _missing_field(self, provider: dict) -> str:
+        """The label of a field the provider needs and lacks ("" when none)."""
+        kind = provider.get("type")
+        needed = [(self.url_label, "url")]
+        if kind == "STB":
+            needed.append((self.mac_label, "mac"))
+        elif kind == "XTREAM":
+            needed += [(self.username_label, "username"), (self.password_label, "password")]
+        for label, key in needed:
+            if not str(provider.get(key) or "").strip():
+                return label.text().rstrip(" :：\u00a0\u202f")
+        return ""
+
+    def _providers_complete(self) -> bool:
+        """Every provider added or edited here has what it needs to connect; else the first
+        that does not is shown, with the field to fill in (nothing is saved then)."""
+        for index, provider in enumerate(self.providers):
+            if self._as_opened.get(id(provider)) == provider:
+                continue  # as it was saved: never refused here
+            field = self._missing_field(provider)
+            if not field:
+                continue
+            if index != self.provider_combo.currentIndex():
+                self.provider_combo.setCurrentIndex(index)
+            name = str(provider.get("name") or "") or self.provider_combo.itemText(index)
+            QMessageBox.warning(
+                self, tr("Settings"), translate(MISSING_FIELD_TEXT, field=field, name=name)
+            )
+            return False
+        return True
 
     def _manager_of(self, name):
         """The provider's own ProviderManager when its catalog exists (it holds the provider's
@@ -1368,7 +1507,15 @@ class OptionsDialog(QDialog):
             self.epg_file_input.setText(file_path)
 
     def save_settings(self):
-        self._store_provider_edits()
+        if not self._store_provider_edits():
+            return  # a name another provider has: the window stays open for another one
+        self._drop_untouched_new()
+        if not self._providers_complete():
+            return  # the provider lacking a field is shown, with what to fill in
+        renames = renames_between(self._original_entries, self.providers)
+        removed = removed_between(self._original_entries, self.providers)
+        if renames and not self._parental_allows():
+            return
         new_identities = {
             provider["name"]: self.provider_manager.provider_cache_identity(
                 provider, ssl_verify=self.ssl_verify_checkbox.isChecked()
@@ -1389,6 +1536,7 @@ class OptionsDialog(QDialog):
         current_provider_changed = (
             self._original_selected_provider_name != self.selected_provider_name
         )
+        self._save_provider_list(renames, removed)
         self.config_manager.language = self.language_combo.currentData() or None
         self.config_manager.check_updates = self.check_updates_checkbox.isChecked()
         self.config_manager.detailed_log = self.detailed_log_checkbox.isChecked()
@@ -1454,11 +1602,6 @@ class OptionsDialog(QDialog):
         # Save the configuration
         self.parent().save_config()
 
-        self.providers_modified = self.providers != self._original_providers
-        if self.providers_modified:
-            # In place: the providers' own managers share this list.
-            self.provider_manager.providers[:] = deepcopy(self.providers)
-            self.provider_manager.save_providers()
         for name in changed_names:
             # The selected provider is invalidated after setup is serialized by the parent.
             # The others' caches go before the catalogs reload: an edited provider in use is
@@ -1522,8 +1665,8 @@ class OptionsDialog(QDialog):
             self.password_input.setText(link.password)
         if link.mac:
             self.mac_input.setText(link.mac)
-        if not self.name_input.text().strip():
-            self.name_input.setText(link.name)
+        if not self.name_input.text().strip():  # two accounts on one server: two names
+            self.name_input.setText(unique_name(link.name, self._other_names()))
         mac_missing = link.type == provider_link.STB and not self.mac_input.text().strip()
         kind = translate(LINK_KINDS[link.type])
         if mac_missing:
@@ -1640,7 +1783,6 @@ class OptionsDialog(QDialog):
     def _provider_from_inputs(self):
         provider = dict(self.edited_provider or {})
         provider["url"] = self.url_input.text()
-        provider["name"] = self.name_input.text() or provider["url"]
         if self.type_STB.isChecked():
             provider["type"] = "STB"
             provider["mac"] = self.mac_input.text()
@@ -1673,14 +1815,42 @@ class OptionsDialog(QDialog):
         verify = self.provider_ssl_verify_checkbox.isChecked()
         if "ssl_verify" in provider or verify != self._loaded_provider_network["ssl_verify"]:
             provider["ssl_verify"] = verify
+        typed = self.name_input.text()
+        provider["name"] = typed if typed.strip() else self._default_name(provider)
         return provider
 
-    def _store_provider_edits(self):
+    def _other_names(self) -> list[str]:
+        """The names of the providers but the one edited."""
+        return [str(p.get("name") or "") for p in self.providers if p is not self.edited_provider]
+
+    def _default_name(self, provider: dict) -> str:
+        """An unnamed provider's name: its address (a playlist file's name, without its folder),
+        never another provider's (QiTV finds providers by name)."""
+        url = str(provider.get("url") or "").strip()
+        if not url:
+            return ""
+        name = url
+        if provider.get("type") in PLAYLIST_TYPES and os.path.isabs(url):
+            name = os.path.splitext(os.path.basename(url))[0] or url
+        return unique_name(name, self._other_names())
+
+    def _name_taken(self, name: str) -> bool:
+        folded = name.casefold()
+        return any(other.casefold() == folded for other in self._other_names())
+
+    def _store_provider_edits(self) -> bool:
+        """The form into the provider edited; False when its new name is another provider's
+        (said; it keeps the name it had, the other edits are kept)."""
         if self.edited_provider is None:
-            return
+            return True
         provider = self._provider_from_inputs()
         if is_media_server(provider.get("type")):
             provider.pop("password", None)  # its sign-in's token is kept instead (2.8)
+        before = str(self.edited_provider.get("name") or "")
+        wanted = provider["name"]
+        taken = wanted != before and self._name_taken(wanted)
+        if taken:
+            provider["name"] = before or self._default_name(provider)
         self.edited_provider.clear()
         self.edited_provider.update(provider)
         self.selected_provider_name = provider["name"]
@@ -1688,6 +1858,22 @@ class OptionsDialog(QDialog):
             self.selected_provider_index,
             f"{self.selected_provider_index + 1}: {provider['name']}",
         )
+        if taken:
+            QMessageBox.warning(self, tr("Settings"), translate(NAME_TAKEN_TEXT, name=wanted))
+        return not taken
+
+    def _save_provider_list(self, renames, removed) -> None:
+        """The provider list, when it changed (in place: the providers' own managers share
+        it); once it is saved, what QiTV keeps under the names of providers renamed or removed
+        follows (the window's `providers_renamed`), before the catalogs reload."""
+        self.providers_modified = self.providers != self._original_providers
+        if not self.providers_modified:
+            return
+        self.provider_manager.providers[:] = deepcopy(self.providers)
+        self.provider_manager.save_providers()
+        follow = getattr(self.parent(), "providers_renamed", None)
+        if follow is not None and (renames or removed):
+            follow(renames, removed)
 
     def apply_provider(self):
         self._store_provider_edits()

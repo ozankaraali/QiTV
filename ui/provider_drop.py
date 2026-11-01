@@ -91,10 +91,11 @@ def normal_address(address: str) -> str:
 
 
 def unique_name(name: str, taken: Iterable[str]) -> str:
-    """`name`, or "name (2)", "name (3)" … when the list already has it."""
-    used = set(taken)
+    """`name`, or "name (2)", "name (3)" … when the list already has it (in any case: QiTV
+    finds a provider by its name, so two may never share one)."""
+    used = {str(t).casefold() for t in taken if t is not None}
     candidate, number = name, 2
-    while candidate in used:
+    while candidate.casefold() in used:
         candidate = f"{name} ({number})"
         number += 1
     return candidate

@@ -368,6 +368,44 @@ class Schedule:
         self._save()
         return dict(item)
 
+    def rename_providers(self, renames: Any) -> int:
+        """A renamed provider's recordings record from its new name
+        (`services.provider_rename.Renames`); how many moved (the file is written then)."""
+        moved = 0
+        for item in self._items:
+            provider = item.get("provider")
+            channel = item.get("channel")
+            if provider not in renames.names and not (
+                isinstance(channel, dict) and channel.get("_provider") in renames.names
+            ):
+                continue
+            item["provider"] = renames.of(provider)
+            if isinstance(channel, dict) and "_provider" in channel:
+                item["channel"] = dict(channel, _provider=renames.of(channel["_provider"]))
+            moved += 1
+        if moved:
+            self._save()
+        return moved
+
+    def drop_providers(self, names: Iterable[str]) -> list[dict]:
+        """The recordings of removed providers go (they could never record again), each
+        noted failed ("provider removed"); what went."""
+        gone = set(names)
+        dropped = [i for i in self._items if str(i.get("provider") or "") in gone]
+        if not dropped:
+            return []
+        self._items = [i for i in self._items if i not in dropped]
+        for item in dropped:
+            self._note(
+                str(item.get("title") or ""),
+                item.get("channel") or {},
+                float(item.get("start") or 0),
+                FAILED,
+                why="provider removed",
+            )
+        self._save()
+        return [dict(item) for item in dropped]
+
     def cancel(self, item_id: str) -> None:
         before = len(self._items)
         self._items = [i for i in self._items if i.get("id") != item_id]

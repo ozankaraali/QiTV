@@ -199,6 +199,26 @@ class Parental:
         self._save(data)
         return True
 
+    def rename_providers(self, renames: Any) -> bool:
+        """What is hidden at a renamed provider stays hidden under its new name
+        (`services.provider_rename.Renames`): each rule's key and provider move, in the
+        format they always had. The config is saved by the caller; True when it changed."""
+        data = self._data()
+        hidden = data.get("hidden")
+        if not isinstance(hidden, list):
+            return False
+        moved, changed = [], False
+        for rule in hidden:
+            renamed = _renamed_rule(rule, renames)
+            changed |= renamed is not rule
+            moved.append(renamed)
+        if not changed:
+            return False
+        self._config.parental = {**data, "hidden": moved}
+        self._load()
+        self.version += 1
+        return True
+
     def adult_rule(self) -> bool:
         return self._adult
 
@@ -320,6 +340,21 @@ class Parental:
             return items
         hidden = self._protector(section)
         return [item for item in items if not hidden(item)]
+
+
+def _renamed_rule(rule: Any, renames: Any) -> Any:
+    """A hidden rule with its provider renamed (the same object when it is not one of them):
+    the provider is the key's third field (`group_key`, `channel_key`) and its "provider"."""
+    if not isinstance(rule, dict) or not isinstance(rule.get("key"), str):
+        return rule
+    parts = rule["key"].split(SEP, 3)
+    renamed = dict(rule)
+    if len(parts) == 4 and parts[2] in renames.names:
+        parts[2] = renames.names[parts[2]]
+        renamed["key"] = SEP.join(parts)
+    if rule.get("provider") in renames.names:
+        renamed["provider"] = renames.names[rule["provider"]]
+    return renamed if renamed != rule else rule
 
 
 _installed: list[Parental] = []

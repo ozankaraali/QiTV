@@ -9,7 +9,7 @@ session there (`LiveSession.start(kept=...)`).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Optional
 
 
@@ -137,6 +137,16 @@ class KeptBuffers:
         self._engine = engine
         self._rings.clear()
         self._listen(engine)
+
+    def rekey(self, keys: dict[str, str]) -> None:
+        """A renamed provider's channels have new keys (`keys`: old -> new): their kept
+        buffers are taken back under them."""
+        self._rings = {
+            keys.get(channel, channel): (
+                ring if channel not in keys else replace(ring, channel=keys[channel])
+            )
+            for channel, ring in self._rings.items()
+        }
 
     def rings(self) -> list[KeptRing]:
         return list(self._rings.values())

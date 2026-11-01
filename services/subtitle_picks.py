@@ -28,6 +28,7 @@ from typing import Any, Callable, Mapping, Optional
 import orjson as json
 
 from services.atomic_write import atomic_write
+from services.channel_store import rekeyed
 from services.next_episode import season_and_episode
 from services.redact import safe_message
 
@@ -152,6 +153,20 @@ class SubtitlePicks:
     def forget(self, key: str) -> None:
         if key and self._entries.pop(key, None) is not None:
             self._save()
+
+    def rekey(self, keys: dict[str, str]) -> int:
+        """Picks moved to new keys (`keys`: old -> new; a renamed provider's films,
+        `services.provider_rename`); how many moved (written then)."""
+        moved = rekeyed(self._entries, keys)
+        if moved is None:
+            return 0
+        count = sum(1 for key in self._entries if key in keys)
+        self._entries = moved
+        self._save()
+        return count
+
+    def keys(self) -> frozenset[str]:
+        return frozenset(self._entries)
 
     def flush(self, timeout: float = 5.0) -> None:
         """Wait for the writes asked for so far (tests; at exit the pool waits by itself)."""

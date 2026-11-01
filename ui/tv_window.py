@@ -30,7 +30,7 @@ import os
 import platform
 import sys
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from PySide6.QtCore import (
     QElapsedTimer,
@@ -94,6 +94,7 @@ from services.playback import (
     default_args,
 )
 from services.provider_link import ProviderLink
+from services.provider_rename import HashedKeys, Renames, carry_over
 from services.provider_types import is_media_server
 from services.recording_schedule import (
     FILE_NAME as SCHEDULE_FILE,
@@ -180,6 +181,9 @@ FORWARD_WAIT_MS = 1000  # the longest wait for QiTV to come forward before a rem
 FORWARD_POLL_MS = 50
 # config.json could not be written (locked by antivirus, read-only, a full disk).
 SAVE_FAILED_TEXT = N_("Couldn't save the settings; changes will be lost when QiTV closes")
+# i18n: a toast after Settings → Save: the scheduled recordings of a provider removed there were
+# cancelled ({titles}: their programmes, comma-separated)
+DROPPED_RECORDINGS_TEXT = N_("Recordings of a removed provider were cancelled: {titles}")
 ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
 # The Qt platform whose window ids libVLC can draw into (NSView, HWND, X11 window).
 _NATIVE_PLATFORMS = {"Darwin": "cocoa", "Windows": "windows", "Linux": "xcb"}
@@ -1735,6 +1739,79 @@ class TVWindow(QMainWindow):
         self.catalogs.reload()
         self.menus.rebuild_providers()
         self.controller.guides_changed()
+
+    def providers_renamed(self, renames: Renames, removed: Sequence[str] = ()) -> None:
+        """Settings saved the provider list with providers renamed or removed (called before
+        `providers_saved`, while the catalogs under the old names still hold their lists): a
+        removed provider's scheduled recordings go, said in a toast (they could never record
+        again); what is kept under a renamed one's old name moves to its new name."""
+        if removed:
+            self._drop_recordings_of(removed)
+        if not renames:
+            return
+        contents = {
+            old: self.catalogs.catalog(old).provider_manager.current_provider_content
+            for old in renames.names
+            if old in self.catalogs.created()
+        }
+        schedule: Any = self.scheduler if self.scheduler is not None else self.recording_schedule
+        hooks: list[Callable[[Renames], Any]] = [
+            self.parental.rename_providers,
+            schedule.rename_providers,  # the scheduler's: its recordings under way too
+            self.budget.rename_providers,
+            self.remote.rename_providers,
+        ]
+        carry_over(self.config_manager, renames, hooks)
+        self._rekey_hashed(renames, contents)
+        self._schedule_changed()
+
+    def _drop_recordings_of(self, removed: Sequence[str]) -> None:
+        dropped = self.recording_schedule.drop_providers(removed)
+        if not dropped:
+            return
+        if self.scheduler is not None:
+            for item in dropped:  # one recording now stops (what it has is kept)
+                self.scheduler.cancel(str(item.get("id") or ""))
+        titles = ", ".join(
+            str(item.get("title") or "")
+            or (slot_text(item["begin"], item["minutes"]) if "begin" in item else "")
+            for item in dropped
+        )
+        logger.info("%d scheduled recording(s) of a removed provider went.", len(dropped))
+        self.screens.notify(translate(DROPPED_RECORDINGS_TEXT, titles=titles), "error", ERROR_MS)
+        self._schedule_changed()
+
+    def _hashed_stores(self) -> list[Any]:
+        """The stores that key channels (and films) by a hash of their provider's name."""
+        stores = (
+            self.live_tuning,
+            self.sound_sync,
+            self.channel_pictures,
+            self.catchup_memory,
+            self.subtitle_picks,
+        )
+        return [store for store in stores if store is not None]
+
+    def _rekey_hashed(self, renames: Renames, contents: dict) -> None:
+        """The renamed providers' channels and films hashed anew off the GUI thread, for the
+        stores that key them so (a provider whose lists are not loaded keeps the old keys)."""
+        wanted: set[str] = set()
+        for store in self._hashed_stores():
+            wanted |= store.keys()
+        if self.kept is not None:
+            wanted |= {ring.channel for ring in self.kept.rings()}
+        if not contents or not wanted:
+            return
+        worker = HashedKeys(renames, contents, wanted)
+        self.jobs.run_worker(worker, self._on_hashed_keys, lambda *_args: None)
+
+    def _on_hashed_keys(self, _context: Any, keys: dict[str, str]) -> None:
+        if self._closing or not keys:
+            return
+        for store in self._hashed_stores():
+            store.rekey(keys)
+        if self.kept is not None:
+            self.kept.rekey(keys)
 
     def save_config(self) -> None:
         """Settings → Save: the new settings apply even when config.json cannot be written."""

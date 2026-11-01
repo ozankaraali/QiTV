@@ -195,3 +195,21 @@ class ConnectionBudget(QObject):
             self._take(head.ticket, provider_name, head.purpose)
         if not waiting:
             self._waiting.pop(provider_name, None)
+
+    def rename_providers(self, renames: Any) -> None:
+        """A renamed provider's held streams, waiting requests and learned limit count under
+        its new name (`services.provider_rename.Renames`): its streams are never counted
+        twice (one name each) while what plays keeps playing."""
+        self._active = {
+            ticket: (renames.of(provider), purpose)
+            for ticket, (provider, purpose) in self._active.items()
+        }
+        waiting: dict[str, list[_Waiter]] = {}
+        for provider, waiters in self._waiting.items():
+            waiting.setdefault(renames.of(provider), []).extend(waiters)
+        self._waiting = waiting
+        learned: dict[str, int] = {}
+        for provider, limit in self._learned.items():
+            name = renames.of(provider)
+            learned[name] = min(limit, learned.get(name, limit))
+        self._learned = learned

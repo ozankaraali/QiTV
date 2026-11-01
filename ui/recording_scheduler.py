@@ -363,6 +363,24 @@ class RecordingScheduler(QObject):
         """The providers the schedule records from (their guides stay loaded for series)."""
         return self.schedule.providers()
 
+    def rename_providers(self, renames: Any) -> None:
+        """A renamed provider (`services.provider_rename.Renames`): the schedule records from
+        its new name, and so do the recordings under way and those to try again."""
+        self.schedule.rename_providers(renames)
+
+        def moved(job: rs.Job) -> rs.Job:
+            if job.provider not in renames.names:
+                return job
+            return replace(
+                job, provider=renames.of(job.provider), channel=renames.item(job.channel)
+            )
+
+        for run in self._runs:
+            run.job = moved(run.job)
+            run.covers = [moved(job) for job in run.covers]
+        for attempt in self._tries.values():
+            attempt.job = moved(attempt.job)
+
     def cancel(self, item_id: str) -> None:
         """A scheduled recording is no longer wanted: off the schedule, and stopped (what it
         recorded is kept) when it records now."""

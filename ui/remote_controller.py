@@ -501,6 +501,16 @@ class RemoteController(QObject):
             self._phone_catalogs[device] = catalog
         return catalog
 
+    def rename_providers(self, renames: Any) -> None:
+        """A renamed provider (`services.provider_rename.Renames`): a phone that showed it
+        goes on showing it under its new name."""
+        for catalog in self._phone_catalogs.values():
+            choice = catalog.config
+            name = getattr(choice, "phone_provider_name", "")
+            if name in renames.names:
+                choice.phone_provider_name = renames.names[name]
+        self._find_source = renames.of(self._find_source)
+
     def _finder(self) -> FindSession:
         """The desktop channel list's find, for every phone: genres and channels at every
         provider from their saved lists (a worker reads them; nothing signs in), ranked as on
