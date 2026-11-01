@@ -371,20 +371,23 @@ class RecorderTests(RecorderCase):
         recorder.stop()
         self.assertEqual(self.finish(recorder)[0], STOPPED)
 
-    def test_a_stop_while_reads_fail_ends_it_at_once(self):
-        # 2.8.12 (review of the 30 s follow): a stop while the disk's reads failed and no RAM
-        # ring had come made it retry without a pause till 30 s, and end "failed".
+    def test_a_stop_while_reads_fail_ends_it_failed_without_spinning(self):
+        # Review of 2.8.12: a stop while the disk's reads failed (no RAM ring yet) spun till
+        # 30 s, then said it stopped as if everything was written. A stop asked (a channel
+        # change: the teardown waits for it) still writes what is left; reads that keep
+        # failing end it "failed", paused between tries.
         failing = FailingRing(64 * SEGMENT, after=1, failures=10**9)
         self.ring, self.writer = failing, Writer(failing)
         self.segments(2)
-        recorder = self.record(0)
-        time.sleep(0.3)
-        reads = failing.reads
-        recorder.stop()
-        reason, _, written = self.finish(recorder, timeout=2)
-        self.assertEqual(reason, STOPPED)
+        with mock.patch.object(recorder_module, "_FOLLOW_S", 0.5):
+            recorder = self.record(0)
+            time.sleep(0.2)
+            reads = failing.reads
+            recorder.stop()
+            reason, _, written = self.finish(recorder, timeout=3)
+        self.assertEqual(reason, FAILED)
         self.assertGreater(written, 0)
-        self.assertLess(failing.reads - reads, 50)  # no spin
+        self.assertLess(failing.reads - reads, 30)  # no spin: a pause between tries
 
     def test_a_ring_closed_before_the_session_moved_to_ram_is_followed(self):
         # 2.8.12: a disk budget's trim closed the session's ring (its oldest file could not go)
