@@ -19,7 +19,7 @@ from services.i18n import N_, tr, translate
 from ui.brand import BRAND_NAME, logo_aspect, logo_available, logo_pixmap
 from ui.keymap import key_hint
 from ui.overlays.base import TooltipWidget
-from ui.overlays.painting import Units, draw_icon, draw_refresh, elided, fill_round
+from ui.overlays.painting import Units, draw_field_icon, draw_icon, draw_refresh, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 HEIGHT_U = 6.0
@@ -40,7 +40,12 @@ REFRESH_TEXT = N_("Refresh films and series")
 
 
 def _search_label() -> str:
-    return "⌕ " + tr("Search")  # i18n: pill button in the Library's top bar that opens search
+    return tr("Search")  # i18n: pill button in the Library's top bar that opens search
+
+
+def _icon_room(fm: QFontMetrics) -> float:
+    """The search pill's magnifier and the gap after it (the finds' drawn icon)."""
+    return fm.height() * 0.85 * 1.45
 
 
 class TopNav(TooltipWidget):
@@ -158,7 +163,7 @@ class TopNav(TooltipWidget):
         source_w = (
             min(fm.horizontalAdvance(self._source_text()) + u, MAX_SOURCE_U * u - 2 * pad) + 2 * pad
         )
-        search_w = fm.horizontalAdvance(_search_label()) + u + 2 * pad
+        search_w = fm.horizontalAdvance(_search_label()) + _icon_room(fm) + u + 2 * pad
         x = self.width() - 2.0 * u - pill_h
         rects["fullscreen"] = QRectF(x, top, pill_h, pill_h)  # a square pill
         x -= 1.0 * u + pill_h
@@ -289,8 +294,18 @@ class TopNav(TooltipWidget):
                 p.setBrush(Qt.NoBrush)
                 p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
             active = item == self._active
-            p.setPen(qcolor(PALETTE.accent if active else PALETTE.text, 1.0 if active else 0.85))
+            tone = qcolor(PALETTE.accent if active else PALETTE.text, 1.0 if active else 0.85)
+            p.setPen(tone)
             inner = rect.adjusted(pad, 0, -pad, 0)
+            if item == "search":  # the magnifier, then the word, centred together
+                fm = p.fontMetrics()
+                room = _icon_room(fm)
+                left = inner.center().x() - (room + fm.horizontalAdvance(text)) / 2
+                inner = draw_field_icon(p, QRectF(left, inner.y(), room, inner.height()), tone)
+                inner.setWidth(fm.horizontalAdvance(text) + 2)
+                p.setPen(tone)
+                p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, text)
+                continue
             p.drawText(inner, Qt.AlignCenter, elided(p, text, inner.width()))
         for name in ("refresh", "fullscreen"):
             rect = rects[name]
