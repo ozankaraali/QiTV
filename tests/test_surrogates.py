@@ -115,6 +115,27 @@ class StbPageTests(unittest.TestCase):
         self.assertEqual((data, total), ([{"name": "Film " + FFFD}], 1))
 
 
+class PlaylistTests(unittest.TestCase):
+    def test_a_playlist_in_a_charset_that_cuts_a_pair_is_mended(self):
+        from services import workers
+
+        body = b'#EXTM3U\n#EXTINF:-1 group-title="News",News +2D0-\nhttp://example.invalid/1.ts\n'
+        response = type("Response", (), {})()
+        response.headers = {"Content-Type": "audio/x-mpegurl; charset=utf-7"}
+        response.text = body.decode("utf-7")  # as requests decodes it: half a pair
+        response.raise_for_status = lambda: None
+        self.assertIn(HIGH, response.text)
+        loaded = []
+        worker = workers.M3ULoaderWorker("http://example.invalid/list.m3u")
+        worker.finished.connect(loaded.append)
+        with patch.object(workers, "requests") as fake:
+            fake.get.return_value = response
+            worker.run()
+        [playlist] = loaded
+        self.assertEqual(playlist["contents"][0]["name"], "News " + FFFD)
+        orjson.dumps(playlist)
+
+
 class SavesTests(unittest.TestCase):
     def setUp(self):
         self.folder = Path(tempfile.mkdtemp(prefix="qitv-surrogates-"))
