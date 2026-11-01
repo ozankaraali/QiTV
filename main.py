@@ -18,6 +18,9 @@ import warnings
 
 SMOKE_FLAG = "--smoke"
 SMOKE_ENV = "QITV_SMOKE"
+# Windows groups a program's windows and its pinned taskbar icon by this id: one for every
+# version, so that a pinned QiTV stays one icon after an update.
+APP_USER_MODEL_ID = "com.ozankaraali.qitv"
 
 
 def qt_platform_override(system: str, environ: Mapping[str, str]) -> Optional[str]:
@@ -204,8 +207,7 @@ def main() -> int:
     )
 
     if platform.system() == "Windows":
-        myappid = f"com.ozankaraali.qitv.{get_app_version()}"
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
 
     app.setWindowIcon(QtGui.QIcon(icon_path))
     qdarktheme.setup_theme("dark", custom_colors={"primary": "#C96B43"})

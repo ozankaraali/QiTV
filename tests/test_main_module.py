@@ -51,6 +51,17 @@ class MainModuleTests(unittest.TestCase):
         )
         self.assertIsNone(main.smoke_arguments(["qitv"], {"QITV_SMOKE": "1"}))
 
+    def test_windows_knows_every_version_as_the_same_app(self):
+        # The taskbar groups windows and keeps a pinned icon by this id: with the version in
+        # it, a pinned QiTV became a second icon after each update.
+        import main
+        from services.config_manager import get_app_version
+
+        self.assertEqual(main.APP_USER_MODEL_ID, "com.ozankaraali.qitv")
+        self.assertNotIn(get_app_version(), main.APP_USER_MODEL_ID)
+        source = (REPO / "main.py").read_text(encoding="utf-8")
+        self.assertIn("SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)", source)
+
     def test_the_frozen_apps_bundle_the_live_helper(self):
         # The helper process is spawned from the bundle; its source imports these lazily.
         wanted = {"services.live.worker", "m3u8", "Cryptodome.Cipher.AES"}
