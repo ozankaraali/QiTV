@@ -185,6 +185,36 @@ class GuideCatchupTests(unittest.TestCase):
         self.assertTrue(self.guide.watch_button().isEmpty())
         self.assertFalse(self.guide.grab().isNull())
 
+    def test_a_window_left_at_now_moves_on_with_the_clock(self):
+        # Opened at 19:59, Enter at 20:01: it tunes (before 2.8.12 the window stayed at 19:30
+        # and Enter played the programme on at 19:30 from its start).
+        clock = [datetime(2026, 10, 15, 19, 59, tzinfo=timezone.utc)]
+        guide = Guide(
+            None,
+            lambda channel, start, limit: half_hours(channel, start),
+            lambda: clock[0],
+            self.host,
+            archive_days=lambda channel: int(channel.get("archive_days") or 0),
+        )
+        tuned, asked = [], []
+        guide.tuneRequested.connect(tuned.append)
+        guide.programmeRequested.connect(lambda c, p: asked.append(p.start))
+        guide.open_guide(CHANNELS, 0)
+        clock[0] += timedelta(minutes=2)
+        self.assertEqual(guide.window_start(), slot_start(clock[0]))
+        self.assertIsNone(guide.chosen())
+        guide.activate()
+        self.assertEqual((tuned, asked), ([CHANNELS[0]], []))
+        guide.shift(-1)  # moved back by the viewer: it stays there
+        clock[0] += timedelta(minutes=30)
+        self.assertEqual(guide.window_start(), datetime(2026, 10, 15, 19, 30, tzinfo=timezone.utc))
+        guide.activate()
+        self.assertEqual(asked, [datetime(2026, 10, 15, 19, 30, tzinfo=timezone.utc)])
+        guide.shift(2)  # back to the current half-hour (20:30): it follows the clock again
+        clock[0] += timedelta(minutes=30)
+        self.assertEqual(guide.window_start(), datetime(2026, 10, 15, 21, 0, tzinfo=timezone.utc))
+        guide.close_guide()
+
     def test_an_archive_that_failed_lately_offers_nothing(self):
         guide = Guide(None, lambda c, s, n: half_hours(c, s), lambda: NOW, self.host)
         guide.open_guide(CHANNELS, 0)  # archive_days: none

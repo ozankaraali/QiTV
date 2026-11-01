@@ -357,6 +357,21 @@ class Guide(Overlay):
         earliest = now - self._back
         return min(max(self._window_start + delta * SLOT, earliest), now + MAX_AHEAD)
 
+    @property
+    def _window_start(self) -> datetime:
+        """The window's first half-hour: the current one while the window is at now (opened,
+        or moved back to it), so it moves on with the clock; else where it was moved
+        (2.8.12: one opened at 20:29 stayed at 20:00, and at 20:31 Enter played the
+        programme on at 20:00 from its start instead of tuning)."""
+        if self._window_follows:
+            return slot_start(self._now())
+        return self._window_at
+
+    @_window_start.setter
+    def _window_start(self, start: datetime) -> None:
+        self._window_at = start
+        self._window_follows = start == slot_start(self._now())
+
     def header_buttons(self) -> dict[str, QRectF]:
         """The header's buttons, left to right: ‹ › at the right of the channels' column, then
         ⌕ ⛶ × at the header's right end."""
