@@ -321,6 +321,7 @@ class ChannelRowDelegate(QStyledItemDelegate):
         if has_bar:
             total += gap + bar_h
         y = rect.y() + (rect.height() - total) / 2
+        text_x, text_w = x, width  # the lines under the name start where it would
         if index.data(PlayingRole):  # the channel playing: a small accent ▶ before its name
             mark = draw_playing_mark(p, x, y + name_h / 2, 1.0 * u) + 0.6 * u
             x, width = x + mark, max(0.0, width - mark)
@@ -353,6 +354,7 @@ class ChannelRowDelegate(QStyledItemDelegate):
                 elided(p, name, width),
             )
         y += name_h
+        x, width = text_x, text_w
         if now:
             p.setFont(units.font(1.25))
             p.setPen(qcolor(PALETTE.text, 0.65))
