@@ -786,12 +786,12 @@ class Transport(Overlay):
                 return translate(NOTHING_PLAYING)
             if not self._timeshift:
                 return translate(NO_RECORDING)
+            # i18n: tooltip of the record button: record the channel being watched (verb)
+            return key_hint(tr("Record"), RECORD_KEY)
         if name == "play" and self._failed:
             return key_hint(translate(TRY_AGAIN), KEY_HINTS["play"][1])
         if name == "pip" and self._grid_shown:
             return translate(PIP_IN_GRID)
-            # i18n: tooltip of the record button: record the channel being watched (verb)
-            return key_hint(tr("Record"), RECORD_KEY)
         if name == "grid":
             if self._grid_shown:
                 what = tr("Back to one picture")  # i18n: tooltip: leave the multiview's grid
