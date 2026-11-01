@@ -17,6 +17,7 @@ from test_tv_controller import (
 from test_tv_pip import MOVIE, PipCase
 from timer_fixtures import wait_until
 
+from services.connection_budget import DENIED
 from services.sessions import Slot
 from ui.keymap import Action
 from ui.live_tuner import LiveTuner
@@ -528,6 +529,76 @@ class ScheduledRecordingQuestionTests(_RecordCase):
         self.assertEqual(
             self.controller.quit_note(), "2 channels are recording. Quit and stop the recordings?"
         )
+
+
+class PhoneStreamTests(_RecordCase):
+    """2.8.12: what a phone's Watch plays holds one of its provider's streams, as the large
+    picture's own play does, until the TV plays again: a scheduled recording coming due
+    meanwhile finds none free. A player outside QiTV (VLC) holds none: QiTV can't tell what it
+    does (the owner)."""
+
+    def setUp(self):
+        super().setUp()
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+        self.launched = []
+
+    def launch(self, target, url):
+        self.launched.append(url)
+        return True, ""
+
+    def target(self, index):
+        from ui.link_lanes import Target
+
+        channel = CHANNELS[index]
+        return Target(channel, "live", channel["name"], group_key="10")
+
+    def watch_on_phone(self, index, launch=None):
+        """Channel `index` handed to a phone (nothing plays here before)."""
+        self.controller.play_elsewhere(launch or self.launch, self.target(index))
+        self.ready(f"http://stream/{CHANNELS[index]['id']}")
+
+    def scheduled_due(self):
+        """RecordingScheduler._attempt's ask: never queued."""
+        return self.budget.request("Home", 1, purpose="sched:a@1", queue=False)
+
+    def test_a_scheduled_recording_finds_no_stream_while_a_phone_watches(self):
+        self.watch_on_phone(1)
+        self.assertEqual(self.launched, ["http://stream/2"])
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.assertEqual(self.scheduled_due(), DENIED)
+
+    def test_the_tv_playing_again_takes_that_stream_over(self):
+        self.watch_on_phone(1)
+        self.start_large(2)
+        self.assertEqual(self.budget.holders("Home"), ["main"])  # one stream, the TV's
+        self.assertEqual(self.controller.live.named("start")[-1][0], "http://stream/3")
+
+    def test_a_newer_phone_watch_holds_one_in_its_place(self):
+        self.watch_on_phone(1)
+        self.watch_on_phone(2)
+        self.assertEqual(self.launched, ["http://stream/2", "http://stream/3"])
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_one_that_failed_to_start_holds_none(self):
+        self.watch_on_phone(1, launch=lambda target, url: (False, "The phone left."))
+        self.assertEqual(self.budget.holders("Home"), [])
+
+    def test_a_player_outside_qitv_holds_none(self):
+        self.watch_on_phone(1)
+        self.controller._play_external(
+            self.target(2), "http://stream/3", lambda url, **_: (True, "")
+        )
+        self.ready("http://stream/3")
+        self.assertEqual(self.budget.holders("Home"), [])  # VLC: what it does is its own
+
+    def test_a_recordings_file_holds_none(self):
+        from ui.link_lanes import Target
+
+        recording = {"path": "/rec/a.ts", "_recording": True, "name": "A"}
+        target = Target(recording, "movies", "A", local=True)
+        self.controller.play_elsewhere(self.launch, target, recordings=True)
+        self.assertEqual(self.launched[-1], "file:///rec/a.ts")
+        self.assertEqual(self.budget.holders("Home"), [])
 
 
 class RecordGuardWiringTests(_RecordCase):

@@ -72,6 +72,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QAbstractScrollArea
 
 from services import external_players, favorites, recording
+from services.budgeted_stream import HeldSlot
 from services.casting import CastDevices
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, shown_label
 from services.catchup import archive_of
@@ -290,6 +291,12 @@ class TVController(QObject):
         self._stopped: Optional[Target] = None  # 2.6: what Stop stopped, for play_again()
         self._page: Optional[str] = None  # the window's page ("player", "library", "corner")
         self._external_pending: Optional[tuple[Target, str]] = None
+        # 2.8.12: what a phone's Watch plays holds one of its provider's streams, as the large
+        # picture's own play would, until the TV plays again, another player shows large,
+        # another outside player takes over or QiTV stops: the phone is QiTV's own (a scheduled
+        # recording nor a picture in picture takes that stream meanwhile). A player outside
+        # QiTV (VLC, mpv) holds none: QiTV can't tell what it does.
+        self._phone_slot = HeldSlot(self.budget, self._tuner.purpose)
         self._external_settle = QTimer(self, singleShot=True)
         self._external_settle.timeout.connect(self._launch_settled)
         self._started = False
@@ -767,6 +774,7 @@ class TVController(QObject):
         2.8: every recording ends first (its file saved), as Quit's question ends them, so its
         player parks as any other and its disk buffer is kept for the next helper (a
         self-update closed it)."""
+        self._phone_slot.give_back()
         recording = [slot.live for slot in self._recordings()]
         large = self.live
         if self.sessions is None and large is not None and self._large_records():
@@ -1810,6 +1818,7 @@ class TVController(QObject):
             # The in-app stream is released first: the player opens the provider again.
             self._tuner.open(self._guarded(target, lambda: self._launch(target, url)))
             return
+        self._phone_slot.give_back()  # it plays here again: the phone's was its stream
         if target.live and target.archive_at is not None:
             # Catch-up (2.2): the channel's archive from that moment, when it offers one now;
             # else the channel plays live.
@@ -1918,10 +1927,13 @@ class TVController(QObject):
 
         return run
 
-    def _launch(self, target: Target, url: str, launcher: Optional[Launcher] = None) -> None:
+    def _launch(
+        self, target: Target, url: str, launcher: Optional[Launcher] = None, *, phone: bool = False
+    ) -> None:
         """Hand the link to the external player (the in-app stream is released by now).
 
-        `launcher` is the context menu's choice; by default, the settings' player.
+        `launcher` is the context menu's choice; by default, the settings' player. `phone`: a
+        phone's Watch, whose stream is counted (`_phone_slot`).
         """
         launcher = launcher or self._external_launcher()
         if launcher is None:  # the setting changed meanwhile: play it here
@@ -1932,8 +1944,13 @@ class TVController(QObject):
             agent = item_provider.stream_agent(self.catalog, target.item)
             referrer = str(target.item.get("referrer") or "")
             http = {k: v for k, v in (("user_agent", agent), ("referrer", referrer)) if v}
+        self._phone_slot.give_back()  # a newer outside play takes over (the phones stop)
+        if phone and not target.local:
+            self._phone_slot.set_purpose(self._tuner.purpose)
+            self._phone_slot.take(item_provider.provider_name(self.catalog, target.item))
         ok, message = launcher(url, **http)
         if not ok:
+            self._phone_slot.give_back()
             first, _, rest = (message or "").strip().partition("\n")
             if rest.strip():
                 logger.info("External player: %s", scrub(rest))
@@ -2789,6 +2806,7 @@ class TVController(QObject):
         if self._wired:
             self._connect_session(self.session, False)
         self.session, self.live, self._tuner = slot.playback, slot.live, tuner
+        self._phone_slot.give_back()  # another player shows large: no phone plays for it
         if self._wired:
             self._connect_session(slot.playback, True)
         self._live_controls.use_slot(tuner, slot.live, slot.playback)
@@ -3793,27 +3811,34 @@ class TVController(QObject):
                 return False
             uri = Path(path).absolute().as_uri()
             self._play_external(
-                chosen, uri, lambda link, **_http: launch(chosen, link), ask_on=ask_on
+                chosen, uri, lambda link, **_http: launch(chosen, link), ask_on=ask_on, phone=True
             )
             return True
 
         def play(url: str) -> None:
             self._play_external(
-                chosen, url, lambda link, **_http: launch(chosen, link), ask_on=ask_on
+                chosen, url, lambda link, **_http: launch(chosen, link), ask_on=ask_on, phone=True
             )
 
         self._lanes.request_side(target, play, play=True)
         return True
 
     def _play_external(
-        self, target: Target, url: str, launcher: Launcher, *, ask_on: Optional[str] = None
+        self,
+        target: Target,
+        url: str,
+        launcher: Launcher,
+        *,
+        ask_on: Optional[str] = None,
+        phone: bool = False,
     ) -> None:
-        """The context menu's external play: the newest choice, once the in-app stream is gone."""
+        """The context menu's external play: the newest choice, once the in-app stream is gone.
+        `phone`: a phone's Watch (its stream is counted: `_launch`)."""
         if self._closed:
             return
 
         def again() -> None:
-            self._play_external(target, url, launcher, ask_on=ask_on)
+            self._play_external(target, url, launcher, ask_on=ask_on, phone=phone)
 
         if not target.local and self._ask_for_stream(
             target.item, self._tuner.purpose, again, gives_way=True, ask_on=ask_on
@@ -3828,7 +3853,7 @@ class TVController(QObject):
         self._lanes.drop_tune()  # e.g. an STB retry still on its way would open in-app
 
         def launch() -> None:
-            self._launch(target, url, launcher)
+            self._launch(target, url, launcher, phone=phone)
             if self._current is target:
                 self._restore_channel()  # INFO, the guide and Ctrl+D follow what it plays
 
