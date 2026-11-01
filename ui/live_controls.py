@@ -190,6 +190,7 @@ class LiveControls(QObject):
         memory: Optional[CatchupMemory] = None,
         prepare: Callable[[Any, Target], None] = lambda session, target: None,
         archive_allowed: Callable[[], bool] = lambda: True,
+        gave_up: Callable[[], None] = lambda: None,
         runner: Any = None,
         back_notice: Callable[[], Any] = lambda: None,
         on_sizes: Callable[[], None] = lambda: None,
@@ -201,10 +202,13 @@ class LiveControls(QObject):
         first). Catch-up: `memory` keeps whether each channel's archive answered (None: for
         this run only), `prepare(session, target)` readies the player for a channel before
         its archive opens, `archive_allowed()` says whether archives may play now, `runner`
-        runs the archive probes (a JobRunner by default). `on_sizes()`: the channel's picture
+        runs the archive probes (a JobRunner by default). `gave_up()`: the channel's live
+        session failed for good (said; a multiview's focused tile then stops and shows its
+        card). `on_sizes()`: the channel's picture
         sizes came, or an archive started or ended (2.8: the ⚙ may show or go)."""
         super().__init__(parent)
         self._on_sizes = on_sizes
+        self._gave_up = gave_up
         # 2.8: each channel's picture sizes as last seen this run (by its key), and whether the
         # next place offered is played on at once (a size chosen in the ⚙).
         self._sizes: dict[str, dict] = {}
@@ -734,6 +738,7 @@ class LiveControls(QObject):
             self.stop_tune()  # nothing plays: its slot goes back
             self._toast(self._refusal_text(message), "error", ERROR_MS)
             self._explain_failure(current)
+            self._gave_up()
             return
         if current is not None and self.may_retry(current):
             self.retry(current)  # STB play tokens expire: a fresh link before the error
@@ -743,10 +748,12 @@ class LiveControls(QObject):
             self.stop_tune()  # nothing plays: its slot goes back
             self._toast(self._refusal_text(message), "error", ERROR_MS)
             self._explain_failure(current)
+            self._gave_up()
             return
         message = translate(message)  # the player's, or LiveSession's N_ texts
         self._error(_named(title, message))
         self._explain_failure(current)
+        self._gave_up()
 
     def _explain_failure(self, current: Optional[Target]) -> None:
         if current is not None:

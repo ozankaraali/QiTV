@@ -843,6 +843,78 @@ class MultiviewTests(MultiviewCase):
         QTest.qWait(150)
         self.assertEqual(len(self.session.plays), plays)
 
+    def test_a_focused_tile_whose_stream_fails_stops_and_says_so_as_one_beside_it(self):
+        # It said "Connecting…" forever and kept its stream.
+        self.catalog.ptype = "XTREAM"
+        self.start_large(0)
+        self.session.stateChanged.emit("playing")
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")  # t2 has the focus
+        t2.playback.stateChanged.emit("playing")
+        t2.live.failed.emit("The stream broke")
+        self.assertEqual(self.toast.messages()[-1], ("Three: The stream broke", "error"))
+        self.assertEqual(self.grid.state("t2"), FAILED)
+        self.assertEqual(self.grid.label("t2"), ("Three", "Couldn't play this channel"))
+        self.assertEqual(self.sessions.large().name, "t2")  # it keeps the focus
+        self.assertEqual(t2.live.calls[-1], ("stop",))
+        t2.live.released.emit()
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.grid_frame.focusRequested.emit("main")
+        self.assertEqual(self.grid.state("t2"), FAILED)
+        links = len(self.catalog.links)
+        self.grid_frame.tileClicked.emit("t2")  # focus and try again
+        self.assertEqual(self.sessions.large().name, "t2")
+        self.assertEqual(len(self.catalog.links), links + 1)
+
+    def test_a_focused_tiles_direct_stream_ended_past_its_reopens_stops_and_says_so(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (20, 30)))
+        self.catalog.ptype = "XTREAM"
+        self.start_large(0)
+        self.session.stateChanged.emit("playing")
+        self.v()
+        self.grid_frame.tileClicked.emit("t2")
+        self.controller.tune(CHANNELS[2], group_key="10", channels=CHANNELS)
+        self.ready("rtsp://stream/3")  # a direct tile, focused
+        t2 = self.sessions.slot("t2")
+        t2.playback.stateChanged.emit("playing")
+        for _ in range(3):  # two reopens, then it is over
+            t2.playback.ended.emit()
+            t2.playback.stateChanged.emit("ended")
+            QTest.qWait(60)
+        self.assertEqual(self.toast.messages()[-1], ("The stream ended", "info"))
+        self.assertEqual(self.grid.state("t2"), FAILED)
+        self.assertEqual(self.grid.label("t2"), ("Three", "The stream ended"))
+        self.assertEqual(t2.playback.stops, 1)
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_leaving_with_an_empty_tile_focused_gives_the_big_picture_to_one_that_plays(self):
+        # The big picture was black, One small beside it.
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.two_pictures()  # One (main), Two (pip), two "+" tiles
+        self.grid_frame.tileClicked.emit("t2")  # "+": the focus, the channel list
+        self.controller.overlays.drawer.close_drawer()
+        self.v()
+        self.assertFalse(self.grid.shown())
+        self.assertIs(self.sessions.large(), self.main_slot)  # One, the tile focused before
+        self.assertTrue(self.sessions.pip_open())
+        self.assertIs(self.sessions.small(), self.pip_slot)  # Two plays on small
+        self.assertEqual(self.controller._current.title, "One")
+        self.assertEqual(self.pip_session.stops, 0)
+        self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
+
+    def test_leaving_with_a_failed_tile_focused_gives_the_big_picture_to_one_that_plays(self):
+        self.catalog.ptype = "XTREAM"
+        self.start_large(0)
+        self.session.stateChanged.emit("playing")
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        t2.live.failed.emit("The stream broke")  # its card, with the focus
+        t2.live.released.emit()
+        self.v()
+        self.assertIs(self.sessions.large(), self.main_slot)
+        self.assertFalse(self.sessions.pip_open())  # nothing else plays
+        self.assertEqual(self.controller._current.title, "One")
+
     def test_a_channel_that_cannot_be_time_shifted_plays_directly_and_says_when_it_fails(self):
         self.catalog.ptype = "XTREAM"
         self.start_large(0)

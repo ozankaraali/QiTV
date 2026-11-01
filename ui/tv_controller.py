@@ -333,6 +333,7 @@ class TVController(QObject):
             prepare=lambda session, target: self._prepare(session, target, None),
             back_notice=lambda: self.overlays.back_notice,
             archive_allowed=self._archive_allowed,
+            gave_up=self._fail_focused_tile,
             on_sizes=self._offer_live_quality,
             parent=self,
         )
@@ -2502,6 +2503,12 @@ class TVController(QObject):
             item, self._guarded(target, play_direct), provider=provider_name, limit=limit
         )
 
+    def _fail_focused_tile(self, *, ended: bool = False) -> None:
+        """The large picture's channel failed for good (said): in the multiview, its focused
+        tile stops and shows a card, as a tile beside the focus does (GridControls)."""
+        if self._grid is not None and self.multiview_shown():
+            self._grid.focused_failed(ended=ended)
+
     def _on_tile_denied(self, name: str) -> None:
         """A tile's stream was refused (its card says so): when it has the focus, nothing
         plays large any more."""
@@ -3308,6 +3315,8 @@ class TVController(QObject):
         self._error(self._named(title, message))
         if current is not None:
             self._explain_item(current.item, title)
+            if current.live:
+                self._fail_focused_tile()
 
     def _give_small_channel_large(self) -> None:
         """The movie or the episode playing large failed: a channel shown small beside it
@@ -3337,6 +3346,7 @@ class TVController(QObject):
             if self._live_controls.reconnect(current):
                 return  # "Reconnecting…": the same stream opens again, in the same slot
             self._toast(tr("The stream ended"))  # i18n: a toast
+            self._fail_focused_tile(ended=True)
             return
         try:
             self.watch.flush()
