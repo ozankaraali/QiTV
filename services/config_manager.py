@@ -11,6 +11,7 @@ import tomllib
 import orjson as json
 
 from services.atomic_write import atomic_write, set_aside
+from services.config_writer import ConfigWriter
 from services.free_channels import ALL_NAME, ALL_URL
 from services.multikeydict import MultiKeyDict
 from services.redact import safe_message
@@ -25,6 +26,7 @@ _REPLACE_RETRY_DELAY_S = 0.05
 # After a failed save, saves try once without those retries for this long: a file that stays
 # locked must not stall every save (a settled zap's among them) by the whole retry wait.
 SAVE_BACKOFF_S = 30.0
+QUIT_SAVE_WAIT_S = 5.0  # quitting waits this long at most for config.json to be written
 # A new config's keys that update_patcher does not add to a loaded one: its providers (a loaded
 # config has its own), its windows (added one by one) and what the one-time steps set.
 _SET_ELSEWHERE = frozenset(
@@ -182,6 +184,7 @@ class ConfigManager:
     def __init__(self):
         self.config = {}
         self._save_failed_at: float | None = None  # monotonic time of the last failed save
+        self._writer: ConfigWriter | None = None  # write_in_background()'s
         self.config_path = self._get_config_path()
         os.makedirs(os.path.dirname(self.config_path) or ".", exist_ok=True)
         self.load_config()
@@ -630,17 +633,52 @@ class ConfigManager:
         settings = self.config["window_positions"][window_name]
         window.setGeometry(settings["x"], settings["y"], settings["width"], settings["height"])
 
-    def save_config(self, *, retry: bool = True):
+    def save_config(self, *, retry: bool = True, wait: bool = False):
         """Write config.json; raises when it cannot (callers on the GUI thread catch it).
 
         A locked file is retried for up to a quarter of a second, unless `retry` is False
         (the save after a zap never waits) or a save failed within SAVE_BACKOFF_S.
+
+        Once `write_in_background()` was called (QiTV does), the settings are serialised here
+        and written by a thread of their own: a save returns before the disk is written and a
+        failure is logged there (`save_failed()` tells); `wait` waits for that write and
+        raises its failure, as a save did before (Settings → Save says so).
         """
         retries = _REPLACE_RETRIES if retry and not self._save_failed_recently() else 0
+        writer = self._writer
+        if writer is not None:
+            written = writer.submit(self._serialized_config(), retries)
+            if wait:
+                writer.wait(written)
+            return
         try:
             self._write_config(retries)
         except Exception:
             self._save_failed_at = time.monotonic()
+            raise
+        self._save_failed_at = None
+
+    def write_in_background(self) -> None:
+        """Saves from now on are written by a thread of their own (`ConfigWriter`), in order,
+        the newest of those waiting only: the GUI thread never waits for the disk, nor for a
+        locked file. QiTV turns this on once its config is loaded; tests and scripts save at
+        once."""
+        if self._writer is None:
+            self._writer = ConfigWriter(self._write_in_background)
+
+    def flush_saves(self, timeout: float = QUIT_SAVE_WAIT_S) -> bool:
+        """Waits, `timeout` seconds at most, until the saves handed to the writer are written
+        (QiTV quitting); False when one still was not."""
+        writer = self._writer
+        return True if writer is None else writer.flush(timeout)
+
+    def _write_in_background(self, serialized: bytes, retries: int) -> None:
+        """On the writer's thread: the snapshot written, a failure noted and logged."""
+        try:
+            self._write_config(retries, serialized)
+        except Exception as e:
+            self._save_failed_at = time.monotonic()
+            logger.warning("Couldn't save the settings: %s", safe_message(e))
             raise
         self._save_failed_at = None
 
@@ -670,8 +708,9 @@ class ConfigManager:
         config["xmltv_channel_map"] = channel_map
         return config
 
-    def _write_config(self, retries: int) -> None:
-        serialized_config = self._serialized_config()
+    def _write_config(self, retries: int, serialized: bytes | None = None) -> None:
+        """config.json written whole (`serialized`: a snapshot taken before; now if None)."""
+        serialized_config = self._serialized_config() if serialized is None else serialized
         with atomic_write(
             self.config_path, lambda temporary, path: self._replace_config(temporary, retries)
         ) as f:

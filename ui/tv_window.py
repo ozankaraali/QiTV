@@ -1814,7 +1814,7 @@ class TVWindow(QMainWindow):
     def save_config(self) -> None:
         """Settings → Save: the new settings apply even when config.json cannot be written."""
         try:
-            self.config_manager.save_config()
+            self.config_manager.save_config(wait=True)  # its failure is said
         except Exception as e:
             logger.warning("Couldn't save the settings: %s", safe_message(e))
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)

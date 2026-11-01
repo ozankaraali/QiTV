@@ -228,6 +228,9 @@ def main() -> int:
     # The sign-in's files (config, provider cache, the log) are this user's only, however an
     # older QiTV or the umask left them.
     private_files.tighten(config_manager.get_config_dir(), log_file.log_dir())
+    # Saves from now on are written off the GUI thread (a 6 MB config.json took 20 to 60 ms
+    # there, a locked one a quarter of a second more); quitting waits for them (below).
+    config_manager.write_in_background()
     log_file.set_detailed(config_manager.detailed_log)  # 2.8.2: Settings' detailed log
     # The language, before any window: every text is looked up as it is shown.
     i18n.set_language(i18n.resolve(config_manager.language))
@@ -284,6 +287,8 @@ def main() -> int:
         if control is not None:
             control.stop()
         allow_sleep()
+        if not config_manager.flush_saves():  # the window's last save among them
+            log.warning("QiTV quits before config.json was written: the last change is lost.")
         log_file.close()
 
 

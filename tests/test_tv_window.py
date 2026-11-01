@@ -2757,7 +2757,7 @@ class DiskAmountSettingTests(unittest.TestCase):
     def window(self, enabled):
         self.amounts, self.dropped = [], []
         config = SimpleNamespace(
-            save_config=lambda: None,
+            save_config=lambda **_options: None,
             timeshift_enabled=enabled,
             timeshift_max_mib=512,
             detailed_log=False,
