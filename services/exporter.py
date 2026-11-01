@@ -26,6 +26,7 @@ from services.provider_api import (
 from services.provider_types import is_media_server
 from services.redact import safe_exc
 from services.search import iter_items
+from services.surrogates import response_json
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
@@ -253,7 +254,7 @@ class ExportWorker(QObject):
                     remember_http_only(bases[-1])  # HTTPS did not answer
                     response = ask(bases[-1])
                 if response.status_code == 200:
-                    js = response.json().get("js", {})
+                    js = response_json(response).get("js", {})
                     box["result"] = js if isinstance(js, dict) else None
                 else:
                     logger.warning("Series listing returned HTTP %s", response.status_code)

@@ -81,15 +81,20 @@ def write_later(path: str, data: dict) -> None:
 
 def _write_pending() -> None:
     global _writer
-    while True:
+    try:
+        while True:
+            with _writing:
+                if not _pending:
+                    return
+                path = next(iter(_pending))
+                data = _pending.pop(path)
+            write_now(path, data)
+    finally:  # even if a write raised: the next save starts a writer, flush_writes returns
         with _writing:
-            if not _pending:
-                _writer = None
-                _writing.notify_all()
-                return
-            path = next(iter(_pending))
-            data = _pending.pop(path)
-        write_now(path, data)
+            _writer = None
+            _writing.notify_all()
+            if _pending:  # left by a writer that died: the next save writes them too
+                logger.warning("The recording schedule's writer stopped; the next save retries")
 
 
 def flush_writes(timeout: float = 5.0) -> None:
@@ -99,11 +104,12 @@ def flush_writes(timeout: float = 5.0) -> None:
 
 
 def write_now(path: str, data: dict) -> None:
+    """`data` to `path`; a failure is logged (a full disk, text no UTF-8 file can hold)."""
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with atomic_write(path) as out:
             out.write(json.dumps(data, ensure_ascii=False, indent=1).encode("utf-8"))
-    except OSError as e:
+    except Exception as e:  # never the writer's end: what is queued after it is written still
         logger.warning("The recording schedule could not be saved: %s", type(e).__name__)
 
 

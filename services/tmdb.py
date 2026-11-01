@@ -54,6 +54,7 @@ from services.opensubtitles import (
 )
 from services.parental import looks_adult
 from services.redact import safe_exc
+from services.surrogates import response_json
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
@@ -479,7 +480,7 @@ class TmdbClient:
             logger.info("TMDB answered %s", status)
             raise TmdbError(SERVER)
         try:
-            data = response.json()
+            data = response_json(response)
         except ValueError:
             raise TmdbError(SERVER) from None
         if not isinstance(data, dict):

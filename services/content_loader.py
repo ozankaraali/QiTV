@@ -9,6 +9,7 @@ import orjson as json
 from services.jobs import cancel_requested
 from services.lazy_import import lazy_module
 from services.redact import safe_exc, safe_traceback
+from services.surrogates import loads
 
 logger = logging.getLogger(__name__)
 aiohttp = lazy_module("aiohttp")
@@ -137,7 +138,7 @@ class ContentLoader(QThread):
                         await asyncio.sleep(wait_time)
                         continue
                     response.raise_for_status()
-                    result = json.loads(content)
+                    result = loads(content)  # a lone surrogate (half an emoji) mended
                     # Special-case EPG actions that return a non-paginated structure
                     if self.action in ("get_short_epg", "get_epg_info"):
                         return (result.get("js"), 1, 1)

@@ -34,6 +34,7 @@ from services.catalog import ALL_GROUP_ID
 from services.i18n import N_
 from services.lazy_import import lazy_module
 from services.provider_types import EMBY, JELLYFIN, MEDIA_SERVERS, is_media_server  # noqa: F401
+from services.surrogates import response_json
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")  # the window shows before the network libraries load
@@ -184,7 +185,7 @@ class MediaServerClient:
                 raise SignInNeeded("401")
             if response.status_code >= 400:  # never the address: it may carry the token
                 raise MediaServerError(f"The server answered {response.status_code}")
-            return response.json() if response.content else None
+            return response_json(response) if response.content else None
         return None
 
     def _note_date(self, response: Any) -> None:

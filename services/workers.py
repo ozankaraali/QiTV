@@ -54,6 +54,7 @@ from services.provider_api import (
 )
 from services.provider_manager import HANDSHAKE_UNEXPECTED, HANDSHAKE_UNREACHABLE
 from services.redact import safe_exc, safe_traceback
+from services.surrogates import mended, response_json
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
@@ -142,7 +143,8 @@ class M3ULoaderWorker(QObject):
                         hooks=capped(LIST_MAX),
                     )
                     response.raise_for_status()
-                    self.finished.emit(parse_m3u(decode_playlist(response), categorize=True))
+                    playlist = parse_m3u(decode_playlist(response), categorize=True)
+                    self.finished.emit(mended(playlist))  # a charset it names may cut a pair
                     return
                 except requests.RequestException as e:
                     last_exc = e
@@ -195,7 +197,7 @@ def _xtream_https_base(get: Callable[..., Any], worker: Any, base: str, server_i
         try:
             response = get(url, timeout=(_HTTPS_CONNECT_S, 10), verify=worker.verify_ssl)
             try:
-                body = response.json() if response.ok and response.content else None
+                body = response_json(response) if response.ok and response.content else None
             finally:
                 response.close()
         except requests.RequestException, ValueError:
@@ -241,7 +243,7 @@ def _xtream_sign_in_at(get: Callable[..., Any], worker: Any) -> Tuple[Any, str, 
         if at + 1 < len(bases) and xtream_elsewhere(response):
             continue  # the next is the root: no further one
         response.raise_for_status()
-        body = response.json() if response.content else {}
+        body = response_json(response) if response.content else {}
         if not isinstance(body, dict):
             body = {}
         if at:
@@ -262,7 +264,7 @@ def _xtream_categories(
     try:
         response = get(url, timeout=10, verify=worker.verify_ssl)
         if response.ok and response.content:
-            listed = response.json()
+            listed = response_json(response)
             # Anything but a list (an expired account's panel answers its account): none.
             for c in listed if isinstance(listed, list) else []:
                 name = c.get("category_name") or N_("Unknown")
@@ -408,7 +410,7 @@ class XtreamLoaderWorker(QObject):
             )
             streams_resp = get(streams_url, timeout=15, verify=self.verify_ssl)
             streams_resp.raise_for_status()
-            streams = streams_resp.json() or []
+            streams = response_json(streams_resp) or []
             if not isinstance(streams, list):
                 raise ValueError(_xtream_refusal(streams, user_info))
 
@@ -502,7 +504,7 @@ class XtreamSeriesInfoWorker(QObject):
                 hooks=capped(LIST_MAX),
             )
             info_resp.raise_for_status()
-            series_data = info_resp.json() or {}
+            series_data = response_json(info_resp) or {}
 
             # Extract seasons and episodes with safety checks
             if not isinstance(series_data, dict):
@@ -605,7 +607,7 @@ class STBCategoriesWorker(QObject):
                 hooks=capped(LIST_MAX),
             )
             resp.raise_for_status()
-            categories = resp.json()["js"]
+            categories = response_json(resp)["js"]
 
             result = {"categories": categories, "contents": {}}
             # Live channels come as one list; VOD/series are fetched per category later.
@@ -648,7 +650,7 @@ class STBCategoriesWorker(QObject):
                 logger.info("The portal's live list timed out; asking again.")
                 continue
             resp.raise_for_status()
-            return list(resp.json()["js"]["data"])
+            return list(response_json(resp)["js"]["data"])
         return []
 
 
@@ -733,7 +735,7 @@ class LinkCreatorWorker(QObject):
                 fetchurl, headers=self.headers, timeout=10, verify=self.verify_ssl
             )
             response.raise_for_status()
-            result = response.json()
+            result = response_json(response)
             if self.programme:
                 link = stb_archive_link(result)  # "": no recording (EMPTY_LINK_MESSAGE)
             else:

@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import platform
 import sys
+import threading
 from typing import IO, Any, Mapping, Optional
 
 from services.redact import mask, safe_traceback
@@ -73,6 +74,21 @@ def _unhandled(kind: type[BaseException], error: BaseException, frames: Any) -> 
     logger.error("Unhandled %s:\n%s", kind.__name__, safe_traceback(error.with_traceback(frames)))
 
 
+def _unhandled_in_thread(args: threading.ExceptHookArgs) -> None:
+    """threading.excepthook: an exception that ended a thread of QiTV's (a writer, say), logged
+    as `_unhandled` logs one, with the thread's name; a SystemExit ends it quietly, as ever."""
+    if args.exc_type is SystemExit:
+        return
+    where = args.thread.name if args.thread is not None else "?"
+    if args.exc_value is None:
+        logger.error("Unhandled %s in the thread %s", args.exc_type.__name__, where)
+        return
+    error = args.exc_value.with_traceback(args.exc_traceback)
+    logger.error(
+        "Unhandled %s in the thread %s:\n%s", args.exc_type.__name__, where, safe_traceback(error)
+    )
+
+
 def install(directory: Optional[Path] = None) -> Optional[Path]:
     """Also log to `directory` (`log_dir()` by default): the log file's path, or None when it
     cannot be written there (the console log goes on alone)."""
@@ -91,6 +107,7 @@ def install(directory: Optional[Path] = None) -> Optional[Path]:
     logging.getLogger().addHandler(handler)
     _handler = handler
     sys.excepthook = _unhandled
+    threading.excepthook = _unhandled_in_thread  # a thread's end would reach the console only
     try:
         _crash_file = open(directory / CRASH_NAME, "a", encoding="utf-8")
         faulthandler.enable(_crash_file)

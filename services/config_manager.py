@@ -14,6 +14,7 @@ from services.atomic_write import atomic_write, set_aside
 from services.free_channels import ALL_NAME, ALL_URL
 from services.multikeydict import MultiKeyDict
 from services.redact import safe_message
+from services.surrogates import mended
 
 logger = logging.getLogger(__name__)
 
@@ -643,13 +644,34 @@ class ConfigManager:
             raise
         self._save_failed_at = None
 
-    def _write_config(self, retries: int) -> None:
-        self.xmltv_channel_map = self.xmltv_channel_map.serialize()
+    def _serialized_config(self) -> bytes:
+        """config.json's bytes, the settings as they are now. Text no UTF-8 file can hold (half
+        an emoji: a lone surrogate) stopped every save; a provider's lists are mended as they
+        are read (services.surrogates), and what came in another way is mended here, where it
+        is kept too."""
         try:
-            serialized_config = json.dumps(self.config, option=json.OPT_INDENT_2)
-        finally:
-            self.xmltv_channel_map = MultiKeyDict.deserialize(self.xmltv_channel_map)
+            return json.dumps(self._config_to_write(), option=json.OPT_INDENT_2)
+        except TypeError:  # orjson's JSONEncodeError is one
+            mended(self.config)
+            channel_map = self.xmltv_channel_map
+            if isinstance(channel_map, MultiKeyDict):  # keyed by tuples: mended as it is kept
+                self.xmltv_channel_map = MultiKeyDict.deserialize(mended(channel_map.serialize()))
+            serialized = json.dumps(self._config_to_write(), option=json.OPT_INDENT_2)
+        logger.warning("The settings held text cut mid-character: saved with U+FFFD in its place")
+        return serialized
 
+    def _config_to_write(self) -> dict:
+        """The config as config.json keeps it: its channel map a list (a copy of the top level;
+        the map in memory stays as it is)."""
+        config = dict(self.config)
+        channel_map = self.xmltv_channel_map
+        if isinstance(channel_map, MultiKeyDict):
+            channel_map = channel_map.serialize()
+        config["xmltv_channel_map"] = channel_map
+        return config
+
+    def _write_config(self, retries: int) -> None:
+        serialized_config = self._serialized_config()
         with atomic_write(
             self.config_path, lambda temporary, path: self._replace_config(temporary, retries)
         ) as f:

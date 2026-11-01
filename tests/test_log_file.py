@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -37,6 +38,7 @@ class InstallTests(unittest.TestCase):
         before = list(root.handlers)
         hook = sys.excepthook
         self.addCleanup(setattr, sys, "excepthook", hook)
+        self.addCleanup(setattr, threading, "excepthook", threading.excepthook)
         self.addCleanup(faulthandler.disable)
         self.addCleanup(self.drop_handlers, before)
         self.addCleanup(log_file.close)
@@ -119,6 +121,26 @@ class InstallTests(unittest.TestCase):
         self.assertIn("Unhandled ValueError", text)
         self.assertIn("test_an_unhandled_exception_is_logged_without_its_message", text)
         self.assertNotIn("secret", text)
+
+    def test_an_exception_that_ends_a_thread_is_logged_too(self):
+        # The recording schedule's writer died on text no UTF-8 file can hold: only the
+        # console (none, in a packaged app) heard of it.
+        log_file.install(self.directory)
+
+        def write():
+            raise UnicodeError("http://panel.test/get.php?username=u&password=secret")
+
+        thread = threading.Thread(target=write, name="schedule-save")
+        thread.start()
+        thread.join()
+        quiet = threading.Thread(target=sys.exit, name="quiet")  # SystemExit: no error
+        quiet.start()
+        quiet.join()
+        text = self.text()
+        self.assertIn("Unhandled UnicodeError in the thread schedule-save", text)
+        self.assertIn("in write", text)  # its frames
+        self.assertNotIn("secret", text)
+        self.assertNotIn("quiet", text)
 
     def test_a_place_that_cannot_be_written_leaves_the_console_log(self):
         with patch.object(Path, "mkdir", side_effect=PermissionError(13, "denied")):
