@@ -752,6 +752,16 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(ctl.mode, "browse")
         self.assertEqual(self.grid_names(), ["Dune Songs", "Salt Roads", "Tide Lines"])
 
+    def test_the_phones_done_closes_the_search_and_nothing_else(self):
+        ctl = self.open_movies()
+        ctl.close_search()  # browsing: stays
+        self.assertEqual(ctl.mode, "browse")
+        ctl.handle(Action.SEARCH)
+        self.type_text("salt")
+        ctl.close_search()  # the phone's Done, Show on TV on: as Esc twice
+        self.assertEqual((ctl.mode, ctl.query), ("browse", ""))
+        self.assertEqual(self.grid_names(), ["Dune Songs", "Salt Roads", "Tide Lines"])
+
     def test_live_and_movie_hits_of_the_current_provider(self):
         ctl = self.build()
         ctl.open_search()

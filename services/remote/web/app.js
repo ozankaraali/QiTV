@@ -16,6 +16,9 @@ const KEEPALIVE_MS = 200;
 // tries once more.
 const RETRY_MS = [500, 1000, 2000, 5000, 10000, 30000, 60000];
 const REST_AFTER_MS = 10 * 60 * 1000;
+// QiTV said it stops (it quits, or its phone remote was turned off): nothing broke, so the
+// tries begin at 5 s rather than at once.
+const STOPPED_RETRY = 3;
 
 // The same count as services/remote/protocol.py steps_for.
 export const stepsFor = (ms) => (ms < DELAY_MS ? 1 : 2 + Math.floor((ms - DELAY_MS) / INTERVAL_MS));
@@ -40,6 +43,9 @@ const FALLBACK = {
   add_home_share: "Tap Share (under ⋯ if you don't see it), then Add to Home Screen.",
   add_home_pair: "Open QiTV from your Home Screen and scan the code on the TV once more.",
   add_home_menu: "Open your browser's menu, then Add to Home screen or Install app.",
+  stopped: "QiTV was closed on the computer, or its phone remote was turned off.",
+  forget_ask: "Forget {tv}? To use it again, scan the code on the TV.",
+  cancel: "Cancel",
 };
 export const t = (key) => strings[key] || FALLBACK[key] || key;
 
@@ -157,7 +163,10 @@ export function connect(tvId) {
 
 export function openSession({ tvId, room = null, opening, pattern, s = null, psk = null, payload, onanswer }) {
   clearTimeout(app.retryTimer);
-  if (app.conn) app.conn.end(1000, "replaced");
+  const old = app.conn;
+  app.conn = null; // first, as forget's: the old one's close must not schedule a reconnect
+  if (old) old.end(1000, "replaced");
+  if (tvId !== app.tvId) app.stopped = false; // another TV: the last one's goodbye isn't its
   app.tvId = tvId;
   const conn = new Connection({
     url: app.socketUrl(tvId, room),
@@ -170,6 +179,7 @@ export function openSession({ tvId, room = null, opening, pattern, s = null, psk
     onopen: (answer) => {
       app.retry = 0;
       app.failingSince = 0;
+      app.stopped = false;
       onanswer(answer);
     },
     onmessage: (message) => onMessage(message),
@@ -193,6 +203,10 @@ function onMessage(message) {
     if (app.onhello) app.onhello(message);
   } else if (message.t === "bye") {
     if (message.reason === "removed") forget(t("removed"));
+    else if (message.reason === "stopped") {
+      app.stopped = true; // its close follows: no "Reconnecting…", tries again slowly (onClose)
+      banner(t("stopped"));
+    }
   }
   const handler = app.handlers[message.t];
   if (handler) handler(message);
@@ -213,7 +227,14 @@ function onClose(code, reason, mode) {
     forget(t("removed"));
     return;
   }
-  scheduleRetry(handled === "banner");
+  if (code === 1001 && reason === "stopped") app.stopped = true; // as its goodbye says
+  if (app.stopped) {
+    // Until QiTV is back its message stays (or the relay's, which says the same), and the
+    // tries go slower: through the relay each costs a request of its quota.
+    app.retry = Math.max(app.retry, STOPPED_RETRY);
+    if (handled !== "banner") banner(t("stopped"));
+  }
+  scheduleRetry(handled === "banner" || app.stopped);
 }
 
 function forget(message) {
@@ -230,7 +251,7 @@ function scheduleRetry(keepBanner = false) {
   if (!app.failingSince) app.failingSince = Date.now();
   clearTimeout(app.retryTimer);
   if (Date.now() - app.failingSince > REST_AFTER_MS) {
-    banner(`${t("offline")} ${t("tap_retry")}`); // resting: a look or a tap tries again
+    banner(`${t(app.stopped ? "stopped" : "offline")} ${t("tap_retry")}`); // resting: a look or a tap tries again
     return;
   }
   const delay = RETRY_MS[Math.min(app.retry, RETRY_MS.length - 1)];
@@ -238,6 +259,7 @@ function scheduleRetry(keepBanner = false) {
   if (!keepBanner) banner(app.retry > RETRY_MS.length ? t("offline") : t("reconnecting"));
   clearTimeout(app.retryTimer);
   app.retryTimer = setTimeout(() => {
+    if (app.conn && !app.conn.ended) return; // one opened meanwhile (a look, a tap, a TV chosen)
     if (app.tvId && document.visibilityState !== "hidden") connect(app.tvId);
   }, delay);
 }
@@ -327,6 +349,13 @@ export function closeSheets() {
   document.body.classList.remove("sheet-open");
 }
 
+// A sheet sent away, by a tap beside it or a swipe down: what it asked is answered as such
+// (QiTV's question: no; screens.js), then it closes.
+function dismissSheets() {
+  if (app.ondismiss) app.ondismiss();
+  closeSheets();
+}
+
 // 2.8.10: a sheet dragged down from its top follows the finger and closes past a quarter of its
 // height (or a flick); short of that it springs back. A drag never starts on a key (its press
 // went to the TV at the touch), and a sheet scrolled down scrolls first.
@@ -364,7 +393,7 @@ function bindSheetSwipe(sheet) {
     drag = null;
     sheet.style.transition = "";
     const flick = dy > 30 && dy / Math.max(1, performance.now() - t) > SHEET_FLICK;
-    if (dy > sheet.offsetHeight / 4 || flick) closeSheets();
+    if (dy > sheet.offsetHeight / 4 || flick) dismissSheets();
     else sheet.style.transform = "";
   };
   sheet.addEventListener("touchend", end);
@@ -374,13 +403,14 @@ function bindSheetSwipe(sheet) {
 function bindChrome() {
   for (const sheet of document.querySelectorAll(".sheet")) bindSheetSwipe(sheet);
   $("moreButton").addEventListener("click", () => openSheet("moreSheet"));
-  $("veil").addEventListener("click", closeSheets);
+  $("veil").addEventListener("click", dismissSheets);
   for (const el of document.querySelectorAll("[data-close]")) el.addEventListener("click", closeSheets);
   for (const tab of document.querySelectorAll("[data-tab]")) {
     tab.addEventListener("click", () => {
+      const again = !document.querySelector(`[data-screen=${tab.dataset.tab}]`).hidden; // tapped while shown
       show(tab.dataset.tab);
       const handler = app.handlers[`tab:${tab.dataset.tab}`];
-      if (handler) handler();
+      if (handler) handler(again);
     });
   }
   $("menuButton").addEventListener("click", openMenu);
@@ -420,14 +450,28 @@ function openMenu() {
   }
   const home = addHomeItem();
   if (home) list.append(home);
-  if (app.tvId) {
-    list.append(
-      menuItem(t("forget"), () => {
-        send({ t: "forget" });
-        forget();
-      }, "danger"),
-    );
-  }
+  if (app.tvId) list.append(menuItem(t("forget"), confirmForget, "danger"));
+  openSheet("menuSheet");
+}
+
+// Forget asks first, as QiTV's own questions do: the safe answer first and lit; a tap beside
+// it or a swipe forgets nothing.
+function confirmForget() {
+  const list = $("menuList");
+  list.replaceChildren();
+  $("menuTitle").textContent = t("forget");
+  const question = document.createElement("p");
+  question.className = "ask-text";
+  question.textContent = t("forget_ask").replace("{tv}", $("tvName").textContent || "QiTV");
+  const buttons = document.createElement("div");
+  buttons.className = "ask-buttons";
+  const keep = menuItem(t("cancel"), () => {}, "keep");
+  const go = menuItem(t("forget"), () => {
+    send({ t: "forget" });
+    forget();
+  }, "stop");
+  buttons.append(keep, go);
+  list.append(question, buttons);
   openSheet("menuSheet");
 }
 

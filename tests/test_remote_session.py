@@ -9,6 +9,7 @@ from services.remote.protocol import (
     Answered,
     CastTo,
     Closed,
+    CloseSearch,
     Forgot,
     Get,
     Held,
@@ -224,6 +225,7 @@ class KkTests(SessionCase):
             {"t": "timer", "id": "h7", "title": "", "begin": 60, "minutes": 30, "days": [1]},
             {"t": "get", "what": "cast"},
             {"t": "refresh"},
+            {"t": "closesearch"},
         ):
             got += session.receive(phone.seal(message)).events
         self.assertEqual(
@@ -249,6 +251,7 @@ class KkTests(SessionCase):
                 Timer(sid, "h7", "", 60, 30, (1,), ""),
                 Get(sid, "cast", "", 0),
                 RefreshLists(sid),
+                CloseSearch(sid),
             ],
         )
 

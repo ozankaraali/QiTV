@@ -35,6 +35,7 @@ from services.remote.protocol import (
     Answered,
     CastTo,
     Closed,
+    CloseSearch,
     Code,
     Get,
     Held,
@@ -349,6 +350,9 @@ class RemoteController(QObject):
             self._to_tv(event.sid)
         elif isinstance(event, RefreshLists):  # 2.8: as the Library's ↻
             self._window.screens.library_controller.refresh_lists()
+        elif isinstance(event, CloseSearch):  # the phone's Done: the TV's search closes too
+            if self._window.screens.library_shown():
+                self._window.screens.library_controller.close_search()
         elif isinstance(event, Position):
             self._position(event.sid, event.position_ms, event.length_ms, event.play)
         elif isinstance(event, Answered):

@@ -36,7 +36,9 @@ from services.remote.hub import RemoteHub, web_dir  # noqa: E402
 from services.remote.protocol import (  # noqa: E402
     Answered,
     CastTo,
+    CloseSearch,
     Code,
+    Forgot,
     Get,
     Opened,
     OpenItem,
@@ -45,6 +47,7 @@ from services.remote.protocol import (  # noqa: E402
     Press,
     Query,
     RecAct,
+    RefreshLists,
     Schedule,
     Status,
     Timer,
@@ -1338,12 +1341,213 @@ def scenario_sheet_swipe(rig: Rig) -> None:
 
 
 def scenario_forget_clean(rig: Rig) -> None:
+    """Forget this TV asks first (a tap beside the question forgets nothing); confirmed, the
+    page goes to the scan screen and stays there, no reconnect after it."""
     paired_sid(rig)
+    mark = rig.events.mark()
     rig.page.click("#menuButton")
     rig.page.locator("#menuList button", has_text="Forget this TV").click()
+    rig.page.locator("#menuList .ask-text", has_text="Living room").wait_for()
+    rig.shot("forget-ask")
+    rig.page.click("#veil", position={"x": 20, "y": 20})  # tapped away: nothing forgotten
+    rig.page.wait_for_selector("#menuSheet", state="hidden")
+    rig.page.wait_for_timeout(300)
+    assert not rig.events.of(Forgot, after=mark), "forgotten without the second tap"
+    assert rig.page.locator("[data-screen=remote]").is_visible()
+    rig.page.click("#menuButton")
+    rig.page.locator("#menuList button", has_text="Forget this TV").click()
+    rig.page.locator("#menuList .ask-buttons .keep").click()  # Cancel: nothing either
+    rig.page.wait_for_timeout(300)
+    assert not rig.events.of(Forgot, after=mark), "Cancel forgot the TV"
+    rig.page.click("#menuButton")
+    rig.page.locator("#menuList button", has_text="Forget this TV").click()
+    rig.page.locator("#menuList .ask-buttons .stop").click()
+    rig.events.wait(Forgot, after=mark)
     rig.page.wait_for_selector("[data-screen=scan]:not([hidden])")
     rig.page.wait_for_timeout(1500)  # past any retry
     assert rig.page.locator("#banner").is_hidden(), rig.page.inner_text("#banner")
+
+
+def scenario_choose_tv(rig: Rig) -> None:
+    """Choosing a TV (the one connected too) connects once, with no reconnecting after it; Pair
+    another TV then stays on the scan screen."""
+    paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("#tvButton")
+    rig.page.locator("#menuList button", has_text="Living room").click()
+    rig.events.wait(Opened, after=mark)
+    rig.page.wait_for_timeout(3000)  # the old loop reconnected every 0.5–1 s
+    opened = rig.events.of(Opened, after=mark)
+    assert len(opened) == 1, f"{len(opened)} connections after one choice"
+    assert rig.page.locator("#banner").is_hidden(), rig.page.inner_text("#banner")
+    mark = rig.events.mark()  # replaced while open, as switching TVs does
+    rig.page.evaluate("import('./app.js').then((m) => m.connect(m.default.tvId))")
+    rig.events.wait(Opened, after=mark)
+    rig.page.wait_for_timeout(2000)
+    assert len(rig.events.of(Opened, after=mark)) == 1, "the replaced connection came back"
+    rig.page.click("#tvButton")
+    rig.page.locator("#menuList button", has_text="Pair another TV").click()
+    rig.page.wait_for_selector("[data-screen=scan]:not([hidden])")
+    rig.page.wait_for_timeout(1500)
+    assert rig.page.locator("[data-screen=scan]").is_visible(), "the scan screen went away"
+
+
+def scenario_ask_swipe(rig: Rig) -> None:
+    """QiTV's question swiped away answers as a tap beside it does: no, nothing stops."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    ask = {"t": "ask", "id": 5, "text": "Stop the recording?", "yes": "Stop", "no": "Keep"}
+    rig.hub.send(sid, ask)
+    rig.page.locator("#askSheet").wait_for()
+    grab = rig.page.locator("#askSheet .grab").bounding_box()
+    assert grab is not None
+    mark = rig.events.mark()
+    touch_drag(rig, grab["x"] + grab["width"] / 2, grab["y"] + grab["height"] / 2, 320)
+    rig.events.wait(Answered, where=lambda e: e.n == 5 and not e.yes, after=mark)
+    rig.page.wait_for_selector("#askSheet", state="hidden")
+    rig.page.click("#moreButton")  # another sheet swiped away answers nothing
+    rig.page.wait_for_selector("#moreSheet:not([hidden])")
+    grab = rig.page.locator("#moreSheet .grab").bounding_box()
+    assert grab is not None
+    mark = rig.events.mark()
+    touch_drag(rig, grab["x"] + grab["width"] / 2, grab["y"] + grab["height"] / 2, 320)
+    rig.page.wait_for_selector("#moreSheet", state="hidden")
+    rig.page.wait_for_timeout(300)
+    assert not rig.events.of(Answered, after=mark)
+
+
+def scenario_library_refresh(rig: Rig) -> None:
+    """The Library's Refresh says so for a moment, then the line goes (QiTV never says when
+    a refresh ends)."""
+    paired_sid(rig)
+    rig.page.click("[data-tab=library]")
+    mark = rig.events.mark()
+    rig.page.click("#libraryRefresh")
+    rig.events.wait(RefreshLists, after=mark)
+    rig.page.locator("#banner", has_text="Refreshing").wait_for()
+    rig.page.locator("#banner").wait_for(state="hidden", timeout=6000)
+
+
+def scenario_qitv_stops(rig: Rig) -> None:
+    """QiTV quits (or its phone remote is turned off): the phone says so and keeps saying it
+    while it tries again, slowly, never "Reconnecting…"."""
+    paired_sid(rig)
+    rig.hub.stop()
+    rig.page.locator("#banner", has_text="closed on the computer").wait_for(timeout=5000)
+    rig.page.wait_for_timeout(7000)  # past the first tries (5 s, then 10 s)
+    shown = rig.page.inner_text("#banner")
+    assert "closed on the computer" in shown, shown
+
+
+def scenario_find_searching(rig: Rig) -> None:
+    """A find says Searching… while QiTV still searches its other providers, Nothing found
+    once it is done."""
+    sid = paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark), GUIDE)
+    rig.page.wait_for_selector("#guideRows .row >> nth=2")
+    mark = rig.events.mark()
+    rig.page.fill("#guideFind", "zz")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "guide" and e.find == "zz", after=mark)
+    empty = {**GUIDE, "find": "zz", "count": 0, "rows": [], "searching": True}
+    answer(rig, sid, ask, empty)
+    rig.page.locator("#guideRows .empty", has_text="Searching").wait_for()
+    rig.hub.send(sid, {**empty, "searching": False})  # QiTV's own resend: the search is over
+    rig.page.locator("#guideRows .empty", has_text="Nothing found").wait_for()
+
+
+def scenario_guide_remembers(rig: Rig) -> None:
+    """The Guide tab comes back where the phone left it, its group and its find, as the
+    Library's does; the Guide tab tapped while it shows goes where the TV is."""
+    sid = paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark), GUIDE)
+    rig.page.wait_for_selector("#guideRows .row >> nth=2")
+    mark = rig.events.mark()
+    rig.page.click("#guideUp")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "groups", after=mark), GROUPS)
+    rig.page.wait_for_selector("#guideRows .row.branch >> nth=2")
+    mark = rig.events.mark()
+    rig.page.fill("#guideFind", "new")
+    rig.events.wait(Get, where=lambda e: e.what == "groups" and e.find == "new", after=mark)
+    rig.page.click("[data-tab=remote]")
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    ask = rig.events.wait(Get, where=lambda e: e.what in ("groups", "guide"), after=mark)
+    assert (ask.what, ask.find) == ("groups", "new"), ask
+    assert rig.page.input_value("#guideFind") == "new"
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")  # again: where the TV is
+    ask = rig.events.wait(Get, where=lambda e: e.what in ("groups", "guide"), after=mark)
+    assert (ask.what, ask.list, ask.find) == ("guide", "", ""), ask
+    mark = rig.events.mark()  # the Library keeps its find too
+    rig.page.click("[data-tab=library]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark), GENRES)
+    mark = rig.events.mark()
+    rig.page.fill("#libraryFind", "harb")
+    rig.events.wait(Get, where=lambda e: e.what == "genres" and e.find == "harb", after=mark)
+    rig.page.click("[data-tab=remote]")
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=library]")
+    ask = rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark)
+    assert ask.find == "harb", ask
+
+
+def scenario_search_done_tv(rig: Rig) -> None:
+    """With Show on TV on, Done closes the TV's search too; without it, the TV is left alone."""
+    paired_sid(rig)
+    rig.page.click("#searchButton")
+    mark = rig.events.mark()
+    rig.page.click("#searchDone")
+    rig.page.wait_for_selector("[data-screen=remote]:not([hidden])")
+    rig.page.wait_for_timeout(300)
+    assert not rig.events.of(CloseSearch, after=mark), "the phone's own search closed the TV's"
+    rig.page.click("#searchButton")
+    rig.page.click("#searchTv")  # Show on TV
+    rig.page.keyboard.type("harb", delay=30)
+    mark = rig.events.mark()
+    rig.page.click("#searchDone")
+    rig.events.wait(CloseSearch, after=mark)
+    rig.page.wait_for_selector("[data-screen=remote]:not([hidden])")
+    rig.page.click("#searchButton")
+    mark = rig.events.mark()
+    rig.page.click("#searchTv")  # off again: the TV's search closes
+    rig.events.wait(CloseSearch, after=mark)
+
+
+SMALL_LAYOUT = """() => {
+  const box = (s) => document.querySelector(s).getBoundingClientRect();
+  const ok = document.querySelector('.ok');
+  const tabs = box('#tabs');
+  const shown = ['#pad', '.cluster', '.trio', '.seg', '.nowbar', '#backTo', '#recLine'];
+  const out = shown.filter((s) => { const b = box(s);
+    return b.bottom > tabs.top + 0.5 || b.right > innerWidth + 0.5 || b.left < -0.5; });
+  return {out, okFits: ok.scrollWidth <= ok.clientWidth};
+}"""
+
+
+def scenario_small_screens(rig: Rig) -> None:
+    """With Resume and REC shown, in Turkish (its OK is "Tamam"), the whole remote fits above
+    the tabs on a 320 × 568 phone and the usual ones, upright or on its side."""
+    from services import i18n
+
+    i18n.set_language("tr")
+    try:
+        sid = paired_sid(rig)
+    finally:
+        i18n.set_language(None)
+    since = int(time.time()) - 60
+    lines = {**STATE, "back": "20:10", "rec": [{"id": "b1", "name": "Quayside", "since": since}]}
+    rig.hub.send(sid, lines)
+    rig.page.locator("#recLine").wait_for()
+    for width, height in ((320, 568), (375, 667), (390, 844), (667, 375), (844, 390)):
+        rig.page.set_viewport_size({"width": width, "height": height})
+        rig.page.wait_for_timeout(200)
+        fit = rig.page.evaluate(SMALL_LAYOUT)
+        rig.shot(f"remote-{width}x{height}")
+        assert fit == {"out": [], "okFits": True}, (width, height, fit)
 
 
 def scenario_hello_keeps_now(rig: Rig) -> None:
@@ -1502,6 +1706,14 @@ SCENARIOS.update(
         "guide-follows-tv": scenario_guide_follows_tv,
         "touchpad": scenario_touchpad,
         "sheet-swipe": scenario_sheet_swipe,
+        "choose-tv": scenario_choose_tv,
+        "ask-swipe": scenario_ask_swipe,
+        "library-refresh": scenario_library_refresh,
+        "qitv-stops": scenario_qitv_stops,
+        "find-searching": scenario_find_searching,
+        "guide-remembers": scenario_guide_remembers,
+        "search-done-tv": scenario_search_done_tv,
+        "small-screens": scenario_small_screens,
     }
 )
 

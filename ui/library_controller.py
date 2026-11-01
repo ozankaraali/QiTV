@@ -387,6 +387,15 @@ class LibraryController(QObject):
             self._search.set_query("")
         self.open_search(query)
 
+    def close_search(self) -> None:
+        """The phone remote's search is done: the search it showed here closes as Esc closes an
+        empty one (back to the section it came from, or to the TV); any other view stays."""
+        if self._closed or self._mode != "search":
+            return
+        self._search.clear()
+        self._screen.search_field.set_query("")
+        self._leave_search()
+
     def search_hits(self) -> list[Hit]:
         """What the search shows now (none while it has no query or is still searching)."""
         return list(self._search.hits or [])

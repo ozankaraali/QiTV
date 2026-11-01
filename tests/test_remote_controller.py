@@ -16,6 +16,7 @@ from services.remote.protocol import (
     Answered,
     CastTo,
     Closed,
+    CloseSearch,
     Code,
     Get,
     Held,
@@ -593,6 +594,23 @@ class WatchHereTests(WindowCase):
         with mock.patch.object(controller, "refresh_lists") as refresh:
             self.window.remote.bridge.post(RefreshLists("s8"))
             self.assertTrue(wait_until(lambda: refresh.called))
+
+    def test_the_phones_search_done_closes_the_tvs_search(self):
+        self.connect()
+        screens = self.window.screens
+        controller = screens.library_controller
+        with (
+            mock.patch.object(controller, "close_search") as close,
+            mock.patch.object(controller, "refresh_lists") as refresh,
+        ):
+            with mock.patch.object(screens, "library_shown", return_value=False):
+                self.window.remote.bridge.post(CloseSearch("s8"))
+                self.window.remote.bridge.post(RefreshLists("s8"))  # after it: it was handled
+                self.assertTrue(wait_until(lambda: refresh.called))
+            self.assertFalse(close.called)  # no Library on the TV: nothing to close
+            with mock.patch.object(screens, "library_shown", return_value=True):
+                self.window.remote.bridge.post(CloseSearch("s8"))
+                self.assertTrue(wait_until(lambda: close.called))
 
     def test_back_to_the_tv_tunes_what_the_phone_played(self):
         row = self.listed_row(1)
