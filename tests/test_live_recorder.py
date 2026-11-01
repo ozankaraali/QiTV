@@ -15,7 +15,7 @@ from unittest import mock
 
 from PySide6.QtWidgets import QApplication
 from http_fixtures import LocalSource
-from ts_fixtures import make_stream
+from ts_fixtures import VIDEO_PID, make_stream
 
 from services.live import engine as engine_module, recorder as recorder_module, worker
 from services.live.engine import LiveEngine
@@ -33,10 +33,15 @@ from services.live.recorder import (
 from services.live.ring import RamRing, RingError
 from tests.test_live_engine import URL_FOR_RING, wait_until
 from tests.test_live_server import Writer, header, payload
-from tests.test_live_worker import RAM, SECRET_PATH, InProcessHelper, paced_route
+from tests.test_live_worker import LIVE_PACE, RAM, SECRET_PATH, InProcessHelper, paced_route
 
 SEGMENT = 64 * 1024
 MIB = 1024 * 1024
+
+
+def pids(data: bytes) -> list[int]:
+    """The PID of each whole 188-byte packet of `data`, in order."""
+    return [((data[i + 1] & 0x1F) << 8) | data[i + 2] for i in range(0, len(data) - 187, 188)]
 
 
 class Ended:
@@ -585,7 +590,7 @@ class HelperRecordingTests(unittest.TestCase):
         self.stop = threading.Event()
         self.hung_up = threading.Event()
         self.source = LocalSource(
-            {SECRET_PATH: paced_route(make_stream(60), self.stop, self.hung_up)}
+            {SECRET_PATH: paced_route(make_stream(60), self.stop, self.hung_up, **LIVE_PACE)}
         )
         self.addCleanup(self.source.close)
         self.addCleanup(self.stop.set)
@@ -608,33 +613,46 @@ class HelperRecordingTests(unittest.TestCase):
         # Generous: the close thread sends it once the upstream let go, on a loaded runner late.
         return self.seen(lambda m: m == ("closed", sid), timeout)
 
-    def assert_transport_stream(self, path):
+    def recording_grew(self, path, timeout=10):
+        """Waits until the recording at `path` holds some of the channel's pictures (past its
+        PAT and PMT): a fixed wait recorded nothing on a loaded runner."""
+        deadline = time.monotonic() + timeout
+        while not (os.path.exists(path) and VIDEO_PID in pids(Path(path).read_bytes())):
+            self.assertLess(time.monotonic(), deadline, "the recording did not follow the stream")
+            time.sleep(0.02)
+
+    def assert_transport_stream(self, path, size):
+        """The file a player opens: a transport stream from its first byte (the PAT, then
+        whole packets), with the channel's pictures, and all `size` bytes its end counted."""
         data = Path(path).read_bytes()
-        self.assertGreater(len(data), 188 * 100)
-        self.assertEqual(data[0], 0x47)
-        self.assertEqual(data[188], 0x47)
+        self.assertEqual(len(data), size)
+        self.assertEqual(len(data) % 188, 0)
+        self.assertEqual(data[::188], b"\x47" * (len(data) // 188))  # each packet's sync byte
+        self.assertEqual(pids(data[:188]), [0])
+        self.assertIn(VIDEO_PID, pids(data))
 
     def test_a_recording_stops_and_keeps_its_file_without_another_connection(self):
         path = str(self.folder / "One.ts")
         self.helper.parent.send(("record_start", "s", "r1", path, 0, {}))
         told = self.helper.wait_for(lambda m: m[0] == "recording" and m[2] == "r1")
         self.assertEqual(told, ("recording", "s", "r1", path, 0))  # its file, once made
-        time.sleep(1.0)
+        self.recording_grew(path)
         self.helper.parent.send(("record_stop", "s"))
         message = self.recorded("r1")
         self.assertEqual(message[:5], ("recorded", "s", "r1", STOPPED, path))
-        self.assertEqual(os.path.getsize(path), message[5])
-        self.assert_transport_stream(path)
+        self.assert_transport_stream(path, message[5])
         self.assertEqual(self.source.connections, 1)  # the session's own, nothing more
 
     def test_a_channel_change_stops_the_recording_and_keeps_the_file(self):
+        # It asserted more than 100 packets after 0.6 s: on a loaded runner the paced source
+        # had sent fewer by the close (92). What it means: the file is whole and playable.
         path = str(self.folder / "One.ts")
         self.helper.parent.send(("record_start", "s", "r1", path, 0, {}))
-        time.sleep(0.6)
+        self.recording_grew(path)
         self.helper.parent.send(("close", "s"))
         message = self.recorded("r1")  # before or after "closed": in no set order
         self.assertEqual(message[3], STOPPED)
-        self.assert_transport_stream(path)
+        self.assert_transport_stream(path, message[5])
         self.assertEqual(self.closed("s"), ("closed", "s"))
         self.assertTrue(self.hung_up.wait(3), "the session kept its upstream connection")
 
@@ -816,7 +834,9 @@ class EngineHelperRecordingTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         stop, hung_up = threading.Event(), threading.Event()
-        source = LocalSource({SECRET_PATH: paced_route(make_stream(60), stop, hung_up)})
+        source = LocalSource(
+            {SECRET_PATH: paced_route(make_stream(60), stop, hung_up, **LIVE_PACE)}
+        )
         self.addCleanup(source.close)
         self.addCleanup(stop.set)
         engine = LiveEngine(str(root / "timeshift"))

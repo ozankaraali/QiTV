@@ -14,7 +14,7 @@ from PySide6.QtCore import QObject, QPoint, QPointF, Qt, Signal
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
-from timer_fixtures import elapse
+from timer_fixtures import elapse, timeline, wait_until
 
 from services.sound_sync import SoundSync
 from ui.keymap import Action, key_hint
@@ -275,15 +275,20 @@ class SoundPanelTests(PanelCase):
         self.panel = TrackPanel(self.host, idle_ms=300)
         self.controls = self.make_controls()
         self.click_button("audio")
-        elapse(150)
-        self.controls.nudge_sound(1)  # a touch: the wait starts again
-        elapse(200)
-        self.assertTrue(self.panel.isVisible())
-        elapse(200)
-        self.assertFalse(self.panel.isVisible())
-        self.assertTrue(self.transport.isVisible())
-        elapse(300)
-        self.assertFalse(self.transport.isVisible())
+        at_close = []  # the controls as the panel closes (after TrackControls heard it)
+        self.panel.closed.connect(
+            lambda: at_close.append((self.transport.isVisible(), self.transport.held()))
+        )
+        # Read as each step fires, never after the wait returned: a loaded runner found the
+        # panel closed, or the controls gone, at a "not yet" read (timer_fixtures).
+        _touched, open_then = timeline(
+            (150, lambda: self.controls.nudge_sound(1)),  # a touch: the wait starts again
+            (350, self.panel.isVisible),  # past the first wait's end
+        )
+        self.assertTrue(open_then)
+        self.assertTrue(wait_until(lambda: not self.panel.isVisible()))  # on its own
+        self.assertEqual(at_close, [(True, "")])  # the controls shown, their fade begun
+        self.assertTrue(wait_until(lambda: not self.transport.isVisible()))  # then they fade
 
     def test_it_closes_with_the_player_controls(self):
         self.click_button("audio")
