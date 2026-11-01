@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -63,9 +64,20 @@ class NamingTests(unittest.TestCase):
                 self.assertLessEqual(len(taken[-1].name.encode("utf-8")), 255)
                 self.assertEqual(len({path.name for path in taken}), len(taken))
 
+    def test_a_run_with_its_own_settings_folder_keeps_its_recordings_there(self):
+        # 2.8.12: tests (and the smoke run) listed the user's own ~/Movies/QiTV.
+        with mock.patch.dict(os.environ, {"QITV_CONFIG_DIR": "/tmp/qitv-own"}):
+            self.assertEqual(recording.default_folder(), "/tmp/qitv-own/Recordings")
+
     def test_the_folder_is_settings_else_the_systems_movies_folder(self):
-        default = recording.default_folder()
+        environ = {k: v for k, v in os.environ.items() if k != "QITV_CONFIG_DIR"}
+        with mock.patch.dict(os.environ, environ, clear=True):
+            default = recording.default_folder()
         self.assertEqual(os.path.basename(default), "QiTV")
+        with mock.patch.object(recording, "default_folder", lambda: default):
+            self.check_folder(default)
+
+    def check_folder(self, default):
         self.assertEqual(recording.folder(SimpleNamespace()), default)
         self.assertEqual(recording.folder(SimpleNamespace(recordings_dir="  ")), default)
         self.assertEqual(recording.folder(SimpleNamespace(recordings_dir="/rec")), "/rec")

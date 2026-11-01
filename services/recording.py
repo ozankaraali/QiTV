@@ -66,7 +66,13 @@ NO_RECORDINGS = N_("There are no recordings yet")
 
 
 def default_folder() -> str:
-    """The system's Movies (macOS) or Videos (Windows, Linux) folder, and QiTV in it."""
+    """The system's Movies (macOS) or Videos (Windows, Linux) folder, and QiTV in it. A run
+    with a settings folder of its own (QITV_CONFIG_DIR: a test, the smoke run) keeps them in
+    its "Recordings" (2.8.12: tests listed and could write the user's own recordings), as
+    it keeps its log in its "logs"."""
+    own = os.environ.get("QITV_CONFIG_DIR")
+    if own:
+        return os.path.join(own, "Recordings")
     base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.MoviesLocation)
     if not base:
         base = os.path.join(os.path.expanduser("~"), "Videos")
