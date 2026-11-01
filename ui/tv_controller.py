@@ -3384,7 +3384,7 @@ class TVController(QObject):
         context = self.zap.context
         index = context.index_of(channel)
         # As ZapContext.by_number: list positions stand in only when nothing is numbered.
-        if index >= 0 and not any(ZapContext.number_of(c) for c in context.channels):
+        if index >= 0 and not context.numbered():
             return str(index + 1)
         return ""
 
