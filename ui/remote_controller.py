@@ -81,6 +81,7 @@ REMOVED_TEXT = N_("{name} can no longer control QiTV")
 PLAYING_ON_TEXT = N_("Playing on {name}")
 PLAYING_ON_PHONE_TEXT = N_("Playing on the phone")  # i18n: a toast, the phone's name unknown
 # i18n: a message when a phone that asked for the stream disconnected before it was sent
+PHONE_GONE_S = 90.0  # 2.8.12: a watching phone away this long gives its stream back
 PHONE_GONE_TEXT = N_("The phone left before the stream reached it")
 # i18n: the pairing screen when the phone remote couldn't start; "Help → Show the Log File" is
 # the Help menu's "Show the Log File…"
@@ -169,6 +170,9 @@ class RemoteController(QObject):
         self._phones: set[str] = set()
         self._last_state: Optional[dict] = None
         self._last_at = 0
+        # 2.8.12: a phone watching whose page closed: its stream is given back once it stayed
+        # away PHONE_GONE_S (a locked screen or a reload comes back sooner).
+        self._gone_timers: dict[str, QTimer] = {}
         self._diff = QTimer(self)
         self._diff.setInterval(DIFF_MS)
         self._diff.timeout.connect(self._push_state)
@@ -325,6 +329,7 @@ class RemoteController(QObject):
         elif isinstance(event, Held):
             self._repeater.held(event.sid, self._now())
         elif isinstance(event, Closed):
+            self._watch_gone(event.sid)
             if self._asks.pop(event.sid, None) is not None:
                 self._window.controller.answer_phone(False)  # gone: the recording stays
             self._repeater.drop(event.sid)
@@ -345,6 +350,9 @@ class RemoteController(QObject):
         elif isinstance(event, Opened):
             self._phones.add(event.sid)
             self._devices[event.sid] = event.device_id
+            away = self._gone_timers.pop(event.device_id, None)
+            if away is not None:
+                away.stop()  # back in time: it still watches
             if event.door == "relay":
                 self._relayed.add(event.sid)
             self._diff.start()
@@ -812,6 +820,31 @@ class RemoteController(QObject):
             del self._watching[device]
             if self.hub is not None:
                 self.hub.forget_film(device)  # nor reads a film for it any more
+
+    def _watch_gone(self, sid: str) -> None:
+        """Session `sid` closed: if its device watched and has no other session open, its
+        stream goes back after PHONE_GONE_S unless it comes back (`Opened`)."""
+        device = self._device(sid)
+        if device not in self._watching or device in self._gone_timers:
+            return
+        if any(other != sid and self._device(other) == device for other in self._phones):
+            return
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda device=device: self._watch_ended(device))
+        self._gone_timers[device] = timer
+        timer.start(int(PHONE_GONE_S * 1000))
+
+    def _watch_ended(self, device: str) -> None:
+        timer = self._gone_timers.pop(device, None)
+        if timer is not None:
+            timer.deleteLater()
+        if self._watching.pop(device, None) is None:
+            return
+        if self.hub is not None:
+            self.hub.forget_film(device)
+        if not self._watching:
+            self._window.controller.phone_stopped()
 
     def _device(self, sid: str) -> str:
         return self._devices.get(sid) or sid

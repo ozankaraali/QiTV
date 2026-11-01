@@ -1970,7 +1970,8 @@ class TVController(QObject):
         self._phone_slot.give_back()  # a newer outside play takes over (the phones stop)
         if phone and not target.local:
             self._phone_slot.set_purpose(self._tuner.purpose)
-            self._phone_slot.take(item_provider.provider_name(self.catalog, target.item))
+            # Held when one is free (never queued: the phone already streams).
+            self._phone_slot.try_take(item_provider.provider_name(self.catalog, target.item), None)
         ok, message = launcher(url, **http)
         if ok and phone and not target.local and self._media is not None:
             self._media.playing(url)  # 2.8: its server hears it start; the phone says where
@@ -1988,6 +1989,11 @@ class TVController(QObject):
         self.handedOn.emit()  # the phones that watched before let go
         self._current, self._cid = target, None
         self._delivered(target, url)
+
+    def phone_stopped(self) -> None:
+        """2.8.12: the phone that watched left for good (`RemoteController`): the stream it
+        held goes back."""
+        self._phone_slot.give_back()
 
     def _delivered(self, target: Target, url: str) -> None:
         """The target is playing (or opening): confirm the zap and record it in the history."""

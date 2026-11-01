@@ -33,6 +33,7 @@ from services.remote.protocol import (
     WatchHere,
 )
 from services.search import Hit
+from ui import remote_controller
 from ui.keymap import Action
 from ui.library.search_session import SearchSession
 from ui.link_lanes import Target
@@ -672,6 +673,34 @@ class WatchHereTests(WindowCase):
         self.hub.forget_film.assert_any_call("s8")
         self.watch("s9", "http://p.test/three.m3u8")  # a zap on the same phone stops nothing
         self.assertEqual(self.stops_to("s9"), [])
+
+    def test_a_watching_phone_gone_a_while_gives_its_stream_back(self):  # 2.8.12
+        self.connect()
+        remote, controller = self.window.remote, self.window.controller
+        self.watch("s8", "http://p.test/news.m3u8")
+        with (
+            mock.patch.object(remote_controller, "PHONE_GONE_S", 0.05),
+            mock.patch.object(controller, "phone_stopped") as stopped,
+        ):
+            remote._on_event(Closed("s8", None))
+            self.assertTrue(wait_until(lambda: stopped.called))
+        self.assertEqual(remote._watching, {})
+
+    def test_a_watching_phone_back_in_time_keeps_its_stream(self):  # 2.8.12
+        self.connect()
+        remote, controller = self.window.remote, self.window.controller
+        self.watch("s8", "http://p.test/news.m3u8")
+        device = remote._device("s8")
+        with (
+            mock.patch.object(remote_controller, "PHONE_GONE_S", 0.2),
+            mock.patch.object(controller, "phone_stopped") as stopped,
+        ):
+            remote._on_event(Closed("s8", None))
+            remote._on_event(Opened("s10", device, "home"))  # a reload: the same phone
+            self.addCleanup(remote._phones.discard, "s10")
+            QTest.qWait(400)
+        self.assertFalse(stopped.called)
+        self.assertIn(device, remote._watching)
 
     def test_play_in_vlc_stops_the_phone(self):  # audit 2: the TV's own outside player
         self.connect()
