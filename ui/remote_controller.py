@@ -162,6 +162,7 @@ class RemoteController(QObject):
         # The number of the "play" each phone was handed last, by device: its position reports
         # carry it back, so one made for the title before a zap is not the new one's.
         self._plays: dict[str, int] = {}
+        self._links: dict[str, str] = {}  # 2.8: the link each device was handed last
         self._play_number = 0
         self.result_handles = Handles(limit=500)  # the search's
         self._removing: dict[str, str] = {}  # device id → name, until the hub confirms
@@ -648,6 +649,7 @@ class RemoteController(QObject):
             self._watching[self._device(sid)] = (target, group)
             self._play_number = (self._play_number + 1) % MAX_ASK
             self._plays[self._device(sid)] = self._play_number
+            self._links[self._device(sid)] = url
             message: dict = {"t": "play", "name": target.title[:TITLE_CHARS]}
             message["p"] = self._play_number  # what its position reports carry back
             if target.live:
@@ -655,9 +657,12 @@ class RemoteController(QObject):
             else:  # a film, an episode or a recording goes on where it stopped (as on the TV)
                 key = self._resume_key(target)
                 watch = self._window.watch
-                start = None if target.start_over or not key else watch.resume_position(key)
-                if not start and not target.start_over and not target.local:
-                    start = server_resume(target.item)  # 2.8: a media server's own
+                if target.start_over:
+                    start = None
+                elif key:  # 2.8: else a media server's own, unless QiTV saw it finished
+                    start = watch.resume_from(key, target.item)
+                else:
+                    start = server_resume(target.item)
                 if start:
                     message["start"] = start // 1000
             if target.local:
@@ -748,15 +753,19 @@ class RemoteController(QObject):
 
     def _position(self, sid: str, position_ms: int, length_ms: int, play: int) -> None:
         """How far a phone got in the film or episode it plays: kept as the TV keeps its own,
-        so the TV (and the Library's Continue) goes on from there. Only a report of the play
-        handed last: one made before a zap (on its way meanwhile) is another title's. A page
-        from before 2.8 says no number (`play` -1): its reports are kept, as 2.7 kept them."""
+        so the TV (and the Library's Continue) goes on from there, and told to its media server
+        (2.8). Only a report of the play handed last: one made before a zap (on its way
+        meanwhile) is another title's. A page from before 2.8 says no number (`play` -1): its
+        reports are kept, as 2.7 kept them."""
         watched = self._watching.get(self._device(sid))
         if watched is None or play not in (-1, self._plays.get(self._device(sid))):
             return
         key = self._resume_key(watched[0])
         if key:
             self._window.watch.update_position(key, position_ms, length_ms)
+        link = self._links.get(self._device(sid))
+        if link and not watched[0].live:
+            self._window.controller.phone_position(link, position_ms)
 
     def _to_tv(self, sid: str) -> None:
         """The phone hands back what it played: the TV plays it."""

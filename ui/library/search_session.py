@@ -278,7 +278,7 @@ class SearchSession(QObject):
         resume = None
         if hit is not None and section == "movies":
             cid = WatchState.content_id(hit.provider, item, item_type="movie")
-            resume = self._watch.resume_position(cid)
+            resume = self._watch.resume_from(cid, item)  # 2.8: or its media server's
         kind = self.kind_of(item)
         filled = self._model.filled(item, kind)  # 2.8: TMDB's details where the provider's lack
         return replace(

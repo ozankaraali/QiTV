@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 from timer_fixtures import elapse
 
+from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE
 from services.library import RECORDINGS, LibraryModel
 from services.provider_ids import (
     ALL_PROVIDERS,
@@ -1370,6 +1371,18 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(grid._message, "Loading…")
         QTest.mouseClick(grid.viewport(), Qt.LeftButton, Qt.NoModifier, middle)
         self.assertEqual(self.catalog.requests.count(("group", "movies", "c")), 2)  # loading
+
+    def test_a_media_servers_ask_to_sign_in_again_shows_as_it_says_it(self):  # 2.8 review
+        # Its sign-in ended (a token revoked or expired): "Couldn't load" hid where to go.
+        self.catalog.item_map[("movies", "c")] = None
+        ctl = self.open_movies()
+        self.model.select_genre("c")
+        self.model.failed.emit(SIGN_IN_AGAIN_MESSAGE)
+        self.assertEqual(self.screen.grid._message, SIGN_IN_AGAIN_MESSAGE)
+        self.model.changed.emit()
+        self.assertEqual(self.screen.grid._message, SIGN_IN_AGAIN_MESSAGE)
+        ctl.handle(Action.NAV_ACTIVATE)  # signed in again meanwhile: Enter asks again
+        self.assertEqual(self.catalog.requests.count(("group", "movies", "c")), 2)
 
     def test_a_loading_provider_keeps_loading_and_a_shown_genre_keeps_its_titles(self):
         self.catalog.item_map[("movies", "c")] = None

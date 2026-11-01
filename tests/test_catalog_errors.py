@@ -75,6 +75,14 @@ SAMPLES = {
 
 
 class FriendlyErrorTests(unittest.TestCase):
+    def test_a_media_servers_ask_to_sign_in_again_passes_as_it_is(self):  # 2.8 review
+        from services import media_server as ms
+        from services.media_workers import _failure
+
+        message = _failure(ms.SignInNeeded())
+        self.assertEqual(friendly_error(message), message)
+        self.assertEqual(message, ms.SIGN_IN_AGAIN)
+
     def test_worker_texts_map_to_fixed_messages(self):
         for text, expected in SAMPLES.items():
             with self.subTest(text=text[:60]):

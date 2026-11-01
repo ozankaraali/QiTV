@@ -33,6 +33,13 @@ plays, the chosen one chosen again, each once (one added meanwhile is not added 
 one that is gone by then is forgotten. `clear_subtitles()` forgets them and the subtitles'
 delay (another title).
 
+The audio and subtitle tracks the viewer chooses (`set_audio_track`, `set_subtitle_track`) are
+chosen again in each media this player opens after it (a reopen, a time-shift step, a quality
+change, a cast's start or end): once it plays, by the same id and name, else the same name, else
+the same language (libVLC's "[English]"), else the same id; one not seen within
+_TRACK_WAIT_MS leaves VLC's own. `forget_tracks()` (another title) drops them, or keeps only
+their language for the next episode of a series.
+
 The picture's shape (`set_aspect`: the stream's own, 16:9, 4:3, or the window's shape,
 cropped; 2.3) and deinterlacing (`set_deinterlace`) are the player's, kept for every media it
 opens until set again (see `services.picture`). libVLC keeps them on the player, but a video
@@ -86,6 +93,7 @@ except (ImportError, OSError) as e:  # libVLC missing or broken
 
 _STALL_AUDIO_RETRIES = 2
 _SUBTITLE_NAME_WAIT_MS = 10_000  # an added file's track not seen by then keeps libVLC's name
+_TRACK_WAIT_MS = 10_000  # a chosen track not seen by then in a new media: VLC's own stays
 
 
 def _readable(path: str) -> bool:
@@ -117,6 +125,45 @@ class PlaybackState(str, Enum):
     PAUSED = "paused"
     ENDED = "ended"
     ERROR = "error"
+
+
+# A stream plays here (opening, waiting for media, playing or paused): a reopen opens it again.
+_PLAYS_HERE = frozenset(
+    {PlaybackState.OPENING, PlaybackState.BUFFERING, PlaybackState.PLAYING, PlaybackState.PAUSED}
+)
+
+
+def _language(name: str) -> str:
+    """The language libVLC puts in a track's name ("Track 2 - [English]": "english"), or ""."""
+    _head, bracket, rest = name.rpartition("[")
+    if not bracket or not rest.endswith("]"):
+        return ""
+    return rest[:-1].strip().casefold()
+
+
+def _matching_track(
+    tracks: list[tuple[int, str]], track: int, name: str, by_language: bool
+) -> Optional[int]:
+    """The track among `tracks` that is the one chosen (`track`, named `name`) in another
+    media: the same id and name, else the same name, else the same language, else the same
+    id; `by_language` (another episode): only a same-named or same-language one. -1 (none)
+    is -1. None: none of them."""
+    if track < 0:
+        return -1
+    language = _language(name)
+    if not by_language and (track, name) in tracks:
+        return track
+    if name and (language or not by_language):
+        same = next((i for i, n in tracks if i >= 0 and n == name), None)
+        if same is not None:
+            return same
+    if language:
+        same = next((i for i, n in tracks if i >= 0 and _language(n) == language), None)
+        if same is not None:
+            return same
+    if not by_language and any(i == track for i, _n in tracks):
+        return track
+    return None
 
 
 def decoder_args(hardware: bool) -> list[str]:
@@ -334,6 +381,10 @@ class PlaybackSession(QObject):
         # libVLC takes it only before a play, so a change applies at the next open (`reopen`).
         self._renderer: Any = None
         self._renderer_due = False  # given at the next open (set, or taken back once)
+        # The tracks the viewer chose ("audio", "spu": id, libVLC's name, by language only),
+        # chosen again in each media opened after (module docstring); those still due here.
+        self._tracks_wanted: dict[str, tuple[int, str, bool]] = {}
+        self._tracks_due: set[str] = set()
 
     def _player_free(self) -> bool:
         """The GUI thread may call into libVLC: not released, and no job holds its input lock.
@@ -446,8 +497,10 @@ class PlaybackSession(QObject):
         self._start_media()
 
     def reopen(self, start_ms: Optional[int] = None) -> None:
-        """Open what plays again, with its options, from `start_ms` (a cast begins or ends)."""
-        if self._released or self._url is None:
+        """Open what plays again, with its options, from `start_ms` (a cast begins or ends).
+        Nothing opens unless a stream plays here: one stopped (handed to a phone or an outside
+        player, its budget slot given back) or ended stays so; the next play opens anew."""
+        if self._released or self._url is None or self._state not in _PLAYS_HERE:
             return
         self._cancel_pending()
         self._start_ms = start_ms if start_ms and start_ms > 0 else None
@@ -521,6 +574,7 @@ class PlaybackSession(QObject):
         self._spu_files, self._spu_known, self._spu_waiting = {}, set(), []
         self._media_files = set()
         self._files_due = bool(self._subtitle_files)  # added once it plays
+        self._tracks_due = set(self._tracks_wanted)  # chosen again once it plays
         self._poll.start()
         self._watch_audio()
 
@@ -703,8 +757,10 @@ class PlaybackSession(QObject):
         return [(int(i), self._decode(n)) for i, n in descriptions]
 
     def set_audio_track(self, track_id: int) -> None:
+        """Play audio track `track_id`, and the same one in each media opened after it."""
         if self._player_free():
             self._player.audio_set_track(int(track_id))
+            self._want_track("audio", int(track_id), self.audio_tracks())
 
     def audio_track(self) -> int:
         """The audio track playing (-1: none, or no media)."""
@@ -738,10 +794,17 @@ class PlaybackSession(QObject):
         ]
 
     def set_subtitle_track(self, track_id: int) -> None:
+        """Show subtitle track `track_id` (-1: none), and the same in each media opened after
+        it (a file's track: its file, chosen again as it is added)."""
         if self._player_free():
             self._player.video_set_spu(int(track_id))
             chosen = self._spu_files.get(int(track_id))
             self._subtitle_on = chosen[0] if chosen is not None else None
+            if chosen is not None:
+                self._tracks_wanted.pop("spu", None)
+                self._tracks_due.discard("spu")
+            else:
+                self._want_track("spu", int(track_id), self._own_subtitles())
 
     def subtitle_track(self) -> int:
         """The subtitle track shown (-1: none, or no media)."""
@@ -782,6 +845,8 @@ class PlaybackSession(QObject):
             return False
         self._subtitle_files = [f for f in self._subtitle_files if f != file] + [file]
         self._subtitle_on = file
+        self._tracks_wanted.pop("spu", None)  # the file is the subtitles chosen
+        self._tracks_due.discard("spu")
         return True
 
     def clear_subtitles(self) -> None:
@@ -791,6 +856,53 @@ class PlaybackSession(QObject):
         if self._subtitle_delay_ms and self._has_input and self._player_free():
             self._player.video_set_spu_delay(0)
         self._subtitle_delay_ms = 0
+
+    def forget_tracks(self, *, keep_language: bool = False) -> None:
+        """Another title: the tracks chosen are not chosen again; `keep_language` (the next
+        episode of a series): a track of the same language is, where the media has one (and
+        subtitles turned off stay off)."""
+        if not keep_language:
+            self._tracks_wanted, self._tracks_due = {}, set()
+            return
+        self._tracks_wanted = {
+            kind: (track, name, True)
+            for kind, (track, name, _by_language) in self._tracks_wanted.items()
+            if _language(name) or track < 0
+        }
+        self._tracks_due &= set(self._tracks_wanted)
+
+    def _want_track(self, kind: str, track: int, tracks: list[tuple[int, str]]) -> None:
+        name = next((n for i, n in tracks if i == track), "")
+        self._tracks_wanted[kind] = (track, name, False)
+        self._tracks_due.discard(kind)  # chosen in this media now
+
+    def _own_subtitles(self) -> list[tuple[int, str]]:
+        """The media's own subtitle tracks (not the files'), with libVLC's names."""
+        descriptions = self._player.video_get_spu_description() or []
+        return [(int(i), self._decode(n)) for i, n in descriptions if int(i) not in self._spu_files]
+
+    def _choose_tracks(self) -> None:
+        """This media plays: the tracks the viewer chose before are chosen in it once they
+        show (the subtitles only while no file is chosen); not seen in time: VLC's stay."""
+        for kind in sorted(self._tracks_due):
+            track, name, by_language = self._tracks_wanted[kind]
+            found: Optional[int]
+            if kind == "audio":
+                if self._pending_track is not None:
+                    continue  # the sound's track is being cycled: after it
+                found = _matching_track(self.audio_tracks(), track, name, by_language)
+                if found is not None and found != int(self._player.audio_get_track()):
+                    self._player.audio_set_track(found)
+            elif self._subtitle_on is not None:
+                found = -2  # a file's track is chosen: never another over it
+            else:
+                found = _matching_track(self._own_subtitles(), track, name, by_language)
+                if found is not None and found != int(self._player.video_get_spu()):
+                    self._player.video_set_spu(found)
+                if found == -1:
+                    found = None  # off: a default track that shows late is turned off too
+            if found is not None or self._playing_clock.elapsed() > _TRACK_WAIT_MS:
+                self._tracks_due.discard(kind)
 
     def _add_file(self, path: str, *, select: bool) -> bool:
         name = Path(path).name
@@ -1025,6 +1137,8 @@ class PlaybackSession(QObject):
             self._apply_audio()
             if self._files_due:
                 self._replay_files()
+            if self._tracks_due:
+                self._choose_tracks()
         if self._picture_due and int(self._player.has_vout() or 0) > 0:
             self._picture_due = False
             self._apply_picture()
@@ -1302,6 +1416,8 @@ class Session(Protocol):
 
     def clear_subtitles(self) -> None: ...
 
+    def forget_tracks(self, *, keep_language: bool = False) -> None: ...
+
     def aspect(self) -> str: ...
 
     def set_aspect(self, aspect: str) -> None: ...
@@ -1456,6 +1572,9 @@ class NullSession(QObject):
         return False
 
     def clear_subtitles(self) -> None:
+        pass
+
+    def forget_tracks(self, *, keep_language: bool = False) -> None:
         pass
 
     def aspect(self) -> str:

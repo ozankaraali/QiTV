@@ -751,10 +751,16 @@ class WatchHereTests(WindowCase):
         handle = remote._library("s8").handles.issue("title", (film, "movie", None))
         self.hand_off("http://p.test/movie/u/p/7.mp4", handle=handle)
         key = self.window.controller.resume_key(self.window.controller.title_target(film, "movie"))
-        with mock.patch.object(self.window.watch, "update_position") as update:
+        with (
+            mock.patch.object(self.window.watch, "update_position") as update,
+            mock.patch.object(self.window.controller, "phone_position") as told,
+        ):
             remote.bridge.post(Position("s8", 61000, 5400000, self.plays()[-1]["p"]))
             self.assertTrue(wait_until(lambda: update.called))
         update.assert_called_once_with(key, 61000, 5400000)
+        # 2.8 review: its media server hears it too (the reporter takes only the stream it
+        # heard start, the link handed to this phone)
+        told.assert_called_once_with("http://p.test/movie/u/p/7.mp4", 61000)
 
     def test_a_report_made_for_the_title_before_is_not_the_new_ones(self):
         """The phone zapped to another film: a report of the first still on its way when the

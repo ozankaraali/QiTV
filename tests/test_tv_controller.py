@@ -361,6 +361,9 @@ class FakeSession(QObject):
         self.clears += 1
         self.files, self.subtitle_ms = [], 0
 
+    def forget_tracks(self, *, keep_language=False):
+        pass
+
     def aspect(self):
         return self.shape
 
@@ -900,6 +903,9 @@ class FakeWatch:
 
     def resume_position(self, cid):
         return self.resume.get(cid)
+
+    def resume_from(self, cid, item):
+        return self.resume.get(cid) or ms.server_resume(item)
 
     def record_play(self, provider_name, item, *, item_type, link, group_id=None):
         self.plays.append((provider_name, item, item_type, link, group_id))
@@ -2014,6 +2020,58 @@ class VodTests(ControllerTestCase):
         self.controller.handle(Action.CH_PREV)
         self.assertEqual(self.session.level, 55)
         self.assertEqual(len(self.catalog.links), 1)
+
+
+class MediaServerReportTests(ControllerTestCase):
+    """2.8 review: a media server hears where its title plays wherever QiTV plays it (a phone's
+    Watch too), and that it stopped once QiTV hands it on, the sleep timer included; of a title
+    handed to an outside player, nothing: QiTV can't see it play."""
+
+    HEAT, RONIN = "http://vod/heat.mkv", "http://vod/ronin.mkv"
+
+    def make_controller(self, column, **extra):
+        self.reported = []
+        told = self.reported.append
+        reporter = SimpleNamespace(
+            playing=lambda url: told(("playing", url)),
+            position=lambda ms, paused=False, url=None: told(("position", ms, url)),
+            stopped=lambda: told(("stopped",)),
+            shutdown=lambda: None,
+        )
+        return super().make_controller(column, media_reporter=reporter, **extra)
+
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
+        self.ready(self.HEAT)
+        self.reported.clear()
+
+    def test_a_title_handed_to_an_outside_player_is_told_stopped_and_never_started(self):
+        self.config.play_in_vlc = True
+        self.controller.play_vod({"id": "m8", "name": "Ronin", "cmd": "x"}, "movie", play_context())
+        self.ready(self.RONIN)
+        self.assertEqual(self.external.calls, [("vlc", self.RONIN)])
+        self.assertEqual(self.reported, [("stopped",)])
+
+    def test_a_phones_watch_starts_it_there_and_tells_its_positions(self):
+        handed = []
+
+        def launch(target, url):
+            handed.append(url)
+            return True, ""
+
+        self.assertTrue(self.controller.play_elsewhere(launch))
+        self.ready(self.HEAT)
+        self.controller.phone_position(self.HEAT, 61_000)
+        self.assertEqual(handed, [self.HEAT])
+        self.assertEqual(
+            self.reported, [("stopped",), ("playing", self.HEAT), ("position", 61_000, self.HEAT)]
+        )
+
+    def test_the_sleep_timer_tells_the_stop(self):
+        self.controller.stop_for_sleep()
+        self.assertEqual(self.reported, [("stopped",)])
 
 
 class GuidesInUseTests(ControllerTestCase):

@@ -26,6 +26,7 @@ from PySide6.QtCore import QObject, Signal
 from services import favorites, parental
 from services.catalog import ALL_GROUP_ID, shown_label
 from services.i18n import N_, tr, translate
+from services.media_server import server_length
 from services.provider_ids import (
     ALL_PROVIDERS,
     PROVIDER_KEY,
@@ -1190,11 +1191,14 @@ class LibraryModel(QObject):
 
     # --- details / favorites ----------------------------------------------------------
     def progress(self, item: dict) -> Optional[float]:
-        resume = self._watch.resume_position(self._item_cid(item))
+        """How far the title goes on from (None: from its beginning): QiTV's point, else its
+        media server's (2.8; `WatchState.resume_from`)."""
+        cid = self._item_cid(item)
+        resume = self._watch.resume_from(cid, item)
         if resume is None:
             return None
-        saved = (self._config.playback_positions or {}).get(self._item_cid(item)) or {}
-        duration = int(saved.get("duration") or 0)
+        saved = (self._config.playback_positions or {}).get(cid) or {}
+        duration = int(saved.get("duration") or 0) or server_length(item)
         return min(1.0, resume / duration) if duration > 0 else None
 
     def set_filler(self, filler: Optional[Callable[[dict, str], dict]]) -> None:
@@ -1215,7 +1219,7 @@ class LibraryModel(QObject):
     def details(self, item: dict, kind: Optional[str] = None) -> Details:
         """The strip's details of a title; `kind` as `filled` takes it."""
         kind = kind or self.item_kind(item)
-        resume_ms = self._watch.resume_position(self._item_cid(item))
+        resume_ms = self._watch.resume_from(self._item_cid(item), item)  # 2.8: or its server's
         progress, favorite = self.progress(item), self.is_favorite(item)
         item = self.filled(item, kind)
         year = _year(item)

@@ -11,6 +11,7 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QTimer
 
+from services.media_server import server_resume
 from services.redact import safe_message
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,21 @@ class WatchState:
         if duration > 0 and position / duration >= RESUME_MAX_RATIO:
             return None
         return position
+
+    def seen_finished(self, cid: str) -> bool:
+        """QiTV saw `cid` played past where a resume stops offering it (90%)."""
+        saved = (getattr(self.config, "playback_positions", None) or {}).get(cid) or {}
+        position, duration = int(saved.get("position") or 0), int(saved.get("duration") or 0)
+        return duration > 0 and position / duration >= RESUME_MAX_RATIO
+
+    def resume_from(self, cid: str, item: dict) -> Optional[int]:
+        """Where `item` (resume key `cid`) goes on from (None: its beginning): where QiTV left
+        it, else where its media server says it stopped (2.8), unless QiTV saw it finished:
+        a server's list loaded before still names its older point."""
+        position = self.resume_position(cid)
+        if position is not None or self.seen_finished(cid):
+            return position
+        return server_resume(item)
 
     def update_position(self, cid: str, position_ms: int, duration_ms: int) -> None:
         self.config.save_playback_position(cid, position_ms, duration_ms)

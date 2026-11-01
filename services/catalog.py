@@ -27,6 +27,7 @@ from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as
     LOGIN_REFUSED_MESSAGE,
     NOT_FOUND_MESSAGE,
     PROXY_MESSAGE,
+    SIGN_IN_AGAIN_MESSAGE,
     TOO_SLOW_MESSAGE,
     UNEXPECTED_ANSWER_MESSAGE,
     UNREACHABLE_MESSAGE,
@@ -95,6 +96,7 @@ _SAFE_MESSAGES = frozenset(
         EXPIRED_MESSAGE,
         DISABLED_MESSAGE,
         STB_SESSION_REFUSED,  # for the catalogs, which never show it (services.catalogs)
+        SIGN_IN_AGAIN_MESSAGE,  # 2.8: a media server's (its sign-in ended)
     }
 )
 _SAFE_PREFIXES = ("Unknown section: ", "Unsupported provider: ", BLOCKED_PREFIX)

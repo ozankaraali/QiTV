@@ -46,6 +46,7 @@ class FakePlayer(QObject):
         self.files = []  # what add_subtitle_file() was given
         self.loads = True  # whether libVLC takes a file
         self.clears = 0
+        self.forgets = []  # forget_tracks(): keep_language each time
 
     def audio_tracks(self):
         return list(self.audio)
@@ -89,6 +90,9 @@ class FakePlayer(QObject):
     def clear_subtitles(self):
         self.clears += 1
         self.spu_delay = 0
+
+    def forget_tracks(self, *, keep_language=False):
+        self.forgets.append(keep_language)
 
 
 class TextTests(unittest.TestCase):
@@ -542,6 +546,26 @@ class SubtitlesPanelTests(PanelCase):
         self.assertEqual(self.player.clears, 1)
         self.controls.prepare_small(self.player, OTHER.item)
         self.assertEqual(self.player.clears, 2)
+
+    def test_the_tracks_chosen_stay_with_the_title_and_their_language_with_its_series(self):
+        series = {"id": "s1", "name": "Harbour Lights"}
+        first, second = (
+            Target({"id": f"e{n}", "name": f"Episode {n}"}, "series", f"E{n}", context=context)
+            for n, context in ((1, {"series": series}), (2, {"series": dict(series)}))
+        )
+        other = Target(
+            {"id": "e9", "name": "Episode 1"},
+            "series",
+            "E1",
+            context={"series": {"id": "s2", "name": "Coastline"}},
+        )
+        self.controls.prepare(self.player, FILM, FILM)  # its quality changed, a retry
+        self.assertEqual(self.player.forgets, [])  # kept
+        self.controls.prepare(self.player, second, first)  # the next episode: their language
+        self.controls.prepare(self.player, other, second)  # another series: forgotten
+        self.controls.prepare(self.player, FILM, other)
+        self.controls.prepare_small(self.player, OTHER.item)
+        self.assertEqual(self.player.forgets, [True, False, False, False])
 
 
 class ManyTracksTests(PanelCase):

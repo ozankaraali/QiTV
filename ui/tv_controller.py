@@ -85,7 +85,6 @@ from services.live import parts as live_parts
 from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
 from services.media_reporter import MediaReporter
-from services.media_server import server_resume
 from services.navigation import (
     FAVORITES_GROUP,
     RECENT_GROUP,
@@ -821,6 +820,8 @@ class TVController(QObject):
         """The sleep timer ended (2.3): what plays stops as for the Library (each stream
         closed, its budget slot back once released) and fullscreen ends; nothing plays by
         itself until the viewer chooses something."""
+        if self._media is not None:
+            self._media.stopped()  # 2.8: a server's title stopped where it was
         if self._closed:
             return
         self.leave_multiview(keep_pip=False)
@@ -1799,13 +1800,16 @@ class TVController(QObject):
 
     def _deliver(self, target: Target, url: str) -> None:
         item = target.item
-        if self._media is not None and not (target.live and self.multiview_shown()):
-            self._media.playing(url)  # 2.8: a server's title starts (another's stops)
+        launcher = self._external_launcher()
+        multiview = target.live and self.multiview_shown()
+        if self._media is not None and launcher is None and not multiview:
+            # 2.8: a server's title starts (another's stops); one handed to an outside player
+            # is told stopped as it goes (_launch), nothing after: QiTV can't see it play.
+            self._media.playing(url)
         self._freed_for = None  # it came: the large picture is the title's
         if target is self._room_for and self._pip is not None:
             self._room_for = None
             self._pip.make_room()  # before it opens: a closing small picture is waited for
-        launcher = self._external_launcher()
         # Direct plays book the slot under the item's own provider, as pipeline tunes do.
         provider_name = item_provider.provider_name(self.catalog, item)
         self._set_recording_aside()  # 2.6: what records large records on in the background
@@ -1880,11 +1884,9 @@ class TVController(QObject):
             start: Optional[int]
             if target.start_ms is not None:  # 2.8: its quality changed: on from where it was
                 start = target.start_ms
-            else:
-                start = 0 if target.start_over else self.watch.resume_position(cid)
+            else:  # 2.8: or where a media server says it stopped, unless QiTV saw it finished
+                start = 0 if target.start_over else self.watch.resume_from(cid, item)
             changed = target.start_ms is not None
-            if not target.start_over and not start and not changed:
-                start = server_resume(item)  # 2.8: where a media server says it stopped
             # 2.8: a quality change's start is asked once: a later reopen of this target goes
             # where the watch state saved it, as any title's.
             target = replace(target, start_ms=None)
@@ -1948,11 +1950,15 @@ class TVController(QObject):
             agent = item_provider.stream_agent(self.catalog, target.item)
             referrer = str(target.item.get("referrer") or "")
             http = {k: v for k, v in (("user_agent", agent), ("referrer", referrer)) if v}
+        if self._media is not None:
+            self._media.stopped()  # 2.8: the server's title that played stopped where it was
         self._phone_slot.give_back()  # a newer outside play takes over (the phones stop)
         if phone and not target.local:
             self._phone_slot.set_purpose(self._tuner.purpose)
             self._phone_slot.take(item_provider.provider_name(self.catalog, target.item))
         ok, message = launcher(url, **http)
+        if ok and phone and not target.local and self._media is not None:
+            self._media.playing(url)  # 2.8: its server hears it start; the phone says where
         if not ok:
             self._phone_slot.give_back()
             first, _, rest = (message or "").strip().partition("\n")
@@ -3255,7 +3261,8 @@ class TVController(QObject):
 
     def _on_small_position(self, name: str, position_ms: int, length_ms: int) -> None:
         """A movie or an episode swapped small still plays: its position is saved under its
-        own resume key (and its end marks it finished), as while it was large."""
+        own resume key (and its end marks it finished), as while it was large, and its media
+        server hears where it is (2.8) while it is the title the server heard start."""
         cid = self._pip.small_resume_key(name) if self._pip is not None else None
         if self._closed or cid is None:
             return
@@ -3263,6 +3270,14 @@ class TVController(QObject):
             self.watch.update_position(cid, position_ms, length_ms)
         except Exception as e:
             self._log_failure("save the playback position", e)
+        if self._media is not None and self._pip is not None:
+            self._media.position(position_ms, url=self._pip.view(name).url)
+
+    def phone_position(self, url: str, position_ms: int) -> None:
+        """Where a phone's Watch plays `url` (2.8): its media server hears it, while that is
+        the title it heard start (QiTV handed it to the phone)."""
+        if self._media is not None and not self._closed:
+            self._media.position(position_ms, url=url)
 
     def _on_small_error(self, name: str, message: str) -> None:
         """A movie or an episode swapped small failed to play: said as the large picture says

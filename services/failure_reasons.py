@@ -38,6 +38,10 @@ UNEXPECTED_ANSWER_MESSAGE = N_("The provider sent an unexpected answer")
 FORBIDDEN_MESSAGE = N_("The server refused QiTV (403)")
 NOT_FOUND_MESSAGE = N_("The server has nothing at this address (404)")
 PROXY_MESSAGE = N_("A proxy on your network asks for a sign-in (407)")
+# i18n: a Jellyfin or Emby server refused QiTV's access (its sign-in ended)
+SIGN_IN_AGAIN_MESSAGE = N_(
+    "The server asks to sign in again: Settings → Providers → Verify Provider."
+)
 # The English start of a block's catalog message (services.catalog lets a message starting
 # with it through) and of a server error's; their whole texts: blocked_text, server_text.
 BLOCKED_PREFIX = "The provider blocked this connection"

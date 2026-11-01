@@ -1139,6 +1139,16 @@ class LibraryPlayTests(PipCase):
         self.assertEqual(self.watch.positions[-1], (cid, 590_000, 600_000))
         self.assertEqual(self.transport.calls[-1], ("update_position", 590_000, 600_000))
 
+    def test_a_movie_swapped_small_tells_its_server_where_it_is(self):  # 2.8 review
+        reporter = mock.Mock()
+        with mock.patch.object(self.controller, "_media", reporter):
+            self.start_large(0)
+            self.play_from_library()
+            self.controller.handle(Action.SWAP)  # the channel large, the film small
+            self.pip_session.positionChanged.emit(61_000, 600_000)
+        reporter.playing.assert_called_with("http://vod/heat.mkv")
+        reporter.position.assert_called_with(61_000, url="http://vod/heat.mkv")
+
     def test_a_movie_swapped_small_shows_its_title_without_live_wording(self):
         # Polish: the label used live wording ("Connecting…") for the film playing small.
         self.start_large(0)

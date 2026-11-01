@@ -91,6 +91,19 @@ class WatchStateTests(unittest.TestCase):
     def test_resume_unknown_is_none(self):
         self.assertIsNone(self.ws.resume_position("nope"))
 
+    def test_a_title_qitv_saw_finished_starts_over_whatever_its_server_said(self):
+        # 2.8: the Library's list still carries the server's point from before QiTV played on
+        # to the end; the server forgets it once told, the list only at its next refresh.
+        film = {"id": "f1", "name": "A film", "server_position_ms": 40 * 60_000}
+        self.assertEqual(self.ws.resume_from("jf:f1", film), 40 * 60_000)  # never played here
+        self.cfg.save_playback_position("jf:f1", 30 * 60_000, 120 * 60_000)
+        self.assertEqual(self.ws.resume_from("jf:f1", film), 30 * 60_000)  # QiTV's own
+        self.cfg.save_playback_position("jf:f1", 118 * 60_000, 120 * 60_000)
+        self.assertTrue(self.ws.seen_finished("jf:f1"))
+        self.assertIsNone(self.ws.resume_from("jf:f1", film))  # from the beginning
+        self.cfg.save_playback_position("jf:f1", 2000, 120 * 60_000)  # started again
+        self.assertEqual(self.ws.resume_from("jf:f1", film), 40 * 60_000)
+
     def test_update_position_throttles_saves(self):
         self.ws.update_position("c", 10000, 100000)
         self.clock.t += 10

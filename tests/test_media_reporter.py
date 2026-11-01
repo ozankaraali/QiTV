@@ -94,6 +94,46 @@ class MediaReporterTests(unittest.TestCase):
         self.reporter.playing(url())  # reopened (a cast, a seek past the buffer)
         self.assertEqual([e for e, *_ in self.sent], ["start"])
 
+    def test_a_quality_change_stops_the_first_play_and_starts_the_new_one(self):  # 2.8
+        sessions = []
+        reporter = MediaReporter(
+            lambda: [SERVER],
+            send=lambda server, event, ref, position, paused: sessions.append(
+                (event, ref.play_session, ref.converted, position)
+            ),
+            clock=self.clock,
+        )
+        converted = ms.converted_url(BASE, "f1", {"Id": "ms1"}, "T", "ps2", 4_000_000, "D", 720)
+        reporter.playing(url())
+        self.clock.now += PROGRESS_S
+        reporter.position(60_000)
+        reporter.playing(converted)  # the ⚙ menu: the same title, converted, a new session
+        self.clock.now += PROGRESS_S
+        reporter.position(70_000)
+        reporter.stopped()
+        self.assertEqual(
+            sessions,
+            [
+                ("start", "ps1", False, 0),
+                ("progress", "ps1", False, 60_000),
+                ("stopped", "ps1", False, 60_000),
+                ("start", "ps2", True, 0),
+                ("progress", "ps2", True, 70_000),
+                ("stopped", "ps2", True, 70_000),
+            ],
+        )
+
+    def test_a_position_of_another_stream_is_not_this_ones(self):  # 2.8
+        # A title swapped small or on a phone reports with its link: once the large picture
+        # plays another title, its reports are not the new one's.
+        self.reporter.playing(url("f1"))
+        self.reporter.playing(url("f2"))
+        self.clock.now += PROGRESS_S
+        self.reporter.position(5_000, url=url("f1"))
+        self.reporter.position(7_000, url=url("f2"))
+        self.assertEqual(self.sent[-1], ("progress", "f2", 7_000, False))
+        self.assertNotIn(("progress", "f2", 5_000, False), self.sent)
+
 
 if __name__ == "__main__":
     unittest.main()

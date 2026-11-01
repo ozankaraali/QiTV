@@ -320,6 +320,21 @@ class LibraryModelTests(unittest.TestCase):
         self.assertEqual(model.details(movie(2)).rating, "")
         self.assertIsNone(model.details(movie(2)).resume_ms)
 
+    def test_a_media_servers_point_offers_resume_unless_qitv_saw_the_title_finished(self):
+        # 2.8: a film its server says was stopped at 40 min plays from there, so the strip
+        # offers Resume and Start over as for QiTV's own point; once QiTV saw it to its end,
+        # the list's older point (loaded before) no longer counts: it plays from the start.
+        cfg = make_config()
+        m = movie(1, duration_secs=7200, server_position_ms=2_400_000)
+        cat = FakeCatalog({"movies": [("1", "Genre One", 1)]}, {("movies", "1"): [m]})
+        model, _ = build(cat, cfg)
+        model.select_genre("1")
+        d = model.details(m)
+        self.assertEqual((d.resume_ms, d.progress), (2_400_000, 2_400_000 / 7_200_000))
+        resume(cfg, m, "movie", pos=7_080_000, dur=7_200_000)  # finished here since
+        d = model.details(m)
+        self.assertEqual((d.resume_ms, d.progress), (None, None))
+
     def test_details_take_what_the_filler_knows(self):  # 2.8: TMDB fills the provider's gaps
         m = movie(1, plot="")
         cat = FakeCatalog({"movies": [("1", "Genre One", 1)]}, {("movies", "1"): [m]})

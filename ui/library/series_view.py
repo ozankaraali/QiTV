@@ -27,6 +27,7 @@ from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QWidget
 
 from services.catalog import shown_label
+from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE, shown_message
 from services.i18n import N_, tr, translate
 from services.library import Details
 from services.navigation import episode_key, item_key
@@ -448,10 +449,11 @@ class SeriesView(QWidget):
     # ---- state ---------------------------------------------------------------------------
     def _status(self) -> str:
         """The message replacing the episodes list, or '' when the list is shown."""
-        if self._seasons_error:
-            return translate(ERROR_TEXT)
-        if self._episodes_error:
-            return translate(ERROR_TEXT)
+        for error in (self._seasons_error, self._episodes_error):
+            if error == SIGN_IN_AGAIN_MESSAGE:
+                return shown_message(error)  # 2.8: a media server's: where to sign in again
+            if error:
+                return translate(ERROR_TEXT)
         if self._seasons is None and self._episodes is None:
             return translate(LOADING_TEXT)
         if self._seasons is not None and not self._seasons and self._episodes is None:

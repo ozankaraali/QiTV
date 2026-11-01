@@ -4,8 +4,10 @@ watching" and watched marks follow what is watched in QiTV.
 The shell says what plays (`playing(url)`: any stream; only a server's own is told), where it is
 (`position`) and when it stops (`stopped`, or another stream playing). The server hears of a
 start, of where it is every PROGRESS_S seconds, and of the stop with its last position (a title
-stopped near its end is marked watched by the server). The requests go out on a thread of their
-own, one after another; a failure is only logged.
+stopped near its end is marked watched by the server). The same title opened again with another
+stream (its quality changed: another play session, converted or not) is the old play's stop and
+the new one's start. The requests go out on a thread of their own, one after another; a failure
+is only logged.
 """
 
 from __future__ import annotations
@@ -63,6 +65,7 @@ class MediaReporter:
         self._queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
         self._active: Optional[tuple[dict, ms.StreamRef]] = None
+        self._url = ""  # the active stream's address
         self._position = 0
         self._paused = False
         self._told = 0.0
@@ -81,18 +84,26 @@ class MediaReporter:
         """`url` plays now (whatever it is): a server's title starts; the one before stops."""
         found = self._server_of(url or "")
         if found is not None and self._active is not None:
-            same = self._active[1]
-            if (same.base, same.item_id) == (found[1].base, found[1].item_id):
-                return  # the same title opened again
+            same, now = self._active[1], found[1]
+            if (same.base, same.item_id, same.play_session, same.converted) == (
+                now.base,
+                now.item_id,
+                now.play_session,
+                now.converted,
+            ):
+                return  # the same stream opened again (a retry, a cast)
         self.stopped()
         if found is None:
             return
         self._active, self._position, self._paused = found, 0, False
+        self._url = url
         self._told = self._clock()
         self._send(found[0], "start", found[1], 0, False)
 
-    def position(self, position_ms: int, paused: bool = False) -> None:
-        if self._active is None:
+    def position(self, position_ms: int, paused: bool = False, url: Optional[str] = None) -> None:
+        """Where the title plays; `url`: only while that stream is the one the server heard
+        start (a title swapped small, a phone's Watch: the large picture may play another)."""
+        if self._active is None or (url is not None and url != self._url):
             return
         self._position, self._paused = max(0, int(position_ms)), paused
         if self._clock() - self._told >= PROGRESS_S:

@@ -29,7 +29,7 @@ from PySide6.QtWidgets import QMenu
 
 from services import i18n
 from services.catalog import PROVIDER_LOADING_MESSAGE
-from services.failure_reasons import shown_message
+from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE, shown_message
 from services.i18n import N_, tr, tr_n, translate
 from services.library import (
     PINNED_TITLES,
@@ -40,6 +40,7 @@ from services.library import (
     history_episode,
     history_season,
 )
+from services.media_server import server_length
 from services.navigation import episode_key
 from services.pending_action import LOAD, RUN, Pending, PendingAction
 from services.provider_ids import (
@@ -154,6 +155,7 @@ class LibraryController(QObject):
         self._grid_content = ""  # what the grid holds: "browse", "search" or nothing yet
         self._grid_signature: Optional[tuple] = None  # (provider, section, genre, sort) shown
         self._failed = False
+        self._failure = ""  # what the list that failed said (its catalog message)
         self._restore_item: Optional[dict] = None  # the browse title to make current again
         # the series view
         self._series: Optional[dict] = None
@@ -801,7 +803,7 @@ class LibraryController(QObject):
             grid.set_sections([])
             grid.set_letter_index(None)
             if items is None:
-                grid.set_message(translate(RETRY_TEXT if self._failed else LOADING_TEXT))
+                grid.set_message(self._failed_text() if self._failed else translate(LOADING_TEXT))
             else:
                 grid.set_message(translate(EMPTY_TEXT))
             return
@@ -820,11 +822,18 @@ class LibraryController(QObject):
         if self._model.items() is not None:
             return  # about titles not on screen (another genre)
         logger.info("Library content failed to load (%s)", message)
-        self._failed = True
+        self._failed, self._failure = True, message
         if self._grid_content == "browse":
             grid = self._screen.grid
             grid.set_sections([])
-            grid.set_message(translate(RETRY_TEXT))
+            grid.set_message(self._failed_text())
+
+    def _failed_text(self) -> str:
+        """Why the list is not shown: a media server's ask to sign in again as it says it (2.8:
+        where to sign in), else "Couldn't load — press Enter to retry"."""
+        if self._failure == SIGN_IN_AGAIN_MESSAGE:
+            return shown_message(self._failure)
+        return translate(RETRY_TEXT)
 
     def _on_grid_message_clicked(self) -> None:
         """A click on "Couldn't load" retries, as Enter does."""
@@ -1185,16 +1194,17 @@ class LibraryController(QObject):
         self._request(provider, lambda: self._play(episode, "episode", context))
 
     def _episode_progress(self, episode: dict) -> Optional[float]:
-        """Resume progress, or the watched share (≥ 90%) that shows the check mark."""
+        """Resume progress, or the watched share (≥ 90%) that shows the check mark; without
+        QiTV's own, where its media server says it stopped (2.8)."""
         cid = WatchState.content_id(self._series_owner(), episode, item_type="episode")
         saved = (self._config.playback_positions or {}).get(cid) or {}
         position, duration = int(saved.get("position") or 0), int(saved.get("duration") or 0)
-        if position <= 0 or duration <= 0:
-            return None
-        share = min(1.0, position / duration)
-        if share >= RESUME_MAX_RATIO or self._watch.resume_position(cid) is not None:
-            return share
-        return None
+        if position > 0 and duration > 0:
+            share = min(1.0, position / duration)
+            if share >= RESUME_MAX_RATIO or self._watch.resume_position(cid) is not None:
+                return share
+        resume, length = self._watch.resume_from(cid, episode), server_length(episode)
+        return min(1.0, resume / length) if resume and length > 0 else None
 
     def _leave_series(self) -> None:
         back = self._series_back
