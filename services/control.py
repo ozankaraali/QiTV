@@ -33,6 +33,7 @@ ENV = "QITV_CONTROL"
 WAIT_S = 30.0  # the longest a command may take on the GUI thread
 LOG_LINES = 200  # `log`'s default number of lines, at most `LOG_MAX`
 LOG_MAX = 5000
+MAX_BODY = 1_000_000  # a command's arguments are a few words: a larger body is refused unread
 
 Handle = Callable[[str, dict], dict]
 
@@ -176,11 +177,23 @@ def _handler(server: ControlServer) -> type[BaseHTTPRequestHandler]:
             pass  # the requests themselves go nowhere
 
         def do_GET(self) -> None:  # noqa: N802 (http.server's names)
-            self._serve({})
+            if self._authorized():
+                self._serve({})
 
         def do_POST(self) -> None:  # noqa: N802
+            # The token first: nothing of a stranger's body is read (any process of this
+            # computer may connect), and no body larger than MAX_BODY is.
+            if not self._authorized():
+                return
             try:
                 length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if not 0 <= length <= MAX_BODY:
+                self.close_connection = True  # its body stays unread
+                self._reply(413, {"error": f"the body must be 0 to {MAX_BODY} bytes"})
+                return
+            try:
                 body = json.loads(self.rfile.read(length) or b"{}")
             except ValueError:
                 self._reply(400, {"error": "the body is not JSON"})
@@ -188,10 +201,15 @@ def _handler(server: ControlServer) -> type[BaseHTTPRequestHandler]:
             args = body.get("args") if isinstance(body, dict) else None
             self._serve(args if isinstance(args, dict) else {})
 
+        def _authorized(self) -> bool:
+            """True with the token; else a 401 is answered and the connection closes."""
+            if server.authorized(self.headers.get("Authorization", "")):
+                return True
+            self.close_connection = True  # a body sent along stays unread
+            self._reply(401, {"error": "a token is needed (control.json)"})
+            return False
+
         def _serve(self, args: dict) -> None:
-            if not server.authorized(self.headers.get("Authorization", "")):
-                self._reply(401, {"error": "a token is needed (control.json)"})
-                return
             command = self.path.split("?", 1)[0].strip("/")
             status, answer = server.call(command, args)
             self._reply(status, answer)
