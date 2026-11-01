@@ -20,7 +20,13 @@ from mixed_fixtures import mixed_config, shut_hub
 import orjson
 from timer_fixtures import wait_until
 
-from services.catalog import EMPTY_LINK_MESSAGE, NO_STREAM_MESSAGE, CatalogService
+from services.browsed_catalog import BrowsedCatalog
+from services.catalog import (
+    EMPTY_LINK_MESSAGE,
+    NO_STREAM_MESSAGE,
+    UNEXPECTED_ANSWER_MESSAGE,
+    CatalogService,
+)
 from services.catalogs import Catalogs
 from services.catchup import (
     ARCHIVE_KEY,
@@ -48,7 +54,12 @@ from services.epg_view import (
 from services.multikeydict import MultiKeyDict
 from services.provider_api import stb_archive_link_url
 from services.provider_manager import ProviderManager, StbHandshake
-from services.workers import LinkCreatorWorker, STBCategoriesWorker, stb_archive_link
+from services.workers import (
+    STB_SESSION_REFUSED,
+    LinkCreatorWorker,
+    STBCategoriesWorker,
+    stb_archive_link,
+)
 from tests.fixtures.local_stb import ARCHIVED_ID, MAC, PLAIN_ID, StbFixture, channels
 from ui.link_lanes import LinkLanes, Target
 
@@ -374,7 +385,8 @@ class PortalLinkTests(PortalCase):
         headers = self.signed_in_headers()
         self.portal.expire()
         programme = self.portal.programme(ARCHIVED_ID, self.portal.now - 3600)["id"]
-        self.assertEqual(run(self.worker(programme, headers))[0], "error")
+        # Said as such ("Authorization failed.", no JSON): the catalogs sign in again.
+        self.assertEqual(run(self.worker(programme, headers)), ("error", STB_SESSION_REFUSED))
 
 
 class PortalLiveLinkTests(PortalCase):  # 2.8.3
@@ -473,13 +485,44 @@ class CatalogLinkTests(PortalCase):
         self.assertTrue(wait_until(lambda: self.catalogs.is_ready(self.name)))
         self.portal.expire()
         first = self.catalogs.request_archive_link(self.item, self.recorded)
-        self.assertTrue(wait_until(lambda: self.failed))
-        self.assertEqual(self.failed[0][0], first)
-        self.catalogs.sign_in_again(self.name)  # what catch-up asks after a failed link
-        again = self.catalogs.request_archive_link(self.item, self.recorded)
-        self.assertTrue(wait_until(lambda: self.ready))
-        self.assertEqual(self.ready, [(again, self.portal.archive_link(self.recorded))])
+        self.assertTrue(wait_until(lambda: self.ready or self.failed))
+        self.assertEqual(self.failed, [])
+        self.assertEqual(self.ready, [(first, self.portal.archive_link(self.recorded))])
         self.assertEqual(self.portal.handshakes, 2)
+
+    def test_the_browsed_portals_expired_session_signs_in_again_for_its_link(self):
+        # Before: the page's own portal never signed in again (its retry skipped it, and
+        # picking it again only checked it was set up): every link failed until a Refresh.
+        view = BrowsedCatalog(
+            self.catalogs,
+            self.config,
+            source_key="selected_provider_name",
+            all_key="all_providers_live",
+        )
+        self.config.selected_provider_name = self.name
+        view.select_provider()
+        self.assertTrue(wait_until(lambda: self.catalogs.is_ready(self.name)))
+        self.portal.expire()
+        request = view.request_link(self.item, section="live")
+        self.assertTrue(wait_until(lambda: self.ready or self.failed))
+        self.assertEqual(self.failed, [])
+        self.assertEqual([rid for rid, _url in self.ready], [request])
+        self.assertTrue(self.ready[0][1].startswith(f"{self.portal.url}/live/{ARCHIVED_ID}.ts"))
+        self.assertEqual(self.portal.handshakes, 2)
+
+    def test_a_portal_refusing_the_new_session_too_fails_once(self):
+        self.catalogs.ensure(self.name)
+        self.assertTrue(wait_until(lambda: self.catalogs.is_ready(self.name)))
+        refusing = self.portal.answer
+        self.portal.answer = lambda query, bearer: (
+            refusing(query, bearer) if query.get("type") == "stb" else None
+        )
+        request = self.catalogs.request_link(self.item, section="live")
+        self.assertTrue(wait_until(lambda: self.failed))
+        self.assertFalse(wait_until(lambda: len(self.failed) > 1, 300))  # nothing more comes
+        self.assertEqual(self.failed, [(request, UNEXPECTED_ANSWER_MESSAGE)])
+        self.assertEqual(self.ready, [])
+        self.assertEqual(self.portal.handshakes, 2)  # signed in again once, not in a loop
 
     def test_another_kind_of_provider_makes_no_archive_link(self):
         catalog = CatalogService(

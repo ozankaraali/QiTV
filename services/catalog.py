@@ -43,7 +43,12 @@ from services.provider_ids import stamp
 from services.provider_types import is_media_server
 from services.redact import safe_message
 from services.stream_address import NO_STREAM_MESSAGE
-from services.workers import NO_PORTAL_DATA_MESSAGE, STB_DEVICE_REJECTED_MESSAGE, find_roman_token
+from services.workers import (
+    NO_PORTAL_DATA_MESSAGE,
+    STB_DEVICE_REJECTED_MESSAGE,
+    STB_SESSION_REFUSED,
+    find_roman_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +94,7 @@ _SAFE_MESSAGES = frozenset(
         PROXY_MESSAGE,
         EXPIRED_MESSAGE,
         DISABLED_MESSAGE,
+        STB_SESSION_REFUSED,  # for the catalogs, which never show it (services.catalogs)
     }
 )
 _SAFE_PREFIXES = ("Unknown section: ", "Unsupported provider: ", BLOCKED_PREFIX)

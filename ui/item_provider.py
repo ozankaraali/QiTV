@@ -105,9 +105,11 @@ def playlist_source(catalog, item: dict) -> str:
 
 def sign_in_again(catalog, item: dict) -> None:
     """An STB retry: the item's own portal signs in again before its next link. The browsed
-    provider does not (as before 2.1: the next link it makes has a fresh play token), nor one
-    that is not set up now: its sign-in is under way (the other picture's retry, say), and the
-    next link waits for it, or the link asks for one."""
+    provider does not (as before 2.1: the next link it makes has a fresh play token; setting
+    it up again would reset its list), nor one that is not set up now: its sign-in is under
+    way (the other picture's retry, say), and the next link waits for it, or the link asks for
+    one. A portal that answers that link as a session it no longer knows signs in again
+    there, the browsed one too (services.catalogs, 2.8.12)."""
     name = provider_of(item)
     if not name or name == catalog.current_provider_name():
         return

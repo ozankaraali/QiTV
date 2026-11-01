@@ -62,6 +62,15 @@ requests = lazy_module("requests")
 # Sent from the worker's thread in English (a catalog message), shown with translate().
 NO_PORTAL_DATA_MESSAGE = N_("The portal returned no data")
 STB_DEVICE_REJECTED_MESSAGE = DEVICE_MESSAGE
+# A link request's error when its portal answered as portals answer a session they no longer
+# know (its token expired: a sleep, the same MAC signing in on a box): a 401, or a body that
+# is no JSON ("Authorization failed."). Never shown: the catalogs sign the portal in again
+# and ask once more (services.catalogs), and say UNEXPECTED_ANSWER_MESSAGE if that fails too.
+STB_SESSION_REFUSED = "The portal no longer knows the session"
+
+
+class _SessionRefused(Exception):
+    """An STB portal answered a request as one whose session it no longer knows."""
 
 
 def _resolve_xtream_base(server_info: dict, base_url: str) -> str:
@@ -734,8 +743,13 @@ class LinkCreatorWorker(QObject):
             response = requests.get(
                 fetchurl, headers=self.headers, timeout=10, verify=self.verify_ssl
             )
+            if response.status_code == 401:
+                raise _SessionRefused()
             response.raise_for_status()
-            result = response_json(response)
+            try:
+                result = response_json(response)
+            except ValueError:
+                raise _SessionRefused() from None
             if self.programme:
                 link = stb_archive_link(result)  # "": no recording (EMPTY_LINK_MESSAGE)
             else:
@@ -754,6 +768,9 @@ class LinkCreatorWorker(QObject):
                 )
                 link = own
             self.finished.emit({"link": link})
+        except _SessionRefused:
+            logger.info("The portal no longer knows its session")
+            self.error.emit(STB_SESSION_REFUSED)
         except Exception as e:
             self.error.emit(str(e))
 
