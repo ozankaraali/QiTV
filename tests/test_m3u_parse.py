@@ -373,6 +373,21 @@ class GroupOrderTests(unittest.TestCase):
             titles, ["All", "KIDS", "Kids", "Movies", "news", "Sport 2", "Sport 10", "Sports"]
         )
 
+    def test_a_cached_playlist_reorders_its_groups_at_load(self):
+        from services.m3u import order_cached_groups
+
+        cached = {
+            "categories": [
+                {"id": "*", "title": "All"},
+                {"id": "KIDS", "title": "KIDS"},
+                {"id": "Movies", "title": "Movies"},
+                {"id": "kids", "title": "kids"},
+            ],
+            "contents": [],
+        }
+        order_cached_groups(cached)
+        self.assertEqual([c["id"] for c in cached["categories"]], ["*", "KIDS", "kids", "Movies"])
+
     def test_turkish_letters_sort_in_turkish(self):
         from services import i18n
 

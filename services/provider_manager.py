@@ -17,7 +17,7 @@ from services import free_channels
 from services.atomic_write import atomic_write, set_aside
 from services.catchup import mark_stb_archives
 from services.lazy_import import lazy_module
-from services.m3u import split_cached_groups
+from services.m3u import order_cached_groups, split_cached_groups
 from services.provider_api import (
     https_fallback_candidates,
     known_http_only,
@@ -150,6 +150,7 @@ class ProviderManager(QObject):
         if ptype == "M3UPLAYLIST" and "itv" in cache:
             # Cached before "A;B" group titles were split: split now, from the cache.
             cache["itv"] = split_cached_groups(cache["itv"])
+            order_cached_groups(cache["itv"])  # in the language's alphabet, case aside
         live = cache.get("itv")
         if ptype == "STB" and isinstance(live, dict):
             # Cached before STB catch-up: the channels the portal marks archived get their

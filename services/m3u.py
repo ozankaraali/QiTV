@@ -212,6 +212,22 @@ def split_cached_groups(payload: Any) -> Any:
     return _build_categorized_structure(contents)
 
 
+def order_cached_groups(payload: Any) -> Any:
+    """A cached playlist's groups in the active language's alphabetical order (a cache made
+    before they sorted case-insensitively, or in another language), "All" first; in place."""
+    categories = payload.get("categories") if isinstance(payload, dict) else None
+    if not isinstance(categories, list) or not all(isinstance(c, dict) for c in categories):
+        return payload
+    first = [c for c in categories if str(c.get("id")) == "*"]
+    by_title: Dict[str, List[Dict]] = {}
+    for category in categories:
+        if str(category.get("id")) != "*":
+            title = str(category.get("title") or category.get("id") or "")
+            by_title.setdefault(title, []).append(category)
+    payload["categories"] = first + [c for t in group_order(by_title) for c in by_title[t]]
+    return payload
+
+
 def _build_categorized_structure(items: List[Dict]) -> Dict:
     """Build categorized structure from M3U items with group-title support.
 
