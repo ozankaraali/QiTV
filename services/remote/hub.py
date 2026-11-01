@@ -472,6 +472,11 @@ class HubCore:
     async def handle_ws(self, request: Any) -> Any:
         from aiohttp import WSMsgType, web
 
+        if not net.own_page(request.headers.get("Origin"), request.host):
+            # Another site's page, in a browser on the home network: it may not hold the
+            # pending slots (the phone page is the door's own; the relay's comes another way).
+            logger.info("Phone remote: refused a connection from another site's page")
+            return web.Response(status=403, text="403: Forbidden")
         ws = web.WebSocketResponse(max_msg_size=MAX_FRAME * 2, heartbeat=10.0)
         await ws.prepare(request)
         if not self.capacity_left():

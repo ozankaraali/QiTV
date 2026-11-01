@@ -186,6 +186,32 @@ class HomeDoorTests(HomeDoorCase):
         self.assertEqual(message.type, aiohttp.WSMsgType.CLOSE)
         self.assertEqual(code, 4429)
 
+    def test_another_sites_page_may_not_open_the_door(self):
+        """A page of another site in a browser on the home network could hold the pending
+        slots and keep phones from pairing: its Origin is refused, as a rebound name's."""
+        port = self.port
+        refused = [
+            {"Origin": "http://evil.test"},
+            {"Origin": f"https://127.0.0.1:{port}"},
+            {"Origin": "null"},
+            {"Origin": f"http://rebound.test:{port}", "Host": f"rebound.test:{port}"},
+        ]
+
+        async def status(headers):
+            async with aiohttp.ClientSession() as s:
+                try:
+                    ws = await s.ws_connect(self.url("/ws"), headers=headers)
+                except aiohttp.WSServerHandshakeError as error:
+                    return error.status
+                await ws.close()
+                return 101
+
+        for headers in refused:
+            with self.subTest(headers=headers):
+                self.assertEqual(self.run_async(status(headers)), 403)
+        self.assertEqual(self.run_async(status({"Origin": f"http://127.0.0.1:{port}"})), 101)
+        self.assertEqual(self.run_async(status({})), 101)  # no browser: no Origin
+
     def test_handshake_timeout_closes(self):
         async def go():
             async with aiohttp.ClientSession() as s:
