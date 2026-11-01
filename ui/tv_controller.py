@@ -1363,14 +1363,20 @@ class TVController(QObject):
         self._cancel_external()  # a newer choice: the settling external launch is dropped
         self._lanes.supersede()  # and an external play still waiting for its link
         context = self.zap.context
-        picked = item_provider.pick_source(self.catalog, channel, group_key)
         if group_key != context.group_key or context.index_of(channel) < 0:
+            if not any(ZapContext.same(channel, other) for other in channels):
+                # Previous or a number outside the group: ↑/↓ walk every channel from it, as
+                # the small picture's Previous does (never the old group from the old place).
+                group_key, channels = ALL_GROUP_ID, self._all_live()
+            picked = item_provider.pick_source(self.catalog, channel, group_key)
             # Numbers reach every live channel, not only the group's (TV numbers are global).
             self.zap.set_context(
                 ZapContext(group_key, channels, fallback=self._all_live(), source=picked)
             )
-        elif not from_zap or not context.source:
-            context.source = picked  # a zap keeps the list its group was picked from
+        else:
+            picked = item_provider.pick_source(self.catalog, channel, group_key)
+            if not from_zap or not context.source:
+                context.source = picked  # a zap keeps the list its group was picked from
         playing = self._playing_live()
         stay = playing is not None and ZapContext.same(channel, playing.item)
         if stay and archive is not None and self._large_records():
@@ -1858,7 +1864,7 @@ class TVController(QObject):
                 self._current, self._cid = target, None
                 self.overlays.transport.set_speed(1.0)  # LiveSession starts every tune at 1x
             else:
-                if self._live_controls.refuse_over_limit(target, direct=True):
+                if self._live_controls.refuse_over_limit(target):
                     return  # over the provider's stream limit: nothing opens
                 target = replace(target, max_height=None)  # 2.8: asked once (see above)
                 self._current, self._cid = target, None

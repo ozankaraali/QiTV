@@ -2663,6 +2663,30 @@ class TuneFailureAndKeyTests(ControllerTestCase):
         self.assertTrue(wait_until(lambda: len(self.catalog.links) == 2))
         self.assertEqual(self.requested(), ["One", "Four"])
 
+    def test_up_down_after_a_number_outside_the_group_walk_every_channel_from_it(self):
+        # ↑/↓ walked the old group from the old place (Two's next: One).
+        self.catalog.live = {"10": CHANNELS[:2], "20": CHANNELS[2:]}
+        self.controller.tune(CHANNELS[1], group_key="10", channels=CHANNELS[:2])
+        self.ready("http://stream/2")
+        self.controller.handle(Action.DIGIT, "3")
+        self.assertTrue(wait_until(lambda: len(self.catalog.links) == 2))
+        self.ready("http://stream/3")
+        self.zap._last_step = float("-inf")  # no burst: the step tunes at once
+        self.controller.handle(Action.CH_NEXT)
+        self.assertEqual(self.requested(), ["Two", "Three", "Four"])
+
+    def test_up_down_after_previous_outside_the_group_walk_every_channel_from_it(self):
+        self.catalog.live = {"10": CHANNELS[:3], "20": CHANNELS[3:]}
+        self.controller.tune(CHANNELS[2], group_key="10", channels=CHANNELS[:3])
+        self.ready("http://stream/3")
+        self.controller.tune(CHANNELS[3], group_key="20", channels=CHANNELS[3:])
+        self.ready("http://stream/4")
+        self.controller.handle(Action.PREVIOUS)  # Three, not in Four's group
+        self.ready("http://stream/3")
+        self.zap._last_step = float("-inf")
+        self.controller.handle(Action.CH_PREV)
+        self.assertEqual(self.requested(), ["Three", "Four", "Three", "Two"])
+
     def test_same_item_queued_keeps_the_link_in_flight(self):
         self.tune(0)
         self.tune(1)
@@ -3908,6 +3932,30 @@ class PipelineErrorTests(PipelineCase):
         self.start_channel(1)  # a new tune may try again
         self.live.failed.emit("The stream could not be opened")
         self.assertEqual(self.requested(), ["One", "One", "Two", "Two"])
+
+    def test_an_stb_fresh_link_that_played_a_while_is_made_again_when_it_fails(self):
+        # Its new play token expires in turn: once more after HEALTHY_S of playing, as an
+        # ended direct stream gets its reopens back.
+        self.enterContext(mock.patch("ui.live_controls.HEALTHY_S", 0.05))
+        self.start_pipeline(0)
+        self.live.failed.emit("The stream could not be opened")
+        self.ready("http://stream/1?play_token=new")
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
+        self.live.play_pipeline()
+        self.session.stateChanged.emit("playing")
+        QTest.qWait(80)  # it played HEALTHY_S on its fresh link
+        self.live.failed.emit("The stream could not be opened")
+        self.assertEqual(self.toast.messages(), [])
+        self.assertEqual(self.requested(), ["One", "One", "One"])
+        self.ready("http://stream/1?play_token=newer")
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 3))
+        self.live.play_pipeline()
+        self.session.stateChanged.emit("playing")  # too briefly this time
+        self.live.failed.emit("The stream could not be opened")
+        self.assertEqual(self.toast.messages(), [("One: The stream could not be opened", "error")])
+        self.assertEqual(len(self.catalog.links), 3)
 
     def test_an_stb_stream_that_ends_at_once_in_direct_play_is_made_again(self):
         self.start_channel(0)

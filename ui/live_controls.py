@@ -4,12 +4,13 @@ Which live links play through the time-shift pipeline, and with which budget slo
 transport's time-shift controls (seek, speed, Go live, ⏮ to the programme start, the bar's
 programme ticks); and LiveSession's reports: its mode and timeline, its notices (time-shift
 unavailable, once per channel and run) and its failures. An STB channel that fails gets a
-fresh link once per tune (its play token may have expired) before the error shows; a
-refusal for the provider's connection limit is never retried and says so. A live channel
-played directly whose stream ends (an on-demand restream may show a placeholder and end)
-opens again in the same player, so in the same budget slot, twice per tune at most, after
-RECONNECT_MS: "Reconnecting…", and only then "The stream ended"; once it has played for
-HEALTHY_S since it last opened, it may open again twice more.
+fresh link once per tune (its play token may have expired) before the error shows, and once
+more each time that link then played for HEALTHY_S; a refusal for the provider's connection
+limit is never retried and says so. A live channel played directly whose stream ends (an
+on-demand restream may show a placeholder and end) opens again in the same player, so in the
+same budget slot, twice per tune at most, after RECONNECT_MS: "Reconnecting…", and only then
+"The stream ended"; once it has played for HEALTHY_S since it last opened, it may open again
+twice more.
 
 Kept buffers (2.6): coming back to a channel whose buffer was kept, it plays live and the
 session offers where the user was (`LiveSession.backOffered`): the Resume pill
@@ -483,14 +484,13 @@ class LiveControls(QObject):
         self._tuner.tune(self.live_start(target, url), name, self.limit(target.item))
         return True
 
-    def refuse_over_limit(self, target: Target, *, direct: bool = False) -> bool:
+    def refuse_over_limit(self, target: Target) -> bool:
         """Other players' streams (picture in picture, tiles) take the whole limit of
-        `target`'s provider: True, the toast says so and the running channel goes on.
-        `direct`: a channel played directly, whose open waits for a closing picture's
-        stream (that one does not count)."""
+        `target`'s provider: True, the toast says so and the running channel goes on. A
+        closing picture's stream does not count: what opens waits for it."""
         name = item_provider.provider_name(self.catalog, target.item)
         limit = self.limit(target.item)
-        if not self._tuner.refused(name, limit, direct=direct):
+        if not self._tuner.refused(name, limit):
             return False
         logger.info("Not opening %s: the provider allows %s streams", target.title, limit)
         self._restore_channel()
@@ -526,14 +526,21 @@ class LiveControls(QObject):
         self._ticks = []
 
     def may_retry(self, current: Optional[Target]) -> bool:
-        """An STB channel's link may be made again once per tune (its play token expires)."""
+        """An STB channel's link may be made again once per tune (its play token expires),
+        and once more each time its fresh link played for `HEALTHY_S` (its token expired
+        again), as an ended direct stream gets its reopens back."""
         return (
             current is not None
             and current.live
-            and not current.retried
+            and (not current.retried or self._played_well())
             and item_provider.provider_type(self.catalog, current.item) == "STB"
             and not self._lanes.busy()
         )
+
+    def _played_well(self) -> bool:
+        """The player played for `HEALTHY_S` since it last started playing."""
+        since = self._playing_since
+        return since is not None and time.monotonic() - since >= HEALTHY_S
 
     def reconnect(self, current: Target) -> bool:
         """`current`'s live stream, played directly, ended: open it again after a back-off.

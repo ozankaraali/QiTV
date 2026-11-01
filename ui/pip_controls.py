@@ -605,6 +605,7 @@ class PipControls(QObject):
         self._timelines.pop(slot.name, None)
         self._said.pop(slot.name, None)  # its new channel's notices are said again
         self._reopens.pop(slot.name, None)
+        self._playing_since.pop(slot.name, None)  # how long it played counts from its open
         self._cancel_reopen()
         # The small picture keeps its time-shift in memory: one disk ring at most.
         kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
@@ -659,9 +660,10 @@ class PipControls(QObject):
         (its play token, or its portal's session, may have expired), else it says why."""
         if self._closed():
             return
-        view = self._views.get(self.sessions.other().name) or self._closed_view
+        name = self.sessions.other().name
+        view = self._views.get(name) or self._closed_view
         self._closed_view = None
-        if view is not None and self._may_retry(view.target):
+        if view is not None and self._may_retry(view.target, name):
             self._retry(view)
             return
         self._toast(translate(message), "error", ERROR_MS)  # one kept in English shows translated
@@ -669,14 +671,17 @@ class PipControls(QObject):
         if target is not None:
             self._explain(target.item, target.title)  # why, at its provider
 
-    def _may_retry(self, target: Optional[Target]) -> bool:
-        """As the large picture (LiveControls.may_retry): once per channel opened small, never
-        for the provider's limit, nor when another channel was chosen small since."""
+    def _may_retry(self, target: Optional[Target], name: str) -> bool:
+        """As the large picture (LiveControls.may_retry): once per channel opened small (and
+        once more each time its fresh link played for HEALTHY_S in slot `name`), never for
+        the provider's limit, nor when another channel was chosen small since."""
         failure = self.sessions.failure  # "": its start raised, or the budget refused
+        since = self._playing_since.get(name)
+        healthy = since is not None and time.monotonic() - since >= live_controls.HEALTHY_S
         return (
             target is not None
             and target.live
-            and not target.retried
+            and (not target.retried or healthy)
             and bool(failure)
             and failure != STREAM_LIMIT
             and self._wanted is None

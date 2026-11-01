@@ -1406,6 +1406,28 @@ class PipRetryTests(PipCase):
         self.assertEqual(self.catalog.setups, ["Portal B"])  # one sign-in serves both links
         self.assertEqual(len(self.catalog.links), links + 2)
 
+    def test_a_fresh_link_that_played_a_while_is_made_again_when_it_fails(self):
+        # Its new play token expires in turn: once more after HEALTHY_S of playing.
+        self.enterContext(mock.patch("ui.live_controls.HEALTHY_S", 0.05))
+        small = self.open_small(self.PORTAL_TWO)
+        self.fail_small(small)
+        self.ready("http://stream/2?play_token=new")
+        self.assertTrue(wait_until(lambda: len(small.live.named("start")) == 2))
+        small.live.play_pipeline()
+        small.playback.stateChanged.emit("playing")
+        QTest.qWait(80)  # it played HEALTHY_S on its fresh link
+        links = len(self.catalog.links)
+        self.fail_small(small)
+        self.assertEqual(self.toast.messages(), [])
+        self.assertEqual(len(self.catalog.links), links + 1)
+        self.ready("http://stream/2?play_token=newer")
+        self.assertTrue(wait_until(lambda: len(small.live.named("start")) == 3))
+        small.live.play_pipeline()
+        small.playback.stateChanged.emit("playing")  # too briefly this time
+        self.fail_small(small)
+        self.assertEqual(self.toast.messages(), [(PIP_FAILED, "error")])
+        self.assertEqual(len(self.catalog.links), links + 1)
+
     def test_the_browsed_portal_makes_the_link_again_without_signing_in(self):
         small = self.open_small(CHANNELS[1])
         links = len(self.catalog.links)
@@ -1516,6 +1538,23 @@ class OneStreamPipTests(PipCase):
         self.pip_live.released.emit()
         self.assertEqual(self.budget.holders("Home"), ["main"])
         self.assertEqual([url for url, _ in self.session.plays], ["rtmp://tv/3"])
+
+    def test_a_time_shifted_channel_waits_for_the_closing_pip_too(self):
+        # It was refused ("allows 1 stream") while the closing PiP's stream still counted.
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.PIP)  # P closes it
+        self.tune(2)
+        self.ready("http://stream/3")  # through the time-shift pipeline
+        QTest.qWait(20)
+        self.assertNotIn(
+            ("Your provider allows 1 stream at a time", "error"), self.toast.messages()
+        )
+        self.assertEqual(self.live.named("start"), [])
+        self.assertEqual(self.budget.holders("Home"), ["pip"])
+        self.pip_live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.live.named("start")) == 1))
+        self.assertEqual(self.live.named("start")[0][0], "http://stream/3")
+        self.assertEqual(self.budget.holders("Home"), ["main"])
 
     def test_a_direct_channel_is_refused_while_the_small_picture_holds_the_only_stream(self):
         self.open_small(CHANNELS[1])
