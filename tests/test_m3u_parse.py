@@ -354,3 +354,32 @@ class MultiGroupChannelTests(unittest.TestCase):
         pinned = self.nav.children(self.nav.path[1])[0]
         self.assertEqual((pinned.key, pinned.count), (FAVORITES_GROUP, 1))
         self.assertEqual([n.title for n in self.nav.children(pinned)], ["Toons"])
+
+
+class GroupOrderTests(unittest.TestCase):
+    """Playlist groups in the language's alphabet, upper and lower case alike."""
+
+    def titles(self, groups):
+        lines = ["#EXTM3U"]
+        for at, group in enumerate(groups):
+            lines += [f'#EXTINF:-1 group-title="{group}",Channel {at}', f"http://s.test/{at}.ts"]
+        return [
+            c["title"] for c in parse_m3u("\n".join(lines) + "\n", categorize=True)["categories"]
+        ]
+
+    def test_case_does_not_split_the_alphabet(self):
+        titles = self.titles(["Sports", "Kids", "news", "KIDS", "Movies", "Sport 10", "Sport 2"])
+        self.assertEqual(
+            titles, ["All", "KIDS", "Kids", "Movies", "news", "Sport 2", "Sport 10", "Sports"]
+        )
+
+    def test_turkish_letters_sort_in_turkish(self):
+        from services import i18n
+
+        before = i18n.language()
+        self.addCleanup(i18n.set_language, before)
+        i18n.set_language("tr")
+        self.assertEqual(
+            self.titles(["Dizi", "Çocuk", "Cinema", "Şarkı", "Spor"]),
+            ["All", "Cinema", "Çocuk", "Dizi", "Spor", "Şarkı"],
+        )

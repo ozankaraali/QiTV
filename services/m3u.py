@@ -1,3 +1,4 @@
+from functools import cmp_to_key
 import re
 import sys
 from typing import Any, Dict, List, Optional
@@ -246,13 +247,31 @@ def _build_categorized_structure(items: List[Dict]) -> Dict:
 
     # Build categories list
     categories = [{"id": "*", "title": N_("All")}]
-    categories.extend({"id": group, "title": group} for group in sorted(sorted_channels))
+    categories.extend({"id": group, "title": group} for group in group_order(sorted_channels))
 
     return {
         "categories": categories,
         "contents": contents,
         "sorted_channels": sorted_channels,
     }
+
+
+def group_order(names) -> List[str]:
+    """Group names in the active language's alphabetical order, upper and lower case alike
+    ("Kids" and "KIDS" side by side, "Çocuk" after "Cinema" in Turkish); names alike but for
+    their case keep a fixed order between them."""
+    listed = sorted(names)  # the fixed order of names alike in the collation
+    try:
+        from PySide6.QtCore import QCollator, Qt
+
+        from services.i18n import app_locale
+
+        collator = QCollator(app_locale())
+        collator.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        collator.setNumericMode(True)  # "Sport 2" before "Sport 10"
+        return sorted(listed, key=cmp_to_key(lambda a, b: int(collator.compare(a, b))))
+    except Exception:  # no Qt (a script): case-folded
+        return sorted(listed, key=str.casefold)
 
 
 def _repeat_key(item: Dict) -> tuple:
