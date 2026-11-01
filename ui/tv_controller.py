@@ -151,7 +151,7 @@ ERROR_MS = 6000
 SET_PIN_FIRST = N_("Set a PIN first: Settings → Parental controls.")
 # i18n: a toast: the channel or group is hidden while QiTV is locked; Settings shows it again
 HIDDEN_TEXT = N_("Hidden while locked. Settings → Parental controls shows it again.")
-RECORDING_MS = 5000  # "Recording saved: <name>" (a name to read)
+RECORDING_MS = 5000  # "Recording saved in <folder>: <name>" (a name to read)
 VOLUME_STEP = 5
 SEEK_STEP_MS = 10_000
 TUNING_KEEP_MS = 3000  # under the banner's 4 s: it is shown again while a link resolves
