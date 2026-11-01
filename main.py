@@ -147,8 +147,13 @@ def main() -> int:
     # save over the first's settings): it brings the first to the front and quits.
     from services.single_instance import claim
 
-    instance = claim(settings_dir(), replacing="--replace" in sys.argv)
-    if instance is None:
+    try:
+        instance = claim(settings_dir(), replacing="--replace" in sys.argv)
+        handed_over = instance is None
+    except Exception as error:  # the check is never a reason for QiTV not to start
+        log.warning("The check for another QiTV failed (%s); starting.", type(error).__name__)
+        instance, handed_over = None, False
+    if handed_over:
         log.info("Another QiTV runs with these settings; this start ends here.")
         log_file.close()
         return 0
@@ -209,7 +214,8 @@ def main() -> int:
     control = None
     try:
         window = TVWindow(app, config_manager, provider_manager, image_manager, epg_manager)
-        instance.activated.connect(window.come_to_front)
+        if instance is not None:
+            instance.activated.connect(window.come_to_front)
         window.show()
         # 2.8.3: a developer's tools read and drive this QiTV (loopback only, token-guarded).
         from services import control as control_port
@@ -231,7 +237,8 @@ def main() -> int:
         log.info("QiTV's event loop ended (%d).", code)
         return code
     finally:
-        instance.close()
+        if instance is not None:
+            instance.close()
         if control is not None:
             control.stop()
         allow_sleep()
