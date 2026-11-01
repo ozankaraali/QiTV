@@ -145,7 +145,7 @@ def main() -> int:
     from PySide6.QtCore import QLocale, QLoggingCategory, QTimer, qInstallMessageHandler
     import qdarktheme
 
-    from services import i18n, log_file
+    from services import i18n, log_file, private_files
     from services.atomic_write import sweep_in_background
     from services.config_manager import ConfigManager, get_app_version
     from services.epg_manager import EpgManager
@@ -225,6 +225,9 @@ def main() -> int:
             icon_path = os.path.join(sys._MEIPASS, "assets", "qitv.png")
 
     config_manager = ConfigManager()
+    # The sign-in's files (config, provider cache, the log) are this user's only, however an
+    # older QiTV or the umask left them.
+    private_files.tighten(config_manager.get_config_dir(), log_file.log_dir())
     log_file.set_detailed(config_manager.detailed_log)  # 2.8.2: Settings' detailed log
     # The language, before any window: every text is looked up as it is shown.
     i18n.set_language(i18n.resolve(config_manager.language))
