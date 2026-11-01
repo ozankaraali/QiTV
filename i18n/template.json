@@ -525,7 +525,6 @@
     "The file holds your sign-in: keep it private.": "said after \"Exported 20 items to file.m3u\": its links name the account (Xtream, STB)",
     "The file may hold your sign-in: keep it private.": "said after \"Exported 20 items to file.m3u\": a playlist's links may name the account",
     "The film didn't open. Tap TV to watch it there.": "the phone remote: the provider didn't hand QiTV the film for the phone",
-    "The phone left before the stream reached it": "a message when a phone that asked for the stream disconnected before it was sent",
     "The phone remote couldn't start": "the phone remote's state: it couldn't start",
     "The portal has no recording of this programme": "a toast: the STB portal has no recording of the programme asked for; what plays goes on",
     "The portal says your subscription ended on {date}": "date as \"3 Oct 2026\"",
