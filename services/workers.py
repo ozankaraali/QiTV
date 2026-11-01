@@ -141,7 +141,7 @@ class M3ULoaderWorker(QObject):
                         raise TooLarge(LIST_MAX)
                     self.finished.emit(parse_m3u(text, categorize=True))
                 return
-            last_exc = None
+            last_exc: Optional[Exception] = None
             for u in https_fallback_candidates(self.url, self.prefer_https):
                 try:
                     response = requests.get(  # read up to LIST_MAX: TooLarge past it
@@ -152,15 +152,41 @@ class M3ULoaderWorker(QObject):
                         hooks=capped(LIST_MAX),
                     )
                     response.raise_for_status()
-                    playlist = parse_m3u(decode_playlist(response), categorize=True)
+                    text = decode_playlist(response)
+                    playlist = parse_m3u(text, categorize=True)
+                    if not_a_playlist(text, playlist):
+                        last_exc = _NotAPlaylist()
+                        continue
                     self.finished.emit(mended(playlist))  # a charset it names may cut a pair
                     return
                 except requests.RequestException as e:
                     last_exc = e
+            if isinstance(last_exc, _NotAPlaylist):
+                # 2.8.12: as an Xtream panel's answer that is no list: the saved list stays.
+                logger.info("The playlist's address answered with no playlist")
+                self.error.emit(UNEXPECTED_ANSWER_MESSAGE)
+                return
             # If we got here, all attempts failed
             raise last_exc or Exception("Failed to load M3U")
         except (requests.RequestException, OSError, ValueError) as e:
             self.error.emit(str(e))
+
+
+class _NotAPlaylist(Exception):
+    """A playlist's address answered with something that is no playlist."""
+
+
+def not_a_playlist(text: str, playlist: Any) -> bool:
+    """Whether a server's answer to a playlist's address is no playlist: an HTML page (an
+    expired account's, a sign-in page), or a text with no channel, no #EXTM3U and no #EXTINF
+    line (an empty answer). Stored, it would replace the saved channels with none; a playlist
+    whose header says it is one but lists nothing still is one."""
+    head = text.lstrip("﻿ \t\r\n")
+    if head.startswith("<"):
+        return True
+    if isinstance(playlist, dict) and playlist.get("contents"):
+        return False
+    return not any(line.startswith(("#EXTM3U", "#EXTINF")) for line in head.splitlines())
 
 
 # Player API actions (categories, streams) and stream URL prefix per content type.

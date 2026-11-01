@@ -3,6 +3,7 @@
 import os
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -11,10 +12,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
+from http_fixtures import LocalSource
 from job_fixtures import ImmediateRunner
+from mixed_fixtures import mixed_config, shut_hub
+import orjson
+from timer_fixtures import wait_until
 
-from services.catalog import CatalogService
+from services.catalog import UNEXPECTED_ANSWER_MESSAGE, CatalogService
+from services.catalogs import Catalogs
+from services.m3u import parse_m3u
 from services.provider_manager import ProviderManager
+from services.workers import not_a_playlist
 from tests.test_catalog_service import FakeFactory, make_service
 from tests.test_series_view import FakePosters
 from ui.library.series_view import SeriesView
@@ -258,6 +266,75 @@ class SeasonReuseTests(unittest.TestCase):
         view = SeriesView(FakePosters())
         self.addCleanup(view.close)
         self.assertEqual(view.season_label(season, 0), "Season 1")
+
+
+PLAYLIST = "#EXTM3U\n" + "".join(
+    f'#EXTINF:-1 group-title="News",Chan {i}\nhttp://127.0.0.1:9/{i}.ts\n' for i in range(3)
+)
+
+
+class PlaylistAnswerTests(unittest.TestCase):
+    """A playlist's refresh answered 200 with an empty body or a page (an expired account's):
+    the saved channels stay and the refresh says it failed, as an Xtream panel's answer that
+    is no list does (before 2.8.12: no channels were stored over them, marked fresh)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_an_answer_that_is_no_playlist_keeps_the_saved_channels(self):
+        for label, body in (("empty", b""), ("page", b"<html><body>Expired</body></html>")):
+            with self.subTest(label):
+                self.refresh_answered_with(body)
+
+    def refresh_answered_with(self, body):
+        source = LocalSource({"/get.php": (200, {"Content-Type": "text/plain"}, body)})
+        self.addCleanup(source.close)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        provider = {"type": "M3UPLAYLIST", "name": "Playlist", "url": source.url + "/get.php"}
+        config, registry = mixed_config(
+            directory.name, [provider], {"Playlist": parse_m3u(PLAYLIST, categorize=True)}
+        )
+        self.addCleanup(registry._cache_writer.shutdown, wait=True)
+        path = registry._provider_cache_name("Playlist")
+        with open(path, "rb") as f:
+            cache = orjson.loads(f.read())
+        cache["_cache"]["refreshed_at"]["itv"] = time.time() - 7 * 3600  # past its time
+        with open(path, "wb") as f:
+            f.write(orjson.dumps(cache))
+        config.selected_provider_name = "Playlist"
+        hub = Catalogs(config, registry, runner=ImmediateRunner())
+        self.addCleanup(shut_hub, hub)
+        hub.ensure("Playlist")
+        self.assertTrue(wait_until(lambda: hub.is_ready("Playlist")))
+        catalog = hub.catalog("Playlist")
+        signals = []
+        catalog.sectionReady.connect(lambda section: signals.append(("ready", section)))
+        catalog.sectionFailed.connect(lambda section, m: signals.append(("failed", section, m)))
+        catalog.request_section("live")
+        self.assertTrue(wait_until(lambda: signals))
+        self.assertEqual(signals, [("failed", "live", UNEXPECTED_ANSWER_MESSAGE)])
+        self.assertEqual(len(catalog.items("live", "*") or []), 3)
+        catalog.provider_manager._cache_writer.shutdown(wait=True)
+        with open(path, "rb") as f:
+            self.assertEqual(len(orjson.loads(f.read())["itv"]["contents"]), 3)
+        self.assertTrue(catalog.provider_manager.is_content_stale("itv"))  # tried next time
+
+    def test_what_is_a_playlist(self):
+        for text, playlist in (
+            ("", False),
+            ("  \r\n", False),
+            ("<!DOCTYPE html><html></html>", False),
+            ("﻿<html>\n#EXTM3U\nhttp://a.test/1.ts\n</html>", False),
+            ("Account expired", False),
+            ("#EXTM3U\n", True),  # it says it is one: a playlist listing nothing (yet)
+            ("http://a.test/1.ts\n", True),  # links alone: each a channel
+            (PLAYLIST, True),
+        ):
+            with self.subTest(text=text[:20]):
+                parsed = parse_m3u(text, categorize=True)
+                self.assertEqual(not not_a_playlist(text, parsed), playlist)
 
 
 if __name__ == "__main__":
