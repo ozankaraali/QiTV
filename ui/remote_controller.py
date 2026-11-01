@@ -178,6 +178,9 @@ class RemoteController(QObject):
         self._ask_number = 0
         window.controller.phoneAsked.connect(self._on_phone_asked)
         window.controller.phoneSettled.connect(self._on_phone_settled)
+        # An outside player took over (a phone's Watch, Play in VLC): the other phones let go.
+        self._handed_to: Optional[str] = None  # the device a Watch was just handed to
+        window.controller.handedOn.connect(self._on_handed_on)
         cast_devices = getattr(window, "cast_devices", None)  # 2.8: the phones' Cast to…
         if cast_devices is not None:
             cast_devices.changed.connect(self._push_cast)
@@ -645,6 +648,7 @@ class RemoteController(QObject):
                 name = self._names.get(self._devices.get(sid, ""), "")
                 text = PLAYING_ON_TEXT if name else PLAYING_ON_PHONE_TEXT
                 self._window.screens.notify(translate(text, name=name))
+            self._handed_to = self._device(sid)  # it plays: the others let go (handedOn)
             return True, ""
 
         try:
@@ -758,6 +762,23 @@ class RemoteController(QObject):
             self._watching.clear()
             if self.hub is not None:
                 self.hub.drop_films()  # nor reads a film for them any more
+
+    def _on_handed_on(self) -> None:
+        """An outside player took over what the TV played: a phone's Watch (the one just
+        handed it plays on), or Play in VLC. Every other phone watching lets go, as when the
+        TV plays again: one screen at a time, and the stream QiTV holds for an outside player
+        is the newest one's."""
+        keep, self._handed_to = self._handed_to, None
+        gone = [device for device in self._watching if device != keep]
+        if not gone:
+            return
+        for sid in self._phones:
+            if self._device(sid) in gone:
+                self._send(sid, {"t": "stop"})
+        for device in gone:
+            del self._watching[device]
+            if self.hub is not None:
+                self.hub.forget_film(device)  # nor reads a film for it any more
 
     def _device(self, sid: str) -> str:
         return self._devices.get(sid) or sid

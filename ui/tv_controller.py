@@ -209,6 +209,9 @@ class TVController(QObject):
     # 2.6: QiTV's question for phone `sid` (its text, the answers' words), and that it is gone.
     phoneAsked = Signal(str, str, str, str)
     phoneSettled = Signal(str)
+    # An outside player (Play in VLC, a phone's Watch) took over what the large picture played:
+    # the phones watching before let go (one screen at a time, as when the TV plays again).
+    handedOn = Signal()
 
     def __init__(
         self,
@@ -1940,6 +1943,7 @@ class TVController(QObject):
                 translate(first) if first else tr("The external player could not start")
             )
             return
+        self.handedOn.emit()  # the phones that watched before let go
         self._current, self._cid = target, None
         self._delivered(target, url)
 

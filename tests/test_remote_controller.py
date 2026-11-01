@@ -604,6 +604,51 @@ class WatchHereTests(WindowCase):
         self.assertEqual(channel["name"], "Channel 2")
         self.assertEqual(self.sent("stop"), [])  # the phone let go itself
 
+    def watch(self, sid, url):
+        """Phone `sid`'s Watch of what the TV plays, handed on as the controller's _launch
+        hands it: the link to the phone, then `handedOn` once it took it."""
+        target = Target({"name": "News", "cmd": url}, "live", "News")
+        controller, results = self.window.controller, []
+
+        def play_elsewhere(launch, chosen=None, **_kwargs):
+            results.append(launch(chosen or target, url))
+            if results[-1][0]:
+                controller.handedOn.emit()
+            return True
+
+        with (
+            mock.patch.object(controller, "play_elsewhere", side_effect=play_elsewhere),
+            mock.patch.object(self.window.screens, "notify"),
+        ):
+            self.window.remote.bridge.post(WatchHere(sid, ""))
+            self.assertTrue(wait_until(lambda: results))
+
+    def stops_to(self, sid):
+        calls = self.hub.send.call_args_list
+        return [c.args[1] for c in calls if c.args[0] == sid and c.args[1]["t"] == "stop"]
+
+    def test_another_phones_watch_stops_this_one(self):  # audit 2: one screen at a time
+        self.connect()
+        remote = self.window.remote
+        remote._phones.add("s9")
+        self.addCleanup(remote._phones.discard, "s9")
+        self.watch("s8", "http://p.test/news.m3u8")
+        self.assertEqual(self.stops_to("s8"), [])
+        self.watch("s9", "http://p.test/two.m3u8")
+        self.assertEqual(self.stops_to("s8"), [{"t": "stop"}])  # as when the TV plays again
+        self.assertEqual(self.stops_to("s9"), [])
+        self.assertEqual(list(remote._watching), ["s9"])
+        self.hub.forget_film.assert_any_call("s8")
+        self.watch("s9", "http://p.test/three.m3u8")  # a zap on the same phone stops nothing
+        self.assertEqual(self.stops_to("s9"), [])
+
+    def test_play_in_vlc_stops_the_phone(self):  # audit 2: the TV's own outside player
+        self.connect()
+        self.watch("s8", "http://p.test/news.m3u8")
+        self.window.controller.handedOn.emit()  # Play in VLC took over
+        self.assertEqual(self.stops_to("s8"), [{"t": "stop"}])
+        self.assertEqual(self.window.remote._watching, {})
+
     def test_the_tv_playing_again_stops_the_phone(self):
         self.connect()
         self.hand_off("http://p.test/news.m3u8")
