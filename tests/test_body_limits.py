@@ -1,5 +1,5 @@
 """A hostile or broken server's answer is read up to a generous limit, never whole: a playlist,
-a Player API or portal list, a logo, a guide (2.8.12 review)."""
+a Player API or portal list, a logo, a guide (a privacy review)."""
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json

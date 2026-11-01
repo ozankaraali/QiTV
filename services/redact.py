@@ -16,7 +16,7 @@ _HIDDEN = "…"
 # An address, its "://" as written, JSON-escaped (http:\/\/) or percent-encoded (http%3A%2F%2F).
 _ADDRESS = re.compile(r"\b[a-z][a-z0-9+.\-]*(?::|%3A)(?:\\?/|%2F){2}\S*", re.IGNORECASE)
 _QUERY = re.compile(r"\S*\?\S*=\S*")  # a query string carries "=": "Who?Me" stays
-# What else names an account, each kept up to its sign and the rest hidden (2.8.12 review):
+# What else names an account, each kept up to its sign and the rest hidden (a privacy review):
 _SECRETS = (
     # An Xtream stream's path, wherever its host went: /live/<user>/<password>/<id>.ts.
     re.compile(r"(/(?:live|movie|series|timeshifts?)/)[^/\s]+/[^/\s]+(?:/\S*)?", re.IGNORECASE),

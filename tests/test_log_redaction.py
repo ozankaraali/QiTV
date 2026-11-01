@@ -56,7 +56,7 @@ class _Response:
 
 
 class MaskTests(unittest.TestCase):
-    """2.8.12 review: what the mask missed, from requests' errors, request lines, headers and
+    """A privacy review: what the mask missed, from requests' errors, request lines, headers and
     JSON. Each sample's account (USER, PASS, a token, a MAC) never shows."""
 
     SAMPLES = {

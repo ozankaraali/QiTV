@@ -66,7 +66,7 @@ class InstallTests(unittest.TestCase):
         for secret in ("secret", "panel.test", "username="):
             self.assertNotIn(secret, text)
 
-    def test_the_console_masks_its_lines_as_the_file_does(self):  # 2.8.12 review
+    def test_the_console_masks_its_lines_as_the_file_does(self):  # a privacy review
         import io
 
         handler = log_file.console_handler()
