@@ -114,7 +114,14 @@ class InstanceServer(QObject):
         return self._server.isListening()
 
     def close(self) -> None:
+        """Stops listening and drops a start still connected, so nothing of it is left for
+        the garbage collector to delete outright (Qt warns, and may crash, on a socket so
+        deleted)."""
         self._server.close()
+        for socket in self._server.findChildren(QLocalSocket):
+            socket.abort()
+            socket.deleteLater()
+        self._read.clear()
 
     def _on_connection(self) -> None:
         while self._server.hasPendingConnections():

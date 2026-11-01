@@ -877,10 +877,12 @@ class MultiviewTests(MultiviewCase):
         self.ready("rtsp://stream/3")  # a direct tile, focused
         t2 = self.sessions.slot("t2")
         t2.playback.stateChanged.emit("playing")
-        for _ in range(3):  # two reopens, then it is over
+        for reopen in range(3):  # two reopens, then it is over
+            opened = len(t2.playback.plays)
             t2.playback.ended.emit()
             t2.playback.stateChanged.emit("ended")
-            QTest.qWait(60)
+            if reopen < 2:  # each opened before the next end (a late timer on a busy CI Mac)
+                self.assertTrue(wait_until(lambda: len(t2.playback.plays) > opened))
         self.assertEqual(self.toast.messages()[-1], ("The stream ended", "info"))
         self.assertEqual(self.grid.state("t2"), FAILED)
         self.assertEqual(self.grid.label("t2"), ("Three", "The stream ended"))

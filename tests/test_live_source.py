@@ -1071,7 +1071,7 @@ video.m3u8
             source_module,
             _RECONNECT_DELAYS=FAST_RETRIES,
             _REFUSED_RETRY_S=0.02,
-            _REFUSED_PATIENCE_S=1.0,
+            _REFUSED_PATIENCE_S=3.0,  # room for more asks than the schedule on a busy CI Mac
         ):
             source = open_source(
                 server.url + "/live.ts", headers={}, verify_ssl=True, stop=threading.Event()

@@ -13,7 +13,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication
 
@@ -80,8 +80,16 @@ class ClaimTests(unittest.TestCase):
 
     def listening(self, server):
         self.assertIsNotNone(server)
-        self.addCleanup(server.close)
+        self.addCleanup(self.dispose, server)
         self.assertTrue(server.listening())
+
+    @staticmethod
+    def dispose(server):
+        # Closed and deleted by Qt here, not by the runner's garbage collection after the
+        # test (a socket still connected then was deleted outright: a crash on CI's Macs).
+        server.close()
+        server.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def first(self, mode="answer"):
         script = Path(self.folder) / "first.py"
