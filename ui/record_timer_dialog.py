@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Callable, Optional
 
-from PySide6.QtCore import QDate, QLocale, QTime
+from PySide6.QtCore import QDate, QLocale, Qt, QTime
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
@@ -98,6 +98,7 @@ class RecordTimerDialog(QDialog):
             for moment in (start, stop)
         )
         self.channel = QLabel(channel_name, self)
+        self.channel.setTextFormat(Qt.TextFormat.PlainText)  # a provider's name, as it is
         self.name = QLineEdit(self)
         # i18n: the placeholder of "Record at a time"'s Name field
         self.name.setPlaceholderText(tr("Optional"))

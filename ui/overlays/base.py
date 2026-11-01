@@ -3,8 +3,17 @@
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QPointF
-from PySide6.QtGui import QHelpEvent, QRegion
+from PySide6.QtGui import QHelpEvent, QRegion, Qt
 from PySide6.QtWidgets import QToolTip, QWidget
+
+
+def plain_tooltip(text: str) -> str:
+    """`text` as a tooltip shows it as it is: Qt shows a text that looks like HTML as HTML,
+    and a tooltip may name a provider's channel or programme ("<h1>…", an <img> of a local
+    file). Such a text is escaped (as rich text that reads as the text); any other stays."""
+    if Qt.mightBeRichText(text):
+        return Qt.convertFromPlainText(text, Qt.WhiteSpaceMode.WhiteSpaceNormal)
+    return text
 
 
 class TooltipWidget(QWidget):
@@ -25,7 +34,7 @@ class TooltipWidget(QWidget):
             text = self.tooltip_at(QPointF(event.pos()))  # QHelpEvent has no position()
             if text is not None:
                 if text:
-                    QToolTip.showText(event.globalPos(), text, self)
+                    QToolTip.showText(event.globalPos(), plain_tooltip(text), self)
                 else:
                     QToolTip.hideText()
                     if self.pass_empty_tooltip:
