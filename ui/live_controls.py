@@ -190,6 +190,7 @@ class LiveControls(QObject):
         memory: Optional[CatchupMemory] = None,
         prepare: Callable[[Any, Target], None] = lambda session, target: None,
         archive_allowed: Callable[[], bool] = lambda: True,
+        beside_recording: Optional[Callable[[Target, float, Optional[float]], None]] = None,
         gave_up: Callable[[], None] = lambda: None,
         runner: Any = None,
         back_notice: Callable[[], Any] = lambda: None,
@@ -201,10 +202,11 @@ class LiveControls(QObject):
         direct stream may open again (a multiview tile's checks its provider's slot
         first). Catch-up: `memory` keeps whether each channel's archive answered (None: for
         this run only), `prepare(session, target)` readies the player for a channel before
-        its archive opens, `archive_allowed()` says whether archives may play now, `runner`
-        runs the archive probes (a JobRunner by default). `gave_up()`: the channel's live
-        session failed for good (said; a multiview's focused tile then stops and shows its
-        card). `on_sizes()`: the channel's picture
+        its archive opens, `archive_allowed()` says whether archives may play now,
+        `beside_recording(target, moment, until)` opens a rewind's archive while the channel
+        records (CatchUp's), `runner` runs the archive probes (a JobRunner by default).
+        `gave_up()`: the channel's live session failed for good (said; a multiview's focused
+        tile then stops and shows its card). `on_sizes()`: the channel's picture
         sizes came, or an archive started or ended (2.8: the ⚙ may show or go)."""
         super().__init__(parent)
         self._on_sizes = on_sizes
@@ -265,6 +267,7 @@ class LiveControls(QObject):
             limit=self.limit,
             prepare=prepare,
             allowed=archive_allowed,
+            beside_recording=beside_recording,
             runner=runner,
             lanes=lanes,  # an STB portal makes its recordings' links
             parent=self,

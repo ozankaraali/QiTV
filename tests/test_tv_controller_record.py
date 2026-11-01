@@ -6,6 +6,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QWidget
+from test_catchup_playback import ARCHIVED, STATE as ARCHIVED_STATE
 from test_multiview import MIB, MultiviewCase
 from test_tv_controller import (
     BACKUP_TWO,
@@ -19,6 +20,7 @@ from timer_fixtures import wait_until
 
 from services.connection_budget import DENIED
 from services.sessions import Slot
+from services.vlc_profile import PlayKind
 from ui.keymap import Action
 from ui.live_tuner import LiveTuner
 from ui.overlays.question_card import QuestionCard
@@ -441,6 +443,78 @@ class RecSignAndQuitTests(_RecordCase):
         self.start_large(0)
         self.assertFalse(self.controller.asks_before_quit(lambda: None))
         self.assertEqual(self.controller.quit_note(), "")
+
+
+class RewindBesideRecordingTests(_RecordCase):
+    """A rewind past the buffer (←, ⏮, the bar's dashed part) into the archive of the channel
+    that records large opens it as the guide's "Watch from the start" does: the recording
+    goes on in the background, or QiTV asks first when no stream is free; never stopped
+    unasked (the archive plays directly: one-stream accounts never play it through the
+    buffer while it records)."""
+
+    def overlays(self, column):
+        overlays = super().overlays(column)
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.question = QuestionCard(self.host)
+        overlays.question = self.question
+        return overlays
+
+    def setUp(self):
+        super().setUp()
+        self.channels = [ARCHIVED, *CHANNELS[1:]]
+        self.catalog.live["10"] = self.channels
+
+    def record_archived(self):
+        self.controller.tune(ARCHIVED, group_key="10", channels=self.channels)
+        self.ready(ARCHIVED["cmd"])
+        live = self.controller.live
+        self.assertTrue(wait_until(lambda: len(live.named("start")) == 1))
+        live.play_pipeline()
+        live.timelineChanged.emit(dict(ARCHIVED_STATE))
+        self.assertTrue(live.start_recording("/tmp/x.ts"))
+        return live
+
+    @staticmethod
+    def archive_plays(slot):
+        return [url for url, kw in slot.playback.plays if kw.get("kind") is PlayKind.VOD_STREAM]
+
+    def test_it_records_on_in_the_background(self):
+        recording = self.record_archived()
+        links = len(self.catalog.links)
+        self.controller.handle(Action.SEEK_BACK)  # 10 s back from 5 s after the buffer's start
+        self.assertEqual(len(self.catalog.links), links + 1)  # its link, as the guide's start
+        self.ready(ARCHIVED["cmd"])
+        self.assertTrue(recording.recording())
+        self.assertNotIn(("stop",), self.since_recording(recording))
+        self.assertEqual([s.name for s in self.sessions.background()], ["main"])
+        stand_in = self.sessions.large()
+        self.assertEqual(stand_in.name, "b1")
+        [url] = self.archive_plays(stand_in)
+        self.assertIn("/timeshift/viewer/secret/", url)
+        self.assertEqual(sorted(self.budget.holders("Home")), ["b1", "main"])
+
+    def test_with_no_stream_free_it_asks_first(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+        recording = self.record_archived()
+        links = len(self.catalog.links)
+        self.controller.handle(Action.SEEK_BACK)
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.assertEqual(
+            self.question.question(),
+            "No stream is free: Harbour News is recording. Stop the recording?",
+        )
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertTrue(recording.recording())
+        self.assertNotIn(("stop",), self.since_recording(recording))
+        self.controller.handle(Action.SEEK_FWD)  # to Stop recording
+        self.controller.handle(Action.OK)
+        self.assertIn(("stop_recording",), recording.calls)
+        self.assertEqual(recording.calls[-1], ("stop",))  # then the archive takes its stream
+        recording.released.emit()
+        [url] = self.archive_plays(self.sessions.large())
+        self.assertIn("/timeshift/viewer/secret/", url)
+        self.assertEqual(self.budget.holders("Home"), ["main"])
 
 
 SCHEDULED = "sched:a@1"  # a scheduled recording's REC sign name, its stream's budget purpose

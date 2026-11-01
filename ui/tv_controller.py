@@ -333,6 +333,7 @@ class TVController(QObject):
             prepare=lambda session, target: self._prepare(session, target, None),
             back_notice=lambda: self.overlays.back_notice,
             archive_allowed=self._archive_allowed,
+            beside_recording=self._archive_beside_recording,
             gave_up=self._fail_focused_tile,
             on_sizes=self._offer_live_quality,
             parent=self,
@@ -1355,7 +1356,7 @@ class TVController(QObject):
         channels: list[dict],
         *,
         from_zap: bool,
-        archive: Optional[tuple[float, float]] = None,
+        archive: Optional[tuple[float, Optional[float]]] = None,
     ) -> None:
         """`archive`: the channel's provider archive from a moment to another (Unix seconds:
         the guide's past programme) instead of live."""
@@ -2300,7 +2301,7 @@ class TVController(QObject):
         channel: dict,
         group_key: str,
         channels: list[dict],
-        archive: Optional[tuple[float, float]],
+        archive: Optional[tuple[float, Optional[float]]],
     ) -> bool:
         """A tune that would stop a recording, or needs the stream one holds: asked."""
 
@@ -3497,6 +3498,22 @@ class TVController(QObject):
     def _on_guide_tune(self, channel: dict, group_key: str, channels: list[dict]) -> None:
         if not self._closed:
             self.tune(channel, group_key=group_key, channels=channels)
+
+    def _archive_beside_recording(
+        self, target: Target, moment: float, until: Optional[float]
+    ) -> None:
+        """A rewind past the buffer (←, ⏮, the bar's dashed part) into the archive of the
+        channel the large picture records: it opens as the guide's "Watch from the start"
+        does, so the recording goes on in the background, or QiTV asks first when no stream
+        is free (never stopped unasked)."""
+        if self._closed:
+            return
+        context = self.zap.context
+        if context.group_key == target.group_key and context.index_of(target.item) >= 0:
+            key, channels = context.group_key, context.channels
+        else:
+            key, channels = ALL_GROUP_ID, self._all_live()
+        self._tune(target.item, key, channels, from_zap=False, archive=(moment, until))
 
     def _on_guide_catchup(
         self, channel: dict, programme: Programme, group_key: str, channels: list[dict]
