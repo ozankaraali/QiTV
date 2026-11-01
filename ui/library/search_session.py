@@ -62,9 +62,13 @@ class SearchSession(QObject):
         *,
         loaded: Optional[Callable[[], dict]] = None,
         idle_ms: int = IDLE_DROP_MS,
+        where: Optional[Callable[[], tuple[Optional[str], str]]] = None,
     ) -> None:
+        """`where()`: the section and the provider the Library shows ((None, "") for none):
+        their results come first."""
         super().__init__(parent)
         self._provider_manager = provider_manager
+        self._where = where or (lambda: (None, ""))
         self._loaded = loaded  # the content the catalogs hold: searched without a re-read
         self._jobs = jobs
         self._model = model
@@ -243,10 +247,15 @@ class SearchSession(QObject):
         self._failed = failed
         sections: list[tuple[str, list[dict]]] = []
         flat: list[Hit] = []
-        for (provider, section), group in itertools.groupby(
-            hits or [], key=lambda h: (h.provider, h.section)
-        ):
-            found = list(group)
+        groups = [
+            (key, list(group))
+            for key, group in itertools.groupby(hits or [], key=lambda h: (h.provider, h.section))
+        ]
+        shown_section, shown_provider = self._where()
+        # The section the Library shows first, the provider it shows first in each (the
+        # others keep their order).
+        groups.sort(key=lambda g: (g[0][1] != shown_section, g[0][0] != shown_provider))
+        for (provider, section), found in groups:
             label = translate(SECTION_LABELS.get(section, section))
             sections.append(
                 (f"{provider} · {label} ({i18n.number(len(found))})", [h.item for h in found])

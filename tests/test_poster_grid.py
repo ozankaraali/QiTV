@@ -6,7 +6,7 @@ import zlib
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QContextMenuEvent, QFont, QFontMetricsF, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
@@ -168,7 +168,8 @@ class PosterGridTests(unittest.TestCase):
     def buttons(self):
         """The strip buttons left to right, each with a point inside it, found via button_at."""
         strip = self.grid.strip_rect()
-        y = strip.center().y()
+        row = self.grid._strip_buttons(QRectF(strip))  # the buttons' row, under the title
+        y = round(row[0][3].center().y()) if row else strip.center().y()
         spans = {}
         for x in range(strip.left(), strip.right() + 1):
             name = self.grid.button_at(QPoint(x, y))
@@ -277,6 +278,19 @@ class PosterGridTests(unittest.TestCase):
         self.assertEqual(self.named("favoriteToggled"), [9])
         self.assertEqual(self.named("activated"), [9])
         self.assertEqual(self.grid.current_index(), 9)
+
+    def test_strip_buttons_sit_at_the_left_under_the_title(self):
+        # The corner player sits at the bottom right, over the strip's right end.
+        self.grid.set_sections([("", titles(30))])
+        self.grid.set_details_provider(lambda item: details())
+        self.grid.set_current_index(9)
+        strip = QRectF(self.grid.strip_rect())
+        row = [rect for _name, _label, _style, rect in self.grid._strip_buttons(strip)]
+        self.assertEqual(len(row), 3)
+        self.assertLess(row[-1].right(), strip.center().x())
+        self.assertGreater(row[0].top(), strip.top() + strip.height() / 4)  # under the title
+        self.assertLessEqual(row[0].bottom(), strip.bottom())
+        self.assertEqual(len({rect.top() for rect in row}), 1)  # one row
 
     def test_strip_buttons_by_kind(self):
         self.grid.set_sections([("", titles(30))])

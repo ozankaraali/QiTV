@@ -171,6 +171,8 @@ class LibraryController(QObject):
             watch,
             self,
             loaded=getattr(catalog, "loaded_contents", None),
+            # The results of the section and the provider shown first.
+            where=lambda: (self._section, str(self._catalog.current_provider_name())),
         )
         self._pending = PendingAction()
         self._ran_for = ""  # the shown provider whose ready just ran the pending action

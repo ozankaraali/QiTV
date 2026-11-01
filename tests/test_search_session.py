@@ -156,6 +156,24 @@ class SearchSessionTests(unittest.TestCase):
             self.session.poster_url(item, lambda url: "logo:" + url), "logo:http://logos.invalid/1"
         )
 
+    def test_the_section_and_provider_shown_come_first(self):
+        where = ["movies", "Q"]
+        session = SearchSession(
+            self.providers, self.runner, self.model, self.watch, where=lambda: tuple(where)
+        )
+        self.addCleanup(session.shutdown)
+        session.set_query("salt")
+        session.run_now()
+        self.runner.finish(0)
+        titles = [title for title, _items in session.sections()]
+        self.assertEqual(titles, ["Q · Movies (1)", "P · Movies (1)", "P · Live TV (1)"])
+        self.assertEqual(session.hit_at(0).provider, "Q")  # the grid's order
+        where[:] = ["live", "P"]
+        session.rerun()
+        self.runner.finish(1)
+        titles = [title for title, _items in session.sections()]
+        self.assertEqual(titles, ["P · Live TV (1)", "P · Movies (1)", "Q · Movies (1)"])
+
     def test_hits_are_stamped_with_their_provider(self):
         self.session.set_query("salt")
         self.session.run_now()

@@ -64,8 +64,12 @@ FOCUS_RING_PX = 1.5
 UNFOCUSED_RING_ALPHA = 0.35  # the current poster's ring while keys move another zone
 TILE_LOGO_W = 0.7  # a channel logo fits in this share of its tile's width…
 TILE_LOGO_H = 0.4  # …and of its height
-STRIP_H_U = 11.0
+# The title and its facts, the buttons under them (at the left: the corner player sits at the
+# bottom right), then the plot.
+STRIP_H_U = 15.5
 STRIP_PAD_U = 2.0
+STRIP_TOP_U = 1.4  # the title's top, and the least room under the last line
+STRIP_ROW_GAP_U = 0.8  # above and below the buttons' row
 STRIP_TINT_ALPHA = 0.2
 STRIP_TITLE_U = 2.2
 STRIP_META_U = 1.1
@@ -1161,25 +1165,33 @@ class PosterGrid(QAbstractScrollArea):
         p.drawRoundedRect(rect.adjusted(half, half, -half, -half), RADIUS_CARD, RADIUS_CARD)
         p.restore()
 
+    def _buttons_top(self, strip: QRectF) -> float:
+        """The y of the strip's buttons: under the title and its facts."""
+        u = self._units.u
+        y = strip.top() + STRIP_TOP_U * u
+        y += QFontMetricsF(self._units.font(STRIP_TITLE_U, QFont.Weight.Bold)).height()
+        if any(self._meta_parts(self._details())):
+            y += 0.3 * u + QFontMetricsF(self._units.font(STRIP_META_U)).height()
+        return y + STRIP_ROW_GAP_U * u
+
     def _strip_buttons(self, strip: QRectF) -> list[tuple[str, str, str, QRectF]]:
-        """(name, label, style, rect) for the current title's buttons, right-aligned."""
+        """(name, label, style, rect) for the current title's buttons, left to right under
+        its title (the corner player covers the strip's right end)."""
         u = self._units.u
         fm = QFontMetricsF(self._units.font(BUTTON_FONT_U, QFont.Weight.DemiBold))
         height = BUTTON_H_U * u
-        y = strip.center().y() - height / 2
-        x = strip.right() - STRIP_PAD_U * u
+        y = self._buttons_top(strip)
+        x = strip.left() + STRIP_PAD_U * u
         out: list[tuple[str, str, str, QRectF]] = []
-        for name, label, style in reversed(self._specs()):
+        for name, label, style in self._specs():
             if style == _SQUARE:
                 width = height
             else:
                 width = fm.horizontalAdvance(label) + 2 * BUTTON_PAD_U * u
                 if name in (PLAY, WHEN):
                     width += BUTTON_ICON_U * u + 0.5 * u
-            x -= width
             out.append((name, label, style, QRectF(x, y, width, height)))
-            x -= BUTTON_GAP_U * u
-        out.reverse()
+            x += width + BUTTON_GAP_U * u
         return out
 
     def _paint_strip(self, p: QPainter, rect: QRectF) -> None:
@@ -1199,8 +1211,7 @@ class PosterGrid(QAbstractScrollArea):
         for name, label, style, button in buttons:
             self._paint_button(p, name, label, style, button, details)
         left = rect.left() + STRIP_PAD_U * u
-        right = (buttons[0][3].left() if buttons else rect.right()) - STRIP_PAD_U * u
-        width = max(0.0, right - left)
+        width = max(0.0, rect.right() - STRIP_PAD_U * u - left)
         item = self._items[self._cur]
         title = details.title if details is not None else title_of(item)
         title_font = units.font(STRIP_TITLE_U, QFont.Weight.Bold)
@@ -1213,14 +1224,13 @@ class PosterGrid(QAbstractScrollArea):
         plot = _wrap(plot_fm, details.plot, width, PLOT_LINES) if details and details.plot else []
         # i18n: on the Library's detail strip: a title's leading actors ("Cast: Ana, Bo")
         cast = tr("Cast: {names}", names=details.cast) if details and details.cast else ""
-        block = title_h
-        if meta or watched:
-            block += 0.3 * u + meta_h
-        if plot:
-            block += 0.6 * u + plot_fm.lineSpacing() * len(plot)
-        if cast:
-            block += 0.4 * u + meta_h
-        y = rect.top() + (rect.height() - block) / 2
+        y = rect.top() + STRIP_TOP_U * u
+        # Under the buttons: the plot's lines and the cast, as many as the strip holds.
+        below = (buttons[0][3].bottom() if buttons else y) + STRIP_ROW_GAP_U * u
+        room = rect.bottom() - STRIP_TOP_U * u - below
+        plot = plot[: max(0, int(room // plot_fm.lineSpacing()))]
+        if room < plot_fm.lineSpacing() * len(plot) + 0.4 * u + meta_h:
+            cast = ""  # no room left under the plot
         p.setFont(title_font)
         p.setPen(qcolor(PALETTE.text))
         p.drawText(
@@ -1231,8 +1241,8 @@ class PosterGrid(QAbstractScrollArea):
             y += 0.3 * u
             self._paint_meta(p, QRectF(left, y, width, meta_h), meta, watched, meta_font)
             y += meta_h
+        y = below
         if plot:
-            y += 0.6 * u
             p.setFont(plot_font)
             p.setPen(qcolor(PALETTE.text, 0.85))
             for text in plot:
