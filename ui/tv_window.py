@@ -72,6 +72,7 @@ from services.catchup_memory import FILE_NAME as CATCHUP_FILE, CatchupMemory
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.find import Preferences, preferences_for
+from services.hidden_groups import HiddenGroups
 from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
@@ -429,6 +430,9 @@ class TVWindow(QMainWindow):
         # 2.8: parental controls: the browsed catalogs and the searches leave out what they hide
         self.parental = Parental(config_manager)
         self.catalogs.parental = self.parental
+        # 2.9.1: groups hidden to tidy the lists, without a PIN (Settings → Providers).
+        self.hidden_groups = HiddenGroups(config_manager)
+        self.catalogs.hidden_groups = self.hidden_groups
         self.parental.group_title = self.catalogs.group_title  # the adult rule reads names
         self._relock = QTimer(self, singleShot=True)
         self._relock.timeout.connect(self.parental_changed)
@@ -773,6 +777,7 @@ class TVWindow(QMainWindow):
                 )
             )
         controller.parental = self.parental  # what it protects never enters the history
+        controller.hidden_groups = self.hidden_groups
         self.overlays.guide.recordRequested.connect(self.schedule_programme)
         self.overlays.guide.recordCancelled.connect(self.cancel_programme)
         self.overlays.guide.timerRequested.connect(self.record_at)
@@ -1834,6 +1839,7 @@ class TVWindow(QMainWindow):
         schedule: Any = self.scheduler if self.scheduler is not None else self.recording_schedule
         hooks: list[Callable[[Renames], Any]] = [
             self.parental.rename_providers,
+            self.hidden_groups.rename_providers,  # 2.9.1
             schedule.rename_providers,  # the scheduler's: its recordings under way too
             self.budget.rename_providers,
             self.remote.rename_providers,

@@ -74,6 +74,7 @@ from services.thread_cleanup import ThreadCleanup
 from services.tmdb import built_in_token as tmdb_built_in_token
 from ui.captions_texts import size_text
 from ui.free_channels_menu import show_menu as show_free_channels_menu
+from ui.hidden_groups_settings import add_hidden_groups_box
 from ui.parental_settings import build_parental_tab, pin_allows
 from ui.provider_drop import unique_name
 from ui.remote_settings import build_remote_tab, save_remote_settings
@@ -1235,6 +1236,7 @@ class OptionsDialog(QDialog):
         removing.addWidget(self.remove_provider_button)
         removing.addStretch(1)
         self.providers_layout.addRow(removing)
+        add_hidden_groups_box(self, self.providers_layout, self.providers_tab)  # 2.9.1
 
     def create_stream_type_ui(self):
         self.type_label = QLabel(tr("Stream Type:"), self)  # i18n: a provider's kind

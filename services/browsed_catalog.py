@@ -330,8 +330,8 @@ class BrowsedCatalog(QObject):
         if shown != self._seen_source:
             self._seen_source = shown
             self._epoch += 1
-        guard = self._parental()  # 2.8: hiding or showing what is hidden changes the lists
-        hidden = (guard.state_version() << 2 * _EPOCH_SHIFT) if guard is not None else 0
+        # 2.8: hiding or showing what is hidden changes the lists (2.9.1: tidying them too)
+        hidden = self._hidden_state() << 2 * _EPOCH_SHIFT
         if self.all_providers():
             return hidden + (self._epoch << _EPOCH_SHIFT) + self._all_version()
         catalog = self._cat()
@@ -342,10 +342,16 @@ class BrowsedCatalog(QObject):
         )
 
     def parental_state(self) -> int:
-        """What parental controls hide now (changes as content_version() does with them): a
-        Library list worked out under another state is never shown meanwhile."""
+        """What parental controls hide now, and the groups hidden to tidy the lists (changes as
+        content_version() does with them): a Library list worked out under another state is
+        never shown meanwhile."""
+        return self._hidden_state()
+
+    def _hidden_state(self) -> int:
         guard = self._parental()
-        return guard.state_version() if guard is not None else 0
+        tidy = getattr(self._catalogs, "hidden_groups", None)
+        state = guard.state_version() if guard is not None else 0
+        return state * 65536 + (tidy.version if tidy is not None else 0)
 
     def _all_version(self) -> int:
         """Changes whenever the content of any provider (or the provider list) does."""
@@ -527,6 +533,10 @@ class BrowsedCatalog(QObject):
         else:
             catalog = self._cat()
             found = catalog.groups(section) if catalog is not None else []
+        tidy = getattr(self._catalogs, "hidden_groups", None)
+        if tidy is not None and tidy.entries():
+            # 2.9.1: the groups hidden to tidy the lists are not listed (services.hidden_groups).
+            found = [g for g in found if g.header or not tidy.hides(section, *self._group_of(g.id))]
         guard = self._parental()
         if guard is None or not guard.active():
             return found

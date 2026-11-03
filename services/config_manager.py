@@ -512,6 +512,11 @@ class ConfigManager:
     media_4k_versions = _config_property(
         "media_4k_versions", "screen", coerce=_one_of(("screen", "always", "never"), "screen")
     )
+    # 2.9.1, optional: groups hidden to tidy the lists ({"version": 1, "groups"});
+    # services.hidden_groups reads and writes it.
+    hidden_groups = _config_property(
+        "hidden_groups", None, coerce=lambda value: value if isinstance(value, dict) else None
+    )
     # 2.8, optional: parental controls ({"version": 1, "salt", "pin" (a PBKDF2 hash), "hidden"});
     # services.parental reads and writes it.
     parental = _config_property(

@@ -4742,9 +4742,28 @@ class ContextMenuTests(ControllerTestCase):
         self.assertTrue(guard.protects("live", self.channels[0].payload))
         group = self.nav.path[-1]
         group_menu = self.menu_for(group)
-        self.assertEqual(self.texts(group_menu), ["Hide (parental controls)"])
+        self.assertEqual(self.texts(group_menu), ["Hide group", "Hide (parental controls)"])
         self.choose(group_menu, "Hide (parental controls)")
         self.assertEqual(len(guard.hidden()), 2)
+
+    def test_without_a_pin_a_group_can_be_hidden_from_the_lists(self):
+        # 2.9.1: "Hide group" tidies the lists; no PIN, nothing locked.
+        from services.hidden_groups import HiddenGroups
+
+        class Kept:
+            hidden_groups = None
+
+            def save_config(self):
+                pass
+
+        tidy = self.controller.hidden_groups = HiddenGroups(Kept())
+        group = self.nav.path[-1]
+        menu = self.menu_for(group)
+        self.assertEqual(self.texts(menu), ["Hide group"])  # no parental entry without a PIN
+        self.choose(menu, "Hide group")
+        [entry] = tidy.entries()
+        self.assertEqual(entry["title"], group.title)
+        self.assertIn("Settings → Providers", self.toast.messages()[-1][0])
 
     def test_what_parental_controls_protect_never_enters_the_history(self):
         guard = self.guarded()
