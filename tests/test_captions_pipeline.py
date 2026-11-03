@@ -817,6 +817,38 @@ class FilmCaptionsTests(unittest.TestCase):
         self.assertEqual(self.captions._cues, [])  # the English ones went
         self.assertEqual(self.captions.language()[0], "Turkish")
 
+    def test_each_run_takes_the_language_of_the_track_it_reads(self):
+        # 2.9: on the owner's film the panel said Turkish while the English track played and
+        # was read: the language had been worked out at another moment than the track.
+        session = self.window.session
+        session.playing = 13
+        session.audio_track = lambda: session.playing
+        session.audio_tracks = lambda: [(-1, "Disable"), (1, "English"), (13, "Track 13")]
+        session.audio_track_info = lambda: [
+            unittest.mock.Mock(id=1, language_code="English"),
+            unittest.mock.Mock(id=13, language_code="tur"),
+        ]
+        self.captions._resolve_language()  # while the Turkish track played
+        session.playing = 1
+        self.captions._start_run()
+        self.assertEqual(self.sent[0][4:6], (1, "English"))
+        self.assertEqual(self.captions.language()[0], "English")
+
+    def test_a_run_begun_on_the_default_track_takes_its_language_once_known(self):
+        session = self.window.session
+        session.playing = -1  # the player busy as the run began: the film's default
+        session.audio_track = lambda: session.playing
+        session.audio_tracks = lambda: [(-1, "Disable"), (13, "Track 13")]
+        session.audio_track_info = lambda: [unittest.mock.Mock(id=13, language_code="tur")]
+        self.captions._start_run()
+        run = self.captions._run
+        self.assertEqual(self.sent[0][4:6], (None, ""))
+        session.playing = 13
+        self.captions._last = None
+        self.captions._tick()
+        self.assertEqual(self.captions._run, run)  # the same sound: not read again
+        self.assertIn(("language", "Turkish"), self.sent)
+
     def test_a_language_the_model_heard_is_forgotten_with_its_track(self):
         session = self.window.session
         session.playing = 2

@@ -656,6 +656,7 @@ class CaptionsController(QObject):
         self._run_channel = self._channel_key()
         self._run_start = start
         self._run_track = self._audio_track()
+        self._resolve_language()  # the language of the track it reads, as it begins
         self._session_key = url.rsplit("/side/", 1)[0]
         self._newest = None
         self._process.send("start", self._run, url, start, self._run_track, self._language[0])
@@ -673,6 +674,7 @@ class CaptionsController(QObject):
         self._run_channel = self._channel_key()
         self._run_start = start
         self._run_track = self._audio_track()
+        self._resolve_language()  # the language of the track it reads, as it begins
         self._session_key = location
         self._newest = None
         self._process.send(
@@ -785,6 +787,11 @@ class CaptionsController(QObject):
             return False  # the player is busy (an opening, a seek): looked at again next tick
         if self._run_track is None:
             self._run_track = track  # the run reads the default track: the one playing then
+            before = self._language[0]
+            self._resolve_language()
+            if self._language[0] != before:  # its language, now that it is known
+                self._process.send("language", self._language[0])
+                self.changed.emit()
             return False
         return track != self._run_track
 
@@ -797,8 +804,7 @@ class CaptionsController(QObject):
         self._cues.clear()
         self._last = None
         self._show("")
-        self._resolve_language()
-        self._start_run()
+        self._start_run()  # in the language of the track it reads
         self.changed.emit()  # the panel's language row says the track's
 
     def _waiting(self) -> bool:
@@ -1020,6 +1026,8 @@ class CaptionsController(QObject):
             tracks = [t for t in session.audio_tracks() if t[0] != -1]
             info = session.audio_track_info()
             playing = self._audio_track()
+            if playing is None:
+                return ""  # the player busy: no track known, not the first one's language
             index = next((i for i, t in enumerate(tracks) if t[0] == playing), 0)
             track = next((t for t in info if t.id == playing), None)
             if track is None and index < len(info):
