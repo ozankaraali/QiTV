@@ -95,6 +95,10 @@ a = Analysis(
         'segno',  # the phone remote's pairing QR (imported where it is drawn)
         # The live time-shift helper process (spawned) and what its source imports.
         'services.live.worker',
+        # 2.9: the AI captions process (spawned); the speech runtime itself is downloaded
+        # by the user with the model and put on that process's path, never bundled.
+        'services.captions.worker',
+        'services.captions.decoder',
         'm3u8',
         'Cryptodome.Cipher.AES',
         # Loaded on first use (services/lazy_import.py): no import statement names them.
@@ -105,7 +109,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['sherpa_onnx'],  # 2.9: downloaded with the AI captions model, never bundled
     noarchive=False,
 )
 
