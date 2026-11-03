@@ -20,8 +20,11 @@ captions process's libVLC).
 - The picture moves the upstream: its read where nothing is cached (a seek, also back over what
   was let go) closes the connection, then opens one there (what libVLC's own seek does).
 - The captions never move it, except for a short detour (`detour` bytes) to read the head or the
-  tail the picture did not keep, and only while the picture has `detour_lead` bytes cached ahead
-  and is not waiting; the picture's read resumes right after. A detour that fails fails only that
+  tail the picture did not keep, or, while the captions' libVLC opens the film (from its first
+  byte until it reads by the picture), what that opening reads anywhere (`opening_detours` at
+  most: 2.9, a film with 39 subtitle tracks read past the pinned head), and only while the
+  picture has `detour_lead` bytes cached ahead and is not waiting; the picture's read resumes
+  right after. A detour that fails fails only that
   captions read, and its range is not asked again. A captions read the upstream is not heading for
   fails after `follower_wait_s`: the captions reader ends, and AI captions start again near the
   picture.
@@ -95,6 +98,11 @@ class Limits:
     open_wait_s: float = 25.0  # the provider's first answer (then libVLC asks it itself)
     leader_wait_s: float = 30.0  # the picture's read waits no longer without the upstream moving
     follower_wait_s: float = 15.0  # a captions read the upstream is not heading for
+    # 2.9: the captions' libVLC opening the film (from its first byte until it reads by the
+    # picture) reads what the picture's opening read, anywhere (fonts for its subtitles too):
+    # this many detours at most, each `opening_detour` times a detour's bytes (32 MiB in all).
+    opening_detours: int = 4
+    opening_detour: int = 4
     idle_s: float = 10.0  # no reader connected this long: the upstream reads nothing
     connect_s: float = 10.0
     head_s: float = 15.0  # the request out and the answer's head in
@@ -411,6 +419,9 @@ class FilmRelay:
         self._lead: Optional[_Span] = None  # the picture's run
         self._detour: Optional[_Span] = None
         self._dead: list[tuple[int, int]] = []  # detour ranges that failed: not asked again
+        # The captions' libVLC opens the film (it read its first byte, not yet by the picture):
+        # its reads past the cache come by detours anywhere, this many more at most.
+        self._opening = 0
         self._reading: Optional[_Span] = None
         self._progress_at = time.monotonic()
         # Counted for the log and the tests: upstream connections made (redirects' too), the
@@ -615,17 +626,30 @@ class FilmRelay:
     def _dead_at(self, pos: int) -> bool:
         return any(start <= pos < end for start, end in self._dead)
 
-    def _ask_detour(self, pos: int) -> None:
+    def _ask_detour(self, pos: int, times: int = 1) -> bool:
+        """A detour for a captions read at `pos` (`times` a detour's bytes); False: none (one
+        goes, or one failed there)."""
         if self._detour is not None or self._size is None or self._dead_at(pos):
-            return
+            return False
         limits = self.limits
         start = pos - pos % limits.block
-        end = min(self._size, start + limits.detour)
+        end = min(self._size, start + limits.detour * times)
         if self._size - start <= limits.detour * 3 // 2:
             end = self._size  # the rest of the tail at once
         self._detour = _Span(start, start, end, detour=True)
         self.stats["detours"] += 1
         self._cond.notify_all()
+        return True
+
+    def _follow_opening(self, pos: int, served: bool) -> None:
+        """The captions' libVLC opens the film at its first byte (an MKV's head, then what its
+        SeekHead points at: in a film with dozens of tracks, past the pinned head), and has
+        opened it once it reads by the picture."""
+        if pos == 0:
+            self._opening = self.limits.opening_detours
+        elif served and self._leader_pos - self.limits.behind <= pos:
+            if pos < self._leader_pos + self.limits.ahead:
+                self._opening = 0
 
     # ---- the upstream (its thread) --------------------------------------------------------------
     def _upstream(self) -> None:
@@ -1231,6 +1255,8 @@ class FilmRelay:
                     self._leader_pos = pos
                     self._cond.notify_all()
                 data = self._cached(pos, size)
+                if role == FOLLOWER and newest:
+                    self._follow_opening(pos, bool(data))
                 if data:
                     return data
                 if self._size is not None and pos >= self._size:
@@ -1255,6 +1281,10 @@ class FilmRelay:
                         late = f"a read at {pos} was not served in time"
                     if role == FOLLOWER and newest and self._metadata(pos):
                         self._ask_detour(pos)  # the head or the tail: once the picture can wait
+                    elif role == FOLLOWER and newest and self._opening > 0:
+                        opening = self.limits.opening_detour
+                        if self._detour_allowed() and self._ask_detour(pos, opening):
+                            self._opening -= 1  # what its opening reads, wherever it is
                 if not late:
                     self._cond.wait(_SLICE)
             if late:  # logged out of the lock: no reader waits on a log's disk

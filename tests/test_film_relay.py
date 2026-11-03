@@ -341,6 +341,44 @@ class CaptionsTests(RelayTestCase):
         self.assertEqual(picture.read(2 * MIB), FILM[600 * KIB : 600 * KIB + 2 * MIB])
         picture.close()
 
+    def test_what_the_captions_opening_reads_past_the_head_comes_by_detours(self):
+        # 2.9, the owner's film (39 subtitle tracks): the captions' libVLC, opening it, read
+        # 8.75 MiB in, past the pinned head, while the picture played 27 minutes in; that read
+        # waited for nothing and failed again and again: no caption at all.
+        film = os.urandom(12 * MIB)
+        provider = FilmProvider(film, extension=".mkv", content_type="video/x-matroska")
+        self.addCleanup(provider.close)
+        relay = FilmRelay(provider.url, user_agent="VLC/3.0.20", limits=SMALL)
+        relay.start()
+        self.addCleanup(relay.wait_closed, 3.0)
+        self.addCleanup(relay.stop)
+        picture = Reader(relay.leader_url, 0)
+        picture.read(100 * KIB)  # the picture's own opening
+        picture.close()
+        at = 6 * MIB  # where it plays (a resume, a seek)
+        picture = Reader(relay.leader_url, at)
+        self.assertEqual(picture.read(64 * KIB), film[at : at + 64 * KIB])
+        self.assertTrue(wait_until(lambda: relay._frontier() >= at + 512 * KIB))
+        self.assertEqual(self.read(relay.follower_url, 0, 64 * KIB), film[: 64 * KIB])  # opens
+        past = 3 * MIB  # what it reads next: past the pinned head and what the picture read
+        self.assertEqual(
+            self.read(relay.follower_url, past, 64 * KIB), film[past : past + 64 * KIB]
+        )
+        opened = relay.stats["detours"]  # (what the relay sent on past a reader's last byte
+        self.assertIn(opened, range(1, SMALL.opening_detours + 1))  # may ask one more)
+        near = at + 128 * KIB  # then it reads by the picture: it has opened the film
+        self.assertEqual(
+            self.read(relay.follower_url, near, 64 * KIB), film[near : near + 64 * KIB]
+        )
+        far = 10 * MIB  # from now on a far read fails as before (the captions start again)
+        follower = Reader(relay.follower_url, far)
+        self.assertEqual(follower.read(64 * KIB), b"")
+        follower.close()
+        self.assertEqual(relay.stats["detours"], opened)
+        self.assertEqual(picture.read(256 * KIB), film[at + 64 * KIB : at + 320 * KIB])
+        picture.close()
+        self.assertEqual(provider.overlaps, [], "two upstream connections were open at once")
+
     def test_a_captions_read_the_upstream_is_not_heading_for_fails_in_time(self):
         picture = Reader(self.relay.leader_url, 0)
         picture.read(100 * KIB)
