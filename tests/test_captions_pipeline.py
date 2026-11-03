@@ -197,13 +197,40 @@ class TurkishModelTests(unittest.TestCase):
 
     def test_turkish_goes_to_ufak_louder_and_starts_with_a_capital(self):
         model, heard = self.model()
-        self.assertEqual(model.decode(array("f", [0.1, 0.05]), "Turkish"), "İyi akşamlar")
+        self.assertEqual(model.decode(array("f", [0.1, 0.05]), "Turkish"), "iyi akşamlar")
         self.assertEqual(heard, [("ufak", "peak", array("f", [0.8])[0])])  # its card's gain
         heard.clear()
         self.assertEqual(model.decode(array("f", [0.1]), "English"), "Good evening.")
         self.assertEqual(heard[0], ("qwen", "language", "English"))
         model.turkish = None  # its files not given: Qwen writes Turkish too
         self.assertEqual(model.decode(array("f", [0.1]), "Turkish"), "Good evening.")
+
+    def test_a_capital_only_where_a_sentence_starts(self):
+        # 2.9.2, the owner: each line began with a capital mid-sentence, with no full stops.
+        from services.captions.worker import _Run
+
+        run = object.__new__(_Run)
+        run._said = None
+        lines = [
+            ("ayde çok güzel bir fikir ve", 10.0, 12.0),  # the first: a sentence starts
+            ("yarın da gideriz", 12.2, 13.5),  # straight on: the same sentence
+            ("ne konuşuyorsun", 15.0, 16.0),  # after a 1.5 s pause: a new one
+            ("tamam. iyi geceler", 16.3, 17.5),  # straight on, as written
+            ("işte böyle", 17.7, 18.5),
+        ]
+        cased = [run.sentence_case(text, start, end) for text, start, end in lines]
+        self.assertEqual(
+            cased,
+            [
+                "Ayde çok güzel bir fikir ve",
+                "yarın da gideriz",
+                "Ne konuşuyorsun",
+                "tamam. iyi geceler",
+                "işte böyle",
+            ],
+        )
+        run._said = ("Gel bakalım.", 20.0)
+        self.assertEqual(run.sentence_case("içeri gir", 20.1, 21.0), "İçeri gir")  # after a stop
 
     def test_a_turkish_capital_is_turkish(self):
         from services.captions.worker import turkish_capital

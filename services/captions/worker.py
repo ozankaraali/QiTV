@@ -83,9 +83,12 @@ _TURKISH_GAIN = 8.0  # the model card's input gain: its sherpa-onnx files want t
 _UPPER = {"i": "İ", "ı": "I"}  # Turkish's own capitals of the dotted and the dotless i
 
 
+_SENTENCE_ENDS = (".", "!", "?", "…")
+SENTENCE_GAP_S = 1.0  # a pause this long before a line: it starts a sentence
+
+
 def turkish_capital(text: str) -> str:
-    """`text` with its first letter a capital, as Turkish writes it (i: İ). ufak writes a line
-    in lower case at times, with no full stop: a caption starts as a sentence does."""
+    """`text` with its first letter a capital, as Turkish writes it (i: İ)."""
     for i, char in enumerate(text):
         if char.isalpha():
             upper = _UPPER.get(char, char.upper())
@@ -152,7 +155,7 @@ class _Model:
             stream = self.turkish.create_stream()
             stream.accept_waveform(16000, array("f", (v * _TURKISH_GAIN for v in samples)))
             self.turkish.decode_stream(stream)
-            return turkish_capital(str(stream.result.text).strip())
+            return str(stream.result.text).strip()  # its case: `_Run.sentence_case`
         stream = self.recognizer.create_stream()
         if language:
             stream.set_option("language", language)
@@ -189,6 +192,7 @@ class _Run:
         self.newest = segment_start
         self.rtf = 0.5
         self._working: Optional[float] = None  # the start of the piece being recognized
+        self._said: Optional[tuple[str, float]] = None  # the line written last, and its end
         self.votes = text_language.Votes()  # the language heard, when none is given
         self._resynced = False
         self._ended = False
@@ -313,7 +317,21 @@ class _Run:
                 continue  # in another language's letters: not what the channel says
             if not self.language and not self._heard(text, length):
                 continue
+            if self.language == TURKISH and self.model.turkish is not None:
+                text = self.sentence_case(text, piece.start, piece.end)
             self.link.send(("caption", self.run, piece.start, piece.end, text))
+
+    def sentence_case(self, text: str, start: float, end: float) -> str:
+        """ufak's line with a capital where a sentence starts (the run's first line, after a
+        full stop, after a pause of SENTENCE_GAP_S), else as it wrote it: it writes no full
+        stops at times, and each line began with a capital mid-sentence (2.9.2, the owner:
+        "capitalization is kinda weird since we are not finalizing sentences with dots")."""
+        said = self._said
+        begins = (
+            said is None or said[0].endswith(_SENTENCE_ENDS) or start - said[1] >= SENTENCE_GAP_S
+        )
+        self._said = (text, end)
+        return turkish_capital(text) if begins else text
 
     def written_to(self) -> float:
         """How far the captions are written: to the piece being recognized, else to the oldest
