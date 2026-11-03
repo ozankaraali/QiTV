@@ -634,6 +634,28 @@ class DownloadQuestionTests(unittest.TestCase):
         absent = mock.patch("services.captions.models.installed", return_value=False)
         absent.start()
         self.addCleanup(absent.stop)
+        measured = mock.patch("services.captions.tier.known_score", return_value=1.0)
+        measured.start()
+        self.addCleanup(measured.stop)
+
+    def test_a_model_chosen_while_its_question_is_up_is_the_one_asked_for(self):
+        # 2.9, the review: the phone stepped to Faster while the TV asked for the 1.7B, and
+        # Download fetched the 1.7B.
+        chosen = {"tier": "large"}
+        self.captions._choose_tier = lambda: chosen["tier"]
+        sizes = {"large": 2_300_000_000, "small": 878_702_423}
+        with mock.patch(
+            "services.captions.models.download_size", side_effect=lambda tier: sizes[tier]
+        ):
+            self.captions.toggle()
+            self.assertIn("2.3 GB", self.captions.question()[0])
+            chosen["tier"] = "small"
+            self.captions.set_model("small")
+        self.assertTrue(self.captions.asking())
+        self.assertIn("879 MB", self.captions.question()[0])
+        self.assertEqual(self.card.question(), self.captions.question()[0])
+        self.captions.answer(True)
+        self.assertEqual((self.begun, self.captions._fetching), ([True], "small"))
 
     def test_the_question_is_asked_with_its_words(self):
         self.assertFalse(self.captions.asking())
@@ -718,6 +740,50 @@ class SpeechModelTests(unittest.TestCase):
         self.assertEqual(self.captions.model_text(), "More accurate (1.7B)")
         self.captions.set_model("huge")
         self.assertEqual(self.config["ai_captions_model"], "large")
+
+    def test_automatic_never_measures_this_computer_on_the_gui_thread(self):
+        # 2.9, the review: measured beside the benchmark's own thread, each ran at half speed:
+        # the reference machine was given the 0.6B, and the GUI waited 0.45 s.
+        from services.captions import tier
+
+        self.disk.update(small=False, large=False)
+        warmed = []
+        self.captions._warm_tier = lambda: warmed.append(True)
+        with (
+            mock.patch.object(tier, "known_score", return_value=None),
+            mock.patch.object(tier, "machine_score", side_effect=AssertionError("measured")),
+            mock.patch.object(tier, "total_ram_bytes", return_value=16 * 1024**3),
+            mock.patch.object(tier, "is_arm_mac", return_value=False),
+        ):
+            self.assertEqual(self.captions.model_text(), "Automatic (1.7B)")  # until known
+            self.assertTrue(warmed)
+        with (
+            mock.patch.object(tier, "known_score", return_value=0.5),
+            mock.patch.object(tier, "total_ram_bytes", return_value=16 * 1024**3),
+            mock.patch.object(tier, "is_arm_mac", return_value=False),
+        ):
+            self.assertEqual(self.captions.model_text(), "Automatic (0.6B)")
+
+    def test_turned_on_before_the_speed_is_known_it_comes_on_once_it_is(self):
+        from services.captions import tier
+        from ui.captions_controller import CaptionsController
+
+        captions = CaptionsController(self.host)
+        captions._config_get = lambda name, default: default
+        captions._here = lambda name: False
+        warmed, decided = [], []
+        captions._warm_tier = lambda: warmed.append(True)
+        captions._choose_tier = lambda: decided.append(True) or "large"
+        with mock.patch.object(tier, "known_score", return_value=None):
+            captions.toggle()
+        self.assertEqual((warmed, decided), ([True], []))  # nothing decided yet
+        with (
+            mock.patch.object(tier, "known_score", return_value=1.0),
+            mock.patch("services.captions.models.installed", return_value=True),
+            mock.patch.object(captions, "_enable") as enable,
+        ):
+            captions._on_scored()
+        enable.assert_called_once_with("large")
 
     def test_chosen_while_off_it_is_kept_for_their_next_time(self):
         self.captions.set_model("large")

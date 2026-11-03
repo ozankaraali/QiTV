@@ -107,6 +107,7 @@ class CaptionsController(QObject):
     """The subtitle panel's AI captions, for the large picture's live channel."""
 
     changed = Signal()  # the row's state or text changed: the panel shows it again
+    _scored = Signal()  # this computer's speed is measured (from the benchmark's thread)
 
     def __init__(self, window: Any, card: Any = None, overlay: Any = None) -> None:
         super().__init__(window)
@@ -140,6 +141,10 @@ class CaptionsController(QObject):
         self._step_tried = False  # Automatic stepped down, or asked to, while QiTV runs
         self._stepped_down = False  # Automatic takes the 0.6B while QiTV runs
         self._fetching = ""  # the tier downloaded
+        self._warming = False  # the speed benchmark started (once)
+        self._unmeasured = False  # it failed: Automatic doesn't wait for it
+        self._toggle_waits = False  # turned on before the speed was known: on once it is
+        self._scored.connect(self._on_scored)
         self._download: Any = None
         self._percent = 0
         self._unpacking = False
@@ -151,7 +156,8 @@ class CaptionsController(QObject):
         self._run_start = 0.0  # the timeline second the run reads from
         self._run_track: Optional[int] = None  # the audio track the run reads (None: default)
         self._cues: list[tuple[float, float, str]] = []  # (start, end, text) by start
-        self._newest: Optional[float] = None
+        self._newest: Optional[float] = None  # the newest second the run has read
+        self._written: Optional[float] = None  # the second its captions are written to
         self._rtf = 0.0
         self._slow_since: Optional[float] = None
         self._last: Optional[tuple[float, float]] = None  # (position, monotonic) last tick
@@ -192,12 +198,33 @@ class CaptionsController(QObject):
         return bool(self._supported)
 
     def _warm_tier(self) -> None:
-        """The speed benchmark (~0.2 s of CPU) off the GUI thread, before the row is pressed."""
+        """The speed benchmark (~0.2 s of CPU, and speed.json) off the GUI thread, before the
+        row is pressed; once it is known, the row says what Automatic takes (`_scored`)."""
+        if self._warming:
+            return
+        self._warming = True
         import threading
 
         from services.captions import tier
 
-        threading.Thread(target=tier.machine_score, name="qitv-captions-tier", daemon=True).start()
+        def measure() -> None:
+            try:
+                tier.machine_score()
+            except Exception as error:  # no speed: Automatic goes by memory alone
+                logger.warning("AI captions: the speed was not measured: %s", error)
+                self._unmeasured = True
+            try:
+                self._scored.emit()  # (a signal: the GUI thread hears it)
+            except RuntimeError:
+                pass  # QiTV closed meanwhile
+
+        threading.Thread(target=measure, name="qitv-captions-tier", daemon=True).start()
+
+    def _on_scored(self) -> None:
+        self.changed.emit()  # "Automatic (1.7B)" or "(0.6B)": known now
+        if self._toggle_waits:
+            self._toggle_waits = False
+            self.toggle()
 
     def enabled(self) -> bool:
         return self._enabled
@@ -226,8 +253,15 @@ class CaptionsController(QObject):
         if self._enabled or self._download is not None:
             self._disable()
             return
+        if self._toggle_waits:
+            self._toggle_waits = False  # pressed again before the speed was known: off
+            return
         from services.captions import models
 
+        if self._speed_unknown():
+            self._toggle_waits = True  # Automatic picks once the benchmark is done
+            self._warm_tier()
+            return
         tier = self._choose_tier()
         if models.installed(tier):
             self._enable(tier)
@@ -334,11 +368,20 @@ class CaptionsController(QObject):
         if (self._enabled or self._download is not None) and self._choose_tier() != self._tier:
             self._disable()
             self.toggle()
+        elif self._asking and not self._asking_step and self._choose_tier() != self._fetching:
+            # Asked to download another one (2.9, the review: the phone stepped to Faster
+            # while the TV asked for the 1.7B, and Download fetched the 1.7B): asked again.
+            self._asking = False
+            if self._card is not None:
+                self._card.withdraw()
+            self.toggle()
         self.changed.emit()
 
     def _auto_tier(self) -> str:
         """What Automatic takes now: the 0.6B once the 1.7B couldn't keep up (see _step_down),
-        else one already here, else by this computer's speed."""
+        else one already here, else by this computer's speed. Never measured here, on the GUI
+        thread (2.9, the review: measured beside the benchmark's thread, each ran at half speed
+        and the reference machine was given the 0.6B): until it is known, as if fast enough."""
         from services.captions import tier
 
         if self._stepped_down:
@@ -346,7 +389,21 @@ class CaptionsController(QObject):
         for name in ("large", "small"):
             if self._here(name):
                 return name
-        return str(tier.choose_tier("auto"))
+        score = tier.known_score()
+        if score is None:
+            self._warm_tier()
+            score = tier.LARGE_MIN_SCORE
+        return str(tier.choose_tier("auto", score=score))
+
+    def _speed_unknown(self) -> bool:
+        """Automatic would pick by this computer's speed, not measured yet."""
+        from services.captions import tier
+
+        if self.model() != "auto" or self._stepped_down:
+            return False
+        if self._here("large") or self._here("small"):
+            return False
+        return tier.known_score() is None and not self._unmeasured
 
     def _here(self, name: str) -> bool:
         """The model is installed, looked at once until a download or Settings' Delete changes
@@ -595,7 +652,7 @@ class CaptionsController(QObject):
         self._process.stop()
         self._tier = tier
         self._slow_since = None
-        self._newest = None
+        self._newest = self._written = None
         self._load_model()
         self._toast(translate(STEPPED_DOWN))
         self.changed.emit()
@@ -612,7 +669,7 @@ class CaptionsController(QObject):
         self._process.stop()  # the model's memory back (a GB or two)
         self._loading = self._ready = False
         self._session_key = ""
-        self._newest = None
+        self._newest = self._written = None
         self._slow_since = None
         self._routed = ""  # a film relay stays until its title ends; on again, asked again
         self._drop_floor()
@@ -634,6 +691,11 @@ class CaptionsController(QObject):
             self._process.stop()  # it did not load: no child left without a model
         if was:
             self._enabled = False
+            self._cancel_download()  # a step down's: captions off, nothing comes on by itself
+            if self._asking_step:
+                self._asking = self._asking_step = False
+                if self._card is not None:
+                    self._card.withdraw()
             self._routed = ""
             self._timer.stop()
             self._drop_floor()
@@ -668,7 +730,7 @@ class CaptionsController(QObject):
         self._run_track = self._audio_track()
         self._resolve_language()  # the language of the track it reads, as it begins
         self._session_key = url.rsplit("/side/", 1)[0]
-        self._newest = None
+        self._newest = self._written = None
         self._process.send("start", self._run, url, start, self._run_track, self._language[0])
         self._process.send("viewer", self._position())
 
@@ -686,7 +748,7 @@ class CaptionsController(QObject):
         self._run_track = self._audio_track()
         self._resolve_language()  # the language of the track it reads, as it begins
         self._session_key = location
-        self._newest = None
+        self._newest = self._written = None
         self._process.send(
             "film", self._run, location, start, self._run_track, self._language[0], options
         )
@@ -701,10 +763,13 @@ class CaptionsController(QObject):
         else:
             self._cues.insert(i, (start, end, text))
 
-    def _on_progress(self, run: int, newest: float, rtf: float) -> None:
+    def _on_progress(
+        self, run: int, newest: float, rtf: float, written: Optional[float] = None
+    ) -> None:
         if run != self._run:
             return
         self._newest, self._rtf = newest, rtf
+        self._written = newest if written is None else written
         # Slow, and late for it: a short line ("Yes.") costs the model a fixed while, so a
         # dialogue's speed reads slow while the silences between its lines keep the captions
         # ahead of the picture (2.9: 1.06 while a film's were 3-60 s ahead, all in time).
@@ -795,14 +860,9 @@ class CaptionsController(QObject):
         track = self._audio_track()
         if track is None:
             return False  # the player is busy (an opening, a seek): looked at again next tick
-        if self._run_track is None:
-            self._run_track = track  # the run reads the default track: the one playing then
-            before = self._language[0]
-            self._resolve_language()
-            if self._language[0] != before:  # its language, now that it is known
-                self._process.send("language", self._language[0])
-                self.changed.emit()
-            return False
+        # A run begun while the player named none reads the media's default, which may not be
+        # the one it plays (2.9, the review: a reopen chooses the viewer's track again): read
+        # again with the one it names.
         return track != self._run_track
 
     def _hear_track(self) -> None:
@@ -851,9 +911,11 @@ class CaptionsController(QObject):
             self._cues.pop(0)
 
     def _lead(self) -> Optional[float]:
-        if self._newest is None:
+        """How far ahead of the picture the captions are written (2.9, the review: not how far
+        the sound is read, which a model too slow for it never shortened)."""
+        if self._written is None:
             return None
-        return float(self._newest) - float(self._position())
+        return float(self._written) - float(self._position())
 
     def add_overlay(self, overlay: Any) -> None:
         """Another place the captions show, as over the picture (2.9: the floating picture's,

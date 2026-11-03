@@ -16,6 +16,7 @@ import logging
 import os
 import platform
 import sys
+import threading
 import time
 from typing import Optional
 
@@ -97,12 +98,39 @@ def _this_computer() -> str:
     return f"{platform.machine()}/{os.cpu_count() or 0}/{platform.processor()}"
 
 
-@functools.cache
+_score_lock = threading.Lock()
+_score: Optional[float] = None  # machine_score()'s, once measured
+
+
 def machine_score() -> float:
     """The best cpu_score() measured on this computer (this run's, or one remembered from an
     earlier run): busy moments only ever lower a measurement (2.9: one taken as a film opened
     scored 0.81 on the reference, which had scored 1.0, and the small model was chosen). Call it
-    off the GUI thread: it measures, and reads and writes a small file."""
+    off the GUI thread: it measures, and reads and writes a small file. Measured once: a second
+    caller waits for the first's (2.9, the review: two at once each ran at half speed)."""
+    global _score
+    with _score_lock:
+        if _score is None:
+            _score = _measure_machine()
+        return _score
+
+
+def known_score() -> Optional[float]:
+    """machine_score() once it has been measured, else None (never measures: the GUI's)."""
+    return _score
+
+
+def _forget_score() -> None:
+    """Tests: measured again next time."""
+    global _score
+    with _score_lock:
+        _score = None
+
+
+setattr(machine_score, "cache_clear", _forget_score)  # as functools.cache's (the tests)
+
+
+def _measure_machine() -> float:
     measured = cpu_score()
     from services.captions.models import captions_root
 

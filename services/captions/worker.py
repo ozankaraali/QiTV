@@ -13,7 +13,7 @@ Messages to it: ("load", {...}), ("start", run, url, segment_start, audio_track,
 ("film", run, location, start_s, audio_track, language, vlc_options): a film's run,
 ("viewer", position), ("language", name), ("stop",), ("quit",).
 From it: ("ready",), ("failed", reason), ("caption", run, start, end, text),
-("progress", run, newest, rtf), ("resync", run, newest), ("ended", run, reason),
+("progress", run, newest, rtf, written_to), ("resync", run, newest), ("ended", run, reason),
 ("detected", run, language) once the pieces agree on one (none was given),
 ("log", level, text); loaded without a model (`load` with "model": None, the packaged smoke
 test's probe), ("piece", run, start, end, speech_share) for each piece instead. No traceback
@@ -44,6 +44,7 @@ _CHUNK = 64 * 1024
 _MIN_SPEECH_SHARE = 0.3  # less of a piece was speech: music the detector caught, dropped
 _MARGIN_S = 0.5
 _PROGRESS_S = 1.0
+_PASSED_S = 1.0  # a piece the picture passed by this much is not recognized (it never shows)
 _READ_TIMEOUT_S = 15.0
 _OWNER_GRACE_S = 0.5
 _AHEAD_MAX_S = 60.0  # read no further ahead of the picture (far behind live: the ring holds it)
@@ -150,6 +151,7 @@ class _Run:
         self.stopped = threading.Event()
         self.newest = segment_start
         self.rtf = 0.5
+        self._working: Optional[float] = None  # the start of the piece being recognized
         self.votes = text_language.Votes()  # the language heard, when none is given
         self._resynced = False
         self._ended = False
@@ -243,7 +245,9 @@ class _Run:
             now = time.monotonic()
             if now - last_progress >= _PROGRESS_S:
                 last_progress = now
-                self.link.send(("progress", self.run, self.newest, round(self.rtf, 3)))
+                self.link.send(
+                    ("progress", self.run, self.newest, round(self.rtf, 3), self.written_to())
+                )
             if piece is None or self.stopped.is_set():
                 continue
             if self.model.recognizer is None:
@@ -251,12 +255,17 @@ class _Run:
                 continue
             if piece.speech_share < _MIN_SPEECH_SHARE:
                 continue
+            if piece.end + _PASSED_S < float(self.viewer[0]):
+                continue  # the picture is past its words: never shown, the time goes to the next
             started = time.perf_counter()
+            self._working = piece.start
             try:
                 text = self.model.decode(piece.samples, self.language)
             except Exception as error:
                 logger.warning("AI captions: a piece failed: %s", type(error).__name__)
                 continue
+            finally:
+                self._working = None
             took = time.perf_counter() - started
             length = max(0.1, piece.end - piece.start)
             self.rtf = 0.8 * self.rtf + 0.2 * (took / length)
@@ -268,6 +277,17 @@ class _Run:
             if not self.language and not self._heard(text, length):
                 continue
             self.link.send(("caption", self.run, piece.start, piece.end, text))
+
+    def written_to(self) -> float:
+        """How far the captions are written: to the piece being recognized, else to the oldest
+        one waiting, else all the sound read (2.9, the review: the lead was the reading's,
+        which a model too slow for it never shortened: no "Can't keep up", no step down)."""
+        working = self._working
+        if working is not None:
+            return working
+        with self.pieces.mutex:
+            waiting = next((p for p in self.pieces.queue if p is not None), None)
+        return waiting.start if waiting is not None else float(self.newest)
 
     def _heard(self, text: str, length: float) -> bool:
         """No language given: the pieces vote with the language their words are in; it locks

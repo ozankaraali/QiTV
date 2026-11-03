@@ -81,7 +81,8 @@ class CaptionsProcess(QObject):
     ready = Signal()
     failed = Signal(str)
     caption = Signal(int, float, float, str)  # run, start, end, text
-    progress = Signal(int, float, float)  # run, newest second decoded, real-time factor
+    # run, newest second decoded, real-time factor, the second the captions are written to
+    progress = Signal(int, float, float, float)
     resync = Signal(int, float)  # run, newest second: read again from there
     ended = Signal(int, str)  # run, reason
     detected = Signal(int, str)  # run, the language the pieces agreed on (none was given)
@@ -154,7 +155,10 @@ class CaptionsProcess(QObject):
         if kind == "caption":
             self.caption.emit(int(message[1]), float(message[2]), float(message[3]), message[4])
         elif kind == "progress":
-            self.progress.emit(int(message[1]), float(message[2]), float(message[3]))
+            written = message[4] if len(message) > 4 else message[2]
+            self.progress.emit(
+                int(message[1]), float(message[2]), float(message[3]), float(written)
+            )
         elif kind == "detected":
             self.detected.emit(int(message[1]), str(message[2]))
         elif kind == "piece":

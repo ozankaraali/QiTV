@@ -11,6 +11,7 @@ import time
 import unittest
 from unittest import mock
 import unittest.mock
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -157,6 +158,56 @@ def _stream(video_pts, audio_pts, language=b"tur"):
     for v, a in zip(video_pts, audio_pts):
         out += _packet(0x101, _pes(0xE0, v), True) + _packet(0x102, _pes(0xC0, a), True)
     return out
+
+
+class WrittenToTests(unittest.TestCase):
+    """2.9, the review: "Can't keep up" and Automatic's step down measured how far the sound
+    was read, which a model too slow for it never shortened."""
+
+    def run_with(self, *pieces, working=None):
+        import queue
+
+        from services.captions.worker import _Run
+
+        run = object.__new__(_Run)
+        run.pieces = queue.Queue()
+        for piece in pieces:
+            run.pieces.put(piece)
+        run.newest, run._working = 140.0, working
+        return run
+
+    def piece(self, start, end):
+        from services.captions.pieces import Piece
+
+        return Piece(start, end, array("f"), 1.0)
+
+    def test_the_captions_are_written_to_what_the_model_has_not_heard_yet(self):
+        self.assertEqual(self.run_with().written_to(), 140.0)  # all read is heard
+        late = self.run_with(self.piece(101.0, 104.0), self.piece(104.5, 107.0))
+        self.assertEqual(late.written_to(), 101.0)  # the oldest waiting
+        self.assertEqual(self.run_with(working=99.0).written_to(), 99.0)
+
+    def test_a_piece_the_picture_passed_is_not_recognized(self):
+        import threading
+
+        run = self.run_with(self.piece(90.0, 95.0), self.piece(101.0, 104.0))
+        decoded, sent = [], []
+        run.model = SimpleNamespace(
+            recognizer=object(), decode=lambda samples, language: decoded.append(1) or "Hello."
+        )
+        run.link = SimpleNamespace(send=sent.append)
+        run.viewer, run.language, run.run, run.rtf = [100.0], "English", 1, 0.5
+        run.stopped = threading.Event()
+        thread = threading.Thread(target=run._recognize, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while not [m for m in sent if m[0] == "caption"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        run.stopped.set()
+        run.pieces.put(None)
+        thread.join(5)
+        self.assertEqual(len(decoded), 1)  # 90-95 s: the picture is at 100 s
+        self.assertEqual([m[2] for m in sent if m[0] == "caption"], [101.0])  # its start
 
 
 class StreamClockTests(unittest.TestCase):
@@ -449,7 +500,7 @@ class ControllerTimingTests(unittest.TestCase):
         # "Catching up…" at every dip under the 6 s they start with.
         self.window.live_session.position_s = 100.0
         for newest, said in ((106.0, ""), (103.0, ""), (101.2, ""), (100.6, "Catching up…")):
-            self.captions._newest = newest
+            self.captions._newest = self.captions._written = newest
             self.assertEqual(self.captions.status_text(), said, newest)
 
     def test_cant_keep_up_only_when_slow_and_late(self):
@@ -465,6 +516,20 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.captions.status_text(), "Can't keep up")
         self.captions._on_progress(run, 108.0, 1.06)  # ahead again
         self.assertIsNone(self.captions._slow_since)
+
+    def test_late_is_how_far_the_captions_are_written_not_the_sound_read(self):
+        # 2.9, the review: a model 1.2x slow on live: the sound read stayed 10 s ahead, the
+        # captions fell behind it, and nothing said so.
+        run = self.captions._run
+        self.window.live_session.position_s = 100.0
+        self.captions._on_progress(run, 110.0, 1.2, 100.3)  # read 10 s ahead, written to 100.3
+        self.assertIsNotNone(self.captions._slow_since)
+        self.assertEqual(self.captions.status_text(), "Catching up…")
+        self.captions._slow_since = time.monotonic() - 31.0
+        self.assertEqual(self.captions.status_text(), "Can't keep up")
+        self.captions._on_progress(run, 110.0, 1.2, 109.0)  # caught up
+        self.assertIsNone(self.captions._slow_since)
+        self.assertEqual(self.captions.status_text(), "")
 
     def test_the_download_says_how_far_it_is_where_the_captions_will_be(self):
         # 2.9: answered, the question went and nothing said the download had begun.
@@ -695,6 +760,30 @@ class StepDownTests(unittest.TestCase):
         self.captions._on_downloaded(self.captions._download)
         self.assertEqual((self.captions._tier, self.loaded), ("large", []))
 
+    def test_the_process_gone_while_it_asks_or_downloads_leaves_captions_off(self):
+        # 2.9, the review: the download finished after "Couldn't start" and the 0.6B came on.
+        self.disk["small"] = False
+        cancelled = []
+
+        class Download:
+            def running(self):
+                return True
+
+            def cancel(self):
+                cancelled.append(True)
+
+        with mock.patch("services.captions.models.download_size", return_value=878_702_423):
+            self.fall_behind()
+        self.captions._on_failed("gone")
+        self.assertEqual(self.card.withdrawn, 1)
+        self.assertFalse(self.captions.asking())
+        self.captions._enabled = True
+        self.captions._download = Download()
+        self.captions._on_failed("gone")
+        self.assertEqual(cancelled, [True])
+        self.assertIsNone(self.captions._download)
+        self.assertFalse(self.captions.enabled())
+
     def test_turned_off_while_it_asks_the_question_goes(self):
         self.disk["small"] = False
         with mock.patch("services.captions.models.download_size", return_value=878_702_423):
@@ -855,7 +944,9 @@ class FilmCaptionsTests(unittest.TestCase):
         self.assertEqual(self.sent[0][4:6], (1, "English"))
         self.assertEqual(self.captions.language()[0], "English")
 
-    def test_a_run_begun_on_the_default_track_takes_its_language_once_known(self):
+    def test_a_run_begun_on_the_default_track_reads_again_with_the_one_named(self):
+        # 2.9, the review: a reopen chooses the viewer's track again once it plays; the run,
+        # begun before, read the media's default.
         session = self.window.session
         session.playing = -1  # the player busy as the run began: the film's default
         session.audio_track = lambda: session.playing
@@ -864,11 +955,14 @@ class FilmCaptionsTests(unittest.TestCase):
         self.captions._start_run()
         run = self.captions._run
         self.assertEqual(self.sent[0][4:6], (None, ""))
-        session.playing = 13
         self.captions._last = None
         self.captions._tick()
-        self.assertEqual(self.captions._run, run)  # the same sound: not read again
-        self.assertIn(("language", "Turkish"), self.sent)
+        self.assertEqual(self.captions._run, run)  # still busy: nothing yet
+        session.playing = 13
+        self.sent.clear()
+        self.captions._tick()
+        self.assertEqual(self.captions._run, run + 1)
+        self.assertEqual(self.sent[0][4:6], (13, "Turkish"))
 
     def test_a_language_the_model_heard_is_forgotten_with_its_track(self):
         session = self.window.session

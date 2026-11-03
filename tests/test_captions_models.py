@@ -710,6 +710,36 @@ class MachineTests(unittest.TestCase):
             f.write("{not json")
         self.assertEqual(run(0.7), 0.7)
 
+    def test_two_callers_at_once_measure_once_and_the_gui_never_does(self):
+        # 2.9, the review: the warm-up thread and the panel measured at once, each at half
+        # speed: the reference machine scored 0.49 and was given the 0.6B.
+        import threading
+        import time
+
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        env = mock.patch.dict(os.environ, {"QITV_CAPTIONS_DIR": folder})
+        env.start()
+        self.addCleanup(env.stop)
+        tier.machine_score.cache_clear()
+        self.addCleanup(tier.machine_score.cache_clear)
+        runs = []
+
+        def measure():
+            runs.append(1)
+            time.sleep(0.1)
+            return 1.0
+
+        self.assertIsNone(tier.known_score())
+        with mock.patch.object(tier, "cpu_score", side_effect=measure):
+            threads = [threading.Thread(target=tier.machine_score) for _ in range(3)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(5)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(tier.known_score(), 1.0)
+
     def test_linux_memory_is_read_from_meminfo(self):
         with tempfile.NamedTemporaryFile("w", suffix=".meminfo", delete=False) as f:
             f.write("MemFree:  100 kB\nMemTotal:       16303848 kB\n")
