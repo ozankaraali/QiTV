@@ -938,6 +938,23 @@ class OverlayTests(unittest.TestCase):
         self.overlay.show_text("Good evening and welcome")
         self.assertEqual(self.overlay.lines(), ["Good evening and welcome"])  # one stays one
 
+    def test_a_caption_too_long_for_two_lines_comes_in_parts_never_cut(self):
+        # 2.9.1, the owner: a long one ended in "…".
+        text = (
+            "Ankara'da bugün yapılan toplantıda bakan, yeni düzenlemenin önümüzdeki aydan "
+            "itibaren yürürlüğe gireceğini söyledi. Muhalefet ise tasarının meclise gelmeden "
+            "önce kamuoyuyla paylaşılması gerektiğini, aksi hâlde itiraz edeceklerini belirtti."
+        )
+        parts = self.overlay.pages(text)
+        self.assertGreater(len(parts), 1)
+        self.assertEqual(" ".join(parts), text)  # nothing lost
+        for part in parts:
+            self.overlay.show_text(part)
+            self.assertLessEqual(len(self.overlay.lines()), 2)
+            self.assertFalse(self.overlay.lines()[-1].endswith("…"), part)
+        self.assertTrue(parts[0].endswith("söyledi."))  # after the sentence's end, near the half
+        self.assertEqual(self.overlay.pages("Good evening"), ["Good evening"])
+
     def test_it_hides_when_cleared(self):
         self.overlay.show_text("Good evening")
         self.overlay.clear()

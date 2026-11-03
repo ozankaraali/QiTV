@@ -64,6 +64,7 @@ SEEK_S = 2.0  # the position moved this much more than the clock: a seek, read a
 KEEP_S = 30 * 60.0  # cues kept this far behind the picture
 _RESTART_MS = 1000
 _SLOW_RTF = 0.9  # the model takes this long per second of speech: it can't keep up
+_BACKLOG_S = 2.0  # ... or this much sound read waits for it (2.9.1)
 _SLOW_FOR_S = 30.0
 
 from ui.captions_texts import (  # noqa: E402  (the texts, with their translations)
@@ -616,6 +617,7 @@ class CaptionsController(QObject):
                     "tokenizer": str(paths.tokenizer),
                 },
                 "vad": str(paths.vad),
+                "turkish": str(paths.turkish),  # 2.9.1: ufakzeka-kulak, for Turkish
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),
@@ -794,14 +796,20 @@ class CaptionsController(QObject):
             return
         self._newest, self._rtf = newest, rtf
         self._written = newest if written is None else written
-        # Slow, and late for it: a short line ("Yes.") costs the model a fixed while, so a
+        # Late, and for the model: a short line ("Yes.") costs the model a fixed while, so a
         # dialogue's speed reads slow while the silences between its lines keep the captions
-        # ahead of the picture (2.9: 1.06 while a film's were 3-60 s ahead, all in time).
+        # ahead of the picture (2.9: 1.06 while a film's were 3-60 s ahead, all in time). A
+        # model with sound waiting for it can't keep up whatever its speed reads (2.9.1, the
+        # owner: the 1.7B at about 0.85 on live wrote each line after its words, none showed,
+        # and nothing stepped down; a pause let it get ahead). Only being in time again ends
+        # it: a dip of the speed doesn't.
         lead = self._lead()
-        if rtf >= _SLOW_RTF and lead is not None and lead < LATE_LEAD_S:
+        backlog = float(newest) - float(self._written)
+        slow = rtf >= _SLOW_RTF or backlog > _BACKLOG_S
+        if lead is not None and lead < LATE_LEAD_S and slow:
             if self._slow_since is None:
                 self._slow_since = time.monotonic()
-        else:
+        elif lead is None or lead >= LATE_LEAD_S:
             self._slow_since = None
 
     def _on_detected(self, run: int, language: str) -> None:
@@ -922,7 +930,25 @@ class CaptionsController(QObject):
             until = max(end + HOLD_S, shows + MIN_SHOW_S, shows + len(text) / READ_CPS)
             if following is not None:
                 until = min(until, following)
-        return text if shows <= position < until else ""
+        if not shows <= position < until:
+            return ""
+        return self._part_at(text, position - shows, end - shows)
+
+    def _part_at(self, text: str, elapsed: float, words_s: float) -> str:
+        """`elapsed` into a caption whose words last `words_s`: the whole of it, or the part
+        of it said by then when it doesn't fit two lines (2.9.1, the owner: a long one ended
+        in "…"), each part for its share of the words by its letters; the last one held."""
+        overlay = next((o for o in self._overlays if hasattr(o, "pages")), None)
+        parts = overlay.pages(text) if overlay is not None else [text]
+        if len(parts) <= 1:
+            return text
+        total = sum(len(part) for part in parts)
+        said, span = 0, max(words_s, MIN_SHOW_S)
+        for part in parts[:-1]:
+            said += len(part)
+            if elapsed < span * said / total:
+                return part
+        return parts[-1]
 
     def _covered(self, position: float) -> bool:
         """The run reads on from before `position` and has not passed it by long: no need to

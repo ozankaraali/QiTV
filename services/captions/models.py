@@ -1,14 +1,18 @@
 """What AI captions download, where it goes, and whether it's in place. No Qt.
 
 Nothing ships with QiTV: the first time AI captions are turned on, the viewer downloads a
-speech model tier, the Silero VAD and (unless this Python already has it) the sherpa-onnx
-runtime, all pinned below by size and sha256. They live in `captions_root()`:
+speech model tier, the Silero VAD, the Turkish model (2.9.1: ufakzeka-kulak, 43 MB: Qwen's
+Turkish was poor, this one's far better and 25 times faster) and (unless this Python already has
+it) the sherpa-onnx runtime, all pinned below by size and sha256. They live in
+`captions_root()`:
 
     ai-captions/
         runtime-2.0.1-cp314/   the sherpa-onnx and sherpa-onnx-core wheels, as pip lays them
                                out in site-packages (put on the captions process's sys.path)
         qwen3-asr-0.6b/        conv_frontend.onnx, encoder.int8.onnx, decoder.int8.onnx,
         qwen3-asr-1.7b/        tokenizer/ (both tiers alike)
+        ufakzeka-kulak/        encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx,
+                               tokens.txt (a FastConformer TDT for Turkish alone)
         silero_vad.onnx
         verified.json          what was downloaded whole and checked (sha256), by path
 
@@ -106,6 +110,7 @@ class ModelPaths:
     decoder: Path
     tokenizer: Path  # a folder
     vad: Path
+    turkish: Path  # ufakzeka-kulak's folder (its transducer's files, TURKISH_FILES)
 
 
 # ---- what is downloaded -------------------------------------------------------------------
@@ -211,6 +216,40 @@ VAD = RemoteFile(
     "silero_vad.onnx",
     643854,
     "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+)
+
+# 2.9.1: ufak AI's ufakzeka-kulak (Apache-2.0), Turkish alone, the sherpa-onnx TDT export. Sizes
+# and sha256 as Hugging Face served them on 2026-11-03 (revision 7190ff5f).
+_UFAK = (
+    "https://huggingface.co/ufakai/ufakzeka-kulak/resolve/"
+    "7190ff5f2374060f488fd234e581ac94a53a887a/sherpa-onnx-tdt/"
+)
+TURKISH_FOLDER = "ufakzeka-kulak"
+TURKISH_FILES = (
+    RemoteFile(
+        _UFAK + "encoder.int8.onnx",
+        "encoder.int8.onnx",
+        37776818,
+        "8b19aa33674fc55ef6a37f01569be19e1b7fed5057ec1bea483c19d3ef07e4ea",
+    ),
+    RemoteFile(
+        _UFAK + "decoder.int8.onnx",
+        "decoder.int8.onnx",
+        3955864,
+        "ef9ae1cc76112970f959da1351b702436ace8a3c94e7631952ba54cb4c806919",
+    ),
+    RemoteFile(
+        _UFAK + "joiner.int8.onnx",
+        "joiner.int8.onnx",
+        1247562,
+        "526499204410eb962dac609aed2140dbeff8d5f7e98037c187d735031ef80664",
+    ),
+    RemoteFile(
+        _UFAK + "tokens.txt",
+        "tokens.txt",
+        10138,
+        "af3092629f214e420ee9a4b563663227cd1998cdd23e1a08a41d489142499c03",
+    ),
 )
 
 
@@ -361,6 +400,7 @@ def model_paths(tier: str, root: Optional[Path] = None) -> ModelPaths:
         decoder=folder / "decoder.int8.onnx",
         tokenizer=folder / "tokenizer",
         vad=base / VAD.path,
+        turkish=base / TURKISH_FOLDER,
     )
 
 
@@ -410,7 +450,8 @@ def has_contents(folder: Path, contents: tuple[tuple[str, Optional[int]], ...]) 
 
 def needed(tier: str, root: Optional[Path] = None) -> list[Download]:
     """Everything the tier needs to run, in download order: the runtime (unless this Python
-    has one), the VAD, the tier's files. Unsupported without a runtime for this computer."""
+    has one), the VAD, the Turkish model, the tier's files. Unsupported without a runtime for
+    this computer."""
     base = _root(root)
     downloads: list[Download] = []
     runtime = runtime_dir(base)
@@ -419,6 +460,9 @@ def needed(tier: str, root: Optional[Path] = None) -> list[Download]:
         downloads.append(Download(runtime, main, _RUNTIME_CONTENTS))
         downloads.append(Download(runtime, core))
     downloads.append(Download(base, VAD, ((VAD.path, VAD.size),)))
+    turkish = base / TURKISH_FOLDER
+    for file in TURKISH_FILES:
+        downloads.append(Download(turkish, file, ((file.path, file.size),)))
     info = TIERS[tier]
     folder = base / info.folder
     for file in info.files:

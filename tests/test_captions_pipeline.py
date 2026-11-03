@@ -160,6 +160,87 @@ def _stream(video_pts, audio_pts, language=b"tur"):
     return out
 
 
+class TurkishModelTests(unittest.TestCase):
+    """2.9.1: Turkish is written by ufakzeka-kulak (far better than Qwen's Turkish, 25 times
+    faster), the rest by Qwen."""
+
+    def model(self):
+        from services.captions.worker import _Model
+
+        heard = []
+
+        class Recognizer:
+            def __init__(self, name, text):
+                self.name, self.text = name, text
+
+            def create_stream(self):
+                recognizer = self
+
+                class Stream:
+                    result = SimpleNamespace(text=recognizer.text)
+
+                    def set_option(self, key, value):
+                        heard.append((recognizer.name, key, value))
+
+                    def accept_waveform(self, rate, samples):
+                        heard.append((recognizer.name, "peak", max(samples)))
+
+                return Stream()
+
+            def decode_stream(self, stream):
+                pass
+
+        model = object.__new__(_Model)
+        model.recognizer = Recognizer("qwen", "Good evening.")
+        model.turkish = Recognizer("ufak", "iyi akşamlar")
+        return model, heard
+
+    def test_turkish_goes_to_ufak_louder_and_starts_with_a_capital(self):
+        model, heard = self.model()
+        self.assertEqual(model.decode(array("f", [0.1, 0.05]), "Turkish"), "iyi akşamlar")
+        self.assertEqual(heard, [("ufak", "peak", array("f", [0.8])[0])])  # its card's gain
+        heard.clear()
+        self.assertEqual(model.decode(array("f", [0.1]), "English"), "Good evening.")
+        self.assertEqual(heard[0], ("qwen", "language", "English"))
+        model.turkish = None  # its files not given: Qwen writes Turkish too
+        self.assertEqual(model.decode(array("f", [0.1]), "Turkish"), "Good evening.")
+
+    def test_a_capital_only_where_a_sentence_starts(self):
+        # 2.9.2, the owner: each line began with a capital mid-sentence, with no full stops.
+        from services.captions.worker import _Run
+
+        run = object.__new__(_Run)
+        run._said = None
+        lines = [
+            ("ayde çok güzel bir fikir ve", 10.0, 12.0),  # the first: a sentence starts
+            ("yarın da gideriz", 12.2, 13.5),  # straight on: the same sentence
+            ("ne konuşuyorsun", 15.0, 16.0),  # after a 1.5 s pause: a new one
+            ("tamam. iyi geceler", 16.3, 17.5),  # straight on, as written
+            ("işte böyle", 17.7, 18.5),
+        ]
+        cased = [run.sentence_case(text, start, end) for text, start, end in lines]
+        self.assertEqual(
+            cased,
+            [
+                "Ayde çok güzel bir fikir ve",
+                "yarın da gideriz",
+                "Ne konuşuyorsun",
+                "tamam. iyi geceler",
+                "işte böyle",
+            ],
+        )
+        run._said = ("Gel bakalım.", 20.0)
+        self.assertEqual(run.sentence_case("içeri gir", 20.1, 21.0), "İçeri gir")  # after a stop
+
+    def test_a_turkish_capital_is_turkish(self):
+        from services.captions.worker import turkish_capital
+
+        self.assertEqual(turkish_capital("ırmak taştı"), "Irmak taştı")
+        self.assertEqual(turkish_capital("“evet” dedi"), "“Evet” dedi")
+        self.assertEqual(turkish_capital("Ankara"), "Ankara")
+        self.assertEqual(turkish_capital("..."), "...")
+
+
 class WrittenToTests(unittest.TestCase):
     """2.9, the review: "Can't keep up" and Automatic's step down measured how far the sound
     was read, which a model too slow for it never shortened."""
@@ -408,6 +489,15 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.at(13.5), "Nasılsın")  # held a little after the words
         self.assertEqual(self.at(13.7), "")
 
+    def test_a_long_caption_shows_in_parts_across_its_words(self):
+        # 2.9.1: the overlay's parts (pages), each for its share of the words by its letters.
+        self.overlay.pages = lambda text: text.split(" | ")
+        run = self.captions._run
+        self.captions._on_caption(run, 10.0, 16.0, "one two three | four five six")
+        self.assertEqual(self.at(10.3), "one two three")
+        self.assertEqual(self.at(15.0), "four five six")  # past the first part's share
+        self.assertEqual(self.at(16.4), "four five six")  # held after the words
+
     def test_a_caption_shows_from_the_first_word_its_piece_leads_in_to(self):
         from services.captions.pieces import LEAD_IN_S
         from ui.captions_controller import FIRST_WORD_S
@@ -515,6 +605,27 @@ class ControllerTimingTests(unittest.TestCase):
         self.captions._slow_since = clock.monotonic() - 31.0
         self.assertEqual(self.captions.status_text(), "Can't keep up")
         self.captions._on_progress(run, 108.0, 1.06)  # ahead again
+        self.assertIsNone(self.captions._slow_since)
+
+    def test_a_model_with_sound_waiting_for_it_cant_keep_up_whatever_its_speed(self):
+        # 2.9.1, the owner on live: the 1.7B at 0.85 wrote each line after its words; none
+        # showed and Automatic never stepped down (the speed under 0.9 said "in time").
+        run = self.captions._run
+        self.window.live_session.position_s = 100.0
+        self.captions._on_progress(run, 110.0, 0.85, 99.6)  # 10 s read, written to 99.6
+        self.assertIsNotNone(self.captions._slow_since)
+        since = self.captions._slow_since
+        self.captions._on_progress(run, 110.0, 0.5, 100.4)  # its speed dips: still late
+        self.assertEqual(self.captions._slow_since, since)
+        self.captions._on_progress(run, 100.8, 0.5, 100.8)  # nothing waits, 0.8 s ahead
+        self.assertEqual(self.captions._slow_since, since)  # not in time yet: kept
+        self.captions._on_progress(run, 110.0, 0.5, 104.0)  # in time again
+        self.assertIsNone(self.captions._slow_since)
+
+    def test_a_stalled_edge_with_nothing_waiting_is_no_slow_model(self):
+        run = self.captions._run
+        self.window.live_session.position_s = 100.0
+        self.captions._on_progress(run, 100.4, 0.3, 100.4)  # nothing read past it, a fast model
         self.assertIsNone(self.captions._slow_since)
 
     def test_late_is_how_far_the_captions_are_written_not_the_sound_read(self):
