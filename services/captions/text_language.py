@@ -87,6 +87,35 @@ def _script(text: str) -> Counter:
     return counts
 
 
+# The scripts each of Qwen's languages is written in (Latin for the rest).
+_SCRIPTS = {
+    "Chinese": {"Han"},
+    "Cantonese": {"Han"},
+    "Japanese": {"Han", "Kana"},
+    "Korean": {"Hangul", "Han"},
+    "Russian": {"Cyrillic"},
+    "Macedonian": {"Cyrillic"},
+    "Arabic": {"Arabic"},
+    "Persian": {"Arabic"},
+    "Thai": {"Thai"},
+    "Greek": {"Greek"},
+    "Hindi": {"Devanagari"},
+}
+
+
+def written_in(text: str, language: str) -> bool:
+    """`text` may be in `language` (one of Qwen's names): False only when most of its letters
+    are in a script the language is not written in (2.9: locked to Turkish, the model wrote a
+    line of Korean speech in Urdu's letters)."""
+    counts = _script(text)
+    letters = sum(counts.values())
+    if letters < 4:
+        return True
+    own = _SCRIPTS.get(language, {"Latin"})
+    foreign = sum(n for script, n in counts.items() if script not in own)
+    return foreign < 0.6 * letters
+
+
 def guess(text: str) -> Optional[str]:
     """The language `text` is written in (one of Qwen's names), or None when it says too
     little to tell."""

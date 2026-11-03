@@ -263,6 +263,8 @@ class _Run:
             text = guards.clean(text)
             if not text or self.stopped.is_set():
                 continue
+            if self.language and not text_language.written_in(text, self.language):
+                continue  # in another language's letters: not what the channel says
             if not self.language and not self._heard(text, length):
                 continue
             self.link.send(("caption", self.run, piece.start, piece.end, text))

@@ -54,6 +54,18 @@ class GuardTests(unittest.TestCase):
 class TextLanguageTests(unittest.TestCase):
     """The language a caption is written in, from what the model wrote on the broadcasts."""
 
+    def test_a_caption_in_another_languages_letters_is_not_the_channels(self):
+        # 2.9: locked to Turkish, the model wrote a line of Korean speech in Urdu's letters.
+        from services.captions.text_language import written_in
+
+        self.assertFalse(written_in("بیکویه جمہور باشکنی لیجے میونگ جمہور باشکنی.", "Turkish"))
+        self.assertTrue(written_in("Merduan ve Li C Miong Askeri Kıta'yı Selamladı.", "Turkish"))
+        self.assertTrue(written_in("Erdoğan ile görüştü: 대한민국.", "Turkish"))  # a little
+        self.assertTrue(written_in("Привет, как дела?", "Russian"))
+        self.assertFalse(written_in("Hello, how are you?", "Russian"))
+        self.assertTrue(written_in("今日は東京で会議があります。", "Japanese"))
+        self.assertTrue(written_in("OK.", "Chinese"))  # too little to tell
+
     def test_the_languages_the_model_wrote(self):
         from services.captions.text_language import guess
 
