@@ -741,6 +741,24 @@ class NoteRowTests(PanelCase):
         self.panel.grab()  # paints: nothing raises
 
 
+class SubtitleFontTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_libvlc_draws_subtitles_in_the_captions_family(self):
+        from ui.overlays import captions
+
+        with mock.patch.object(captions, "QFontInfo") as info:
+            info.return_value.family.return_value = "Segoe UI"
+            self.assertEqual(captions.subtitle_font(), "Segoe UI")
+            info.return_value.family.return_value = ".AppleSystemUIFont"  # hidden from libVLC
+            with mock.patch.object(captions.sys, "platform", "darwin"):
+                self.assertEqual(captions.subtitle_font(), "System Font")
+            with mock.patch.object(captions.sys, "platform", "linux"):
+                self.assertEqual(captions.subtitle_font(), "")
+
+
 class OverlayTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

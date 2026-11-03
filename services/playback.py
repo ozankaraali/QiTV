@@ -234,12 +234,44 @@ def software_options() -> list[str]:
     return [":" + arg[2:] for arg in decoder_args(hardware=False)]
 
 
-def default_args(hardware_decoding: bool = False) -> list[str]:
-    """The app's libVLC arguments: quiet, or a verbose log file when VLC_LOG_ENV names one."""
+# 2.9: the subtitles libVLC draws (a stream's own tracks, a file, OpenSubtitles') look as
+# QiTV's AI captions do (ui.overlays.captions), as far as VLC 3's text renderer goes: their
+# text colour on their dark box, no outline and no shadow, in the app's font, as large (its
+# step 16, letters as tall as the captions' 3.2 units of a 16:9 picture). The box's rounded
+# corners and the text's medium weight are beyond it, and a styled subtitle (ASS/SSA) keeps
+# its own look. The colours are ui.theme's (a test holds them alike).
+SUBTITLE_TEXT = 0xEEF2F6  # PALETTE.text
+SUBTITLE_BOX = 0x080B0F  # PALETTE.panel
+SUBTITLE_BOX_OPACITY = 228  # out of 255: as dark on the picture as the captions' box
+SUBTITLE_REL_SIZE = 16
+
+
+def subtitle_args(font: str = "") -> list[str]:
+    """libVLC's text renderer styled as QiTV's captions; `font`: the family it draws in
+    ("": libVLC's own)."""
+    args = [
+        f"--freetype-color={SUBTITLE_TEXT}",
+        f"--freetype-background-color={SUBTITLE_BOX}",
+        f"--freetype-background-opacity={SUBTITLE_BOX_OPACITY}",
+        "--freetype-outline-thickness=0",
+        "--freetype-shadow-opacity=0",
+        f"--freetype-rel-fontsize={SUBTITLE_REL_SIZE}",
+    ]
+    return args + ([f"--freetype-font={font}"] if font else [])
+
+
+def default_args(hardware_decoding: bool = False, subtitle_font: str = "") -> list[str]:
+    """The app's libVLC arguments: quiet, or a verbose log file when VLC_LOG_ENV names one.
+    `subtitle_font`: the family the subtitles libVLC draws are in (subtitle_args)."""
     # VLC 3's volume-save keeps the last level set on any audio output in the process's
     # config, and every output opened later starts there: the PiP player's 30 became the
     # large picture's. Each player is given its own level instead (SessionManager).
-    args = ["--no-video-title-show", "--no-volume-save", *decoder_args(hardware_decoding)]
+    args = [
+        "--no-video-title-show",
+        "--no-volume-save",
+        *decoder_args(hardware_decoding),
+        *subtitle_args(subtitle_font),
+    ]
     if platform.system() == "Windows":
         # VLC 3's default Windows output, mmdevice, sets volume and mute on the process's
         # audio session (ISimpleAudioVolume), which every player's stream joins: the main

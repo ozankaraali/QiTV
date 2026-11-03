@@ -451,7 +451,11 @@ class TVWindow(QMainWindow):
         self.zap = ZapController(parent=self)
         owns_instance = vlc_instance is None
         if owns_instance:  # the decoder Settings chose (software unless hardware)
-            vlc_instance = create_instance(default_args(config_manager.hardware_decoding))
+            from ui.overlays.captions import subtitle_font
+
+            vlc_instance = create_instance(  # subtitles drawn as the AI captions are (2.9)
+                default_args(config_manager.hardware_decoding, subtitle_font=subtitle_font())
+            )
         self._instance = vlc_instance
         self._owns_instance = owns_instance and self._instance is not None
         self.session: Session
