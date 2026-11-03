@@ -680,6 +680,7 @@ class TVWindow(QMainWindow):
         self.floating_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.floating_note.setStyleSheet("color: rgba(255, 255, 255, 0.55); font-size: 18px;")
         self.floating_note.hide()
+        self._floating_captions: Optional[OverlayHost] = None  # AI captions over it (2.9)
         self.desktop_pip.floatingChanged.connect(self._on_picture_floating)
         self.pip_frame.suspending.connect(self.desktop_pip.dock)  # the multiview lays them out
         # The host covers the page exactly: page coordinates are the host's.
@@ -1571,8 +1572,25 @@ class TVWindow(QMainWindow):
             note.setGeometry(self.player_page.rect())
             note.show()
             note.raise_()
+            self._caption_the_floating_picture()
         else:
             note.hide()
+
+    def _caption_the_floating_picture(self) -> None:
+        """2.9: AI captions over the floating picture too (the owner: "no subs in pip"); the
+        window's own show on its desktop, away. As over the window, a see-through window of
+        their own above it: libVLC's view covers any widget inside it. It lets the mouse
+        through (the floating picture is dragged and double-clicked there)."""
+        player = self.desktop_pip.floating_window()
+        if player is None or self._floating_captions is not None:
+            return
+        host = OverlayHost(player, player)
+        host.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
+        overlay = CaptionsOverlay(host)
+        host.add_overlay(overlay)
+        macos_window.join_all_spaces(host)  # beside the floating picture on every desktop
+        self._floating_captions = host
+        self.captions.add_overlay(overlay)
 
     def _mini_rect(self) -> QRect:
         screen = self.screen() or QGuiApplication.primaryScreen()

@@ -350,6 +350,45 @@ class DesktopPipWindowTests(WindowCase):
             self.assertIs(window.surface.parentWidget(), window.player_page)
             self.assertFalse(pip._timer.isActive())
 
+    def test_ai_captions_show_over_the_floating_picture_too(self):
+        # 2.9: the owner, "no subs in pip": they showed on the fullscreen desktop left.
+        shown = {"value": True}
+        with mock.patch("ui.tv_window._macos_desktops", return_value=True):
+            window = self.window
+            pip = window.desktop_pip
+            pip._on_active_space = lambda _w: shown["value"]
+            pip._may_float = lambda: True
+            window.show()
+            window.showFullScreen()
+            self.app.processEvents()
+            shown["value"] = False
+            pip.check()
+            pip.check()
+            host = window._floating_captions
+            self.assertIsNotNone(host)
+            self.assertIs(host.parentWidget(), pip.floating_window())
+            # The mouse goes through to the floating picture (dragged, double-clicked there).
+            self.assertTrue(host.windowFlags() & Qt.WindowType.WindowTransparentForInput)
+            [overlay] = host._overlays
+            window.captions._show("Merhaba")
+            self.app.processEvents()
+            self.assertEqual(overlay.text(), "Merhaba")
+            self.assertTrue(overlay.isVisibleTo(host))
+            self.assertTrue(host.isVisible())
+            self.assertEqual(window.captions_overlay.text(), "Merhaba")  # the window's too
+            shown["value"] = True
+            pip.check()  # back: the floating window and its captions hide
+            self.app.processEvents()
+            self.assertFalse(host.isVisible())
+            shown["value"] = False
+            pip.check()
+            pip.check()
+            self.assertIs(window._floating_captions, host)  # made once
+            window.captions._show("")
+            self.assertEqual(overlay.text(), "")
+            window.showNormal()
+            self.app.processEvents()
+
     def test_without_a_playing_picture_or_with_the_setting_off_nothing_floats(self):
         window = self.window
         window.show()

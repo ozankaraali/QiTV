@@ -51,6 +51,14 @@ FILM_AHEAD_S = 6.0  # a film's sound is read from this far past the picture (aft
 LATE_LEAD_S = 1.0
 HOLD_S = 0.6  # a caption stays this long after its words, unless the next one starts
 MIN_SHOW_S = 1.2
+# 2.9, the owner: captions came "a tiny bit" before the words, and went before the next line
+# came ("hard to read"). A piece starts LEAD_IN_S (services.captions.pieces) before its first
+# word: its caption shows from the word. A pause up to BRIDGE_S between two lines keeps the
+# first on until the next; after a longer one it stays as long as it takes to read (READ_CPS
+# characters a second), and never over the next.
+FIRST_WORD_S = 0.2  # services.captions.pieces.LEAD_IN_S
+BRIDGE_S = 3.0
+READ_CPS = 15.0
 TICK_MS = 250
 SEEK_S = 2.0  # the position moved this much more than the clock: a seek, read again there
 KEEP_S = 30 * 60.0  # cues kept this far behind the picture
@@ -106,7 +114,9 @@ class CaptionsController(QObject):
 
         self._window = window
         self._card = card  # a QuestionCard of its own: download the model?
-        self._overlay = overlay  # the captions overlay (ui.overlays.captions)
+        # Where the captions show (ui.overlays.captions): over the picture, and over the floating
+        # picture while it floats on another desktop (add_overlay; ui/desktop_pip.py).
+        self._overlays: list[Any] = [overlay] if overlay is not None else []
         self._process = CaptionsProcess(self)
         self._process.ready.connect(self._on_ready)
         self._process.failed.connect(self._on_failed)
@@ -816,13 +826,19 @@ class CaptionsController(QObject):
         return bool(waiting()) if callable(waiting) else False
 
     def _cue_at(self, position: float) -> str:
-        i = bisect.bisect_right(self._cues, (position, float("inf"), "")) - 1
+        i = bisect.bisect_right(self._cues, (position - FIRST_WORD_S, float("inf"), "")) - 1
         if i < 0:
             return ""
         start, end, text = self._cues[i]
-        following = self._cues[i + 1][0] if i + 1 < len(self._cues) else float("inf")
-        until = min(max(end + HOLD_S, start + MIN_SHOW_S), following)
-        return text if start <= position < until else ""
+        shows = start + FIRST_WORD_S
+        following = self._cues[i + 1][0] + FIRST_WORD_S if i + 1 < len(self._cues) else None
+        if following is not None and following - end <= BRIDGE_S:
+            until = following  # a short pause: on until the next line
+        else:
+            until = max(end + HOLD_S, shows + MIN_SHOW_S, shows + len(text) / READ_CPS)
+            if following is not None:
+                until = min(until, following)
+        return text if shows <= position < until else ""
 
     def _covered(self, position: float) -> bool:
         """The run reads on from before `position` and has not passed it by long: no need to
@@ -839,17 +855,26 @@ class CaptionsController(QObject):
             return None
         return float(self._newest) - float(self._position())
 
+    def add_overlay(self, overlay: Any) -> None:
+        """Another place the captions show, as over the picture (2.9: the floating picture's,
+        which had none: the captions showed on the fullscreen desktop left)."""
+        self._overlays.append(overlay)
+        if self._shown:
+            overlay.show_text(self._shown)
+
     def _show(self, text: str) -> None:
         if text == self._shown:
             return
         self._shown = text
-        overlay = self._overlay
-        if overlay is None:
-            return
-        if text:
-            overlay.show_text(text)
-        else:
-            overlay.clear()
+        from shiboken6 import isValid
+
+        for overlay in self._overlays:
+            if isinstance(overlay, QObject) and not isValid(overlay):
+                continue  # the floating picture's, gone as QiTV closes
+            if text:
+                overlay.show_text(text)
+            else:
+                overlay.clear()
 
     # ---- live or a film ----------------------------------------------------------------------
     def _is_live(self) -> bool:

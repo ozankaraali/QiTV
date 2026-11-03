@@ -20,7 +20,9 @@ others' distributions, which may have malware.**
   waits a few seconds once ("Starting captions…") and then plays on normally. Go live keeps
   that distance while captions are on. Turn them off and the picture stays where it is, as
   after a pause: the bar and Go live take you back to live. A film needs no delay: after a
-  seek, captions start a few seconds later.
+  seek, captions start a few seconds later. A line stays on through a short pause, until the
+  next one comes, so it can be read to its end. On a Mac the captions show over the small
+  floating picture too, when you go to another desktop from the fullscreen player.
 - **One download, sized for your computer:** the first time, QiTV asks before downloading the
   speech model once: the more accurate one (2.4 GB) where the computer is fast enough and
   has 12 GB of memory, as most from the last few years are, else a faster one (0.9 GB).

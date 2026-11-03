@@ -350,11 +350,32 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.sent[0][:4], ("start", run, "http://127.0.0.1:1/t/s1/side/3.ts", 0.0))
         self.captions._on_caption(run, 10.0, 12.0, "Merhaba")
         self.captions._on_caption(run, 12.2, 13.0, "Nasılsın")
-        self.assertEqual(self.at(9.9), "")
-        self.assertEqual(self.at(10.0), "Merhaba")
-        self.assertEqual(self.at(12.1), "Merhaba")  # held a little after the words
-        self.assertEqual(self.at(12.2), "Nasılsın")  # until the next one starts
-        self.assertEqual(self.at(13.9), "")
+        self.assertEqual(self.at(10.1), "")  # the piece's lead-in: not the words yet
+        self.assertEqual(self.at(10.2), "Merhaba")  # its first word
+        self.assertEqual(self.at(12.3), "Merhaba")  # on until the next line's first word
+        self.assertEqual(self.at(12.4), "Nasılsın")
+        self.assertEqual(self.at(13.5), "Nasılsın")  # held a little after the words
+        self.assertEqual(self.at(13.7), "")
+
+    def test_a_caption_shows_from_the_first_word_its_piece_leads_in_to(self):
+        from services.captions.pieces import LEAD_IN_S
+        from ui.captions_controller import FIRST_WORD_S
+
+        self.assertEqual(FIRST_WORD_S, LEAD_IN_S)
+
+    def test_a_short_pause_keeps_the_line_on_until_the_next_a_long_one_for_its_reading(self):
+        # 2.9, the owner: the lines went before the next came ("hard to read").
+        run = self.captions._run
+        long_line = "Beyaz saray seçim sonuçlarını bekliyor, İran politikasında belirsizlik var."
+        self.captions._on_caption(run, 50.0, 52.0, "Kısa.")
+        self.captions._on_caption(run, 54.8, 56.0, long_line)  # a 2.8 s pause before it
+        self.captions._on_caption(run, 80.0, 81.0, "Sonra.")  # 24 s of music before it
+        self.assertEqual(self.at(54.9), "Kısa.")  # bridged
+        self.assertEqual(self.at(55.0), long_line)
+        reading = 55.0 + len(long_line) / 15.0  # longer than its words and the hold
+        self.assertEqual(self.at(reading - 0.1), long_line)
+        self.assertEqual(self.at(reading + 0.1), "")  # not on over the music
+        self.assertEqual(self.at(80.2), "Sonra.")
 
     def test_the_distance_follows_the_large_picture_after_a_swap(self):
         import types
