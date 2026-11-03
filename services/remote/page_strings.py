@@ -155,6 +155,8 @@ PAGE_STRINGS: dict[str, str] = {
     "ai_captions": N_("AI captions"),  # i18n: the phone remote's Subtitles: a row
     # i18n: the phone remote's Subtitles: the row naming the language AI captions hear
     "language": N_("Language"),
+    # i18n: the phone remote's Subtitles: the row naming the speech model that writes AI captions
+    "speech_model": N_("Speech model"),
     "no_audio": N_("No audio tracks"),  # i18n: the phone remote's Sound, when there are none
     "no_subtitles": N_("No subtitles"),  # i18n: the phone remote's Subtitles, with none to show
     "fullscreen": N_("Full screen"),  # i18n: the phone remote: a button

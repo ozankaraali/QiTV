@@ -34,7 +34,7 @@ from typing import Any, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services.i18n import translate
+from services.i18n import tr, translate
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,21 @@ from ui.captions_texts import (  # noqa: E402  (the texts, with their translatio
     size_text,
 )
 
+MODEL_NAMES = ("auto", "small", "large")
+
+
+def model_texts() -> dict[str, str]:
+    """The speech models' names, as Settings names them."""
+    return {
+        # i18n: Settings → AI captions → Speech model, and the Subtitles panel's list: QiTV
+        # picks it by this computer's speed
+        "auto": tr("Automatic", ctx="a speech model"),
+        # i18n: Settings → AI captions → Speech model: the smaller one; keep "0.6B"
+        "small": tr("Faster (0.6B)"),
+        # i18n: Settings → AI captions → Speech model: the larger one; keep "1.7B"
+        "large": tr("More accurate (1.7B)"),
+    }
+
 
 class CaptionsController(QObject):
     """The subtitle panel's AI captions, for the large picture's live channel."""
@@ -92,6 +107,7 @@ class CaptionsController(QObject):
             card.answered.connect(self._on_answer)
         self._enabled = False
         self._leaving_download: Any = None  # cancelled, still ending its request
+        self._disk: dict[str, tuple[bool, int]] = {}  # each model's (installed, to fetch)
         self._start_after_leaving = False
         self._run_channel = ""  # the channel the run reads (a vote's language is its)
         self._resync_at: Optional[float] = None  # read again from past a jump here
@@ -255,6 +271,69 @@ class CaptionsController(QObject):
         self._process.send("language", self._language[0])
         self.changed.emit()
 
+    # ---- the speech model (2.9: the Subtitles panel's and the phone's, as Settings') ---------
+    def model(self) -> str:
+        """The viewer's speech model: "auto" (by this computer's speed), "small" or "large"."""
+        name = str(self._config_get("ai_captions_model", "auto") or "auto")
+        return name if name in MODEL_NAMES else "auto"
+
+    def model_choices(self) -> list[tuple[str, str, str]]:
+        """Automatic, Faster (0.6B) and More accurate (1.7B) as (name, text, note): Automatic's
+        note names the one it takes now; another's, its download ("1.6 GB"), or how far that is
+        ("Downloading 40%"), and nothing once it is here."""
+        texts = model_texts()
+        choices = [("auto", texts["auto"], texts[self._auto_tier()])]
+        for name in ("small", "large"):
+            here, missing = self._on_disk(name)
+            if self._download is not None and name == self._tier:
+                note = self.status_text()
+            else:
+                note = "" if here else size_text(missing)
+            choices.append((name, texts[name], note))
+        return choices
+
+    def model_text(self) -> str:
+        """The Speech model row's note: "Automatic · Faster (0.6B)", or the one chosen."""
+        texts, name = model_texts(), self.model()
+        if name == "auto":
+            return f"{texts['auto']} · {texts[self._auto_tier()]}"
+        return texts[name]
+
+    def set_model(self, name: str) -> None:
+        """The viewer's speech model, kept as Settings keeps it. While they are on (or on their
+        way) with another model, they come on again with this one: its download's question
+        first, when it isn't here yet."""
+        if name not in MODEL_NAMES:
+            return
+        self._config_set("ai_captions_model", name)
+        if (self._enabled or self._download is not None) and self._choose_tier() != self._tier:
+            self._disable()
+            self.toggle()
+        self.changed.emit()
+
+    def _auto_tier(self) -> str:
+        """What Automatic takes now: one already here, else by this computer's speed."""
+        from services.captions import tier
+
+        for name in ("large", "small"):
+            if self._on_disk(name)[0]:
+                return name
+        return str(tier.choose_tier("auto"))
+
+    def _on_disk(self, name: str) -> tuple[bool, int]:
+        """(installed, bytes still to fetch) of a model, looked at once until a download or
+        Settings' Delete changes them: the panel and the phones ask often."""
+        from services.captions import models
+
+        known = self._disk.get(name)
+        if known is None:
+            try:
+                known = (models.installed(name), models.download_size(name))
+            except models.Unsupported:
+                known = (False, 0)
+            self._disk[name] = known
+        return known
+
     def shutdown(self) -> None:
         """QiTV closes: no model left running, no download going on."""
         self._timer.stop()
@@ -289,6 +368,8 @@ class CaptionsController(QObject):
                 QTimer.singleShot(200, done)
                 return
             then()
+            self._disk.clear()  # the files went
+            self.changed.emit()
 
         done()
 
@@ -319,6 +400,7 @@ class CaptionsController(QObject):
     def _begin_download(self) -> None:
         from services.captions.download import CaptionsDownload
 
+        self._disk.clear()  # what is here changes from now on
         download = CaptionsDownload(self)
         # Each download's signals are its own: a cancelled one's late answer changes nothing.
         download.progress.connect(
@@ -354,6 +436,7 @@ class CaptionsController(QObject):
     def _on_downloaded(self, download: Any) -> None:
         if self._left(download):
             return
+        self._disk.clear()
         self._unpacking = False
         self._download = None
         self._show("")
@@ -362,6 +445,7 @@ class CaptionsController(QObject):
     def _on_download_failed(self, download: Any, reason: str) -> None:
         if self._left(download):
             return
+        self._disk.clear()
         self._download = None
         self._unpacking = False
         self._show("")
@@ -376,6 +460,7 @@ class CaptionsController(QObject):
         starts now. True when `download` is not the current one."""
         if download is self._leaving_download:
             self._leaving_download = None
+            self._disk.clear()  # what it left (a ".part", an archive not unpacked)
             if self._start_after_leaving:
                 self._begin_download()
             return True
@@ -818,15 +903,8 @@ class CaptionsController(QObject):
         return ""
 
     def _choose_tier(self) -> str:
-        from services.captions import models, tier
-
-        override = str(self._config_get("ai_captions_model", "auto") or "auto")
-        if override in ("small", "large"):
-            return override
-        for name in ("large", "small"):  # one already here is the one to use
-            if models.installed(name):
-                return name
-        return str(tier.choose_tier("auto"))
+        override = self.model()
+        return override if override in ("small", "large") else self._auto_tier()
 
     def _config_get(self, name: str, default: Any) -> Any:
         config = getattr(self._window, "config_manager", None)

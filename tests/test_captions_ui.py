@@ -33,6 +33,8 @@ from ui.track_controls import (
     AI_BACK,
     AI_CAPTIONS,
     AI_LANGUAGE,
+    AI_MODEL,
+    AI_MODEL_PICK,
     AI_PICK,
     TrackControls,
     audio_names,
@@ -180,6 +182,9 @@ class FakeCaptions(QObject):
         self.going = False  # the model downloads (2.9: the phone's sheet says so)
         self.toggles = 0
         self.picked = []
+        self.chosen_model = "auto"
+        self.models = []  # set_model's calls
+        self.model_asks = False  # choosing a model asks its download's question first
 
     def available(self):
         return self.offered
@@ -228,6 +233,28 @@ class FakeCaptions(QObject):
         self.picked.append(name)
         self.lang = ("auto", "") if name == "auto" else (name, "you chose")
 
+    def model(self):
+        return self.chosen_model
+
+    def model_choices(self):
+        return [
+            ("auto", "Automatic", "Faster (0.6B)"),
+            ("small", "Faster (0.6B)", ""),
+            ("large", "More accurate (1.7B)", "2.5 GB"),
+        ]
+
+    def model_text(self):
+        names = {name: text for name, text, _note in self.model_choices()}
+        if self.chosen_model == "auto":
+            return "Automatic · Faster (0.6B)"
+        return names[self.chosen_model]
+
+    def set_model(self, name):
+        self.models.append(name)
+        self.chosen_model = name
+        if self.model_asks:
+            self.on, self.asked = False, True
+
 
 class CaptionRowsTests(PanelCase):
     def setUp(self):
@@ -275,7 +302,15 @@ class CaptionRowsTests(PanelCase):
         self.captions.offered = True
         self.click_button("subtitles")
         self.assertEqual(
-            self.texts(), ["*Off", "English", "Français", "AI captions", "Load a file…"]
+            self.texts(),
+            [
+                "*Off",
+                "English",
+                "Français",
+                "AI captions",
+                "Speech model [Automatic · Faster (0.6B)]",  # 2.9: chosen before a download too
+                "Load a file…",
+            ],
         )
 
     def test_turning_them_on_ticks_the_row_and_the_language_row_comes(self):
@@ -292,6 +327,7 @@ class CaptionRowsTests(PanelCase):
                 "Français",
                 "*AI captions",
                 "Language [Türkçe · audio track]",
+                "Speech model [Automatic · Faster (0.6B)]",
                 "Load a file…",
             ],
         )
@@ -343,6 +379,37 @@ class CaptionRowsTests(PanelCase):
         self.click_row(AI_LANGUAGE)
         self.assertEqual(self.texts()[1:4], ["Auto", "English", "*Türkçe"])
         self.click_row(AI_BACK)
+        self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
+
+    def test_the_speech_model_list_picks_one_and_comes_back(self):
+        # 2.9, the owner's: Faster or More accurate chosen where they are turned on, before
+        # their download too, as a game's performance or quality.
+        self.click_button("subtitles")
+        self.click_row(AI_MODEL)
+        self.assertEqual(self.subtitle_panel.model().title, "Speech model")
+        self.assertEqual(
+            self.texts(),
+            [
+                "Subtitles",
+                "*Automatic [Faster (0.6B)]",
+                "Faster (0.6B)",
+                "More accurate (1.7B) [2.5 GB]",
+            ],
+        )
+        self.assertEqual(self.rows()[0].key, AI_BACK)
+        self.click_row((AI_MODEL_PICK, "large"))
+        self.assertEqual(self.captions.models, ["large"])
+        self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
+        model = self.rows()[[r.key for r in self.rows()].index(AI_MODEL)]
+        self.assertEqual(model.note, "More accurate (1.7B)")
+
+    def test_a_model_that_must_download_first_puts_its_question_in_front(self):
+        self.captions.on, self.captions.model_asks = True, True
+        self.click_button("subtitles")
+        self.click_row(AI_MODEL)
+        self.click_row((AI_MODEL_PICK, "large"))
+        self.assertFalse(self.subtitle_panel.isVisible())
+        self.click_button("subtitles")  # opened again: Subtitles, not the model list
         self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
 
     def test_left_goes_back_from_the_list_and_it_opens_on_its_own_list_again(self):
@@ -484,6 +551,14 @@ class PhoneChoicesTests(PanelCase):
         self.controls.set_captions(True)  # another phone, while it asks: its answer decides
         self.assertEqual(self.captions.toggles, 1)
 
+    def test_the_speech_model_is_chosen_as_its_list_does(self):
+        self.assertTrue(self.controls.choose_caption_model("small"))
+        self.assertFalse(self.controls.choose_caption_model("huge"))
+        self.assertEqual(self.captions.models, ["small"])
+        choice = self.controls.captions_choice()
+        self.assertEqual((choice.model, choice.model_text), ("small", "Faster (0.6B)"))
+        self.assertEqual([m[0] for m in choice.models], ["auto", "small", "large"])
+
     def test_the_language_is_chosen_while_they_are_on(self):
         controls = self.controls
         self.assertFalse(controls.choose_caption_language("Turkish"))  # off: no Language row
@@ -558,6 +633,61 @@ class DownloadQuestionTests(unittest.TestCase):
         self.card.escape()
         self.assertFalse(self.captions.asking())
         self.assertEqual((self.changes, self.begun), ([True], []))  # a phone's closes too
+
+
+class SpeechModelTests(unittest.TestCase):
+    """2.9: the speech model chosen where AI captions are turned on (Settings' choice too)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from ui.captions_controller import CaptionsController
+
+        self.host = QWidget()
+        self.addCleanup(self.host.deleteLater)
+        self.captions = CaptionsController(self.host)
+        self.config = {}
+        self.captions._config_get = lambda name, default: self.config.get(name, default)
+        self.captions._config_set = self.config.__setitem__
+        self.disk = {"small": (True, 0), "large": (False, 2_500_000_000)}
+        self.captions._on_disk = lambda name: self.disk[name]
+        self.restarts = []
+        self.captions._disable = lambda: self.restarts.append("off")
+        self.captions.toggle = lambda: self.restarts.append("on")
+
+    def test_each_is_noted_with_what_it_takes(self):
+        self.assertEqual(
+            self.captions.model_choices(),
+            [
+                ("auto", "Automatic", "Faster (0.6B)"),  # the one here
+                ("small", "Faster (0.6B)", ""),
+                ("large", "More accurate (1.7B)", size_text(2_500_000_000)),
+            ],
+        )
+        self.assertEqual(self.captions.model_text(), "Automatic · Faster (0.6B)")
+        self.captions._download, self.captions._tier = object(), "large"
+        self.captions._percent = 40
+        self.assertEqual(self.captions.model_choices()[2][2], "Downloading 40%")
+
+    def test_chosen_while_on_with_another_they_come_on_again_with_it(self):
+        self.captions._enabled, self.captions._tier = True, "small"
+        self.captions.set_model("small")  # the one they use: nothing to do
+        self.assertEqual(self.restarts, [])
+        self.captions.set_model("large")
+        self.assertEqual(self.config["ai_captions_model"], "large")
+        self.assertEqual(self.restarts, ["off", "on"])  # its question, when it isn't here
+        self.assertEqual(self.captions.model_text(), "More accurate (1.7B)")
+        self.captions.set_model("huge")
+        self.assertEqual(self.config["ai_captions_model"], "large")
+
+    def test_chosen_while_off_it_is_kept_for_their_next_time(self):
+        self.captions.set_model("large")
+        self.assertEqual(self.restarts, [])
+        self.assertEqual(self.captions._choose_tier(), "large")
+        self.captions.set_model("auto")
+        self.assertEqual(self.captions._choose_tier(), "small")  # the one here
 
 
 class NoteRowTests(PanelCase):

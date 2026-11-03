@@ -22,6 +22,16 @@ from services.remote.protocol import Closed, Get, Opened, OpenItem, Press, Query
 from tests.fixtures import local_xtream
 from ui.remote_snapshots import MAX_TRACKS, TITLE_CHARS, Handles, state, tracks
 
+MODELS = {
+    "model": "auto",
+    "model_note": "Automatic · Faster (0.6B)",
+    "models": [
+        {"id": "auto", "name": "Automatic", "note": "Faster (0.6B)"},
+        {"id": "small", "name": "Faster (0.6B)", "note": ""},
+        {"id": "large", "name": "More accurate (1.7B)", "note": "2.5 GB"},
+    ],
+}
+
 
 class SnapshotTests(WindowCase):
     def test_state_has_no_urls_or_credentials(self):
@@ -303,7 +313,7 @@ class TracksTests(PanelCase):
                     {"id": 3, "name": "English", "on": False},
                     {"id": 4, "name": "Français", "on": True},
                 ],
-                "ai": {"on": False, "going": False, "note": ""},
+                "ai": {"on": False, "going": False, "note": "", **MODELS},
             },
         )
         for secret in ("http", "cmd", "tv/1"):
@@ -330,7 +340,8 @@ class TracksTests(PanelCase):
         self.captions.on, self.captions.going = False, True  # the model downloads
         self.captions.status = "Downloading 40%"
         self.assertEqual(
-            tracks(self.window, 1)["ai"], {"on": False, "going": True, "note": "Downloading 40%"}
+            tracks(self.window, 1)["ai"],
+            {"on": False, "going": True, "note": "Downloading 40%", **MODELS},
         )
         self.captions.offered = False  # a provider's film: none
         self.assertNotIn("ai", tracks(self.window, 1))

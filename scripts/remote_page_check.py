@@ -37,6 +37,7 @@ from services.remote.hub import RemoteHub, web_dir  # noqa: E402
 from services.remote.protocol import (  # noqa: E402
     Answered,
     CaptionsLanguage,
+    CaptionsModel,
     CaptionsSwitch,
     CastTo,
     CloseSearch,
@@ -1652,6 +1653,16 @@ TRACKS = {
     "subs": [{"id": 3, "name": "English", "on": False}],
     "ai": {"on": False, "going": False, "note": ""},
 }
+MODELS = {  # 2.9: the speech model, Settings' choice, on the sheet too
+    "model": "auto",
+    "model_note": "Automatic · Faster (0.6B)",
+    "models": [
+        {"id": "auto", "name": "Automatic", "note": "Faster (0.6B)"},
+        {"id": "small", "name": "Faster (0.6B)", "note": ""},
+        {"id": "large", "name": "More accurate (1.7B)", "note": "2.5 GB"},
+    ],
+}
+TRACKS["ai"] = {**TRACKS["ai"], **MODELS}
 AI_ON = {
     "on": True,
     "going": False,
@@ -1660,6 +1671,7 @@ AI_ON = {
     "lang_note": "Türkçe · automatic",
     "langs": [{"id": "auto", "name": "Auto"}]
     + [{"id": name, "name": own_name(name)} for name in QWEN_LANGUAGES],
+    **MODELS,
 }
 
 
@@ -1686,7 +1698,7 @@ def scenario_tracks(rig: Rig) -> None:
     rig.page.locator("#tracksList .choice", has_text="AI captions").wait_for()
     assert rig.page.inner_text("#tracksTitle") == "Subtitles", rig.page.inner_text("#tracksTitle")
     labels = rig.page.locator("#tracksList .choice .label").all_inner_texts()
-    assert labels == ["Off", "English", "AI captions"], labels
+    assert labels == ["Off", "English", "AI captions", "Speech model"], labels
     assert ticked(rig) == ["Off"], ticked(rig)
     mark = rig.events.mark()
     rig.page.locator("#tracksList .choice", has_text="English").click()
@@ -1705,10 +1717,11 @@ def scenario_tracks(rig: Rig) -> None:
     rig.events.wait(Answered, where=lambda e: e.n == 11 and e.yes, after=mark)
     rig.events.wait(Get, where=lambda e: e.what == "tracks", after=mark)  # back to Subtitles
     rig.page.locator("#tracksSheet").wait_for()
-    rig.hub.send(sid, {**TRACKS, "ai": {"on": False, "going": True, "note": "Downloading 40%"}})
+    going = {"on": False, "going": True, **MODELS}
+    rig.hub.send(sid, {**TRACKS, "ai": {**going, "note": "Downloading 40%"}})
     rig.page.locator("#tracksList .choice", has_text="Downloading 40%").wait_for()
     row = rig.page.locator("#tracksList .choice", has_text="AI captions").element_handle()
-    rig.hub.send(sid, {**TRACKS, "ai": {"on": False, "going": True, "note": "Downloading 41%"}})
+    rig.hub.send(sid, {**TRACKS, "ai": {**going, "note": "Downloading 41%"}})
     rig.page.locator("#tracksList .choice", has_text="Downloading 41%").wait_for()
     assert row.evaluate("el => el.isConnected"), "a note's change redrew the row: a tap is lost"
     rig.shot("tracks-downloading")
@@ -1728,6 +1741,17 @@ def scenario_tracks(rig: Rig) -> None:
     rig.events.wait(
         CaptionsLanguage, where=lambda e: (e.language, e.of) == ("English", 4), after=mark
     )
+    assert rig.page.inner_text("#tracksTitle") == "Subtitles"  # back, as the panel's list
+    rig.page.locator("#tracksList .choice", has_text="Speech model").click()
+    assert rig.page.inner_text("#tracksTitle") == "Speech model", rig.page.inner_text(
+        "#tracksTitle"
+    )
+    assert ticked(rig) == ["Automatic"], ticked(rig)
+    rig.page.locator("#tracksList .choice", has_text="2.5 GB").wait_for()  # its download
+    rig.shot("tracks-models")
+    mark = rig.events.mark()
+    rig.page.locator("#tracksList .choice", has_text="More accurate").click()
+    rig.events.wait(CaptionsModel, where=lambda e: (e.model, e.of) == ("large", 4), after=mark)
     assert rig.page.inner_text("#tracksTitle") == "Subtitles"  # back, as the panel's list
     mark = rig.events.mark()
     rig.page.click("#veil", position={"x": 20, "y": 20})

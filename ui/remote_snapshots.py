@@ -155,6 +155,13 @@ def tracks(window: Any, of: int) -> dict:
             ai["lang"] = captions.language
             ai["lang_note"] = captions.language_text[:TITLE_CHARS]  # "Türkçe · automatic"
             ai["langs"] = [{"id": name, "name": own} for name, own in captions.languages]
+        if captions.models:  # their Speech model row, and its list (Automatic, Faster, …)
+            ai["model"] = captions.model
+            ai["model_note"] = captions.model_text[:TITLE_CHARS]  # "Automatic · Faster (0.6B)"
+            ai["models"] = [
+                {"id": name, "name": text[:TITLE_CHARS], "note": note[:TITLE_CHARS]}
+                for name, text, note in captions.models
+            ]
         message["ai"] = ai
     return message
 

@@ -35,6 +35,7 @@ from services.remote.protocol import (
     STORE_VERSION,
     Answered,
     CaptionsLanguage,
+    CaptionsModel,
     CaptionsSwitch,
     CastTo,
     Closed,
@@ -413,6 +414,8 @@ class RemoteController(QObject):
             self._switch_captions(event)
         elif isinstance(event, CaptionsLanguage):
             self._caption_language(event)
+        elif isinstance(event, CaptionsModel):
+            self._caption_model(event)
         elif isinstance(event, Timer):
             self._timer_from_phone(event)
         elif isinstance(event, Schedule):
@@ -1005,6 +1008,20 @@ class RemoteController(QObject):
                 controls.choose_caption_language(event.language)
         except Exception as error:  # a phone's pick must never take QiTV down
             logger.error("Phone remote: AI captions' language failed: %s", safe_message(error))
+        self._track_phones.add(event.sid)
+        self._push_tracks(asked=event.sid)
+
+    def _caption_model(self, event: CaptionsModel) -> None:
+        """The speech model; on with another, they come on again with it, its download's
+        question first (on the TV and on this phone) when it isn't here."""
+        controls = self._picked(event.of)
+        captions = getattr(self._window, "captions", None)
+        try:
+            if controls is not None and controls.choose_caption_model(event.model):
+                if captions is not None and captions.asking():
+                    self._ask_captions(event.sid, captions)
+        except Exception as error:  # a phone's pick must never take QiTV down
+            logger.error("Phone remote: AI captions' model failed: %s", safe_message(error))
         self._track_phones.add(event.sid)
         self._push_tracks(asked=event.sid)
 

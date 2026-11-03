@@ -153,13 +153,19 @@ class MessageTests(unittest.TestCase):
         for lang in ("auto", "Turkish", "English", "Cantonese"):
             message = {"t": "captions", "lang": lang, "of": 2}
             self.assertEqual(parse_phone_message(message), message)
+        for model in ("auto", "small", "large"):  # the speech model, as Settings'
+            message = {"t": "captions", "model": model, "of": 2}
+            self.assertEqual(parse_phone_message(message), message)
         for bad in (
             {"t": "captions", "on": 1, "of": 2},
             {"t": "captions", "on": None, "of": 2},
             {"t": "captions", "lang": "tr", "of": 2},  # Qwen's names only, as QiTV listed them
             {"t": "captions", "lang": "Klingon", "of": 2},
             {"t": "captions", "lang": ["Turkish"], "of": 2},
-            {"t": "captions", "on": True, "lang": "Turkish", "of": 2},  # one of the two
+            {"t": "captions", "on": True, "lang": "Turkish", "of": 2},  # one of them
+            {"t": "captions", "model": "large", "lang": "Turkish", "of": 2},
+            {"t": "captions", "model": "huge", "of": 2},  # Settings' three only
+            {"t": "captions", "model": 1, "of": 2},
             {"t": "captions", "of": 2},
             {"t": "captions", "on": True},
             {"t": "captions", "on": True, "of": "2"},

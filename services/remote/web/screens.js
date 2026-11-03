@@ -83,6 +83,7 @@ const words = {
   subtitles_off: "Off",
   ai_captions: "AI captions",
   language: "Language",
+  speech_model: "Speech model",
   no_audio: "No audio tracks",
   no_subtitles: "No subtitles",
 };
@@ -763,12 +764,13 @@ function bindCast() {
 // ---- 2.9: the TV's subtitles and sound, as its Subtitles and Sound panels list them --------
 
 // What QiTV last said of the large picture: {of, playing, sound: [{id, name, on}], subs: [...],
-// ai: {on, going, note, lang, lang_note, langs}} (ui/remote_snapshots.py tracks). A pick carries
-// `of` back: one made in the list of what played before changes nothing. While the sheet shows
-// one of its lists ("subs", "sound", or "langs": AI captions' languages), QiTV sends each change.
+// ai: {on, going, note, lang, lang_note, langs, model, model_note, models}} (ui/remote_snapshots.py
+// tracks). A pick carries `of` back: one made in the list of what played before changes nothing.
+// While the sheet shows one of its lists ("subs", "sound", "langs": AI captions' languages, or
+// "models": their speech models), QiTV sends each change.
 let trackList = null;
 let tracksView = "subs";
-const TRACK_TITLES = { subs: "subtitles", sound: "sound", langs: "language" };
+const TRACK_TITLES = { subs: "subtitles", sound: "sound", langs: "language", models: "speech_model" };
 
 function tracksShown() {
   return $("tracksSheet").hidden ? "" : tracksView;
@@ -786,7 +788,7 @@ function showTracks(view) {
   tracksView = view;
   drawTracks();
   $("tracksSheet").scrollTop = 0;
-  const chosen = view === "langs" && $("tracksList").querySelector(".current");
+  const chosen = (view === "langs" || view === "models") && $("tracksList").querySelector(".current");
   if (chosen) chosen.scrollIntoView({ block: "nearest" }); // the language heard, further down
 }
 
@@ -820,6 +822,7 @@ function drawTracks() {
   const tracks = trackList;
   const ai = tracks && tracks.ai;
   if (tracksView === "langs" && !(ai && ai.on && Array.isArray(ai.langs))) tracksView = "subs"; // off meanwhile
+  if (tracksView === "models" && !(ai && Array.isArray(ai.models))) tracksView = "subs";
   $("tracksTitle").textContent = w(TRACK_TITLES[tracksView]);
   const rows = [];
   const note = (key) => rows.push(el("p", "step", w(key)));
@@ -840,6 +843,15 @@ function drawTracks() {
       };
       rows.push(choiceRow(lang.name, pick, { on: lang.id === ai.lang }));
     }
+  } else if (tracksView === "models") {
+    rows.push(choiceRow(w("subtitles"), () => showTracks("subs"), { up: true }));
+    for (const model of ai.models) {
+      const pick = () => {
+        pickTrack({ t: "captions", model: model.id });
+        showTracks("subs"); // as the panel's list, back to Subtitles (a download asks first)
+      };
+      rows.push(choiceRow(model.name, pick, { on: model.id === ai.model, note: model.note }));
+    }
   } else {
     const subs = tracks.subs || [];
     const shown = subs.some((track) => track.on) || (ai && ai.on);
@@ -856,6 +868,7 @@ function drawTracks() {
       };
       rows.push(choiceRow(w("ai_captions"), turn, { on: ai.on, note: ai.note }));
       if (ai.on) rows.push(choiceRow(w("language"), () => showTracks("langs"), { note: ai.lang_note, opens: true }));
+      if (Array.isArray(ai.models)) rows.push(choiceRow(w("speech_model"), () => showTracks("models"), { note: ai.model_note, opens: true }));
     } else if (!subs.length) note("no_subtitles");
   }
   // Pushes come often (a download's percent): a list whose rows are the same but for their notes

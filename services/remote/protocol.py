@@ -243,6 +243,7 @@ MAX_DEVICE = 200  # 2.8: a cast device's name, as the TV lists it
 MAX_TRACK = 2**31 - 1  # 2.9: a track's id, as libVLC numbers it (an MPEG-TS stream's: a PID)
 # 2.9: the languages AI captions hear, as the phone picks one: "auto", or Qwen's name
 CAPTION_LANGUAGES = frozenset(("auto", *QWEN_LANGUAGES))
+CAPTION_MODELS = frozenset(("auto", "small", "large"))  # 2.9: the speech model, as Settings
 MAX_POS = 2 * 24 * 3600 * 1000  # a title's place or length, in ms: two days at most
 MAX_TIMER_TITLE = 80  # 2.8: a timer's name, as the phone typed it (cut there)
 DAY_MINUTES = 24 * 60
@@ -267,12 +268,18 @@ def _track(obj: dict) -> Optional[dict]:
 
 
 def _captions(obj: dict) -> Optional[dict]:
-    """2.9: AI captions on or off ("on"), or the language they hear ("lang"): one of the two."""
+    """2.9: AI captions on or off ("on"), the language they hear ("lang"), or the speech model
+    that writes them ("model"): one of the three."""
     of = _of(obj)
-    if of is None or ("on" in obj) == ("lang" in obj):
+    if of is None or sum(key in obj for key in ("on", "lang", "model")) != 1:
         return None
     if "on" in obj:
         return {"t": "captions", "on": obj["on"], "of": of} if isinstance(obj["on"], bool) else None
+    if "model" in obj:
+        model = obj["model"]
+        if isinstance(model, str) and model in CAPTION_MODELS:
+            return {"t": "captions", "model": model, "of": of}
+        return None
     lang = obj["lang"]
     if isinstance(lang, str) and lang in CAPTION_LANGUAGES:
         return {"t": "captions", "lang": lang, "of": of}
@@ -508,6 +515,15 @@ class CaptionsLanguage:
 
     sid: str
     language: str
+    of: int
+
+
+@dataclass(frozen=True)
+class CaptionsModel:
+    """2.9: the speech model that writes AI captions ("auto", "small" or "large")."""
+
+    sid: str
+    model: str
     of: int
 
 

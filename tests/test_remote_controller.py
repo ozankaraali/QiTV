@@ -15,6 +15,7 @@ from test_tv_window import WindowCase, wait_until
 from services.remote.protocol import (
     Answered,
     CaptionsLanguage,
+    CaptionsModel,
     CaptionsSwitch,
     CastTo,
     Closed,
@@ -559,6 +560,17 @@ class PhoneTracksTests(WindowCase):
         QTest.qWait(50)
         answer.assert_called_once_with(True)
         self.assertEqual(self.sent("unask"), [])  # it closed its own
+
+    def test_a_speech_model_picked_on_the_phone_asks_its_download_there_too(self):
+        of = self.opened()["of"]
+        captions, _answer = self.captions()
+        self.controls.choose_caption_model.return_value = True
+        self.window.remote.bridge.post(CaptionsModel("s8", "large", of))
+        self.assertTrue(wait_until(lambda: self.sent("ask")))
+        self.controls.choose_caption_model.assert_called_once_with("large")
+        self.window.remote.bridge.post(CaptionsModel("s8", "large", of + 1))  # an older list
+        QTest.qWait(50)
+        self.controls.choose_caption_model.assert_called_once_with("large")
 
     def test_answered_on_the_tv_it_closes_on_the_phones(self):
         of = self.opened()["of"]

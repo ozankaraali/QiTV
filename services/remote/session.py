@@ -26,6 +26,7 @@ from services.remote.protocol import (
     PROTO,
     Answered,
     CaptionsLanguage,
+    CaptionsModel,
     CaptionsSwitch,
     CastTo,
     Closed,
@@ -305,6 +306,8 @@ class Session:
         if t == "captions":  # 2.9: AI captions on or off, or their language
             if "on" in m:
                 return Reply(events=[CaptionsSwitch(sid, m["on"], m["of"])])
+            if "model" in m:
+                return Reply(events=[CaptionsModel(sid, m["model"], m["of"])])
             return Reply(events=[CaptionsLanguage(sid, m["lang"], m["of"])])
         if t == "sched":  # 2.8
             return Reply(events=[Schedule(sid, m["id"], m["do"])])

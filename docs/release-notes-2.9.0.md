@@ -24,8 +24,11 @@ others' distributions, which may have malware.**
 - **One download, sized for your computer:** the first time, QiTV asks before downloading the
   speech model once: the more accurate one (2.4 GB) where the computer is fast enough and
   has 12 GB of memory, as most from the last few years are, else a faster one (0.9 GB).
-  Settings → AI captions can choose either. Nothing of it ships with QiTV, nothing you watch
-  leaves your computer, and Settings shows the space it takes and deletes it.
+  You can choose yourself, before the download too: the panel's **Speech model** row offers
+  Automatic, Faster (0.6B) and More accurate (1.7B), each with its download size (Settings →
+  AI captions too). While it downloads, the picture says how far it is. Nothing of it ships
+  with QiTV, nothing you watch leaves your computer, and Settings shows the space it takes and
+  deletes it.
 - **The language:** QiTV takes it from the channel's audio track when the channel names it;
   otherwise the model hears it. You can choose another in the panel, and QiTV remembers your
   choice for that channel.
@@ -49,7 +52,8 @@ others' distributions, which may have malware.**
 
 - **Subtitles and Sound from the phone:** the remote's **More** has **Subtitles** and
   **Sound**, the TV's two panels: Off, the stream's subtitles and **AI captions** (on or off,
-  what they are waiting for, such as "Downloading 40%", and the language they hear, which you
-  can change), and the sound tracks by their language, named as on the TV. They follow what
+  what they are waiting for, such as "Downloading 40%", the language they hear and their speech
+  model, both of which you can change), and the sound tracks by their language, named as on the
+  TV. They follow what
   the TV does while they are open. The first time AI captions are turned on from the phone, the
   download question shows on the phone and on the TV: answer either one.
