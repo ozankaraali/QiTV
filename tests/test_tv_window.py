@@ -1523,7 +1523,9 @@ class LivePipelineWindowTests(WindowCase):
         self.assertEqual(window.budget.holders(PROVIDER_NAME), ["main"])
         self.assertEqual(window.engine.root_dir, Path(self.config_dir) / "timeshift")
 
-    def test_close_stops_the_live_session_then_the_engine_then_the_rest(self):
+    def test_close_parks_the_live_session_then_stops_the_engine_then_the_rest(self):
+        # 2.6: the channel's buffer is kept (parked) for the next helper once something is
+        # buffered (a stop before then: `keepable`); either way before the engine goes.
         window, order = self.window, []
 
         def spy(name, method):
@@ -1534,7 +1536,8 @@ class LivePipelineWindowTests(WindowCase):
             return call
 
         live, engine, catalog = window.live_session, window.engine, window.catalogs
-        for obj, name in ((live, "stop"), (engine, "shutdown"), (catalog, "shutdown")):
+        spied = ((live, "stop"), (live, "park"), (engine, "shutdown"), (catalog, "shutdown"))
+        for obj, name in spied:
             patcher = mock.patch.object(
                 obj, name, spy(f"{type(obj).__name__}.{name}", getattr(obj, name))
             )
@@ -1542,11 +1545,14 @@ class LivePipelineWindowTests(WindowCase):
             self.addCleanup(patcher.stop)
         self.open_first_channel()
         self.assertTrue(wait_until(lambda: live.is_pipeline()))
+        # Something buffered: the buffer is kept (on a fast helper this came before the close,
+        # on a slower one after it, and the close stopped instead).
+        self.assertTrue(wait_until(lambda: live.keepable()))
         order.clear()  # LiveSession.start() stops first too
         with self.assertNoLogs("services.live.live_session", "WARNING"):  # no close-cap warning
             self.close_window()  # it also checks that no background thread is left
         self.assertEqual(
-            order[:3], ["LiveSession.stop", "LiveEngine.shutdown", "Catalogs.shutdown"]
+            order[:3], ["LiveSession.park", "LiveEngine.shutdown", "Catalogs.shutdown"]
         )
 
     def test_a_windows_self_update_stops_the_pipeline_before_waiting_for_threads(self):
