@@ -1085,6 +1085,9 @@ class TVController(QObject):
             return  # 2.6: QiTV asks (stop a recording?): Enter, Esc, the arrows are its own
         if self._quality is not None and self._quality.handle(action, key):
             return  # 2.8: the ⚙ quality menu, or its question (convert on the server?)
+        captions = getattr(self.window_actions, "captions", None)
+        if captions is not None and captions.handle(action):
+            return  # 2.9: its question (download AI captions' speech model?)
         if self._online is not None and self._online.handle(action, payload):
             return  # the OpenSubtitles search shows: typing, the lists, Enter and Esc
         if self._guide.is_open() and self._guide.handle(action, payload):

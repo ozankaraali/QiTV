@@ -542,6 +542,17 @@ class ConfigManager:
     ai_captions_language = _config_property(
         "ai_captions_language", "auto", coerce=_one_of(("auto", *QWEN_LANGUAGES), "auto")
     )
+    # 2.9: the AI captions language the viewer chose per channel ("<source>|<channel>": a
+    # Qwen language name); optional, so older builds keep reading the config.
+    ai_captions_picks = _config_property(
+        "ai_captions_picks",
+        {},
+        coerce=lambda v: (
+            {str(k): str(n) for k, n in v.items() if str(n) in QWEN_LANGUAGES}
+            if isinstance(v, dict)
+            else {}
+        ),
+    )
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 

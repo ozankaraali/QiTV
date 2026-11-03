@@ -112,6 +112,7 @@ from services.watch_state import WatchState
 from services.zapping import ZapController
 from ui import macos_window, provider_drop, quit_reason
 from ui.bottom_band import BottomBand
+from ui.captions_controller import CaptionsController
 from ui.desktop_pip import DesktopPip, corner_rect
 from ui.export_flow import ExportFlow
 from ui.find_session import FindSession
@@ -547,6 +548,7 @@ class TVWindow(QMainWindow):
         self.back_notice = BackNotice(host)  # 2.6: Resume, where a channel was left
         self.question_card = QuestionCard(host)  # 2.6: stop a recording for a stream?
         self.quality_card = QuestionCard(host)  # 2.8: convert on the server?
+        self.captions_card = QuestionCard(host)  # 2.9: download AI captions' speech model?
         self.rec_sign = RecSign(host)  # 2.6: recordings in the background
         self.stopped_notice = StoppedNotice(host)  # 2.6: after Stop, Play again
         self.cast_notice = CastNotice(host)  # 2.8: Playing on <device>, Stop casting
@@ -647,6 +649,7 @@ class TVWindow(QMainWindow):
             self.rec_sign,
             self.question_card,
             self.quality_card,
+            self.captions_card,
             self.pair_overlay,
             self.overlays.toast,
         ):
@@ -740,6 +743,11 @@ class TVWindow(QMainWindow):
         # then). It listens once the window is on screen (_start: Windows lists the window).
         self.media_keys = MediaKeys(self)
         self.media_keys.pressed.connect(self.remote_key)
+        # 2.9: AI captions (the Subtitles panel's row): a speech model in its own process
+        # reads the live channel ahead of the picture; the captions show over it.
+        self.captions = CaptionsController(
+            self, card=self.captions_card, overlay=self.captions_overlay
+        )
         self.media_keys.raiseRequested.connect(self.come_to_front)
         self.session.stateChanged.connect(self._show_now_playing)
         self.screens = TVPages(self, self)  # the Library's controller and the page moves
@@ -2145,6 +2153,7 @@ class TVWindow(QMainWindow):
             ("let the next click through", self.screens.shutdown),
             ("stop the phone remote", self.remote.shutdown),
             ("leave Now Playing", self.media_keys.stop),  # the media keys go back to others
+            ("stop AI captions", self.captions.shutdown),  # its process and any download
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
             ("stop the channel list's find", self.finder.shutdown),

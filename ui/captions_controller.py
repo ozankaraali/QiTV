@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services.i18n import N_, translate
+from services.i18n import translate
 
 logger = logging.getLogger(__name__)
 
@@ -38,28 +38,23 @@ _RESTART_MS = 1000
 _SLOW_RTF = 0.9  # the model takes this long per second of speech: it can't keep up
 _SLOW_FOR_S = 30.0
 
-DOWNLOADING = N_("Downloading {percent}%")
-PREPARING = N_("Preparing…")
-CATCHING_UP = N_("Catching up…")
-CANT_KEEP_UP = N_("Can't keep up")
-NOT_HERE = N_("Not available for this stream")
-COULD_NOT_START = N_("Couldn't start AI captions")
-QUESTION = N_(
-    "AI captions need a speech model on this computer: {size} to download once. " "Download it now?"
+from ui.captions_texts import (  # noqa: E402  (the texts, with their translations)
+    CANT_KEEP_UP,
+    CATCHING_UP,
+    COULDNT_START,
+    DOWNLOAD,
+    DOWNLOAD_FAILED,
+    DOWNLOAD_QUESTION,
+    DOWNLOADING,
+    FROM_AUDIO_TRACK,
+    FROM_DEFAULT,
+    FROM_MODEL,
+    FROM_VIEWER,
+    NOT_AVAILABLE,
+    NOT_NOW,
+    PREPARING,
+    size_text,
 )
-YES = N_("Download")
-NO = N_("Not now")
-DOWNLOAD_FAILED = N_("The AI captions download failed: {reason}")
-FROM_AUDIO = N_("audio track")
-FROM_YOU = N_("you chose")
-FROM_DEFAULT = N_("default")
-FROM_MODEL = N_("automatic")
-
-
-def _size_text(size: int) -> str:
-    if size >= 1_000_000_000:
-        return f"{size / 1e9:.1f} GB"
-    return f"{max(1, round(size / 1e6))} MB"
 
 
 class CaptionsController(QObject):
@@ -149,7 +144,7 @@ class CaptionsController(QObject):
         if self._loading or not self._ready:
             return translate(PREPARING)
         if self._live() is None or self._live().caption_source() is None:
-            return translate(NOT_HERE)
+            return translate(NOT_AVAILABLE)
         if self._slow_since is not None and time.monotonic() - self._slow_since >= _SLOW_FOR_S:
             return translate(CANT_KEEP_UP)
         lead = self._lead()
@@ -171,7 +166,9 @@ class CaptionsController(QObject):
             self._asking = True
             self._tier = tier
             self._card.ask(
-                translate(QUESTION, size=_size_text(missing)), translate(YES), translate(NO)
+                translate(DOWNLOAD_QUESTION, size=size_text(missing)),
+                translate(DOWNLOAD),
+                translate(NOT_NOW),
             )
             return
         self._enable(tier)
@@ -327,7 +324,7 @@ class CaptionsController(QObject):
             if live is not None:
                 live.set_caption_floor(0.0)
             self._show("")
-            self._toast(translate(COULD_NOT_START), "error")
+            self._toast(translate(COULDNT_START), "error")
         self.changed.emit()
 
     def _start_run(self) -> None:
@@ -472,11 +469,11 @@ class CaptionsController(QObject):
 
         pick = (self._config_get("ai_captions_picks", {}) or {}).get(self._channel_key())
         if pick:
-            self._language = (pick, FROM_YOU)
+            self._language = (pick, FROM_VIEWER)
             return
         heard = self._track_language()
         if heard:
-            self._language = (heard, FROM_AUDIO)
+            self._language = (heard, FROM_AUDIO_TRACK)
             return
         default = self._config_get("ai_captions_language", "auto")
         if default and default != "auto":
@@ -485,17 +482,24 @@ class CaptionsController(QObject):
         self._language = ("", FROM_MODEL)
 
     def _track_language(self) -> str:
+        """The language the playing audio track names, as Qwen's name ("" when none). The
+        media's track ids are not the player's for a TS stream (1, 2 against the PIDs): the
+        two lists pair in order (PlaybackSession.audio_track_info)."""
         from services.captions.languages import qwen_name
 
         session = getattr(self._window, "session", None)
-        info = getattr(session, "audio_track_info", None)
-        if info is None:
+        if session is None or not hasattr(session, "audio_track_info"):
             return ""
         try:
+            tracks = [t for t in session.audio_tracks() if t[0] != -1]
+            info = session.audio_track_info()
             playing = self._audio_track()
-            for track in info():
-                if playing is None or track.id == playing:
-                    return str(qwen_name(track.language_code) or "") if track.language_code else ""
+            index = next((i for i, t in enumerate(tracks) if t[0] == playing), 0)
+            track = next((t for t in info if t.id == playing), None)
+            if track is None and index < len(info):
+                track = info[index]
+            code = track.language_code if track is not None else ""
+            return str(qwen_name(code) or "") if code else ""
         except Exception as error:
             logger.debug("AI captions: no track language: %s", error)
         return ""
