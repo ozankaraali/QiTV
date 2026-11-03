@@ -84,9 +84,11 @@ class CaptionsController(QObject):
         if card is not None:
             card.answered.connect(self._on_answer)
         self._enabled = False
+        self._supported: Optional[bool] = None
         self._asking = False
         self._download: Any = None
         self._percent = 0
+        self._unpacking = False
         self._loading = False
         self._ready = False
         self._tier = ""
@@ -110,14 +112,37 @@ class CaptionsController(QObject):
 
     # ---- the panel's questions ---------------------------------------------------------
     def available(self) -> bool:
+        """A live channel plays, and this computer can run the model (a runtime is pinned)."""
         target = self._target()
-        return target is not None and bool(getattr(target, "live", False))
+        if target is None or not getattr(target, "live", False):
+            return False
+        if self._supported is None:
+            from services.captions import models
+
+            try:
+                models.download_size("small")
+                self._supported = True
+            except models.Unsupported:
+                self._supported = False
+            if self._supported:
+                self._warm_tier()
+        return bool(self._supported)
+
+    def _warm_tier(self) -> None:
+        """The speed benchmark (~0.2 s of CPU) off the GUI thread, before the row is pressed."""
+        import threading
+
+        from services.captions import tier
+
+        threading.Thread(target=tier.cpu_score, name="qitv-captions-tier", daemon=True).start()
 
     def enabled(self) -> bool:
         return self._enabled
 
     def status_text(self) -> str:
         if self._download is not None:
+            if self._unpacking:
+                return translate(PREPARING)
             return translate(DOWNLOADING, percent=self._percent)
         if not self._enabled:
             return ""
@@ -201,25 +226,34 @@ class CaptionsController(QObject):
 
         download = CaptionsDownload(self)
         download.progress.connect(self._on_download_progress)
+        download.preparing.connect(self._on_download_preparing)
         download.finished.connect(self._on_downloaded)
         download.failed.connect(self._on_download_failed)
         self._download = download
         self._percent = 0
+        self._unpacking = False
         download.start(self._tier)
         self.changed.emit()
 
-    def _on_download_progress(self, done: int, total: int) -> None:
+    def _on_download_progress(self, done: Any, total: Any) -> None:
         percent = int(100 * done / total) if total > 0 else 0
         if percent != self._percent:
             self._percent = percent
             self.changed.emit()
 
+    def _on_download_preparing(self) -> None:
+        self._percent = 100
+        self._unpacking = True
+        self.changed.emit()
+
     def _on_downloaded(self) -> None:
+        self._unpacking = False
         self._download = None
         self._enable(self._tier)
 
     def _on_download_failed(self, reason: str) -> None:
         self._download = None
+        self._unpacking = False
         self._toast(translate(DOWNLOAD_FAILED, reason=reason), "error")
         self.changed.emit()
 

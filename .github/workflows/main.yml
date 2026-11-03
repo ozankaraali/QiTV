@@ -116,6 +116,11 @@ jobs:
           if python3 -c "import ctypes; ctypes.CDLL('libvlc.so.5')" 2>/dev/null; then
             echo "::error::the system libVLC still loads"; exit 1
           fi
+      - name: Fetch the AI captions runtime
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # 2.9: as a user's first enable would (the pinned wheels, the voice detector), not the
+        # model; the smoke's captions probe loads them in the packaged app.
+        run: uv run python scripts/fetch_captions_runtime.py "$RUNNER_TEMP/captions" >> "$GITHUB_ENV"
       - name: Smoke test the packaged app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         # The same scenario through main.py's --smoke entry: the live helper must spawn from
@@ -248,6 +253,14 @@ jobs:
         # The app ships its own libVLC: its smoke must pass with no VLC installed.
         shell: pwsh
         run: Rename-Item -Path "C:\Program Files\VideoLAN" -NewName "VideoLAN.hidden"
+      - name: Fetch the AI captions runtime
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # 2.9: as a user's first enable would (the pinned wheels, the voice detector), not the
+        # model; the smoke's captions probe loads them in the packaged app.
+        shell: pwsh
+        run: |
+          uv run python scripts/fetch_captions_runtime.py "$env:RUNNER_TEMP\captions" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Smoke test the packaged app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         # A windowed app: the shell would not wait for it, and it has no console (its logs
@@ -345,6 +358,11 @@ jobs:
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         # The app ships its own libVLC: its smoke must pass with no VLC installed.
         run: sudo mv /Applications/VLC.app "$RUNNER_TEMP/VLC.app"
+      - name: Fetch the AI captions runtime
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # 2.9: as a user's first enable would (the pinned wheels, the voice detector), not the
+        # model; the smoke's captions probe loads them in the packaged app.
+        run: uv run python scripts/fetch_captions_runtime.py "$RUNNER_TEMP/captions" >> "$GITHUB_ENV"
       - name: Smoke test the packaged app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         # The same scenario through main.py's --smoke entry: the live helper must spawn from
@@ -464,6 +482,11 @@ jobs:
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         # The app ships its own libVLC: its smoke must pass with no VLC installed.
         run: sudo mv /Applications/VLC.app "$RUNNER_TEMP/VLC.app"
+      - name: Fetch the AI captions runtime
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # 2.9: as a user's first enable would (the pinned wheels, the voice detector), not the
+        # model; the smoke's captions probe loads them in the packaged app.
+        run: uv run python scripts/fetch_captions_runtime.py "$RUNNER_TEMP/captions" >> "$GITHUB_ENV"
       - name: Smoke test the packaged app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         # The same scenario through main.py's --smoke entry: the live helper must spawn from
