@@ -308,7 +308,11 @@ def runtime_folder_name(python_tag: str = PYTHON_TAG) -> str:
 
 
 def captions_root() -> Path:
-    """`<config dir>/ai-captions` (QITV_CONFIG_DIR, the portable folder or the system's)."""
+    """`<config dir>/ai-captions` (QITV_CONFIG_DIR, the portable folder or the system's), or
+    QITV_CAPTIONS_DIR: AI captions' files kept elsewhere (a check that reuses a download)."""
+    elsewhere = os.environ.get("QITV_CAPTIONS_DIR", "")
+    if elsewhere:
+        return Path(elsewhere)
     from services.config_manager import ConfigManager
 
     # Where config.json goes depends on nothing a ConfigManager loads: no config is read.
