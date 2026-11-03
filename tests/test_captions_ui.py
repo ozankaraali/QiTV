@@ -749,11 +749,30 @@ class SubtitleFontTests(unittest.TestCase):
     def test_libvlc_draws_subtitles_in_the_captions_family(self):
         from ui.overlays import captions
 
-        with mock.patch.object(captions, "QFontInfo") as info:
+        with (
+            mock.patch.object(captions, "CAPTION_FAMILY", ""),
+            mock.patch.object(captions, "QFontInfo") as info,
+        ):
             info.return_value.family.return_value = "Segoe UI"
             self.assertEqual(captions.subtitle_font(), "Segoe UI")
             info.return_value.family.return_value = ".AppleSystemUIFont"  # hidden from libVLC
-            self.assertEqual(captions.subtitle_font(), "")  # its own Helvetica, not "System Font"
+            self.assertEqual(captions.subtitle_font(), "")
+        with mock.patch.object(captions, "CAPTION_FAMILY", "Helvetica Neue"):  # a Mac's
+            self.assertEqual(captions.subtitle_font(), "")  # libVLC's own is it: no lookup
+
+    def test_the_captions_are_drawn_in_that_family_at_a_regular_weight(self):
+        from PySide6.QtGui import QFont
+
+        from ui.overlays import captions
+
+        host = QWidget()
+        host.resize(1280, 720)
+        self.addCleanup(host.deleteLater)
+        with mock.patch.object(captions, "CAPTION_FAMILY", "Helvetica Neue"):
+            overlay = captions.CaptionsOverlay(host)
+            overlay.show_text("Merhaba")
+        self.assertEqual(overlay._font.family(), "Helvetica Neue")
+        self.assertEqual(overlay._font.weight(), QFont.Weight.Normal)
 
 
 class OverlayTests(unittest.TestCase):

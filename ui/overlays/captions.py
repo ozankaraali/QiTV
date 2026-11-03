@@ -14,6 +14,7 @@ reads alike in a small window and at fullscreen. Clicks go through it to the pic
 
 from __future__ import annotations
 
+import sys
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt
@@ -48,12 +49,18 @@ _RADIUS_U = 0.8
 _EVENTS = (QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.Resize)
 
 
+# One family for the captions and the subtitles libVLC draws (2.9, the owner's: on par). A
+# Mac's system font is hidden from libVLC under Qt's name (".AppleSystemUIFont": it found a
+# serif), and asked for as "System Font" it hung libVLC's text renderer as it opened (the
+# packaged app on macOS 26, libVLC 3.0.24): there both use libVLC's own, Helvetica Neue.
+CAPTION_FAMILY = "Helvetica Neue" if sys.platform == "darwin" else ""  # "": Qt's own
+
+
 def subtitle_font() -> str:
-    """The family the captions are drawn in, for the subtitles libVLC draws
-    (services.playback.subtitle_args); "": libVLC's own. A Mac's system font is hidden from
-    libVLC under Qt's name (".AppleSystemUIFont": it found a serif instead), and asked for as
-    "System Font" it hung libVLC's text renderer as it opened (the packaged app on macOS 26
-    with libVLC 3.0.24, at a channel's third open): there libVLC's own Helvetica, the nearest."""
+    """The family for the subtitles libVLC draws (services.playback.subtitle_args), the
+    captions' own; "": libVLC's own (a Mac's, which is the captions' there)."""
+    if CAPTION_FAMILY:
+        return ""  # libVLC's default family is it: no name to look up
     family = QFontInfo(QFont()).family()
     return "" if family.startswith(".") else family
 
@@ -161,7 +168,9 @@ class CaptionsOverlay(Overlay):
         width = float(max(1, min(un.px(_LINE_U), room) - 2 * pad_x))
         text = self._text
         for scale in _SHRINK:
-            font = un.font(FONT_U * scale, QFont.Weight.Medium)
+            font = un.font(FONT_U * scale)  # regular, as libVLC's subtitles (no medium there)
+            if CAPTION_FAMILY:
+                font.setFamily(CAPTION_FAMILY)
             spans = wrap(text, font, width)
             if len(spans) <= MAX_LINES:
                 break
