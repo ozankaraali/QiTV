@@ -12,6 +12,7 @@ import requests
 from services.catalog import (
     FORBIDDEN_MESSAGE,
     LOGIN_REFUSED_MESSAGE,
+    NO_ADDRESS_TRY_DNS_MESSAGE,
     NOT_FOUND_MESSAGE,
     PROVIDER_LOADING_MESSAGE,
     PROXY_MESSAGE,
@@ -44,7 +45,7 @@ CONNECT_TIMEOUT = (
 )
 SAMPLES = {
     REFUSED: UNREACHABLE_MESSAGE,
-    DNS: UNREACHABLE_MESSAGE,
+    DNS: NO_ADDRESS_TRY_DNS_MESSAGE,  # 2.9.1: what may help while Secure DNS is off
     "Cannot connect to host portal.example:80 ssl:default [Connection refused]": (
         UNREACHABLE_MESSAGE
     ),

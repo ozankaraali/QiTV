@@ -896,9 +896,18 @@ class HelperArgsTests(unittest.TestCase):  # 2.8.2: the detailed log reaches the
         from services.live import engine as engine_module
 
         self.addCleanup(log_file.set_detailed, False)
-        self.assertEqual(engine_module._helper_args("c", Path("/r")), ("c", "/r", False))
+        self.assertEqual(engine_module._helper_args("c", Path("/r"))[:3], ("c", "/r", False))
         log_file.set_detailed(True)
-        self.assertEqual(engine_module._helper_args("c", Path("/r")), ("c", "/r", True))
+        self.assertEqual(engine_module._helper_args("c", Path("/r"))[:3], ("c", "/r", True))
+
+    def test_the_helper_starts_with_secure_dns_as_qitv_has_it(self):  # 2.9.1
+        from services import secure_dns
+        from services.live import engine as engine_module
+
+        self.addCleanup(secure_dns.enable, False)
+        self.assertFalse(engine_module._helper_args("c", Path("/r"))[3])
+        secure_dns.enable(True)
+        self.assertTrue(engine_module._helper_args("c", Path("/r"))[3])
 
 
 class FailureReasonTests(unittest.TestCase):
@@ -1020,12 +1029,12 @@ class Unreadable:
         return (operator.truediv, (1, 0))
 
 
-def silent_helper(conn, root, detailed_log=False):
+def silent_helper(conn, root, detailed_log=False, secure_dns_on=False):
     """A helper that never says hello."""
     time.sleep(60)
 
 
-def crashing_session_helper(conn, root, detailed_log=False):
+def crashing_session_helper(conn, root, detailed_log=False, secure_dns_on=False):
     """The real helper, except that a session whose URL ends in "/crash" fails unexpectedly
     (its helper stays up)."""
     from services.live import worker
@@ -1041,7 +1050,7 @@ def crashing_session_helper(conn, root, detailed_log=False):
     worker.helper_main(conn, root)
 
 
-def stubborn_helper(conn, root, detailed_log=False):
+def stubborn_helper(conn, root, detailed_log=False, secure_dns_on=False):
     """A helper that holds a real disk buffer and ignores "shutdown" and SIGTERM."""
     from services.live.ring import DiskRing
 

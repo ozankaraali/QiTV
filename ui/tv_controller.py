@@ -108,6 +108,7 @@ from services.provider_types import is_media_server
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot, records
 from services.sound_sync import SoundSync
+from services.track_memory import TrackMemory
 from services.vlc_profile import DEFAULT_USER_AGENT, classify
 from services.zapping import ZapContext
 from ui import item_provider
@@ -153,6 +154,8 @@ ERROR_MS = 6000
 SET_PIN_FIRST = N_("Set a PIN first: Settings → Parental controls.")
 # i18n: a toast: the channel or group is hidden while QiTV is locked; Settings shows it again
 HIDDEN_TEXT = N_("Hidden while locked. Settings → Parental controls shows it again.")
+# i18n: a toast after "Hide group" (2.9.1): no PIN, nothing locked
+TIDIED_TEXT = N_("Hidden. Settings → Providers → Hidden groups shows it again.")
 RECORDING_MS = 5000  # "Recording saved in <folder>: <name>" (a name to read)
 VOLUME_STEP = 5
 SEEK_STEP_MS = 10_000
@@ -235,6 +238,7 @@ class TVController(QObject):
         sessions: Optional[SessionManager] = None,
         pip_frame=None,
         sound_sync: Optional[SoundSync] = None,
+        track_memory: Optional[TrackMemory] = None,
         channel_pictures: Optional[ChannelPictures] = None,
         catchup_memory: Optional[CatchupMemory] = None,
         pick_subtitle_file: Optional[Callable[[str], str]] = None,
@@ -250,7 +254,8 @@ class TVController(QObject):
     ):
         """With `sessions` (picture in picture), its large slot's player, live session and
         tuner stand for `session`, `live` and `budget`. `sound_sync` keeps each channel's
-        sound sync and `channel_pictures` its aspect ratio (None: for this run only),
+        sound sync, `track_memory` each title's tracks (2.9.1) and `channel_pictures` its
+        aspect ratio (None: for this run only),
         `catchup_memory` whether each channel's provider
         archive answered (None: alike); `pick_subtitle_file(folder)` asks for a subtitle
         file (the Subtitles panel's "Load a file…"); with `online_subtitles` (and the overlays'
@@ -404,6 +409,7 @@ class TVController(QObject):
             clear_recents=self._clear_recents,
             hide=self._hide_from_menu,  # 2.8: parental controls, once their PIN is set
             may_hide=lambda: self.parental is not None and self.parental.has_pin(),
+            tidy=self._tidy_from_menu,  # 2.9.1: out of the lists, no PIN
             record_at=lambda: self.record_at,
             parent=self,
         )
@@ -454,6 +460,7 @@ class TVController(QObject):
             playing=self._has_media,
             keys=self._player_keys,
             store=sound_sync if sound_sync is not None else SoundSync(None),
+            memory=track_memory,
             toast=self._toast,
             show_transport=self._show_transport,
             parent=self,
@@ -506,6 +513,7 @@ class TVController(QObject):
         # 2.8: parental controls (services.parental.Parental; None: none): what they hide never
         # enters the history.
         self.parental: Optional[Any] = None
+        self.hidden_groups: Optional[Any] = None  # 2.9.1: the window's (services.hidden_groups)
         # 2.8: casting the large picture to a Chromecast (none without libVLC's renderers).
         self._cast: Optional[CastControls] = None
         if cast_devices is not None:
@@ -3917,6 +3925,27 @@ class TVController(QObject):
         if guard.hide_item(section, node.payload):
             self._toast(translate(HIDDEN_TEXT))
             self.parental_changed()  # out of the history; locked, it stops if it plays
+
+    def _tidy_from_menu(self, node: NavNode) -> None:
+        """A group's "Hide group" (2.9.1): out of the lists, without a PIN."""
+        section = self.nav.section_of(node) or "live"
+        name, own = split_group_id(node.key)
+        provider = name or self.catalog.current_provider_name()
+        self.tidy_group(section, provider, own or node.key, node.title)
+
+    def tidy_group(self, section: str, provider: str, group_id: str, title: str) -> None:
+        """A group or a Library genre leaves the lists (2.9.1, services.hidden_groups):
+        nothing else changes, and Settings → Providers shows it again."""
+        tidy = self.hidden_groups
+        if tidy is not None and tidy.hide(section, provider, group_id, title=title):
+            self._toast(translate(TIDIED_TEXT))
+            self.lists_changed()
+
+    def lists_changed(self) -> None:
+        """What the lists leave out changed (a group shown again, 2.9.1): they read again."""
+        if not self._closed:
+            self._repaint()
+            self._guide.invalidate()
 
     def hide_group(self, section: str, provider: str, group_id: str, title: str) -> None:
         """A group's or a Library genre's "Hide (parental controls)" (2.8): hidden while

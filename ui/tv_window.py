@@ -72,6 +72,8 @@ from services.catchup_memory import FILE_NAME as CATCHUP_FILE, CatchupMemory
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.find import Preferences, preferences_for
+from services import secure_dns
+from services.hidden_groups import HiddenGroups
 from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
@@ -107,6 +109,7 @@ from services.sessions import SessionManager, Slot
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
 from services.thread_cleanup import has_pending_threads
+from services.track_memory import FILE_NAME as TRACKS_FILE, TrackMemory
 from services.update_checker import call_before_update, set_quit_note
 from services.watch_state import WatchState
 from services.zapping import ZapController
@@ -343,6 +346,8 @@ class TVWindow(QMainWindow):
         self.app = app
         # OptionsDialog reads these from its parent.
         self.config_manager = config_manager
+        # 2.9.1: before the first provider request and the time-shift helper's start.
+        secure_dns.enable(getattr(config_manager, "secure_dns", False) is True)
         self.provider_manager = provider_manager
         self.image_manager = image_manager
         self.epg_manager = epg_manager
@@ -428,6 +433,9 @@ class TVWindow(QMainWindow):
         # 2.8: parental controls: the browsed catalogs and the searches leave out what they hide
         self.parental = Parental(config_manager)
         self.catalogs.parental = self.parental
+        # 2.9.1: groups hidden to tidy the lists, without a PIN (Settings → Providers).
+        self.hidden_groups = HiddenGroups(config_manager)
+        self.catalogs.hidden_groups = self.hidden_groups
         self.parental.group_title = self.catalogs.group_title  # the adult rule reads names
         self._relock = QTimer(self, singleShot=True)
         self._relock.timeout.connect(self.parental_changed)
@@ -502,6 +510,8 @@ class TVWindow(QMainWindow):
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
         # Each channel's sound sync (J/K, the Sound panel), written off the GUI thread.
         self.sound_sync = SoundSync(os.path.join(config_manager.get_config_dir(), SOUND_SYNC_FILE))
+        # The tracks chosen for each film, series and channel (2.9.1), alike.
+        self.track_memory = TrackMemory(os.path.join(config_manager.get_config_dir(), TRACKS_FILE))
         # Each channel's aspect ratio (the Picture panel, 2.3), alike.
         self.channel_pictures = ChannelPictures(
             os.path.join(config_manager.get_config_dir(), PICTURE_FILE)
@@ -722,6 +732,7 @@ class TVWindow(QMainWindow):
             sessions=self.sessions,
             pip_frame=self.pip_frame,
             sound_sync=self.sound_sync,
+            track_memory=self.track_memory,
             channel_pictures=self.channel_pictures,
             catchup_memory=self.catchup_memory,
             pick_subtitle_file=self.pick_subtitle_file,
@@ -769,6 +780,7 @@ class TVWindow(QMainWindow):
                 )
             )
         controller.parental = self.parental  # what it protects never enters the history
+        controller.hidden_groups = self.hidden_groups
         self.overlays.guide.recordRequested.connect(self.schedule_programme)
         self.overlays.guide.recordCancelled.connect(self.cancel_programme)
         self.overlays.guide.timerRequested.connect(self.record_at)
@@ -1830,6 +1842,7 @@ class TVWindow(QMainWindow):
         schedule: Any = self.scheduler if self.scheduler is not None else self.recording_schedule
         hooks: list[Callable[[Renames], Any]] = [
             self.parental.rename_providers,
+            self.hidden_groups.rename_providers,  # 2.9.1
             schedule.rename_providers,  # the scheduler's: its recordings under way too
             self.budget.rename_providers,
             self.remote.rename_providers,
@@ -1859,6 +1872,7 @@ class TVWindow(QMainWindow):
         stores = (
             self.live_tuning,
             self.sound_sync,
+            self.track_memory,
             self.channel_pictures,
             self.catchup_memory,
             self.subtitle_picks,
@@ -1906,6 +1920,10 @@ class TVWindow(QMainWindow):
             self.engine.set_disk_amount(mib * 1024 * 1024)
         if self.engine is not None:  # 2.8.2: the running helper's detail follows at once
             self.engine.set_detailed_log(self.config_manager.detailed_log)
+        secure = getattr(self.config_manager, "secure_dns", False) is True  # 2.9.1
+        secure_dns.enable(secure)  # at once, here ...
+        if self.engine is not None:
+            self.engine.set_secure_dns(secure)  # ... and in the time-shift helper
         self.remote.apply_config()
 
     def set_provider(self, force_update: bool = False) -> None:

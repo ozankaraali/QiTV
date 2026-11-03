@@ -52,6 +52,9 @@ from services.provider_ids import (
 from services.search import Hit
 from services.watch_state import RESUME_MAX_RATIO, WatchState
 from ui.context_actions import HIDE_TEXT
+
+# i18n: a Library genre's menu (2.9.1): out of the lists, no PIN; Settings → Providers shows it
+TIDY_GENRE_TEXT = N_("Hide genre")
 from ui.keymap import Action
 from ui.library.library_screen import LibraryScreen
 from ui.library.poster_grid import poster_url
@@ -150,6 +153,7 @@ class LibraryController(QObject):
         self._context_menu = context_menu
         # 2.8: parental controls hide a genre (set_hiding); none until set.
         self._hide_genre: Optional[Callable[[str, str, str, str], None]] = None
+        self._tidy_genre: Optional[Callable[[str, str, str, str], None]] = None
         self._may_hide: Callable[[], bool] = lambda: False
         self._closed = False
         self._mode = "browse"
@@ -693,10 +697,13 @@ class LibraryController(QObject):
         self,
         hide: Callable[[str, str, str, str], None],
         may_hide: Callable[[], bool],
+        tidy: Optional[Callable[[str, str, str, str], None]] = None,
     ) -> None:
         """Parental controls (2.8): `hide(section, provider, genre id, title)` hides a genre,
-        offered on its right-click while `may_hide()` (a PIN is set)."""
+        offered on its right-click while `may_hide()` (a PIN is set); `tidy(…)` takes it out
+        of the lists without a PIN (2.9.1, services.hidden_groups), offered always."""
         self._hide_genre, self._may_hide = hide, may_hide
+        self._tidy_genre = tidy
 
     def _show_genre_menu(self, gid: str, pos: QPoint) -> None:
         menu = self.genre_menu(gid)
@@ -707,8 +714,9 @@ class LibraryController(QObject):
     def genre_menu(self, gid: str) -> Optional[QMenu]:
         """A genre's right-click menu: Hide (parental controls); None for a pinned row (My
         list, Continue …), a genre not shown, or without a PIN."""
-        hide = self._hide_genre
-        if hide is None or not self._may_hide() or self._closed:
+        hide = self._hide_genre if self._may_hide() else None
+        tidy = self._tidy_genre
+        if (hide is None and tidy is None) or self._closed:
             return None
         genre = next((g for g in self._model.genres() if g.id == gid and not g.header), None)
         if genre is None or genre.pinned:
@@ -717,9 +725,14 @@ class LibraryController(QObject):
         provider = name or self._catalog.current_provider_name()
         section = self._model.section
         menu = QMenu(self._screen)
-        menu.addAction(translate(HIDE_TEXT)).triggered.connect(
-            lambda _=False: hide(section, provider, own or gid, genre.title)
-        )
+        if tidy is not None:
+            menu.addAction(translate(TIDY_GENRE_TEXT)).triggered.connect(
+                lambda _=False: tidy(section, provider, own or gid, genre.title)
+            )
+        if hide is not None:
+            menu.addAction(translate(HIDE_TEXT)).triggered.connect(
+                lambda _=False: hide(section, provider, own or gid, genre.title)
+            )
         return menu
 
     def refresh_lists(self) -> None:

@@ -689,6 +689,22 @@ class DecodingWindowTests(base.WindowCase):
         dialog.save_settings()
         self.assertTrue(ConfigManager().hardware_decoding)
 
+    def test_settings_offers_secure_dns_off_and_it_applies_at_once(self):
+        # 2.9.1: the providers' names over HTTPS (services.secure_dns), off by default.
+        from services import secure_dns
+
+        self.addCleanup(secure_dns.enable, False)
+        dialog = OptionsDialog(self.window)
+        self.addCleanup(dialog.deleteLater)
+        box = dialog.secure_dns_checkbox
+        self.assertFalse(box.isChecked())
+        self.assertIn("Cloudflare", box.toolTip())
+        box.setChecked(True)
+        dialog.save_settings()
+        self.assertTrue(ConfigManager().secure_dns)
+        self.window.save_config()  # what Save does after the dialog wrote the config
+        self.assertTrue(secure_dns.enabled())
+
     def test_the_window_creates_libvlc_with_the_setting(self):
         self.config.hardware_decoding = True
         with mock.patch("ui.tv_window.create_instance", return_value=None) as create:

@@ -104,6 +104,33 @@ class WatchStateTests(unittest.TestCase):
         self.cfg.save_playback_position("jf:f1", 2000, 120 * 60_000)  # started again
         self.assertEqual(self.ws.resume_from("jf:f1", film), 40 * 60_000)
 
+    def test_a_film_numbered_anew_by_its_provider_keeps_its_point(self):
+        # 2.9.1: the point follows the film's TMDB id at its provider.
+        old = WatchState.content_id("P", {"stream_id": 7}, item_type="movie")
+        self.ws.resume_from(old, {"stream_id": 7, "tmdb": "98"})
+        self.ws.update_position(old, 600_000, 9_000_000)
+        self.assertEqual(self.cfg.playback_positions[old]["tmdb"], "98")
+        new = WatchState.content_id("P", {"stream_id": 99}, item_type="movie")
+        self.assertEqual(self.ws.resume_from(new, {"stream_id": 99, "tmdb": "98"}), 600_000)
+        self.assertNotIn(old, self.cfg.playback_positions)  # moved, not copied
+        other = WatchState.content_id("Q", {"stream_id": 5}, item_type="movie")
+        self.assertIsNone(self.ws.resume_from(other, {"stream_id": 5, "tmdb": "98"}))
+
+    def test_a_number_given_to_another_film_starts_it_from_its_beginning(self):
+        cid = WatchState.content_id("P", {"stream_id": 7}, item_type="movie")
+        self.ws.resume_from(cid, {"stream_id": 7, "tmdb": "98"})
+        self.ws.update_position(cid, 600_000, 9_000_000)
+        self.assertIsNone(self.ws.resume_from(cid, {"stream_id": 7, "tmdb": "155"}))
+        self.assertEqual(self.ws.resume_from(cid, {"stream_id": 7, "tmdb": "98"}), 600_000)
+        self.assertEqual(self.ws.resume_from(cid, {"stream_id": 7}), 600_000)  # no id: as ever
+
+    def test_an_episode_is_kept_by_its_number_as_before(self):
+        cid = WatchState.content_id(
+            "P", {"id": 3, "season": 1, "episode_num": 2}, item_type="episode"
+        )
+        self.cfg.save_playback_position(cid, 60_000, 3_000_000)
+        self.assertEqual(self.ws.resume_from(cid, {"id": 3, "tmdb": "1"}), 60_000)
+
     def test_update_position_throttles_saves(self):
         self.ws.update_position("c", 10000, 100000)
         self.clock.t += 10

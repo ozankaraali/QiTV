@@ -441,6 +441,9 @@ class ConfigManager:
     hardware_decoding = _config_property(
         "hardware_decoding", DEFAULT_OPTION_HARDWARE_DECODING, coerce=lambda value: value is True
     )
+    # 2.9.1, optional (older builds ignore it): the providers' names looked up over HTTPS
+    # (services.secure_dns); off by default.
+    secure_dns = _config_property("secure_dns", False, coerce=lambda value: value is True)
     timeshift_max_mib = _config_property(
         "timeshift_max_mib", DEFAULT_OPTION_TIMESHIFT_MAX_MIB, coerce=int, clamp=(256, 16384)
     )
@@ -511,6 +514,11 @@ class ConfigManager:
     # file plays as it is (the player's ⚙ quality menu asks the server to convert).
     media_4k_versions = _config_property(
         "media_4k_versions", "screen", coerce=_one_of(("screen", "always", "never"), "screen")
+    )
+    # 2.9.1, optional: groups hidden to tidy the lists ({"version": 1, "groups"});
+    # services.hidden_groups reads and writes it.
+    hidden_groups = _config_property(
+        "hidden_groups", None, coerce=lambda value: value if isinstance(value, dict) else None
     )
     # 2.8, optional: parental controls ({"version": 1, "salt", "pin" (a PBKDF2 hash), "hidden"});
     # services.parental reads and writes it.

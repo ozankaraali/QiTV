@@ -1613,6 +1613,20 @@ class GenreHideTests(unittest.TestCase):  # 2.8: parental controls hide a Librar
         self.may = False
         self.assertIsNone(ctl.genre_menu("c"))
 
+    def test_a_genre_hides_from_the_lists_without_a_pin(self):  # 2.9.1
+        ctl = self.build()
+        tidied = []
+        ctl.set_hiding(lambda *args: self.hidden.append(args), lambda: False, tidied.append)
+        ctl.open("movies")
+        self.catalog.sectionReady.emit("movies")
+        menu = ctl.genre_menu("c")
+        self.addCleanup(menu.deleteLater)
+        (action,) = menu.actions()  # no PIN: the tidy one alone
+        self.assertEqual(action.text(), "Hide genre")
+        ctl.set_hiding(lambda *a: None, lambda: False, lambda *args: tidied.append(args))
+        ctl.genre_menu("c").actions()[0].trigger()
+        self.assertEqual(tidied, [("movies", "P", "c", "Comedy")])
+
     def test_a_right_click_on_a_genre_asks_for_its_menu(self):
         ctl = self.built()
         shown = []

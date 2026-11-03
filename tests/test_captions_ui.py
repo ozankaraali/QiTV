@@ -657,6 +657,37 @@ class DownloadQuestionTests(unittest.TestCase):
         self.captions.answer(True)
         self.assertEqual((self.begun, self.captions._fetching), ([True], "small"))
 
+    def test_the_1_7b_not_downloaded_automatic_offers_the_0_6b(self):
+        # 2.9.1: the 1.7B comes from a community export, which can go.
+        self.captions._choose_tier = lambda: "large"
+        toasts = []
+        self.captions._toast = lambda text, kind="info": toasts.append(text)
+        sizes = {"large": 2_300_000_000, "small": 878_702_423}
+        with mock.patch(
+            "services.captions.models.download_size", side_effect=lambda tier: sizes[tier]
+        ):
+            self.captions.toggle()
+            self.captions.answer(True)
+            download = self.captions._download = object()
+            self.captions._on_download_failed(download, "Download failed: 404")
+            self.assertEqual(toasts, ["Download failed: 404"])  # why, as before
+            text, yes, _no = self.captions.question()
+            self.assertIn("879 MB", text)
+            self.assertEqual(self.card.question(), text)
+            self.assertTrue(self.captions.asked_unprompted())  # every phone hears it
+            self.captions.answer(True)
+        self.assertEqual((self.begun, self.captions._fetching), ([True, True], "small"))
+
+    def test_a_1_7b_the_viewer_chose_is_never_swapped_for_another(self):
+        self.captions._choose_tier = lambda: "large"
+        self.captions.model = lambda: "large"
+        self.captions._toast = lambda text, kind="info": None
+        self.captions.toggle()
+        self.captions.answer(True)
+        download = self.captions._download = object()
+        self.captions._on_download_failed(download, "Download failed: 404")
+        self.assertFalse(self.captions.asking())
+
     def test_the_question_is_asked_with_its_words(self):
         self.assertFalse(self.captions.asking())
         self.captions.toggle()

@@ -116,6 +116,7 @@ class TVPages(QObject):
         self.library_controller.set_hiding(
             lambda *args: window.controller.hide_group(*args),
             lambda: window.parental is not None and window.parental.has_pin(),
+            lambda *args: window.controller.tidy_group(*args),  # 2.9.1: no PIN
         )
         window.library_catalog.providerFailed.connect(self._on_provider_failed)
         window.overlays.drawer.libraryRequested.connect(self.open_from_list)

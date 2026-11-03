@@ -1468,6 +1468,18 @@ class TrackMemoryTests(unittest.TestCase):
         self.plays(C)
         self.assertEqual(self.player.audio_on, 3)
 
+    def test_a_choice_kept_for_the_title_is_chosen_when_it_opens_another_day(self):
+        # 2.9.1: services.track_memory keeps them; the player is told before the title opens.
+        self.plays(A)
+        self.session.set_audio_track(2)
+        self.session.set_subtitle_track(6)
+        kept = self.session.chosen_tracks()
+        self.assertEqual(kept, {"audio": (2, DE.decode()), "spu": (6, "Track 4 - [Deutsch]")})
+        self.session.forget_tracks()  # another title, then another day
+        self.session.want_tracks(kept)
+        self.plays(B)  # the title again, its tracks numbered otherwise
+        self.assertEqual(self.player.audio_on, 11)
+
     def test_another_title_starts_with_vlcs_own(self):
         self.plays(A)
         self.session.set_audio_track(2)

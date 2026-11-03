@@ -1891,6 +1891,12 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.note(name, command[2])
+            elif name == "secure_dns":  # 2.9.1: Secure DNS turned on or off
+                if len(command) != 2 or type(command[1]) is not bool:
+                    raise ValueError("secure DNS needs on or off")
+                from services import secure_dns
+
+                secure_dns.enable(command[1])
             elif name == "detailed_log":  # 2.8.2: the detailed log turned on or off
                 if len(command) != 2 or type(command[1]) is not bool:
                     raise ValueError("the detailed log needs on or off")
@@ -2124,7 +2130,9 @@ def _log_thread_death(args: threading.ExceptHookArgs) -> None:
     )
 
 
-def helper_main(conn: Connection, root: str, detailed_log: bool = False) -> None:
+def helper_main(
+    conn: Connection, root: str, detailed_log: bool = False, secure_dns_on: bool = False
+) -> None:
     """Spawn entry point: arguments travel through multiprocessing IPC, not argv.
 
     It never returns: the process ends with `os._exit` once the helper has shut down.
@@ -2143,6 +2151,10 @@ def helper_main(conn: Connection, root: str, detailed_log: bool = False) -> None
         threading.excepthook = _log_thread_death  # 2.8.5: fd 2 is gone, the log says it
         _stacks_on_signal()
         _raise_open_files()
+        if secure_dns_on:  # 2.9.1: the provider's names over HTTPS, as QiTV looks them up
+            from services import secure_dns
+
+            secure_dns.enable(True)
         helper = _Helper(conn, root, owner_gone)
         # 2.8.1: into the app's log; 2.8.2: its detail follows the setting while it runs
         helper.log_forwarder = _forward_logs(helper.send, detailed=detailed_log)

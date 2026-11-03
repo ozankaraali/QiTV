@@ -236,8 +236,25 @@ class HashedTests(unittest.TestCase):
         self.assertEqual(
             keys, {old_one: channel_key("B", one), old_film: pick_key("B", film, episode=False)}
         )
-        self.assertEqual(len(hashed_keys(renames, {"A": content})), 3)
+        self.assertEqual(len(hashed_keys(renames, {"A": content})), 4)  # the film's tracks too
         self.assertEqual(hashed_keys(renames, {"Z": content}), {})
+
+    def test_a_films_and_a_series_kept_tracks_get_their_new_keys(self):
+        # 2.9.1: track_choices.json keys films and series by their provider, hashed.
+        from services.track_memory import title_key
+
+        film, series = {"stream_id": 5, "tmdb": "98"}, {"series_id": 3, "name": "S"}
+        content = {"vod": {"contents": [film]}, "series": {"contents": [series]}}
+        old_film = title_key("A", film, episode=False)
+        old_series = title_key("A", {}, episode=True, context={"series": series})
+        keys = hashed_keys(Renames({"A": "B"}), {"A": content}, wanted={old_film, old_series})
+        self.assertEqual(
+            keys,
+            {
+                old_film: title_key("B", film, episode=False),
+                old_series: title_key("B", {}, episode=True, context={"series": series}),
+            },
+        )
 
     def test_a_store_moves_its_entries_in_order(self):
         self.assertEqual(

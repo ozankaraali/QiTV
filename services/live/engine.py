@@ -164,10 +164,14 @@ class _View:
     status: int | None = None  # 2.8.12: the HTTP status its input failed with, if any
 
 
-def _helper_args(child: Any, root: Path) -> tuple[Any, str, bool]:
-    """A helper's start arguments: its pipe, its buffers' folder and whether it forwards its
-    debug lines too (2.8.2: while the detailed log is on, QiTV's own loggers are at DEBUG)."""
-    return child, str(root), logging.getLogger("services").isEnabledFor(logging.DEBUG)
+def _helper_args(child: Any, root: Path) -> tuple[Any, str, bool, bool]:
+    """A helper's start arguments: its pipe, its buffers' folder, whether it forwards its
+    debug lines too (2.8.2: while the detailed log is on, QiTV's own loggers are at DEBUG) and
+    whether it looks names up over HTTPS (2.9.1: as QiTV does, services.secure_dns)."""
+    from services import secure_dns
+
+    detailed = logging.getLogger("services").isEnabledFor(logging.DEBUG)
+    return child, str(root), detailed, secure_dns.enabled()
 
 
 class _Supervisor(QThread):
@@ -258,7 +262,7 @@ class _Supervisor(QThread):
             if self._up:
                 conn.send(command)  # otherwise its next disk open brings it
             return
-        if command[0] == "detailed_log":  # 2.8.2: the next helper starts with it anyway
+        if command[0] in ("detailed_log", "secure_dns"):  # the next helper starts with it
             if self._up:
                 conn.send(command)
             return
@@ -679,7 +683,7 @@ class _Supervisor(QThread):
             return
         if command[0] == "drop_kept":
             self._drop_kept()  # 2.8: the disk buffer turned off needs no helper
-        elif command[0] in ("adopt_kept", "disk_amount", "detailed_log", "junction"):
+        elif command[0] in ("adopt_kept", "disk_amount", "detailed_log", "junction", "secure_dns"):
             return  # 2.8: no helper takes anything back, holds a disk ring or logs
         elif command[0] == "open":
             # Time-shift is off: available(False) was emitted already, and no reopen follows.
@@ -972,6 +976,12 @@ class LiveEngine(QObject):
         lines, or stops, at once; a helper started later starts so (`_helper_args`)."""
         if not self._shut:
             self._commands.put(("detailed_log", bool(on)))
+
+    def set_secure_dns(self, on: bool) -> None:
+        """Secure DNS turned on or off (2.9.1): the running helper looks names up so at once;
+        one started later starts so (`_helper_args`)."""
+        if not self._shut:
+            self._commands.put(("secure_dns", bool(on)))
 
     def set_junction(self, sid: str, seconds: float) -> None:
         """Ask a raw TS session's next stream restart to take `seconds` more than its repeat

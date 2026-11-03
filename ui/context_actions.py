@@ -45,11 +45,23 @@ OPEN_PIP_TEXT = N_("Open in picture-in-picture")  # i18n: a menu entry
 REMOVE_RECENT_TEXT = N_("Remove from Recents")
 # i18n: a channel's or a group's right-click entry: parental controls hide it (2.8)
 HIDE_TEXT = N_("Hide (parental controls)")
+# i18n: a channel group's menu (2.9.1): out of the lists, no PIN; Settings → Providers shows it
+TIDY_TEXT = N_("Hide group")
 # i18n: a channel's right-click entry: record it from one time to another (no guide needed)
 RECORD_AT_TEXT = N_("Record at a time…")
 # i18n: a menu entry opening a submenu that confirms emptying the "Recent" list
 CLEAR_RECENTS_TEXT = N_("Clear Recents")
 PLAYERS = ((N_("Play in VLC"), "vlc"), (N_("Play in MPV"), "mpv"))
+
+
+def _a_providers_group(node: NavNode) -> bool:
+    """A group its provider lists (not Favorites, Recent, All, or a provider's heading)."""
+    from services.catalog import ALL_GROUP_ID
+    from services.provider_ids import split_group_id
+
+    name, own = split_group_id(node.key)
+    group_id = own if name else node.key
+    return bool(group_id) and group_id != ALL_GROUP_ID and not str(group_id).startswith("@")
 
 
 def is_channel(nav: NavModel, node: Optional[NavNode]) -> bool:
@@ -96,6 +108,7 @@ class ContextActions(QObject):
         clear_recents: Optional[Callable[[], None]] = None,
         hide: Optional[Callable[[NavNode], None]] = None,
         may_hide: Callable[[], bool] = lambda: True,
+        tidy: Optional[Callable[[NavNode], None]] = None,
         record_at: Optional[Callable[[], Optional[Callable[[dict], None]]]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
@@ -109,6 +122,7 @@ class ContextActions(QObject):
         self._open_pip = open_pip
         self._hide = hide  # 2.8: parental controls hide a channel or a group ...
         self._may_hide = may_hide  # ... once their PIN is set
+        self._tidy = tidy  # 2.9.1: a group leaves the lists, no PIN (services.hidden_groups)
         self._record_at = record_at
         self._forget_recent = forget_recent
         self._clear_recents = clear_recents
@@ -153,10 +167,19 @@ class ContextActions(QObject):
         if node.layer == "group" and node.key == RECENT_GROUP:
             return self._recents_menu(parent)
         hide = self._hide if self._may_hide() else None
-        if node.layer == "group" and hide is not None and node.key != FAVORITES_GROUP:
-            menu = QMenu(parent)  # 2.8: a group's menu: parental controls hide it
+        tidy = self._tidy
+        if (
+            node.layer == "group"
+            and (hide is not None or tidy is not None)
+            and node.key != FAVORITES_GROUP
+            and _a_providers_group(node)
+        ):
+            menu = QMenu(parent)  # a group's menu: hidden from the lists (2.9.1), parental (2.8)
             menu.setStyleSheet(menu_style())
-            menu.addAction(translate(HIDE_TEXT)).triggered.connect(lambda _=False: hide(node))
+            if tidy is not None:
+                menu.addAction(translate(TIDY_TEXT)).triggered.connect(lambda _=False: tidy(node))
+            if hide is not None:
+                menu.addAction(translate(HIDE_TEXT)).triggered.connect(lambda _=False: hide(node))
             return menu
         channel = is_channel(self.nav, node)
         playable = isinstance(node.payload, dict) and self.nav.is_playable(node)

@@ -1,11 +1,19 @@
 """History, last-watched, last live channel, resume points (spec §4.1 PlaybackSession
-bookkeeping)."""
+bookkeeping).
+
+A resume point is kept under the provider's number for the title (`content_id`). A film's also
+keeps its TMDB id (2.9.1, an optional field: older builds read the entry as before), so that a
+provider that numbers its films anew changes nothing: a film whose number has no point takes the
+one kept for its TMDB id at that provider, and a number given to another film never starts that
+one where the first was left.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
+import re
 import time
 from typing import Callable, Optional
 
@@ -18,6 +26,16 @@ logger = logging.getLogger(__name__)
 
 RESUME_MIN_MS = 5000
 RESUME_MAX_RATIO = 0.90
+_EPISODE_CID = re.compile(r":s[^:]*:e[^:]*$")  # content_id()'s for an episode
+
+
+def film_tmdb(item: dict) -> str:
+    """A provider's film's TMDB id as its list gives it ("" without one)."""
+    for field in ("tmdb", "tmdb_id"):
+        value = str(item.get(field) or "").strip()
+        if value and value != "0":
+            return value
+    return ""
 
 
 class WatchState:
@@ -45,6 +63,7 @@ class WatchState:
         self._dirty = False
         self.save_delay_ms = save_delay_ms
         self._save_timer: Optional[QTimer] = None
+        self._films: dict[str, str] = {}  # resume key -> the film's TMDB id, as it opened
 
     @staticmethod
     def content_id(provider_name: str, item: dict, *, item_type: str) -> str:
@@ -128,14 +147,55 @@ class WatchState:
     def resume_from(self, cid: str, item: dict) -> Optional[int]:
         """Where `item` (resume key `cid`) goes on from (None: its beginning): where QiTV left
         it, else where its media server says it stopped (2.8), unless QiTV saw it finished:
-        a server's list loaded before still names its older point."""
+        a server's list loaded before still names its older point. A film's point follows
+        its TMDB id (2.9.1, the module's docstring)."""
+        tmdb = "" if _EPISODE_CID.search(cid) else film_tmdb(item)
+        if tmdb:
+            self._films[cid] = tmdb
+            saved = (getattr(self.config, "playback_positions", None) or {}).get(cid)
+            kept = str(saved.get("tmdb") or "") if isinstance(saved, dict) else ""
+            if kept and kept != tmdb:
+                return None  # the provider gave this number to another film: from its start
+            if saved is None:
+                self._relink(cid, tmdb)
         position = self.resume_position(cid)
         if position is not None or self.seen_finished(cid):
             return position
         return server_resume(item)
 
+    def _relink(self, cid: str, tmdb: str) -> None:
+        """The point kept at this provider for the film's TMDB id under an older number moves
+        to `cid` (the provider numbered its films anew)."""
+        positions = getattr(self.config, "playback_positions", None) or {}
+        provider = cid.rsplit(":", 1)[0]
+        old = next(
+            (
+                key
+                for key, saved in positions.items()
+                if key != cid
+                and isinstance(saved, dict)
+                and str(saved.get("tmdb") or "") == tmdb
+                and key.rsplit(":", 1)[0] == provider
+                and not _EPISODE_CID.search(key)
+            ),
+            None,
+        )
+        if old is None:
+            return
+        positions[cid] = positions.pop(old)
+        self.config.playback_positions = positions
+        logger.info("A film's resume point followed its new number at its provider")
+        self._save_soon()
+
     def update_position(self, cid: str, position_ms: int, duration_ms: int) -> None:
         self.config.save_playback_position(cid, position_ms, duration_ms)
+        tmdb = self._films.get(cid)
+        if tmdb:
+            positions = getattr(self.config, "playback_positions", None) or {}
+            saved = positions.get(cid)
+            if isinstance(saved, dict) and saved.get("tmdb") != tmdb:
+                saved["tmdb"] = tmdb
+                self.config.playback_positions = positions
         self._dirty = True
         if self._clock() - self._last_flush >= self._flush_interval_s:
             self.flush()

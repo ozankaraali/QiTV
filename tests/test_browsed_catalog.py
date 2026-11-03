@@ -161,6 +161,31 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.assertEqual(view.sections(), catalog.sections())
         self.assertIs(view.provider_manager, catalog.provider_manager)
 
+    def test_a_group_hidden_to_tidy_the_lists_leaves_only_them(self):
+        # 2.9.1: no PIN, never locked: the group isn't listed, its channels still are in All.
+        from services.hidden_groups import HiddenGroups
+
+        class Kept:
+            hidden_groups = None
+
+            def save_config(self):
+                pass
+
+        tidy = HiddenGroups(Kept())
+        self.catalogs.hidden_groups = tidy
+        view = self.view("Demo TV")
+        view.select_provider()
+        before, state = view.content_version(), view.parental_state()
+        all_count = len(view.items("live", ALL_GROUP_ID))
+        tidy.hide("live", "Demo TV", "Sports", "Sports")
+        self.assertNotEqual(view.content_version(), before)  # the lists rebuild
+        self.assertNotEqual(view.parental_state(), state)
+        self.assertNotIn("Sports", [g.id for g in view.groups("live")])
+        self.assertEqual(len(view.items("live", ALL_GROUP_ID)), all_count)
+        [entry] = tidy.entries()
+        self.assertTrue(tidy.show_again(entry["key"]))
+        self.assertIn("Sports", [g.id for g in view.groups("live")])
+
     def test_a_group_parental_controls_hide_is_left_out_while_locked(self):
         from services.parental import Parental
 
