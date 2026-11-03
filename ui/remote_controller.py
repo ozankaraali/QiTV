@@ -196,7 +196,7 @@ class RemoteController(QObject):
         if cast_devices is not None:
             cast_devices.changed.connect(self._push_cast)
         # 2.9: the large picture's sound and subtitles on the phones' sheets. The phones that
-        # opened one (while their session lasts) hear each change; `of` numbers what plays.
+        # have one open hear each change; `of` numbers what plays.
         self._track_phones: set[str] = set()
         self._last_tracks: Optional[dict] = None
         self._tracks_target: object = None  # what played large when `of` was last numbered
@@ -486,6 +486,10 @@ class RemoteController(QObject):
             elif event.what == "tracks":  # 2.9: its Subtitles or Sound sheet opened
                 self._track_phones.add(sid)
                 self._push_tracks(asked=sid)
+            elif event.what == "tracks_closed":  # and closed: no more of its changes
+                self._track_phones.discard(sid)
+                if not self._track_phones:
+                    self._last_tracks = None
             else:
                 self._library(sid).titles(section, event.genre, event.page, event.find, event.n)
         except Exception as error:  # a phone's question must never take QiTV down

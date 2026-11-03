@@ -233,6 +233,8 @@ def parse_phone_message(obj: object) -> Optional[dict]:
             return {"t": "get", "what": "cast"}
         if what == "tracks":  # 2.9: the large picture's sound and subtitles, AI captions too
             return {"t": "get", "what": "tracks"}
+        if what == "tracks_closed":  # 2.9: that sheet closed: its changes are no longer sent
+            return {"t": "get", "what": "tracks_closed"}
     return None
 
 

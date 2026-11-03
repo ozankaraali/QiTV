@@ -492,6 +492,16 @@ class PhoneTracksTests(WindowCase):
         self.assertEqual(len(self.sent("tracks")), 2)
         self.assertEqual(self.sent("tracks", "s9"), [])  # a phone that never asked
 
+    def test_a_closed_sheet_hears_no_more_changes(self):
+        self.opened()
+        self.window.remote.bridge.post(Get("s8", "tracks_closed", "", 0))
+        QTest.qWait(50)
+        self.controls.sound_choices.return_value = [(1, "English", False), (2, "Deutsch", True)]
+        QTest.qWait(700)  # a look came: nothing goes to a phone whose sheet closed
+        self.assertEqual(len(self.sent("tracks")), 1)
+        self.opened()  # opened again: the list as it is now
+        self.assertEqual(self.sent("tracks")[-1]["sound"][1]["on"], True)
+
     def test_a_pick_acts_on_what_plays_large_and_never_on_what_played_before(self):
         of = self.opened()["of"]
         remote = self.window.remote

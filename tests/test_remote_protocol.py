@@ -125,6 +125,10 @@ class MessageTests(unittest.TestCase):
             parse_phone_message({"t": "get", "what": "tracks", "extra": 1}),
             {"t": "get", "what": "tracks"},
         )
+        self.assertEqual(
+            parse_phone_message({"t": "get", "what": "tracks_closed"}),
+            {"t": "get", "what": "tracks_closed"},
+        )
         for kind, track in (("sound", 0), ("sound", 257), ("sub", -1), ("sub", 3)):
             message = {"t": "track", "kind": kind, "id": track, "of": 7}
             self.assertEqual(parse_phone_message({**message, "more": "x"}), message)

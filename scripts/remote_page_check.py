@@ -630,7 +630,8 @@ def scenario_back_to(rig: Rig) -> None:
 def scenario_ask(rig: Rig) -> None:
     """2.6: QiTV's question on the phone that asked (stop a recording for its Watch?): a
     sheet over everything with the safe answer first; each answer carries the question's
-    number back; Keep recording says nothing opened; a question gone on the TV closes."""
+    number back; Keep recording says nothing opened; a question gone on the TV closes, and so
+    does one a reconnect left (its answer would go to a session that is gone)."""
     sid = paired_sid(rig)
     rig.hub.send(sid, STATE)
     rig.page.locator("#nowName", has_text="Harbourline News").wait_for()
@@ -653,6 +654,12 @@ def scenario_ask(rig: Rig) -> None:
     rig.page.locator("#askSheet").wait_for()
     rig.hub.send(sid, {"t": "unask", "id": 9})  # settled on the TV
     rig.page.locator("#askSheet").wait_for(state="hidden")
+    rig.hub.send(sid, {**ask, "id": 10})
+    rig.page.locator("#askSheet").wait_for()
+    mark = rig.events.mark()
+    rig.page.evaluate("import('./app.js').then((m) => m.default.conn.ws.close())")  # it slept
+    rig.events.wait(Opened, after=mark, timeout=15)
+    rig.page.locator("#askSheet").wait_for(state="hidden")  # the old session's: gone (2.9)
 
 
 def scenario_rec_line(rig: Rig) -> None:
@@ -1663,8 +1670,9 @@ def ticked(rig: Rig) -> list[str]:
 def scenario_tracks(rig: Rig) -> None:
     """2.9: More's Subtitles and Sound list the TV's tracks as its panels name them; a tap picks
     from the list it shows (its "of" goes back); AI captions' download question asks over the
-    sheet, which comes back once answered; a download on its way is called off by a tap; the
-    language list picks one; each list QiTV sends redraws the sheet open."""
+    sheet, which comes back once answered; a download on its way is called off by a tap (its
+    row kept while only its note changes); the language list picks one; each list QiTV sends
+    redraws the sheet open; a closed sheet says so."""
     sid = paired_sid(rig)
     rig.page.click("#moreButton")
     rig.page.wait_for_selector("#moreSheet:not([hidden])")
@@ -1699,6 +1707,10 @@ def scenario_tracks(rig: Rig) -> None:
     rig.page.locator("#tracksSheet").wait_for()
     rig.hub.send(sid, {**TRACKS, "ai": {"on": False, "going": True, "note": "Downloading 40%"}})
     rig.page.locator("#tracksList .choice", has_text="Downloading 40%").wait_for()
+    row = rig.page.locator("#tracksList .choice", has_text="AI captions").element_handle()
+    rig.hub.send(sid, {**TRACKS, "ai": {"on": False, "going": True, "note": "Downloading 41%"}})
+    rig.page.locator("#tracksList .choice", has_text="Downloading 41%").wait_for()
+    assert row.evaluate("el => el.isConnected"), "a note's change redrew the row: a tap is lost"
     rig.shot("tracks-downloading")
     mark = rig.events.mark()
     rig.page.locator("#tracksList .choice", has_text="AI captions").click()  # calls it off
@@ -1717,8 +1729,10 @@ def scenario_tracks(rig: Rig) -> None:
         CaptionsLanguage, where=lambda e: (e.language, e.of) == ("English", 4), after=mark
     )
     assert rig.page.inner_text("#tracksTitle") == "Subtitles"  # back, as the panel's list
+    mark = rig.events.mark()
     rig.page.click("#veil", position={"x": 20, "y": 20})
     rig.page.locator("#tracksSheet").wait_for(state="hidden")
+    rig.events.wait(Get, where=lambda e: e.what == "tracks_closed", after=mark)  # no more lists
     rig.page.click("#moreButton")
     mark = rig.events.mark()
     rig.page.click("#soundButton")

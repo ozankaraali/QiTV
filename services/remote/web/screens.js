@@ -814,6 +814,8 @@ function choiceRow(text, pick, { on = false, note = "", opens = false, up = fals
   return row;
 }
 
+let drawnShape = ""; // the rows drawn, but for their notes: the same rows are kept (a tap lands)
+
 function drawTracks() {
   const tracks = trackList;
   const ai = tracks && tracks.ai;
@@ -846,13 +848,32 @@ function drawTracks() {
       rows.push(choiceRow(track.name, () => pickTrack({ t: "track", kind: "sub", id: track.id }), { on: track.on }));
     }
     if (ai) {
-      // On or off as the TV's row is: a download on its way calls off too, as a tap there does.
-      const turn = () => pickTrack({ t: "captions", on: !(ai.on || ai.going) });
+      // On or off as the TV's row is now: a download on its way calls off too, as a tap there
+      // does (read at the tap: the row may be kept across lists that only moved its note).
+      const turn = () => {
+        const now = trackList && trackList.ai;
+        if (now) pickTrack({ t: "captions", on: !(now.on || now.going) });
+      };
       rows.push(choiceRow(w("ai_captions"), turn, { on: ai.on, note: ai.note }));
       if (ai.on) rows.push(choiceRow(w("language"), () => showTracks("langs"), { note: ai.lang_note, opens: true }));
     } else if (!subs.length) note("no_subtitles");
   }
-  $("tracksList").replaceChildren(...rows);
+  // Pushes come often (a download's percent): a list whose rows are the same but for their notes
+  // keeps its rows and changes the notes, so a tap between touch and click is never lost.
+  const shape = tracksView + "|" + rows.map((row) => (row.querySelector(".label") || row).textContent + (row.classList.contains("current") ? "*" : "") + (row.classList.contains("opens") ? ">" : "")).join("|");
+  const list = $("tracksList");
+  if (shape === drawnShape && list.children.length === rows.length) {
+    rows.forEach((row, i) => {
+      const note = row.querySelector(".muted");
+      const kept = list.children[i].querySelector(".muted");
+      if (note && kept) kept.textContent = note.textContent;
+      else if (note) list.children[i].querySelector(".label").after(note);
+      else if (kept) kept.remove();
+    });
+    return;
+  }
+  drawnShape = shape;
+  list.replaceChildren(...rows);
 }
 
 function bindTracks() {
@@ -861,6 +882,14 @@ function bindTracks() {
     pressable(button);
     button.addEventListener("click", () => openTracks(view));
   }
+  // However it closes (a tap beside it, a swipe, a question over it), the TV stops sending its
+  // changes; opened again, it asks again.
+  new MutationObserver(() => {
+    if ($("tracksSheet").hidden) {
+      drawnShape = "";
+      send({ t: "get", what: "tracks_closed" });
+    }
+  }).observe($("tracksSheet"), { attributes: true, attributeFilter: ["hidden"] });
 }
 
 function onTimetable(message) {
@@ -1432,6 +1461,13 @@ function onHello() {
   hellos += 1;
   if (zapping()) zap.reopen(); // the Remote tab's list, on the first hello too
   if (hellos === 1) return; // the first: nothing else is open yet
+  if (askId !== null) {
+    // The question was the old session's: QiTV no longer waits for this phone's answer (the
+    // TV's card still asks). The sheet it came over shows again, as it is now.
+    askId = null;
+    closeSheets();
+    backFromAsk(true);
+  }
   if (tracksShown()) send({ t: "get", what: "tracks" }); // its changes come to this session
   const shown = (document.querySelector("[data-screen]:not([hidden])") || {}).dataset;
   const screen = shown ? shown.screen : "";
