@@ -408,6 +408,15 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.at(13.5), "Nasılsın")  # held a little after the words
         self.assertEqual(self.at(13.7), "")
 
+    def test_a_long_caption_shows_in_parts_across_its_words(self):
+        # 2.9.1: the overlay's parts (pages), each for its share of the words by its letters.
+        self.overlay.pages = lambda text: text.split(" | ")
+        run = self.captions._run
+        self.captions._on_caption(run, 10.0, 16.0, "one two three | four five six")
+        self.assertEqual(self.at(10.3), "one two three")
+        self.assertEqual(self.at(15.0), "four five six")  # past the first part's share
+        self.assertEqual(self.at(16.4), "four five six")  # held after the words
+
     def test_a_caption_shows_from_the_first_word_its_piece_leads_in_to(self):
         from services.captions.pieces import LEAD_IN_S
         from ui.captions_controller import FIRST_WORD_S

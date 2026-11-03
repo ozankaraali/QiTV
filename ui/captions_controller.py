@@ -929,7 +929,25 @@ class CaptionsController(QObject):
             until = max(end + HOLD_S, shows + MIN_SHOW_S, shows + len(text) / READ_CPS)
             if following is not None:
                 until = min(until, following)
-        return text if shows <= position < until else ""
+        if not shows <= position < until:
+            return ""
+        return self._part_at(text, position - shows, end - shows)
+
+    def _part_at(self, text: str, elapsed: float, words_s: float) -> str:
+        """`elapsed` into a caption whose words last `words_s`: the whole of it, or the part
+        of it said by then when it doesn't fit two lines (2.9.1, the owner: a long one ended
+        in "…"), each part for its share of the words by its letters; the last one held."""
+        overlay = next((o for o in self._overlays if hasattr(o, "pages")), None)
+        parts = overlay.pages(text) if overlay is not None else [text]
+        if len(parts) <= 1:
+            return text
+        total = sum(len(part) for part in parts)
+        said, span = 0, max(words_s, MIN_SHOW_S)
+        for part in parts[:-1]:
+            said += len(part)
+            if elapsed < span * said / total:
+                return part
+        return parts[-1]
 
     def _covered(self, position: float) -> bool:
         """The run reads on from before `position` and has not passed it by long: no need to

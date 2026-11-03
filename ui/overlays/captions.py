@@ -6,7 +6,8 @@ player controls while they show (`follow`: the transport's controls_top() and ba
 the Sound panel does). Its text is the palette's text colour on a translucent panel box,
 word-wrapped and centred, two lines at most, of about one length (2.9, the owner: a full top
 line over a short one stretched the box from edge to edge): a longer caption's font shrinks a
-little, and past that its second line ends in "…".
+little. Longer still, it is shown in parts (`pages`, which the controller times across its
+words; 2.9.1, the owner: a long one ended in "…"); only a part that still can't fit is cut.
 
 Its size follows the picture: FONT_U units of a 16:9 picture as wide as the window, or as tall
 in a window wider than 16:9 (never under MIN_FONT_PX: the mini player's stays readable), so it
@@ -90,6 +91,39 @@ def balanced(text: str, font: QFont, width: float) -> float:
     return wide
 
 
+_ENDS = ".!?…;:,"  # a part ends best after one of these (a sentence's, then a clause's end)
+
+
+def _split(text: str, count: int) -> list[str]:
+    """`text` in `count` parts of about one length, each split between words, after a
+    sentence's or a clause's end when one is within a sixth of a part of where it would be."""
+    words = text.split()
+    if count <= 1 or len(words) <= 1:
+        return [text]
+    count = min(count, len(words))
+    ends: list[int] = []  # where each word ends in the text, with a single space between
+    at = 0
+    for word in words:
+        at += len(word) + (1 if ends else 0)
+        ends.append(at)
+    cuts: list[int] = []  # the index of the last word of each part but the last
+    for k in range(1, count):
+        target = len(text) * k / count
+        reach = len(text) / count / 6
+        first = cuts[-1] + 1 if cuts else 0
+        choices = range(first, len(words) - (count - k))
+        if not choices:
+            break
+        near = min(choices, key=lambda i: abs(ends[i] - target))
+        good = [i for i in choices if words[i][-1] in _ENDS and abs(ends[i] - target) <= reach]
+        cuts.append(min(good, key=lambda i: abs(ends[i] - target)) if good else near)
+    parts, first = [], 0
+    for cut in cuts + [len(words) - 1]:
+        parts.append(" ".join(words[first : cut + 1]))
+        first = cut + 1
+    return [part for part in parts if part]
+
+
 def wrap(text: str, font: QFont, width: float) -> list[tuple[int, int]]:
     """Where each line of `text` starts and how long it is, word-wrapped at `width` (a word
     too long for a line, or a language written without spaces, breaks where it must)."""
@@ -118,6 +152,7 @@ class CaptionsOverlay(Overlay):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._text = ""
         self._lines: list[str] = []
+        self._pages_for: Optional[tuple[tuple[str, int, int], list[str]]] = None
         self._font = QFont()
         self._floor: Optional[int] = None  # the player controls' top while they show
         self._transport: Optional[QWidget] = None
@@ -151,6 +186,41 @@ class CaptionsOverlay(Overlay):
         """The lines shown (two at most; a cut one ends in "…")."""
         return list(self._lines)
 
+    def pages(self, text: str) -> list[str]:
+        """`text` in parts that each fit two lines as the captions show now (one part when it
+        fits, a little smaller too): of about one length each, split after a sentence's or a
+        clause's end when one is near, else between words."""
+        text = " ".join(str(text).split())
+        host = self.parentWidget()
+        if not text or host is None:
+            return [text] if text else []
+        key = (text, host.width(), host.height())
+        if self._pages_for is not None and self._pages_for[0] == key:
+            return list(self._pages_for[1])
+        un = picture_units(host)
+        width = self._line_width(un, host)
+        smallest = self._font_at(un, _SHRINK[-1])
+        if len(wrap(text, smallest, width)) <= MAX_LINES:
+            parts = [text]
+        else:  # as few parts as fit, each a little smaller where it must (as _layout does)
+            count = -(-len(wrap(text, smallest, width)) // MAX_LINES)
+            parts = _split(text, count)
+            if any(len(wrap(part, smallest, width)) > MAX_LINES for part in parts):
+                parts = _split(text, count + 1)
+        self._pages_for = (key, parts)
+        return list(parts)
+
+    def _font_at(self, un: Units, scale: float) -> QFont:
+        font = un.font(FONT_U * scale)  # regular, as libVLC's subtitles (no medium there)
+        if CAPTION_FAMILY:
+            font.setFamily(CAPTION_FAMILY)
+        return font
+
+    @staticmethod
+    def _line_width(un: Units, host: QWidget) -> float:
+        room = max(1, host.width() - 2 * un.px(_EDGE_U))
+        return float(max(1, min(un.px(_LINE_U), room) - 2 * un.px(_PAD_X_U)))
+
     def font_px(self) -> int:
         return self._font.pixelSize()
 
@@ -182,12 +252,10 @@ class CaptionsOverlay(Overlay):
         un = picture_units(host)
         pad_x, pad_y = un.px(_PAD_X_U), un.px(_PAD_Y_U)
         room = max(1, host.width() - 2 * un.px(_EDGE_U))
-        width = float(max(1, min(un.px(_LINE_U), room) - 2 * pad_x))
+        width = self._line_width(un, host)
         text = self._text
         for scale in _SHRINK:
-            font = un.font(FONT_U * scale)  # regular, as libVLC's subtitles (no medium there)
-            if CAPTION_FAMILY:
-                font.setFamily(CAPTION_FAMILY)
+            font = self._font_at(un, scale)
             spans = wrap(text, font, width)
             if len(spans) <= MAX_LINES:
                 spans = wrap(text, font, balanced(text, font, width))
