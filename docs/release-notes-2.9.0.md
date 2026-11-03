@@ -33,7 +33,13 @@ others' distributions, which may have malware.**
   otherwise the model hears it. You can choose another in the panel, and QiTV remembers your
   choice for that channel.
 - **Nothing made up:** what speech models write over music and silence (credits, repeated
-  lines) is kept off the screen.
+  lines), or a line written in another language's letters, is kept off the screen.
+
+## Subtitles
+
+- **One look for every subtitle:** a channel's or film's own subtitles, a file you load and
+  OpenSubtitles' are drawn as AI captions are: light text on a dark box in the app's font,
+  without the black outline. A subtitle with its own styles (ASS/SSA) keeps them.
 
 ## Sound
 
@@ -48,12 +54,19 @@ others' distributions, which may have malware.**
 - **The Sound panel names each audio track's language** ("Türkçe", "English"…), with its
   format when two would read alike, and says so when a channel doesn't name it.
 
+## Live TV
+
+- **A channel whose server loses its playlist for a moment keeps its time-shift:** an HLS
+  channel's server answered "not found" once, and QiTV played the channel directly from then
+  on, without the bar, Go live or AI captions. QiTV now asks again, and once through the
+  channel's own address, before it gives up.
+
 ## Phone remote
 
 - **Subtitles and Sound from the phone:** the remote's **More** has **Subtitles** and
   **Sound**, the TV's two panels: Off, the stream's subtitles and **AI captions** (on or off,
   what they are waiting for, such as "Downloading 40%", their speech model's ‹ › and the
   language they hear, which you can change), and the sound tracks by their language, named as
-  on the TV. They follow what
-  the TV does while they are open. The first time AI captions are turned on from the phone, the
-  download question shows on the phone and on the TV: answer either one.
+  on the TV. They follow what the TV does while they are open. The first time AI captions are
+  turned on from the phone, the download question shows on the phone and on the TV: answer
+  either one.
