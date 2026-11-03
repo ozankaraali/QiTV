@@ -517,6 +517,27 @@ class ControllerTimingTests(unittest.TestCase):
         self.captions._on_progress(run, 108.0, 1.06)  # ahead again
         self.assertIsNone(self.captions._slow_since)
 
+    def test_a_model_with_sound_waiting_for_it_cant_keep_up_whatever_its_speed(self):
+        # 2.9.1, the owner on live: the 1.7B at 0.85 wrote each line after its words; none
+        # showed and Automatic never stepped down (the speed under 0.9 said "in time").
+        run = self.captions._run
+        self.window.live_session.position_s = 100.0
+        self.captions._on_progress(run, 110.0, 0.85, 99.6)  # 10 s read, written to 99.6
+        self.assertIsNotNone(self.captions._slow_since)
+        since = self.captions._slow_since
+        self.captions._on_progress(run, 110.0, 0.5, 100.4)  # its speed dips: still late
+        self.assertEqual(self.captions._slow_since, since)
+        self.captions._on_progress(run, 100.8, 0.5, 100.8)  # nothing waits, 0.8 s ahead
+        self.assertEqual(self.captions._slow_since, since)  # not in time yet: kept
+        self.captions._on_progress(run, 110.0, 0.5, 104.0)  # in time again
+        self.assertIsNone(self.captions._slow_since)
+
+    def test_a_stalled_edge_with_nothing_waiting_is_no_slow_model(self):
+        run = self.captions._run
+        self.window.live_session.position_s = 100.0
+        self.captions._on_progress(run, 100.4, 0.3, 100.4)  # nothing read past it, a fast model
+        self.assertIsNone(self.captions._slow_since)
+
     def test_late_is_how_far_the_captions_are_written_not_the_sound_read(self):
         # 2.9, the review: a model 1.2x slow on live: the sound read stayed 10 s ahead, the
         # captions fell behind it, and nothing said so.
