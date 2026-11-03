@@ -169,8 +169,9 @@ class FakeEngine(QObject):
     def snapshot(self, sid):
         return dict(self._snapshots.get(sid, {}))
 
-    def stream_url(self, sid, seq):
-        return f"http://127.0.0.1:9/token/{sid}/stream/{seq}.ts" if self.up else ""
+    def stream_url(self, sid, seq, side=False):
+        route = "side" if side else "stream"
+        return f"http://127.0.0.1:9/token/{sid}/{route}/{seq}.ts" if self.up else ""
 
     def buffer(
         self,
@@ -2329,6 +2330,159 @@ class StayLiveTests(LiveSessionCase):
         self.assertFalse(last["paused"])
         self.assertFalse(last["ended"])
         self.assertEqual(last["target"], 2.5)
+
+    def test_ai_captions_wait_once_for_their_distance_then_play_at_1x(self):
+        # 2.9: not minutes at 0.97x: the picture waits where it is ("Starting captions…")
+        # until it is the floor behind live, then plays on at 1x.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(30.0)
+        rates, holds = len(self.playback.rates), len(self.playback.holds)
+        self.live.set_caption_floor(8.0)
+        feed.run(1.0)
+        self.assertTrue(self.playback.held)
+        self.assertTrue(self.live.caption_waiting())
+        self.assertTrue(self.timelines[-1]["captions_wait"])
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        feed.run(10.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertFalse(self.timelines[-1]["captions_wait"])
+        self.assertEqual(self.playback.holds[holds:], [True, False])
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        feed.run(300.0)
+        self.assertEqual(self.playback.holds[holds:], [True, False])  # once
+        self.assertEqual([r for r in self.playback.rates[rates:] if r != 1.0], [])
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertEqual(len(self.playback.plays), 1)
+
+    def test_ai_captions_off_leave_the_picture_where_it_is_time_shifted(self):
+        # 2.9: turned off, nothing catches up by itself: time-shifted as after a pause, the
+        # bar and Go live showing; Go live goes back to the latency's target.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        self.live.set_caption_floor(8.0)
+        feed.run(40.0)
+        rates = len(self.playback.rates)
+        self.live.set_caption_floor(0.0)
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")
+        feed.run(120.0)
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        self.assertEqual([r for r in self.playback.rates[rates:] if r != 1.0], [])
+        self.live.go_live()
+        feed.run(10.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertLess(self.timelines[-1]["lag"], 4.0)
+
+    def test_ai_captions_off_at_their_floor_while_waiting_play_on_at_once(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.set_caption_floor(8.0)
+        feed.run(2.0)
+        self.assertTrue(self.playback.held)
+        self.live.set_caption_floor(0.0)
+        self.assertFalse(self.playback.held)
+        self.assertFalse(self.live.caption_waiting())
+
+    def test_ai_captions_wait_after_a_tune_that_lands_short_of_their_floor(self):
+        # A zap with captions on: the new channel's first picture waits for the floor, once.
+        self.live.set_caption_floor(8.0)  # captions already on, then a channel is tuned
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.assertEqual(self.playback.holds, [True, False])
+        feed.run(300.0)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        self.assertEqual([r for r in self.playback.rates if r < 1.0], [])
+        self.assertEqual(len(self.playback.plays), 1)
+
+    def test_ai_captions_go_live_lands_at_their_floor_when_the_buffer_holds_it(self):
+        self.live.set_caption_floor(8.0)
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.toggle_pause()
+        feed.run(30.0)
+        self.live.toggle_pause()
+        feed.run(2.0)
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")
+        holds = len(self.playback.holds)
+        self.live.go_live()
+        feed.run(10.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=1.0)
+        self.assertEqual(self.playback.holds[holds:], [])  # no wait: it landed there
+
+    def test_ai_captions_off_and_on_again_are_live_again_where_it_is(self):
+        # Turned off, it stays where it is, time-shifted; on again about there: live again.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        self.live.set_caption_floor(8.0)
+        feed.run(30.0)
+        self.live.set_caption_floor(0.0)
+        feed.run(5.0)
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")
+        holds = len(self.playback.holds)
+        self.live.set_caption_floor(10.0)  # the larger model, say
+        feed.run(10.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertEqual(self.playback.holds[holds:], [True, False])  # the 2 s more, waited
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 10.0, delta=0.5)
+
+    def test_ai_captions_leaving_a_picture_that_is_no_longer_large_steer_it_back(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        self.live.set_caption_floor(8.0)
+        feed.run(30.0)
+        self.live.set_caption_floor(0.0, shift=False)
+        feed.run(5.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        feed.run(300.0)
+        self.assertLess(self.timelines[-1]["lag"], 4.0)
+
+    def test_ai_captions_wait_again_after_an_interruption_during_it(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.set_caption_floor(8.0)
+        feed.run(1.0)
+        self.assertTrue(self.live.caption_waiting())
+        self.playback.ended.emit()
+        self.live._on_interrupted()  # VLC's input ended meanwhile: it opens again
+        feed.run(20.0)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        self.assertGreaterEqual(min(self.playback.rates or [1.0]), 1.0)  # never 0.97x for it
+
+    def test_a_pause_while_ai_captions_wait_is_the_viewers(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.set_caption_floor(8.0)
+        feed.run(1.0)
+        self.assertTrue(self.live.caption_waiting())
+        self.live.toggle_pause()
+        self.assertFalse(self.live.caption_waiting())
+        self.assertIs(self.playback.current, PlaybackState.PAUSED)
+        feed.run(20.0)
+        self.assertIs(self.playback.current, PlaybackState.PAUSED)
+        self.live.toggle_pause()
+        feed.run(2.0)
+        self.assertFalse(self.live.caption_waiting())  # 20 s behind now: nothing to wait for
+        self.assertIs(self.playback.current, PlaybackState.PLAYING)
+
+    def test_ai_captions_read_from_the_segment_that_holds_the_picture(self):
+        self.ready(segments(0, 4), live_edge=8.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        source = self.live.caption_source()
+        self.assertIsNotNone(source)
+        url, seq, start = source
+        position = self.live.position()
+        self.assertIn("/side/", url)
+        self.assertTrue(start <= position < start + 2.0, (start, position))
+        self.assertTrue(url.endswith(f"/{seq}.ts"))
 
     def test_a_lasting_lag_above_the_band_gets_one_gentle_nudge_then_settles(self):
         # 2.1: not within a tick (2.0 did, and flapped on a public HLS channel): after 15 s outside

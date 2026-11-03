@@ -20,8 +20,11 @@ has more), and the title and the Sync row always show.
 
 A setting's row (the Picture panel's "Aspect ratio  ‹ 16:9 ›", `PanelRow.value`) steps through
 its choices: a click on ‹ or › steps back or on, a click elsewhere on it, Enter or → on (← back);
-`rowStepped` says so. Its value is lit while it is not the default (`lit`), and it keeps its
-width while it steps (`widest`).
+`rowStepped` says so. A choosable one (2.9: "AI captions  ‹ Automatic ›", `choosable`) is chosen
+as any other row by a click on it or Enter, and only its ‹ ›, ← and → step it. Its value is lit
+while it is not the default (`lit`), and it keeps its width while it steps (`widest`). A row may
+say something more at its right, muted (`note`: "Downloading 34%", before a value's ‹ ›), and a
+row that opens a list of its own ends in a › (`opens`).
 
 It is painted as the mixer is (ui/overlays/mixer.py): the same panel, outline and radius, the
 same unit-based metrics and focus fill, and the speed chip's round − and + (transport).
@@ -98,6 +101,11 @@ class PanelRow:
     widest: str = ""  # the setting's longest choice: its column keeps that width
     lit: bool = False  # the setting is not at its default: its value shows lit
     tip: str = ""  # the row's tooltip (it names its key)
+    note: str = ""  # said at its right, muted ("Downloading 34%"); before a value's ‹ ›
+    opens: bool = False  # it opens a list of its own: a › at its right
+    # 2.9: a row chosen as the others (ticked while on) that also has a setting: a click on it
+    # or Enter chooses it, only ‹ › and ←/→ step its value ("AI captions  ‹ Automatic ›").
+    choosable: bool = False
 
 
 @dataclass(frozen=True)
@@ -300,7 +308,7 @@ class TrackPanel(Overlay):
         focus = self._focus
         if focus is not None and focus < len(self._model.rows):
             row = self._model.rows[focus]
-            if row.value:
+            if row.value and not row.choosable:
                 self.rowStepped.emit(row.key, 1)
             else:
                 self.rowChosen.emit(row.key)
@@ -378,9 +386,10 @@ class TrackPanel(Overlay):
                 un.px(_TICK_U)
                 # A track's long name is cut short, a setting's (QiTV's words) never.
                 + (
-                    row_fm.horizontalAdvance(r.text) + setting
+                    row_fm.horizontalAdvance(r.text) + setting + self._end_width(un, r)
                     if r.value
                     else min(row_fm.horizontalAdvance(r.text), float(un.px(_TEXT_MAX_U)))
+                    + self._end_width(un, r)
                 )
                 for r in model.rows
             ),
@@ -402,6 +411,17 @@ class TrackPanel(Overlay):
             controls = 2 * un.px(_CHIP_U) + 4 * un.px(_GAP_U) + text
             content = max(content, label, controls)
         return math.ceil(content + 2 * un.px(_PAD_U)) + 2, math.ceil(height)
+
+    def _end_width(self, un: Units, row: PanelRow) -> float:
+        """The room a row's note and › take after its text (0: neither)."""
+        width = 0.0
+        if row.note:
+            width += 2 * un.px(_GAP_U) + QFontMetricsF(self._fonts(un)["row"]).horizontalAdvance(
+                row.note
+            )
+        if row.opens:
+            width += un.px(_GAP_U) + un.px(_ICON_U)
+        return width
 
     def _value_width(self, un: Units) -> float:
         """The settings' ‹ value › column: as wide as their widest choice (0: no setting)."""
@@ -534,9 +554,13 @@ class TrackPanel(Overlay):
             p.setPen(qcolor(PALETTE.accent) if row.action else text)
             steps = rects.steps.get(index)
             if steps is not None:
-                room = steps[0].left() - 2 * un.px(_GAP_U) - (x + tick_w)
+                end = steps[0].left() - un.px(_GAP_U)
+                end = self._paint_end(p, un, row, rect, end, x + tick_w, muted)  # its note
+                room = end - un.px(_GAP_U) - (x + tick_w)
             else:
-                room = rect.right() - un.px(_PAD_U) / 2 - (x + tick_w) - arrow
+                end = rect.right() - un.px(_PAD_U) / 2 - arrow
+                end = self._paint_end(p, un, row, rect, end, x + tick_w, muted)
+                room = end - (x + tick_w)
             label = row_fm.elidedText(row.text, Qt.TextElideMode.ElideRight, max(0.0, room))
             p.drawText(QRectF(x + tick_w, rect.top(), room, rect.height()), left, label)
             if steps is not None:
@@ -569,6 +593,34 @@ class TrackPanel(Overlay):
             p.setBrush(color)
             p.drawPath(path)
             p.restore()
+
+    @staticmethod
+    def _paint_end(
+        p: QPainter, un: Units, row: PanelRow, rect: QRectF, end: float, start: float, muted
+    ) -> float:
+        """A row's › and note at its right, before `end`; where its text must end. The note
+        gives way to the text (it keeps 40% of the room at least) only when the panel is
+        narrower than both (a host narrower than the panel)."""
+        gap = float(un.px(_GAP_U))
+        if row.opens:
+            icon = float(un.px(_ICON_U))
+            box = QRectF(end - icon, 0, icon, icon)
+            box.moveCenter(QPointF(box.center().x(), rect.center().y()))
+            draw_icon(p, "chevron_right", box, muted)
+            end = box.left() - gap
+        if row.note:
+            fm = QFontMetricsF(p.font())
+            room = max(0.0, end - start - 2 * gap)
+            text_w = min(fm.horizontalAdvance(row.text), room * 0.6)
+            width = min(fm.horizontalAdvance(row.note), room - text_w)
+            note = fm.elidedText(row.note, Qt.TextElideMode.ElideRight, width)
+            p.save()
+            p.setPen(muted)
+            right = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            p.drawText(QRectF(end - width, rect.top(), width, rect.height()), right, note)
+            p.restore()
+            end -= width + 2 * gap
+        return end
 
     @staticmethod
     def _paint_steps(p: QPainter, un: Units, row: PanelRow, steps, text, muted) -> None:
@@ -660,7 +712,7 @@ class TrackPanel(Overlay):
             return
         name, index = hit
         row = self._model.rows[index] if name in ("row", "less", "more") else None
-        if row is not None and (row.value or name != "row"):
+        if row is not None and (name != "row" or (row.value and not row.choosable)):
             self.rowStepped.emit(row.key, -1 if name == "less" else 1)
         elif row is not None:
             self.rowChosen.emit(row.key)

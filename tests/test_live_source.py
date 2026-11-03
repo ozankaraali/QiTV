@@ -953,6 +953,73 @@ video.m3u8
         self.assertEqual(server.counts["/live.m3u8"], 4)
         self.assertEqual(server.counts["/b.ts"], 2)
 
+    def test_a_reload_answered_404_a_moment_is_asked_again(self):
+        # 2.9: a public channel's CDN answered one 404 for its playlist: the session ended,
+        # played the channel directly, and AI captions had no buffer to read.
+        def playlist(_request, count):
+            text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\na.ts\n"
+            if count == 1:
+                return 200, {}, text.encode()
+            if count in (2, 3):
+                return 404, {}, b""
+            return 200, {}, (text + "#EXTINF:1,\nb.ts\n#EXT-X-ENDLIST\n").encode()
+
+        server = self.server(
+            {
+                "/live.m3u8": playlist,
+                "/a.ts": (200, {}, self.video),
+                "/b.ts": (200, {}, self.next_video),
+            }
+        )
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            parts = media(server.url + "/live.m3u8")
+        self.assertEqual(parts, joined(self.video, self.next_video))
+        self.assertEqual(server.counts["/live.m3u8"], 4)
+
+    def test_a_variant_gone_for_good_is_found_again_through_the_channels_master(self):
+        # A variant's address that expired: its master names it anew.
+        def master(_request, count):
+            variant = "v1.m3u8" if count == 1 else "v2.m3u8"
+            return 200, {}, f"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n{variant}\n".encode()
+
+        def first(_request, count):
+            if count == 1:
+                text = (
+                    "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\na.ts\n"
+                )
+                return 200, {}, text.encode()
+            return 404, {}, b""
+
+        second = (
+            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n"
+            "#EXTINF:1,\na.ts\n#EXTINF:1,\nb.ts\n#EXT-X-ENDLIST\n"
+        )
+        server = self.server(
+            {
+                "/channel.m3u8": master,
+                "/v1.m3u8": first,
+                "/v2.m3u8": (200, {}, second.encode()),
+                "/a.ts": (200, {}, self.video),
+                "/b.ts": (200, {}, self.next_video),
+            }
+        )
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            parts = media(server.url + "/channel.m3u8")
+        self.assertEqual(parts, joined(self.video, self.next_video))
+        self.assertEqual(server.counts["/channel.m3u8"], 2)
+        self.assertEqual(server.counts["/v1.m3u8"], 1 + 1 + len(FAST_RETRIES))
+
+    def test_a_playlist_gone_without_a_master_still_fails(self):
+        def playlist(_request, count):
+            text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\na.ts\n"
+            return (200, {}, text.encode()) if count == 1 else (404, {}, b"")
+
+        server = self.server({"/live.m3u8": playlist, "/a.ts": (200, {}, self.video)})
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            with self.assertRaises(SourceError) as failure:
+                media(server.url + "/live.m3u8")
+        self.assertEqual((failure.exception.kind, failure.exception.status), ("http", 404))
+
     def test_tls_verification_default_rejects_and_explicit_opt_out_decodes(self):
         with self.tls_context() as context:
             server = self.server({"/user/secret.ts": (200, {}, self.video)}, tls=context)

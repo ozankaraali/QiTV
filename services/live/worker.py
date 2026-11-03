@@ -155,6 +155,7 @@ from services.live.ts import (
     ReconnectTrimmer,
     RepeatTrimmer,
     Segmenter,
+    SoundClock,
     Unsupported,
 )
 
@@ -558,6 +559,7 @@ class _Session:
         self._segmenter = Segmenter()
         # Renames an audio stream the PMT misnames, on the bytes' way to the segmenter.
         self._relabeler = CodecRelabeler()
+        self._sound_clock = SoundClock()  # 2.9: a sound whose stamps drift is restamped
         # 2.8: a resumed run joins the earlier one after this HLS media sequence (its first
         # open only).
         self._join_after: int | None = None
@@ -1417,18 +1419,25 @@ class _Session:
                 self._to_segmenter(tail)
 
     def _to_segmenter(self, data: bytes) -> None:
-        """Bytes for the segmenter, through the codec relabeler."""
-        self._apply(self._segmenter.feed(self._relabeler.feed(data)))
+        """Bytes for the segmenter, through the codec relabeler and the sound's clock."""
+        self._apply(self._segmenter.feed(self._sound_clock.feed(self._relabeler.feed(data))))
+
+    def _held_by_stages(self) -> bytes:
+        """What the relabeler and the sound's clock hold, passed on (a discontinuity or the
+        end comes next)."""
+        clock = self._sound_clock
+        return clock.feed(self._relabeler.flush()) + clock.flush()
 
     def _discontinuity(self) -> None:
-        """The segmenter's next cut is a discontinuity; what the relabeler holds goes first."""
-        held = self._relabeler.flush()
+        """The segmenter's next cut is a discontinuity; what the stages hold goes first."""
+        held = self._held_by_stages()
         if held:
             self._apply(self._segmenter.feed(held))
+        self._sound_clock.discontinuity()
         self._segmenter.discontinuity()
 
     def _finish_segmenter(self) -> None:
-        held = self._relabeler.flush()
+        held = self._held_by_stages()
         if held:
             self._apply(self._segmenter.feed(held))
         self._apply(self._segmenter.finish())

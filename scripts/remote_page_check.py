@@ -31,10 +31,14 @@ from urllib.parse import urlsplit, urlunsplit
 ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 
+from services.captions.languages import QWEN_LANGUAGES, own_name  # noqa: E402
 from services.remote import net  # noqa: E402
 from services.remote.hub import RemoteHub, web_dir  # noqa: E402
 from services.remote.protocol import (  # noqa: E402
     Answered,
+    CaptionsLanguage,
+    CaptionsModel,
+    CaptionsSwitch,
     CastTo,
     CloseSearch,
     Code,
@@ -52,6 +56,7 @@ from services.remote.protocol import (  # noqa: E402
     Status,
     Timer,
     ToTv,
+    TrackPick,
     WatchHere,
 )
 
@@ -626,7 +631,8 @@ def scenario_back_to(rig: Rig) -> None:
 def scenario_ask(rig: Rig) -> None:
     """2.6: QiTV's question on the phone that asked (stop a recording for its Watch?): a
     sheet over everything with the safe answer first; each answer carries the question's
-    number back; Keep recording says nothing opened; a question gone on the TV closes."""
+    number back; Keep recording says nothing opened; a question gone on the TV closes, and so
+    does one a reconnect left (its answer would go to a session that is gone)."""
     sid = paired_sid(rig)
     rig.hub.send(sid, STATE)
     rig.page.locator("#nowName", has_text="Harbourline News").wait_for()
@@ -649,6 +655,12 @@ def scenario_ask(rig: Rig) -> None:
     rig.page.locator("#askSheet").wait_for()
     rig.hub.send(sid, {"t": "unask", "id": 9})  # settled on the TV
     rig.page.locator("#askSheet").wait_for(state="hidden")
+    rig.hub.send(sid, {**ask, "id": 10})
+    rig.page.locator("#askSheet").wait_for()
+    mark = rig.events.mark()
+    rig.page.evaluate("import('./app.js').then((m) => m.default.conn.ws.close())")  # it slept
+    rig.events.wait(Opened, after=mark, timeout=15)
+    rig.page.locator("#askSheet").wait_for(state="hidden")  # the old session's: gone (2.9)
 
 
 def scenario_rec_line(rig: Rig) -> None:
@@ -1630,6 +1642,136 @@ def scenario_cast(rig: Rig) -> None:
     assert title == "REC", f"a cast list replaced the REC menu: {title!r}"
 
 
+TRACKS = {
+    "t": "tracks",
+    "of": 4,
+    "playing": True,
+    "sound": [
+        {"id": 257, "name": "Türkçe", "on": True},
+        {"id": 258, "name": "English · AC-3 5.1", "on": False},
+    ],
+    "subs": [{"id": 3, "name": "English", "on": False}],
+    "ai": {"on": False, "going": False, "note": ""},
+}
+MODELS = {  # 2.9: the speech model, Settings' choice, stepped on the AI captions row
+    "model": "auto",
+    "models": [
+        {"id": "auto", "name": "Automatic (1.7B)"},
+        {"id": "small", "name": "Faster (0.6B)"},
+        {"id": "large", "name": "More accurate (1.7B)"},
+    ],
+}
+TRACKS["ai"] = {**TRACKS["ai"], **MODELS}
+AI_ON = {
+    "on": True,
+    "going": False,
+    "note": "Catching up…",
+    "lang": "Turkish",
+    "lang_note": "Türkçe · automatic",
+    "langs": [{"id": "auto", "name": "Auto"}]
+    + [{"id": name, "name": own_name(name)} for name in QWEN_LANGUAGES],
+    **MODELS,
+}
+
+
+def ticked(rig: Rig) -> list[str]:
+    return rig.page.locator("#tracksList .choice.current .label").all_inner_texts()
+
+
+def scenario_tracks(rig: Rig) -> None:
+    """2.9: More's Subtitles and Sound list the TV's tracks as its panels name them; a tap picks
+    from the list it shows (its "of" goes back); AI captions' download question asks over the
+    sheet, which comes back once answered; a download on its way is called off by a tap (its
+    row kept while only its note changes); the language list picks one; each list QiTV sends
+    redraws the sheet open; a closed sheet says so."""
+    sid = paired_sid(rig)
+    rig.page.click("#moreButton")
+    rig.page.wait_for_selector("#moreSheet:not([hidden])")
+    rig.page.locator("#soundButton").scroll_into_view_if_needed()
+    rig.shot("tracks-more")
+    mark = rig.events.mark()
+    rig.page.click("#subtitlesButton")
+    rig.events.wait(Get, where=lambda e: e.what == "tracks", after=mark)
+    rig.page.locator("#tracksList", has_text="Loading").wait_for()
+    rig.hub.send(sid, TRACKS)
+    rig.page.locator("#tracksList .choice", has_text="AI captions").wait_for()
+    assert rig.page.inner_text("#tracksTitle") == "Subtitles", rig.page.inner_text("#tracksTitle")
+    labels = rig.page.locator("#tracksList .choice .label").all_inner_texts()
+    assert labels == ["Off", "English", "AI captions"], labels
+    ai_row = rig.page.locator("#tracksList .stepped")
+    assert ai_row.locator(".step-value").inner_text() == "Automatic (1.7B)"
+    mark = rig.events.mark()
+    ai_row.locator(".step-more").click()  # the next model; the row stays off
+    rig.events.wait(CaptionsModel, where=lambda e: (e.model, e.of) == ("small", 4), after=mark)
+    ai_row.locator(".step-less").click()  # round the three, from the list QiTV sent
+    rig.events.wait(CaptionsModel, where=lambda e: e.model == "large", after=mark)
+    assert not rig.events.of(CaptionsSwitch, after=mark), "a step turned them on or off"
+    rig.hub.send(sid, {**TRACKS, "ai": {**TRACKS["ai"], "model": "large"}})
+    rig.page.locator("#tracksList .stepped.lit .step-value", has_text="More accurate").wait_for()
+    rig.shot("tracks-model-step")
+    rig.hub.send(sid, TRACKS)
+    rig.page.locator("#tracksList .step-value", has_text="Automatic").wait_for()
+    assert ticked(rig) == ["Off"], ticked(rig)
+    mark = rig.events.mark()
+    rig.page.locator("#tracksList .choice", has_text="English").click()
+    rig.events.wait(TrackPick, where=lambda e: (e.kind, e.track, e.of) == ("sub", 3, 4), after=mark)
+    assert not rig.page.locator("#tracksSheet").is_hidden(), "a pick closed the sheet"
+    rig.page.locator("#tracksList .choice", has_text="AI captions").click()
+    rig.events.wait(CaptionsSwitch, where=lambda e: e.on and e.of == 4, after=mark)
+    question = "AI captions need a speech model on this computer: 900 MB to download once."
+    ask = {"t": "ask", "id": 11, "text": question, "yes": "Download", "no": "Not now"}
+    rig.hub.send(sid, ask)
+    rig.page.locator("#askSheet").wait_for()
+    assert rig.page.locator("#tracksSheet").is_hidden(), "the question shows over nothing else"
+    rig.shot("tracks-question")
+    mark = rig.events.mark()
+    rig.page.click("#askYes")
+    rig.events.wait(Answered, where=lambda e: e.n == 11 and e.yes, after=mark)
+    rig.events.wait(Get, where=lambda e: e.what == "tracks", after=mark)  # back to Subtitles
+    rig.page.locator("#tracksSheet").wait_for()
+    going = {"on": False, "going": True, **MODELS}
+    rig.hub.send(sid, {**TRACKS, "ai": {**going, "note": "Downloading 40%"}})
+    rig.page.locator("#tracksList .choice", has_text="Downloading 40%").wait_for()
+    row = rig.page.locator("#tracksList .choice", has_text="AI captions").element_handle()
+    rig.hub.send(sid, {**TRACKS, "ai": {**going, "note": "Downloading 41%"}})
+    rig.page.locator("#tracksList .choice", has_text="Downloading 41%").wait_for()
+    assert row.evaluate("el => el.isConnected"), "a note's change redrew the row: a tap is lost"
+    rig.shot("tracks-downloading")
+    mark = rig.events.mark()
+    rig.page.locator("#tracksList .choice", has_text="AI captions").click()  # calls it off
+    rig.events.wait(CaptionsSwitch, where=lambda e: not e.on, after=mark)
+    rig.hub.send(sid, {**TRACKS, "ai": AI_ON})
+    rig.page.locator("#tracksList .choice", has_text="Türkçe · automatic").wait_for()
+    assert ticked(rig) == ["AI captions"], ticked(rig)  # Off is not: they show
+    rig.shot("tracks-subtitles")
+    rig.page.locator("#tracksList .choice", has_text="Türkçe · automatic").click()
+    assert rig.page.inner_text("#tracksTitle") == "Language", rig.page.inner_text("#tracksTitle")
+    assert ticked(rig) == ["Türkçe"], ticked(rig)
+    rig.shot("tracks-languages")
+    mark = rig.events.mark()
+    rig.page.locator("#tracksList .choice", has_text="English").click()
+    rig.events.wait(
+        CaptionsLanguage, where=lambda e: (e.language, e.of) == ("English", 4), after=mark
+    )
+    assert rig.page.inner_text("#tracksTitle") == "Subtitles"  # back, as the panel's list
+    mark = rig.events.mark()
+    rig.page.click("#veil", position={"x": 20, "y": 20})
+    rig.page.locator("#tracksSheet").wait_for(state="hidden")
+    rig.events.wait(Get, where=lambda e: e.what == "tracks_closed", after=mark)  # no more lists
+    rig.page.click("#moreButton")
+    mark = rig.events.mark()
+    rig.page.click("#soundButton")
+    rig.events.wait(Get, where=lambda e: e.what == "tracks", after=mark)
+    rig.hub.send(sid, TRACKS)
+    rig.page.locator("#tracksList .choice.current", has_text="Türkçe").wait_for()
+    assert rig.page.inner_text("#tracksTitle") == "Sound", rig.page.inner_text("#tracksTitle")
+    rig.shot("tracks-sound")
+    rig.page.locator("#tracksList .choice", has_text="AC-3").click()
+    rig.events.wait(TrackPick, where=lambda e: (e.kind, e.track) == ("sound", 258), after=mark)
+    rig.hub.send(sid, {"t": "tracks", "of": 5, "playing": False, "sound": [], "subs": []})
+    rig.page.locator("#tracksList", has_text="Nothing playing").wait_for()
+
+
 def scenario_schedule(rig: Rig) -> None:
     """2.8: a programme to come records at its time from the timetable (once or its series),
     a scheduled one cancels; the chips' taps never tune the row."""
@@ -1718,6 +1860,7 @@ def scenario_timer(rig: Rig) -> None:
 SCENARIOS.update(
     {
         "cast": scenario_cast,
+        "tracks": scenario_tracks,
         "schedule": scenario_schedule,
         "timer": scenario_timer,
         "forget-clean": scenario_forget_clean,

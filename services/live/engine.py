@@ -1047,11 +1047,13 @@ class LiveEngine(QObject):
         view = self._sessions.get(sid)
         return view.status if view is not None else None
 
-    def stream_url(self, sid: str, seq: int) -> str:
-        """The loopback URL streaming from segment `seq`; "" while no helper is up."""
+    def stream_url(self, sid: str, seq: int, *, side: bool = False) -> str:
+        """The loopback URL streaming from segment `seq`; "" while no helper is up. `side`:
+        for a reader that is not the viewer's VLC (AI captions), which the server's
+        `reading()` leaves out."""
         if not self._base_url:
             return ""
-        return f"{self._base_url}/{sid}/stream/{seq}.ts"
+        return f"{self._base_url}/{sid}/{'side' if side else 'stream'}/{seq}.ts"
 
     def shutdown(self) -> None:
         """Stop the helper (bounded) and remove its buffers; no signal follows."""

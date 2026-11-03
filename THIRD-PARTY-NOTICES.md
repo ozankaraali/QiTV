@@ -121,6 +121,23 @@ The libraries they need (as `uv.lock` resolves them):
 QiTV 1.14.x bundled MPV (GPLv3); 2.0 does not. The `mpv` library above only lets QiTV hand a
 stream to an MPV player you installed yourself ("Play in MPV").
 
+## Downloaded for AI captions (not in the packaged apps)
+
+AI captions run a speech model on your computer. Nothing of it ships with QiTV: when you
+first turn AI captions on, QiTV downloads, from their publishers' own servers, and checks
+against pinned SHA-256 sums:
+
+- **Qwen3-ASR** (0.6B or 1.7B, by the Qwen team, Alibaba Cloud): Apache License 2.0
+  (<https://huggingface.co/Qwen/Qwen3-ASR-0.6B>). The 0.6B model as converted to int8 ONNX by
+  the sherpa-onnx project (its GitHub releases); the 1.7B model as converted by a community
+  export on ModelScope (`zengshuishui/Qwen3-ASR-onnx`), under the same license.
+- **sherpa-onnx** and **sherpa-onnx-core** 2.0.1 (k2-fsa), which run the model and include
+  ONNX Runtime (Microsoft, MIT License): Apache License 2.0, from PyPI.
+- **Silero VAD** (Silero Team), the voice detector: MIT License, from sherpa-onnx's releases.
+
+The sound is decoded by QiTV's own libVLC (above); nothing you hear or that the model writes
+leaves your computer.
+
 ## Online services and media servers
 
 - **OpenSubtitles.com** finds and serves the subtitles of the Subtitles panel's "Search

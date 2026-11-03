@@ -335,6 +335,11 @@ _OPEN_SEED_S = 0.5  # VLC's open time (play() to Playing) before any was measure
 _OPEN_MAX_S = 2.0  # a longer open (a stalled source, say) counts as this long
 _OPEN_WEIGHT = 0.3  # of each new measurement in the open time's moving average
 _EDGE_S = 1.0  # VLC this close to the live edge is at it (a starvation, and its restart after)
+# 2.9, AI captions: a picture this far short of their floor waits once to get there (closer, it
+# is stay-live's to steer), and plays on once this close to it.
+_CAPTION_SHORT_S = 1.0
+_CAPTION_REACHED_S = 0.1
+_CAPTION_BACK_S = 3.0  # time-shifted this near their floor when they come on: live again
 # 2.7: a channel's own server window (a long HLS playlist) is offered past the buffer when it
 # keeps at least this much more (the bar then shows all of it); a part played without one (a
 # provider archive's) has the bar reach this far past where it plays (as catch-up's).
@@ -673,6 +678,13 @@ class LiveSession(QObject):
         # 2.7: the server part (the channel's own server window, before the buffer), whether
         # its helper said ready, and whether VLC plays it.
         self._part: Optional[ServerPart] = None
+        # 2.9: AI captions read ahead of the picture; while they are on, stay-live holds the
+        # picture at least this far behind the live edge (`set_caption_floor`), and the
+        # picture waits once to get there (`_caption_wait`: armed at the floor's rise and at
+        # each landing, held since then).
+        self._caption_floor = 0.0
+        self._caption_armed = False
+        self._caption_held: Optional[float] = None
         self._part_ready = False
         self._in_part = False  # also while a new part is on its way to replace one VLC played
         self._part_playing = False  # VLC plays `_part` itself
@@ -931,6 +943,7 @@ class LiveSession(QObject):
 
     def _halt(self, *, park: bool) -> None:
         """Stop playback; the session closes, or parks (2.6); a server part closes."""
+        self._caption_held, self._caption_armed = None, False
         self._end_recording()
         self._close_part(resume=False)
         self._live_parked = False
@@ -972,6 +985,7 @@ class LiveSession(QObject):
         if not playing and self._phase not in _BEFORE_PLAY:
             return
         self._held = None  # the viewer's pause or play from here
+        self._caption_held = None  # (the AI captions' wait too: PlaybackSession's pause is it)
         if not self._paused:
             # From any mode, a catch-up included: paused at 1x, time-shifted. Before ready
             # or while recovering it is remembered: the stream that opens next is paused.
@@ -1149,7 +1163,7 @@ class LiveSession(QObject):
                     retry = _Retry.LIVE if build else _Retry.GO_LIVE
                     self._retry = _Retry.REOPEN if reopen else retry
                 else:
-                    landing = pick[1] - self._target(self._snapshot())
+                    landing = pick[1] - self._aim(self._snapshot())
                     if reopen:
                         self._reopened_at = self._clock()
                     if filtered:
@@ -1165,6 +1179,7 @@ class LiveSession(QObject):
                 self._stay.user_go_live(keep_landing=merged)  # nothing opened: it stays
                 if landing is not None:
                     self._stay.landed(landing, build=build)
+                    self._arm_caption_wait()
 
     def set_speed(self, rate: float) -> None:
         if self._phase is not _Phase.PIPELINE or rate <= 0 or self._stay.mode is Mode.LIVE:
@@ -1308,6 +1323,113 @@ class LiveSession(QObject):
         self._archive = ArchiveRoute(build, fallback)
         self._open_part(t)
         return True
+
+    def set_caption_floor(self, seconds: float, *, shift: bool = True) -> None:
+        """AI captions (2.9): hold the picture at least `seconds` behind the live edge while
+        they are on (0: off). Raised, the picture waits once where it is ("Starting
+        captions…") until it is that far behind, then plays on at 1x (`_caption_wait`);
+        stay-live steers to it from there; time-shifted about there already (captions turned
+        off and on again), it is live again there. Dropped, it stays where it is, time-shifted
+        as after a pause, the bar and Go live showing: nothing catches up by itself; without
+        `shift` (a picture no longer large) stay-live steers it back."""
+        seconds = max(0.0, float(seconds))
+        if abs(seconds - self._caption_floor) < 1e-6:
+            return
+        raised = seconds > self._caption_floor
+        self._caption_floor = seconds
+        playing = self._phase is _Phase.PIPELINE and not self._paused
+        if raised:
+            self._caption_armed = True
+            if playing and self._stay.mode is Mode.SHIFTED and self._part is None:
+                lag = self._mean_lag(self._snapshot(), self._advance())
+                if lag <= seconds + _CAPTION_BACK_S:
+                    self._stay.user_go_live(keep_landing=True)  # live again, where it is
+                    self._emit_timeline()
+            return
+        self._caption_armed = False
+        self._release_caption_wait()
+        if not shift or not playing or self._stay.mode is not Mode.LIVE:
+            return
+        snapshot = self._snapshot()
+        lag = self._mean_lag(snapshot, self._advance())
+        if lag > self._control_target() + _CAPTION_SHORT_S:
+            self._set_rate(1.0)
+            self._stay.user_seeked_back()  # time-shifted where it is, at 1x
+        self._emit_timeline()
+
+    def caption_floor(self) -> float:
+        return self._caption_floor
+
+    def caption_waiting(self) -> bool:
+        """The picture waits for the AI captions' distance behind live (`_caption_wait`)."""
+        return self._caption_held is not None
+
+    def _arm_caption_wait(self) -> None:
+        """A landing (a tune, Go live, a jump) lands at the floor when the buffer holds it
+        (`_aim`); short of it, the picture waits once to get there."""
+        if self._caption_floor > 0:
+            self._caption_armed = True
+
+    def _caption_wait(self, snapshot: Mapping[str, Any], lag: float) -> bool:
+        """AI captions (2.9): the picture short of the floor by more than `_CAPTION_SHORT_S`
+        after the floor rose or a landing waits (VLC held, as at the edge, saying "Starting
+        captions…") until its lag reaches the floor, then plays at 1x; one at the floor
+        already waits for nothing. A drift later is stay-live's to steer, gently. True while
+        it waits: stay-live is not consulted (no rate, no trouble, no landing measured)."""
+        if self._caption_held is not None:
+            if lag >= self._caption_floor - _CAPTION_REACHED_S:
+                self._release_caption_wait()
+                return False
+            self._reland_edge = self._live_edge(snapshot)  # the wait's growth, no backlog's
+            return True
+        if not self._caption_armed or self._caption_floor <= 0:
+            return False
+        if self._held is not None or self._playback.state() is not PlaybackState.PLAYING:
+            return False  # held at the edge, or not playing yet: once it plays
+        self._caption_armed = False
+        if lag >= self._caption_floor - _CAPTION_SHORT_S:
+            return False
+        _LOG.info("AI captions: waiting %.1f s behind live until %.1f s.", lag, self._caption_floor)
+        self._caption_held = self._clock()
+        self._land_check = None  # a wait is no landing's error
+        self._ask_junction(0.0)  # a restart meanwhile takes nothing of what the wait builds
+        self._set_rate(1.0)
+        self._playback.hold(True)
+        return True
+
+    def _release_caption_wait(self) -> None:
+        held, self._caption_held = self._caption_held, None
+        if held is None:
+            return
+        _LOG.info("AI captions: waited %.1f s; playing on.", self._clock() - held)
+        self._stay.absorb()  # the lag stepped up on purpose: counted afresh from here
+        self._playback.hold(False)
+
+    def caption_source(self, after: Optional[float] = None) -> Optional[tuple[str, int, float]]:
+        """Where AI captions read the stream (2.9): the helper's side URL from the segment that
+        holds the picture's position, that segment's seq and its start on the timeline; with
+        `after`, from the first segment that starts there or later (past a jump the reader
+        stopped at). None when no pipeline stream plays from the ring (a direct play, the
+        channel's server window or a provider archive, or nothing yet), or no such segment."""
+        if self._phase is not _Phase.PIPELINE or self._sid is None:
+            return None
+        if self._part is not None or self._in_part or self._archive is not None:
+            return None
+        spans = self._engine.spans(self._sid)
+        if not spans:
+            return None
+        if after is not None:
+            found = next((s for s in spans if s.start >= after - 0.05), None)
+            if found is None:
+                return None
+            span = found
+        else:
+            position = self.position()
+            span = next((s for s in reversed(spans) if s.start <= position), spans[0])
+        url = self._engine.stream_url(self._sid, span.seq, side=True)
+        if not url:
+            return None
+        return url, int(span.seq), float(span.start)
 
     def position(self) -> float:
         if self._phase is _Phase.PIPELINE:
@@ -1913,7 +2035,8 @@ class LiveSession(QObject):
             return
         snapshot = self._snapshot()
         target = self._target(snapshot)
-        self._stay.landed(lag - target)
+        self._stay.landed(lag - self._aim(snapshot))
+        self._arm_caption_wait()
         if aimed:
             self._cushion = max(self._cushion, target)
         self._reland_until = self._clock() + _RELAND_S
@@ -2345,6 +2468,9 @@ class LiveSession(QObject):
                 if self._phase is _Phase.PIPELINE:
                     self._emit_timeline()
                 return
+            if self._caption_wait(snapshot, lag):
+                self._emit_timeline()
+                return  # waiting for the AI captions' distance: nothing to steer
             self._back_off(snapshot, position, stalled, cushioned)
             self._stay.target = self._control_target()
             self._stay.slack = self._target(snapshot) - self._stay.target
@@ -2380,6 +2506,8 @@ class LiveSession(QObject):
             self._land_check = None
             self._lost_since = None
             self._ask_junction(0.0)
+            if not live:
+                self._release_caption_wait()  # an ended source: nothing to wait for
             if self._held is not None and not self._paused:
                 self._release_hold(snapshot, position)  # an ended source: nothing to wait for
             if not live and not self._paused:
@@ -2861,6 +2989,8 @@ class LiveSession(QObject):
 
     def _starved(self, snapshot: Mapping[str, Any], position: float) -> bool:
         """VLC met the live edge and waits there (libVLC 3 says Playing, its clock stands still)."""
+        if self._caption_held is not None:
+            return False  # the AI captions' wait (2.9), VLC held on purpose
         waiting = self._playback.state() is PlaybackState.BUFFERING or self._clock_frozen()
         return waiting and self._live_edge(snapshot) - position <= _EDGE_S
 
@@ -3115,6 +3245,8 @@ class LiveSession(QObject):
             "target": self._target(snapshot),
             # Held at the edge (2.8.8) it waits for the channel too.
             "stalled": self._stalled(snapshot) or self._held is not None,
+            # 2.9: it waits to get the AI captions' distance behind live.
+            "captions_wait": self._caption_held is not None,
             # The helper is opening a new connection (raw TS), not waiting on this one.
             "reconnecting": bool(snapshot.get("reconnecting", False)),
             "auto": learned is not None,
@@ -3459,6 +3591,11 @@ class LiveSession(QObject):
             return self._auto_target(burst)
         return max(TARGETS[self._latency], burst)
 
+    def _aim(self, snapshot: Mapping[str, Any]) -> float:
+        """Where a start lands (a tune, Go live, a jump): the target, and while AI captions
+        are on never under their floor (2.9; short of it, the picture waits once)."""
+        return max(self._target(snapshot), self._caption_floor)
+
     def _auto_target(self, reported: float) -> float:
         """Auto's target for a source reporting the burst `reported`: the steered learned
         target (`_steer_learned`, for the burst as the lag filter has it), moved by what
@@ -3489,11 +3626,12 @@ class LiveSession(QObject):
 
     def _control_target(self) -> float:
         """The target stay-live steers to: as `_target`, for the source's burst as the lag
-        filter classifies it (a burst the helper measures for a moment and drops is none)."""
+        filter classifies it (a burst the helper measures for a moment and drops is none),
+        and never under the AI captions' floor while they are on (`_aim`, `_caption_wait`)."""
         burst = self._filter.burst
         if self._learned is not None:
-            return self._auto_target(burst)
-        return max(TARGETS[self._latency], burst)
+            return max(self._auto_target(burst), self._caption_floor)
+        return max(TARGETS[self._latency], burst, self._caption_floor)
 
     @staticmethod
     def _live_edge(snapshot: Mapping[str, Any]) -> float:
@@ -3585,7 +3723,7 @@ class LiveSession(QObject):
         cleanly as an IDR)."""
         assert self._sid is not None
         snapshot = self._snapshot()
-        target = self._target(snapshot)
+        target = self._aim(snapshot)
         means = self._start_lags(snapshot, ahead)
         if not means:
             parts = live_parts.from_state(snapshot.get("parts"))
@@ -3746,6 +3884,9 @@ class LiveSession(QObject):
         self._retry = None
         self._land_check = None  # a landing still measured is no longer playing
         self._held = None  # a new play is not held
+        if self._caption_held is not None:
+            self._caption_armed = True  # it waits again once the new play plays
+        self._caption_held = None  # (PlaybackSession.play opens it unheld)
         self._opening = True
         try:
             self._playback.play(

@@ -47,6 +47,8 @@
   <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" class="solid"/></symbol>
   <symbol id="i-cast" viewBox="0 0 24 24"><path d="M3 9V6.5A1.5 1.5 0 0 1 4.5 5h15A1.5 1.5 0 0 1 21 6.5v11a1.5 1.5 0 0 1-1.5 1.5H14"/><path d="M3 12.5a6.5 6.5 0 0 1 6.5 6.5M3 16a3 3 0 0 1 3 3"/><circle cx="3.6" cy="18.6" r="1" class="solid"/></symbol>
   <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></symbol>
+  <symbol id="i-subtitles" viewBox="0 0 24 24"><rect x="3" y="5.5" width="18" height="13" rx="2.4"/><path d="M6.5 10.8H12M14 10.8h3.5M6.5 14.4h3.5M12 14.4h5.5"/></symbol>
+  <symbol id="i-sound" viewBox="0 0 24 24"><ellipse cx="7.9" cy="17" rx="3.1" ry="2.6" class="solid"/><path d="M10.6 16.8V4.8l8.6-1.9V12"/><ellipse cx="16.5" cy="13.2" rx="3.1" ry="2.6" class="solid"/></symbol>
 </svg>
 
 <main id="app">
@@ -237,6 +239,8 @@
     <button type="button" data-key="swap"><svg><use href="#i-swap"/></svg><span data-t="swap">Swap pictures</span></button>
     <button type="button" data-key="multiview"><svg><use href="#i-grid"/></svg><span data-t="multiview">Multiview</span></button>
     <button type="button" data-key="picture"><svg><use href="#i-aspect"/></svg><span data-t="picture">Picture</span></button>
+    <button type="button" id="subtitlesButton"><svg><use href="#i-subtitles"/></svg><span data-t="subtitles">Subtitles</span></button>
+    <button type="button" id="soundButton"><svg><use href="#i-sound"/></svg><span data-t="sound">Sound</span></button>
     <button type="button" data-key="fullscreen"><svg><use href="#i-full"/></svg><span data-t="fullscreen">Full screen</span></button>
     <button type="button" id="castTo"><svg><use href="#i-cast"/></svg><span data-t="cast_to">Cast to a TV</span></button>
     <button type="button" class="stop" data-key="stop"><svg><use href="#i-stop"/></svg><span data-t="stop">Stop</span></button>
@@ -251,6 +255,11 @@
   <div class="grab"></div>
   <div class="sh" id="menuTitle" data-t="this_phone">This phone</div>
   <div class="menu-list" id="menuList"></div>
+</div>
+<div class="sheet" id="tracksSheet" hidden>
+  <div class="grab"></div>
+  <div class="sh" id="tracksTitle"></div>
+  <div class="menu-list tracks" id="tracksList"></div>
 </div>
 
 <script type="module" src="main.js"></script>

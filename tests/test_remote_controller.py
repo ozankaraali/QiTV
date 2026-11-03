@@ -14,6 +14,9 @@ from test_tv_window import WindowCase, wait_until
 
 from services.remote.protocol import (
     Answered,
+    CaptionsLanguage,
+    CaptionsModel,
+    CaptionsSwitch,
     CastTo,
     Closed,
     CloseSearch,
@@ -30,6 +33,7 @@ from services.remote.protocol import (
     Status,
     StoreSaved,
     ToTv,
+    TrackPick,
     WatchHere,
 )
 from services.search import Hit
@@ -435,6 +439,185 @@ class PhoneQuestionTests(WindowCase):
             self.window.remote.bridge.post(WatchHere("s8"))
             self.assertTrue(wait_until(lambda: asked_on))
         self.assertEqual(asked_on, ["s8"])
+
+
+class PhoneTracksTests(WindowCase):
+    """2.9: the phone's Subtitles and Sound sheets: the list when one opens and each change
+    after it, a pick acting on what plays large only, and AI captions' download question on
+    that phone as on the TV (either answer goes for both)."""
+
+    def setUp(self):
+        super().setUp()
+        remote = self.window.remote
+        self.hub = mock.Mock()
+        remote.hub = self.hub
+        self.addCleanup(setattr, remote, "hub", None)
+        remote.apply_config = lambda: None
+        self.controls = mock.Mock()
+        self.controls.offers.return_value = True
+        self.controls.sound_choices.return_value = [(1, "English", True), (2, "Deutsch", False)]
+        self.controls.subtitle_choices.return_value = [(3, "English", False)]
+        self.controls.captions_choice.return_value = None
+        controller = self.window.controller
+        patch = mock.patch.object(controller, "track_controls", return_value=self.controls)
+        patch.start()
+        self.addCleanup(patch.stop)
+        remote.bridge.post(Opened("s8", "d8", "home"))
+        remote.bridge.post(Opened("s9", "d9", "home"))  # another phone, its sheets closed
+        self.addCleanup(remote.bridge.post, Closed("s9", "d9"))
+        self.addCleanup(remote.bridge.post, Closed("s8", "d8"))
+
+    def sent(self, kind, sid="s8"):
+        calls = self.hub.send.call_args_list
+        return [c.args[1] for c in calls if c.args[0] == sid and c.args[1]["t"] == kind]
+
+    def opened(self):
+        self.window.remote.bridge.post(Get("s8", "tracks", "", 0))
+        self.assertTrue(wait_until(lambda: self.sent("tracks")))
+        return self.sent("tracks")[-1]
+
+    def test_a_sheet_gets_the_list_and_each_change_after_it(self):
+        message = self.opened()
+        self.assertEqual(
+            message["sound"],
+            [{"id": 1, "name": "English", "on": True}, {"id": 2, "name": "Deutsch", "on": False}],
+        )
+        self.assertEqual(message["subs"], [{"id": 3, "name": "English", "on": False}])
+        self.assertIsInstance(message["of"], int)
+        self.controls.sound_choices.return_value = [(1, "English", False), (2, "Deutsch", True)]
+        self.assertTrue(wait_until(lambda: len(self.sent("tracks")) == 2))  # the next look
+        self.assertEqual(
+            self.sent("tracks")[-1]["sound"][1], {"id": 2, "name": "Deutsch", "on": True}
+        )
+        QTest.qWait(600)  # nothing changed since: nothing more
+        self.assertEqual(len(self.sent("tracks")), 2)
+        self.assertEqual(self.sent("tracks", "s9"), [])  # a phone that never asked
+
+    def test_a_closed_sheet_hears_no_more_changes(self):
+        self.opened()
+        self.window.remote.bridge.post(Get("s8", "tracks_closed", "", 0))
+        QTest.qWait(50)
+        self.controls.sound_choices.return_value = [(1, "English", False), (2, "Deutsch", True)]
+        QTest.qWait(700)  # a look came: nothing goes to a phone whose sheet closed
+        self.assertEqual(len(self.sent("tracks")), 1)
+        self.opened()  # opened again: the list as it is now
+        self.assertEqual(self.sent("tracks")[-1]["sound"][1]["on"], True)
+
+    def test_a_pick_acts_on_what_plays_large_and_never_on_what_played_before(self):
+        of = self.opened()["of"]
+        remote = self.window.remote
+        remote.bridge.post(TrackPick("s8", "sound", 2, of))
+        remote.bridge.post(TrackPick("s8", "sub", -1, of))
+        remote.bridge.post(CaptionsLanguage("s8", "Turkish", of))
+        remote.bridge.post(TrackPick("s8", "sound", 1, of + 1))  # a list QiTV never sent
+        self.assertTrue(wait_until(lambda: self.controls.choose_caption_language.called))
+        self.controls.choose_sound.assert_called_once_with(2)
+        self.controls.choose_subtitles.assert_called_once_with(-1)
+        self.controls.choose_caption_language.assert_called_once_with("Turkish")
+        with mock.patch.object(self.window.controller, "now_playing", return_value=object()):
+            remote.bridge.post(TrackPick("s8", "sound", 1, of))  # a zap came meanwhile
+            QTest.qWait(50)
+            self.controls.choose_sound.assert_called_once_with(2)
+            self.assertNotEqual(self.sent("tracks")[-1]["of"], of)  # the new list went to it
+
+    def test_a_pick_that_fails_leaves_qitv_running(self):
+        of = self.opened()["of"]
+        self.controls.choose_sound.side_effect = RuntimeError("libVLC")
+        with self.assertLogs("ui.remote_controller", "ERROR"):
+            self.window.remote.bridge.post(TrackPick("s8", "sound", 2, of))
+            self.assertTrue(wait_until(lambda: self.controls.choose_sound.called))
+
+    def captions(self, asking=True):
+        captions = self.window.captions
+        for name, value in (
+            ("asking", asking),
+            ("question", ("Download the speech model?", "Download", "Not now")),
+        ):
+            patch = mock.patch.object(captions, name, return_value=value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        answer = mock.patch.object(captions, "answer")
+        self.addCleanup(answer.stop)
+        return captions, answer.start()
+
+    def test_their_question_asks_on_that_phone_and_its_answer_goes_to_the_tv(self):
+        of = self.opened()["of"]
+        captions, answer = self.captions()
+        self.window.remote.bridge.post(CaptionsSwitch("s8", True, of))
+        self.assertTrue(wait_until(lambda: self.sent("ask")))
+        self.controls.set_captions.assert_called_once_with(True)
+        [ask] = self.sent("ask")
+        self.assertEqual(
+            (ask["text"], ask["yes"], ask["no"]),
+            ("Download the speech model?", "Download", "Not now"),
+        )
+        self.assertEqual(self.sent("ask", "s9"), [])
+        self.window.remote.bridge.post(Answered("s8", ask["id"] + 1, True))  # not this one
+        self.window.remote.bridge.post(Answered("s8", ask["id"], True))
+        self.assertTrue(wait_until(lambda: answer.called))
+        answer.assert_called_once_with(True)
+        self.window.remote.bridge.post(Answered("s8", ask["id"], False))  # answered once
+        QTest.qWait(50)
+        answer.assert_called_once_with(True)
+        self.assertEqual(self.sent("unask"), [])  # it closed its own
+
+    def test_a_speech_model_picked_on_the_phone_asks_its_download_there_too(self):
+        of = self.opened()["of"]
+        captions, _answer = self.captions()
+        self.controls.choose_caption_model.return_value = True
+        self.window.remote.bridge.post(CaptionsModel("s8", "large", of))
+        self.assertTrue(wait_until(lambda: self.sent("ask")))
+        self.controls.choose_caption_model.assert_called_once_with("large")
+        self.window.remote.bridge.post(CaptionsModel("s8", "large", of + 1))  # an older list
+        QTest.qWait(50)
+        self.controls.choose_caption_model.assert_called_once_with("large")
+
+    def test_answered_on_the_tv_it_closes_on_the_phones(self):
+        of = self.opened()["of"]
+        captions, answer = self.captions()
+        remote = self.window.remote
+        remote.bridge.post(CaptionsSwitch("s8", True, of))
+        remote.bridge.post(Get("s9", "tracks", "", 0))
+        remote.bridge.post(CaptionsSwitch("s9", True, of))  # another phone, while it asks
+        self.assertTrue(wait_until(lambda: self.sent("ask", "s9")))
+        mine, theirs = self.sent("ask")[0], self.sent("ask", "s9")[0]
+        with mock.patch.object(captions, "asking", return_value=False):
+            captions.changed.emit()  # answered on the TV's card
+        self.assertEqual(self.sent("unask"), [{"t": "unask", "id": mine["id"]}])
+        self.assertEqual(self.sent("unask", "s9"), [{"t": "unask", "id": theirs["id"]}])
+        answer.assert_not_called()
+
+    def test_a_phone_that_leaves_leaves_the_question_to_the_tv(self):
+        of = self.opened()["of"]
+        captions, answer = self.captions()
+        self.window.remote.bridge.post(CaptionsSwitch("s8", True, of))
+        self.assertTrue(wait_until(lambda: self.sent("ask")))
+        self.window.remote.bridge.post(Closed("s8", "d8"))
+        QTest.qWait(50)
+        answer.assert_not_called()  # the TV's card still asks
+        self.assertEqual(self.window.remote._caption_asks, {})
+
+    def test_qitvs_own_question_asks_every_phone_and_one_answer_closes_the_others(self):
+        # 2.9: Automatic's 1.7B can't keep up and the 0.6B isn't here: no phone turned
+        # anything on, so each one hears the question, its sheets open or not.
+        self.opened()
+        captions, answer = self.captions()
+        with mock.patch.object(captions, "asked_unprompted", return_value=True):
+            captions.changed.emit()
+            captions.changed.emit()  # asked once
+        [mine], [theirs] = self.sent("ask"), self.sent("ask", "s9")
+        self.window.remote.bridge.post(Answered("s9", theirs["id"], False))
+        self.assertTrue(wait_until(lambda: answer.called))
+        answer.assert_called_once_with(False)
+        self.assertEqual(self.sent("unask"), [{"t": "unask", "id": mine["id"]}])
+
+    def test_turned_off_or_on_with_the_model_there_nothing_asks(self):
+        of = self.opened()["of"]
+        self.captions(asking=False)
+        self.window.remote.bridge.post(CaptionsSwitch("s8", False, of))
+        self.assertTrue(wait_until(lambda: self.controls.set_captions.called))
+        self.controls.set_captions.assert_called_once_with(False)
+        self.assertEqual(self.sent("ask"), [])
 
 
 class FakeSearcher(QObject):

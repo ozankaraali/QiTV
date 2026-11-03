@@ -24,6 +24,7 @@ from services.playback import (
     PlaybackState,
     create_instance,
     default_args,
+    subtitle_args,
     vlc,
 )
 from services.vlc_profile import PlayKind
@@ -1499,8 +1500,23 @@ class DefaultArgsTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on("Darwin"):
             self.assertEqual(
                 default_args(hardware_decoding=True),  # decoding: tests/test_video_decoding.py
-                ["--no-video-title-show", "--no-volume-save", "--quiet"],
+                ["--no-video-title-show", "--no-volume-save", *subtitle_args(), "--quiet"],
             )
+
+    def test_subtitles_are_drawn_as_the_ai_captions_are(self):
+        # 2.9: the owner's: VLC's subtitles (a stream's, a file's) in the captions' look.
+        from ui.theme import PALETTE
+
+        args = default_args(subtitle_font="Segoe UI")
+        self.assertIn("--freetype-font=Segoe UI", args)
+        self.assertIn("--freetype-outline-thickness=0", args)
+        self.assertIn("--freetype-shadow-opacity=0", args)
+        self.assertIn(f"--freetype-color={int(PALETTE.text[1:], 16)}", args)
+        box = PALETTE.panel.removeprefix("rgba(").split(",")[:3]
+        self.assertIn(
+            f"--freetype-background-color={int(''.join(f'{int(c):02x}' for c in box), 16)}", args
+        )
+        self.assertNotIn("--freetype-font=", " ".join(default_args()))  # libVLC's own
 
     def test_windows_plays_audio_through_directsound(self):
         # mmdevice sets volume and mute on the process's audio session: main and PiP would
@@ -1508,7 +1524,14 @@ class DefaultArgsTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on("Windows"):
             quiet = default_args(hardware_decoding=True)
         self.assertEqual(
-            quiet, ["--no-video-title-show", "--no-volume-save", "--aout=directsound", "--quiet"]
+            quiet,
+            [
+                "--no-video-title-show",
+                "--no-volume-save",
+                *subtitle_args(),
+                "--aout=directsound",
+                "--quiet",
+            ],
         )
         with (
             mock.patch.dict(os.environ, {VLC_LOG_ENV: "/tmp/smoke/libvlc.log"}),

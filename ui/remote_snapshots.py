@@ -1,5 +1,6 @@
-"""What the phone remote shows of QiTV, as plain dicts: what's on and the search's results (the
-Guide's and the Library's pages: ui/remote_guide.py, ui/remote_library.py). GUI thread only.
+"""What the phone remote shows of QiTV, as plain dicts: what's on, the large picture's sound and
+subtitles (2.9) and the search's results (the Guide's and the Library's pages:
+ui/remote_guide.py, ui/remote_library.py). GUI thread only.
 
 Nothing a phone receives names a stream, a link or a credential: titles, numbers, times and
 opaque handles only. A handle is a random id for something the phone may tap later (a channel, a
@@ -120,6 +121,47 @@ def state(window: Any) -> dict:
         # when, in Unix seconds, so the phone counts the time itself
         "rec": _rec(controller),
     }
+
+
+MAX_TRACKS = 40  # a sheet's tracks at most: messages stay frame-sized
+
+
+def tracks(window: Any, of: int) -> dict:
+    """The large picture's sound and subtitle tracks and its AI captions, as the desktop's
+    Sound and Subtitles panels name them (ui/track_controls.py), for the phone's sheets (2.9).
+    `of` is the number QiTV gave what plays large: a pick carries it back, so one made in the
+    list of what played before is not for what plays now."""
+    controls = window.controller.track_controls()
+    message: dict = {"t": "tracks", "of": of, "playing": False, "sound": [], "subs": []}
+    if controls is None or not controls.offers():
+        return message
+    message["playing"] = True
+    for key, choices in (
+        ("sound", controls.sound_choices()),
+        ("subs", controls.subtitle_choices()),
+    ):
+        message[key] = [
+            {"id": track, "name": str(name)[:TITLE_CHARS], "on": bool(on)}
+            for track, name, on in choices[:MAX_TRACKS]
+        ]
+    captions = controls.captions_choice()
+    if captions is not None:  # AI captions can be offered for what plays
+        ai: dict = {
+            "on": captions.on,
+            "going": captions.going,  # the model downloads: they are on their way
+            "note": captions.status[:TITLE_CHARS],  # "Downloading 40%", "Catching up…"
+        }
+        if captions.on:  # their Language row, and its list
+            ai["lang"] = captions.language
+            ai["lang_note"] = captions.language_text[:TITLE_CHARS]  # "Türkçe · automatic"
+            ai["langs"] = [{"id": name, "name": own} for name, own in captions.languages]
+        if captions.models:  # their row's ‹ speech model ›, and its steps in order
+            ai["model"] = captions.model
+            ai["models"] = [
+                {"id": name, "name": text[:TITLE_CHARS]} for name, text in captions.models
+            ]
+        message["ai"] = ai
+    return message
 
 
 def _rec(controller: Any) -> list[dict]:

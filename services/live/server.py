@@ -33,7 +33,9 @@ _CHUNK = 64 * 1024
 _HEADER_TIMEOUT = 2.0
 _WAIT = 0.5
 _SESSION_ID = r"[A-Za-z0-9_-]{1,64}"
-_ROUTE = re.compile(rf"/([^/]+)/({_SESSION_ID})/stream/([0-9]{{1,20}})\.ts")
+# `side`: the same stream for a reader that is not the viewer (2.9: AI captions read ahead of
+# the picture); it never moves `reading()`, which follows the viewer's VLC.
+_ROUTE = re.compile(rf"/([^/]+)/({_SESSION_ID})/(stream|side)/([0-9]{{1,20}})\.ts")
 # Windows reports a vanished client as a reset or an abort where Unix reports EOF.
 _QUIET = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError)
 
@@ -150,10 +152,12 @@ class StreamServer:
             session = self._sessions.get(session_id)
         return session.reading if session is not None else None
 
-    def stream_url(self, session_id: str, seq: int) -> str:
+    def stream_url(self, session_id: str, seq: int, *, side: bool = False) -> str:
+        """The stream of a session from segment `seq`; `side`: for a reader that is not the
+        viewer (it never moves `reading()`)."""
         if not self._base_url:
             raise RuntimeError("The stream server is not running.")
-        return f"{self._base_url}/{session_id}/stream/{seq}.ts"
+        return f"{self._base_url}/{session_id}/{'side' if side else 'stream'}/{seq}.ts"
 
     def stop(self) -> None:
         with self._lock:
@@ -192,12 +196,13 @@ class StreamServer:
         with self._lock:
             self._clients.discard(client)
 
-    def _attach(self, path: str, client: socket.socket) -> tuple[_Session, int] | None:
-        """The session and start seq for a valid stream path, registered to `client`."""
+    def _attach(self, path: str, client: socket.socket) -> tuple[_Session, int, bool] | None:
+        """The session, start seq and whether it is a side reader, for a valid stream path,
+        registered to `client`."""
         match = _ROUTE.fullmatch(path)
         if match is None:
             return None
-        token, session_id, seq_text = match.groups()
+        token, session_id, kind, seq_text = match.groups()
         if not secrets.compare_digest(token.encode("latin-1"), self.token.encode("ascii")):
             return None
         with self._lock:
@@ -205,7 +210,7 @@ class StreamServer:
             if session is None or self._stopping:
                 return None
             session.clients.add(client)
-        return session, int(seq_text)
+        return session, int(seq_text), kind == "side"
 
     def _detach(self, session: _Session, client: socket.socket) -> None:
         with self._lock:
@@ -258,9 +263,9 @@ class _Handler(BaseHTTPRequestHandler):
         if attached is None:
             self._empty(404)
             return
-        session, seq = attached
+        session, seq, side = attached
         try:
-            status = self._stream(session, seq)
+            status = self._stream(session, seq, side)
             if status:
                 self._empty(status)
         finally:
@@ -282,13 +287,16 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
 
-    def _stream(self, session: _Session, seq: int) -> int:
-        """Stream from segment `seq`; returns the status to send when nothing was sent."""
+    def _stream(self, session: _Session, seq: int, side: bool = False) -> int:
+        """Stream from segment `seq`; returns the status to send when nothing was sent. A
+        side reader leaves `reading` to the viewer's."""
         ring = session.ring
         number, offset, started = seq, 0, False
-        session.reader += 1
-        turn = session.reader
-        session.reading = number
+        turn = 0
+        if not side:
+            session.reader += 1
+            turn = session.reader
+            session.reading = number
         while not session.removed:
             # Before the read, so any later append, completion or eviction ends the wait.
             with ring.changed:
@@ -326,7 +334,7 @@ class _Handler(BaseHTTPRequestHandler):
                 # A new run's tables (2.6) come with it; else the header is skipped.
                 number = number + 1
                 offset = 0 if ring.junction(number) else following[2]
-                if session.reader == turn:
+                if not side and session.reader == turn:
                     session.reading = number
             elif status != "timeout" or ended:
                 return 0  # the next segment was evicted, the ring closed, or the session ended

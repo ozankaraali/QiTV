@@ -59,18 +59,27 @@ stream live). A time-shift stream's position is LiveSession's: it reopens it. Ea
 one included, gives the decoder a first picture's time again. The same URL opened again in this
 player (a reconnect, a retry) decodes in software too; `play(software=True)` asks for it (a channel
 that froze before).
+
+A provider's film can play through a film relay (2.9, `services.film_relay`: AI captions read it
+too, over the same provider connection): `play(relay=)` from its start, `play_through(relay)` on
+from where it plays (opened again there; a paused one opens paused, libVLC's :start-paused, and is
+put where it was while paused, until the viewer plays it). `url` stays the provider's address;
+libVLC opens the relay's. The relay is the title's: another play, a stop, its end, a failure or
+the release stops it, and its provider connection counts as this player's input until it is
+closed (`holds_input`; `inputEnded` follows), and no media opens before it is.
 """
 
 from __future__ import annotations
 
 import ctypes
+from dataclasses import dataclass
 from enum import Enum
 import logging
 import os
 from pathlib import Path
 import platform
 import time
-from typing import Any, Callable, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
@@ -82,6 +91,9 @@ from services.picture_watch import Counters, FrozenPicture
 from services.sound_watch import SoundWatch
 from services.stream_address import NO_STREAM_MESSAGE, playable, shape
 from services.vlc_profile import PlayKind, media_options
+
+if TYPE_CHECKING:
+    from services.film_relay import FilmRelay
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +122,7 @@ _STALL_BUDGET_RESET_MS = 30000  # healthy playback after a stall refills the ret
 _AUDIO_POLL_MS = 30  # how often to look for the audio output while mute/volume wait for it
 _AUDIO_WATCH_MS = 5000  # then only the regular poll looks (media without audio never opens one)
 _DEFAULT_VOLUME = 100  # libVLC's, until a level is read from an open audio output
+_RELAY_POLL_MS = 50  # how often a stopped film relay is looked at until its connection closed
 # Sent translated (errorOccurred); the English value names it.
 NO_VLC_MESSAGE = N_("Video needs VLC: install it from videolan.org and restart QiTV")
 # A file for libVLC's verbose log (the smoke test sets it). For debugging only: libVLC logs
@@ -131,6 +144,22 @@ class PlaybackState(str, Enum):
 _PLAYS_HERE = frozenset(
     {PlaybackState.OPENING, PlaybackState.BUFFERING, PlaybackState.PLAYING, PlaybackState.PAUSED}
 )
+_OPENED = frozenset({PlaybackState.PLAYING, PlaybackState.PAUSED})
+
+
+@dataclass(frozen=True)
+class AudioTrackInfo:
+    """What a media says of one of its audio tracks (`audio_track_info`), in the order
+    audio_tracks() lists them.
+
+    Its id is the one libVLC's media gives it, which for some streams is not the player's: an
+    MPEG-TS stream's are 1, 2 … where audio_tracks() has the PIDs (257, 258; measured with
+    3.0.20). Where the ids differ, the tracks pair in order."""
+
+    id: int
+    language_code: str  # as the stream names it ("tur", "en", "pt-BR"); "": not given
+    codec: str  # libVLC's four-character code ("mp4a", "a52 "); "": unknown
+    channels: int  # 0: not known (libVLC knows it once the track decodes)
 
 
 def _language(name: str) -> str:
@@ -205,12 +234,45 @@ def software_options() -> list[str]:
     return [":" + arg[2:] for arg in decoder_args(hardware=False)]
 
 
-def default_args(hardware_decoding: bool = False) -> list[str]:
-    """The app's libVLC arguments: quiet, or a verbose log file when VLC_LOG_ENV names one."""
+# 2.9: the subtitles libVLC draws (a stream's own tracks, a file, OpenSubtitles') look as
+# QiTV's AI captions do (ui.overlays.captions), as far as VLC 3's text renderer goes: their
+# text colour on their dark box, no outline and no shadow, in their font (a Mac's: libVLC's
+# own Helvetica Neue, ui.overlays.captions.CAPTION_FAMILY), as large (the picture's height /
+# 18: the captions' 3.2 units of a 16:9 picture as wide). The box's rounded
+# corners and the text's medium weight are beyond it, and a styled subtitle (ASS/SSA) keeps
+# its own look. The colours are ui.theme's (a test holds them alike).
+SUBTITLE_TEXT = 0xEEF2F6  # PALETTE.text
+SUBTITLE_BOX = 0x080B0F  # PALETTE.panel
+SUBTITLE_BOX_OPACITY = 199  # out of 255: the captions' box's 0.78 (measured alike)
+SUBTITLE_REL_SIZE = 18
+
+
+def subtitle_args(font: str = "") -> list[str]:
+    """libVLC's text renderer styled as QiTV's captions; `font`: the family it draws in
+    ("": libVLC's own)."""
+    args = [
+        f"--freetype-color={SUBTITLE_TEXT}",
+        f"--freetype-background-color={SUBTITLE_BOX}",
+        f"--freetype-background-opacity={SUBTITLE_BOX_OPACITY}",
+        "--freetype-outline-thickness=0",
+        "--freetype-shadow-opacity=0",
+        f"--freetype-rel-fontsize={SUBTITLE_REL_SIZE}",
+    ]
+    return args + ([f"--freetype-font={font}"] if font else [])
+
+
+def default_args(hardware_decoding: bool = False, subtitle_font: str = "") -> list[str]:
+    """The app's libVLC arguments: quiet, or a verbose log file when VLC_LOG_ENV names one.
+    `subtitle_font`: the family the subtitles libVLC draws are in (subtitle_args)."""
     # VLC 3's volume-save keeps the last level set on any audio output in the process's
     # config, and every output opened later starts there: the PiP player's 30 became the
     # large picture's. Each player is given its own level instead (SessionManager).
-    args = ["--no-video-title-show", "--no-volume-save", *decoder_args(hardware_decoding)]
+    args = [
+        "--no-video-title-show",
+        "--no-volume-save",
+        *decoder_args(hardware_decoding),
+        *subtitle_args(subtitle_font),
+    ]
     if platform.system() == "Windows":
         # VLC 3's default Windows output, mmdevice, sets volume and mute on the process's
         # audio session (ISimpleAudioVolume), which every player's stream joins: the main
@@ -385,6 +447,15 @@ class PlaybackSession(QObject):
         # chosen again in each media opened after (module docstring); those still due here.
         self._tracks_wanted: dict[str, tuple[int, str, bool]] = {}
         self._tracks_due: set[str] = set()
+        # 2.9: the film relay libVLC opens self._url through (None: the address itself), the
+        # ones stopped whose provider connection is not closed yet, and whether the film opens
+        # again paused (play_through of a paused film: libVLC's :start-paused, so no sound
+        # plays, and its position is set while paused).
+        self._relay: Optional[FilmRelay] = None
+        self._closing_relays: list[FilmRelay] = []
+        self._relay_watch = QTimer(self, interval=_RELAY_POLL_MS)
+        self._relay_watch.timeout.connect(self._watch_relays)
+        self._paused_open = False
 
     def _player_free(self) -> bool:
         """The GUI thread may call into libVLC: not released, and no job holds its input lock.
@@ -428,8 +499,24 @@ class PlaybackSession(QObject):
         return bool(self._player.is_seekable())
 
     def holds_input(self) -> bool:
-        """libVLC holds an input, or a worker still ends one: its connection may be open."""
-        return self._has_input or self._job is not None
+        """libVLC holds an input, a worker still ends one, or a stopped film relay still closes
+        its provider connection: a connection may be open."""
+        return self._has_input or self._job is not None or bool(self._closing_relays)
+
+    def relay(self) -> Optional[FilmRelay]:
+        """2.9: the film relay libVLC opens this film through (None: its address itself)."""
+        return self._relay
+
+    def placed(self) -> bool:
+        """2.9: what plays has opened and is where it is meant to be (a resume position
+        applied): its time is the media's, not an opening's."""
+        return (
+            self._job is None
+            and self._ever_played
+            and self._start_ms is None
+            and self._state
+            in (PlaybackState.PLAYING, PlaybackState.PAUSED, PlaybackState.BUFFERING)
+        )
 
     def decodes_in_software(self) -> bool:
         """The media playing (or the last one opened) decodes in software: its open asked for
@@ -467,17 +554,26 @@ class PlaybackSession(QObject):
         software: bool = False,
         max_height: int = 0,
         local: bool = False,
+        relay: Optional[FilmRelay] = None,
     ) -> None:
         """`software`: decode this stream in software (with hardware decoding; a channel
         whose picture froze before). `max_height` (2.8): VLC's own HLS plays no variant
         taller (`max_height()` tells a reopen). `local`: `url` is QiTV's own file's URI (a
         recording, a file opened from the disk); any other address must be a stream's
-        (`stream_address.playable`), or the play fails with NO_STREAM_MESSAGE."""
+        (`stream_address.playable`), or the play fails with NO_STREAM_MESSAGE. `relay` (2.9):
+        a started film relay of `url` that libVLC opens it through (module docstring)."""
         if self._released:
+            if relay is not None:
+                relay.stop()
             return
+        if relay is not self._relay:
+            self._retire_relay()  # another title's, or this title again without one
+        self._relay = relay
+        self._paused_open = False
         if not playable(url, local=local):
             logger.warning("Not playing an address in a scheme no stream uses (%s)", shape(url))
             self._url = None  # nothing to open again
+            self._retire_relay()
             self._fail(translate(NO_STREAM_MESSAGE))
             return
         self._cancel_pending()
@@ -506,6 +602,23 @@ class PlaybackSession(QObject):
         self._start_ms = start_ms if start_ms and start_ms > 0 else None
         self._stalls, self._restarted = 0, False
         self._start_media()
+
+    def play_through(self, relay: FilmRelay) -> bool:
+        """2.9: play the film on through `relay`, a started film relay of its address (AI
+        captions turned on for a provider's film): libVLC opens it again there, where it plays;
+        a paused film opens paused (no sound plays) and stays so until the viewer plays it.
+        False: no such film plays here (the caller stops `relay`)."""
+        if self._released or self._url is None or relay.source != self._url:
+            return False
+        if self._state not in _PLAYS_HERE or relay is self._relay:
+            return False
+        paused = self._state is PlaybackState.PAUSED
+        start = self._start_ms if self._start_ms is not None else self.time_ms()  # a resume due
+        self._retire_relay()
+        self._relay = relay
+        self._paused_open = paused  # before the reopen: its open may come at once
+        self.reopen(start)
+        return True
 
     def cast_to(self, renderer: Any) -> None:
         """Send what plays from the next open on to `renderer` (a libVLC renderer item), or
@@ -538,15 +651,20 @@ class PlaybackSession(QObject):
         elif self._has_input:
             self._start_wanted = True
             self._run_job(_Job.DETACH)
+        elif self._closing_relays:
+            self._start_wanted = True  # once the old film relay's connection is closed
         else:
             self._open()
 
     def _open(self) -> None:
         """set_media and play on the GUI thread: only while libVLC holds no input to join."""
-        media = self._instance.media_new(self._url)
+        relay = self._relay
+        media = self._instance.media_new(relay.leader_url if relay is not None else self._url)
         options = list(self._options)
         if self._software and self._hardware:
             options += software_options()
+        if self._paused_open:
+            options.append(":start-paused")  # 2.9: paused on its first picture (play_through)
         for option in options:
             media.add_option(option)
         self._player.set_media(media)
@@ -614,12 +732,37 @@ class PlaybackSession(QObject):
             else:
                 self._release_player()
         elif self._start_wanted:
-            self._start_wanted = False
-            self._open()
+            if not self._closing_relays:  # else once they are closed (_watch_relays)
+                self._start_wanted = False
+                self._open()
         elif self._stop_owed:
             self._stop_owed = False
             self._run_job(_Job.STOP)
         if not self._released and not self.holds_input():
+            self.inputEnded.emit()
+
+    def _retire_relay(self) -> None:
+        """2.9: stop the film relay this playback opened through; until its provider connection
+        is closed it holds the input (`holds_input`) and no media opens."""
+        relay, self._relay = self._relay, None
+        if relay is None:
+            return
+        relay.stop()  # never blocks: its threads close the connection
+        if not relay.closed():
+            self._closing_relays.append(relay)
+            self._relay_watch.start()
+
+    def _watch_relays(self) -> None:
+        self._closing_relays = [r for r in self._closing_relays if not r.closed()]
+        if self._closing_relays:
+            return
+        self._relay_watch.stop()
+        if self._released:
+            return
+        if self._start_wanted and self._job is None and not self._has_input:
+            self._start_wanted = False
+            self._open()
+        if not self.holds_input():
             self.inputEnded.emit()
 
     def _cancel_pending(self) -> None:
@@ -641,17 +784,21 @@ class PlaybackSession(QObject):
         self._poll.stop()
         self._cancel_pending()
         self._start_ms = None
+        self._paused_open = False
+        self._retire_relay()
         self._end_input()
         self._set_seekable(False)
         self._set_state(PlaybackState.IDLE)
 
     def toggle_pause(self) -> None:
         self._held = False  # the viewer's pause from here
+        self._paused_open = False  # 2.9: and theirs over a film opening again paused
         if self._player_free():
             self._player.pause()
 
     def set_paused(self, paused: bool) -> None:
         self._held = False
+        self._paused_open = False
         if self._player_free():
             self._player.set_pause(1 if paused else 0)
 
@@ -755,6 +902,19 @@ class PlaybackSession(QObject):
             return []
         descriptions = self._player.audio_get_track_description() or []
         return [(int(i), self._decode(n)) for i, n in descriptions]
+
+    def audio_track_info(self) -> list[AudioTrackInfo]:
+        """What the media playing says of its audio tracks: each one's language, codec and
+        channels, as libVLC has read them so far ([] when nothing plays)."""
+        if vlc is None or not self._player_free() or not self._has_input:
+            return []
+        media = self._player.get_media()
+        if media is None:
+            return []
+        try:
+            return _audio_info(media)
+        finally:
+            media.release()
 
     def set_audio_track(self, track_id: int) -> None:
         """Play audio track `track_id`, and the same one in each media opened after it."""
@@ -1078,6 +1238,8 @@ class PlaybackSession(QObject):
         self._poll.stop()
         self._shape_timer.stop()
         self._cancel_pending()
+        self._retire_relay()
+        self._relay_watch.stop()
         self._start_wanted = self._stop_owed = False
         if self._job is not None:
             return  # _job_done stops (after a DETACH) and releases it
@@ -1103,6 +1265,7 @@ class PlaybackSession(QObject):
         # play behind the error and hold one of the provider's connections.
         self._poll.stop()
         self._cancel_pending()
+        self._retire_relay()
         self._end_input()
         self._set_seekable(False)
         self._set_state(PlaybackState.ERROR)
@@ -1120,6 +1283,7 @@ class PlaybackSession(QObject):
                 self._fail(tr("The stream could not be opened"))  # i18n: error toast
                 return
             self._poll.stop()
+            self._retire_relay()  # 2.9: the title ended: its film relay's cache and threads go
             self._set_state(PlaybackState.ENDED)
             self.ended.emit()
             return
@@ -1150,7 +1314,9 @@ class PlaybackSession(QObject):
             return
         seekable = self.is_seekable()
         self._set_seekable(seekable)
-        if self._start_ms is not None and state is PlaybackState.PLAYING:
+        # A film opened paused (2.9, play_through) goes to its position while paused.
+        paused_open = self._paused_open and state is PlaybackState.PAUSED
+        if self._start_ms is not None and (state is PlaybackState.PLAYING or paused_open):
             if seekable:
                 target = self._start_ms
                 length = self.length_ms()
@@ -1163,6 +1329,8 @@ class PlaybackSession(QObject):
             elif self._playing_clock.elapsed() > _RESUME_GIVE_UP_MS:
                 logger.debug("Dropping the resume position: the media is not seekable")
                 self._start_ms = None
+        if self._paused_open and self._start_ms is None and state in _OPENED:
+            self._paused_open = False  # it opened (and is where it was): later opens as ever
         if state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
             self.positionChanged.emit(self.time_ms(), self.length_ms())
         if self._watch_picture(state):
@@ -1344,6 +1512,12 @@ class Session(Protocol):
 
     def holds_input(self) -> bool: ...
 
+    def relay(self) -> Any: ...
+
+    def placed(self) -> bool: ...
+
+    def play_through(self, relay: Any) -> bool: ...
+
     def reopen(self, start_ms: Optional[int] = None) -> None: ...
 
     def cast_to(self, renderer: Any) -> None: ...
@@ -1368,6 +1542,7 @@ class Session(Protocol):
         software: bool = False,
         max_height: int = 0,
         local: bool = False,
+        relay: Any = None,
     ) -> None: ...
 
     def stop(self) -> None: ...
@@ -1393,6 +1568,8 @@ class Session(Protocol):
     def set_muted(self, muted: bool) -> None: ...
 
     def audio_tracks(self) -> list[tuple[int, str]]: ...
+
+    def audio_track_info(self) -> list[AudioTrackInfo]: ...
 
     def set_audio_track(self, track_id: int) -> None: ...
 
@@ -1493,8 +1670,20 @@ class NullSession(QObject):
         software: bool = False,
         max_height: int = 0,
         local: bool = False,
+        relay: Any = None,
     ) -> None:
+        if relay is not None:
+            relay.stop()
         self.errorOccurred.emit(translate(NO_VLC_MESSAGE))
+
+    def relay(self) -> Any:
+        return None
+
+    def placed(self) -> bool:
+        return False
+
+    def play_through(self, relay: Any) -> bool:
+        return False
 
     def reopen(self, start_ms: Optional[int] = None) -> None:
         pass
@@ -1539,6 +1728,9 @@ class NullSession(QObject):
         pass
 
     def audio_tracks(self) -> list[tuple[int, str]]:
+        return []
+
+    def audio_track_info(self) -> list[AudioTrackInfo]:
         return []
 
     def set_audio_track(self, track_id: int) -> None:
@@ -1626,6 +1818,51 @@ def _track_stats(media: Any) -> dict[str, Any]:
                 if details.value:
                     audio = ctypes.cast(details, ctypes.POINTER(vlc.AudioTrack)).contents
                     found["audio_rate"] = int(audio.rate)
+    finally:
+        vlc.libvlc_media_tracks_release(
+            ctypes.cast(tracks, ctypes.POINTER(ctypes.POINTER(vlc.MediaTrack))), count
+        )
+    return found
+
+
+class _Track(ctypes.Structure):
+    """libVLC 3's libvlc_media_track_t as C lays it out: python-vlc's MediaTrack makes its union
+    three pointers, which moves the bitrate, the language and the description after it."""
+
+    _fields_ = (
+        ("codec", ctypes.c_uint32),
+        ("original_fourcc", ctypes.c_uint32),
+        ("id", ctypes.c_int),
+        ("type", ctypes.c_int),
+        ("profile", ctypes.c_int),
+        ("level", ctypes.c_int),
+        ("details", ctypes.c_void_p),  # the union: the audio, video or subtitle struct
+        ("bitrate", ctypes.c_uint),
+        ("language", ctypes.c_char_p),
+        ("description", ctypes.c_char_p),
+    )
+
+
+def _audio_info(media: Any) -> list[AudioTrackInfo]:
+    """Each audio track's id, language, codec and channels, from libVLC's track list."""
+    tracks = ctypes.POINTER(vlc.MediaTrack)()
+    count = int(vlc.libvlc_media_tracks_get(media, ctypes.byref(tracks)) or 0)
+    if count <= 0:
+        return []
+    found: list[AudioTrackInfo] = []
+    try:
+        array = ctypes.cast(tracks, ctypes.POINTER(ctypes.POINTER(_Track) * count))
+        for pointer in array.contents:
+            track = pointer.contents
+            if track.type != vlc.TrackType.audio.value:
+                continue
+            codec = int(track.codec).to_bytes(4, "little").decode("latin-1") if track.codec else ""
+            channels = 0
+            if track.details:
+                audio = ctypes.cast(track.details, ctypes.POINTER(vlc.AudioTrack)).contents
+                channels = int(audio.channels)
+            language = (track.language or b"").decode("utf-8", "replace").strip()
+            found.append(AudioTrackInfo(int(track.id), language, codec, channels))
     finally:
         vlc.libvlc_media_tracks_release(
             ctypes.cast(tracks, ctypes.POINTER(ctypes.POINTER(vlc.MediaTrack))), count

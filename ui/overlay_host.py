@@ -139,11 +139,12 @@ class OverlayHost(QWidget):
 
     def sync_geometry(self) -> None:
         rect = QRect(self._surface.mapToGlobal(QPoint(0, 0)), self._surface.size())
+        resized = rect.size() != self.size()
         if rect != self.geometry():
             self.setGeometry(rect)
-        self._update_mask()
+        self._update_mask(repaint=resized)
 
-    def _update_mask(self) -> None:
+    def _update_mask(self, repaint: bool = False) -> None:
         region, claims = QRegion(), QRegion()
         for widget in self.visible_overlays():
             part = (
@@ -162,10 +163,26 @@ class OverlayHost(QWidget):
                 claims = claims.united(part)
         if not self._hole.isEmpty():
             region = region.subtracted(QRegion(self._hole).subtracted(claims))
+        # Qt repaints nothing when a window's mask changes (only a child widget's): what an
+        # overlay that hid painted would stay in the window's buffers outside the mask, and
+        # show again wherever the mask grows next (2.9: the download question came back over
+        # the film for a moment at each hover). What leaves the mask is cleared while it still
+        # shows; once it changed, all it shows is painted at once, in the same frame as the
+        # mask (2.9: painted later, the owner saw a caption, then stretched leftovers of older
+        # ones and flicker, after a window size change most), and after a resize all of it.
+        old = self.mask() if not self.mask().isEmpty() else QRegion(self.rect())
+        leaving = old.subtracted(region) if not region.isEmpty() else QRegion()
+        if not leaving.isEmpty() and self.isVisible():
+            self.repaint(leaving)
         if region.isEmpty():
             self.clearMask()
-        else:
-            self.setMask(region)
+            if repaint and self.isVisible():
+                self.repaint()
+            return
+        changed = region != self.mask()
+        self.setMask(region)
+        if (changed or repaint) and self.isVisible():
+            self.repaint(region)
 
     def _window_shown(self) -> bool:
         return isValid(self._window) and self._window.isVisible() and not self._window.isMinimized()
@@ -230,7 +247,10 @@ class OverlayHost(QWidget):
                 self._watch_platform()
                 if self._window.isMinimized() and animates_restore():
                     self._in_dock = True
-            if self.isVisible():
+            # Hidden too while the player shows (2.9: the channel list opened as a small
+            # square, a caption tiny, once the window had changed size with no overlay up: an
+            # overlay lays itself out against the host as it opens, before the host shows).
+            if self.isVisible() or (self._window_shown() and self._surface_shown()):
                 self.sync_geometry()
             self._update_visibility()
             if obj is self._window and kind in (QEvent.Type.WindowStateChange, QEvent.Type.Show):

@@ -236,6 +236,10 @@ class DesktopPip(QObject):
     def floating(self) -> bool:
         return self._shown
 
+    def floating_window(self) -> Optional[FloatingPlayer]:
+        """The floating window, once the picture has floated (None before)."""
+        return self._floating
+
     def nudge(self) -> None:
         """Something suggests the desktop changed (the window lost or got the focus): ask
         now, not at the next poll."""

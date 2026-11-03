@@ -275,6 +275,28 @@ class StreamServerTests(unittest.TestCase):
         self.assertEqual(server.reading("part"), 1)  # on the open segment now
         self.assertIsNone(server.reading("unknown"))
 
+    def test_a_side_reader_streams_alike_and_never_moves_what_the_viewer_reads(self):
+        # 2.9: AI captions read ahead of the picture; the server part stays paced by the viewer.
+        server = self.start_server()
+        writer = Writer(RamRing())
+        writer.open(0)
+        writer.append(4_000_000)  # more than the sockets hold: a reader that stops stays in it
+        writer.open()
+        writer.append(1000)
+        server.add_session("part", writer.ring, lambda: False)
+        viewer = self.client(server.stream_url("part", 1))
+        viewer.read(500)
+        deadline = time.monotonic() + LIVE
+        while server.reading("part") != 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(server.reading("part"), 1)
+        url = server.stream_url("part", 0, side=True)
+        self.assertIn("/side/0.ts", url)
+        side = self.client(url)
+        self.assertEqual(side.read(1000), writer.stream(0)[:1000])  # then it stops reading
+        time.sleep(0.1)
+        self.assertEqual(server.reading("part"), 1)  # still the viewer's segment
+
     def test_response_ends_after_the_last_segment_of_an_ended_session(self):
         server = self.start_server()
         ended = threading.Event()

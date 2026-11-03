@@ -87,10 +87,91 @@ class OverlayHostTests(HostCase):
         QTest.qWait(30)
         self.assertEqual(self.host.geometry(), surface_rect(self.surface))
 
+    def test_hidden_it_follows_the_window_so_an_overlay_opens_at_the_size_it_shows(self):
+        # 2.9, the owner: the channel list sometimes opened as a small square (fine when
+        # opened again), a caption tiny: the window changed size while no overlay showed, and
+        # the next one laid itself out against the host's old size as it opened.
+        self.assertFalse(self.host.isVisible())
+        self.window.resize(1200, 675)
+        QTest.qWait(30)
+        self.assertEqual(self.host.size(), self.surface.size())
+        sizes = []
+
+        class Sized(Overlay):
+            def showEvent(inner, event):
+                sizes.append(inner.parentWidget().size())
+                super().showEvent(event)
+
+        drawer = Sized()
+        self.host.add_overlay(drawer)
+        drawer.setGeometry(0, 0, self.host.width() // 3, self.host.height())  # as it opens
+        drawer.show()
+        QTest.qWait(20)
+        self.assertEqual(drawer.height(), self.surface.height())
+        self.assertEqual(sizes[0], self.surface.size())
+
     def test_mask_is_union_of_visible_overlays(self):
         self.panel.show()
         QTest.qWait(20)
         self.assertEqual(self.host.mask().boundingRect(), QRect(0, 0, 200, 100))
+
+    def test_what_leaves_the_mask_is_cleared_first_and_what_joins_it_is_painted(self):
+        # 2.9, macOS: Qt repaints nothing when a window's mask changes. The download question,
+        # answered, stayed in the window's buffers outside the mask and came back over the film
+        # each time the mask grew there (a hover).
+        card = Overlay()
+        self.host.add_overlay(card)
+        card.setGeometry(300, 50, 300, 120)
+        self.panel.show()
+        card.show()
+        QTest.qWait(20)
+        calls = []
+        real_repaint, real_update = self.host.repaint, self.host.update
+
+        def repaint(*args):
+            calls.append(("repaint", QRegion(args[0]), QRegion(self.host.mask())))
+            real_repaint(*args)
+
+        def update(*args):
+            calls.append(("update", QRegion(args[0]), QRegion(self.host.mask())))
+            real_update(*args)
+
+        with (
+            mock.patch.object(self.host, "repaint", side_effect=repaint),
+            mock.patch.object(self.host, "update", side_effect=update),
+        ):
+            card.hide()
+            # Cleared while still inside the mask: the card's place, with the old mask.
+            name, region, mask_then = calls[0]
+            self.assertEqual(name, "repaint")
+            self.assertEqual(region.boundingRect(), QRect(300, 50, 300, 120))
+            self.assertTrue(mask_then.contains(QRect(300, 50, 300, 120)))
+            self.assertEqual(self.host.mask().boundingRect(), QRect(0, 0, 200, 100))
+            calls.clear()
+            card.show()  # the mask grows over a place it left: painted at once, all it shows
+            name, region, mask_then = calls[-1]
+            self.assertEqual(name, "repaint")
+            self.assertTrue(region.contains(QRect(300, 50, 300, 120)))
+            self.assertTrue(mask_then.contains(QRect(300, 50, 300, 120)))  # once it shows there
+            self.assertNotIn("update", [n for n, _r, _m in calls])  # never a frame later
+
+    def test_a_resize_paints_all_it_shows_at_once(self):
+        # 2.9: the owner's window left fullscreen; leftovers of older captions showed stretched.
+        self.panel.show()
+        QTest.qWait(20)
+        painted = []
+        real_repaint = self.host.repaint
+        with mock.patch.object(
+            self.host,
+            "repaint",
+            side_effect=lambda *a: (painted.append(a), real_repaint(*a)),
+        ):
+            self.host.sync_geometry()  # nothing moved: nothing painted
+            self.assertEqual(painted, [])
+            self.surface.resize(self.surface.width() + 40, self.surface.height())
+            QTest.qWait(20)
+            self.host.sync_geometry()
+        self.assertTrue(painted)
 
     def test_clicks_on_the_pip_reach_it_unless_an_overlay_claims_them(self):
         # A PiP under the host's overlays takes the clicks no overlay claims there.

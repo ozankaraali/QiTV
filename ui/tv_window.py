@@ -112,6 +112,7 @@ from services.watch_state import WatchState
 from services.zapping import ZapController
 from ui import macos_window, provider_drop, quit_reason
 from ui.bottom_band import BottomBand
+from ui.captions_controller import CaptionsController
 from ui.desktop_pip import DesktopPip, corner_rect
 from ui.export_flow import ExportFlow
 from ui.find_session import FindSession
@@ -124,6 +125,7 @@ from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
 from ui.overlay_host import OverlayHost
 from ui.overlays.back_notice import BackNotice
+from ui.overlays.captions import CaptionsOverlay
 from ui.overlays.cast_notice import CastNotice
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.corner_controls import CornerControls
@@ -449,7 +451,11 @@ class TVWindow(QMainWindow):
         self.zap = ZapController(parent=self)
         owns_instance = vlc_instance is None
         if owns_instance:  # the decoder Settings chose (software unless hardware)
-            vlc_instance = create_instance(default_args(config_manager.hardware_decoding))
+            from ui.overlays.captions import subtitle_font
+
+            vlc_instance = create_instance(  # subtitles drawn as the AI captions are (2.9)
+                default_args(config_manager.hardware_decoding, subtitle_font=subtitle_font())
+            )
         self._instance = vlc_instance
         self._owns_instance = owns_instance and self._instance is not None
         self.session: Session
@@ -546,6 +552,7 @@ class TVWindow(QMainWindow):
         self.back_notice = BackNotice(host)  # 2.6: Resume, where a channel was left
         self.question_card = QuestionCard(host)  # 2.6: stop a recording for a stream?
         self.quality_card = QuestionCard(host)  # 2.8: convert on the server?
+        self.captions_card = QuestionCard(host)  # 2.9: download AI captions' speech model?
         self.rec_sign = RecSign(host)  # 2.6: recordings in the background
         self.stopped_notice = StoppedNotice(host)  # 2.6: after Stop, Play again
         self.cast_notice = CastNotice(host)  # 2.8: Playing on <device>, Stop casting
@@ -553,6 +560,7 @@ class TVWindow(QMainWindow):
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
         self.corner_controls = CornerControls(host)
+        self.captions_overlay = CaptionsOverlay(host)  # 2.9: AI captions over the picture
         # 2.8: the recordings scheduled from the guide (a small file beside the config).
         self.recording_schedule = Schedule(
             os.path.join(config_manager.get_config_dir(), SCHEDULE_FILE)
@@ -598,6 +606,7 @@ class TVWindow(QMainWindow):
             pairing=self.pair_overlay,
             library_toast=self.library_toast,
             layout_row=self.layout_row,
+            captions=self.captions_overlay,
         )
         # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
         self.rec_sign.cover_with(self.overlays.drawer, self.overlays.guide, self.grid_tiles)
@@ -608,14 +617,17 @@ class TVWindow(QMainWindow):
         # PiP the transport keeps only its own buttons and bar, and other clicks reach the
         # small picture (OverlayHost.set_hole). The multiview's tiles are drawn under all of
         # them, and take their clicks over the transport but for its buttons and bar
-        # (GridTiles.hits). The mixer shows over them (it sits above the transport's controls
-        # and beside the PiP), and the Sound, Subtitles and Picture panels and the multiview's
-        # layouts over it (above their buttons). The statistics sit over the transport, under
-        # its title row (they take no click). The drawer and the guide cover them all; the
-        # OpenSubtitles search covers the player with its backdrop, under the corner player's
-        # controls, the sleep timer's last minute, Resume and the question (2.6) and the toast.
+        # (GridTiles.hits); AI captions just above the tiles, under everything else (they sit
+        # above the player controls while those show, and take no click). The mixer shows over
+        # them (it sits above the transport's controls and beside the PiP), and the Sound,
+        # Subtitles and Picture panels and the multiview's layouts over it (above their
+        # buttons). The statistics sit over the transport, under its title row (they take no
+        # click). The drawer and the guide cover them all; the OpenSubtitles search covers the
+        # player with its backdrop, under the corner player's controls, the sleep timer's last
+        # minute, Resume and the question (2.6) and the toast.
         for overlay in (
             self.grid_tiles,
+            self.captions_overlay,
             self.overlays.banner,
             self.overlays.column,
             self.overlays.transport,
@@ -641,10 +653,12 @@ class TVWindow(QMainWindow):
             self.rec_sign,
             self.question_card,
             self.quality_card,
+            self.captions_card,
             self.pair_overlay,
             self.overlays.toast,
         ):
             host.add_overlay(overlay)
+        self.captions_overlay.follow(self.overlays.transport)
         # After the window's surface filters: the frame takes the small surface's left button
         # before the window (its mini-player drag) and the surface (the drawer) see it.
         self.pip_frame = PipFrame(self.player_page, self.surface, self.pip_surface, config_manager)
@@ -666,6 +680,7 @@ class TVWindow(QMainWindow):
         self.floating_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.floating_note.setStyleSheet("color: rgba(255, 255, 255, 0.55); font-size: 18px;")
         self.floating_note.hide()
+        self._floating_captions: Optional[OverlayHost] = None  # AI captions over it (2.9)
         self.desktop_pip.floatingChanged.connect(self._on_picture_floating)
         self.pip_frame.suspending.connect(self.desktop_pip.dock)  # the multiview lays them out
         # The host covers the page exactly: page coordinates are the host's.
@@ -733,6 +748,11 @@ class TVWindow(QMainWindow):
         # then). It listens once the window is on screen (_start: Windows lists the window).
         self.media_keys = MediaKeys(self)
         self.media_keys.pressed.connect(self.remote_key)
+        # 2.9: AI captions (the Subtitles panel's row): a speech model in its own process
+        # reads the live channel ahead of the picture; the captions show over it.
+        self.captions = CaptionsController(
+            self, card=self.captions_card, overlay=self.captions_overlay
+        )
         self.media_keys.raiseRequested.connect(self.come_to_front)
         self.session.stateChanged.connect(self._show_now_playing)
         self.screens = TVPages(self, self)  # the Library's controller and the page moves
@@ -1552,8 +1572,30 @@ class TVWindow(QMainWindow):
             note.setGeometry(self.player_page.rect())
             note.show()
             note.raise_()
+            self._caption_the_floating_picture()
+            host = self._floating_captions
+            if host is not None:
+                # Once the floating window is placed: its Show came before (2.9, the review:
+                # the captions sat where it floated last time for a moment).
+                QTimer.singleShot(0, host, host.sync_geometry)
         else:
             note.hide()
+
+    def _caption_the_floating_picture(self) -> None:
+        """2.9: AI captions over the floating picture too (the owner: "no subs in pip"); the
+        window's own show on its desktop, away. As over the window, a see-through window of
+        their own above it: libVLC's view covers any widget inside it. It lets the mouse
+        through (the floating picture is dragged and double-clicked there)."""
+        player = self.desktop_pip.floating_window()
+        if player is None or self._floating_captions is not None:
+            return
+        host = OverlayHost(player, player)
+        host.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
+        overlay = CaptionsOverlay(host)
+        host.add_overlay(overlay)
+        macos_window.join_all_spaces(host)  # beside the floating picture on every desktop
+        self._floating_captions = host
+        self.captions.add_overlay(overlay)
 
     def _mini_rect(self) -> QRect:
         screen = self.screen() or QGuiApplication.primaryScreen()
@@ -2138,6 +2180,7 @@ class TVWindow(QMainWindow):
             ("let the next click through", self.screens.shutdown),
             ("stop the phone remote", self.remote.shutdown),
             ("leave Now Playing", self.media_keys.stop),  # the media keys go back to others
+            ("stop AI captions", self.captions.shutdown),  # its process and any download
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
             ("stop the channel list's find", self.finder.shutdown),

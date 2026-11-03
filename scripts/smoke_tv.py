@@ -264,6 +264,22 @@ CATCHUP_CHECK = (
 CATCHUP_SOURCE_CHECK = (
     f"{PIPELINE_PREFIX}{LIVE_CHANNEL}'s archive was probed, then played on a connection of its own"
 )
+# 2.9: AI captions' process in the packaged app, without the 880 MB model: CI gives it the
+# speech runtime and the voice detector (QITV_CAPTIONS_RUNTIME, QITV_CAPTIONS_VAD) as a user's
+# download would, and it reads the channel from the buffer's side route ahead of the picture.
+CAPTIONS_CHECK = (
+    f"{PIPELINE_PREFIX}AI captions: the captions process decodes {LIVE_CHANNEL}'s sound from "
+    "the buffer, ahead of the picture"
+)
+# QITV_CAPTIONS_LIVE=1 (a developer's check, not CI: it needs the model, QITV_CAPTIONS_DIR):
+# AI captions on in the window for CAPTIONS_LIVE_S over the channel, every caption shown is
+# checked against the picture's place, and 07-captions.png shows one.
+CAPTIONS_LIVE_CHECK = f"{PIPELINE_PREFIX}AI captions show {LIVE_CHANNEL}'s words in step"
+CAPTIONS_LIVE_S = float(os.environ.get("QITV_CAPTIONS_LIVE_S", "75"))
+CAPTIONS_BUILT_S = 7.0  # the lead from which every caption must be in step
+CAPTIONS_SHOT = "07-captions.png"
+CAPTIONS_LOAD_MS = 30_000
+CAPTIONS_AHEAD_MS = 15_000
 PIPELINE_CHECKS = (
     TUNED_CHECK,
     ON_DISK_CHECK,
@@ -530,6 +546,8 @@ def _child_command(args: list[str]) -> list[str]:
 def _hang_budget(seconds: float, pipeline: bool, pip: bool = False) -> float:
     """Seconds after which the app dumps its Python stacks (it keeps going)."""
     extra = (PIPELINE_BUDGET_S if pipeline else 0.0) + (PIP_BUDGET_S if pip else 0.0)
+    if pipeline and os.environ.get("QITV_CAPTIONS_LIVE") == "1":
+        extra += CAPTIONS_LIVE_S + 30.0  # the developer's AI captions check, and its model load
     return HANG_DUMP_S + seconds + extra
 
 
@@ -1226,6 +1244,130 @@ class Driver:
         session = self.window.session
         return lambda: session.url == url and session.state() is PlaybackState.PLAYING
 
+    def _check_captions(self) -> Generator[int, None, None]:
+        """The captions process (no model: a probe) reads the playing channel's side route and
+        places its sound on the timeline ahead of the picture."""
+        runtime = os.environ.get("QITV_CAPTIONS_RUNTIME", "")
+        vad = os.environ.get("QITV_CAPTIONS_VAD", "")
+        facts: dict = {"runtime": bool(runtime), "vad": bool(vad)}
+        self.report.data["captions"] = facts
+        if not runtime or not vad:
+            facts["skipped"] = "no speech runtime given (CI gives one)"
+            return
+        from services.captions.process import CaptionsProcess
+
+        live = self.window.live_session
+        process = CaptionsProcess()
+        seen: dict = {"ready": False, "failed": "", "newest": None, "pieces": 0}
+        process.ready.connect(lambda: seen.update(ready=True))
+        process.failed.connect(lambda reason: seen.update(failed=reason))
+        process.progress.connect(lambda run, newest, rtf: seen.update(newest=newest))
+        process.piece.connect(lambda *piece: seen.update(pieces=seen["pieces"] + 1))
+        ahead = False
+        try:
+            process.start({"runtime": runtime, "model": None, "vad": vad, "threads": 1})
+            yield from self._wait(lambda: seen["ready"] or bool(seen["failed"]), CAPTIONS_LOAD_MS)
+            source = live.caption_source() if live is not None else None
+            facts["source"] = source is not None
+            if seen["ready"] and source is not None:
+                process.send("start", 1, source[0], source[2], None, "")
+
+                def ahead_of_the_picture() -> bool:
+                    newest = seen["newest"]
+                    return newest is not None and newest > live.position() + 1.0
+
+                ahead = yield from self._wait(ahead_of_the_picture, CAPTIONS_AHEAD_MS)
+                facts["position"] = round(live.position(), 2)
+        except Exception as e:
+            facts["problem"] = f"{type(e).__name__}: {e}"
+        finally:
+            process.stop()
+            process.wait(5000)
+        facts.update({k: seen[k] for k in ("ready", "failed", "newest", "pieces")})
+        self.report.check(CAPTIONS_CHECK, bool(seen["ready"]) and ahead, facts)
+
+    def _check_captions_live(self) -> Generator[int, None, None]:
+        """The window's AI captions over the channel: each text the overlay shows is a cue
+        whose words have started where the picture is (in step), none after its words."""
+        w = self.window
+        captions, live = getattr(w, "captions", None), w.live_session
+        facts: dict = {}
+        self.report.data["captions_live"] = facts
+        if captions is None or live is None:
+            self.report.check(CAPTIONS_LIVE_CHECK, False, "no AI captions in the window")
+            return
+        from services.i18n import translate
+        from ui.captions_texts import STARTING
+
+        captions.toggle()  # installed already (QITV_CAPTIONS_DIR): no download question
+        shown: list = []
+        shot = False
+        waited = 0.0  # the picture waited for the captions' distance (2.9), this long
+        until = time.monotonic() + CAPTIONS_LIVE_S
+        while time.monotonic() < until:
+            yield POLL_MS
+            if live.caption_waiting():
+                waited += POLL_MS / 1000.0
+                continue
+            text = captions._shown
+            position = live.position()
+            if text == translate(STARTING):
+                continue
+            if text and (not shown or shown[-1][1] != text):
+                cue = next((c for c in captions._cues if c[2] == text), None)
+                lead = captions._lead()
+                shown.append(
+                    (
+                        round(position, 2),
+                        text,
+                        round(cue[0], 2) if cue else None,
+                        round(cue[1], 2) if cue else None,
+                        round(lead, 1) if lead is not None else None,
+                    )
+                )
+                if not shot and len(text) > 12:
+                    shot = True
+                    self._capture_with_video(CAPTIONS_SHOT)
+        facts.update(
+            shown=shown,
+            cues=len(captions._cues),
+            status=captions.status_text(),
+            floor=live.caption_floor(),
+            tier=captions._tier,
+            language=captions.language(),
+            waited_s=round(waited, 1),
+        )
+        captions.toggle()  # off: the picture stays where it is, time-shifted
+        # Never after its words (a caption in the next scene); in step once the lead is built.
+        after_words = [s for s in shown if s[3] is not None and s[0] > s[3] + 1.0]
+        built = [s for s in shown if s[4] is not None and s[4] >= CAPTIONS_BUILT_S]
+        late = [s for s in built if s[2] is not None and s[0] - s[2] > 1.0]
+        late_all = [s for s in shown if s[2] is not None and s[0] - s[2] > 1.0]
+        facts["mode_after_off"] = live._stay.mode.value  # shifted: stays where it is
+        self.report.check(
+            CAPTIONS_LIVE_CHECK,
+            len(shown) >= 3 and not after_words and not late,
+            f"{len(shown)} shown ({len(built)} with the lead built, {len(late)} of them late; "
+            f"{len(late_all)} late in all), {len(after_words)} after their words; waited "
+            f"{waited:.1f} s; language {captions.language()}: {shown[:6]}",
+        )
+
+    def _capture_with_video(self, name: str) -> None:
+        """The overlay host over libVLC's snapshot of the video (the captions over the picture)."""
+        pixmap = self.window.host.grab()
+        image = QImage(pixmap.size(), QImage.Format.Format_ARGB32)
+        image.setDevicePixelRatio(pixmap.devicePixelRatio())
+        image.fill(0xFF000000)
+        painter = QPainter(image)
+        video = self._snapshot(self.window.session)
+        if video is not None:
+            size = pixmap.size() / pixmap.devicePixelRatio()
+            painter.drawImage(QRectF(0, 0, size.width(), size.height()), video)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.end()
+        self.report.data["screenshots"][name] = image.save(str(self.out / name))
+        self.report.save()
+
     def _check_media_keys(self) -> Generator[int, None, None]:
         session, keys = self.window.session, self.window.media_keys
         system = keys.system
@@ -1552,6 +1694,12 @@ class Driver:
         yield WARM_UP_MS
         facts["video"] = self._video_facts(PIPELINE_VIDEO)  # inspection only, no check
         report.save()
+
+        report.step("pipeline 2b. AI captions read the sound")
+        yield from self._check_captions()
+        if os.environ.get("QITV_CAPTIONS_LIVE") == "1":
+            report.step("pipeline 2c. AI captions on, in step")
+            yield from self._check_captions_live()
 
         # 3. Pause for 4 s, then resume: it plays on time-shifted, at least 3 s behind.
         report.step("pipeline 3. pause and resume")
