@@ -286,6 +286,18 @@ class FakeSession(QObject):
     def holds_input(self):
         return self.holding
 
+    through = None  # relay(): the film relay its play or play_through gave it (2.9)
+    state_now = "playing"  # what play_through finds playing
+
+    def relay(self):
+        return self.through or (self.plays[-1][1].get("relay") if self.plays else None)
+
+    def play_through(self, relay):
+        if self.state_now not in ("playing", "paused") or relay.source != self.url:
+            return False
+        self.through = relay
+        return True
+
     def let_go(self):
         """The worker ended libVLC's input: the provider connection is closed."""
         self.holding = False
@@ -2011,6 +2023,72 @@ class VodTests(ControllerTestCase):
         self.play_movie()
         self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
         self.assertIsNone(self.session.plays[0][1].get("user_agent"))  # VLC's own
+
+    def captions_on(self, on=True):
+        self.window.captions = SimpleNamespace(enabled=lambda: on)
+
+    def relay_of_play(self):
+        relay = self.session.plays[-1][1].get("relay")
+        if relay is not None:
+            self.addCleanup(relay.stop)
+        return relay
+
+    def test_with_ai_captions_on_a_providers_film_plays_through_a_film_relay(self):  # 2.9
+        self.captions_on()
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        url, kwargs = self.session.plays[-1]
+        relay = self.relay_of_play()
+        self.assertEqual(url, "http://vod/heat.mkv")  # the title stays the provider's address
+        self.assertEqual(relay.source, url)
+        self.assertEqual(relay._user_agent, STB_USER_AGENT)  # as the picture's play asks
+        self.assertTrue(relay.leader_url.startswith("http://127.0.0.1:"))
+        self.assertEqual(self.watch.plays[-1][3], url)
+
+    def test_with_ai_captions_off_a_providers_film_plays_as_before(self):
+        self.captions_on(False)
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.assertNotIn("relay", self.session.plays[-1][1])
+
+    def test_a_media_servers_or_an_hls_film_never_plays_through_one(self):
+        self.captions_on()
+        self.catalog.ptype = "JELLYFIN"  # no stream limit there
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.assertNotIn("relay", self.session.plays[-1][1])
+        self.catalog.ptype = "XTREAM"
+        self.play_movie()
+        self.catalog.linkReady.emit(2, "http://vod/heat.m3u8")
+        self.assertNotIn("relay", self.session.plays[-1][1])
+        self.assertFalse(self.controller.film_relay_wanted())
+
+    def test_ai_captions_turned_on_during_a_film_play_it_on_through_one(self):
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.assertTrue(self.controller.film_relay_wanted())
+        self.captions_on()
+        self.assertTrue(self.controller.relay_film())
+        relay = self.session.through
+        self.addCleanup(relay.stop)
+        self.assertEqual(relay.source, "http://vod/heat.mkv")
+        self.assertEqual(len(self.session.plays), 1)  # opened again by the session, not played
+        self.assertFalse(self.controller.relay_film())  # once: it plays through one now
+
+    def test_nothing_to_open_again_leaves_no_relay_behind(self):
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.session.state_now = "ended"
+        made = []
+        real = self.controller._film_relay
+
+        def film_relay(*args):
+            made.append(real(*args))
+            return made[-1]
+
+        self.controller._film_relay = film_relay
+        self.assertFalse(self.controller.relay_film())
+        self.assertTrue(made[0].closed())  # stopped at once: it never opened anything
 
     def test_episode_requests_a_series_link(self):
         episode = {"id": "s", "cmd": "x", "series": 2}

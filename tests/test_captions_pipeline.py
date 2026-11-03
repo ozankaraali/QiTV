@@ -427,19 +427,50 @@ class _Target:
 
 
 class _Controller:
-    def __init__(self, target):
-        self.target = target
+    def __init__(self, target, session=None):
+        self.target, self.session = target, session
+        self.relayable = False  # a provider's film the film relay carries (TVController's)
+        self.relays = 0
 
     def now_playing(self):
         return self.target
+
+    def film_relay_wanted(self):
+        return self.relayable
+
+    def relay_film(self):
+        self.relays += 1
+        self.session.through = _Relay(self.session.url)
+        return True
+
+
+class _Relay:
+    def __init__(self, source, followable=True):
+        self.source, self.follower_url = source, "http://127.0.0.1:5000/t/follower.mkv"
+        self.can_follow = followable
+        self.stops = 0
+
+    def followable(self):
+        return self.can_follow
+
+    def stop(self):
+        self.stops += 1
 
 
 class _Session:
     def __init__(self, url, ms):
         self.url, self.ms = url, ms
+        self.through = None  # the film relay it plays through
+        self.settled = True  # placed(): opened and where it resumes
 
     def time_ms(self):
         return self.ms
+
+    def relay(self):
+        return self.through
+
+    def placed(self):
+        return self.settled
 
     def audio_track(self):
         return 2
@@ -500,15 +531,72 @@ class FilmCaptionsTests(unittest.TestCase):
         self.assertEqual(self.captions._run, run + 1)
         self.assertAlmostEqual(self.sent[-2][3], 600.0 + self.ahead)
 
-    def test_a_media_servers_film_is_offered_and_a_providers_is_not(self):
+    def test_a_media_servers_film_is_read_as_it_is(self):
         self.window.session.url = "http://server.local/Videos/1/stream"
         self.window.controller.target = _Target(live=False, item={"_provider": "Server"})
         with unittest.mock.patch(
             "services.provider_ids.provider_of", lambda item: item["_provider"]
         ):
             self.assertTrue(self.captions.available())
-            self.window.controller.target = _Target(live=False, item={"_provider": "Provider"})
-            self.assertFalse(self.captions.available())  # a second stream from the provider
+            self.assertEqual(self.captions._film()[0], "http://server.local/Videos/1/stream")
+
+    def provider_film(self):
+        self.window.session.url = "http://provider.local/movie/u/p/7.mkv"
+        self.window.controller = _Controller(
+            _Target(live=False, item={"_provider": "Provider"}), self.window.session
+        )
+        patch = unittest.mock.patch(
+            "services.provider_ids.provider_of", lambda item: item["_provider"]
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_a_providers_film_is_read_through_its_film_relay_never_again(self):  # 2.9
+        self.provider_film()
+        self.assertFalse(self.captions.available())  # one the relay can't carry (HLS)
+        self.window.controller.relayable = True
+        self.assertTrue(self.captions.available())  # offered: the relay will carry it
+        self.assertIsNone(self.captions._film())  # not through one yet: nothing read
+        self.window.session.through = _Relay(self.window.session.url)
+        self.captions._start_run()
+        kind, _run, location = self.sent[0][:3]
+        self.assertEqual((kind, location), ("film", "http://127.0.0.1:5000/t/follower.mkv"))
+        self.window.session.through = _Relay(self.window.session.url, followable=False)
+        self.assertIsNone(self.captions._film())  # a relay the provider's answer declined
+
+    def test_on_during_a_providers_film_sends_it_through_a_relay_once(self):
+        self.provider_film()
+        self.window.controller.relayable = True
+        self.captions._enabled = False
+        self.captions._enable("small")
+        self.assertEqual(self.window.controller.relays, 1)
+        self.captions._tick()
+        self.captions._tick()
+        self.assertEqual(self.window.controller.relays, 1)
+        films = [m for m in self.sent if m[0] == "film"]
+        self.assertEqual(len(films), 1)
+        self.assertEqual(films[0][2], "http://127.0.0.1:5000/t/follower.mkv")
+
+    def test_off_keeps_the_films_relay_and_on_again_reads_it_at_once(self):
+        self.provider_film()
+        self.window.controller.relayable = True
+        relay = self.window.session.through = _Relay(self.window.session.url)
+        self.captions._disable()
+        self.assertIs(self.window.session.relay(), relay)  # no second reopen: kept to its end
+        self.assertEqual(relay.stops, 0)
+        self.captions._enable("small")
+        self.assertEqual(self.window.controller.relays, 0)
+
+    def test_a_film_still_opening_is_read_once_it_plays_where_it_resumes(self):
+        self.window.session.settled = False
+        self.captions._start_run()
+        self.assertEqual(self.sent, [])
+        self.captions._tick()
+        self.assertEqual(self.sent, [])
+        self.window.session.settled = True
+        self.captions._tick()
+        self.assertEqual(self.sent[0][:2], ("film", self.captions._run))
+        self.assertAlmostEqual(self.sent[0][3], 120.0 + self.ahead)
 
 
 if __name__ == "__main__":
