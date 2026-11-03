@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import time
 import unittest
+import unittest.mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -404,6 +405,97 @@ class ControllerTimingTests(unittest.TestCase):
         self.captions._disable()
         self.assertEqual(self.overlay.text, "")
         self.assertEqual(self.window.live_session.floor, 0.0)
+
+
+class _Target:
+    def __init__(self, live, local=False, item=None):
+        self.live, self.local, self.item = live, local, item or {}
+        self.source, self.title = "films", "A film"
+
+
+class _Controller:
+    def __init__(self, target):
+        self.target = target
+
+    def now_playing(self):
+        return self.target
+
+
+class _Session:
+    def __init__(self, url, ms):
+        self.url, self.ms = url, ms
+
+    def time_ms(self):
+        return self.ms
+
+    def audio_track(self):
+        return 2
+
+    def audio_tracks(self):
+        return [(-1, "Disable"), (2, "Track 1")]
+
+
+class _Catalogs:
+    def __init__(self, kinds):
+        self.kinds = kinds
+
+    def provider(self, name):
+        return {"type": self.kinds[name]}
+
+
+class FilmCaptionsTests(unittest.TestCase):
+    """A film's captions: its sound read a little ahead of the picture, on the film's clock."""
+
+    def setUp(self):
+        from PySide6.QtWidgets import QApplication, QWidget
+
+        from ui.captions_controller import FILM_AHEAD_S, CaptionsController
+
+        self.ahead = FILM_AHEAD_S
+        self.app = QApplication.instance() or QApplication([])
+        self.window = QWidget()
+        self.window.controller = _Controller(_Target(live=False, local=True))
+        self.window.session = _Session("file:///films/a.mkv", 120_000)
+        self.window.catalogs = _Catalogs({"Server": "JELLYFIN", "Provider": "XTREAM"})
+        self.overlay = _Overlay()
+        self.captions = CaptionsController(self.window, overlay=self.overlay)
+        self.sent = []
+        self.captions._process.send = lambda *m: self.sent.append(m)
+        self.captions._process.running = lambda: True
+        self.captions._supported = True
+        self.captions._enabled = self.captions._ready = True
+
+    def test_a_film_from_the_disk_reads_from_a_little_past_the_picture(self):
+        self.assertTrue(self.captions.available())
+        self.captions._start_run()
+        kind, run, location, start = self.sent[0][:4]
+        self.assertEqual((kind, location), ("film", "file:///films/a.mkv"))
+        self.assertAlmostEqual(start, 120.0 + self.ahead)
+        self.assertEqual(self.sent[1], ("viewer", 120.0))
+        self.captions._on_caption(run, 127.0, 129.0, "Bonjour")
+        self.window.session.ms = 127_500
+        self.captions._last = None
+        self.captions._tick()
+        self.assertEqual(self.overlay.text, "Bonjour")
+
+    def test_a_seek_in_the_film_reads_again_from_there(self):
+        self.captions._start_run()
+        run = self.captions._run
+        self.captions._last = (120.0, time.monotonic())
+        self.window.session.ms = 600_000
+        self.captions._tick()
+        self.assertEqual(self.captions._run, run + 1)
+        self.assertAlmostEqual(self.sent[-2][3], 600.0 + self.ahead)
+
+    def test_a_media_servers_film_is_offered_and_a_providers_is_not(self):
+        self.window.session.url = "http://server.local/Videos/1/stream"
+        self.window.controller.target = _Target(live=False, item={"_provider": "Server"})
+        with unittest.mock.patch(
+            "services.provider_ids.provider_of", lambda item: item["_provider"]
+        ):
+            self.assertTrue(self.captions.available())
+            self.window.controller.target = _Target(live=False, item={"_provider": "Provider"})
+            self.assertFalse(self.captions.available())  # a second stream from the provider
 
 
 if __name__ == "__main__":

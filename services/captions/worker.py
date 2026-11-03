@@ -10,6 +10,7 @@ write each one; what nobody said is dropped (guards). It runs at low priority: t
 always comes first.
 
 Messages to it: ("load", {...}), ("start", run, url, segment_start, audio_track, language),
+("film", run, location, start_s, audio_track, language, vlc_options): a film's run,
 ("viewer", position), ("language", name), ("stop",), ("quit",).
 From it: ("ready",), ("failed", reason), ("caption", run, start, end, text),
 ("progress", run, newest, rtf), ("resync", run, newest), ("ended", run, reason),
@@ -215,8 +216,13 @@ class _Run:
         ints.frombytes(pcm[: samples * 2])
         if sys.byteorder == "big":
             ints.byteswap()
-        floats = array("f", [v / 32768.0 for v in ints])
-        self.newest = at + samples / 16000
+        self._take(at, array("f", [v / 32768.0 for v in ints]))
+
+    def _take(self, at: float, floats: array) -> None:
+        """Placed sound (16 kHz mono floats from timeline second `at`) into pieces."""
+        if self.stopped.is_set():
+            return
+        self.newest = at + len(floats) / 16000
         self.cutter.set_max(self._longest())
         for piece in self.cutter.push(at, floats):
             self.pieces.put(piece)
@@ -273,6 +279,56 @@ class _Run:
             self.link.send(("detected", self.run, locked))
             return True
         return heard is not None and heard == self.votes.leading()
+
+
+class _FilmRun(_Run):
+    """A film's run (services.captions.film): its sound played alone from `start_s`, a little
+    ahead of the picture, placed on the film's own clock (the main player's time); held while
+    far enough ahead, ended with the film."""
+
+    def __init__(
+        self,
+        link: _Link,
+        model: _Model,
+        run: int,
+        location: str,
+        start_s: float,
+        audio_track: Optional[int],
+        language: str,
+        viewer: list,
+        options: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(link, model, run, "", start_s, audio_track, language, viewer)
+        from services.captions.film import FilmReader
+
+        self.reader = FilmReader(
+            location, start_s, self._take, audio_track=audio_track, options=options
+        )
+
+    def start(self) -> None:
+        self.reader.start()
+        threading.Thread(target=self._watch, name="qitv-captions-film", daemon=True).start()
+        threading.Thread(target=self._recognize, name="qitv-captions-asr", daemon=True).start()
+
+    def stop(self) -> None:
+        self.stopped.set()
+        self.pieces.put(None)
+        self.reader.stop()
+
+    def _watch(self) -> None:
+        held = False
+        while not self.stopped.wait(0.5):
+            ahead = self.newest - float(self.viewer[0])
+            if not held and ahead > _AHEAD_MAX_S:
+                held = True
+                self.reader.hold(True)
+            elif held and ahead < _AHEAD_MAX_S / 2:
+                held = False
+                self.reader.hold(False)
+            if self.reader.finished():
+                self.pieces.put(None)
+                self._end("ended")
+                return
 
 
 def _lower_priority() -> None:
@@ -348,6 +404,27 @@ def _serve(link: _Link) -> None:
                 continue
             viewer[0] = float(segment_start)
             run = _Run(link, model, number, url, segment_start, audio_track, language, viewer)
+            run.start()
+        elif kind == "film":
+            _, number, location, start_s, audio_track, language, options = message
+            if run is not None:
+                run.stop()
+                run = None
+            if model is None:
+                link.send(("ended", number, "no model"))
+                continue
+            viewer[0] = float(start_s)
+            run = _FilmRun(
+                link,
+                model,
+                number,
+                location,
+                start_s,
+                audio_track,
+                language,
+                viewer,
+                tuple(options),
+            )
             run.start()
         elif kind == "viewer":
             viewer[0] = float(message[1])

@@ -29,6 +29,7 @@ from services.i18n import translate
 logger = logging.getLogger(__name__)
 
 LEAD_S = {"small": 8.0, "large": 10.0}  # the picture's distance behind live while on
+FILM_AHEAD_S = 6.0  # a film's sound is read from this far past the picture (after a seek too)
 HOLD_S = 0.6  # a caption stays this long after its words, unless the next one starts
 MIN_SHOW_S = 1.2
 TICK_MS = 250
@@ -114,7 +115,9 @@ class CaptionsController(QObject):
     def available(self) -> bool:
         """A live channel plays, and this computer can run the model (a runtime is pinned)."""
         target = self._target()
-        if target is None or not getattr(target, "live", False):
+        if target is None:
+            return False
+        if not getattr(target, "live", False) and self._film() is None:
             return False
         if self._supported is None:
             from services.captions import models
@@ -148,12 +151,13 @@ class CaptionsController(QObject):
             return ""
         if self._loading or not self._ready:
             return translate(PREPARING)
-        if self._live() is None or self._live().caption_source() is None:
+        if self._source() is None:
             return translate(NOT_AVAILABLE)
         if self._slow_since is not None and time.monotonic() - self._slow_since >= _SLOW_FOR_S:
             return translate(CANT_KEEP_UP)
         lead = self._lead()
-        if lead is not None and lead < LEAD_S.get(self._tier, 8.0) - 1.0:
+        wanted = LEAD_S.get(self._tier, 8.0) if self._is_live() else FILM_AHEAD_S
+        if lead is not None and lead < wanted - 1.0:
             return translate(CATCHING_UP)
         return ""
 
@@ -323,7 +327,7 @@ class CaptionsController(QObject):
         self._cues.clear()
         self._resolve_language()
         live = self._live()
-        if live is not None:
+        if live is not None and self._is_live():
             live.set_caption_floor(LEAD_S.get(tier, 8.0))
         if not self._process.running():
             paths = models.model_paths(tier)
@@ -392,6 +396,9 @@ class CaptionsController(QObject):
         self._restart.stop()  # this is the start a pending restart was for
         if not self._enabled or not self._ready:
             return
+        if not self._is_live():
+            self._start_film()
+            return
         live = self._live()
         after, self._resync_at = self._resync_at, None
         source = None
@@ -412,7 +419,25 @@ class CaptionsController(QObject):
         self._session_key = url.rsplit("/side/", 1)[0]
         self._newest = None
         self._process.send("start", self._run, url, start, self._audio_track(), self._language[0])
-        self._process.send("viewer", live.position())
+        self._process.send("viewer", self._position())
+
+    def _start_film(self) -> None:
+        film = self._film()
+        if film is None:
+            self._session_key = ""
+            self.changed.emit()
+            return
+        location, options = film
+        start = self._position() + FILM_AHEAD_S
+        self._run += 1
+        self._run_channel = self._channel_key()
+        self._run_start = start
+        self._session_key = location
+        self._newest = None
+        self._process.send(
+            "film", self._run, location, start, self._audio_track(), self._language[0], options
+        )
+        self._process.send("viewer", self._position())
 
     def _on_caption(self, run: int, start: float, end: float, text: str) -> None:
         if run != self._run or not self._enabled:
@@ -458,21 +483,20 @@ class CaptionsController(QObject):
 
     # ---- every tick: the picture's place --------------------------------------------------
     def _tick(self) -> None:
-        live = self._live()
-        if live is None or not self._enabled:
+        if not self._enabled:
             return
-        source = live.caption_source()
-        if source is None:
+        key = self._source()
+        if key is None:
             self._show("")
             return
-        if self._ready and source[0].rsplit("/side/", 1)[0] != self._session_key:
+        if self._ready and key != self._session_key:
             self._cues.clear()  # another channel or a new session: its own captions
             self._last = None
             self._resolve_language()  # its own language too
             self._start_run()
             self.changed.emit()
             return
-        position = live.position()
+        position = self._position()
         now = time.monotonic()
         if self._last is not None:
             moved = position - self._last[0]
@@ -509,10 +533,9 @@ class CaptionsController(QObject):
             self._cues.pop(0)
 
     def _lead(self) -> Optional[float]:
-        live = self._live()
-        if live is None or self._newest is None:
+        if self._newest is None:
             return None
-        return float(self._newest) - float(live.position())
+        return float(self._newest) - float(self._position())
 
     def _show(self, text: str) -> None:
         if text == self._shown:
@@ -525,6 +548,58 @@ class CaptionsController(QObject):
             overlay.show_text(text)
         else:
             overlay.clear()
+
+    # ---- live or a film ----------------------------------------------------------------------
+    def _is_live(self) -> bool:
+        target = self._target()
+        return target is None or bool(getattr(target, "live", False))
+
+    def _position(self) -> float:
+        """Where the picture is: the time-shift timeline's second (live), the film's (a film)."""
+        if self._is_live():
+            live = self._live()
+            return float(live.position()) if live is not None else 0.0
+        session = getattr(self._window, "session", None)
+        try:
+            return max(0.0, int(session.time_ms()) / 1000.0) if session is not None else 0.0
+        except Exception:
+            return 0.0
+
+    def _source(self) -> Optional[str]:
+        """What the captions read, as a key (another one: read again, its own captions);
+        None where they can't read what plays."""
+        if self._is_live():
+            live = self._live()
+            source = live.caption_source() if live is not None else None
+            return source[0].rsplit("/side/", 1)[0] if source is not None else None
+        film = self._film()
+        return film[0] if film is not None else None
+
+    def _film(self) -> Optional[tuple[str, tuple[str, ...]]]:
+        """The film playing, as the captions process can open it, and its VLC options: a file
+        on this computer, or a film from Jellyfin or Emby. None for a provider's film: reading
+        it again would be a second stream from the provider, which many allow none of."""
+        target = self._target()
+        session = getattr(self._window, "session", None)
+        if target is None or getattr(target, "live", False) or session is None:
+            return None
+        location = str(getattr(session, "url", "") or "")
+        if not location:
+            return None
+        if getattr(target, "local", False) or location.startswith("file:"):
+            return location, ()
+        from services.provider_ids import provider_of
+        from services.provider_types import is_media_server
+
+        name = provider_of(getattr(target, "item", None) or {})
+        catalogs = getattr(self._window, "catalogs", None)
+        try:
+            entry = catalogs.provider(name) if catalogs is not None and name else None
+        except KeyError:
+            entry = None
+        if entry is not None and is_media_server(entry.get("type")):
+            return location, ()
+        return None
 
     # ---- what it reads from the window ------------------------------------------------------
     def _live(self) -> Any:

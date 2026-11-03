@@ -6,15 +6,18 @@ others' distributions, which may have malware.**
 
 ## AI captions
 
-- **Captions for live TV, made on your computer:** the Subtitles panel has a new row, AI
-  captions. Turn it on and QiTV writes what is said in the channel's own language, for anyone
-  who follows speech better by reading it. It understands 30 languages, among them English,
-  Turkish, German, Spanish, French, Italian, Portuguese, Dutch, Polish, Russian and Arabic.
-- **In step with the picture:** QiTV reads the channel a few seconds ahead of what it shows, so
-  each caption appears when its words are said, not after them. While captions are on, live TV
-  plays about 8 seconds behind the broadcast: QiTV slows the picture very slightly (3%) until it
-  has those seconds, so nothing stops or jumps. Turn captions off and it catches up the same
-  way, or press Go live.
+- **Captions for live TV and films, made on your computer:** the Subtitles panel has a new row,
+  AI captions. Turn it on and QiTV writes what is said in its own language, for anyone who
+  follows speech better by reading it: on live channels, and on films and episodes from your
+  Jellyfin or Emby server or from your disk (recordings too). A provider's films are not
+  covered yet: captions would need a second stream from the provider. It understands 30
+  languages, among them English, Turkish, German, Spanish, French, Italian, Portuguese, Dutch,
+  Polish, Russian and Arabic.
+- **In step with the picture:** QiTV reads a few seconds ahead of what it shows, so each
+  caption appears when its words are said, not after them. While captions are on, live TV plays
+  about 8 seconds behind the broadcast: QiTV slows the picture very slightly (3%) until it has
+  those seconds, so nothing stops or jumps. Turn captions off and it catches up the same way,
+  or press Go live. A film needs no delay: after a seek, captions start a few seconds later.
 - **One download, sized for your computer:** the first time, QiTV asks before downloading the
   speech model once: 0.9 GB on most computers, or a more accurate 2.4 GB one where the
   computer is fast enough (Settings → AI captions can choose either). Nothing of it ships with
