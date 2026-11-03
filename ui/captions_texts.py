@@ -28,6 +28,12 @@ STEP_DOWN_QUESTION = N_(
     "AI captions can't keep up on this computer. Download the faster speech model ({size}) "
     "and switch to it?"
 )
+# i18n: the question after the larger speech model's download failed (its source can go);
+# size: as "880 MB"
+FALLBACK_QUESTION = N_(
+    "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) "
+    "instead?"
+)
 # i18n: a toast: AI captions fell behind with the larger speech model and now use the faster one
 STEPPED_DOWN = N_("AI captions switched to the faster speech model to keep up")
 DOWNLOAD = N_("Download")  # i18n: the AI captions question's yes (verb)

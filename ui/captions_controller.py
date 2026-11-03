@@ -73,6 +73,7 @@ from ui.captions_texts import (  # noqa: E402  (the texts, with their translatio
     DOWNLOAD,
     DOWNLOAD_QUESTION,
     DOWNLOADING,
+    FALLBACK_QUESTION,
     FROM_AUDIO_TRACK,
     FROM_DEFAULT,
     FROM_MODEL,
@@ -547,7 +548,30 @@ class CaptionsController(QObject):
 
         if reason != CANCELLED:
             self._toast(reason, "error")  # already the whole sentence ("Download failed: …")
+            self._offer_faster()
         self.changed.emit()
+
+    def _offer_faster(self) -> None:
+        """Automatic's 1.7B didn't download (2.9.1: it comes from a community export, which can
+        go): the 0.6B instead, its question first, as QiTV's own (every phone hears it)."""
+        if self._fetching != "large" or self.model() != "auto" or self._enabled:
+            return
+        from services.captions import models
+
+        try:
+            missing = models.download_size("small")
+        except models.Unsupported:
+            return
+        if self._card is None:
+            return
+        self._asking = self._asking_step = True
+        self._tier = self._fetching = "small"
+        self._question = (
+            translate(FALLBACK_QUESTION, size=size_text(missing)),
+            translate(DOWNLOAD),
+            translate(NOT_NOW),
+        )
+        self._card.ask(*self._question)
 
     def _left(self, download: Any) -> bool:
         """A cancelled download ended: nothing of it shows, and one asked for meanwhile
