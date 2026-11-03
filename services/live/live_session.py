@@ -673,6 +673,9 @@ class LiveSession(QObject):
         # 2.7: the server part (the channel's own server window, before the buffer), whether
         # its helper said ready, and whether VLC plays it.
         self._part: Optional[ServerPart] = None
+        # 2.9: AI captions read ahead of the picture; while they are on, stay-live holds the
+        # picture at least this far behind the live edge (`set_caption_floor`).
+        self._caption_floor = 0.0
         self._part_ready = False
         self._in_part = False  # also while a new part is on its way to replace one VLC played
         self._part_playing = False  # VLC plays `_part` itself
@@ -1308,6 +1311,38 @@ class LiveSession(QObject):
         self._archive = ArchiveRoute(build, fallback)
         self._open_part(t)
         return True
+
+    def set_caption_floor(self, seconds: float) -> None:
+        """AI captions (2.9): hold the picture at least `seconds` behind the live edge while
+        they are on (0: off). Stay-live steers to the new target at once and gently (0.97x
+        to build it, 1.03x back once it is dropped); Go live stays the viewer's to press."""
+        seconds = max(0.0, float(seconds))
+        if abs(seconds - self._caption_floor) < 1e-6:
+            return
+        self._caption_floor = seconds
+        self._stay.retarget_now()
+
+    def caption_floor(self) -> float:
+        return self._caption_floor
+
+    def caption_source(self) -> Optional[tuple[str, int, float]]:
+        """Where AI captions read the stream (2.9): the helper's side URL from the segment that
+        holds the picture's position, that segment's seq and its start on the timeline. None
+        when no pipeline stream plays from the ring (a direct play, the channel's server
+        window or a provider archive, or nothing yet)."""
+        if self._phase is not _Phase.PIPELINE or self._sid is None:
+            return None
+        if self._part is not None or self._in_part or self._archive is not None:
+            return None
+        spans = self._engine.spans(self._sid)
+        if not spans:
+            return None
+        position = self.position()
+        span = next((s for s in reversed(spans) if s.start <= position), spans[0])
+        url = self._engine.stream_url(self._sid, span.seq, side=True)
+        if not url:
+            return None
+        return url, int(span.seq), float(span.start)
 
     def position(self) -> float:
         if self._phase is _Phase.PIPELINE:
@@ -3489,11 +3524,13 @@ class LiveSession(QObject):
 
     def _control_target(self) -> float:
         """The target stay-live steers to: as `_target`, for the source's burst as the lag
-        filter classifies it (a burst the helper measures for a moment and drops is none)."""
+        filter classifies it (a burst the helper measures for a moment and drops is none),
+        and never under the AI captions' floor while they are on (a tune still lands at the
+        latency's target; the floor is built while playing)."""
         burst = self._filter.burst
         if self._learned is not None:
-            return self._auto_target(burst)
-        return max(TARGETS[self._latency], burst)
+            return max(self._auto_target(burst), self._caption_floor)
+        return max(TARGETS[self._latency], burst, self._caption_floor)
 
     @staticmethod
     def _live_edge(snapshot: Mapping[str, Any]) -> float:

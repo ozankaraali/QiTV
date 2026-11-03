@@ -169,8 +169,9 @@ class FakeEngine(QObject):
     def snapshot(self, sid):
         return dict(self._snapshots.get(sid, {}))
 
-    def stream_url(self, sid, seq):
-        return f"http://127.0.0.1:9/token/{sid}/stream/{seq}.ts" if self.up else ""
+    def stream_url(self, sid, seq, side=False):
+        route = "side" if side else "stream"
+        return f"http://127.0.0.1:9/token/{sid}/{route}/{seq}.ts" if self.up else ""
 
     def buffer(
         self,
@@ -2329,6 +2330,38 @@ class StayLiveTests(LiveSessionCase):
         self.assertFalse(last["paused"])
         self.assertFalse(last["ended"])
         self.assertEqual(last["target"], 2.5)
+
+    def test_ai_captions_hold_the_picture_further_behind_at_once_and_let_it_go_after(self):
+        # 2.9: while captions are on, the picture is built back to the floor at 0.97x (not after
+        # 15 s outside the band); once they are off, it catches up at 1.03x.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(30.0)
+        before = len(self.playback.rates)
+        self.live.set_caption_floor(8.0)
+        feed.run(5.0)
+        self.assertEqual(self.playback.rates[before : before + 3], [0.99, 0.98, 0.97])
+        feed.run(300.0)
+        self.assertGreaterEqual(min(self.playback.rates), 0.97)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        before = len(self.playback.rates)
+        self.live.set_caption_floor(0.0)
+        feed.run(5.0)
+        self.assertEqual(self.playback.rates[before : before + 3], [1.01, 1.02, 1.03])
+        feed.run(300.0)
+        self.assertLess(self.timelines[-1]["lag"], 4.0)
+
+    def test_ai_captions_read_from_the_segment_that_holds_the_picture(self):
+        self.ready(segments(0, 4), live_edge=8.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        source = self.live.caption_source()
+        self.assertIsNotNone(source)
+        url, seq, start = source
+        position = self.live.position()
+        self.assertIn("/side/", url)
+        self.assertTrue(start <= position < start + 2.0, (start, position))
+        self.assertTrue(url.endswith(f"/{seq}.ts"))
 
     def test_a_lasting_lag_above_the_band_gets_one_gentle_nudge_then_settles(self):
         # 2.1: not within a tick (2.0 did, and flapped on a public HLS channel): after 15 s outside

@@ -221,6 +221,25 @@ class SteeringTests(unittest.TestCase):
         self.assertEqual(changes(rates), 2)
         self.assertAlmostEqual(lag, T, delta=0.1)
 
+    def test_a_target_moved_on_purpose_is_steered_to_at_once_and_gently(self):
+        # 2.9: AI captions hold the picture 8 s behind while they are on, and let it go after.
+        stay, clock = live(), Clock()
+        drive(stay, T + 2.0, 120.0, clock=clock)  # a nudge ran: the budget is spent
+        stay.target = T + 5.0
+        stay.retarget_now()
+        lag, rates = drive(stay, T, 5.0, clock=clock)
+        self.assertIn(0.97, rates)  # at once, not after _PERSIST_S, and not refused
+        lag, rates = drive(stay, lag, 240.0, clock=clock)
+        self.assertGreaterEqual(min(rates), 0.97)  # gently: never 0.95x for this
+        self.assertAlmostEqual(lag, T + 5.0, delta=0.3)
+        stay.target = T
+        stay.retarget_now()
+        lag, rates = drive(stay, lag, 5.0, clock=clock)
+        self.assertIn(1.03, rates)
+        lag, rates = drive(stay, lag, 240.0, clock=clock)
+        self.assertLessEqual(max(rates), 1.03)
+        self.assertAlmostEqual(lag, T, delta=0.3)
+
     def test_a_far_lag_is_not_held_back_by_the_budget(self):
         stay, clock = live(), Clock()
         drive(stay, T + 2.0, 120.0, clock=clock)  # the budget is spent
