@@ -31,6 +31,13 @@ from services.i18n import N_, tr, tr_n, translate
 # --- the catalog's fixed failure messages (services.catalog re-exports them) -----------------
 # English, as the catalog compares them: `translate` (or `shown_message`) shows them.
 UNREACHABLE_MESSAGE = N_("Couldn't reach the provider")
+# 2.9.1: the provider's name didn't resolve (an internet provider may block it by name)
+NO_ADDRESS_MESSAGE = N_("Couldn't find the provider's address")
+# i18n: the same, while Settings → General → Secure DNS is off: what may help
+NO_ADDRESS_TRY_DNS_MESSAGE = N_(
+    "Couldn't find the provider's address. If your internet provider blocks it, turn on "
+    "Settings → General → Secure DNS."
+)
 LOGIN_REFUSED_MESSAGE = N_("The provider refused the login")
 TOO_SLOW_MESSAGE = N_("The provider took too long to answer")
 UNEXPECTED_ANSWER_MESSAGE = N_("The provider sent an unexpected answer")

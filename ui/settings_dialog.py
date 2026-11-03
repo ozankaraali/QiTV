@@ -586,6 +586,20 @@ class OptionsDialog(QDialog):
         self.hardware_decoding_checkbox.setChecked(self.config_manager.hardware_decoding)
         self.settings_layout.addRow(self.hardware_decoding_checkbox)
 
+        # 2.9.1: the providers' names looked up over HTTPS (services.secure_dns).
+        # i18n: a setting (General): DNS over HTTPS; keep "DNS"
+        self.secure_dns_checkbox = QCheckBox(tr("Secure DNS"), self.settings_tab)
+        self.secure_dns_checkbox.setToolTip(
+            tr(
+                "If your internet provider blocks your IPTV provider's address, QiTV can look it"
+                " up over HTTPS instead, with Cloudflare's or Google's resolver: the names of"
+                " the providers you use are sent to them. Channels VLC plays directly, without"
+                " time-shift, still use your computer's DNS."
+            )
+        )
+        self.secure_dns_checkbox.setChecked(self.config_manager.secure_dns)
+        self.settings_layout.addRow(self.secure_dns_checkbox)
+
         # 2.8: Jellyfin and Emby servers: which version of a title plays, and when the server
         # converts it (never, by default: the file plays as it is).
         self.media_4k_combo = QComboBox(self.settings_tab)
@@ -1764,6 +1778,7 @@ class OptionsDialog(QDialog):
         self.config_manager.ssl_verify = self.ssl_verify_checkbox.isChecked()
         self.config_manager.live_latency = self.live_latency_combo.currentData()
         self.config_manager.hardware_decoding = self.hardware_decoding_checkbox.isChecked()
+        self.config_manager.secure_dns = self.secure_dns_checkbox.isChecked()
         self.config_manager.media_4k_versions = self.media_4k_combo.currentData() or "screen"
         self.config_manager.tmdb_details = self.tmdb_checkbox.isChecked()
         self.config_manager.tmdb_token = "".join(self.tmdb_token_input.text().split())

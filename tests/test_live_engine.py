@@ -896,9 +896,18 @@ class HelperArgsTests(unittest.TestCase):  # 2.8.2: the detailed log reaches the
         from services.live import engine as engine_module
 
         self.addCleanup(log_file.set_detailed, False)
-        self.assertEqual(engine_module._helper_args("c", Path("/r")), ("c", "/r", False))
+        self.assertEqual(engine_module._helper_args("c", Path("/r"))[:3], ("c", "/r", False))
         log_file.set_detailed(True)
-        self.assertEqual(engine_module._helper_args("c", Path("/r")), ("c", "/r", True))
+        self.assertEqual(engine_module._helper_args("c", Path("/r"))[:3], ("c", "/r", True))
+
+    def test_the_helper_starts_with_secure_dns_as_qitv_has_it(self):  # 2.9.1
+        from services import secure_dns
+        from services.live import engine as engine_module
+
+        self.addCleanup(secure_dns.enable, False)
+        self.assertFalse(engine_module._helper_args("c", Path("/r"))[3])
+        secure_dns.enable(True)
+        self.assertTrue(engine_module._helper_args("c", Path("/r"))[3])
 
 
 class FailureReasonTests(unittest.TestCase):

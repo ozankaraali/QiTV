@@ -441,6 +441,9 @@ class ConfigManager:
     hardware_decoding = _config_property(
         "hardware_decoding", DEFAULT_OPTION_HARDWARE_DECODING, coerce=lambda value: value is True
     )
+    # 2.9.1, optional (older builds ignore it): the providers' names looked up over HTTPS
+    # (services.secure_dns); off by default.
+    secure_dns = _config_property("secure_dns", False, coerce=lambda value: value is True)
     timeshift_max_mib = _config_property(
         "timeshift_max_mib", DEFAULT_OPTION_TIMESHIFT_MAX_MIB, coerce=int, clamp=(256, 16384)
     )

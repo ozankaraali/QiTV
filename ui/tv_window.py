@@ -72,6 +72,7 @@ from services.catchup_memory import FILE_NAME as CATCHUP_FILE, CatchupMemory
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.find import Preferences, preferences_for
+from services import secure_dns
 from services.hidden_groups import HiddenGroups
 from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
@@ -345,6 +346,8 @@ class TVWindow(QMainWindow):
         self.app = app
         # OptionsDialog reads these from its parent.
         self.config_manager = config_manager
+        # 2.9.1: before the first provider request and the time-shift helper's start.
+        secure_dns.enable(config_manager.secure_dns)
         self.provider_manager = provider_manager
         self.image_manager = image_manager
         self.epg_manager = epg_manager
@@ -1917,6 +1920,9 @@ class TVWindow(QMainWindow):
             self.engine.set_disk_amount(mib * 1024 * 1024)
         if self.engine is not None:  # 2.8.2: the running helper's detail follows at once
             self.engine.set_detailed_log(self.config_manager.detailed_log)
+        secure_dns.enable(self.config_manager.secure_dns)  # 2.9.1: at once, here ...
+        if self.engine is not None:
+            self.engine.set_secure_dns(self.config_manager.secure_dns)  # ... and in the helper
         self.remote.apply_config()
 
     def set_provider(self, force_update: bool = False) -> None:

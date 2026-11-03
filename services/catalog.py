@@ -25,6 +25,8 @@ from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as
     EXPIRED_MESSAGE,
     FORBIDDEN_MESSAGE,
     LOGIN_REFUSED_MESSAGE,
+    NO_ADDRESS_MESSAGE,
+    NO_ADDRESS_TRY_DNS_MESSAGE,
     NOT_FOUND_MESSAGE,
     PROXY_MESSAGE,
     SIGN_IN_AGAIN_MESSAGE,
@@ -87,6 +89,8 @@ _SAFE_MESSAGES = frozenset(
         FAILED_MESSAGE,
         NO_RESULT_MESSAGE,
         UNREACHABLE_MESSAGE,
+        NO_ADDRESS_MESSAGE,
+        NO_ADDRESS_TRY_DNS_MESSAGE,
         LOGIN_REFUSED_MESSAGE,
         TOO_SLOW_MESSAGE,
         UNEXPECTED_ANSWER_MESSAGE,
@@ -109,6 +113,12 @@ _STATUS = re.compile(
 )
 _LOGIN_REFUSED = re.compile(r"unauthori[sz]ed", re.IGNORECASE)
 _FORBIDDEN = re.compile(r"forbidden", re.IGNORECASE)
+# 2.9.1: the name didn't resolve (before _UNREACHABLE, which names it too).
+_NO_ADDRESS = re.compile(
+    r"failed to resolve|name or service not known|nodename nor servname|getaddrinfo failed"
+    r"|name resolution|no address associated|nameresolutionerror",
+    re.IGNORECASE,
+)
 _UNREACHABLE = re.compile(
     r"max retries exceeded|failed to establish|connection (?:refused|reset|aborted|error)"
     r"|connectionerror|failed to resolve|name or service not known|nodename nor servname"
@@ -152,6 +162,10 @@ def friendly_error(message: object) -> str:
         friendly = str(status_message(status))  # 403, 404, 407, a block (451, 456, 458)
     elif _FORBIDDEN.search(text):
         friendly = FORBIDDEN_MESSAGE
+    elif _NO_ADDRESS.search(text):
+        from services import secure_dns
+
+        friendly = NO_ADDRESS_MESSAGE if secure_dns.enabled() else NO_ADDRESS_TRY_DNS_MESSAGE
     elif _UNREACHABLE.search(text):
         friendly = UNREACHABLE_MESSAGE
     else:
