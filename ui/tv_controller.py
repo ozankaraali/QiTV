@@ -203,6 +203,7 @@ class Overlays:
     cast_notice: Any = None  # 2.8: "Playing on <device>", with Stop casting
     quality_panel: Any = None  # 2.8: the ⚙ quality menu's panel above its button
     quality_question: Any = None  # 2.8: its own QuestionCard (convert on the server?)
+    captions: Any = None  # 2.9: the AI captions over the picture (a CaptionsOverlay)
 
 
 class TVController(QObject):
@@ -443,6 +444,8 @@ class TVController(QObject):
             pick_file=pick_subtitle_file,
             config=config,
             online=self._online,
+            # 2.9: AI captions' rows, once the window has its CaptionsController.
+            captions=lambda: getattr(window_actions, "captions", None),
             transport=overlays.transport,
             session=lambda: self.session,
             current=lambda: self._current,

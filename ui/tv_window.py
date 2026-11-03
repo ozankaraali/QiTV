@@ -124,6 +124,7 @@ from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
 from ui.overlay_host import OverlayHost
 from ui.overlays.back_notice import BackNotice
+from ui.overlays.captions import CaptionsOverlay
 from ui.overlays.cast_notice import CastNotice
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.corner_controls import CornerControls
@@ -553,6 +554,7 @@ class TVWindow(QMainWindow):
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
         self.corner_controls = CornerControls(host)
+        self.captions_overlay = CaptionsOverlay(host)  # 2.9: AI captions over the picture
         # 2.8: the recordings scheduled from the guide (a small file beside the config).
         self.recording_schedule = Schedule(
             os.path.join(config_manager.get_config_dir(), SCHEDULE_FILE)
@@ -598,6 +600,7 @@ class TVWindow(QMainWindow):
             pairing=self.pair_overlay,
             library_toast=self.library_toast,
             layout_row=self.layout_row,
+            captions=self.captions_overlay,
         )
         # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
         self.rec_sign.cover_with(self.overlays.drawer, self.overlays.guide, self.grid_tiles)
@@ -608,14 +611,17 @@ class TVWindow(QMainWindow):
         # PiP the transport keeps only its own buttons and bar, and other clicks reach the
         # small picture (OverlayHost.set_hole). The multiview's tiles are drawn under all of
         # them, and take their clicks over the transport but for its buttons and bar
-        # (GridTiles.hits). The mixer shows over them (it sits above the transport's controls
-        # and beside the PiP), and the Sound, Subtitles and Picture panels and the multiview's
-        # layouts over it (above their buttons). The statistics sit over the transport, under
-        # its title row (they take no click). The drawer and the guide cover them all; the
-        # OpenSubtitles search covers the player with its backdrop, under the corner player's
-        # controls, the sleep timer's last minute, Resume and the question (2.6) and the toast.
+        # (GridTiles.hits); AI captions just above the tiles, under everything else (they sit
+        # above the player controls while those show, and take no click). The mixer shows over
+        # them (it sits above the transport's controls and beside the PiP), and the Sound,
+        # Subtitles and Picture panels and the multiview's layouts over it (above their
+        # buttons). The statistics sit over the transport, under its title row (they take no
+        # click). The drawer and the guide cover them all; the OpenSubtitles search covers the
+        # player with its backdrop, under the corner player's controls, the sleep timer's last
+        # minute, Resume and the question (2.6) and the toast.
         for overlay in (
             self.grid_tiles,
+            self.captions_overlay,
             self.overlays.banner,
             self.overlays.column,
             self.overlays.transport,
@@ -645,6 +651,7 @@ class TVWindow(QMainWindow):
             self.overlays.toast,
         ):
             host.add_overlay(overlay)
+        self.captions_overlay.follow(self.overlays.transport)
         # After the window's surface filters: the frame takes the small surface's left button
         # before the window (its mini-player drag) and the surface (the drawer) see it.
         self.pip_frame = PipFrame(self.player_page, self.surface, self.pip_surface, config_manager)

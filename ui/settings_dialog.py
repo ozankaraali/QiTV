@@ -1,4 +1,5 @@
 from copy import deepcopy
+import importlib
 import logging
 import os
 import sys
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 import orjson as json
+from shiboken6 import isValid
 
 from services import (
     failure_reasons as reasons,
@@ -45,6 +47,7 @@ from services import (
     system_open,
 )
 from services.account_check import check_account
+from services.captions.languages import QWEN_LANGUAGES, own_name
 from services.config_manager import ConfigManager
 from services.epg_view import (
     GUIDE_OFFSET_KEY,
@@ -53,6 +56,7 @@ from services.epg_view import (
     guide_offset_minutes,
 )
 from services.i18n import N_, tr, tr_n, translate
+from services.jobs import JobRunner
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
 from services.opensubtitles import ANONYMOUS_DAILY, CONSUMERS_URL, built_in_key
@@ -68,11 +72,13 @@ from services.provider_types import EMBY, JELLYFIN, is_media_server
 from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
 from services.tmdb import built_in_token as tmdb_built_in_token
+from ui.captions_texts import size_text
 from ui.free_channels_menu import show_menu as show_free_channels_menu
 from ui.parental_settings import build_parental_tab, pin_allows
 from ui.provider_drop import unique_name
 from ui.remote_settings import build_remote_tab, save_remote_settings
 from ui.theme import PALETTE, accent_button_style
+from ui.track_controls import AI_CAPTIONS_TEXT, auto_language_text
 from ui.update_dialogs import check_for_updates
 
 
@@ -182,6 +188,38 @@ requests = lazy_module("requests")
 
 # Jobs outlive a closed dialog; a running QThread must never be owned by that dialog.
 _verification_jobs: list[tuple[QThread, QObject]] = []
+
+
+class CaptionsFilesJob(QObject):
+    """AI captions' downloaded files, off the GUI thread: their size on disk, after deleting
+    them with `delete`. None: this build has no AI captions' files to tell of."""
+
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, delete: bool = False) -> None:
+        super().__init__()
+        self._delete = delete
+
+    def run(self) -> None:
+        try:
+            models = importlib.import_module("services.captions.models")
+        except ImportError:
+            self.finished.emit(None)
+            return
+        if self._delete:
+            models.delete_all()
+        self.finished.emit(int(models.space_used()))
+
+
+def captions_space_text(size) -> str:
+    """Settings' line on AI captions' downloaded files (""; nothing to tell)."""
+    if size is None:
+        return ""
+    if size <= 0:
+        return tr("Nothing downloaded")  # i18n: Settings → AI captions: no speech model yet
+    # i18n: Settings → AI captions: the space the speech model takes; size: as "880 MB"
+    return tr("Downloaded: {size}", size=size_text(size))
 
 
 class ProviderVerificationWorker(QObject):
@@ -679,10 +717,17 @@ class OptionsDialog(QDialog):
         self.settings_layout.addRow(self.auto_play_movies_checkbox)
 
     def create_subtitles_ui(self):
-        """OpenSubtitles: the API key and an optional sign-in, masked (never logged)."""
-        tab = QWidget(self)
+        """OpenSubtitles: the API key and an optional sign-in, masked (never logged); then AI
+        captions (2.9). The page scrolls when the window is shorter than it."""
+        scroll = QScrollArea(self)
+        scroll.setObjectName("subtitlesScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        tab = QWidget(scroll)
         tab.setObjectName("subtitlesSettings")
-        self.options_tab.addTab(tab, tr("Subtitles"))  # i18n: a tab of the Settings window
+        scroll.setWidget(tab)
+        self.options_tab.addTab(scroll, tr("Subtitles"))  # i18n: a tab of the Settings window
         layout = QFormLayout(tab)
         intro = QLabel(opensubtitles_hint(), tab)
         intro.setWordWrap(True)
@@ -717,6 +762,127 @@ class OptionsDialog(QDialog):
         self.opensubtitles_sign_out_button = QPushButton(tr("Sign out"), tab)
         self.opensubtitles_sign_out_button.clicked.connect(self.sign_out_of_opensubtitles)
         layout.addRow(self.opensubtitles_sign_out_button)
+        layout.addRow(self._captions_group(tab))
+
+    def _captions_group(self, tab: QWidget) -> QGroupBox:
+        """AI captions (2.9): the speech model's tier, the language they hear when nothing
+        names it (both kept at Save), and the space their downloads take, with Delete (at once,
+        asked first)."""
+        group = QGroupBox(translate(AI_CAPTIONS_TEXT), tab)
+        group.setObjectName("aiCaptionsSettings")
+        form = QFormLayout(group)
+        intro = QLabel(
+            tr(
+                "AI captions write down what is said, in the language spoken. A speech model"
+                " makes them on this computer: the sound never leaves it. Turn them on in the"
+                " Subtitles panel; the first time downloads the speech model."
+            ),
+            group,
+        )
+        intro.setWordWrap(True)
+        form.addRow(intro)
+        self.ai_captions_model_combo = QComboBox(group)
+        self.ai_captions_model_combo.setObjectName("aiCaptionsModel")
+        for text, value in (
+            # i18n: Settings → AI captions → Speech model: QiTV picks it by this computer's speed
+            (tr("Automatic", ctx="a speech model"), "auto"),
+            # i18n: Settings → AI captions → Speech model: the smaller one; keep "0.6B"
+            (tr("Faster (0.6B)"), "small"),
+            # i18n: Settings → AI captions → Speech model: the larger one; keep "1.7B"
+            (tr("More accurate (1.7B)"), "large"),
+        ):
+            self.ai_captions_model_combo.addItem(text, value)
+        self.ai_captions_model_combo.setCurrentIndex(
+            max(0, self.ai_captions_model_combo.findData(self.config_manager.ai_captions_model))
+        )
+        form.addRow(tr("Speech model"), self.ai_captions_model_combo)  # i18n: a setting
+        model_note = QLabel(tr("Automatic takes the more accurate one on a fast computer."), group)
+        model_note.setWordWrap(True)
+        form.addRow(model_note)
+        self.ai_captions_language_combo = QComboBox(group)
+        self.ai_captions_language_combo.setObjectName("aiCaptionsLanguage")
+        self.ai_captions_language_combo.addItem(auto_language_text(), "auto")
+        for name in sorted(QWEN_LANGUAGES, key=lambda name: own_name(name).casefold()):
+            self.ai_captions_language_combo.addItem(own_name(name), name)
+        self.ai_captions_language_combo.setCurrentIndex(
+            max(
+                0,
+                self.ai_captions_language_combo.findData(self.config_manager.ai_captions_language),
+            )
+        )
+        # i18n: a setting: the language AI captions hear when nothing names it
+        form.addRow(tr("Default language"), self.ai_captions_language_combo)
+        language_note = QLabel(
+            tr(
+                "Used when the audio track names no language. The Subtitles panel's Language"
+                " row picks one for a single channel."
+            ),
+            group,
+        )
+        language_note.setWordWrap(True)
+        form.addRow(language_note)
+        files = QHBoxLayout()
+        self.ai_captions_space = QLabel("", group)
+        self.ai_captions_space.setObjectName("aiCaptionsSpace")
+        files.addWidget(self.ai_captions_space)
+        files.addStretch()
+        # i18n: a button: delete AI captions' speech model from this computer
+        self.ai_captions_delete_button = QPushButton(tr("Delete downloaded files"), group)
+        self.ai_captions_delete_button.setObjectName("aiCaptionsDelete")
+        self.ai_captions_delete_button.setAutoDefault(False)
+        self.ai_captions_delete_button.setEnabled(False)  # until their size is known
+        self.ai_captions_delete_button.clicked.connect(self.delete_captions_files)
+        files.addWidget(self.ai_captions_delete_button)
+        form.addRow(files)
+        # The window's runner outlives this window: a measure on its way ends after a close.
+        jobs = getattr(self.parent(), "jobs", None)
+        self._captions_jobs = jobs if isinstance(jobs, JobRunner) else JobRunner(self)
+        self._captions_size = None
+        self._measure_captions_files()
+        return group
+
+    def _measure_captions_files(self, delete: bool = False) -> None:
+        """Their size (after deleting them), on a worker; the line and Delete follow."""
+        self.ai_captions_delete_button.setEnabled(False)
+        self._captions_jobs.run_worker(
+            CaptionsFilesJob(delete), self._captions_measured, self._captions_unmeasured
+        )
+
+    def _captions_measured(self, _context, size) -> None:
+        if not isValid(self.ai_captions_space):
+            return  # Settings closed meanwhile
+        self._captions_size = size
+        self.ai_captions_space.setText(captions_space_text(size))
+        self.ai_captions_delete_button.setEnabled(bool(size))
+        self.ai_captions_delete_button.setVisible(size is not None)
+
+    def _captions_unmeasured(self, _context, message) -> None:
+        logging.getLogger(__name__).warning("AI captions' files: %s", message)
+        self._captions_measured(None, None)
+
+    def delete_captions_files(self) -> None:
+        """Delete: asked first; AI captions playing now stop."""
+        size = self._captions_size
+        if not size:
+            return
+        answer = QMessageBox.question(
+            self,
+            translate(AI_CAPTIONS_TEXT),
+            # i18n: asked before Delete; size: as "880 MB"
+            tr(
+                "Delete AI captions' speech model ({size})? Turning AI captions on downloads it"
+                " again.",
+                size=size_text(size),
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        captions = getattr(self.parent(), "captions", None)
+        if captions is not None and captions.enabled():
+            captions.toggle()  # off: their files go next
+        self._measure_captions_files(delete=True)
 
     def sign_out_of_opensubtitles(self):
         """Sign out: the username and password go (saved with Save, which ends the sign-in)."""
@@ -1617,6 +1783,8 @@ class OptionsDialog(QDialog):
             self.opensubtitles_username_input.text().strip()
         )
         self.config_manager.opensubtitles_password = self.opensubtitles_password_input.text()
+        self.config_manager.ai_captions_model = self.ai_captions_model_combo.currentData()
+        self.config_manager.ai_captions_language = self.ai_captions_language_combo.currentData()
 
         # The combos' data: the values as the config has always had them ("STB", "Hours").
         epg_source = self.epg_source_combo.currentData()

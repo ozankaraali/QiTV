@@ -188,10 +188,10 @@ class SoundPanelTests(PanelCase):
         self.assertEqual(self.shown()[0], ["English", "*Deutsch"])
         self.assertTrue(self.panel.isVisible())
 
-    def test_one_track_is_no_choice(self):
+    def test_one_track_still_says_what_it_is(self):  # 2.9: its language, ticked
         self.player.audio = [(-1, "Disable"), (1, "English")]
         self.click_button("audio")
-        self.assertEqual(self.shown(), ([], "In sync"))
+        self.assertEqual(self.shown(), (["*English"], "In sync"))
 
     def test_minus_and_plus_nudge_the_sound_and_reset_brings_it_back(self):
         self.click_button("audio")

@@ -11,6 +11,7 @@ import tomllib
 import orjson as json
 
 from services.atomic_write import atomic_write, set_aside
+from services.captions.languages import QWEN_LANGUAGES
 from services.config_writer import ConfigWriter
 from services.free_channels import ALL_NAME, ALL_URL
 from services.multikeydict import MultiKeyDict
@@ -164,6 +165,7 @@ class ConfigManager:
     DEFAULT_OPTION_VOLUME = 100  # the large picture's level: libVLC's default
     DEFAULT_OPTION_DEINTERLACE = "auto"  # 2.3: libVLC's own; "on" or "off" (the Picture panel)
     DEINTERLACE_CHOICES = ("auto", "on", "off")
+    AI_CAPTIONS_MODELS = ("auto", "small", "large")  # 2.9: AI captions' speech model tier
     # 2.2, the multiview: a tile's time-shift buffer while it has no focus (an optional key,
     # never written by default). 48 MiB holds one keyframe interval of a 4K channel.
     DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB = 64
@@ -530,6 +532,16 @@ class ConfigManager:
     # never logged.
     tmdb_details = _config_property("tmdb_details", True, coerce=lambda value: value is not False)
     tmdb_token = _config_property("tmdb_token", "", coerce=str)
+    # 2.9, optional (older builds ignore them): AI captions. The speech model's tier ("auto":
+    # chosen by the computer's speed; "small": faster, 0.6B; "large": more accurate, 1.7B), and
+    # the language they hear when nothing names it ("auto": the speech model's own guess, else
+    # one of services.captions.languages.QWEN_LANGUAGES, Qwen's English names).
+    ai_captions_model = _config_property(
+        "ai_captions_model", "auto", coerce=_one_of(AI_CAPTIONS_MODELS, "auto")
+    )
+    ai_captions_language = _config_property(
+        "ai_captions_language", "auto", coerce=_one_of(("auto", *QWEN_LANGUAGES), "auto")
+    )
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 

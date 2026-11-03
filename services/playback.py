@@ -64,6 +64,7 @@ that froze before).
 from __future__ import annotations
 
 import ctypes
+from dataclasses import dataclass
 from enum import Enum
 import logging
 import os
@@ -131,6 +132,21 @@ class PlaybackState(str, Enum):
 _PLAYS_HERE = frozenset(
     {PlaybackState.OPENING, PlaybackState.BUFFERING, PlaybackState.PLAYING, PlaybackState.PAUSED}
 )
+
+
+@dataclass(frozen=True)
+class AudioTrackInfo:
+    """What a media says of one of its audio tracks (`audio_track_info`), in the order
+    audio_tracks() lists them.
+
+    Its id is the one libVLC's media gives it, which for some streams is not the player's: an
+    MPEG-TS stream's are 1, 2 … where audio_tracks() has the PIDs (257, 258; measured with
+    3.0.20). Where the ids differ, the tracks pair in order."""
+
+    id: int
+    language_code: str  # as the stream names it ("tur", "en", "pt-BR"); "": not given
+    codec: str  # libVLC's four-character code ("mp4a", "a52 "); "": unknown
+    channels: int  # 0: not known (libVLC knows it once the track decodes)
 
 
 def _language(name: str) -> str:
@@ -755,6 +771,19 @@ class PlaybackSession(QObject):
             return []
         descriptions = self._player.audio_get_track_description() or []
         return [(int(i), self._decode(n)) for i, n in descriptions]
+
+    def audio_track_info(self) -> list[AudioTrackInfo]:
+        """What the media playing says of its audio tracks: each one's language, codec and
+        channels, as libVLC has read them so far ([] when nothing plays)."""
+        if vlc is None or not self._player_free() or not self._has_input:
+            return []
+        media = self._player.get_media()
+        if media is None:
+            return []
+        try:
+            return _audio_info(media)
+        finally:
+            media.release()
 
     def set_audio_track(self, track_id: int) -> None:
         """Play audio track `track_id`, and the same one in each media opened after it."""
@@ -1394,6 +1423,8 @@ class Session(Protocol):
 
     def audio_tracks(self) -> list[tuple[int, str]]: ...
 
+    def audio_track_info(self) -> list[AudioTrackInfo]: ...
+
     def set_audio_track(self, track_id: int) -> None: ...
 
     def audio_track(self) -> int: ...
@@ -1541,6 +1572,9 @@ class NullSession(QObject):
     def audio_tracks(self) -> list[tuple[int, str]]:
         return []
 
+    def audio_track_info(self) -> list[AudioTrackInfo]:
+        return []
+
     def set_audio_track(self, track_id: int) -> None:
         pass
 
@@ -1626,6 +1660,51 @@ def _track_stats(media: Any) -> dict[str, Any]:
                 if details.value:
                     audio = ctypes.cast(details, ctypes.POINTER(vlc.AudioTrack)).contents
                     found["audio_rate"] = int(audio.rate)
+    finally:
+        vlc.libvlc_media_tracks_release(
+            ctypes.cast(tracks, ctypes.POINTER(ctypes.POINTER(vlc.MediaTrack))), count
+        )
+    return found
+
+
+class _Track(ctypes.Structure):
+    """libVLC 3's libvlc_media_track_t as C lays it out: python-vlc's MediaTrack makes its union
+    three pointers, which moves the bitrate, the language and the description after it."""
+
+    _fields_ = (
+        ("codec", ctypes.c_uint32),
+        ("original_fourcc", ctypes.c_uint32),
+        ("id", ctypes.c_int),
+        ("type", ctypes.c_int),
+        ("profile", ctypes.c_int),
+        ("level", ctypes.c_int),
+        ("details", ctypes.c_void_p),  # the union: the audio, video or subtitle struct
+        ("bitrate", ctypes.c_uint),
+        ("language", ctypes.c_char_p),
+        ("description", ctypes.c_char_p),
+    )
+
+
+def _audio_info(media: Any) -> list[AudioTrackInfo]:
+    """Each audio track's id, language, codec and channels, from libVLC's track list."""
+    tracks = ctypes.POINTER(vlc.MediaTrack)()
+    count = int(vlc.libvlc_media_tracks_get(media, ctypes.byref(tracks)) or 0)
+    if count <= 0:
+        return []
+    found: list[AudioTrackInfo] = []
+    try:
+        array = ctypes.cast(tracks, ctypes.POINTER(ctypes.POINTER(_Track) * count))
+        for pointer in array.contents:
+            track = pointer.contents
+            if track.type != vlc.TrackType.audio.value:
+                continue
+            codec = int(track.codec).to_bytes(4, "little").decode("latin-1") if track.codec else ""
+            channels = 0
+            if track.details:
+                audio = ctypes.cast(track.details, ctypes.POINTER(vlc.AudioTrack)).contents
+                channels = int(audio.channels)
+            language = (track.language or b"").decode("utf-8", "replace").strip()
+            found.append(AudioTrackInfo(int(track.id), language, codec, channels))
     finally:
         vlc.libvlc_media_tracks_release(
             ctypes.cast(tracks, ctypes.POINTER(ctypes.POINTER(vlc.MediaTrack))), count
