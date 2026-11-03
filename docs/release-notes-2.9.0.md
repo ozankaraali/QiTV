@@ -33,5 +33,13 @@ others' distributions, which may have malware.**
 
 ## Sound
 
+- **A channel whose sound is stamped with a clock that runs slow plays its sound again:** one
+  provider's channel stamped its sound 2% slower than it plays, and after a few hours the
+  stamps sat minutes behind the picture. VLC then lost the sound in a long play, and after a
+  pause or Go live it played either the sound with a frozen picture or the picture without
+  sound. QiTV now notices such a sound (its stamps against its own length, and against the
+  picture's) and stamps it again from its length, in step with the picture; any other channel
+  passes as it comes.
+
 - **The Sound panel names each audio track's language** ("Türkçe", "English"…), with its
   format when two would read alike, and says so when a channel doesn't name it.
