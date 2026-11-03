@@ -339,6 +339,7 @@ _EDGE_S = 1.0  # VLC this close to the live edge is at it (a starvation, and its
 # is stay-live's to steer), and plays on once this close to it.
 _CAPTION_SHORT_S = 1.0
 _CAPTION_REACHED_S = 0.1
+_CAPTION_BACK_S = 3.0  # time-shifted this near their floor when they come on: live again
 # 2.7: a channel's own server window (a long HLS playlist) is offered past the buffer when it
 # keeps at least this much more (the bar then shows all of it); a part played without one (a
 # provider archive's) has the bar reach this far past where it plays (as catch-up's).
@@ -1323,23 +1324,31 @@ class LiveSession(QObject):
         self._open_part(t)
         return True
 
-    def set_caption_floor(self, seconds: float) -> None:
+    def set_caption_floor(self, seconds: float, *, shift: bool = True) -> None:
         """AI captions (2.9): hold the picture at least `seconds` behind the live edge while
         they are on (0: off). Raised, the picture waits once where it is ("Starting
         captions…") until it is that far behind, then plays on at 1x (`_caption_wait`);
-        stay-live steers to it from there. Dropped, it stays where it is, time-shifted as
-        after a pause, the bar and Go live showing: nothing catches up by itself."""
+        stay-live steers to it from there; time-shifted about there already (captions turned
+        off and on again), it is live again there. Dropped, it stays where it is, time-shifted
+        as after a pause, the bar and Go live showing: nothing catches up by itself; without
+        `shift` (a picture no longer large) stay-live steers it back."""
         seconds = max(0.0, float(seconds))
         if abs(seconds - self._caption_floor) < 1e-6:
             return
         raised = seconds > self._caption_floor
         self._caption_floor = seconds
+        playing = self._phase is _Phase.PIPELINE and not self._paused
         if raised:
             self._caption_armed = True
+            if playing and self._stay.mode is Mode.SHIFTED and self._part is None:
+                lag = self._mean_lag(self._snapshot(), self._advance())
+                if lag <= seconds + _CAPTION_BACK_S:
+                    self._stay.user_go_live(keep_landing=True)  # live again, where it is
+                    self._emit_timeline()
             return
         self._caption_armed = False
         self._release_caption_wait()
-        if self._phase is not _Phase.PIPELINE or self._paused or self._stay.mode is not Mode.LIVE:
+        if not shift or not playing or self._stay.mode is not Mode.LIVE:
             return
         snapshot = self._snapshot()
         lag = self._mean_lag(snapshot, self._advance())
@@ -1383,6 +1392,7 @@ class LiveSession(QObject):
         _LOG.info("AI captions: waiting %.1f s behind live until %.1f s.", lag, self._caption_floor)
         self._caption_held = self._clock()
         self._land_check = None  # a wait is no landing's error
+        self._ask_junction(0.0)  # a restart meanwhile takes nothing of what the wait builds
         self._set_rate(1.0)
         self._playback.hold(True)
         return True
@@ -3874,6 +3884,8 @@ class LiveSession(QObject):
         self._retry = None
         self._land_check = None  # a landing still measured is no longer playing
         self._held = None  # a new play is not held
+        if self._caption_held is not None:
+            self._caption_armed = True  # it waits again once the new play plays
         self._caption_held = None  # (PlaybackSession.play opens it unheld)
         self._opening = True
         try:

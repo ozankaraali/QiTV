@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import bisect
 import logging
-import os
 import time
 from typing import Any, Optional
 
@@ -114,6 +113,7 @@ class CaptionsController(QObject):
         self._slow_since: Optional[float] = None
         self._last: Optional[tuple[float, float]] = None  # (position, monotonic) last tick
         self._was_waiting = False  # the live picture waited for the captions' distance
+        self._floored: Any = None  # the live session holding the captions' distance
         self._shown = ""
         self._language: tuple[str, str] = ("", FROM_MODEL)  # (qwen name or "", source)
         self._detected: dict[str, str] = {}  # channel: the language the model's pieces agreed on
@@ -368,14 +368,14 @@ class CaptionsController(QObject):
         self._enabled = True
         self._cues.clear()
         self._resolve_language()
-        live = self._live()
-        if live is not None and self._is_live():
-            live.set_caption_floor(LEAD_S.get(tier, 8.0))
+        self._hold_floor()
         self._route_film()  # a provider's film: through the film relay while the model loads
         if not self._process.running():
             paths = models.model_paths(tier)
             runtime = models.runtime_dir()
-            threads = max(2, min(6, (os.cpu_count() or 4) // 2))
+            from services.captions.tier import model_threads
+
+            threads = model_threads()
             self._loading, self._ready = True, False
             self._process.start(
                 {
@@ -407,9 +407,7 @@ class CaptionsController(QObject):
         self._newest = None
         self._slow_since = None
         self._routed = ""  # a film relay stays until its title ends; on again, asked again
-        live = self._live()
-        if live is not None:
-            live.set_caption_floor(0.0)
+        self._drop_floor()
         self._show("")
         self.changed.emit()
 
@@ -430,9 +428,7 @@ class CaptionsController(QObject):
             self._enabled = False
             self._routed = ""
             self._timer.stop()
-            live = self._live()
-            if live is not None:
-                live.set_caption_floor(0.0)
+            self._drop_floor()
             self._show("")
             self._toast(translate(COULDNT_START), "error")
         self.changed.emit()
@@ -530,6 +526,8 @@ class CaptionsController(QObject):
     def _tick(self) -> None:
         if not self._enabled:
             return
+        if self._is_live() and self._live() is not self._floored:
+            self._hold_floor()  # a swap or the multiview's focus: the large picture's own
         key = self._source()
         if key is None:
             self._route_film()  # a provider's film started without one (once per title)
@@ -709,7 +707,28 @@ class CaptionsController(QObject):
 
     # ---- what it reads from the window ------------------------------------------------------
     def _live(self) -> Any:
-        return getattr(self._window, "live_session", None)
+        """The large picture's live session (after a swap or in the multiview, not the main
+        slot's)."""
+        controller = getattr(self._window, "controller", None)
+        live = getattr(controller, "live", None) if controller is not None else None
+        return live if live is not None else getattr(self._window, "live_session", None)
+
+    def _hold_floor(self) -> None:
+        """The large picture's live session holds the captions' distance behind live; one that
+        held it before and is no longer large lets it go, steered back (no time shift for a
+        picture the viewer did not turn captions off on)."""
+        live = self._live() if self._is_live() else None
+        if live is self._floored:
+            return
+        self._drop_floor(shift=False)
+        if live is not None:
+            live.set_caption_floor(LEAD_S.get(self._tier, 8.0))
+            self._floored = live
+
+    def _drop_floor(self, shift: bool = True) -> None:
+        live, self._floored = self._floored, None
+        if live is not None:
+            live.set_caption_floor(0.0, shift=shift)
 
     def _target(self) -> Any:
         controller = getattr(self._window, "controller", None)

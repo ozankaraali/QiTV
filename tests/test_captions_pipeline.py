@@ -267,8 +267,8 @@ class _Live:
             return ("http://127.0.0.1:1/t/s1/side/9.ts", 9, after + 0.4)
         return self.source
 
-    def set_caption_floor(self, seconds):
-        self.floor = seconds
+    def set_caption_floor(self, seconds, *, shift=True):
+        self.floor, self.shifted = seconds, shift
 
 
 class _Overlay:
@@ -317,6 +317,24 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.at(12.1), "Merhaba")  # held a little after the words
         self.assertEqual(self.at(12.2), "Nasılsın")  # until the next one starts
         self.assertEqual(self.at(13.9), "")
+
+    def test_the_distance_follows_the_large_picture_after_a_swap(self):
+        import types
+
+        main, other = self.window.live_session, _Live()
+        live_target = types.SimpleNamespace(live=True, source="p", title="ch", item={})
+        controller = types.SimpleNamespace(live=main, now_playing=lambda: live_target)
+        self.window.controller = controller
+        self.captions._floored = None
+        self.captions._tier = "small"
+        self.captions._hold_floor()
+        self.assertEqual(main.floor, 8.0)
+        controller.live = other  # swapped: the other picture is large now
+        self.captions._tick()
+        self.assertEqual((main.floor, main.shifted), (0.0, False))  # steered back, not shifted
+        self.assertEqual(other.floor, 8.0)
+        self.captions._drop_floor()
+        self.assertEqual((other.floor, other.shifted), (0.0, True))  # off: it stays where it is
 
     def test_while_the_picture_waits_for_the_distance_it_says_starting_captions(self):
         run = self.captions._run

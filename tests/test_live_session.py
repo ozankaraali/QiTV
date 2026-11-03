@@ -2415,6 +2415,46 @@ class StayLiveTests(LiveSessionCase):
         self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=1.0)
         self.assertEqual(self.playback.holds[holds:], [])  # no wait: it landed there
 
+    def test_ai_captions_off_and_on_again_are_live_again_where_it_is(self):
+        # Turned off, it stays where it is, time-shifted; on again about there: live again.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        self.live.set_caption_floor(8.0)
+        feed.run(30.0)
+        self.live.set_caption_floor(0.0)
+        feed.run(5.0)
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")
+        holds = len(self.playback.holds)
+        self.live.set_caption_floor(10.0)  # the larger model, say
+        feed.run(10.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertEqual(self.playback.holds[holds:], [True, False])  # the 2 s more, waited
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 10.0, delta=0.5)
+
+    def test_ai_captions_leaving_a_picture_that_is_no_longer_large_steer_it_back(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        self.live.set_caption_floor(8.0)
+        feed.run(30.0)
+        self.live.set_caption_floor(0.0, shift=False)
+        feed.run(5.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        feed.run(300.0)
+        self.assertLess(self.timelines[-1]["lag"], 4.0)
+
+    def test_ai_captions_wait_again_after_an_interruption_during_it(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.set_caption_floor(8.0)
+        feed.run(1.0)
+        self.assertTrue(self.live.caption_waiting())
+        self.playback.ended.emit()
+        self.live._on_interrupted()  # VLC's input ended meanwhile: it opens again
+        feed.run(20.0)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        self.assertGreaterEqual(min(self.playback.rates or [1.0]), 1.0)  # never 0.97x for it
+
     def test_a_pause_while_ai_captions_wait_is_the_viewers(self):
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=2.5).ready()

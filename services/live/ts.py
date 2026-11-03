@@ -3951,13 +3951,17 @@ class CodecRelabeler:
 _SOUND_WINDOW_S = 60.0  # the provider's stamps are judged against the sound's length over this
 _SOUND_SPAN_S = 30.0  # ... once at least this much sound came
 _SOUND_DRIFT = 0.005  # stamps this much faster or slower than the sound: it is restamped
-_SOUND_GAP_S = 5.0  # a sound stamped this far from the pictures it came with: restamped ...
+_SOUND_GAP_S = 5.0  # a sound stamped this far behind the pictures it came with: restamped ...
+_SOUND_AHEAD_S = 30.0  # ... or this far ahead (closer ahead, a mux may hold it so: legal) ...
 _SOUND_GAP_SPAN_S = 2.0  # ... once this much of it came (as it is, it plays nowhere)
 _SOUND_CALM_DRIFT = 0.001  # the provider's stamps within this of the sound's length and ...
 _SOUND_CALM_GAP_S = 1.0  # ... this near the pictures again: they pass as they come
 _SOUND_WANDER_S = 1.5  # restamped sound this far from where it was anchored: anchored again
 _SOUND_STEP_S = 1.0  # a provider's stamp this far off the sound's length since the last: a step
 _SOUND_KEEP = 16  # the latest offsets from the pictures' clock the wander is judged on
+_SOUND_SEEN = 4096  # PES starts noted at most (frames that can't be counted keep no window)
+_SOUND_STALE_S = 1.0  # no PCR over this much sound: the pictures' clock is not known
+_SOUND_BLIND_S = 2.0  # restamped sound waits this long for a clock to anchor on, dropped
 _SOUND_KINDS = {0x03: "mpeg", 0x04: "mpeg", 0x0F: "aac"}
 _SOUND_HEAD = {"mpeg": 4, "aac": 7}  # the bytes a frame header is read from
 _MPEG_RATES = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000), 0: (11025, 12000, 8000)}
@@ -4010,12 +4014,17 @@ class _SoundTrack:
     skip: int = 0  # bytes to the next frame header
     synced: bool = False  # a header was found: each next one is where its frame ended
     resyncs: deque = field(default_factory=deque)  # ticks where a header was not
-    seen: deque = field(default_factory=deque)  # (provider's PTS, ticks, pictures' clock)
+    # (provider's PTS, ticks, the pictures' clock as it came) per PES start
+    seen: deque = field(default_factory=lambda: deque(maxlen=_SOUND_SEEN))
     last: tuple[int, float] | None = None  # (provider's PTS, ticks) of the PES before
     active: bool = False
+    by_clock: bool = False  # restamped for its distance from the pictures (not drift alone)
     anchor: tuple[float, int] | None = None  # (ticks, PTS written there)
-    offset: float = 0.0  # the written PTS less the pictures' clock when anchored (ticks)
+    offset: float | None = None  # the written PTS less the pictures' clock when anchored
     offsets: deque = field(default_factory=lambda: deque(maxlen=_SOUND_KEEP))
+    pcr_mark: tuple[int, float] = (-1, 0.0)  # (PCRs counted, ticks) when one last came
+    blind: float | None = None  # ticks since which restamped sound waits for a clock
+    dropping: bool = False  # this PES's packets go as null packets (no clock to stamp on)
 
     def restart(self) -> None:
         """Measured and anchored afresh (a discontinuity, or a step in the provider's stamps);
@@ -4024,7 +4033,8 @@ class _SoundTrack:
         self.resyncs.clear()
         self.seen.clear()
         self.offsets.clear()
-        self.last = self.anchor = None
+        self.last = self.anchor = self.blind = None
+        self.pcr_mark = (-1, 0.0)
 
 
 class SoundClock:
@@ -4039,16 +4049,23 @@ class SoundClock:
     For each sound of the program the PAT lists first that the PMT names MPEG audio or ADTS
     AAC, the frames' headers give their length (a frame's samples at its rate), and each PES
     start is noted with the provider's PTS, the length of the frames begun before it and the
-    pictures' clock as it came (the latest video DTS, its PTS without one). Over
+    pictures' clock as it came: the latest PCR (at least ten a second) plus how far the
+    pictures' stamps (DTS, else PTS) run ahead of it (the median of the latest), so sparse or
+    stalled pictures leave it right; a PCR that stood still over `_SOUND_STALE_S` of sound
+    says nothing. Over
     `_SOUND_WINDOW_S` of sound with every header where the frame before ended, the sound is
     restamped from its length when its stamps run more than `_SOUND_DRIFT` faster or slower
     than it (judged over `_SOUND_SPAN_S` at least), or at once (`_SOUND_GAP_SPAN_S`) when they
-    sit more than `_SOUND_GAP_S` from the pictures' clock: each PES's PTS (and DTS) becomes the
-    anchor's plus the length since it. The anchor is the provider's own stamp when it was near
-    the pictures (no jump), else the pictures' clock at that PES (the sound in step with the
-    pictures it came with). A step in the provider's stamps (a restart), a discontinuity
-    (`discontinuity()`) or restamped sound wandering `_SOUND_WANDER_S` from where it was
-    anchored against the pictures (frames the provider lost) anchors it again. Stamps within
+    sit more than `_SOUND_GAP_S` behind the pictures' clock (VLC drops such sound as late) or
+    `_SOUND_AHEAD_S` ahead: each PES's PTS (and DTS) becomes the anchor's plus the length since
+    it. For drift alone the anchor is the provider's own stamp where the window began (before
+    most of the drift); for the distance, the pictures' clock at that PES (the sound in step
+    with the pictures it came with). A step in the provider's stamps (a restart) or a
+    discontinuity (`discontinuity()`) anchors it again; restamped sound wandering
+    `_SOUND_WANDER_S` from where it was anchored against the pictures (frames the provider
+    lost) is anchored again at its old distance from them. Sound restamped by the distance
+    that has no clock to anchor on (after a discontinuity, before the first PCR) is dropped
+    (null packets) for up to `_SOUND_BLIND_S`, never passed with stamps minutes off. Stamps within
     `_SOUND_CALM_DRIFT` of the sound's length and `_SOUND_CALM_GAP_S` of the pictures over a
     window pass as they come again. Healthy sound passes untouched: nothing is written while
     the stamps agree with it. It runs after the codec relabeler (its PIDs and types).
@@ -4059,8 +4076,11 @@ class SoundClock:
         self._pmt_pid: int | None = None
         self._program: int | None = None
         self._video_pid: int | None = None
+        self._pcr_pid: int | None = None
         self._tracks: dict[int, _SoundTrack] = {}
-        self._video: int | None = None  # the pictures' clock: the latest video DTS (or PTS)
+        self._pcr: int | None = None  # the latest PCR base
+        self._pcrs = 0  # PCRs seen, to tell a PCR that stood still
+        self._leads: deque[int] = deque(maxlen=_SOUND_KEEP)  # pictures' stamps less the PCR
         self.restamped: deque[tuple[int, float, float]] = deque(maxlen=_TRIMS_KEPT)
 
     def feed(self, chunk: bytes) -> bytes:
@@ -4076,6 +4096,15 @@ class SoundClock:
                 continue
             b1 = data[off + 1]
             pid = ((b1 & 0x1F) << 8) | data[off + 2]
+            if (
+                pid == self._pcr_pid
+                and data[off + 3] & 0x20
+                and data[off + 4] >= 7
+                and data[off + 5] & 0x10
+                and not b1 & 0x80
+            ):
+                self._pcr = _pcr_base(data, off + 6)
+                self._pcrs += 1
             if b1 & 0x80:
                 pass  # a transport error: nothing read from it
             elif pid == 0:
@@ -4085,19 +4114,22 @@ class SoundClock:
                 if b1 & 0x40:
                     self._on_pmt(data, off)
             elif pid == self._video_pid:
-                if b1 & 0x40:
+                if b1 & 0x40 and self._pcr is not None:
                     reference = _reference(_stamps(data, off))
                     if reference is not None:
-                        self._video = reference[1]
+                        self._leads.append(pts_delta(self._pcr, reference[1]))
             else:
                 track = self._tracks.get(pid)
                 if track is not None:
                     writes = self._on_sound(pid, track, data, off)
-                    if writes:
+                    if writes or track.dropping:
                         if out is None:
                             out = bytearray(data)
-                        for at, value in writes:
+                        for at, value in writes or ():
                             _write_timestamp(out, off + at, value)
+                        if track.dropping:
+                            out[off + 1] = (out[off + 1] & 0xE0) | 0x1F  # a null packet
+                            out[off + 2] = 0xFF
             off += PACKET
         self._buf = data[off:]
         return bytes(out[:off]) if out is not None else data[:off]
@@ -4109,8 +4141,9 @@ class SoundClock:
 
     def discontinuity(self) -> None:
         """The stream starts afresh: each sound is measured and anchored again, on the
-        pictures' clock that comes next (a sound restamped stays so)."""
-        self._video = None
+        pictures' clock that comes next (a sound restamped stays so; how far the pictures run
+        ahead of the PCR is the mux's, kept)."""
+        self._pcr = None
         for track in self._tracks.values():
             track.restart()
 
@@ -4123,8 +4156,9 @@ class SoundClock:
             if program:
                 pmt_pid = ((section[i + 2] & 0x1F) << 8) | section[i + 3]
                 if pmt_pid != self._pmt_pid:
-                    self._pmt_pid, self._video_pid = pmt_pid, None
+                    self._pmt_pid, self._video_pid, self._pcr_pid = pmt_pid, None, None
                     self._tracks.clear()
+                    self._leads.clear()
                 self._program = program
                 return
 
@@ -4147,6 +4181,7 @@ class SoundClock:
                 sounds[pid] = _SOUND_KINDS[stream_type]
             i += 5 + (((section[i + 3] & 0x0F) << 8) | section[i + 4])
         self._video_pid = video
+        self._pcr_pid = ((section[8] & 0x1F) << 8) | section[9]
         tracks = {}
         for pid, kind in sounds.items():
             track = self._tracks.get(pid)
@@ -4169,6 +4204,7 @@ class SoundClock:
         if data[off + 1] & 0x40:
             places = _stamps(data, off)
             pts = next((value for kind, _, value in places if kind == _PTS), None)
+            track.dropping = False
             if pts is not None:
                 writes = self._stamp(pid, track, pts, places)
             if not track.synced:
@@ -4216,8 +4252,9 @@ class SoundClock:
         self, pid: int, track: _SoundTrack, pts: int, places: list[tuple[int, int, int]]
     ) -> list[tuple[int, int]] | None:
         """A PES of the sound starts with the provider's `pts`: noted, judged, and what its
-        PTS and DTS become (None: as they came)."""
-        ticks, video = track.ticks, self._video
+        PTS and DTS become (None: as they came; `track.dropping`: the PES goes)."""
+        ticks, clock = track.ticks, self._arrival(track)
+        track.dropping = False
         if track.last is not None:
             last_pts, last_ticks = track.last
             if abs(pts_delta(last_pts, pts) - (ticks - last_ticks)) > _SOUND_STEP_S * _CLOCK:
@@ -4226,7 +4263,7 @@ class SoundClock:
                 track.offsets.clear()
                 track.anchor = None
         track.last = (pts, ticks)
-        track.seen.append((pts, ticks, video))
+        track.seen.append((pts, ticks, clock))
         while ticks - track.seen[0][1] > _SOUND_WINDOW_S * _CLOCK:
             track.seen.popleft()
         while track.resyncs and track.resyncs[0] < track.seen[0][1]:
@@ -4234,18 +4271,13 @@ class SoundClock:
         self._judge(pid, track)
         if not track.active:
             return None
-        if track.anchor is None:
-            if video is None:
-                return None  # the pictures' clock comes first (after a discontinuity)
-            gap = self._gap(track)
-            near = gap is not None and abs(gap) <= _SOUND_CALM_GAP_S * _CLOCK
-            track.anchor = (ticks, pts if near else video)
-            track.offset = float(pts_delta(video, track.anchor[1]))
-            track.offsets.clear()
+        if track.anchor is None and not self._anchor(pid, track, ticks, clock):
+            return None
+        assert track.anchor is not None
         anchor_ticks, anchor_pts = track.anchor
         written = (anchor_pts + round(ticks - anchor_ticks)) % _PTS_MODULO
-        if video is not None:
-            track.offsets.append(pts_delta(video, written))
+        if clock is not None and track.offset is not None:
+            track.offsets.append(pts_delta(clock, written))
             offsets = sorted(track.offsets)
             if (
                 len(offsets) == _SOUND_KEEP
@@ -4254,10 +4286,9 @@ class SoundClock:
                 logger.info(
                     "Audio PID %#x restamped wandered from the pictures: anchored again.", pid
                 )
-                track.anchor = (ticks, video)
-                track.offset = 0.0
+                written = (clock + round(track.offset)) % _PTS_MODULO
+                track.anchor = (ticks, written)
                 track.offsets.clear()
-                written = video
         shift = pts_delta(pts, written)
         return [
             (at, (value + shift) % _PTS_MODULO)
@@ -4265,11 +4296,51 @@ class SoundClock:
             if kind in (_PTS, _DTS)
         ]
 
+    def _anchor(self, pid: int, track: _SoundTrack, ticks: float, clock: int | None) -> bool:
+        """Anchor a restamped sound at this PES (class docstring); False when it can't be yet:
+        the PES is dropped (`dropping`) while it waits for a clock, or, waited too long, the
+        sound passes as it comes again."""
+        if not track.by_clock:
+            first_pts, first_ticks, _ = track.seen[0]  # where the window began
+            track.anchor = (first_ticks, first_pts)
+        elif clock is not None:
+            track.anchor = (ticks, clock)
+        else:
+            if track.blind is None:
+                track.blind = ticks
+            if ticks - track.blind <= _SOUND_BLIND_S * _CLOCK:
+                track.dropping = True
+                return False
+            track.active = track.by_clock = False
+            track.blind = None
+            logger.info("Audio PID %#x has no clock to be stamped on: as it comes.", pid)
+            return False
+        track.blind = None
+        anchor_ticks, anchor_pts = track.anchor
+        written = (anchor_pts + round(ticks - anchor_ticks)) % _PTS_MODULO
+        track.offset = None if clock is None else float(pts_delta(clock, written))
+        track.offsets.clear()
+        return True
+
+    def _arrival(self, track: _SoundTrack) -> int | None:
+        """The pictures' clock as this sound's PES came: the latest PCR plus how far the
+        pictures' stamps run ahead of it; None without both, or when no PCR came over
+        `_SOUND_STALE_S` of the sound."""
+        if self._pcr is None or not self._leads:
+            return None
+        count, since = track.pcr_mark
+        if count != self._pcrs:
+            track.pcr_mark = (self._pcrs, track.ticks)
+        elif track.ticks - since > _SOUND_STALE_S * _CLOCK:
+            return None
+        leads = sorted(self._leads)
+        return (self._pcr + leads[len(leads) // 2]) % _PTS_MODULO
+
     @staticmethod
     def _gap(track: _SoundTrack) -> float | None:
         """The provider's stamps less the pictures' clock they came with (median, ticks)."""
         gaps = sorted(
-            pts_delta(v, p) for p, _, v in list(track.seen)[-_SOUND_KEEP:] if v is not None
+            pts_delta(c, p) for p, _, c in list(track.seen)[-_SOUND_KEEP:] if c is not None
         )
         return float(gaps[len(gaps) // 2]) if gaps else None
 
@@ -4284,12 +4355,12 @@ class SoundClock:
             return
         drift = pts_delta(first[0], last[0]) / span - 1.0
         gap = self._gap(track)
+        far = gap is not None and not (-_SOUND_GAP_S * _CLOCK <= gap <= _SOUND_AHEAD_S * _CLOCK)
         if not track.active:
-            far = gap is not None and abs(gap) > _SOUND_GAP_S * _CLOCK
             if (far and span >= _SOUND_GAP_SPAN_S * _CLOCK) or (
                 span >= _SOUND_SPAN_S * _CLOCK and abs(drift) > _SOUND_DRIFT
             ):
-                track.active, track.anchor = True, None
+                track.active, track.by_clock, track.anchor = True, far, None
                 seconds = (gap or 0.0) / _CLOCK
                 self.restamped.append((pid, drift, seconds))
                 logger.info(
@@ -4300,9 +4371,13 @@ class SoundClock:
                     seconds,
                 )
             return
+        if far and not track.by_clock:
+            track.by_clock, track.anchor = True, None  # drifted far meanwhile: on the clock
+            return
         calm_gap = gap is None or abs(gap) <= _SOUND_CALM_GAP_S * _CLOCK
         if span >= _SOUND_SPAN_S * _CLOCK and abs(drift) <= _SOUND_CALM_DRIFT and calm_gap:
-            track.active, track.anchor = False, None
+            track.active = track.by_clock = False
+            track.anchor = None
             logger.info("Audio PID %#x is stamped by its length again: as it comes.", pid)
 
 

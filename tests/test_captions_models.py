@@ -661,7 +661,15 @@ class MachineTests(unittest.TestCase):
             mock.patch.object(tier.os, "cpu_count", return_value=16),
             mock.patch.object(tier, "single_thread_round_s", return_value=reference / 2),
         ):
-            self.assertAlmostEqual(tier.cpu_score(), 4.0)
+            self.assertAlmostEqual(tier.cpu_score(), 3.0)  # the model takes 6 of the 16
+        tier.cpu_score.cache_clear()
+        with (
+            mock.patch.object(tier.os, "cpu_count", return_value=24),
+            mock.patch.object(tier, "single_thread_round_s", return_value=reference / 0.35),
+        ):
+            # Many slow threads: the model gets 6 of them, about half the reference's speed.
+            self.assertAlmostEqual(tier.cpu_score(), 0.525)
+        self.assertEqual([tier.model_threads(n) for n in (2, 4, 8, 12, 64)], [2, 2, 4, 6, 6])
 
     def test_linux_memory_is_read_from_meminfo(self):
         with tempfile.NamedTemporaryFile("w", suffix=".meminfo", delete=False) as f:

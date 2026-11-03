@@ -65,13 +65,21 @@ def single_thread_round_s() -> float:
     return best
 
 
+def model_threads(cpus: Optional[int] = None) -> int:
+    """The threads the speech model runs on: half the logical cores, 2 to 6."""
+    count = (os.cpu_count() or 4) if cpus is None else cpus
+    return max(2, min(6, count // 2))
+
+
 @functools.cache
 def cpu_score() -> float:
-    """Logical cores × single-thread speed, relative to the reference machine (1.0). Measured
-    once per run (about 0.2 s)."""
+    """The model's threads × single-thread speed, relative to the reference machine's (1.0):
+    what the model gets, not the whole machine (24 slow threads give it 6). Measured once per
+    run (about 0.2 s)."""
     threads = os.cpu_count() or 1
     round_s = max(single_thread_round_s(), 1e-6)
-    score = (threads / REFERENCE_THREADS) * (REFERENCE_ROUND_S / round_s)
+    used = model_threads(threads) / model_threads(REFERENCE_THREADS)
+    score = used * (REFERENCE_ROUND_S / round_s)
     logger.info("CPU score %.2f (%d threads, %.1f ms a round)", score, threads, round_s * 1000)
     return score
 
