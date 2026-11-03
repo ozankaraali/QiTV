@@ -347,7 +347,7 @@ class TVWindow(QMainWindow):
         # OptionsDialog reads these from its parent.
         self.config_manager = config_manager
         # 2.9.1: before the first provider request and the time-shift helper's start.
-        secure_dns.enable(config_manager.secure_dns)
+        secure_dns.enable(getattr(config_manager, "secure_dns", False) is True)
         self.provider_manager = provider_manager
         self.image_manager = image_manager
         self.epg_manager = epg_manager
@@ -1920,9 +1920,10 @@ class TVWindow(QMainWindow):
             self.engine.set_disk_amount(mib * 1024 * 1024)
         if self.engine is not None:  # 2.8.2: the running helper's detail follows at once
             self.engine.set_detailed_log(self.config_manager.detailed_log)
-        secure_dns.enable(self.config_manager.secure_dns)  # 2.9.1: at once, here ...
+        secure = getattr(self.config_manager, "secure_dns", False) is True  # 2.9.1
+        secure_dns.enable(secure)  # at once, here ...
         if self.engine is not None:
-            self.engine.set_secure_dns(self.config_manager.secure_dns)  # ... and in the helper
+            self.engine.set_secure_dns(secure)  # ... and in the time-shift helper
         self.remote.apply_config()
 
     def set_provider(self, force_update: bool = False) -> None:

@@ -2761,7 +2761,7 @@ class OptionsDialogTests(WindowCase):
 
 class DiskAmountSettingTests(unittest.TestCase):
     def window(self, enabled):
-        self.amounts, self.dropped = [], []
+        self.amounts, self.dropped, self.secure = [], [], []
         config = SimpleNamespace(
             save_config=lambda **_options: None,
             timeshift_enabled=enabled,
@@ -2772,6 +2772,7 @@ class DiskAmountSettingTests(unittest.TestCase):
             set_disk_amount=self.amounts.append,
             drop_kept=lambda: self.dropped.append(True),
             set_detailed_log=lambda on: None,  # 2.8.2
+            set_secure_dns=self.secure.append,  # 2.9.1
         )
         return SimpleNamespace(
             config_manager=config,
@@ -2785,6 +2786,7 @@ class DiskAmountSettingTests(unittest.TestCase):
         # 2.8 (review of 2.6): a lowered amount applied only at the next disk open.
         TVWindow.save_config(self.window(enabled=True))
         self.assertEqual(self.amounts, [512 * 1024 * 1024])
+        self.assertEqual(self.secure, [False])  # 2.9.1: the helper hears Secure DNS too
 
     def test_with_the_disk_buffer_off_no_amount_is_sent(self):
         TVWindow.save_config(self.window(enabled=False))
