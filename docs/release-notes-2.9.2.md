@@ -10,7 +10,7 @@ others' distributions, which may have malware.**
   (ufak AI's ufakzeka-kulak), which gets far more words right and is so fast that every caption
   is ready well before its words. Other languages are written as before. It comes with the speech
   model (43 MB more); if you already have AI captions, the next time you turn them on QiTV asks
-  once to download it.
+  once to download it. A Turkish caption starts with a capital only where a sentence starts.
 - **Automatic switches to the faster model when it should:** on a computer only a little too slow
   for the more accurate model, every caption came just after its words and none showed, and
   Automatic didn't switch. Now captions that keep coming late make it switch within half a
