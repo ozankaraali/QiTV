@@ -46,6 +46,18 @@ class GuardTests(unittest.TestCase):
         )  # said twice: kept
         self.assertEqual(guards.clean("  Five others were  injured. "), "Five others were injured.")
 
+    def test_the_language_the_model_heard_is_not_part_of_the_caption(self):
+        # 2.9: the 1.7B with no language given, on a Turkish recording.
+        self.assertEqual(
+            guards.clean("language Turkish<asr_text>Gedällle halkoyunları ekibinin sahnesi."),
+            "Gedällle halkoyunları ekibinin sahnesi.",
+        )
+        self.assertEqual(guards.clean("language None<asr_text>"), "")  # nothing heard
+        self.assertEqual(guards.clean("<asr_text>Hello."), "Hello.")
+        self.assertEqual(
+            guards.clean("The language English is spoken."), "The language English is spoken."
+        )
+
     def test_a_piece_may_only_say_so_much(self):
         self.assertEqual(guards.token_cap(0), guards.TOKENS_BASE)
         self.assertGreater(guards.token_cap(6.0), guards.token_cap(2.0))
@@ -510,6 +522,165 @@ class ControllerTimingTests(unittest.TestCase):
         self.captions._disable()
         self.assertEqual(self.overlay.text, "")
         self.assertEqual(self.window.live_session.floor, 0.0)
+
+
+class _Card:
+    def __init__(self):
+        from unittest.mock import Mock
+
+        self.answered = Mock()
+        self.asked, self.withdrawn = [], 0
+
+    def ask(self, text, yes, no):
+        self.asked.append((text, yes, no))
+
+    def withdraw(self):
+        self.withdrawn += 1
+
+
+class StepDownTests(unittest.TestCase):
+    """2.9 (the owner's call): Automatic's 1.7B that can't keep up steps down to the 0.6B while
+    QiTV runs, its download's question first (once) when it isn't here."""
+
+    def setUp(self):
+        from PySide6.QtWidgets import QApplication, QWidget
+
+        from ui.captions_controller import CaptionsController
+
+        self.app = QApplication.instance() or QApplication([])
+        self.window = QWidget()
+        self.window.live_session = _Live()
+        self.window.live_session.position_s = 100.0
+        self.overlay, self.card = _Overlay(), _Card()
+        self.captions = CaptionsController(self.window, card=self.card, overlay=self.overlay)
+        process = self.captions._process
+        self.sent, self.loaded, self.stopped = [], [], []
+        process.send = lambda *m: self.sent.append(m)
+        process.running = lambda: True
+        process.stop = lambda: self.stopped.append(True)
+        process.start = lambda load, detailed_log=False: self.loaded.append(load)
+        self.config = {}
+        self.captions._config_get = lambda name, default: self.config.get(name, default)
+        self.captions._config_set = self.config.__setitem__
+        self.disk = {"small": True, "large": True}
+        self.captions._here = lambda name: self.disk[name]
+        self.toasts = []
+        self.captions._toast = lambda text, kind="info": self.toasts.append(text)
+        self.captions._tier = "large"
+        self.captions._enabled = self.captions._ready = True
+        self.captions._start_run()
+        self.captions._on_caption(self.captions._run, 99.0, 101.0, "written")
+
+    def fall_behind(self):
+        import time as clock
+
+        self.captions._on_progress(self.captions._run, 100.5, 1.06)  # slow, about to be late
+        self.captions._slow_since = clock.monotonic() - 31.0
+        self.captions._last = None
+        self.captions._tick()
+
+    def test_behind_it_switches_at_once_and_keeps_what_it_wrote(self):
+        self.captions._slow_since = time.monotonic() - 10.0
+        self.captions._tick()  # slow for a while only: the 1.7B goes on
+        self.assertEqual((self.loaded, self.stopped), ([], []))
+        self.fall_behind()
+        self.assertEqual(self.stopped, [True])
+        [load] = self.loaded
+        self.assertIn("qwen3-asr-0.6b", load["model"]["encoder"])
+        self.assertEqual(self.captions._tier, "small")
+        self.assertEqual(
+            self.toasts, ["AI captions switched to the faster speech model to keep up"]
+        )
+        self.assertEqual(self.captions.model_text(), "Automatic (0.6B)")
+        self.assertEqual(self.captions.status_text(), "Preparing…")  # not "Can't keep up"
+        self.assertEqual(self.overlay.text, "written")  # shown on while the 0.6B loads
+        self.assertEqual(self.window.live_session.floor, 10.0)  # held as it was: no new wait
+        run = self.captions._run
+        self.captions._on_ready()
+        self.assertEqual(self.captions._run, run + 1)  # it reads on from the picture
+        self.assertEqual(self.captions._cues, [(99.0, 101.0, "written")])
+        self.fall_behind()  # the 0.6B can't either: nothing smaller, it says so
+        self.assertEqual(len(self.loaded), 1)
+        self.assertEqual(self.captions.status_text(), "Can't keep up")
+        self.captions._disable()
+        self.assertEqual(self.captions._auto_tier(), "small")  # while QiTV runs
+
+    def test_the_viewers_own_choice_never_changes(self):
+        self.config["ai_captions_model"] = "large"
+        self.fall_behind()
+        self.assertEqual((self.loaded, self.card.asked), ([], []))
+        self.assertEqual(self.captions.status_text(), "Can't keep up")
+
+    def test_not_here_it_asks_once_and_not_now_leaves_the_1_7b(self):
+        self.disk["small"] = False
+        changed = []
+        self.captions.changed.connect(lambda: changed.append(True))
+        with mock.patch("services.captions.models.download_size", return_value=878_702_423):
+            self.fall_behind()
+        [(text, yes, no)] = self.card.asked
+        self.assertIn("879 MB", text)
+        self.assertEqual((yes, no), ("Download", "Not now"))
+        self.assertTrue(self.captions.asked_unprompted())  # every phone hears it
+        self.assertTrue(changed)
+        self.captions._on_answer(False)
+        self.assertFalse(self.captions.asking())
+        self.fall_behind()
+        self.assertEqual(len(self.card.asked), 1)  # once while QiTV runs
+        self.assertEqual((self.loaded, self.captions._tier), ([], "large"))
+        self.assertEqual(self.captions.status_text(), "Can't keep up")
+
+    def test_download_said_yes_the_1_7b_captions_on_until_the_0_6b_is_here(self):
+        self.disk["small"] = False
+        started = []
+
+        class Download:
+            def running(self):
+                return True
+
+            def cancel(self):
+                pass
+
+        download = Download()
+
+        def begin():
+            started.append(self.captions._fetching)
+            self.captions._download = download
+
+        self.captions._begin_download = begin
+        with mock.patch("services.captions.models.download_size", return_value=878_702_423):
+            self.fall_behind()
+        self.captions._on_answer(True)
+        self.assertEqual(started, ["small"])
+        self.assertTrue(self.captions.enabled())
+        self.captions._on_download_progress(download, 40, 100)
+        self.assertEqual(self.captions.status_text(), "Downloading 40%")  # the row says it
+        self.captions._last = None
+        self.captions._tick()
+        self.assertEqual(self.overlay.text, "written")  # the picture shows the captions
+        self.assertEqual(self.captions.model_text(), "Automatic (1.7B)")
+        self.disk["small"] = True
+        self.captions._on_downloaded(download)
+        self.assertEqual(self.captions._tier, "small")
+        self.assertEqual(len(self.loaded), 1)
+        self.assertEqual(self.captions.model_text(), "Automatic (0.6B)")
+
+    def test_a_model_chosen_while_it_downloads_stays(self):
+        self.disk["small"] = False
+        self.captions._begin_download = lambda: setattr(self.captions, "_download", object())
+        with mock.patch("services.captions.models.download_size", return_value=878_702_423):
+            self.fall_behind()
+        self.captions._on_answer(True)
+        self.config["ai_captions_model"] = "large"
+        self.captions._on_downloaded(self.captions._download)
+        self.assertEqual((self.captions._tier, self.loaded), ("large", []))
+
+    def test_turned_off_while_it_asks_the_question_goes(self):
+        self.disk["small"] = False
+        with mock.patch("services.captions.models.download_size", return_value=878_702_423):
+            self.fall_behind()
+        self.captions._disable()
+        self.assertEqual(self.card.withdrawn, 1)
+        self.assertFalse(self.captions.asking())
 
 
 class _Target:

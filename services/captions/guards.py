@@ -5,7 +5,9 @@ channel): over music or silence the models write a phrase again and again until 
 cap ("Sen öyle." 40 times), the words of their own prompt ("system."), or the credits their
 training subtitles ended with ("Altyazı M.K.", "İzlediğiniz için teşekkür ederim.", "Thanks
 for watching"). `clean()` keeps a phrase repeated in a row once and drops the rest;
-`token_cap()` bounds what a piece of speech can produce.
+`token_cap()` bounds what a piece of speech can produce. With no language given, the 1.7B
+(2026-11-03, the community export) writes the one it heard first ("language Turkish<asr_text>
+Gedällle halkoyunları…"): only the words after it are the caption.
 """
 
 from __future__ import annotations
@@ -17,6 +19,8 @@ import re
 TOKENS_PER_S = 6.0
 TOKENS_BASE = 8
 
+# The model's own heading: the language it heard, then its text marker (once, at the start).
+_HEADING = re.compile(r"^\s*(?:language\s+[^<]{0,40})?<asr_text>", re.IGNORECASE)
 _ROLE_WORDS = re.compile(r"\s*(system|user|assistant)\s*[.!]?\s*", re.IGNORECASE)
 # Credits subtitle files end with, in the languages they came up in; matched anywhere.
 _FALSE_CAPTIONS = re.compile(
@@ -36,7 +40,7 @@ def token_cap(seconds: float) -> int:
 
 def clean(text: str) -> str:
     """`text` without what nobody said; "" when nothing is left."""
-    text = " ".join(text.split())
+    text = " ".join(_HEADING.sub("", text).replace("<asr_text>", " ").split())
     if not any(c.isalnum() for c in text) or _ROLE_WORDS.fullmatch(text):
         return ""  # nothing said (a lone "." over music), or the prompt's own words
     if _FALSE_CAPTIONS.search(text):
