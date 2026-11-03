@@ -1056,6 +1056,10 @@ class RemoteController(QObject):
         captions = getattr(self._window, "captions", None)
         if self._caption_asks and (captions is None or not captions.asking()):
             self._unask_captions()
+        elif captions is not None and not self._caption_asks and captions.asked_unprompted():
+            # QiTV's own question (Automatic's step down): no phone asked, every phone hears it
+            for sid in sorted(self._phones):
+                self._ask_captions(sid, captions)
         self._push_tracks()
 
     # ---- casting and scheduled recordings (2.8) ---------------------------------------------

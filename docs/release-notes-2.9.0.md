@@ -29,6 +29,11 @@ others' distributions, which may have malware.**
   AI captions too). While it downloads, the picture says how far it is. Nothing of it ships
   with QiTV, nothing you watch leaves your computer, and Settings shows the space it takes and
   deletes it.
+- **Automatic steps down when the computer is busy:** if the more accurate model falls behind
+  the picture for half a minute (a busy computer, a heavy film), Automatic switches to the
+  faster one until you quit QiTV, and says so. The captions already written stay. If the
+  faster one isn't on the computer yet, QiTV asks once before downloading it, and the captions
+  keep going meanwhile. A model you chose yourself is never changed.
 - **The language:** QiTV takes it from the channel's audio track when the channel names it;
   otherwise the model hears it. You can choose another in the panel, and QiTV remembers your
   choice for that channel.

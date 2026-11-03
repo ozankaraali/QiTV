@@ -8,6 +8,9 @@ the buffer holds it; turned off, the picture stays where it is, time-shifted, wi
 so each caption is written before the picture gets to its words and shows when they start. The
 first time, the model is downloaded (services.captions.download) once the viewer says so;
 the tier (0.6B or 1.7B) follows the computer's speed (services.captions.tier) or Settings.
+Automatic's 1.7B that can't keep up (slow and late for `_SLOW_FOR_S`) steps down to the 0.6B
+while QiTV runs, its download's question first (once) when it isn't here: the captions written
+so far stay, and the picture stays where it is. The viewer's own choice of a model never changes.
 Turned on from a phone remote, the question shows on the TV and on that phone: either answer
 goes for both (`answer`, ui/remote_controller.py).
 
@@ -68,6 +71,8 @@ from ui.captions_texts import (  # noqa: E402  (the texts, with their translatio
     NOT_NOW,
     PREPARING,
     STARTING,
+    STEP_DOWN_QUESTION,
+    STEPPED_DOWN,
     size_text,
 )
 
@@ -119,6 +124,10 @@ class CaptionsController(QObject):
         self._supported: Optional[bool] = None
         self._asking = False
         self._question = ("", "", "")  # the download's question and its answers, as asked
+        self._asking_step = False  # the question is Automatic's step down's (see _step_down)
+        self._step_tried = False  # Automatic stepped down, or asked to, while QiTV runs
+        self._stepped_down = False  # Automatic takes the 0.6B while QiTV runs
+        self._fetching = ""  # the tier downloaded
         self._download: Any = None
         self._percent = 0
         self._unpacking = False
@@ -193,7 +202,7 @@ class CaptionsController(QObject):
             return translate(NOT_AVAILABLE)
         if self._waiting():
             return translate(STARTING)
-        if self._slow_since is not None and time.monotonic() - self._slow_since >= _SLOW_FOR_S:
+        if self._behind():
             return translate(CANT_KEEP_UP)
         lead = self._lead()
         if lead is not None and lead < LATE_LEAD_S:
@@ -212,12 +221,12 @@ class CaptionsController(QObject):
             return
         missing = models.download_size(tier)
         if missing == 0:  # all here already, only to be checked and unpacked: nothing to ask
-            self._tier = tier
+            self._tier = self._fetching = tier
             self._start_download()
             return
         if self._card is not None:
             self._asking = True
-            self._tier = tier
+            self._tier = self._fetching = tier
             self._question = (
                 translate(DOWNLOAD_QUESTION, size=size_text(missing)),
                 translate(DOWNLOAD),
@@ -236,6 +245,11 @@ class CaptionsController(QObject):
     def question(self) -> tuple[str, str, str]:
         """The download's question as asked, and its answers' words (yes, no)."""
         return self._question
+
+    def asked_unprompted(self) -> bool:
+        """The question is QiTV's own (Automatic's step down, not a viewer's turning them on):
+        every phone remote hears it (ui/remote_controller.py)."""
+        return self._asking and self._asking_step
 
     def answer(self, yes: bool) -> None:
         """The question answered elsewhere (2.9: on a phone remote): the TV's card goes, and
@@ -310,9 +324,12 @@ class CaptionsController(QObject):
         self.changed.emit()
 
     def _auto_tier(self) -> str:
-        """What Automatic takes now: one already here, else by this computer's speed."""
+        """What Automatic takes now: the 0.6B once the 1.7B couldn't keep up (see _step_down),
+        else one already here, else by this computer's speed."""
         from services.captions import tier
 
+        if self._stepped_down:
+            return "small"
         for name in ("large", "small"):
             if self._here(name):
                 return name
@@ -351,8 +368,9 @@ class CaptionsController(QObject):
 
     def _show_download(self) -> None:
         """The download's progress where the captions will be ("Downloading 12%", then
-        "Preparing…"): answered, the question went, and nothing else said they were coming."""
-        if self._download is not None:
+        "Preparing…"): answered, the question went, and nothing else said they were coming.
+        Automatic's step down downloads while the captions show: only the row says it."""
+        if self._download is not None and not self._enabled:
             self._show(self.status_text())
 
     def release(self, then: Any) -> None:
@@ -367,6 +385,7 @@ class CaptionsController(QObject):
                 return
             then()
             self._disk.clear()  # the files went
+            self._stepped_down = False  # Automatic by this computer's speed again
             self.changed.emit()
 
         done()
@@ -375,7 +394,7 @@ class CaptionsController(QObject):
     def _on_answer(self, yes: bool) -> None:
         if not self._asking:
             return
-        self._asking = False
+        self._asking = self._asking_step = False
         if not yes:
             self.changed.emit()  # the question is gone (a phone's closes too)
             return
@@ -410,7 +429,7 @@ class CaptionsController(QObject):
         self._download = download
         self._leaving_download = None
         self._start_after_leaving = False
-        download.start(self._tier)
+        download.start(self._fetching)
         self._show_download()
         self.changed.emit()
 
@@ -437,8 +456,14 @@ class CaptionsController(QObject):
         self._disk.clear()
         self._unpacking = False
         self._download = None
+        if self._enabled:  # Automatic's step down, fetched while the 1.7B captioned
+            if self.model() == "auto" and self._fetching != self._tier:
+                self._switch(self._fetching)
+            else:
+                self.changed.emit()  # the viewer chose a model meanwhile: theirs stays
+            return
         self._show("")
-        self._enable(self._tier)
+        self._enable(self._fetching)
 
     def _on_download_failed(self, download: Any, reason: str) -> None:
         if self._left(download):
@@ -446,7 +471,8 @@ class CaptionsController(QObject):
         self._disk.clear()
         self._download = None
         self._unpacking = False
-        self._show("")
+        if not self._enabled:  # else the captions show on (a step down's download failed)
+            self._show("")
         from services.captions.download import CANCELLED
 
         if reason != CANCELLED:
@@ -465,8 +491,6 @@ class CaptionsController(QObject):
         return download is not self._download
 
     def _enable(self, tier: str) -> None:
-        from services.captions import models
-
         self._tier = tier
         self._enabled = True
         self._cues.clear()
@@ -474,33 +498,101 @@ class CaptionsController(QObject):
         self._hold_floor()
         self._route_film()  # a provider's film: through the film relay while the model loads
         if not self._process.running():
-            paths = models.model_paths(tier)
-            runtime = models.runtime_dir()
-            from services.captions.tier import model_threads
-
-            threads = model_threads()
-            self._loading, self._ready = True, False
-            self._process.start(
-                {
-                    "runtime": str(runtime) if runtime is not None else None,
-                    "model": {
-                        "conv_frontend": str(paths.conv_frontend),
-                        "encoder": str(paths.encoder),
-                        "decoder": str(paths.decoder),
-                        "tokenizer": str(paths.tokenizer),
-                    },
-                    "vad": str(paths.vad),
-                    "threads": threads,
-                },
-                detailed_log=bool(self._config_get("detailed_log", False)),
-            )
+            self._load_model()
         elif self._ready:
             self._start_run()
         self._timer.start()
         self.changed.emit()
 
+    def _load_model(self) -> None:
+        """The captions process, loading the model of `_tier` (then `_on_ready`)."""
+        from services.captions import models
+        from services.captions.tier import model_threads
+
+        paths = models.model_paths(self._tier)
+        runtime = models.runtime_dir()
+        self._loading, self._ready = True, False
+        self._process.start(
+            {
+                "runtime": str(runtime) if runtime is not None else None,
+                "model": {
+                    "conv_frontend": str(paths.conv_frontend),
+                    "encoder": str(paths.encoder),
+                    "decoder": str(paths.decoder),
+                    "tokenizer": str(paths.tokenizer),
+                },
+                "vad": str(paths.vad),
+                "threads": model_threads(),
+            },
+            detailed_log=bool(self._config_get("detailed_log", False)),
+        )
+
+    # ---- Automatic steps down (2.9: the owner's call) -------------------------------------
+    def _behind(self) -> bool:
+        """The model has been slow and late for `_SLOW_FOR_S`: it can't keep up."""
+        since = self._slow_since
+        return since is not None and time.monotonic() - since >= _SLOW_FOR_S
+
+    def _steps_down(self) -> bool:
+        """Automatic's 1.7B can't keep up, and nothing has been tried for it yet."""
+        return (
+            not self._step_tried
+            and self._behind()
+            and self._ready
+            and self._tier == "large"
+            and self._download is None
+            and not self._asking
+            and self.model() == "auto"
+        )
+
+    def _step_down(self) -> None:
+        """The 0.6B instead, from now on while QiTV runs; its download's question first, once,
+        when it isn't here ("Not now": the 1.7B goes on, "Can't keep up")."""
+        self._step_tried = True
+        if self._here("small"):
+            self._switch("small")
+            return
+        from services.captions import models
+
+        try:
+            missing = models.download_size("small")
+        except models.Unsupported:
+            return
+        self._fetching = "small"
+        if missing == 0:  # all here already, only to be checked and unpacked
+            self._start_download()
+            return
+        if self._card is None:
+            return
+        self._asking = self._asking_step = True
+        self._question = (
+            translate(STEP_DOWN_QUESTION, size=size_text(missing)),
+            translate(DOWNLOAD),
+            translate(NOT_NOW),
+        )
+        self._card.ask(*self._question)
+        self.changed.emit()  # the phones ask too (asked_unprompted)
+
+    def _switch(self, tier: str) -> None:
+        """Captions on with `tier` instead, at once: the captions written so far stay (the
+        timeline is the same), the picture stays where it is, and the new model reads on
+        from it once loaded (`_on_ready`)."""
+        logger.info("AI captions: the %s model can't keep up, the %s instead", self._tier, tier)
+        self._stepped_down = True
+        self._process.stop()
+        self._tier = tier
+        self._slow_since = None
+        self._newest = None
+        self._load_model()
+        self._toast(translate(STEPPED_DOWN))
+        self.changed.emit()
+
     def _disable(self) -> None:
         self._cancel_download()
+        if self._asking_step:  # Automatic's question goes with them
+            self._asking = self._asking_step = False
+            if self._card is not None:
+                self._card.withdraw()
         self._enabled = False
         self._timer.stop()
         self._restart.stop()
@@ -633,6 +725,8 @@ class CaptionsController(QObject):
     def _tick(self) -> None:
         if not self._enabled:
             return
+        if self._steps_down():
+            self._step_down()
         if self._is_live() and self._live() is not self._floored:
             self._hold_floor()  # a swap or the multiview's focus: the large picture's own
         key = self._source()

@@ -597,6 +597,20 @@ class PhoneTracksTests(WindowCase):
         answer.assert_not_called()  # the TV's card still asks
         self.assertEqual(self.window.remote._caption_asks, {})
 
+    def test_qitvs_own_question_asks_every_phone_and_one_answer_closes_the_others(self):
+        # 2.9: Automatic's 1.7B can't keep up and the 0.6B isn't here: no phone turned
+        # anything on, so each one hears the question, its sheets open or not.
+        self.opened()
+        captions, answer = self.captions()
+        with mock.patch.object(captions, "asked_unprompted", return_value=True):
+            captions.changed.emit()
+            captions.changed.emit()  # asked once
+        [mine], [theirs] = self.sent("ask"), self.sent("ask", "s9")
+        self.window.remote.bridge.post(Answered("s9", theirs["id"], False))
+        self.assertTrue(wait_until(lambda: answer.called))
+        answer.assert_called_once_with(False)
+        self.assertEqual(self.sent("unask"), [{"t": "unask", "id": mine["id"]}])
+
     def test_turned_off_or_on_with_the_model_there_nothing_asks(self):
         of = self.opened()["of"]
         self.captions(asking=False)

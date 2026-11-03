@@ -22,6 +22,14 @@ COULDNT_START = N_("Couldn't start AI captions")  # i18n: a toast
 DOWNLOAD_QUESTION = N_(
     "AI captions need a speech model on this computer: {size} to download once. Download it now?"
 )
+# AI captions fell behind with the larger speech model (Automatic) and the faster isn't here.
+# i18n: the question when AI captions fall behind with the larger speech model; size: "880 MB"
+STEP_DOWN_QUESTION = N_(
+    "AI captions can't keep up on this computer. Download the faster speech model ({size}) "
+    "and switch to it?"
+)
+# i18n: a toast: AI captions fell behind with the larger speech model and now use the faster one
+STEPPED_DOWN = N_("AI captions switched to the faster speech model to keep up")
 DOWNLOAD = N_("Download")  # i18n: the AI captions question's yes (verb)
 NOT_NOW = N_("Not now")  # i18n: the AI captions question's no
 # i18n: a toast; reason: why, as the system or the server said it

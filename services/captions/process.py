@@ -23,10 +23,13 @@ _QUIT_GRACE_S = 3.0
 
 
 class _Supervisor(QThread):
-    message = Signal(object)
+    message = Signal(int, object)  # its serial, what the child said
 
-    def __init__(self, conn: Any, process: Any, outbox: "queue.Queue[Optional[tuple]]") -> None:
+    def __init__(
+        self, conn: Any, process: Any, outbox: "queue.Queue[Optional[tuple]]", serial: int = 0
+    ) -> None:
         super().__init__()
+        self._serial = serial
         self._conn = conn
         self._process = process
         self._outbox = outbox
@@ -48,13 +51,13 @@ class _Supervisor(QThread):
                 break
             try:
                 if self._conn.poll(_POLL_S):
-                    self.message.emit(self._conn.recv())
+                    self.message.emit(self._serial, self._conn.recv())
                     continue
             except EOFError, OSError:
-                self.message.emit(("failed", "gone"))
+                self.message.emit(self._serial, ("failed", "gone"))
                 break
             if not self._process.is_alive():
-                self.message.emit(("failed", "gone"))
+                self.message.emit(self._serial, ("failed", "gone"))
                 break
         self._process.join(_QUIT_GRACE_S)
         if self._process.is_alive():
@@ -88,6 +91,7 @@ class CaptionsProcess(QObject):
         super().__init__(parent)
         self._supervisor: Optional[_Supervisor] = None
         self._leaving: Optional[_Supervisor] = None  # stopped, its child still ending
+        self._serial = 0  # the running child's: a stopped one's last words are not passed on
         self._outbox: "queue.Queue[Optional[tuple]]" = queue.Queue()
 
     def running(self) -> bool:
@@ -111,7 +115,8 @@ class CaptionsProcess(QObject):
         process.start()
         child.close()
         self._outbox = queue.Queue()
-        supervisor = _Supervisor(conn, process, self._outbox)
+        self._serial += 1
+        supervisor = _Supervisor(conn, process, self._outbox, self._serial)
         supervisor.message.connect(self._on_message, Qt.ConnectionType.QueuedConnection)
         supervisor.finished.connect(supervisor.deleteLater)
         supervisor.finished.connect(lambda: self._forget(supervisor))
@@ -140,8 +145,12 @@ class CaptionsProcess(QObject):
         if self._leaving is supervisor:
             self._leaving = None
 
-    def _on_message(self, message: Any) -> None:
+    def _on_message(self, serial: int, message: Any) -> None:
         kind = message[0]
+        if kind != "log" and (self._supervisor is None or serial != self._serial):
+            # A stopped child's (2.9: Automatic's step down starts the other model at once):
+            # its "gone" would forget the new one, its "ready" would be the new one's.
+            return
         if kind == "caption":
             self.caption.emit(int(message[1]), float(message[2]), float(message[3]), message[4])
         elif kind == "progress":
