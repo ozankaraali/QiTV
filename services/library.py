@@ -37,7 +37,7 @@ from services.provider_ids import (
 from services.provider_types import is_media_server
 from services.search import Hit, search_index
 from services.text_fold import fold
-from services.watch_state import WatchState
+from services.watch_state import WatchState, film_tmdb
 
 logger = logging.getLogger(__name__)
 
@@ -372,6 +372,11 @@ class LibraryWork(QObject):
 
     def run(self) -> None:
         self.finished.emit(dict(zip(self._keys, self._work(*self._inputs))))
+
+
+def _film_number(item: dict) -> str:
+    """A film's number at its provider (an Xtream stream id, a portal's id)."""
+    return str(item.get("stream_id") or item.get("id") or "")
 
 
 def history_episode(history, provider: str, series: dict) -> Optional[dict]:
@@ -922,6 +927,7 @@ class LibraryModel(QObject):
     def _continue_items(self) -> list[dict]:
         guard = parental.installed()
         gone = self._gone_from_server()
+        current = self._current_film()
         out: list[dict] = []
         seen: set[str] = set()
         for entry in self._history_entries():
@@ -932,6 +938,10 @@ class LibraryModel(QObject):
             item = entry["item_data"]
             if gone(entry["provider_name"], item):
                 continue  # 2.8.2: its server has it under another id now (or not at all)
+            found = current(entry["provider_name"], item)
+            if found is None:
+                continue  # 2.9.1: its number is another film's now, and it isn't listed
+            item = found
             if guard is not None and guard.hides_item(
                 self._section, with_provider(item, entry["provider_name"])
             ):
@@ -940,6 +950,38 @@ class LibraryModel(QObject):
             # plays, stars and asks for its link there, whatever page is on another provider.
             out.append(with_provider(item, entry["provider_name"]))
         return out
+
+    def _current_film(self) -> Callable[[str, dict], Optional[dict]]:
+        """A film of the history as its provider lists it now (2.9.1), by its TMDB id: one its
+        provider numbered anew is the one under its new number; one whose number is another
+        film's now is that film's, or None when it isn't listed (it would play the other film).
+        Without a TMDB id, or when nothing is listed for it, the history's copy stays."""
+        if self._section != "movies":
+            return lambda _provider, item: item
+        by_id: dict[str, dict[str, dict]] = {}
+        by_tmdb: dict[str, dict[str, dict]] = {}
+        for title in self._loaded_items():
+            name = provider_of(title) or self._catalog.current_provider_name()
+            number = _film_number(title)
+            if number:
+                by_id.setdefault(name, {})[number] = title
+            tmdb = film_tmdb(title)
+            if tmdb:
+                by_tmdb.setdefault(name, {}).setdefault(tmdb, title)
+
+        def current(provider: str, item: dict) -> Optional[dict]:
+            tmdb = film_tmdb(item)
+            if not tmdb:
+                return item
+            listed = (by_id.get(provider) or {}).get(_film_number(item))
+            if listed is not None and film_tmdb(listed) in ("", tmdb):
+                return item  # the same film, under the same number
+            renumbered = (by_tmdb.get(provider) or {}).get(tmdb)
+            if renumbered is not None:
+                return renumbered
+            return None if listed is not None else item
+
+        return current
 
     def _gone_from_server(self) -> Callable[[str, dict], bool]:
         """Whether a film of the history is gone from its Jellyfin or Emby server (2.8.2): the

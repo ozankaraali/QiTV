@@ -179,6 +179,34 @@ class LibraryModelTests(unittest.TestCase):
         self.assertEqual(series.item_kind(series.items()[0]), "episode")
         self.assertEqual(series.details(series.items()[0]).kind, "episode")
 
+    def test_continue_follows_a_film_its_provider_numbered_anew(self):
+        # 2.9.1: the history's copy of the film names its old number; the list, the new one.
+        old = movie(1, "Lighthouse", tmdb="98")
+        cfg = make_config()
+        history(cfg, old, "movie")
+        resume(cfg, old, "movie")
+        renumbered = movie(40, "Lighthouse", tmdb="98")
+        cat = FakeCatalog({"movies": [("1", "G", 1)]}, {("movies", "1"): [renumbered]})
+        model, _ = build(cat, cfg)
+        self.assertEqual(model.genre_id, CONTINUE)
+        [shown] = model.items()
+        self.assertEqual(shown["id"], "40")
+
+    def test_continue_never_plays_another_film_that_took_the_old_number(self):
+        old = movie(1, "Lighthouse", tmdb="98")
+        cfg = make_config()
+        history(cfg, old, "movie")
+        resume(cfg, old, "movie")
+        other = movie(1, "Harbour", tmdb="155")  # the number is another film's now
+        cat = FakeCatalog({"movies": [("1", "G", 1)]}, {("movies", "1"): [other]})
+        model, _ = build(cat, cfg)
+        self.assertNotIn(CONTINUE, [g.id for g in model.genres()])  # nothing to continue
+        moved = movie(7, "Lighthouse", tmdb="98")  # and listed under its new one
+        cat = FakeCatalog({"movies": [("1", "G", 2)]}, {("movies", "1"): [other, moved]})
+        model, _ = build(cat, cfg)
+        self.assertEqual(model.genre_id, CONTINUE)
+        self.assertEqual([i["id"] for i in model.items()], ["7"])
+
     def test_new_group(self):
         items = [movie(i, added=str(1700000000 + i * 100)) for i in range(60)]
         items.append(movie(100, added="2030-01-01 10:00:00"))
