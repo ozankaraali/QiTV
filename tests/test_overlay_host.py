@@ -92,6 +92,44 @@ class OverlayHostTests(HostCase):
         QTest.qWait(20)
         self.assertEqual(self.host.mask().boundingRect(), QRect(0, 0, 200, 100))
 
+    def test_what_leaves_the_mask_is_cleared_first_and_what_joins_it_is_painted(self):
+        # 2.9, macOS: Qt repaints nothing when a window's mask changes. The download question,
+        # answered, stayed in the window's buffers outside the mask and came back over the film
+        # each time the mask grew there (a hover).
+        card = Overlay()
+        self.host.add_overlay(card)
+        card.setGeometry(300, 50, 300, 120)
+        self.panel.show()
+        card.show()
+        QTest.qWait(20)
+        calls = []
+        real_repaint, real_update = self.host.repaint, self.host.update
+
+        def repaint(*args):
+            calls.append(("repaint", QRegion(args[0]), QRegion(self.host.mask())))
+            real_repaint(*args)
+
+        def update(*args):
+            calls.append(("update", QRegion(args[0]), QRegion(self.host.mask())))
+            real_update(*args)
+
+        with (
+            mock.patch.object(self.host, "repaint", side_effect=repaint),
+            mock.patch.object(self.host, "update", side_effect=update),
+        ):
+            card.hide()
+            # Cleared while still inside the mask: the card's place, with the old mask.
+            name, region, mask_then = calls[0]
+            self.assertEqual(name, "repaint")
+            self.assertEqual(region.boundingRect(), QRect(300, 50, 300, 120))
+            self.assertTrue(mask_then.contains(QRect(300, 50, 300, 120)))
+            self.assertEqual(self.host.mask().boundingRect(), QRect(0, 0, 200, 100))
+            calls.clear()
+            card.show()  # the mask grows over a place it left: painted afresh
+            self.assertIn(
+                ("update", QRect(300, 50, 300, 120)), [(n, r.boundingRect()) for n, r, _m in calls]
+            )
+
     def test_clicks_on_the_pip_reach_it_unless_an_overlay_claims_them(self):
         # A PiP under the host's overlays takes the clicks no overlay claims there.
         class Buttons(Overlay):  # a bar with one button inside the hole

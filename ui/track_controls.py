@@ -699,7 +699,10 @@ class TrackControls(QObject):
         "Language  Türkçe · audio track ›", which opens the language list."""
         on = bool(captions.enabled())
         status = str(captions.status_text() or "")
-        rows = [PanelRow(AI_CAPTIONS, translate(AI_CAPTIONS_TEXT), on, note=status)]
+        # Ticked while their download is on its way too, as on the phone: a tap then calls it
+        # off, never reads as "turn them on" (2.9: one did, and cancelled it while unpacking).
+        ticked = on or bool(captions.downloading())
+        rows = [PanelRow(AI_CAPTIONS, translate(AI_CAPTIONS_TEXT), ticked, note=status)]
         if on:
             note = self._language_text(captions)
             rows.append(PanelRow(AI_LANGUAGE, translate(LANGUAGE_TEXT), note=note, opens=True))

@@ -385,6 +385,32 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(stopped, [True])
         self.assertFalse(self.captions.enabled())
 
+    def test_the_download_says_how_far_it_is_where_the_captions_will_be(self):
+        # 2.9: answered, the question went and nothing said the download had begun.
+        from services.captions.download import CANCELLED
+
+        class Download:
+            def running(self):
+                return True
+
+            def cancel(self):
+                pass
+
+        self.captions._enabled = False
+        download = self.captions._download = Download()
+        self.captions._on_download_progress(download, 12, 100)
+        self.assertEqual(self.overlay.text, "Downloading 12%")
+        self.captions._on_download_preparing(download)
+        self.assertEqual(self.overlay.text, "Preparing…")
+        self.captions._cancel_download()
+        self.assertEqual(self.overlay.text, "")
+        again = self.captions._download = Download()
+        self.captions._unpacking = False  # as a new answer's download begins
+        self.captions._on_download_progress(again, 50, 100)
+        self.assertEqual(self.overlay.text, "Downloading 50%")
+        self.captions._on_download_failed(again, CANCELLED)
+        self.assertEqual(self.overlay.text, "")
+
     def test_a_cancelled_downloads_late_answer_changes_nothing(self):
         from services.captions.download import CANCELLED
 

@@ -162,10 +162,22 @@ class OverlayHost(QWidget):
                 claims = claims.united(part)
         if not self._hole.isEmpty():
             region = region.subtracted(QRegion(self._hole).subtracted(claims))
+        # Qt repaints nothing when a window's mask changes (only a child widget's): what an
+        # overlay that hid painted would stay in the window's buffers outside the mask, and
+        # show again wherever the mask grows next (2.9: the download question came back over
+        # the film for a moment at each hover). What leaves the mask is cleared while it still
+        # shows, and what joins it is painted afresh.
+        old = self.mask() if not self.mask().isEmpty() else QRegion(self.rect())
+        leaving = old.subtracted(region) if not region.isEmpty() else QRegion()
+        if not leaving.isEmpty() and self.isVisible():
+            self.repaint(leaving)
         if region.isEmpty():
             self.clearMask()
         else:
             self.setMask(region)
+            joining = region.subtracted(old)
+            if not joining.isEmpty():
+                self.update(joining)
 
     def _window_shown(self) -> bool:
         return isValid(self._window) and self._window.isVisible() and not self._window.isMinimized()

@@ -11,6 +11,7 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -485,6 +486,18 @@ class InstalledTierTests(DownloadTestCase):
         self.wait_until(lambda: seen.finished == 2)
         self.assertEqual(len(self.server.requests), asked)
 
+    def test_what_is_on_disk_already_is_not_counted_again(self):
+        # 2.9: a cancel while unpacking left the whole archive; the question still said 879 MB.
+        downloads = models.needed("small", self.root)
+        whole, part = downloads[0], downloads[1]
+        whole.target.parent.mkdir(parents=True, exist_ok=True)
+        whole.target.write_bytes(b"x" * whole.file.size)
+        part.target.parent.mkdir(parents=True, exist_ok=True)
+        part.target.with_name(part.target.name + ".part").write_bytes(b"x" * 3)
+        everything = sum(d.file.size for d in downloads)
+        self.assertEqual(models.download_size("small", self.root), everything - whole.file.size - 3)
+        self.assertFalse(models.installed("small", self.root))  # still to be unpacked
+
     def test_installed_needs_every_file_at_its_size_and_its_record(self):
         job = CaptionsDownload(root=self.root)
         seen = _Recorder(job)
@@ -618,7 +631,7 @@ class TierChoiceTests(unittest.TestCase):
 
     def setUp(self) -> None:
         # Every value is given: no benchmark runs, no memory is read.
-        for name in ("cpu_score", "total_ram_bytes", "is_arm_mac"):
+        for name in ("cpu_score", "machine_score", "total_ram_bytes", "is_arm_mac"):
             patch = mock.patch.object(tier, name, side_effect=AssertionError(name))
             patch.start()
             self.addCleanup(patch.stop)
@@ -670,6 +683,31 @@ class MachineTests(unittest.TestCase):
             # Many slow threads: the model gets 6 of them, about half the reference's speed.
             self.assertAlmostEqual(tier.cpu_score(), 0.525)
         self.assertEqual([tier.model_threads(n) for n in (2, 4, 8, 12, 64)], [2, 2, 4, 6, 6])
+
+    def test_the_best_score_measured_on_this_computer_is_kept(self):
+        # 2.9: measured as a film opened, the reference scored 0.81 (1.0 quiet): the small model.
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        env = mock.patch.dict(os.environ, {"QITV_CAPTIONS_DIR": folder})
+        env.start()
+        self.addCleanup(env.stop)
+        self.addCleanup(tier.machine_score.cache_clear)
+
+        def run(measured):
+            tier.machine_score.cache_clear()
+            with mock.patch.object(tier, "cpu_score", return_value=measured):
+                return tier.machine_score()
+
+        self.assertEqual(run(1.0), 1.0)
+        self.assertEqual(run(0.81), 1.0)  # a busy moment: the quiet one stands
+        self.assertEqual(run(1.2), 1.2)
+        self.assertEqual(run(0.9), 1.2)
+        with mock.patch.object(tier, "_this_computer", return_value="another"):
+            self.assertEqual(run(0.5), 0.5)  # a profile copied elsewhere measures anew
+        self.assertEqual(models.space_used(Path(folder)), 0)  # nothing downloaded to tell
+        with open(os.path.join(folder, tier.SPEED_FILE), "w") as f:
+            f.write("{not json")
+        self.assertEqual(run(0.7), 0.7)
 
     def test_linux_memory_is_read_from_meminfo(self):
         with tempfile.NamedTemporaryFile("w", suffix=".meminfo", delete=False) as f:

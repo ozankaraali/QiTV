@@ -1,7 +1,9 @@
 """Which AI captions model suits this computer: the large one (Qwen3-ASR 1.7B) on a fast
 machine with the memory for it, else the small one (0.6B). No Qt.
 
-`cpu_score()` runs a short pure-Python benchmark (about 0.2 s): call it off the GUI thread.
+`cpu_score()` runs a short pure-Python benchmark (about 0.2 s), and `machine_score()` keeps the
+best one measured on this computer (speed.json in the captions folder): call them off the GUI
+thread.
 """
 
 from __future__ import annotations
@@ -9,12 +11,15 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import functools
+import json
 import logging
 import os
 import platform
 import sys
 import time
 from typing import Optional
+
+from services.atomic_write import atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +87,44 @@ def cpu_score() -> float:
     score = used * (REFERENCE_ROUND_S / round_s)
     logger.info("CPU score %.2f (%d threads, %.1f ms a round)", score, threads, round_s * 1000)
     return score
+
+
+SPEED_FILE = "speed.json"  # in the captions folder: the best score measured on this computer
+
+
+def _this_computer() -> str:
+    """What a remembered score belongs to: a profile copied to another computer measures anew."""
+    return f"{platform.machine()}/{os.cpu_count() or 0}/{platform.processor()}"
+
+
+@functools.cache
+def machine_score() -> float:
+    """The best cpu_score() measured on this computer (this run's, or one remembered from an
+    earlier run): busy moments only ever lower a measurement (2.9: one taken as a film opened
+    scored 0.81 on the reference, which had scored 1.0, and the small model was chosen). Call it
+    off the GUI thread: it measures, and reads and writes a small file."""
+    measured = cpu_score()
+    from services.captions.models import captions_root
+
+    path = captions_root() / SPEED_FILE
+    try:
+        kept = json.loads(path.read_text(encoding="utf-8"))
+        if kept.get("computer") == _this_computer():
+            best = max(measured, float(kept.get("score", 0.0)))
+        else:
+            best = measured
+    except OSError, ValueError, TypeError, AttributeError:
+        best = measured
+    if best == measured:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with atomic_write(str(path)) as out:
+                out.write(json.dumps({"computer": _this_computer(), "score": measured}).encode())
+        except OSError as e:
+            logger.debug("The CPU score was not kept: %s", e)
+    if best != measured:
+        logger.info("CPU score %.2f: the best measured on this computer", best)
+    return best
 
 
 def _sysctl_int(name: str) -> Optional[int]:
@@ -165,4 +208,4 @@ def choose_tier(
         return SMALL
     if is_arm_mac() if arm_mac is None else arm_mac:
         return LARGE
-    return LARGE if (cpu_score() if score is None else score) >= LARGE_MIN_SCORE else SMALL
+    return LARGE if (machine_score() if score is None else score) >= LARGE_MIN_SCORE else SMALL

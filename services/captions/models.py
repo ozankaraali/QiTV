@@ -452,16 +452,36 @@ def installed(tier: str, root: Optional[Path] = None) -> bool:
 
 
 def download_size(tier: str, root: Optional[Path] = None) -> int:
-    """Bytes the tier's download still fetches (what the question card says); Unsupported as
-    `needed`."""
-    return sum(download.file.size for download in missing(tier, root))
+    """Bytes the tier's download still fetches (what the question card says): a file already
+    here whole (an archive a cancel left before it was unpacked) or in part (its ".part", which
+    resumes) isn't fetched again. 0 says nothing is fetched, not that the tier is `installed`.
+    Unsupported as `needed`."""
+    total = 0
+    for download in missing(tier, root):
+        size, target = download.file.size, download.target
+        have = _file_size(target)
+        if have != size:
+            have = min(size, _file_size(target.with_name(target.name + ".part")))
+        total += size - have
+    return total
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def space_used(root: Optional[Path] = None) -> int:
-    """Bytes AI captions take on disk, unfinished downloads included."""
+    """Bytes AI captions take on disk, unfinished downloads included (not the CPU score the
+    tier keeps there: nothing downloaded, nothing for Settings to tell or delete)."""
     total = 0
-    for folder, _dirs, files in os.walk(_root(root)):
+    base = _root(root)
+    for folder, _dirs, files in os.walk(base):
         for name in files:
+            if name == "speed.json" and Path(folder) == base:
+                continue
             try:
                 total += os.lstat(os.path.join(folder, name)).st_size
             except OSError:

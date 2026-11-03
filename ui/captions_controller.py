@@ -154,7 +154,7 @@ class CaptionsController(QObject):
 
         from services.captions import tier
 
-        threading.Thread(target=tier.cpu_score, name="qitv-captions-tier", daemon=True).start()
+        threading.Thread(target=tier.machine_score, name="qitv-captions-tier", daemon=True).start()
 
     def enabled(self) -> bool:
         return self._enabled
@@ -187,10 +187,15 @@ class CaptionsController(QObject):
         from services.captions import models
 
         tier = self._choose_tier()
+        if models.installed(tier):
+            self._enable(tier)
+            return
         missing = models.download_size(tier)
-        if missing > 0:
-            if self._card is None:
-                return
+        if missing == 0:  # all here already, only to be checked and unpacked: nothing to ask
+            self._tier = tier
+            self._start_download()
+            return
+        if self._card is not None:
             self._asking = True
             self._tier = tier
             self._question = (
@@ -199,8 +204,6 @@ class CaptionsController(QObject):
                 translate(NOT_NOW),
             )
             self._card.ask(*self._question)
-            return
-        self._enable(tier)
 
     def downloading(self) -> bool:
         """The speech model downloads: they are on their way (the row's tap calls them off)."""
@@ -263,9 +266,17 @@ class CaptionsController(QObject):
     def _cancel_download(self) -> None:
         download, self._download = self._download, None
         self._start_after_leaving = False
+        if download is not None:
+            self._show("")  # its progress goes with it
         if download is not None and download is not self._leaving_download:
             download.cancel()
             self._leaving_download = download
+
+    def _show_download(self) -> None:
+        """The download's progress where the captions will be ("Downloading 12%", then
+        "Preparing…"): answered, the question went, and nothing else said they were coming."""
+        if self._download is not None:
+            self._show(self.status_text())
 
     def release(self, then: Any) -> None:
         """Settings deletes the files: captions off, the download cancelled, and `then()`
@@ -289,6 +300,9 @@ class CaptionsController(QObject):
         if not yes:
             self.changed.emit()  # the question is gone (a phone's closes too)
             return
+        self._start_download()
+
+    def _start_download(self) -> None:
         self._percent = 0
         self._unpacking = False
         leaving = self._leaving_download
@@ -297,6 +311,7 @@ class CaptionsController(QObject):
             # would write the same file).
             self._download = leaving
             self._start_after_leaving = True
+            self._show_download()
             self.changed.emit()
             return
         self._begin_download()
@@ -316,6 +331,7 @@ class CaptionsController(QObject):
         self._leaving_download = None
         self._start_after_leaving = False
         download.start(self._tier)
+        self._show_download()
         self.changed.emit()
 
     def _on_download_progress(self, download: Any, done: Any, total: Any) -> None:
@@ -324,6 +340,7 @@ class CaptionsController(QObject):
         percent = int(100 * done / total) if total > 0 else 0
         if percent != self._percent:
             self._percent = percent
+            self._show_download()
             self.changed.emit()
 
     def _on_download_preparing(self, download: Any) -> None:
@@ -331,6 +348,7 @@ class CaptionsController(QObject):
             return
         self._percent = 100
         self._unpacking = True
+        self._show_download()
         self.changed.emit()
 
     def _on_downloaded(self, download: Any) -> None:
@@ -338,6 +356,7 @@ class CaptionsController(QObject):
             return
         self._unpacking = False
         self._download = None
+        self._show("")
         self._enable(self._tier)
 
     def _on_download_failed(self, download: Any, reason: str) -> None:
@@ -345,6 +364,7 @@ class CaptionsController(QObject):
             return
         self._download = None
         self._unpacking = False
+        self._show("")
         from services.captions.download import CANCELLED
 
         if reason != CANCELLED:
@@ -804,7 +824,7 @@ class CaptionsController(QObject):
         if override in ("small", "large"):
             return override
         for name in ("large", "small"):  # one already here is the one to use
-            if models.download_size(name) == 0:
+            if models.installed(name):
                 return name
         return str(tier.choose_tier("auto"))
 

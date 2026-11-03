@@ -318,6 +318,16 @@ class CaptionRowsTests(PanelCase):
         row = self.rows()[[r.key for r in self.rows()].index(AI_CAPTIONS)]
         self.assertEqual(row.note, "Preparing…")
 
+    def test_ticked_while_the_download_is_on_its_way_and_a_tap_calls_it_off(self):
+        # 2.9: unticked, "Preparing…" read as "tap to turn them on": the tap cancelled it.
+        self.captions.going, self.captions.status = True, "Preparing…"
+        self.click_button("subtitles")
+        row = self.rows()[[r.key for r in self.rows()].index(AI_CAPTIONS)]
+        self.assertEqual((row.checked, row.note), (True, "Preparing…"))
+        self.assertNotIn(AI_LANGUAGE, [r.key for r in self.rows()])  # not on yet
+        self.click_row(AI_CAPTIONS)
+        self.assertFalse(self.captions.going)
+
     def test_the_language_list_picks_one_and_comes_back(self):
         self.captions.on = True
         self.click_button("subtitles")
@@ -511,6 +521,9 @@ class DownloadQuestionTests(unittest.TestCase):
         missing = mock.patch("services.captions.models.download_size", return_value=900_000_000)
         missing.start()
         self.addCleanup(missing.stop)
+        absent = mock.patch("services.captions.models.installed", return_value=False)
+        absent.start()
+        self.addCleanup(absent.stop)
 
     def test_the_question_is_asked_with_its_words(self):
         self.assertFalse(self.captions.asking())
@@ -530,6 +543,14 @@ class DownloadQuestionTests(unittest.TestCase):
         self.assertFalse(self.captions.asking())
         self.assertEqual(self.begun, [True])
         self.captions.answer(True)  # answered once
+        self.assertEqual(self.begun, [True])
+
+    def test_all_here_already_it_is_unpacked_without_a_question(self):
+        # A cancel while unpacking left the whole archive: 0 bytes to fetch, nothing to ask.
+        with mock.patch("services.captions.models.download_size", return_value=0):
+            self.captions.toggle()
+        self.assertFalse(self.captions.asking())
+        self.assertFalse(self.card.isVisible())
         self.assertEqual(self.begun, [True])
 
     def test_not_now_on_the_card_says_the_question_is_gone(self):
