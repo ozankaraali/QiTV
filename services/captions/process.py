@@ -93,6 +93,10 @@ class CaptionsProcess(QObject):
     def running(self) -> bool:
         return self._supervisor is not None
 
+    def busy(self) -> bool:
+        """A child runs or is still ending (its files are open)."""
+        return self._supervisor is not None or self._leaving is not None
+
     def start(self, load: dict, *, detailed_log: bool = False) -> None:
         """Start the child and have it load the model (`load`: the paths and threads)."""
         if self._supervisor is not None:

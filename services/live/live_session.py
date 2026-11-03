@@ -1168,6 +1168,7 @@ class LiveSession(QObject):
                 self._stay.user_go_live(keep_landing=merged)  # nothing opened: it stays
                 if landing is not None:
                     self._stay.landed(landing, build=build)
+                    self._keep_caption_floor()
 
     def set_speed(self, rate: float) -> None:
         if self._phase is not _Phase.PIPELINE or rate <= 0 or self._stay.mode is Mode.LIVE:
@@ -1325,11 +1326,19 @@ class LiveSession(QObject):
     def caption_floor(self) -> float:
         return self._caption_floor
 
-    def caption_source(self) -> Optional[tuple[str, int, float]]:
+    def _keep_caption_floor(self) -> None:
+        """A landing (a tune, Go live, a jump) measures its shortfall against the latency's
+        target and has stay-live accept the rest: while AI captions hold the picture back,
+        the floor is built again from there, as when it was raised."""
+        if self._caption_floor > 0:
+            self._stay.retarget_now()
+
+    def caption_source(self, after: Optional[float] = None) -> Optional[tuple[str, int, float]]:
         """Where AI captions read the stream (2.9): the helper's side URL from the segment that
-        holds the picture's position, that segment's seq and its start on the timeline. None
-        when no pipeline stream plays from the ring (a direct play, the channel's server
-        window or a provider archive, or nothing yet)."""
+        holds the picture's position, that segment's seq and its start on the timeline; with
+        `after`, from the first segment that starts there or later (past a jump the reader
+        stopped at). None when no pipeline stream plays from the ring (a direct play, the
+        channel's server window or a provider archive, or nothing yet), or no such segment."""
         if self._phase is not _Phase.PIPELINE or self._sid is None:
             return None
         if self._part is not None or self._in_part or self._archive is not None:
@@ -1337,8 +1346,14 @@ class LiveSession(QObject):
         spans = self._engine.spans(self._sid)
         if not spans:
             return None
-        position = self.position()
-        span = next((s for s in reversed(spans) if s.start <= position), spans[0])
+        if after is not None:
+            found = next((s for s in spans if s.start >= after - 0.05), None)
+            if found is None:
+                return None
+            span = found
+        else:
+            position = self.position()
+            span = next((s for s in reversed(spans) if s.start <= position), spans[0])
         url = self._engine.stream_url(self._sid, span.seq, side=True)
         if not url:
             return None
@@ -1949,6 +1964,7 @@ class LiveSession(QObject):
         snapshot = self._snapshot()
         target = self._target(snapshot)
         self._stay.landed(lag - target)
+        self._keep_caption_floor()
         if aimed:
             self._cushion = max(self._cushion, target)
         self._reland_until = self._clock() + _RELAND_S

@@ -146,6 +146,19 @@ class StreamClockTests(unittest.TestCase):
         self.assertIsNone(clock.place(9_000_000, 1600, RATE))  # VLC's blocks stepped
         self.assertTrue(clock.broken)
 
+    def test_a_radio_channel_is_timed_by_its_sound(self):
+        # The helper cuts and times an audio-only channel by its sound (services.live.ts).
+        pmt_pid = 0x100
+        pat = _section(0x00, bytes([0, 1, 0xE0 | (pmt_pid >> 8), pmt_pid & 0xFF]))
+        pmt = _section(0x02, bytes([0xE1, 0x02, 0xF0, 0x00]) + bytes([0x0F, 0xE1, 0x02, 0xF0, 0]))
+        data = _packet(0, pat, True) + _packet(pmt_pid, pmt, True)
+        data += _packet(0x102, _pes(0xC0, 90_000), True) + _packet(0x102, _pes(0xC0, 91_800), True)
+        times = TsTimes()
+        times.feed(data)
+        clock = StreamClock(30.0, times)
+        self.assertTrue(clock.ready())
+        self.assertAlmostEqual(clock.place(1_000_000, 1600, RATE), 30.0)
+
     def test_stamps_across_the_wrap(self):
         self.assertAlmostEqual(pts_seconds(100, (1 << 33) - 800), 0.01)
 
@@ -247,7 +260,10 @@ class _Live:
     def position(self):
         return self.position_s
 
-    def caption_source(self):
+    def caption_source(self, after=None):
+        self.asked_after = after
+        if after is not None:
+            return ("http://127.0.0.1:1/t/s1/side/9.ts", 9, after + 0.4)
         return self.source
 
     def set_caption_floor(self, seconds):
@@ -329,6 +345,57 @@ class ControllerTimingTests(unittest.TestCase):
         self.window.live_session.position_s = 60.0
         self.captions._tick()
         self.assertEqual(self.captions._run, run + 1)
+
+    def test_a_model_that_did_not_load_leaves_no_child_behind(self):
+        stopped = []
+        self.captions._process.stop = lambda: stopped.append(True)
+        self.captions._on_failed("ModuleNotFoundError")
+        self.assertEqual(stopped, [True])
+        self.assertFalse(self.captions.enabled())
+
+    def test_a_cancelled_downloads_late_answer_changes_nothing(self):
+        from services.captions.download import CANCELLED
+
+        class Download:
+            def running(self):
+                return False
+
+        old, new = Download(), Download()
+        toasts = []
+        self.captions._toast = lambda text, kind="info": toasts.append(text)
+        self.captions._enabled = False
+        self.captions._leaving_download, self.captions._download = old, new
+        self.captions._on_download_failed(old, CANCELLED)
+        self.captions._on_downloaded(old)
+        self.assertIs(self.captions._download, new)
+        self.assertFalse(self.captions.enabled())
+        self.assertEqual(toasts, [])
+        self.captions._on_download_failed(new, CANCELLED)  # the viewer's own cancel: no toast
+        self.assertEqual(toasts, [])
+
+    def test_after_a_jump_it_reads_again_past_it_not_before(self):
+        run = self.captions._run
+        self.sent.clear()
+        self.captions._on_resync(run, 20.0)
+        self.captions._start_run()
+        self.assertEqual(self.window.live_session.asked_after, 20.0)
+        self.assertEqual(self.sent[0][2], "http://127.0.0.1:1/t/s1/side/9.ts")
+
+    def test_a_language_the_pieces_agreed_on_is_the_runs_channel(self):
+        self.captions._run_channel = "provider|A"
+        self.captions._on_detected(self.captions._run, "Turkish")
+        self.assertEqual(self.captions._detected, {"provider|A": "Turkish"})
+
+    def test_an_ended_run_starts_again_once_and_keeps_its_captions(self):
+        run = self.captions._run
+        self.captions._on_caption(run, 10.0, 12.0, "kept")
+        self.captions._on_ended(run, "TimeoutError")
+        self.at(10.5)  # the next tick: the same session, nothing cleared
+        self.assertEqual(self.captions._cues, [(10.0, 12.0, "kept")])
+        self.assertEqual(self.captions._run, run)
+        self.captions._start_run()  # the restart
+        self.assertEqual(self.captions._run, run + 1)
+        self.assertFalse(self.captions._restart.isActive())
 
     def test_off_gives_the_picture_back_and_clears_the_screen(self):
         self.captions._on_caption(self.captions._run, 10.0, 12.0, "x")

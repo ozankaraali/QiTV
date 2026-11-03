@@ -607,6 +607,7 @@ class StayLive:
         self._retarget = True
         self._wide = 0.0
         self._accepting = self._tolerant = False
+        self._start = 0.0  # not a start's build (capped at _START_BUILD_S): the whole move
 
     def landed(self, excess: float, *, build: bool = True) -> None:
         """A stream opened at the start Go live picks (after `user_go_live()` for a Go live):
@@ -956,7 +957,7 @@ class StayLive:
                 self._wide = abs(error) + _WIDEN_S
             self.absorb()
             return False
-        if start:
+        if start and not self._retarget:
             self._start = 0.0  # one build per landing
             nudge = _Nudge(_GENTLE_DOWN, abs(error), self._centre(side), limit=_START_BUILD_S)
         else:

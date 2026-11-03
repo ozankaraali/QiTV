@@ -880,8 +880,11 @@ class OptionsDialog(QDialog):
         if answer != QMessageBox.StandardButton.Yes:
             return
         captions = getattr(self.parent(), "captions", None)
-        if captions is not None and captions.enabled():
-            captions.toggle()  # off: their files go next
+        if captions is not None and hasattr(captions, "release"):
+            # Off, its download cancelled, and the files deleted once nothing holds them open
+            # (Windows keeps an open file).
+            captions.release(lambda: self._measure_captions_files(delete=True))
+            return
         self._measure_captions_files(delete=True)
 
     def sign_out_of_opensubtitles(self):

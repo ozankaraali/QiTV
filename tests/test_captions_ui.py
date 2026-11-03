@@ -194,6 +194,11 @@ class FakeCaptions(QObject):
             return
         self.on = not self.on
 
+    def release(self, then):
+        """Settings' Delete: off, then the files (CaptionsController.release)."""
+        self.on = False
+        then()
+
     def languages(self):
         return [("English", "English"), ("Turkish", "Türkçe"), ("German", "Deutsch")]
 

@@ -2351,6 +2351,16 @@ class StayLiveTests(LiveSessionCase):
         feed.run(300.0)
         self.assertLess(self.timelines[-1]["lag"], 4.0)
 
+    def test_ai_captions_build_their_floor_again_after_a_tune_and_go_live(self):
+        # The review's probe (2.9): a landing measured its shortfall against the latency's
+        # target and had stay-live accept the rest, so a zap with captions on stayed 3 s behind.
+        self.live.set_caption_floor(8.0)  # captions already on, then a channel is tuned
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(330.0)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        self.assertGreaterEqual(min(self.playback.rates), 0.97)
+
     def test_ai_captions_read_from_the_segment_that_holds_the_picture(self):
         self.ready(segments(0, 4), live_edge=8.0)
         self.playback.set_state(PlaybackState.PLAYING)

@@ -43,7 +43,6 @@ from ui.captions_texts import (  # noqa: E402  (the texts, with their translatio
     CATCHING_UP,
     COULDNT_START,
     DOWNLOAD,
-    DOWNLOAD_FAILED,
     DOWNLOAD_QUESTION,
     DOWNLOADING,
     FROM_AUDIO_TRACK,
@@ -80,6 +79,10 @@ class CaptionsController(QObject):
         if card is not None:
             card.answered.connect(self._on_answer)
         self._enabled = False
+        self._leaving_download: Any = None  # cancelled, still ending its request
+        self._start_after_leaving = False
+        self._run_channel = ""  # the channel the run reads (a vote's language is its)
+        self._resync_at: Optional[float] = None  # read again from past a jump here
         self._supported: Optional[bool] = None
         self._asking = False
         self._download: Any = None
@@ -208,11 +211,30 @@ class CaptionsController(QObject):
         """QiTV closes: no model left running, no download going on."""
         self._timer.stop()
         self._restart.stop()
-        if self._download is not None:
-            self._download.cancel()
-            self._download = None
+        self._cancel_download()
         self._process.stop()
-        self._process.wait(3000)
+        self._process.wait(4500)  # its quit, else the supervisor's kill (3 s + 1 s)
+
+    def _cancel_download(self) -> None:
+        download, self._download = self._download, None
+        self._start_after_leaving = False
+        if download is not None and download is not self._leaving_download:
+            download.cancel()
+            self._leaving_download = download
+
+    def release(self, then: Any) -> None:
+        """Settings deletes the files: captions off, the download cancelled, and `then()`
+        once no process or download holds them (Windows keeps open files)."""
+        self._disable()
+
+        def done() -> None:
+            leaving = self._leaving_download
+            if self._process.busy() or (leaving is not None and leaving.running()):
+                QTimer.singleShot(200, done)
+                return
+            then()
+
+        done()
 
     # ---- on and off --------------------------------------------------------------------
     def _on_answer(self, yes: bool) -> None:
@@ -221,40 +243,77 @@ class CaptionsController(QObject):
         self._asking = False
         if not yes:
             return
+        self._percent = 0
+        self._unpacking = False
+        leaving = self._leaving_download
+        if leaving is not None and leaving.running():
+            # A cancelled one still ends its current request: this one starts after it (two
+            # would write the same file).
+            self._download = leaving
+            self._start_after_leaving = True
+            self.changed.emit()
+            return
+        self._begin_download()
+
+    def _begin_download(self) -> None:
         from services.captions.download import CaptionsDownload
 
         download = CaptionsDownload(self)
-        download.progress.connect(self._on_download_progress)
-        download.preparing.connect(self._on_download_preparing)
-        download.finished.connect(self._on_downloaded)
-        download.failed.connect(self._on_download_failed)
+        # Each download's signals are its own: a cancelled one's late answer changes nothing.
+        download.progress.connect(
+            lambda done, total: self._on_download_progress(download, done, total)
+        )
+        download.preparing.connect(lambda: self._on_download_preparing(download))
+        download.finished.connect(lambda: self._on_downloaded(download))
+        download.failed.connect(lambda reason: self._on_download_failed(download, reason))
         self._download = download
-        self._percent = 0
-        self._unpacking = False
+        self._leaving_download = None
+        self._start_after_leaving = False
         download.start(self._tier)
         self.changed.emit()
 
-    def _on_download_progress(self, done: Any, total: Any) -> None:
+    def _on_download_progress(self, download: Any, done: Any, total: Any) -> None:
+        if download is not self._download:
+            return
         percent = int(100 * done / total) if total > 0 else 0
         if percent != self._percent:
             self._percent = percent
             self.changed.emit()
 
-    def _on_download_preparing(self) -> None:
+    def _on_download_preparing(self, download: Any) -> None:
+        if download is not self._download:
+            return
         self._percent = 100
         self._unpacking = True
         self.changed.emit()
 
-    def _on_downloaded(self) -> None:
+    def _on_downloaded(self, download: Any) -> None:
+        if self._left(download):
+            return
         self._unpacking = False
         self._download = None
         self._enable(self._tier)
 
-    def _on_download_failed(self, reason: str) -> None:
+    def _on_download_failed(self, download: Any, reason: str) -> None:
+        if self._left(download):
+            return
         self._download = None
         self._unpacking = False
-        self._toast(translate(DOWNLOAD_FAILED, reason=reason), "error")
+        from services.captions.download import CANCELLED
+
+        if reason != CANCELLED:
+            self._toast(reason, "error")  # already the whole sentence ("Download failed: …")
         self.changed.emit()
+
+    def _left(self, download: Any) -> bool:
+        """A cancelled download ended: nothing of it shows, and one asked for meanwhile
+        starts now. True when `download` is not the current one."""
+        if download is self._leaving_download:
+            self._leaving_download = None
+            if self._start_after_leaving:
+                self._begin_download()
+            return True
+        return download is not self._download
 
     def _enable(self, tier: str) -> None:
         from services.captions import models
@@ -291,9 +350,7 @@ class CaptionsController(QObject):
         self.changed.emit()
 
     def _disable(self) -> None:
-        if self._download is not None:
-            self._download.cancel()
-            self._download = None
+        self._cancel_download()
         self._enabled = False
         self._timer.stop()
         self._restart.stop()
@@ -319,6 +376,8 @@ class CaptionsController(QObject):
         was = self._enabled
         logger.warning("AI captions stopped: %s", reason)
         self._loading = self._ready = False
+        if reason != "gone":
+            self._process.stop()  # it did not load: no child left without a model
         if was:
             self._enabled = False
             self._timer.stop()
@@ -330,16 +389,25 @@ class CaptionsController(QObject):
         self.changed.emit()
 
     def _start_run(self) -> None:
+        self._restart.stop()  # this is the start a pending restart was for
         if not self._enabled or not self._ready:
             return
         live = self._live()
-        source = live.caption_source() if live is not None else None
+        after, self._resync_at = self._resync_at, None
+        source = None
+        if live is not None:
+            source = live.caption_source(after) if after is not None else live.caption_source()
         if source is None:
+            if after is not None:  # the segment after the jump is not there yet
+                self._resync_at = after
+                self._restart.start()
+                return
             self._session_key = ""
             self.changed.emit()
             return
         url, _seq, start = source
         self._run += 1
+        self._run_channel = self._channel_key()
         self._run_start = start
         self._session_key = url.rsplit("/side/", 1)[0]
         self._newest = None
@@ -370,7 +438,7 @@ class CaptionsController(QObject):
         runs (the next run there starts with it), and the panel says it."""
         if run != self._run:
             return
-        key = self._channel_key()
+        key = self._run_channel  # the run's channel, not the one a zap just tuned
         if key:
             self._detected[key] = language
         if self._language[1] == FROM_MODEL:
@@ -378,13 +446,15 @@ class CaptionsController(QObject):
             self.changed.emit()
 
     def _on_resync(self, run: int, newest: float) -> None:
+        """The stream's stamps jumped (a provider's restart): read again from the segment
+        after the jump, not from the picture's (before it: the same jump again)."""
         if run == self._run and self._enabled:
+            self._resync_at = newest
             self._restart.start()
 
     def _on_ended(self, run: int, reason: str) -> None:
         if run == self._run and self._enabled:
-            self._session_key = ""
-            self._restart.start()  # the session ended or the reader fell behind: again
+            self._restart.start()  # the reader fell behind or lost the stream: again, once
 
     # ---- every tick: the picture's place --------------------------------------------------
     def _tick(self) -> None:

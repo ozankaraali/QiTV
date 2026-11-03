@@ -54,7 +54,7 @@ class TsTimes:
     audio_pid: Optional[int] = None  # the track VLC decodes; None: the first one listed
     video_pid: Optional[int] = None
     audio: list[AudioTrack] = field(default_factory=list)
-    first_video_pts: Optional[int] = None
+    first_video_pts: Optional[int] = None  # the timeline's anchor (a radio's: its sound's)
     first_audio_pts: Optional[int] = None
     last_video_pts: Optional[int] = None
     jumped: bool = False  # a video PTS jump since the first: the run's times end there
@@ -106,7 +106,7 @@ class TsTimes:
         return self.audio[0].pid if self.audio else None
 
     def _pts(self, pid: int, pts: int) -> None:
-        if pid == self.video_pid:
+        if pid == self.video_pid:  # the pictures' (a radio channel's: its sound's) stamps
             if self.first_video_pts is None:
                 self.first_video_pts = pts
             elif self.last_video_pts is not None:
@@ -114,7 +114,7 @@ class TsTimes:
                 if step >= JUMP_S or step < -_BACK_S:
                     self.jumped = True
             self.last_video_pts = pts
-        elif self.first_audio_pts is None:
+        if pid == self._audio_pid() and self.first_audio_pts is None:
             # VLC decodes the sound from its first PES on, before the first picture or not.
             self.first_audio_pts = pts
 
@@ -150,10 +150,14 @@ class TsTimes:
             elif stream_type in _AUDIO_TYPES or (stream_type == 0x06 and ac3):
                 audio.append(AudioTrack(pid, stream_type, language))
             i += 5 + es_length
-        if video is not None:
-            self.video_pid = video
         if audio:
             self.audio = audio
+        if video is not None:
+            self.video_pid = video
+        elif audio:
+            # A radio channel: the helper cuts and times it by its sound (services.live.ts),
+            # so its timeline counts from the first audio PTS.
+            self.video_pid = audio[0].pid
 
 
 def _resync(data: bytes, at: int) -> int:

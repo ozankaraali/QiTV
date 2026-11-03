@@ -45,6 +45,7 @@ _MARGIN_S = 0.5
 _PROGRESS_S = 1.0
 _READ_TIMEOUT_S = 15.0
 _OWNER_GRACE_S = 0.5
+_AHEAD_MAX_S = 60.0  # read no further ahead of the picture (far behind live: the ring holds it)
 
 
 class _Link:
@@ -172,6 +173,9 @@ class _Run:
             request = urllib.request.Request(self.url)
             with urllib.request.urlopen(request, timeout=_READ_TIMEOUT_S) as response:
                 while not self.stopped.is_set():
+                    if self.newest - float(self.viewer[0]) > _AHEAD_MAX_S:
+                        self.stopped.wait(0.5)  # far enough ahead: wait for the picture
+                        continue
                     data = response.read1(_CHUNK) if hasattr(response, "read1") else b""
                     if not data:
                         break
