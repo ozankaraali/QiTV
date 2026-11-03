@@ -81,6 +81,7 @@ class CaptionsProcess(QObject):
     progress = Signal(int, float, float)  # run, newest second decoded, real-time factor
     resync = Signal(int, float)  # run, newest second: read again from there
     ended = Signal(int, str)  # run, reason
+    detected = Signal(int, str)  # run, the language the pieces agreed on (none was given)
     piece = Signal(int, float, float, float)  # run, start, end, speech share (no model loaded)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
@@ -141,6 +142,8 @@ class CaptionsProcess(QObject):
             self.caption.emit(int(message[1]), float(message[2]), float(message[3]), message[4])
         elif kind == "progress":
             self.progress.emit(int(message[1]), float(message[2]), float(message[3]))
+        elif kind == "detected":
+            self.detected.emit(int(message[1]), str(message[2]))
         elif kind == "piece":
             self.piece.emit(
                 int(message[1]), float(message[2]), float(message[3]), float(message[4])

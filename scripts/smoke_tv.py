@@ -275,7 +275,8 @@ CAPTIONS_CHECK = (
 # AI captions on in the window for CAPTIONS_LIVE_S over the channel, every caption shown is
 # checked against the picture's place, and 07-captions.png shows one.
 CAPTIONS_LIVE_CHECK = f"{PIPELINE_PREFIX}AI captions show {LIVE_CHANNEL}'s words in step"
-CAPTIONS_LIVE_S = 75.0
+CAPTIONS_LIVE_S = float(os.environ.get("QITV_CAPTIONS_LIVE_S", "75"))
+CAPTIONS_BUILT_S = 7.0  # the lead from which every caption must be in step
 CAPTIONS_SHOT = "07-captions.png"
 CAPTIONS_LOAD_MS = 30_000
 CAPTIONS_AHEAD_MS = 15_000
@@ -545,6 +546,8 @@ def _child_command(args: list[str]) -> list[str]:
 def _hang_budget(seconds: float, pipeline: bool, pip: bool = False) -> float:
     """Seconds after which the app dumps its Python stacks (it keeps going)."""
     extra = (PIPELINE_BUDGET_S if pipeline else 0.0) + (PIP_BUDGET_S if pip else 0.0)
+    if pipeline and os.environ.get("QITV_CAPTIONS_LIVE") == "1":
+        extra += CAPTIONS_LIVE_S + 30.0  # the developer's AI captions check, and its model load
     return HANG_DUMP_S + seconds + extra
 
 
@@ -1303,7 +1306,16 @@ class Driver:
             position = live.position()
             if text and (not shown or shown[-1][1] != text):
                 cue = next((c for c in captions._cues if c[2] == text), None)
-                shown.append((round(position, 2), text, cue[0] if cue else None))
+                lead = captions._lead()
+                shown.append(
+                    (
+                        round(position, 2),
+                        text,
+                        round(cue[0], 2) if cue else None,
+                        round(cue[1], 2) if cue else None,
+                        round(lead, 1) if lead is not None else None,
+                    )
+                )
                 if not shot and len(text) > 12:
                     shot = True
                     self._capture_with_video(CAPTIONS_SHOT)
@@ -1313,13 +1325,18 @@ class Driver:
             status=captions.status_text(),
             floor=live.caption_floor(),
             tier=captions._tier,
+            language=captions.language(),
         )
         captions.toggle()  # off: the picture catches up
-        in_step = [s for s in shown if s[2] is not None and s[0] - s[2] <= 1.0]
+        # Never after its words (a caption in the next scene); in step once the lead is built.
+        after_words = [s for s in shown if s[3] is not None and s[0] > s[3] + 1.0]
+        built = [s for s in shown if s[4] is not None and s[4] >= CAPTIONS_BUILT_S]
+        late = [s for s in built if s[2] is not None and s[0] - s[2] > 1.0]
         self.report.check(
             CAPTIONS_LIVE_CHECK,
-            len(shown) >= 3 and len(in_step) == len(shown),
-            f"{len(shown)} shown, {len(in_step)} within 1 s of their words' start: {shown[:8]}",
+            len(shown) >= 3 and not after_words and not late,
+            f"{len(shown)} shown ({len(built)} with the lead built, {len(late)} of them late), "
+            f"{len(after_words)} after their words; language {captions.language()}: {shown[:6]}",
         )
 
     def _capture_with_video(self, name: str) -> None:

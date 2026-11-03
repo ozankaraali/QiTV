@@ -13,6 +13,7 @@ Messages to it: ("load", {...}), ("start", run, url, segment_start, audio_track,
 ("viewer", position), ("language", name), ("stop",), ("quit",).
 From it: ("ready",), ("failed", reason), ("caption", run, start, end, text),
 ("progress", run, newest, rtf), ("resync", run, newest), ("ended", run, reason),
+("detected", run, language) once the pieces agree on one (none was given),
 ("log", level, text); loaded without a model (`load` with "model": None, the packaged smoke
 test's probe), ("piece", run, start, end, speech_share) for each piece instead. No traceback
 or URL crosses: URLs carry the session token.
@@ -32,7 +33,7 @@ import time
 from typing import Any, Optional
 import urllib.request
 
-from services.captions import guards
+from services.captions import guards, text_language
 from services.captions.pieces import END_PAUSE_S, MAX_PIECE_S, Cutter, Piece
 from services.captions.stream_clock import StreamClock, TsTimes
 
@@ -147,6 +148,7 @@ class _Run:
         self.stopped = threading.Event()
         self.newest = segment_start
         self.rtf = 0.5
+        self.votes = text_language.Votes()  # the language heard, when none is given
         self._resynced = False
         self._ended = False
         from services.captions.decoder import AudioDecoder
@@ -249,8 +251,24 @@ class _Run:
             length = max(0.1, piece.end - piece.start)
             self.rtf = 0.8 * self.rtf + 0.2 * (took / length)
             text = guards.clean(text)
-            if text and not self.stopped.is_set():
-                self.link.send(("caption", self.run, piece.start, piece.end, text))
+            if not text or self.stopped.is_set():
+                continue
+            if not self.language and not self._heard(text, length):
+                continue
+            self.link.send(("caption", self.run, piece.start, piece.end, text))
+
+    def _heard(self, text: str, length: float) -> bool:
+        """No language given: the pieces vote with the language their words are in; it locks
+        once they agree, and the model is told it from then on. Until then only a caption in
+        the language most pieces say shows (a short piece the model heard as Chinese on a
+        Turkish channel does not)."""
+        heard = text_language.guess(text) if length >= 1.2 else None
+        locked = self.votes.add(heard)
+        if locked is not None:
+            self.language = locked
+            self.link.send(("detected", self.run, locked))
+            return True
+        return heard is not None and heard == self.votes.leading()
 
 
 def _lower_priority() -> None:

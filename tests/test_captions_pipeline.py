@@ -36,6 +36,48 @@ class GuardTests(unittest.TestCase):
         self.assertGreater(guards.token_cap(6.0), guards.token_cap(2.0))
 
 
+class TextLanguageTests(unittest.TestCase):
+    """The language a caption is written in, from what the model wrote on the broadcasts."""
+
+    def test_the_languages_the_model_wrote(self):
+        from services.captions.text_language import guess
+
+        cases = {
+            "Tamam tamam problem yok ya kostümleri ben hallederim zaten merak etmeyin.": "Turkish",
+            "Feda edenlerin canı şahidi. Bizler de söz veriyoruz.": "Turkish",
+            "Rising food and fuel prices have been major issues for voters.": "English",
+            "Die Regierung hat das nicht gesagt, und es ist auch nicht so.": "German",
+            "Le gouvernement ne veut pas que les prix montent dans la ville.": "French",
+            "El gobierno dijo que los precios no van a subir en la ciudad.": "Spanish",
+            "好了。我们走吧。": "Chinese",
+            "جد بكر، أنت بكر.": "Arabic",
+            "И я огням лар, салю гню уленин": "Russian",
+            "맛, 맛처럼 맛이.": "Korean",
+        }
+        for text, language in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(guess(text), language)
+
+    def test_too_little_to_tell_says_so(self):
+        from services.captions.text_language import guess
+
+        self.assertIsNone(guess("Okay."))
+        self.assertIsNone(guess("å ja."))
+
+    def test_the_pieces_lock_the_language_once_they_agree(self):
+        from services.captions.text_language import Votes
+
+        votes = Votes()
+        self.assertIsNone(votes.add("Turkish"))
+        self.assertIsNone(votes.leading())  # one says nothing yet
+        self.assertIsNone(votes.add("Chinese"))  # a short piece over music
+        self.assertIsNone(votes.add("Turkish"))
+        self.assertEqual(votes.leading(), "Turkish")
+        self.assertEqual(votes.add("Turkish"), "Turkish")  # three of the last four
+        self.assertEqual(votes.locked, "Turkish")
+        self.assertIsNone(votes.add("Arabic"))  # locked: no more votes
+
+
 def _packet(pid, payload, start=False):
     header = bytes([0x47, (0x40 if start else 0) | (pid >> 8), pid & 0xFF, 0x10])
     body = payload[:184]

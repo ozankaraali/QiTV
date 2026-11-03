@@ -76,6 +76,7 @@ class CaptionsController(QObject):
         self._process.progress.connect(self._on_progress)
         self._process.resync.connect(self._on_resync)
         self._process.ended.connect(self._on_ended)
+        self._process.detected.connect(self._on_detected)
         if card is not None:
             card.answered.connect(self._on_answer)
         self._enabled = False
@@ -97,6 +98,7 @@ class CaptionsController(QObject):
         self._last: Optional[tuple[float, float]] = None  # (position, monotonic) last tick
         self._shown = ""
         self._language: tuple[str, str] = ("", FROM_MODEL)  # (qwen name or "", source)
+        self._detected: dict[str, str] = {}  # channel: the language the model's pieces agreed on
         self._timer = QTimer(self)
         self._timer.setInterval(TICK_MS)
         self._timer.timeout.connect(self._tick)
@@ -363,6 +365,18 @@ class CaptionsController(QObject):
         else:
             self._slow_since = None
 
+    def _on_detected(self, run: int, language: str) -> None:
+        """No language was given and the pieces agreed on one: kept for the channel while QiTV
+        runs (the next run there starts with it), and the panel says it."""
+        if run != self._run:
+            return
+        key = self._channel_key()
+        if key:
+            self._detected[key] = language
+        if self._language[1] == FROM_MODEL:
+            self._language = (language, FROM_MODEL)
+            self.changed.emit()
+
     def _on_resync(self, run: int, newest: float) -> None:
         if run == self._run and self._enabled:
             self._restart.start()
@@ -384,7 +398,9 @@ class CaptionsController(QObject):
         if self._ready and source[0].rsplit("/side/", 1)[0] != self._session_key:
             self._cues.clear()  # another channel or a new session: its own captions
             self._last = None
+            self._resolve_language()  # its own language too
             self._start_run()
+            self.changed.emit()
             return
         position = live.position()
         now = time.monotonic()
@@ -479,7 +495,7 @@ class CaptionsController(QObject):
         if default and default != "auto":
             self._language = (str(qwen_name(default) or default), FROM_DEFAULT)
             return
-        self._language = ("", FROM_MODEL)
+        self._language = (self._detected.get(self._channel_key(), ""), FROM_MODEL)
 
     def _track_language(self) -> str:
         """The language the playing audio track names, as Qwen's name ("" when none). The
