@@ -160,6 +160,60 @@ def _stream(video_pts, audio_pts, language=b"tur"):
     return out
 
 
+class TurkishModelTests(unittest.TestCase):
+    """2.9.1: Turkish is written by ufakzeka-kulak (far better than Qwen's Turkish, 25 times
+    faster), the rest by Qwen."""
+
+    def model(self):
+        from services.captions.worker import _Model
+
+        heard = []
+
+        class Recognizer:
+            def __init__(self, name, text):
+                self.name, self.text = name, text
+
+            def create_stream(self):
+                recognizer = self
+
+                class Stream:
+                    result = SimpleNamespace(text=recognizer.text)
+
+                    def set_option(self, key, value):
+                        heard.append((recognizer.name, key, value))
+
+                    def accept_waveform(self, rate, samples):
+                        heard.append((recognizer.name, "peak", max(samples)))
+
+                return Stream()
+
+            def decode_stream(self, stream):
+                pass
+
+        model = object.__new__(_Model)
+        model.recognizer = Recognizer("qwen", "Good evening.")
+        model.turkish = Recognizer("ufak", "iyi akşamlar")
+        return model, heard
+
+    def test_turkish_goes_to_ufak_louder_and_starts_with_a_capital(self):
+        model, heard = self.model()
+        self.assertEqual(model.decode(array("f", [0.1, 0.05]), "Turkish"), "İyi akşamlar")
+        self.assertEqual(heard, [("ufak", "peak", array("f", [0.8])[0])])  # its card's gain
+        heard.clear()
+        self.assertEqual(model.decode(array("f", [0.1]), "English"), "Good evening.")
+        self.assertEqual(heard[0], ("qwen", "language", "English"))
+        model.turkish = None  # its files not given: Qwen writes Turkish too
+        self.assertEqual(model.decode(array("f", [0.1]), "Turkish"), "Good evening.")
+
+    def test_a_turkish_capital_is_turkish(self):
+        from services.captions.worker import turkish_capital
+
+        self.assertEqual(turkish_capital("ırmak taştı"), "Irmak taştı")
+        self.assertEqual(turkish_capital("“evet” dedi"), "“Evet” dedi")
+        self.assertEqual(turkish_capital("Ankara"), "Ankara")
+        self.assertEqual(turkish_capital("..."), "...")
+
+
 class WrittenToTests(unittest.TestCase):
     """2.9, the review: "Can't keep up" and Automatic's step down measured how far the sound
     was read, which a model too slow for it never shortened."""

@@ -617,6 +617,7 @@ class CaptionsController(QObject):
                     "tokenizer": str(paths.tokenizer),
                 },
                 "vad": str(paths.vad),
+                "turkish": str(paths.turkish),  # 2.9.1: ufakzeka-kulak, for Turkish
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),

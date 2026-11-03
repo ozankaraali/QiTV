@@ -131,6 +131,10 @@ against pinned SHA-256 sums:
   (<https://huggingface.co/Qwen/Qwen3-ASR-0.6B>). The 0.6B model as converted to int8 ONNX by
   the sherpa-onnx project (its GitHub releases); the 1.7B model as converted by a community
   export on ModelScope (`zengshuishui/Qwen3-ASR-onnx`), under the same license.
+- **ufakzeka-kulak** (ufak AI), the Turkish speech model: Apache License 2.0
+  (<https://huggingface.co/ufakai/ufakzeka-kulak>), its sherpa-onnx export; trained on openly
+  licensed Turkish speech (Common Voice, ISSAI Turkish Speech Corpus, antalia-voice-corpus,
+  YODAS), each source and its licence listed in the model's ATTRIBUTION.md.
 - **sherpa-onnx** and **sherpa-onnx-core** 2.0.1 (k2-fsa), which run the model and include
   ONNX Runtime (Microsoft, MIT License): Apache License 2.0, from PyPI.
 - **Silero VAD** (Silero Team), the voice detector: MIT License, from sherpa-onnx's releases.

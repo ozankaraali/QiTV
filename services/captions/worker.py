@@ -27,6 +27,7 @@ import logging
 import multiprocessing
 from multiprocessing.connection import Connection, wait
 import os
+from pathlib import Path
 import queue
 import sys
 import threading
@@ -77,8 +78,25 @@ class _LogToOwner(logging.Handler):
             pass
 
 
+TURKISH = "Turkish"  # Qwen's name for it: the language ufakzeka-kulak writes (2.9.1)
+_TURKISH_GAIN = 8.0  # the model card's input gain: its sherpa-onnx files want the sound louder
+_UPPER = {"i": "İ", "ı": "I"}  # Turkish's own capitals of the dotted and the dotless i
+
+
+def turkish_capital(text: str) -> str:
+    """`text` with its first letter a capital, as Turkish writes it (i: İ). ufak writes a line
+    in lower case at times, with no full stop: a caption starts as a sentence does."""
+    for i, char in enumerate(text):
+        if char.isalpha():
+            upper = _UPPER.get(char, char.upper())
+            return text[:i] + upper + text[i + 1 :]
+    return text
+
+
 class _Model:
-    """The loaded speech model and voice detector; decodes one piece at a time."""
+    """The loaded speech models and voice detector; decodes one piece at a time: Qwen3-ASR, and
+    for Turkish ufak AI's ufakzeka-kulak (2.9.1: far better Turkish than Qwen's, at a
+    twenty-fifth of its time) once the files are given."""
 
     def __init__(self, spec: dict) -> None:
         runtime = spec.get("runtime")
@@ -100,6 +118,18 @@ class _Model:
                 num_threads=threads,
                 max_new_tokens=guards.token_cap(MAX_PIECE_S),
             )
+        self.turkish: Any = None
+        turkish = spec.get("turkish")
+        if paths and turkish:
+            folder = Path(turkish)
+            self.turkish = sherpa_onnx.OfflineRecognizer.from_transducer(
+                encoder=str(folder / "encoder.int8.onnx"),
+                decoder=str(folder / "decoder.int8.onnx"),
+                joiner=str(folder / "joiner.int8.onnx"),
+                tokens=str(folder / "tokens.txt"),
+                num_threads=min(2, threads),
+                model_type="nemo_transducer",
+            )
         config = sherpa_onnx.VadModelConfig()
         config.silero_vad.model = spec["vad"]
         config.silero_vad.threshold = float(spec.get("vad_threshold", 0.5))
@@ -110,12 +140,19 @@ class _Model:
         if self.recognizer is not None:
             # Warm up: the first decode is slow (graph optimisation), not the viewer's first.
             self.decode(array("f", bytes(16000 * 4)), "")
+            if self.turkish is not None:
+                self.decode(array("f", bytes(16000 * 4)), TURKISH)
 
     def is_speech(self, window: array) -> bool:
         with self._lock:
             return bool(self.vad.is_speech(window))
 
     def decode(self, samples: array, language: str) -> str:
+        if language == TURKISH and self.turkish is not None:
+            stream = self.turkish.create_stream()
+            stream.accept_waveform(16000, array("f", (v * _TURKISH_GAIN for v in samples)))
+            self.turkish.decode_stream(stream)
+            return turkish_capital(str(stream.result.text).strip())
         stream = self.recognizer.create_stream()
         if language:
             stream.set_option("language", language)
