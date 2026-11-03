@@ -80,6 +80,7 @@ from services.catchup_memory import CatchupMemory
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
 from services.failure_reasons import LIMIT, Reason, own_streams_text, shown_message
+from services.film_relay import FilmRelay, relayable
 from services.i18n import N_, tr, translate
 from services.live import parts as live_parts
 from services.live.live_session import LiveSession
@@ -103,10 +104,11 @@ from services.provider_ids import (
     split_group_id,
     with_provider,
 )
+from services.provider_types import is_media_server
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot, records
 from services.sound_sync import SoundSync
-from services.vlc_profile import classify
+from services.vlc_profile import DEFAULT_USER_AGENT, classify
 from services.zapping import ZapContext
 from ui import item_provider
 from ui.autoplay import FINISHED_TEXT, Autoplay
@@ -1590,6 +1592,58 @@ class TVController(QObject):
             replace(target, quality=quality, start_ms=start, start_over=False, zapped=False)
         )
 
+    # ---- AI captions on a provider's film (2.9) ----------------------------------------------
+    def film_relay_wanted(self) -> bool:
+        """The large picture plays a provider's film or episode, which AI captions can read only
+        through a film relay (services.film_relay): the picture's one provider stream, shared.
+        A file, a media server's film (no stream limit) or an HLS one is read as it is, or not."""
+        target, url = self._current, self.session.url
+        return target is not None and url is not None and self._relayable(target, url)
+
+    def relay_film(self) -> bool:
+        """AI captions came on during a provider's film: it plays on through a film relay, opened
+        again where it is (a paused one stays paused). False: it plays as it did (nothing to
+        relay, one already relays it, or nothing plays to open again)."""
+        session, target = self.session, self._current
+        if self._closed or target is None or not self.film_relay_wanted():
+            return False
+        if session.relay() is not None:
+            return False
+        url = str(session.url)
+        relay = self._film_relay(target, url, item_provider.stream_agent(self.catalog, target.item))
+        if relay is None:
+            return False
+        if not session.play_through(relay):
+            relay.stop()
+            return False
+        logger.info("AI captions: the film plays on through the film relay")
+        return True
+
+    def _captions_on(self) -> bool:
+        captions = getattr(self.window_actions, "captions", None)
+        return captions is not None and bool(captions.enabled())
+
+    def _relayable(self, target: Target, url: str) -> bool:
+        if target.live or target.local or not relayable(url):
+            return False
+        return not is_media_server(item_provider.provider_type(self.catalog, target.item))
+
+    def _film_relay(self, target: Target, url: str, agent: Optional[str]) -> Optional[FilmRelay]:
+        """A started film relay of `url`, asking the provider as the picture's own play does
+        (its user agent, else libVLC's; no referrer, as for any film); None: the film plays as
+        it is (not a provider's film the relay carries, or no loopback port)."""
+        if not self._relayable(target, url):
+            return None
+        provider = item_provider.provider_dict(self.catalog, target.item)
+        verify = bool(provider.get("ssl_verify", getattr(self.config, "ssl_verify", True)))
+        relay = FilmRelay(url, user_agent=agent or DEFAULT_USER_AGENT, verify_ssl=verify)
+        try:
+            relay.start()
+        except OSError as error:
+            logger.warning("AI captions: no film relay (%s)", type(error).__name__)
+            return None
+        return relay
+
     def live_menu(self) -> Optional[dict]:
         """The live ⚙ (2.8): the large picture's channel's picture sizes, when its stream comes
         in two or more (LiveControls.sizes); None in the multiview or while an archive plays."""
@@ -1929,11 +1983,13 @@ class TVController(QObject):
             def open_vod() -> None:
                 self._prepare(session, target, previous)
                 agent = None if target.local else item_provider.stream_agent(self.catalog, item)
+                relay = self._film_relay(target, url, agent) if self._captions_on() else None
                 session.play(
                     url,
                     kind=classify(url, False),
                     start_ms=start,
                     **({"user_agent": agent} if agent else {}),  # 2.8: an STB portal's box's
+                    **({"relay": relay} if relay is not None else {}),  # 2.9: AI captions
                 )
                 self._reset_speed(session)
 

@@ -9,10 +9,11 @@ others' distributions, which may have malware.**
 - **Captions for live TV and films, made on your computer:** the Subtitles panel has a new row,
   AI captions. Turn it on and QiTV writes what is said in its own language, for anyone who
   follows speech better by reading it: on live channels, and on films and episodes from your
-  Jellyfin or Emby server or from your disk (recordings too). A provider's films are not
-  covered yet: captions would need a second stream from the provider. It understands 30
-  languages, among them English, Turkish, German, Spanish, French, Italian, Portuguese, Dutch,
-  Polish, Russian and Arabic.
+  provider, your Jellyfin or Emby server or your disk (recordings too). A provider's film still
+  takes one stream from the provider: the picture and the captions share it. Turned on during
+  one, the film opens again where it is (a moment's pause). It understands 30 languages, among
+  them English, Turkish, German, Spanish, French, Italian, Portuguese, Dutch, Polish, Russian
+  and Arabic.
 - **In step with the picture:** QiTV reads a few seconds ahead of what it shows, so each
   caption appears when its words are said, not after them. While captions are on, live TV plays
   about 8 seconds behind the broadcast: QiTV slows the picture very slightly (3%) until it has
