@@ -78,6 +78,10 @@ class FilmProvider:
         self.answers: list[int] = []  # statuses the next film asks get instead of the film
         self.cut: Optional[int] = None  # the next film answer ends after this many bytes
         self.ranges = True  # False: the film is answered whole, without ranges
+        self.bare_416 = False  # a 416 without its Content-Range (the film's real length)
+        self.empty = False  # a film answer brings no byte (a 206 with Content-Length: 0)
+        self.fail_from: Optional[int] = None  # asks from this byte on get a 500
+        self.delay = 0.0  # each film answer waits this long before its head
         self._token = 1
         self._lock = threading.Lock()
         self._open: dict[int, socket.socket] = {}
@@ -157,8 +161,13 @@ class FilmProvider:
         if not path.startswith(f"/stream/{token}/"):
             self._status(handler, 403)
             return
+        if self.delay:
+            time.sleep(self.delay)
         if answer is not None:
             self._status(handler, answer)
+            return
+        if self.fail_from is not None and (first or 0) >= self.fail_from:
+            self._status(handler, 500)
             return
         size = len(self.data)
         if first is None or not self.ranges:
@@ -167,7 +176,8 @@ class FilmProvider:
             start, end, status = first, size if last is None else min(size, last + 1), 206
         if start >= size:
             handler.send_response(416)
-            handler.send_header("Content-Range", f"bytes */{size}")
+            if not self.bare_416:
+                handler.send_header("Content-Range", f"bytes */{size}")
             handler.send_header("Content-Length", "0")
             handler.end_headers()
             return
@@ -177,6 +187,10 @@ class FilmProvider:
             handler.send_header("Accept-Ranges", "bytes")
         if status == 206:
             handler.send_header("Content-Range", f"bytes {start}-{end - 1}/{size}")
+        if self.empty:  # the head says the range, the body brings nothing
+            handler.send_header("Content-Length", "0")
+            handler.end_headers()
+            return
         handler.send_header("Content-Length", str(end - start))
         handler.end_headers()
         began, pos = time.monotonic(), start

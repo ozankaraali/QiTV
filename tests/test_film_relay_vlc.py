@@ -240,14 +240,54 @@ class FilmThroughRelayTests(unittest.TestCase):
         relay.start()
         self.addCleanup(relay.wait_closed, 3.0)
         self.addCleanup(relay.stop)
+        states = []
+        session.stateChanged.connect(states.append)
         self.assertTrue(session.play_through(relay))
         self.assertIs(session.relay(), relay)
         self.assertEqual(session.url, url)
         self.assertTrue(wait_until(lambda: session.placed(), 15_000))
         self.assertTrue(wait_until(lambda: session.state() is PlaybackState.PAUSED, 5_000))
+        self.assertNotIn("playing", states)  # opened paused: not a moment of its sound
         self.assertLess(abs(session.time_ms() - where), 1500)
         self.assertGreater(relay.stats["bytes"], 0)  # it reads through the relay now
+        session.set_paused(False)  # the viewer plays it: it stays playing
+        self.assertTrue(wait_until(lambda: session.time_ms() > where + 1500, 5_000))
+        self.assertIs(session.state(), PlaybackState.PLAYING)
         self.stop_and_check(session, relay)
+
+    def test_the_viewers_play_during_the_paused_reopen_is_kept(self):  # review: paused again
+        self.provider = FilmProvider(
+            self.films[".mp4"].read_bytes(), extension=".mp4", content_type="video/mp4", rate=RATE
+        )
+        self.addCleanup(self.provider.close)
+        session = PlaybackSession(INSTANCE, poll_ms=50, open_timeout_ms=15_000)
+        self.addCleanup(self.release, session)
+        url = self.provider.url
+        session.play(url, kind=classify(url, False))
+        self.assertTrue(wait_until(lambda: session.time_ms() > 2000, 15_000))
+        session.set_paused(True)
+        self.assertTrue(wait_until(lambda: session.state() is PlaybackState.PAUSED, 5_000))
+        self.provider.overlaps.clear()  # libVLC's own open (as above): the relay's from here
+        relay = FilmRelay(url, user_agent="VLC/3.0.20")
+        relay.start()
+        self.addCleanup(relay.wait_closed, 3.0)
+        self.addCleanup(relay.stop)
+        self.assertTrue(session.play_through(relay))
+        session.toggle_pause()  # Play, while it opens again
+        self.assertTrue(wait_until(lambda: session.placed(), 15_000))
+        where = session.time_ms()
+        self.assertTrue(wait_until(lambda: session.time_ms() > where + 1000, 5_000))
+        self.assertIs(session.state(), PlaybackState.PLAYING)
+
+    def test_a_film_that_ends_lets_its_relay_go(self):  # review: not kept to the next title
+        relay, session = self.start(".mp4", "video/mp4")
+        url = self.provider.url
+        near_end = int((LENGTH_S - 2) * 1000)
+        session.play(url, kind=classify(url, False), start_ms=near_end, relay=relay)
+        self.assertTrue(wait_until(lambda: session.state() is PlaybackState.ENDED, 20_000))
+        self.assertIsNone(session.relay())
+        self.assertTrue(wait_until(lambda: relay.closed(), 3_000))
+        self.assertEqual(self.provider.open_now(), 0)
 
 
 if __name__ == "__main__":

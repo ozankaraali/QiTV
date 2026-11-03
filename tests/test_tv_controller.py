@@ -2090,6 +2090,13 @@ class VodTests(ControllerTestCase):
         self.assertFalse(self.controller.relay_film())
         self.assertTrue(made[0].closed())  # stopped at once: it never opened anything
 
+    def test_a_film_that_ended_gets_no_relay(self):  # review: none made for nothing
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.session.stateChanged.emit("ended")
+        self.controller._film_relay = lambda *args: self.fail("a relay was made")
+        self.assertFalse(self.controller.relay_film())
+
     def test_episode_requests_a_series_link(self):
         episode = {"id": "s", "cmd": "x", "series": 2}
         self.controller.play_vod(episode, "episode", play_context())

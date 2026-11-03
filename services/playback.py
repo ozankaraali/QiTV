@@ -62,10 +62,11 @@ that froze before).
 
 A provider's film can play through a film relay (2.9, `services.film_relay`: AI captions read it
 too, over the same provider connection): `play(relay=)` from its start, `play_through(relay)` on
-from where it plays (opened again there; a paused one pauses again once it plays). `url` stays the
-provider's address; libVLC opens the relay's. The relay is the title's: another play, a stop, a
-failure or the release stops it, and its provider connection counts as this player's input until
-it is closed (`holds_input`; `inputEnded` follows), and no media opens before it is.
+from where it plays (opened again there; a paused one opens paused, libVLC's :start-paused, and is
+put where it was while paused, until the viewer plays it). `url` stays the provider's address;
+libVLC opens the relay's. The relay is the title's: another play, a stop, its end, a failure or
+the release stops it, and its provider connection counts as this player's input until it is
+closed (`holds_input`; `inputEnded` follows), and no media opens before it is.
 """
 
 from __future__ import annotations
@@ -143,6 +144,7 @@ class PlaybackState(str, Enum):
 _PLAYS_HERE = frozenset(
     {PlaybackState.OPENING, PlaybackState.BUFFERING, PlaybackState.PLAYING, PlaybackState.PAUSED}
 )
+_OPENED = frozenset({PlaybackState.PLAYING, PlaybackState.PAUSED})
 
 
 @dataclass(frozen=True)
@@ -413,13 +415,14 @@ class PlaybackSession(QObject):
         self._tracks_wanted: dict[str, tuple[int, str, bool]] = {}
         self._tracks_due: set[str] = set()
         # 2.9: the film relay libVLC opens self._url through (None: the address itself), the
-        # ones stopped whose provider connection is not closed yet, and a pause to apply again
-        # once a film opened through one plays (it was paused).
+        # ones stopped whose provider connection is not closed yet, and whether the film opens
+        # again paused (play_through of a paused film: libVLC's :start-paused, so no sound
+        # plays, and its position is set while paused).
         self._relay: Optional[FilmRelay] = None
         self._closing_relays: list[FilmRelay] = []
         self._relay_watch = QTimer(self, interval=_RELAY_POLL_MS)
         self._relay_watch.timeout.connect(self._watch_relays)
-        self._pause_due = False
+        self._paused_open = False
 
     def _player_free(self) -> bool:
         """The GUI thread may call into libVLC: not released, and no job holds its input lock.
@@ -533,7 +536,7 @@ class PlaybackSession(QObject):
         if relay is not self._relay:
             self._retire_relay()  # another title's, or this title again without one
         self._relay = relay
-        self._pause_due = False
+        self._paused_open = False
         if not playable(url, local=local):
             logger.warning("Not playing an address in a scheme no stream uses (%s)", shape(url))
             self._url = None  # nothing to open again
@@ -569,9 +572,9 @@ class PlaybackSession(QObject):
 
     def play_through(self, relay: FilmRelay) -> bool:
         """2.9: play the film on through `relay`, a started film relay of its address (AI
-        captions turned on for a provider's film): libVLC opens it again there, where it plays,
-        and a paused film pauses again once it plays. False: no such film plays here (the
-        caller stops `relay`)."""
+        captions turned on for a provider's film): libVLC opens it again there, where it plays;
+        a paused film opens paused (no sound plays) and stays so until the viewer plays it.
+        False: no such film plays here (the caller stops `relay`)."""
         if self._released or self._url is None or relay.source != self._url:
             return False
         if self._state not in _PLAYS_HERE or relay is self._relay:
@@ -580,8 +583,8 @@ class PlaybackSession(QObject):
         start = self._start_ms if self._start_ms is not None else self.time_ms()  # a resume due
         self._retire_relay()
         self._relay = relay
+        self._paused_open = paused  # before the reopen: its open may come at once
         self.reopen(start)
-        self._pause_due = paused
         return True
 
     def cast_to(self, renderer: Any) -> None:
@@ -627,6 +630,8 @@ class PlaybackSession(QObject):
         options = list(self._options)
         if self._software and self._hardware:
             options += software_options()
+        if self._paused_open:
+            options.append(":start-paused")  # 2.9: paused on its first picture (play_through)
         for option in options:
             media.add_option(option)
         self._player.set_media(media)
@@ -746,7 +751,7 @@ class PlaybackSession(QObject):
         self._poll.stop()
         self._cancel_pending()
         self._start_ms = None
-        self._pause_due = False
+        self._paused_open = False
         self._retire_relay()
         self._end_input()
         self._set_seekable(False)
@@ -754,11 +759,13 @@ class PlaybackSession(QObject):
 
     def toggle_pause(self) -> None:
         self._held = False  # the viewer's pause from here
+        self._paused_open = False  # 2.9: and theirs over a film opening again paused
         if self._player_free():
             self._player.pause()
 
     def set_paused(self, paused: bool) -> None:
         self._held = False
+        self._paused_open = False
         if self._player_free():
             self._player.set_pause(1 if paused else 0)
 
@@ -1243,6 +1250,7 @@ class PlaybackSession(QObject):
                 self._fail(tr("The stream could not be opened"))  # i18n: error toast
                 return
             self._poll.stop()
+            self._retire_relay()  # 2.9: the title ended: its film relay's cache and threads go
             self._set_state(PlaybackState.ENDED)
             self.ended.emit()
             return
@@ -1273,7 +1281,9 @@ class PlaybackSession(QObject):
             return
         seekable = self.is_seekable()
         self._set_seekable(seekable)
-        if self._start_ms is not None and state is PlaybackState.PLAYING:
+        # A film opened paused (2.9, play_through) goes to its position while paused.
+        paused_open = self._paused_open and state is PlaybackState.PAUSED
+        if self._start_ms is not None and (state is PlaybackState.PLAYING or paused_open):
             if seekable:
                 target = self._start_ms
                 length = self.length_ms()
@@ -1286,9 +1296,8 @@ class PlaybackSession(QObject):
             elif self._playing_clock.elapsed() > _RESUME_GIVE_UP_MS:
                 logger.debug("Dropping the resume position: the media is not seekable")
                 self._start_ms = None
-        if self._pause_due and state is PlaybackState.PLAYING and self._start_ms is None:
-            self._pause_due = False  # 2.9: opened again through a film relay while paused
-            self._player.set_pause(1)
+        if self._paused_open and self._start_ms is None and state in _OPENED:
+            self._paused_open = False  # it opened (and is where it was): later opens as ever
         if state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
             self.positionChanged.emit(self.time_ms(), self.length_ms())
         if self._watch_picture(state):
