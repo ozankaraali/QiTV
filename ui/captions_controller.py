@@ -67,7 +67,8 @@ from ui.captions_texts import (  # noqa: E402  (the texts, with their translatio
     size_text,
 )
 
-MODEL_NAMES = ("auto", "small", "large")
+MODEL_NAMES = ("auto", "small", "large")  # the AI captions row's ‹ › steps, in order
+MODEL_SIZES = {"small": "0.6B", "large": "1.7B"}
 
 
 def model_texts() -> dict[str, str]:
@@ -107,7 +108,7 @@ class CaptionsController(QObject):
             card.answered.connect(self._on_answer)
         self._enabled = False
         self._leaving_download: Any = None  # cancelled, still ending its request
-        self._disk: dict[str, tuple[bool, int]] = {}  # each model's (installed, to fetch)
+        self._disk: dict[str, bool] = {}  # each model installed (see _here)
         self._start_after_leaving = False
         self._run_channel = ""  # the channel the run reads (a vote's language is its)
         self._resync_at: Optional[float] = None  # read again from past a jump here
@@ -271,34 +272,27 @@ class CaptionsController(QObject):
         self._process.send("language", self._language[0])
         self.changed.emit()
 
-    # ---- the speech model (2.9: the Subtitles panel's and the phone's, as Settings') ---------
+    # ---- the speech model (2.9: on the AI captions row, a game's ‹ quality ›; Settings' too) --
     def model(self) -> str:
         """The viewer's speech model: "auto" (by this computer's speed), "small" or "large"."""
         name = str(self._config_get("ai_captions_model", "auto") or "auto")
         return name if name in MODEL_NAMES else "auto"
 
-    def model_choices(self) -> list[tuple[str, str, str]]:
-        """Automatic, Faster (0.6B) and More accurate (1.7B) as (name, text, note): Automatic's
-        note names the one it takes now; another's, its download ("1.6 GB"), or how far that is
-        ("Downloading 40%"), and nothing once it is here."""
+    def model_choices(self) -> list[tuple[str, str]]:
+        """The row's ‹ › steps, in order, as (name, text): "Automatic (1.7B)" (the one it takes
+        now), "Faster (0.6B)", "More accurate (1.7B)"."""
         texts = model_texts()
-        choices = [("auto", texts["auto"], texts[self._auto_tier()])]
-        for name in ("small", "large"):
-            here, missing = self._on_disk(name)
-            if self._download is not None and name == self._tier:
-                note = self.status_text()
-            else:
-                # nothing to fetch (only to unpack: a cancel left it whole): nothing to say
-                note = "" if here or not missing else size_text(missing)
-            choices.append((name, texts[name], note))
-        return choices
+        auto = f"{texts['auto']} ({MODEL_SIZES[self._auto_tier()]})"
+        return [("auto", auto), ("small", texts["small"]), ("large", texts["large"])]
 
     def model_text(self) -> str:
-        """The Speech model row's note: "Automatic · Faster (0.6B)", or the one chosen."""
-        texts, name = model_texts(), self.model()
-        if name == "auto":
-            return f"{texts['auto']} · {texts[self._auto_tier()]}"
-        return texts[name]
+        """The model chosen, as the row's ‹ › shows it."""
+        return dict(self.model_choices())[self.model()]
+
+    def step_model(self, delta: int) -> None:
+        """The row's ‹ or ›: the model before or after the one chosen (round the three)."""
+        names = list(MODEL_NAMES)
+        self.set_model(names[(names.index(self.model()) + (1 if delta > 0 else -1)) % len(names)])
 
     def set_model(self, name: str) -> None:
         """The viewer's speech model, kept as Settings keeps it. While they are on (or on their
@@ -317,21 +311,21 @@ class CaptionsController(QObject):
         from services.captions import tier
 
         for name in ("large", "small"):
-            if self._on_disk(name)[0]:
+            if self._here(name):
                 return name
         return str(tier.choose_tier("auto"))
 
-    def _on_disk(self, name: str) -> tuple[bool, int]:
-        """(installed, bytes still to fetch) of a model, looked at once until a download or
-        Settings' Delete changes them: the panel and the phones ask often."""
+    def _here(self, name: str) -> bool:
+        """The model is installed, looked at once until a download or Settings' Delete changes
+        it: the panel and the phones ask often."""
         from services.captions import models
 
         known = self._disk.get(name)
         if known is None:
             try:
-                known = (models.installed(name), models.download_size(name))
+                known = models.installed(name)
             except models.Unsupported:
-                known = (False, 0)
+                known = False
             self._disk[name] = known
         return known
 

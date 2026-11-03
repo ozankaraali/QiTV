@@ -99,15 +99,10 @@ AI_CAPTIONS = "ai_captions"  # on or off
 AI_LANGUAGE = "ai_language"  # the language they hear: opens the list
 AI_BACK = "ai_back"  # the list's way back to the Subtitles panel
 AI_PICK = "ai_pick"  # a language of the list: (AI_PICK, "auto" or Qwen's name)
-AI_MODEL = "ai_model"  # the speech model: opens its list (Automatic, Faster, More accurate)
-AI_MODEL_PICK = "ai_model_pick"  # a model of the list: (AI_MODEL_PICK, "auto", "small", "large")
 # i18n: the Subtitles panel's row: captions written on this computer by a speech model, in the
 # language spoken; a Settings group's title
 AI_CAPTIONS_TEXT = N_("AI captions")
 LANGUAGE_TEXT = N_("Language")
-# i18n: the Subtitles panel's row under AI captions, and a setting: which speech model writes
-# them (Automatic, Faster, More accurate)
-MODEL_TEXT = N_("Speech model")
 SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")
 # i18n: the file dialog's filter; keep the part in brackets as it is
 SUBTITLE_FILTER = N_("Subtitles (*.srt *.ass *.ssa *.vtt *.sub)")
@@ -288,6 +283,11 @@ def audio_names(tracks: list[tuple[int, str]], infos: Optional[list] = None) -> 
     return names
 
 
+def _chosen(captions) -> bool:
+    """AI captions are the subtitle source chosen: on, or their download on its way."""
+    return bool(captions.enabled() or captions.downloading())
+
+
 @dataclass(frozen=True)
 class CaptionsChoice:
     """AI captions as the Subtitles panel offers them (2.9), for the phone remote's sheet."""
@@ -298,9 +298,8 @@ class CaptionsChoice:
     language: str  # the language they hear: "auto", or Qwen's name
     language_text: str  # the Language row's note while on: "Türkçe · automatic"
     languages: tuple[tuple[str, str], ...]  # while on, the list: ("auto", "Auto"), (name, own)
-    model: str = "auto"  # the speech model chosen: "auto", "small" or "large"
-    model_text: str = ""  # the Speech model row's note: "Automatic · Faster (0.6B)"
-    models: tuple[tuple[str, str, str], ...] = ()  # its list: (name, text, note: "1.6 GB")
+    model: str = "auto"  # the speech model, the row's ‹ ›: "auto", "small" or "large"
+    models: tuple[tuple[str, str], ...] = ()  # its steps, in order: (name, "Automatic (1.7B)")
 
 
 class TrackControls(QObject):
@@ -363,6 +362,7 @@ class TrackControls(QObject):
         for name, panel in self._panels.items():
             panel.set_controls(transport, transport.control_at)  # another button acts at once
             panel.rowChosen.connect(partial(self._on_row, name))
+            panel.rowStepped.connect(partial(self._on_row_step, name))
             panel.syncStepped.connect(partial(self._step, name))
             panel.syncReset.connect(partial(self._reset, name))
             panel.closed.connect(partial(self._on_closed, name))
@@ -570,15 +570,13 @@ class TrackControls(QObject):
         captions = self._offered()
         if self._level == AI_LANGUAGE and captions is not None and captions.enabled():
             return self._language_model(captions)
-        if self._level == AI_MODEL and captions is not None:
-            return self._models_model(captions)
         self._level = ""
         session = self._session()
         shown = session.subtitle_track()
         tracks = self.subtitle_choices()
         online, target = self._online, self._current()
         searchable = online is not None and online.available(target)
-        ai_on = captions is not None and bool(captions.enabled())
+        ai_on = captions is not None and _chosen(captions)
         rows = []
         if searchable:
             pick = online.remembered(target)
@@ -636,7 +634,6 @@ class TrackControls(QObject):
             language_text=self._language_text(captions) if on else "",
             languages=languages,
             model=str(captions.model()),
-            model_text=str(captions.model_text()),
             models=tuple(captions.model_choices()),
         )
 
@@ -696,7 +693,7 @@ class TrackControls(QObject):
         captions = self._offered()
         if captions is None or not self.offers():
             return False
-        if name not in {model for model, _text, _note in captions.model_choices()}:
+        if name not in {model for model, _text in captions.model_choices()}:
             return False
         captions.set_model(name)
         self._one_source(captions)
@@ -716,7 +713,7 @@ class TrackControls(QObject):
             if changed is not None:
                 changed.connect(self._captions_changed)
             self._watched = captions
-            self._captions_on = bool(captions.enabled())
+            self._captions_on = _chosen(captions)
         return captions
 
     def _offered(self) -> Any:
@@ -732,14 +729,25 @@ class TrackControls(QObject):
         # Ticked while their download is on its way too, as on the phone: a tap then calls it
         # off, never reads as "turn them on" (2.9: one did, and cancelled it while unpacking).
         ticked = on or bool(captions.downloading())
-        rows = [PanelRow(AI_CAPTIONS, translate(AI_CAPTIONS_TEXT), ticked, note=status)]
+        # The owner's: the speech model is stepped on the row itself, as a game's quality
+        # (‹ Automatic › Faster › More accurate), before the first download too; a click on
+        # the row turns them on or off as any subtitle's.
+        choices = captions.model_choices()
+        rows = [
+            PanelRow(
+                AI_CAPTIONS,
+                translate(AI_CAPTIONS_TEXT),
+                ticked,
+                note=status,
+                value=captions.model_text(),
+                widest=max((text for _name, text in choices), key=len, default=""),
+                lit=captions.model() != "auto",
+                choosable=True,
+            )
+        ]
         if on:
             note = self._language_text(captions)
             rows.append(PanelRow(AI_LANGUAGE, translate(LANGUAGE_TEXT), note=note, opens=True))
-        # 2.9: which model writes them, chosen here too (Settings' choice): before the first
-        # download as well, so the larger one can be the one fetched.
-        model = captions.model_text()
-        rows.append(PanelRow(AI_MODEL, translate(MODEL_TEXT), note=model, opens=True))
         return rows
 
     @staticmethod
@@ -763,30 +771,16 @@ class TrackControls(QObject):
         ]
         return PanelModel(translate(LANGUAGE_TEXT), tuple(rows))
 
-    def _models_model(self, captions) -> PanelModel:
-        """The speech models: "‹ Subtitles", then Automatic, Faster and More accurate, the one
-        chosen ticked, each noted with what it takes (Automatic: the one it uses now)."""
-        current = captions.model()
-        rows = [PanelRow(AI_BACK, translate(SUBTITLES_TITLE), action=True, icon="chevron_left")]
-        rows += [
-            PanelRow((AI_MODEL_PICK, name), text, current == name, note=note)
-            for name, text, note in captions.model_choices()
-        ]
-        return PanelModel(translate(MODEL_TEXT), tuple(rows))
-
-    def _pick_model(self, name: str) -> None:
-        """A speech model chosen: they come on again with it, its download's question first
-        when it isn't here (the question in front, as their row's)."""
+    def _on_row_step(self, name: str, key, delta: int) -> None:
+        """A row's ‹ or › (2.9: AI captions' speech model): they come on again with it while
+        on, its download's question first when it isn't here (the question in front)."""
         captions = self._offered()
-        if captions is None:
+        if name != SUBTITLES or key != AI_CAPTIONS or captions is None or not self._playing():
             return
-        captions.set_model(name)
+        captions.step_model(delta)
         self._one_source(captions)
         if captions.asking():
-            self._level = ""
             self.close()
-        else:
-            self._back_to_subtitles()
 
     def _toggle_captions(self) -> None:
         """The AI captions row: on or off. Turning them on closes the panel first (their first
@@ -803,8 +797,10 @@ class TrackControls(QObject):
             self._open(SUBTITLES)
 
     def _one_source(self, captions) -> None:
-        """AI captions on: the subtitle track shown goes (one subtitle source at a time)."""
-        on = bool(captions.enabled())
+        """AI captions on, or their download on its way: the subtitle track shown goes (one
+        subtitle source at a time; 2.9: a track left on while the model downloaded was ticked
+        beside them)."""
+        on = _chosen(captions)
         if on and self._playing():
             session = self._session()
             if session.subtitle_track() != -1:
@@ -812,9 +808,10 @@ class TrackControls(QObject):
         self._captions_on = on
 
     def _captions_off(self) -> None:
-        """A subtitle track, Off or a file chosen: AI captions go off."""
+        """A subtitle track, Off or a file chosen: AI captions go off, a download on its way
+        too (it resumes when they are turned on again)."""
         captions = self._captions_now()
-        if captions is not None and captions.enabled():
+        if captions is not None and _chosen(captions):
             captions.toggle()
             self._captions_on = False
 
@@ -824,9 +821,9 @@ class TrackControls(QObject):
         captions = self._watched
         if captions is None:
             return
-        if captions.enabled() and not self._captions_on:
+        if _chosen(captions) and not self._captions_on:
             self._one_source(captions)
-        self._captions_on = bool(captions.enabled())
+        self._captions_on = _chosen(captions)
         shown = self._shown()
         if shown is not None and shown[0] == SUBTITLES and self._playing():
             shown[1].set_model(self._model(SUBTITLES))
@@ -849,11 +846,6 @@ class TrackControls(QObject):
             if captions is not None:
                 captions.set_language(key[1])
             self._back_to_subtitles()
-        elif key == AI_MODEL:
-            self._level = AI_MODEL
-            self._open(SUBTITLES)
-        elif isinstance(key, tuple) and len(key) == 2 and key[0] == AI_MODEL_PICK:
-            self._pick_model(key[1])
         else:
             return False
         return True

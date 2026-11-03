@@ -24,11 +24,10 @@ from ui.remote_snapshots import MAX_TRACKS, TITLE_CHARS, Handles, state, tracks
 
 MODELS = {
     "model": "auto",
-    "model_note": "Automatic · Faster (0.6B)",
     "models": [
-        {"id": "auto", "name": "Automatic", "note": "Faster (0.6B)"},
-        {"id": "small", "name": "Faster (0.6B)", "note": ""},
-        {"id": "large", "name": "More accurate (1.7B)", "note": "2.5 GB"},
+        {"id": "auto", "name": "Automatic (0.6B)"},
+        {"id": "small", "name": "Faster (0.6B)"},
+        {"id": "large", "name": "More accurate (1.7B)"},
     ],
 }
 

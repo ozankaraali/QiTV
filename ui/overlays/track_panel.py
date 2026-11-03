@@ -20,9 +20,11 @@ has more), and the title and the Sync row always show.
 
 A setting's row (the Picture panel's "Aspect ratio  ‹ 16:9 ›", `PanelRow.value`) steps through
 its choices: a click on ‹ or › steps back or on, a click elsewhere on it, Enter or → on (← back);
-`rowStepped` says so. Its value is lit while it is not the default (`lit`), and it keeps its
-width while it steps (`widest`). Any other row may say something more at its right, muted
-(`note`: "Downloading 34%"), and a row that opens a list of its own ends in a › (`opens`).
+`rowStepped` says so. A choosable one (2.9: "AI captions  ‹ Automatic ›", `choosable`) is chosen
+as any other row by a click on it or Enter, and only its ‹ ›, ← and → step it. Its value is lit
+while it is not the default (`lit`), and it keeps its width while it steps (`widest`). A row may
+say something more at its right, muted (`note`: "Downloading 34%", before a value's ‹ ›), and a
+row that opens a list of its own ends in a › (`opens`).
 
 It is painted as the mixer is (ui/overlays/mixer.py): the same panel, outline and radius, the
 same unit-based metrics and focus fill, and the speed chip's round − and + (transport).
@@ -99,8 +101,11 @@ class PanelRow:
     widest: str = ""  # the setting's longest choice: its column keeps that width
     lit: bool = False  # the setting is not at its default: its value shows lit
     tip: str = ""  # the row's tooltip (it names its key)
-    note: str = ""  # said at its right, muted ("Downloading 34%"); not with a value
+    note: str = ""  # said at its right, muted ("Downloading 34%"); before a value's ‹ ›
     opens: bool = False  # it opens a list of its own: a › at its right
+    # 2.9: a row chosen as the others (ticked while on) that also has a setting: a click on it
+    # or Enter chooses it, only ‹ › and ←/→ step its value ("AI captions  ‹ Automatic ›").
+    choosable: bool = False
 
 
 @dataclass(frozen=True)
@@ -303,7 +308,7 @@ class TrackPanel(Overlay):
         focus = self._focus
         if focus is not None and focus < len(self._model.rows):
             row = self._model.rows[focus]
-            if row.value:
+            if row.value and not row.choosable:
                 self.rowStepped.emit(row.key, 1)
             else:
                 self.rowChosen.emit(row.key)
@@ -381,7 +386,7 @@ class TrackPanel(Overlay):
                 un.px(_TICK_U)
                 # A track's long name is cut short, a setting's (QiTV's words) never.
                 + (
-                    row_fm.horizontalAdvance(r.text) + setting
+                    row_fm.horizontalAdvance(r.text) + setting + self._end_width(un, r)
                     if r.value
                     else min(row_fm.horizontalAdvance(r.text), float(un.px(_TEXT_MAX_U)))
                     + self._end_width(un, r)
@@ -549,7 +554,9 @@ class TrackPanel(Overlay):
             p.setPen(qcolor(PALETTE.accent) if row.action else text)
             steps = rects.steps.get(index)
             if steps is not None:
-                room = steps[0].left() - 2 * un.px(_GAP_U) - (x + tick_w)
+                end = steps[0].left() - un.px(_GAP_U)
+                end = self._paint_end(p, un, row, rect, end, x + tick_w, muted)  # its note
+                room = end - un.px(_GAP_U) - (x + tick_w)
             else:
                 end = rect.right() - un.px(_PAD_U) / 2 - arrow
                 end = self._paint_end(p, un, row, rect, end, x + tick_w, muted)
@@ -705,7 +712,7 @@ class TrackPanel(Overlay):
             return
         name, index = hit
         row = self._model.rows[index] if name in ("row", "less", "more") else None
-        if row is not None and (row.value or name != "row"):
+        if row is not None and (name != "row" or (row.value and not row.choosable)):
             self.rowStepped.emit(row.key, -1 if name == "less" else 1)
         elif row is not None:
             self.rowChosen.emit(row.key)

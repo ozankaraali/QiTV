@@ -373,6 +373,16 @@ body.sheet-open .remote, body.sheet-open .rows, body.sheet-open .chips { overflo
 .menu-list .choice.up { gap: 4px; font-weight: 600; color: var(--accent); }
 .menu-list .choice.up svg { color: var(--accent); }
 .menu-list .choice.pressed { background: rgba(238, 242, 246, 0.05); }
+/* 2.9: AI captions' row: a tap turns them on or off; under it, its ‹ › step the speech model
+   (a phone is too narrow for both on one line). */
+.menu-list .stepped { display: flex; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--line); }
+.menu-list .stepped > .choice { flex: 1 0 100%; min-width: 0; border-bottom: 0; padding-bottom: 2px; }
+.menu-list .steps { display: flex; flex: none; align-items: center; margin: 0 0 6px -4px; }
+.menu-list .steps button { padding: 8px 6px; border-bottom: 0; }
+.menu-list .steps button.pressed { background: rgba(238, 242, 246, 0.05); }
+.menu-list .steps svg { width: 18px; height: 18px; color: var(--muted); }
+.menu-list .step-value { font-size: 13px; color: var(--muted); white-space: nowrap; }
+.menu-list .stepped.lit .step-value { color: var(--text); }
 /* Forget's question, in the menu sheet: as QiTV's own (.ask below). */
 .menu-list .ask-text { margin: 4px 2px 14px; }
 .menu-list .ask-buttons button { justify-content: center; border-bottom: 0; text-align: center; }

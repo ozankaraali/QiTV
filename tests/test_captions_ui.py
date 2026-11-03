@@ -33,8 +33,6 @@ from ui.track_controls import (
     AI_BACK,
     AI_CAPTIONS,
     AI_LANGUAGE,
-    AI_MODEL,
-    AI_MODEL_PICK,
     AI_PICK,
     TrackControls,
     audio_names,
@@ -238,22 +236,24 @@ class FakeCaptions(QObject):
 
     def model_choices(self):
         return [
-            ("auto", "Automatic", "Faster (0.6B)"),
-            ("small", "Faster (0.6B)", ""),
-            ("large", "More accurate (1.7B)", "2.5 GB"),
+            ("auto", "Automatic (0.6B)"),
+            ("small", "Faster (0.6B)"),
+            ("large", "More accurate (1.7B)"),
         ]
 
     def model_text(self):
-        names = {name: text for name, text, _note in self.model_choices()}
-        if self.chosen_model == "auto":
-            return "Automatic · Faster (0.6B)"
-        return names[self.chosen_model]
+        return dict(self.model_choices())[self.chosen_model]
+
+    def step_model(self, delta):
+        names = [name for name, _text in self.model_choices()]
+        self.set_model(names[(names.index(self.chosen_model) + delta) % 3])
 
     def set_model(self, name):
         self.models.append(name)
         self.chosen_model = name
         if self.model_asks:
             self.on, self.asked = False, True
+        self.changed.emit()  # as the controller's: the panel follows
 
 
 class CaptionRowsTests(PanelCase):
@@ -308,7 +308,6 @@ class CaptionRowsTests(PanelCase):
                 "English",
                 "Français",
                 "AI captions",
-                "Speech model [Automatic · Faster (0.6B)]",  # 2.9: chosen before a download too
                 "Load a file…",
             ],
         )
@@ -327,7 +326,6 @@ class CaptionRowsTests(PanelCase):
                 "Français",
                 "*AI captions",
                 "Language [Türkçe · audio track]",
-                "Speech model [Automatic · Faster (0.6B)]",
                 "Load a file…",
             ],
         )
@@ -364,6 +362,21 @@ class CaptionRowsTests(PanelCase):
         self.click_row(AI_CAPTIONS)
         self.assertFalse(self.captions.going)
 
+    def test_one_subtitle_source_while_their_download_is_on_its_way_too(self):
+        # 2.9: the track shown stayed ticked beside AI captions while their model downloaded.
+        self.player.spu = 4  # Français shows
+        self.captions.asks = True
+        self.click_button("subtitles")
+        self.click_row(AI_CAPTIONS)  # the question
+        self.captions.answer(True)  # Download: on their way
+        self.captions.changed.emit()
+        self.assertEqual(self.player.spu, -1)  # the track went
+        self.click_button("subtitles")
+        self.assertEqual([t for t in self.texts() if t.startswith("*")], ["*AI captions"])
+        self.click_row(4)  # a track chosen meanwhile: the download is called off
+        self.assertFalse(self.captions.going)
+        self.assertEqual(self.player.spu, 4)
+
     def test_the_language_list_picks_one_and_comes_back(self):
         self.captions.on = True
         self.click_button("subtitles")
@@ -381,36 +394,45 @@ class CaptionRowsTests(PanelCase):
         self.click_row(AI_BACK)
         self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
 
-    def test_the_speech_model_list_picks_one_and_comes_back(self):
-        # 2.9, the owner's: Faster or More accurate chosen where they are turned on, before
-        # their download too, as a game's performance or quality.
+    def ai_row(self):
+        return self.rows()[[r.key for r in self.rows()].index(AI_CAPTIONS)]
+
+    def test_the_speech_model_steps_on_the_row_and_a_click_on_it_turns_them_on(self):
+        # 2.9, the owner's: as a game's quality, "AI captions  ‹ Automatic ›" on the row, before
+        # their download too; the row is chosen as any subtitle's.
         self.click_button("subtitles")
-        self.click_row(AI_MODEL)
-        self.assertEqual(self.subtitle_panel.model().title, "Speech model")
-        self.assertEqual(
-            self.texts(),
-            [
-                "Subtitles",
-                "*Automatic [Faster (0.6B)]",
-                "Faster (0.6B)",
-                "More accurate (1.7B) [2.5 GB]",
-            ],
-        )
-        self.assertEqual(self.rows()[0].key, AI_BACK)
-        self.click_row((AI_MODEL_PICK, "large"))
-        self.assertEqual(self.captions.models, ["large"])
-        self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
-        model = self.rows()[[r.key for r in self.rows()].index(AI_MODEL)]
-        self.assertEqual(model.note, "More accurate (1.7B)")
+        row = self.ai_row()
+        self.assertEqual((row.value, row.lit, row.choosable), ("Automatic (0.6B)", False, True))
+        self.assertEqual(row.widest, "More accurate (1.7B)")
+        index = [r.key for r in self.rows()].index(AI_CAPTIONS)
+        more = self.subtitle_panel.step_rect(index, 1).center().toPoint()
+        self.click(self.subtitle_panel, more)
+        self.assertEqual((self.captions.models, self.captions.toggles), (["small"], 0))
+        self.assertEqual((self.ai_row().value, self.ai_row().lit), ("Faster (0.6B)", True))
+        less = self.subtitle_panel.step_rect(index, -1).center().toPoint()
+        self.click(self.subtitle_panel, less)
+        self.click(self.subtitle_panel, less)  # round the three
+        self.assertEqual(self.captions.models, ["small", "auto", "large"])
+        self.click_row(AI_CAPTIONS)  # elsewhere on it: on, as a subtitle's row
+        self.assertEqual(self.captions.toggles, 1)
+
+    def test_the_keys_step_the_model_and_enter_turns_them_on(self):
+        self.click_button("subtitles")
+        panel = self.subtitle_panel
+        index = [r.key for r in self.rows()].index(AI_CAPTIONS)
+        while panel.focused() != index:
+            panel.move_focus(1)
+        self.assertTrue(self.controls.handle(Action.SEEK_FWD))
+        self.assertEqual(self.captions.models, ["small"])
+        self.assertTrue(self.controls.handle(Action.OK))
+        self.assertEqual(self.captions.toggles, 1)
 
     def test_a_model_that_must_download_first_puts_its_question_in_front(self):
         self.captions.on, self.captions.model_asks = True, True
         self.click_button("subtitles")
-        self.click_row(AI_MODEL)
-        self.click_row((AI_MODEL_PICK, "large"))
+        index = [r.key for r in self.rows()].index(AI_CAPTIONS)
+        self.click(self.subtitle_panel, self.subtitle_panel.step_rect(index, 1).center().toPoint())
         self.assertFalse(self.subtitle_panel.isVisible())
-        self.click_button("subtitles")  # opened again: Subtitles, not the model list
-        self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
 
     def test_left_goes_back_from_the_list_and_it_opens_on_its_own_list_again(self):
         self.captions.on = True
@@ -556,7 +578,7 @@ class PhoneChoicesTests(PanelCase):
         self.assertFalse(self.controls.choose_caption_model("huge"))
         self.assertEqual(self.captions.models, ["small"])
         choice = self.controls.captions_choice()
-        self.assertEqual((choice.model, choice.model_text), ("small", "Faster (0.6B)"))
+        self.assertEqual(choice.model, "small")
         self.assertEqual([m[0] for m in choice.models], ["auto", "small", "large"])
 
     def test_the_language_is_chosen_while_they_are_on(self):
@@ -651,27 +673,27 @@ class SpeechModelTests(unittest.TestCase):
         self.config = {}
         self.captions._config_get = lambda name, default: self.config.get(name, default)
         self.captions._config_set = self.config.__setitem__
-        self.disk = {"small": (True, 0), "large": (False, 2_500_000_000)}
-        self.captions._on_disk = lambda name: self.disk[name]
+        self.disk = {"small": True, "large": False}
+        self.captions._here = lambda name: self.disk[name]
         self.restarts = []
         self.captions._disable = lambda: self.restarts.append("off")
         self.captions.toggle = lambda: self.restarts.append("on")
 
-    def test_each_is_noted_with_what_it_takes(self):
+    def test_the_steps_name_what_automatic_takes_and_go_round(self):
         self.assertEqual(
             self.captions.model_choices(),
             [
-                ("auto", "Automatic", "Faster (0.6B)"),  # the one here
-                ("small", "Faster (0.6B)", ""),
-                ("large", "More accurate (1.7B)", size_text(2_500_000_000)),
+                ("auto", "Automatic (0.6B)"),  # the one here
+                ("small", "Faster (0.6B)"),
+                ("large", "More accurate (1.7B)"),
             ],
         )
-        self.assertEqual(self.captions.model_text(), "Automatic · Faster (0.6B)")
-        self.disk["small"] = (False, 0)  # whole on disk, only to unpack: not "1 MB"
-        self.assertEqual(self.captions.model_choices()[1][2], "")
-        self.captions._download, self.captions._tier = object(), "large"
-        self.captions._percent = 40
-        self.assertEqual(self.captions.model_choices()[2][2], "Downloading 40%")
+        self.assertEqual(self.captions.model_text(), "Automatic (0.6B)")
+        for expected in ("small", "large", "auto"):
+            self.captions.step_model(1)
+            self.assertEqual(self.captions.model(), expected)
+        self.captions.step_model(-1)
+        self.assertEqual(self.captions.model(), "large")
 
     def test_chosen_while_on_with_another_they_come_on_again_with_it(self):
         self.captions._enabled, self.captions._tier = True, "small"

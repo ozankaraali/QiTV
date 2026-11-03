@@ -1653,13 +1653,12 @@ TRACKS = {
     "subs": [{"id": 3, "name": "English", "on": False}],
     "ai": {"on": False, "going": False, "note": ""},
 }
-MODELS = {  # 2.9: the speech model, Settings' choice, on the sheet too
+MODELS = {  # 2.9: the speech model, Settings' choice, stepped on the AI captions row
     "model": "auto",
-    "model_note": "Automatic · Faster (0.6B)",
     "models": [
-        {"id": "auto", "name": "Automatic", "note": "Faster (0.6B)"},
-        {"id": "small", "name": "Faster (0.6B)", "note": ""},
-        {"id": "large", "name": "More accurate (1.7B)", "note": "2.5 GB"},
+        {"id": "auto", "name": "Automatic (1.7B)"},
+        {"id": "small", "name": "Faster (0.6B)"},
+        {"id": "large", "name": "More accurate (1.7B)"},
     ],
 }
 TRACKS["ai"] = {**TRACKS["ai"], **MODELS}
@@ -1698,7 +1697,20 @@ def scenario_tracks(rig: Rig) -> None:
     rig.page.locator("#tracksList .choice", has_text="AI captions").wait_for()
     assert rig.page.inner_text("#tracksTitle") == "Subtitles", rig.page.inner_text("#tracksTitle")
     labels = rig.page.locator("#tracksList .choice .label").all_inner_texts()
-    assert labels == ["Off", "English", "AI captions", "Speech model"], labels
+    assert labels == ["Off", "English", "AI captions"], labels
+    ai_row = rig.page.locator("#tracksList .stepped")
+    assert ai_row.locator(".step-value").inner_text() == "Automatic (1.7B)"
+    mark = rig.events.mark()
+    ai_row.locator(".step-more").click()  # the next model; the row stays off
+    rig.events.wait(CaptionsModel, where=lambda e: (e.model, e.of) == ("small", 4), after=mark)
+    ai_row.locator(".step-less").click()  # round the three, from the list QiTV sent
+    rig.events.wait(CaptionsModel, where=lambda e: e.model == "large", after=mark)
+    assert not rig.events.of(CaptionsSwitch, after=mark), "a step turned them on or off"
+    rig.hub.send(sid, {**TRACKS, "ai": {**TRACKS["ai"], "model": "large"}})
+    rig.page.locator("#tracksList .stepped.lit .step-value", has_text="More accurate").wait_for()
+    rig.shot("tracks-model-step")
+    rig.hub.send(sid, TRACKS)
+    rig.page.locator("#tracksList .step-value", has_text="Automatic").wait_for()
     assert ticked(rig) == ["Off"], ticked(rig)
     mark = rig.events.mark()
     rig.page.locator("#tracksList .choice", has_text="English").click()
@@ -1741,17 +1753,6 @@ def scenario_tracks(rig: Rig) -> None:
     rig.events.wait(
         CaptionsLanguage, where=lambda e: (e.language, e.of) == ("English", 4), after=mark
     )
-    assert rig.page.inner_text("#tracksTitle") == "Subtitles"  # back, as the panel's list
-    rig.page.locator("#tracksList .choice", has_text="Speech model").click()
-    assert rig.page.inner_text("#tracksTitle") == "Speech model", rig.page.inner_text(
-        "#tracksTitle"
-    )
-    assert ticked(rig) == ["Automatic"], ticked(rig)
-    rig.page.locator("#tracksList .choice", has_text="2.5 GB").wait_for()  # its download
-    rig.shot("tracks-models")
-    mark = rig.events.mark()
-    rig.page.locator("#tracksList .choice", has_text="More accurate").click()
-    rig.events.wait(CaptionsModel, where=lambda e: (e.model, e.of) == ("large", 4), after=mark)
     assert rig.page.inner_text("#tracksTitle") == "Subtitles"  # back, as the panel's list
     mark = rig.events.mark()
     rig.page.click("#veil", position={"x": 20, "y": 20})

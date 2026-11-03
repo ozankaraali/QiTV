@@ -668,6 +668,48 @@ class PanelWidgetTests(PanelCase):
         self.assertEqual(spy.count(), 0)
         self.assertTrue(self.panel.isVisible())
 
+    def test_a_choosable_setting_is_chosen_by_a_click_and_stepped_by_its_arrows(self):
+        # 2.9: "AI captions  Downloading 40%  ‹ Automatic ›": the row is a subtitle source, its
+        # ‹ › the speech model.
+        panel = TrackPanel(self.host)  # on its own: no panel's rows behind it
+        plain = PanelRow("ai", "AI captions", value="Automatic (1.7B)", choosable=True)
+        panel.show_panel(PanelModel("Subtitles", (PanelRow("a", "Off"), plain)))
+        width = panel.width()
+        noted = PanelRow(
+            "ai",
+            "AI captions",
+            True,
+            note="Downloading 40%",
+            value="Automatic (1.7B)",
+            widest="More accurate (1.7B)",
+            choosable=True,
+        )
+        panel.show_panel(PanelModel("Subtitles", (PanelRow("a", "Off"), noted)))
+        self.assertGreater(panel.width(), width)  # the note's room, beside the value's
+        panel.grab()  # paints both: nothing raises
+        chosen, stepped = QSignalSpy(panel.rowChosen), QSignalSpy(panel.rowStepped)
+        QTest.mouseClick(
+            panel,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            panel.row_rect(1).topLeft().toPoint() + QPoint(30, 10),
+        )
+        self.assertEqual((chosen.count(), stepped.count()), (1, 0))
+        for delta in (1, -1):
+            QTest.mouseClick(
+                panel,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                panel.step_rect(1, delta).center().toPoint(),
+            )
+        self.assertEqual([stepped.at(i) for i in range(2)], [["ai", 1], ["ai", -1]])
+        panel.move_focus(1)
+        panel.move_focus(1)
+        panel.activate()  # Enter: chosen, as any row
+        self.assertEqual((chosen.count(), stepped.count()), (2, 2))
+        panel.step(1)  # →: stepped
+        self.assertEqual(stepped.count(), 3)
+
     def test_the_pointer_lights_the_row_under_it(self):
         self.panel.show_panel(self.model())
         QTest.mouseMove(self.panel, self.panel.row_rect(1).center().toPoint())

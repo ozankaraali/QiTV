@@ -83,7 +83,6 @@ const words = {
   subtitles_off: "Off",
   ai_captions: "AI captions",
   language: "Language",
-  speech_model: "Speech model",
   no_audio: "No audio tracks",
   no_subtitles: "No subtitles",
 };
@@ -764,13 +763,13 @@ function bindCast() {
 // ---- 2.9: the TV's subtitles and sound, as its Subtitles and Sound panels list them --------
 
 // What QiTV last said of the large picture: {of, playing, sound: [{id, name, on}], subs: [...],
-// ai: {on, going, note, lang, lang_note, langs, model, model_note, models}} (ui/remote_snapshots.py
-// tracks). A pick carries `of` back: one made in the list of what played before changes nothing.
-// While the sheet shows one of its lists ("subs", "sound", "langs": AI captions' languages, or
-// "models": their speech models), QiTV sends each change.
+// ai: {on, going, note, lang, lang_note, langs, model, models}} (ui/remote_snapshots.py tracks).
+// A pick carries `of` back: one made in the list of what played before changes nothing. While
+// the sheet shows one of its lists ("subs", "sound", or "langs": AI captions' languages), QiTV
+// sends each change.
 let trackList = null;
 let tracksView = "subs";
-const TRACK_TITLES = { subs: "subtitles", sound: "sound", langs: "language", models: "speech_model" };
+const TRACK_TITLES = { subs: "subtitles", sound: "sound", langs: "language" };
 
 function tracksShown() {
   return $("tracksSheet").hidden ? "" : tracksView;
@@ -788,7 +787,7 @@ function showTracks(view) {
   tracksView = view;
   drawTracks();
   $("tracksSheet").scrollTop = 0;
-  const chosen = (view === "langs" || view === "models") && $("tracksList").querySelector(".current");
+  const chosen = view === "langs" && $("tracksList").querySelector(".current");
   if (chosen) chosen.scrollIntoView({ block: "nearest" }); // the language heard, further down
 }
 
@@ -816,13 +815,39 @@ function choiceRow(text, pick, { on = false, note = "", opens = false, up = fals
   return row;
 }
 
+// 2.9, the owner's: AI captions' row also steps their speech model, as a game's quality (the TV's
+// row: "AI captions  ‹ Automatic (1.7B) ›"): its ‹ › go round Automatic, Faster and More
+// accurate, read at the tap; a tap elsewhere on it turns them on or off.
+function modelSteps(row, ai) {
+  const group = el("div", `stepped${ai.model !== "auto" ? " lit" : ""}`);
+  const step = (delta) => {
+    const now = trackList && trackList.ai;
+    const models = (now && Array.isArray(now.models) && now.models) || [];
+    const at = models.findIndex((model) => model.id === now.model);
+    if (!models.length || at < 0) return;
+    pickTrack({ t: "captions", model: models[(at + delta + models.length) % models.length].id });
+  };
+  const current = ai.models.find((model) => model.id === ai.model);
+  const steps = el("span", "steps");
+  for (const [delta, icon] of [[-1, "i-left"], [1, "i-right"]]) {
+    const button = el("button", delta < 0 ? "step-less" : "step-more");
+    button.type = "button";
+    button.insertAdjacentHTML("beforeend", `<svg><use href="#${icon}"/></svg>`);
+    pressable(button);
+    button.addEventListener("click", () => step(delta));
+    if (delta < 0) steps.append(button, el("span", "step-value", current ? current.name : ""));
+    else steps.append(button);
+  }
+  group.append(row, steps);
+  return group;
+}
+
 let drawnShape = ""; // the rows drawn, but for their notes: the same rows are kept (a tap lands)
 
 function drawTracks() {
   const tracks = trackList;
   const ai = tracks && tracks.ai;
   if (tracksView === "langs" && !(ai && ai.on && Array.isArray(ai.langs))) tracksView = "subs"; // off meanwhile
-  if (tracksView === "models" && !(ai && Array.isArray(ai.models))) tracksView = "subs";
   $("tracksTitle").textContent = w(TRACK_TITLES[tracksView]);
   const rows = [];
   const note = (key) => rows.push(el("p", "step", w(key)));
@@ -843,18 +868,9 @@ function drawTracks() {
       };
       rows.push(choiceRow(lang.name, pick, { on: lang.id === ai.lang }));
     }
-  } else if (tracksView === "models") {
-    rows.push(choiceRow(w("subtitles"), () => showTracks("subs"), { up: true }));
-    for (const model of ai.models) {
-      const pick = () => {
-        pickTrack({ t: "captions", model: model.id });
-        showTracks("subs"); // as the panel's list, back to Subtitles (a download asks first)
-      };
-      rows.push(choiceRow(model.name, pick, { on: model.id === ai.model, note: model.note }));
-    }
   } else {
     const subs = tracks.subs || [];
-    const shown = subs.some((track) => track.on) || (ai && ai.on);
+    const shown = subs.some((track) => track.on) || (ai && (ai.on || ai.going)); // one source
     rows.push(choiceRow(w("subtitles_off"), () => pickTrack({ t: "track", kind: "sub", id: -1 }), { on: !shown }));
     for (const track of subs) {
       rows.push(choiceRow(track.name, () => pickTrack({ t: "track", kind: "sub", id: track.id }), { on: track.on }));
@@ -866,14 +882,15 @@ function drawTracks() {
         const now = trackList && trackList.ai;
         if (now) pickTrack({ t: "captions", on: !(now.on || now.going) });
       };
-      rows.push(choiceRow(w("ai_captions"), turn, { on: ai.on, note: ai.note }));
+      // Ticked while their download is on its way too, as the TV's row: a tap calls it off.
+      const row = choiceRow(w("ai_captions"), turn, { on: ai.on || ai.going, note: ai.note });
+      rows.push(Array.isArray(ai.models) && ai.models.length ? modelSteps(row, ai) : row);
       if (ai.on) rows.push(choiceRow(w("language"), () => showTracks("langs"), { note: ai.lang_note, opens: true }));
-      if (Array.isArray(ai.models)) rows.push(choiceRow(w("speech_model"), () => showTracks("models"), { note: ai.model_note, opens: true }));
     } else if (!subs.length) note("no_subtitles");
   }
   // Pushes come often (a download's percent): a list whose rows are the same but for their notes
   // keeps its rows and changes the notes, so a tap between touch and click is never lost.
-  const shape = tracksView + "|" + rows.map((row) => (row.querySelector(".label") || row).textContent + (row.classList.contains("current") ? "*" : "") + (row.classList.contains("opens") ? ">" : "")).join("|");
+  const shape = tracksView + "|" + rows.map((row) => (row.querySelector(".label") || row).textContent + (row.matches(".current") || row.querySelector(".current") ? "*" : "") + (row.classList.contains("opens") ? ">" : "") + ((row.querySelector(".step-value") || {}).textContent || "")).join("|");
   const list = $("tracksList");
   if (shape === drawnShape && list.children.length === rows.length) {
     rows.forEach((row, i) => {
