@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from urllib.parse import urlsplit
 
 from film_provider import FilmProvider
@@ -74,6 +75,7 @@ class Reader:
         return found
 
     def close(self):
+        self.response.close()  # its file holds the socket open otherwise (no FIN goes out)
         self.connection.close()
 
 
@@ -117,6 +119,8 @@ class AddressTests(unittest.TestCase):
         self.assertTrue(relayable("http://host/play?id=3"))
         self.assertFalse(relayable("http://host/movie/u/p/7.m3u8"))
         self.assertFalse(relayable("http://host/play?id=3&output=m3u8"))
+        self.assertFalse(relayable("http://host/films/7/manifest.mpd"))
+        self.assertFalse(relayable("http://viewer:secret@host/movie/7.mkv"))  # libVLC signs in
         self.assertFalse(relayable("file:///films/a.mkv"))
         self.assertFalse(relayable("rtsp://host/a"))
 
@@ -162,6 +166,28 @@ class PictureTests(RelayTestCase):
             self.read(self.relay.leader_url, near, 64 * KIB), FILM[near : near + 64 * KIB]
         )
         self.assertEqual(len(self.provider.film_asks()), 1)
+
+    def test_a_seek_back_over_what_was_let_go_reads_it_again(self):  # review: froze the picture
+        reader = Reader(self.relay.leader_url, 0)
+        self.assertEqual(reader.read(int(4.5 * MIB)), FILM[: int(4.5 * MIB)])
+        time.sleep(0.3)
+        reader.close()
+        back = 1 * MIB  # past the pinned head, long let go, yet after the run's start
+        self.assertNotIn(back // SMALL.block, self.relay._blocks)
+        started = time.monotonic()
+        self.assertEqual(
+            self.read(self.relay.leader_url, back, 64 * KIB), FILM[back : back + 64 * KIB]
+        )
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertIn(back, [a["first"] for a in self.provider.film_asks()])  # moved back there
+
+    def test_a_seek_back_after_the_film_was_read_to_its_end(self):
+        self.assertEqual(self.read(self.relay.leader_url, 0, len(FILM)), FILM)  # the run is done
+        back = 2 * MIB
+        self.assertNotIn(back // SMALL.block, self.relay._blocks)
+        self.assertEqual(
+            self.read(self.relay.leader_url, back, 64 * KIB), FILM[back : back + 64 * KIB]
+        )
 
     def test_a_seek_back_into_what_is_kept_needs_no_connection(self):
         self.assertEqual(self.read(self.relay.leader_url, 0, 512 * KIB), FILM[: 512 * KIB])
@@ -298,6 +324,23 @@ class CaptionsTests(RelayTestCase):
         self.assertGreater(tail[0]["at"], done["at"])  # not while the picture waited
         picture.close()
 
+    def test_a_failed_detour_fails_that_captions_read_alone_and_once(self):  # review
+        self.provider.fail_from = len(FILM) - 200 * KIB  # the provider fails the tail
+        picture = Reader(self.relay.leader_url, 0)
+        self.assertEqual(picture.read(600 * KIB), FILM[: 600 * KIB])
+        cues = len(FILM) - 30 * KIB
+        for _ in range(2):
+            follower = Reader(self.relay.follower_url, cues)
+            started = time.monotonic()
+            self.assertEqual(follower.read(30 * KIB), b"")  # the captions start again elsewhere
+            self.assertLess(time.monotonic() - started, SMALL.follower_wait_s)
+            follower.close()
+        tail = [a for a in self.provider.film_asks() if a["first"] >= len(FILM) - SMALL.pin_tail]
+        self.assertEqual(len(tail), 1)  # not asked again
+        self.assertFalse(self.relay._failed)
+        self.assertEqual(picture.read(2 * MIB), FILM[600 * KIB : 600 * KIB + 2 * MIB])
+        picture.close()
+
     def test_a_captions_read_the_upstream_is_not_heading_for_fails_in_time(self):
         picture = Reader(self.relay.leader_url, 0)
         picture.read(100 * KIB)
@@ -339,11 +382,114 @@ class ProviderTests(RelayTestCase):
         self.assertEqual(self.read(self.relay.leader_url, 0, 100 * KIB), FILM[: 100 * KIB])
         self.assertEqual(len(self.provider.film_asks()), 3)
 
-    def test_a_refusal_reaches_the_picture(self):
-        self.provider.answers = [404]
-        reader = Reader(self.relay.leader_url, 0)
-        self.assertEqual(reader.status, 404)
+    def declined_to_libvlc(self, relay=None):
+        """The picture's first ask is redirected to the provider, once nothing is open there."""
+        relay = relay or self.relay
+        reader = Reader(relay.leader_url, 0)
+        self.assertEqual(reader.status, 302)
+        self.assertEqual(reader.response.getheader("Location"), self.provider.url)
+        self.assertEqual(self.provider.open_now(), 0)  # closed before libVLC asks itself
         reader.close()
+        self.assertTrue(relay.declined())
+        self.assertFalse(relay.followable())
+
+    def test_a_refusal_before_the_film_leaves_it_to_libvlc(self):  # review: no failed film
+        self.provider.answers = [404]
+        self.declined_to_libvlc()
+        self.assertEqual(len(self.provider.film_asks()), 1)
+
+    def test_a_provider_that_never_answers_well_leaves_the_film_to_libvlc(self):
+        self.provider.answers = [503] * 10
+        self.declined_to_libvlc()
+        self.assertEqual(len(self.provider.film_asks()), SMALL.retries + 1)  # then no more
+
+    def test_no_answer_in_time_leaves_the_film_to_libvlc_after_closing_its_connection(self):
+        self.provider.delay = 3.0  # its head comes after the picture's wait
+        limits = Limits(**{**SMALL.__dict__, "open_wait_s": 1.0})
+        self.declined_to_libvlc(self.make_relay(limits=limits))
+        self.assertTrue(wait_until(lambda: self.provider.open_now() == 0, 4.0))
+
+    def test_a_refusal_once_the_film_plays_ends_the_pictures_read(self):
+        self.assertEqual(self.read(self.relay.leader_url, 0, 100 * KIB), FILM[: 100 * KIB])
+        self.provider.answers = [404, 404]  # the address it went to, then the provider's
+        reader = Reader(self.relay.leader_url, 4 * MIB)  # a seek: the upstream moves
+        self.assertEqual(reader.status, 206)
+        self.assertEqual(reader.read(64 * KIB), b"")  # libVLC's reconnect asks again
+        reader.close()
+        self.assertFalse(self.relay.declined())
+        self.assertEqual(
+            self.read(self.relay.leader_url, 4 * MIB, 64 * KIB), FILM[4 * MIB : 4 * MIB + 64 * KIB]
+        )
+
+    def test_a_film_shorter_than_it_said_ends_where_it_ends(self):  # review: a 416 loop
+        self.assertEqual(self.read(self.relay.leader_url, 0, 64 * KIB), FILM[: 64 * KIB])
+        self.provider.data = FILM[: 3 * MIB]  # its 416 says the real length
+        asks = len(self.provider.film_asks())
+        reader = Reader(self.relay.leader_url, 4 * MIB)
+        self.assertEqual(reader.read(10), b"")  # the film's end at once
+        reader.close()
+        time.sleep(0.5)
+        self.assertLessEqual(len(self.provider.film_asks()) - asks, 1)
+        self.assertEqual(self.relay._size, 3 * MIB)
+        late = Reader(self.relay.leader_url, 4 * MIB)
+        self.assertEqual(late.status, 416)
+        late.close()
+
+    def test_a_416_without_the_length_is_tried_a_few_times_then_told(self):
+        self.assertEqual(self.read(self.relay.leader_url, 0, 64 * KIB), FILM[: 64 * KIB])
+        self.provider.data, self.provider.bare_416 = FILM[: 3 * MIB], True
+        asks = len(self.provider.film_asks())
+        started = time.monotonic()
+        reader = Reader(self.relay.leader_url, 4 * MIB)
+        self.assertEqual(reader.read(10), b"")
+        reader.close()
+        time.sleep(0.5)
+        self.assertEqual(len(self.provider.film_asks()) - asks, SMALL.retries + 1)
+        self.assertGreaterEqual(time.monotonic() - started, SMALL.retry_s * 2)  # it waited
+
+    def test_answers_without_a_byte_are_tried_a_few_times_with_waits_never_in_a_loop(self):
+        self.assertEqual(self.read(self.relay.leader_url, 0, 64 * KIB), FILM[: 64 * KIB])
+        self.provider.empty = True  # a 206 with Content-Length: 0
+        asks = len(self.provider.film_asks())
+        reader = Reader(self.relay.leader_url, 4 * MIB)
+        self.assertEqual(reader.read(10), b"")
+        reader.close()
+        time.sleep(0.5)
+        self.assertEqual(len(self.provider.film_asks()) - asks, SMALL.retries + 1)
+        self.assertEqual(self.relay.stats["failures"], SMALL.retries + 1)
+
+    def test_an_empty_first_answer_leaves_the_film_to_libvlc(self):
+        self.provider.empty = True
+        self.declined_to_libvlc()
+
+    def test_a_manifest_by_its_bytes_is_left_to_libvlc(self):  # whatever the address says
+        for name, body, kind in (
+            ("hls", b"#EXTM3U\n#EXT-X-VERSION:3\nfilm.ts\n", "video/x-matroska"),
+            (
+                "dash",
+                b'<?xml version="1.0"?>\n<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">',
+                "video/mp4",
+            ),
+            ("dash type", FILM[:4096], "application/dash+xml"),
+        ):
+            with self.subTest(name):
+                self.provider.data, self.provider.content_type = body + bytes(4096), kind
+                self.declined_to_libvlc(self.make_relay())
+
+    def test_nobody_reading_lets_the_held_connection_go_and_asks_nothing_more(self):
+        limits = Limits(**{**SMALL.__dict__, "idle_s": 0.5})
+        relay = self.make_relay(limits=limits)
+        reader = Reader(relay.leader_url, 0)
+        reader.read(64 * KIB)  # the upstream reads to its cap and holds
+        self.assertTrue(wait_until(lambda: self.provider.open_now() == 1))
+        reader.close()  # the picture gave up
+        self.assertTrue(wait_until(lambda: self.provider.open_now() == 0, 3.0))
+        asks = len(self.provider.film_asks())
+        time.sleep(1.0)
+        self.assertEqual(len(self.provider.film_asks()), asks)
+        self.assertEqual(
+            self.read(relay.leader_url, 100 * KIB, 64 * KIB), FILM[100 * KIB : 164 * KIB]
+        )
 
     def test_the_referrer_goes_as_libvlc_sends_it(self):
         relay = self.make_relay(user_agent="Box/1.0", referrer="http://portal.local/")
@@ -395,6 +541,16 @@ class StopTests(RelayTestCase):
         relay = self.make_relay()
         relay.stop()
         self.assertTrue(relay.closed())
+
+    def test_an_unexpected_error_while_connecting_still_closes_and_says_so(self):  # review
+        fault = ValueError("filedescriptor out of range in select()")
+        with mock.patch.object(FilmRelay, "_connect_socket", side_effect=fault):
+            reader = Reader(self.relay.leader_url, 0)
+            self.assertEqual(reader.status, 302)  # libVLC asks it itself
+            reader.close()
+        self.assertFalse(self.relay._sock_open)
+        self.relay.stop()
+        self.assertTrue(self.relay.wait_closed(1.0))
 
 
 @unittest.skipIf(shutil.which("openssl") is None, "openssl makes the test certificate")
@@ -453,15 +609,17 @@ class HttpsTests(unittest.TestCase):
         self.assertTrue(relay.wait_closed(2.0))
         self.assertEqual(self.provider.overlaps, [])
 
-    def test_an_untrusted_certificate_is_refused(self):
+    def test_an_untrusted_certificate_leaves_the_film_to_libvlc(self):
         url = self.provider.url.replace("http://", "https://")
         relay = FilmRelay(url, user_agent="VLC/3.0.20", limits=SMALL)  # certifi's roots only
         relay.start()
         self.addCleanup(relay.wait_closed, 3.0)
         self.addCleanup(relay.stop)
         reader = Reader(relay.leader_url, 0)
-        self.assertEqual(reader.status, 502)
+        self.assertEqual(reader.status, 302)  # libVLC asks it itself (and judges it as today)
+        self.assertEqual(reader.response.getheader("Location"), url)
         reader.close()
+        self.assertTrue(relay.declined())
 
 
 if __name__ == "__main__":

@@ -1607,8 +1607,8 @@ class TVController(QObject):
         session, target = self.session, self._current
         if self._closed or target is None or not self.film_relay_wanted():
             return False
-        if session.relay() is not None:
-            return False
+        if session.relay() is not None or self._state not in _ACTIVE_STATES:
+            return False  # one relays it, or it ended (or failed): none made for nothing
         url = str(session.url)
         relay = self._film_relay(target, url, item_provider.stream_agent(self.catalog, target.item))
         if relay is None:
