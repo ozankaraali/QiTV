@@ -139,11 +139,12 @@ class OverlayHost(QWidget):
 
     def sync_geometry(self) -> None:
         rect = QRect(self._surface.mapToGlobal(QPoint(0, 0)), self._surface.size())
+        resized = rect.size() != self.size()
         if rect != self.geometry():
             self.setGeometry(rect)
-        self._update_mask()
+        self._update_mask(repaint=resized)
 
-    def _update_mask(self) -> None:
+    def _update_mask(self, repaint: bool = False) -> None:
         region, claims = QRegion(), QRegion()
         for widget in self.visible_overlays():
             part = (
@@ -166,18 +167,22 @@ class OverlayHost(QWidget):
         # overlay that hid painted would stay in the window's buffers outside the mask, and
         # show again wherever the mask grows next (2.9: the download question came back over
         # the film for a moment at each hover). What leaves the mask is cleared while it still
-        # shows, and what joins it is painted afresh.
+        # shows; once it changed, all it shows is painted at once, in the same frame as the
+        # mask (2.9: painted later, the owner saw a caption, then stretched leftovers of older
+        # ones and flicker, after a window size change most), and after a resize all of it.
         old = self.mask() if not self.mask().isEmpty() else QRegion(self.rect())
         leaving = old.subtracted(region) if not region.isEmpty() else QRegion()
         if not leaving.isEmpty() and self.isVisible():
             self.repaint(leaving)
         if region.isEmpty():
             self.clearMask()
-        else:
-            self.setMask(region)
-            joining = region.subtracted(old)
-            if not joining.isEmpty():
-                self.update(joining)
+            if repaint and self.isVisible():
+                self.repaint()
+            return
+        changed = region != self.mask()
+        self.setMask(region)
+        if (changed or repaint) and self.isVisible():
+            self.repaint(region)
 
     def _window_shown(self) -> bool:
         return isValid(self._window) and self._window.isVisible() and not self._window.isMinimized()

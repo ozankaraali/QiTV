@@ -4,8 +4,9 @@ ui/captions_controller.py shows each caption (`show_text`) as its words start an
 (`clear`) after. It sits at the bottom centre, BOTTOM_U above the bottom, or just above the
 player controls while they show (`follow`: the transport's controls_top() and bandChanged, as
 the Sound panel does). Its text is the palette's text colour on a translucent panel box,
-word-wrapped and centred, two lines at most: a longer caption's font shrinks a little, and past
-that its second line ends in "…".
+word-wrapped and centred, two lines at most, of about one length (2.9, the owner: a full top
+line over a short one stretched the box from edge to edge): a longer caption's font shrinks a
+little, and past that its second line ends in "…".
 
 Its size follows the picture: FONT_U units of a 16:9 picture as wide as the window, or as tall
 in a window wider than 16:9 (never under MIN_FONT_PX: the mini player's stays readable), so it
@@ -71,6 +72,22 @@ def picture_units(host: QWidget) -> Units:
     if host.height() > 0:
         width = min(width, round(host.height() * 16 / 9))
     return Units(max(1, width))
+
+
+def balanced(text: str, font: QFont, width: float) -> float:
+    """The narrowest width up to `width` at which `text` wraps into as few lines as at `width`:
+    two lines of about one length rather than a full one over a few words."""
+    lines = len(wrap(text, font, width))
+    if lines < 2:
+        return width
+    narrow, wide = width / lines, width
+    while wide - narrow > 2.0:
+        middle = (narrow + wide) / 2
+        if len(wrap(text, font, middle)) <= lines:
+            wide = middle
+        else:
+            narrow = middle
+    return wide
 
 
 def wrap(text: str, font: QFont, width: float) -> list[tuple[int, int]]:
@@ -173,6 +190,7 @@ class CaptionsOverlay(Overlay):
                 font.setFamily(CAPTION_FAMILY)
             spans = wrap(text, font, width)
             if len(spans) <= MAX_LINES:
+                spans = wrap(text, font, balanced(text, font, width))
                 break
         fm = QFontMetricsF(font)
         lines = [text[start : start + length].strip() for start, length in spans[:MAX_LINES]]

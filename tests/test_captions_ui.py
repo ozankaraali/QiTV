@@ -821,6 +821,26 @@ class OverlayTests(unittest.TestCase):
         self.assertTrue(lines[-1].endswith("…"))
         self.overlay.grab()
 
+    def test_two_lines_are_of_about_one_length(self):
+        # 2.9, the owner: "stretching weird": a full top line over a few words made the box
+        # as wide as the picture for every long caption.
+        from PySide6.QtGui import QFontMetricsF
+
+        text = (
+            "da silah alımı konusunda da er tutluk olaylı gösteriz ve bunu herkes biliyor "
+            "ama yardıma ikna."
+        )
+        self.overlay.show_text(text)
+        top, bottom = self.overlay.lines()
+        fm = QFontMetricsF(self.overlay._font)
+        self.assertLess(
+            abs(fm.horizontalAdvance(top) - fm.horizontalAdvance(bottom)),
+            0.25 * fm.horizontalAdvance(top + " " + bottom),
+        )
+        self.assertEqual(" ".join((top, bottom)), text)  # nothing lost
+        self.overlay.show_text("Good evening and welcome")
+        self.assertEqual(self.overlay.lines(), ["Good evening and welcome"])  # one stays one
+
     def test_it_hides_when_cleared(self):
         self.overlay.show_text("Good evening")
         self.overlay.clear()
