@@ -399,6 +399,14 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(stopped, [True])
         self.assertFalse(self.captions.enabled())
 
+    def test_catching_up_only_when_what_was_heard_is_about_to_fall_behind(self):
+        # 2.9: a film's 1.7B captions ran 3-6 s ahead, all in time, and the row said
+        # "Catching up…" at every dip under the 6 s they start with.
+        self.window.live_session.position_s = 100.0
+        for newest, said in ((106.0, ""), (103.0, ""), (101.2, ""), (100.6, "Catching up…")):
+            self.captions._newest = newest
+            self.assertEqual(self.captions.status_text(), said, newest)
+
     def test_the_download_says_how_far_it_is_where_the_captions_will_be(self):
         # 2.9: answered, the question went and nothing said the download had begun.
         from services.captions.download import CANCELLED

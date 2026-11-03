@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 
 LEAD_S = {"small": 8.0, "large": 10.0}  # the picture's distance behind live while on
 FILM_AHEAD_S = 6.0  # a film's sound is read from this far past the picture (after a seek too)
+# "Catching up…" only when what has been heard is about to fall behind the picture: anything
+# ahead of it is in time (2.9: a 1.7B film's captions 3-6 s ahead, all in time, said so at
+# every dip under the 6 s it starts with).
+LATE_LEAD_S = 1.0
 HOLD_S = 0.6  # a caption stays this long after its words, unless the next one starts
 MIN_SHOW_S = 1.2
 TICK_MS = 250
@@ -192,8 +196,7 @@ class CaptionsController(QObject):
         if self._slow_since is not None and time.monotonic() - self._slow_since >= _SLOW_FOR_S:
             return translate(CANT_KEEP_UP)
         lead = self._lead()
-        wanted = LEAD_S.get(self._tier, 8.0) if self._is_live() else FILM_AHEAD_S
-        if lead is not None and lead < wanted - 1.0:
+        if lead is not None and lead < LATE_LEAD_S:
             return translate(CATCHING_UP)
         return ""
 
