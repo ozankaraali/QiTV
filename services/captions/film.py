@@ -4,10 +4,11 @@ the picture, and says where in the film each moment of it is.
 A film has no time-shift helper and is read whole, so the live route (services.captions.
 decoder: the converter, as fast as bytes come, tied to the stream's own stamps) does not fit:
 the converter reports no clock (`get_time()` stays 0), an MP4 seek there lands up to a GOP
-early and an MKV start time is ignored (measured with 3.0.20). Played normally (no picture,
+early and an MKV start time is ignored (measured with 3.0.20). Played normally (no picture shown,
 the sound into memory through libVLC's audio callbacks, in real time), the player's own clock
 works: `FilmReader` opens the film at `start_s`, a few seconds past the picture, so the
-captions come ahead of it, and places each block of sound at
+captions come ahead of it (its video chosen but never decoded: INSTANCE_ARGS), and places each
+block of sound at
 
     the player's time now + how long until the block plays (its pts against libvlc_clock)
 
@@ -33,6 +34,22 @@ _ESTIMATE_STEPS = 3  # fresh readings of VLC's time the first offset is the medi
 _KEEP = 31  # the running estimate's window
 _BEFORE_SEEK_S = 2.0  # a time this far before the start: the seek has not happened yet
 _OUTLIER_S = 0.3
+# The picture stays chosen, never decoded (each frame skipped) nor shown (a dummy output): an
+# MKV's seek points are its video's (Cues), and without a video track libVLC 3.0.20 reaches
+# `start_s` by reading the film from its start (2.9: 2.4 GB for a film resumed 27 minutes
+# in, through the film relay's window: no caption ever came). libavcodec decodes, so the skip
+# holds where a hardware decoder (VideoToolbox) would have taken the video.
+INSTANCE_ARGS = (
+    "--quiet",
+    "--vout=dummy",
+    "--codec=avcodec,any",
+    "--avcodec-hw=none",
+    "--avcodec-skip-frame=4",
+    "--avcodec-skip-idct=4",
+    "--no-stats",
+    "--no-sub-autodetect-file",
+    "--no-lua",
+)
 
 
 class FilmReader:
@@ -70,15 +87,13 @@ class FilmReader:
 
     def start(self) -> None:
         vlc = self._vlc
-        self._instance = vlc.Instance(
-            ["--quiet", "--no-video", "--no-stats", "--no-sub-autodetect-file", "--no-lua"]
-        )
+        self._instance = vlc.Instance(list(INSTANCE_ARGS))
         if "://" in self._location:
             media = self._instance.media_new_location(self._location)
         else:
             media = self._instance.media_new_path(self._location)
         media.add_option(f":start-time={self._start_s:.3f}")
-        for option in (":no-video", ":no-spu", *self._options):
+        for option in (":no-spu", *self._options):
             media.add_option(option)
         if self._audio_track is not None:
             media.add_option(f":audio-track-id={int(self._audio_track)}")

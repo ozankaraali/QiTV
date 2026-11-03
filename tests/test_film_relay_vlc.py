@@ -185,6 +185,28 @@ class FilmThroughRelayTests(unittest.TestCase):
         self.assertEqual(ended, [True])  # told once the relay's connection is closed
         self.assertTrue(wait_until(lambda: self.provider.open_now() == 0, 2_000))
 
+    def test_the_captions_reader_jumps_into_an_mkv_rather_than_reading_up_to_it(self):
+        # 2.9: without a video track, libVLC reached an MKV's start time by reading the film
+        # from its first byte (an MKV's seek points are its video's): a film resumed 27 minutes
+        # in never got a caption. At the stand-in provider's pace that reading takes ~15 s here.
+        from services.captions.film import FilmReader
+
+        data = self.films[".mkv"].read_bytes()
+        provider = FilmProvider(  # read directly: libVLC's own jump overlaps its asks
+            data, extension=".mkv", content_type="video/x-matroska", rate=RATE
+        )
+        self.addCleanup(provider.close)
+        listener = Listener()
+        start_s = 30.0
+        reader = FilmReader(provider.url, start_s, listener)
+        reader.start()
+        self.addCleanup(reader.stop)
+        placed = wait_until(lambda: len([o for o in listener.onsets() if o >= start_s]) >= 3, 8000)
+        reader.stop()
+        self.assertTrue(placed, f"no beep past {start_s} s in 8 s: {listener.onsets()}")
+        jumps = [a["first"] for a in provider.film_asks() if a["first"] > len(data) // 2]
+        self.assertTrue(jumps, f"read up to it: {provider.film_asks()}")
+
     def test_an_mkv_plays_and_its_captions_read_it_over_one_connection(self):
         relay, session = self.start(".mkv", "video/x-matroska")
         self.play(session, relay)
