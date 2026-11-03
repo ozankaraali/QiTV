@@ -264,6 +264,15 @@ CATCHUP_CHECK = (
 CATCHUP_SOURCE_CHECK = (
     f"{PIPELINE_PREFIX}{LIVE_CHANNEL}'s archive was probed, then played on a connection of its own"
 )
+# 2.9: AI captions' process in the packaged app, without the 880 MB model: CI gives it the
+# speech runtime and the voice detector (QITV_CAPTIONS_RUNTIME, QITV_CAPTIONS_VAD) as a user's
+# download would, and it reads the channel from the buffer's side route ahead of the picture.
+CAPTIONS_CHECK = (
+    f"{PIPELINE_PREFIX}AI captions: the captions process decodes {LIVE_CHANNEL}'s sound from "
+    "the buffer, ahead of the picture"
+)
+CAPTIONS_LOAD_MS = 30_000
+CAPTIONS_AHEAD_MS = 15_000
 PIPELINE_CHECKS = (
     TUNED_CHECK,
     ON_DISK_CHECK,
@@ -1226,6 +1235,48 @@ class Driver:
         session = self.window.session
         return lambda: session.url == url and session.state() is PlaybackState.PLAYING
 
+    def _check_captions(self) -> Generator[int, None, None]:
+        """The captions process (no model: a probe) reads the playing channel's side route and
+        places its sound on the timeline ahead of the picture."""
+        runtime = os.environ.get("QITV_CAPTIONS_RUNTIME", "")
+        vad = os.environ.get("QITV_CAPTIONS_VAD", "")
+        facts: dict = {"runtime": bool(runtime), "vad": bool(vad)}
+        self.report.data["captions"] = facts
+        if not runtime or not vad:
+            facts["skipped"] = "no speech runtime given (CI gives one)"
+            return
+        from services.captions.process import CaptionsProcess
+
+        live = self.window.live_session
+        process = CaptionsProcess()
+        seen: dict = {"ready": False, "failed": "", "newest": None, "pieces": 0}
+        process.ready.connect(lambda: seen.update(ready=True))
+        process.failed.connect(lambda reason: seen.update(failed=reason))
+        process.progress.connect(lambda run, newest, rtf: seen.update(newest=newest))
+        process.piece.connect(lambda *piece: seen.update(pieces=seen["pieces"] + 1))
+        ahead = False
+        try:
+            process.start({"runtime": runtime, "model": None, "vad": vad, "threads": 1})
+            yield from self._wait(lambda: seen["ready"] or bool(seen["failed"]), CAPTIONS_LOAD_MS)
+            source = live.caption_source() if live is not None else None
+            facts["source"] = source is not None
+            if seen["ready"] and source is not None:
+                process.send("start", 1, source[0], source[2], None, "")
+
+                def ahead_of_the_picture() -> bool:
+                    newest = seen["newest"]
+                    return newest is not None and newest > live.position() + 1.0
+
+                ahead = yield from self._wait(ahead_of_the_picture, CAPTIONS_AHEAD_MS)
+                facts["position"] = round(live.position(), 2)
+        except Exception as e:
+            facts["problem"] = f"{type(e).__name__}: {e}"
+        finally:
+            process.stop()
+            process.wait(5000)
+        facts.update({k: seen[k] for k in ("ready", "failed", "newest", "pieces")})
+        self.report.check(CAPTIONS_CHECK, bool(seen["ready"]) and ahead, facts)
+
     def _check_media_keys(self) -> Generator[int, None, None]:
         session, keys = self.window.session, self.window.media_keys
         system = keys.system
@@ -1552,6 +1603,9 @@ class Driver:
         yield WARM_UP_MS
         facts["video"] = self._video_facts(PIPELINE_VIDEO)  # inspection only, no check
         report.save()
+
+        report.step("pipeline 2b. AI captions read the sound")
+        yield from self._check_captions()
 
         # 3. Pause for 4 s, then resume: it plays on time-shifted, at least 3 s behind.
         report.step("pipeline 3. pause and resume")

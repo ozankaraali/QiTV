@@ -13,7 +13,9 @@ Messages to it: ("load", {...}), ("start", run, url, segment_start, audio_track,
 ("viewer", position), ("language", name), ("stop",), ("quit",).
 From it: ("ready",), ("failed", reason), ("caption", run, start, end, text),
 ("progress", run, newest, rtf), ("resync", run, newest), ("ended", run, reason),
-("log", level, text). No traceback or URL crosses: URLs carry the session token.
+("log", level, text); loaded without a model (`load` with "model": None, the packaged smoke
+test's probe), ("piece", run, start, end, speech_share) for each piece instead. No traceback
+or URL crosses: URLs carry the session token.
 """
 
 from __future__ import annotations
@@ -80,16 +82,20 @@ class _Model:
             sys.path.insert(0, runtime)
         import sherpa_onnx  # the runtime the user downloaded, or a source run's own
 
-        paths = spec["model"]
+        paths = spec.get("model")
         threads = int(spec.get("threads", 2))
-        self.recognizer = sherpa_onnx.OfflineRecognizer.from_qwen3_asr(
-            conv_frontend=paths["conv_frontend"],
-            encoder=paths["encoder"],
-            decoder=paths["decoder"],
-            tokenizer=paths["tokenizer"],
-            num_threads=threads,
-            max_new_tokens=guards.token_cap(MAX_PIECE_S),
-        )
+        # Without a model (the packaged smoke test's probe): the sound, the clock and the
+        # detector alone; each piece is reported instead of written.
+        self.recognizer: Any = None
+        if paths:
+            self.recognizer = sherpa_onnx.OfflineRecognizer.from_qwen3_asr(
+                conv_frontend=paths["conv_frontend"],
+                encoder=paths["encoder"],
+                decoder=paths["decoder"],
+                tokenizer=paths["tokenizer"],
+                num_threads=threads,
+                max_new_tokens=guards.token_cap(MAX_PIECE_S),
+            )
         config = sherpa_onnx.VadModelConfig()
         config.silero_vad.model = spec["vad"]
         config.silero_vad.threshold = float(spec.get("vad_threshold", 0.5))
@@ -97,8 +103,9 @@ class _Model:
         config.num_threads = 1
         self.vad = sherpa_onnx.VadModel.create(config)
         self._lock = threading.Lock()
-        # Warm up: the first decode is slow (graph optimisation), not the viewer's first piece.
-        self.decode(array("f", bytes(16000 * 4)), "")
+        if self.recognizer is not None:
+            # Warm up: the first decode is slow (graph optimisation), not the viewer's first.
+            self.decode(array("f", bytes(16000 * 4)), "")
 
     def is_speech(self, window: array) -> bool:
         with self._lock:
@@ -226,6 +233,9 @@ class _Run:
                 last_progress = now
                 self.link.send(("progress", self.run, self.newest, round(self.rtf, 3)))
             if piece is None or self.stopped.is_set():
+                continue
+            if self.model.recognizer is None:
+                self.link.send(("piece", self.run, piece.start, piece.end, piece.speech_share))
                 continue
             if piece.speech_share < _MIN_SPEECH_SHARE:
                 continue
