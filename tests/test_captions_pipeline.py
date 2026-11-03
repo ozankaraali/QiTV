@@ -5,8 +5,11 @@ shows each caption."""
 from array import array
 import os
 from pathlib import Path
+import shutil
+import tempfile
 import time
 import unittest
+from unittest import mock
 import unittest.mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -16,6 +19,17 @@ from services.captions.pieces import RATE, WINDOW, Cutter
 from services.captions.stream_clock import StreamClock, TsTimes, pts_seconds
 
 FIXTURE = Path(__file__).parent / "fixtures" / "live.ts"
+
+
+def setUpModule():
+    """AI captions' files in a folder of this module's own: the controller's speed check
+    (tier.machine_score) never writes the developer's own captions folder."""
+    if not os.environ.get("QITV_CAPTIONS_DIR"):
+        folder = tempfile.mkdtemp(prefix="qitv-captions-")
+        patch = mock.patch.dict(os.environ, {"QITV_CAPTIONS_DIR": folder})
+        patch.start()
+        unittest.addModuleCleanup(patch.stop)
+        unittest.addModuleCleanup(shutil.rmtree, folder, True)
 
 
 class GuardTests(unittest.TestCase):

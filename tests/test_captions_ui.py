@@ -3,8 +3,10 @@ list (with a fake CaptionsController), the Sound panel's language labels, the ca
 and Settings → Subtitles → AI captions."""
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -44,6 +46,17 @@ QWEN_CODES = (
     "zh en yue ar de fr es pt id it ko ru th vi ja tr hi ms nl sv da fi pl cs fil fa el hu mk ro"
 )
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def setUpModule():
+    """AI captions' files in a folder of this module's own: the controller's speed check
+    (tier.machine_score) never writes the developer's own captions folder."""
+    if not os.environ.get("QITV_CAPTIONS_DIR"):
+        folder = tempfile.mkdtemp(prefix="qitv-captions-")
+        patch = mock.patch.dict(os.environ, {"QITV_CAPTIONS_DIR": folder})
+        patch.start()
+        unittest.addModuleCleanup(patch.stop)
+        unittest.addModuleCleanup(shutil.rmtree, folder, True)
 
 
 class LanguagesTests(unittest.TestCase):

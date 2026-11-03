@@ -37,6 +37,16 @@ def run_file(path: Path) -> tuple[Path, int, str, float]:
 def run_one(name: str) -> None:
     """`--file <name>`: the file as `python -m unittest discover -s tests -p <name>` runs it,
     with the app's garbage collection (exits as unittest does)."""
+    if not os.environ.get("QITV_CAPTIONS_DIR"):
+        # AI captions' files (2.9: the speed score the tier keeps) in a folder of the file's
+        # own: a test never writes the developer's own captions folder.
+        import atexit
+        import shutil
+        import tempfile
+
+        folder = tempfile.mkdtemp(prefix="qitv-captions-")
+        atexit.register(shutil.rmtree, folder, True)
+        os.environ["QITV_CAPTIONS_DIR"] = folder
     sys.path[0] = str(ROOT)  # as `python -m` has it (the working folder), not scripts/
     sys.path.insert(0, str(TESTS))  # as discover puts it
     from gc_fixtures import CollectingResult

@@ -619,6 +619,7 @@ class PinnedFilesTests(unittest.TestCase):
     def test_the_folder_is_in_the_config_folder(self):
         with tempfile.TemporaryDirectory() as config:
             with mock.patch.dict(os.environ, {"QITV_CONFIG_DIR": config}):
+                os.environ.pop("QITV_CAPTIONS_DIR", None)  # the tests' own folder (run_tests)
                 self.assertEqual(models.captions_root(), Path(config) / "ai-captions")
             self.assertEqual(os.listdir(config), [])  # finding it makes nothing
 
