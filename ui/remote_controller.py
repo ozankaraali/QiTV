@@ -34,6 +34,8 @@ from services.remote.protocol import (
     MAX_DEVICE,
     STORE_VERSION,
     Answered,
+    CaptionsLanguage,
+    CaptionsSwitch,
     CastTo,
     Closed,
     CloseSearch,
@@ -53,6 +55,7 @@ from services.remote.protocol import (
     StoreSaved,
     Timer,
     ToTv,
+    TrackPick,
     WatchHere,
 )
 from services.search import Hit
@@ -66,7 +69,7 @@ from ui.remote_buttons import BUTTONS
 from ui.remote_guide import PhoneGuide
 from ui.remote_library import PhoneLibrary
 from ui.remote_repeat import KeyRepeater
-from ui.remote_snapshots import TITLE_CHARS, Handles, results, results_of, state
+from ui.remote_snapshots import TITLE_CHARS, Handles, results, results_of, state, tracks
 
 if TYPE_CHECKING:
     from services.remote.hub import RemoteHub
@@ -192,6 +195,18 @@ class RemoteController(QObject):
         cast_devices = getattr(window, "cast_devices", None)  # 2.8: the phones' Cast to…
         if cast_devices is not None:
             cast_devices.changed.connect(self._push_cast)
+        # 2.9: the large picture's sound and subtitles on the phones' sheets. The phones that
+        # opened one (while their session lasts) hear each change; `of` numbers what plays.
+        self._track_phones: set[str] = set()
+        self._last_tracks: Optional[dict] = None
+        self._tracks_target: object = None  # what played large when `of` was last numbered
+        self._tracks_of = 0
+        # 2.9: AI captions' download question on the phones that turned them on: its number
+        # on each (the TV's card asks too: either answer goes for both).
+        self._caption_asks: dict[str, int] = {}
+        captions = getattr(window, "captions", None)
+        if captions is not None:
+            captions.changed.connect(self._on_captions_changed)
 
     # ---- lifecycle -------------------------------------------------------------------------
 
@@ -236,6 +251,9 @@ class RemoteController(QObject):
         self._timer.stop()
         self._diff.stop()
         self._phones.clear()
+        self._track_phones.clear()
+        self._last_tracks = None
+        self._caption_asks.clear()  # the TV's card still asks
         if self.hub is not None:
             # Not waited for: a phone being sent a film held the window up to 4 s (Settings,
             # Quit). Quitting waits for it later (`wait_stopped`).
@@ -332,6 +350,10 @@ class RemoteController(QObject):
             self._watch_gone(event.sid)
             if self._asks.pop(event.sid, None) is not None:
                 self._window.controller.answer_phone(False)  # gone: the recording stays
+            self._caption_asks.pop(event.sid, None)  # 2.9: the TV's card asks on
+            self._track_phones.discard(event.sid)
+            if not self._track_phones:
+                self._last_tracks = None
             self._repeater.drop(event.sid)
             self._schedule()
             self._phones.discard(event.sid)
@@ -385,6 +407,12 @@ class RemoteController(QObject):
                 controller.stop_background_recording(event.slot)
         elif isinstance(event, CastTo):
             self._cast_to(event.to)
+        elif isinstance(event, TrackPick):  # 2.9: the Sound or Subtitles sheet's pick
+            self._pick_track(event)
+        elif isinstance(event, CaptionsSwitch):
+            self._switch_captions(event)
+        elif isinstance(event, CaptionsLanguage):
+            self._caption_language(event)
         elif isinstance(event, Timer):
             self._timer_from_phone(event)
         elif isinstance(event, Schedule):
@@ -422,6 +450,7 @@ class RemoteController(QObject):
         if not self._phones or self.hub is None:
             return
         self._stop_phones()
+        self._push_tracks()
         last, last_at = self._last_state, self._last_at
         snapshot = state(self._window)
         if last is not None and not _changed(last, snapshot, self._now() - last_at):
@@ -454,6 +483,9 @@ class RemoteController(QObject):
                 self._library(sid).genres(section, event.page, event.find, event.n)
             elif event.what == "cast":  # 2.8: the devices QiTV can cast to
                 self._send(sid, self._cast_list())
+            elif event.what == "tracks":  # 2.9: its Subtitles or Sound sheet opened
+                self._track_phones.add(sid)
+                self._push_tracks(asked=sid)
             else:
                 self._library(sid).titles(section, event.genre, event.page, event.find, event.n)
         except Exception as error:  # a phone's question must never take QiTV down
@@ -715,6 +747,9 @@ class RemoteController(QObject):
             self._send(sid, {"t": "play", "failed": True, "why": "elsewhere"})
 
     def _on_answered(self, sid: str, number: int, yes: bool) -> None:
+        if self._caption_asks.get(sid) == number:  # 2.9: AI captions' download question
+            self._answer_captions(sid, yes)
+            return
         if self._asks.get(sid) != number:
             return  # a question no longer asked
         del self._asks[sid]
@@ -896,6 +931,111 @@ class RemoteController(QObject):
             self._window.library_controller.remote_search(text)
         else:
             screens.open_search(text)
+
+    # ---- the large picture's sound and subtitles (2.9) --------------------------------------
+
+    def _tracks_number(self) -> int:
+        """The number of what plays large: another title or channel (a zap, a swap) is another
+        number, so a pick made in the list of the one before is not taken for it."""
+        current = self._window.controller.now_playing()
+        if current is not self._tracks_target:
+            self._tracks_target = current
+            self._tracks_of = (self._tracks_of + 1) % MAX_ASK
+        return self._tracks_of
+
+    def _push_tracks(self, asked: str = "") -> None:
+        """The phones' Subtitles and Sound sheets follow what changed (a track, a zap, AI
+        captions' state): looked at every DIFF_MS while one has asked, as the desktop's panels
+        follow libVLC. `asked`: the phone that just asked, which hears the list unchanged too."""
+        if not self._track_phones or self.hub is None:
+            return
+        try:
+            message = tracks(self._window, self._tracks_number())
+        except Exception as error:  # a phone's sheet must never take QiTV down
+            logger.error("Phone remote: the tracks failed: %s", safe_message(error))
+            return
+        if message != self._last_tracks:
+            self._last_tracks = message
+            for sid in self._track_phones:
+                self._send(sid, message)
+        elif asked:
+            self._send(asked, message)
+
+    def _picked(self, of: int) -> Any:
+        """The TrackControls a pick from the list `of` acts on (None: that list is of what
+        played before, or nothing does)."""
+        controls = self._window.controller.track_controls()
+        return controls if controls is not None and of == self._tracks_number() else None
+
+    def _pick_track(self, event: TrackPick) -> None:
+        controls = self._picked(event.of)
+        try:
+            if controls is not None and event.kind == "sound":
+                controls.choose_sound(event.track)
+            elif controls is not None:
+                controls.choose_subtitles(event.track)  # AI captions go off, as on the TV
+        except Exception as error:  # a phone's pick must never take QiTV down
+            logger.error("Phone remote: choosing a track failed: %s", safe_message(error))
+        self._track_phones.add(event.sid)
+        self._push_tracks(asked=event.sid)
+
+    def _switch_captions(self, event: CaptionsSwitch) -> None:
+        """AI captions on or off; their first time, the download's question shows on the TV
+        and on this phone (`_ask_captions`)."""
+        controls = self._picked(event.of)
+        captions = getattr(self._window, "captions", None)
+        try:
+            if controls is not None:
+                controls.set_captions(event.on)
+                if event.on and captions is not None and captions.asking():
+                    self._ask_captions(event.sid, captions)
+        except Exception as error:  # a phone's pick must never take QiTV down
+            logger.error("Phone remote: AI captions failed: %s", safe_message(error))
+        self._track_phones.add(event.sid)
+        self._push_tracks(asked=event.sid)
+
+    def _caption_language(self, event: CaptionsLanguage) -> None:
+        controls = self._picked(event.of)
+        try:
+            if controls is not None:
+                controls.choose_caption_language(event.language)
+        except Exception as error:  # a phone's pick must never take QiTV down
+            logger.error("Phone remote: AI captions' language failed: %s", safe_message(error))
+        self._track_phones.add(event.sid)
+        self._push_tracks(asked=event.sid)
+
+    def _ask_captions(self, sid: str, captions: Any) -> None:
+        """AI captions' download question on the phone that turned them on, as QiTV's other
+        questions ask there; the TV's card asks the same meanwhile."""
+        text, yes, no = captions.question()
+        self._ask_number = (self._ask_number + 1) % MAX_ASK
+        self._caption_asks[sid] = self._ask_number
+        self._send(sid, {"t": "ask", "id": self._ask_number, "text": text, "yes": yes, "no": no})
+
+    def _answer_captions(self, sid: str, yes: bool) -> None:
+        """A phone answered AI captions' download question: the TV's card goes, and so does
+        the question on any other phone that turned them on."""
+        self._unask_captions(but=sid)
+        captions = getattr(self._window, "captions", None)
+        try:
+            if captions is not None:
+                captions.answer(yes)
+        except Exception as error:  # a phone's answer must never take QiTV down
+            logger.error("Phone remote: AI captions' answer failed: %s", safe_message(error))
+
+    def _unask_captions(self, but: str = "") -> None:
+        asks, self._caption_asks = self._caption_asks, {}
+        for sid, number in asks.items():
+            if sid != but:
+                self._send(sid, {"t": "unask", "id": number})
+
+    def _on_captions_changed(self) -> None:
+        """AI captions' state changed: a question answered on the TV (or left unanswered there)
+        closes on the phones, and their sheets follow ("Downloading 40%", the language)."""
+        captions = getattr(self._window, "captions", None)
+        if self._caption_asks and (captions is None or not captions.asking()):
+            self._unask_captions()
+        self._push_tracks()
 
     # ---- casting and scheduled recordings (2.8) ---------------------------------------------
 

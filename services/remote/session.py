@@ -25,6 +25,8 @@ from services.remote.protocol import (
     MAX_RATE,
     PROTO,
     Answered,
+    CaptionsLanguage,
+    CaptionsSwitch,
     CastTo,
     Closed,
     CloseSearch,
@@ -43,6 +45,7 @@ from services.remote.protocol import (
     StoreSaved,
     Timer,
     ToTv,
+    TrackPick,
     WatchHere,
     b64d,
     parse_opening,
@@ -297,6 +300,12 @@ class Session:
             return Reply(events=[RecAct(sid, m["id"], m["do"])])
         if t == "cast":  # 2.8
             return Reply(events=[CastTo(sid, m["to"])])
+        if t == "track":  # 2.9: the Sound or Subtitles sheet's pick
+            return Reply(events=[TrackPick(sid, m["kind"], m["id"], m["of"])])
+        if t == "captions":  # 2.9: AI captions on or off, or their language
+            if "on" in m:
+                return Reply(events=[CaptionsSwitch(sid, m["on"], m["of"])])
+            return Reply(events=[CaptionsLanguage(sid, m["lang"], m["of"])])
         if t == "sched":  # 2.8
             return Reply(events=[Schedule(sid, m["id"], m["do"])])
         if t == "timer":  # 2.8: Record at a time

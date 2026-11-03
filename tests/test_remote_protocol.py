@@ -120,6 +120,48 @@ class MessageTests(unittest.TestCase):
         for bad in ({"t": "cast"}, {"t": "cast", "to": 3}, {"t": "cast", "to": "x" * 201}):
             self.assertIsNone(parse_phone_message(bad), bad)
 
+    def test_the_tracks_are_asked_for_and_one_is_picked_from_its_list(self):  # 2.9
+        self.assertEqual(
+            parse_phone_message({"t": "get", "what": "tracks", "extra": 1}),
+            {"t": "get", "what": "tracks"},
+        )
+        for kind, track in (("sound", 0), ("sound", 257), ("sub", -1), ("sub", 3)):
+            message = {"t": "track", "kind": kind, "id": track, "of": 7}
+            self.assertEqual(parse_phone_message({**message, "more": "x"}), message)
+        for bad in (
+            {"t": "track", "kind": "sound", "id": -1, "of": 7},  # no sound at all: not a pick
+            {"t": "track", "kind": "sub", "id": -2, "of": 7},
+            {"t": "track", "kind": "sub", "id": 2**31, "of": 7},
+            {"t": "track", "kind": "video", "id": 1, "of": 7},
+            {"t": "track", "kind": ["sub"], "id": 1, "of": 7},
+            {"t": "track", "kind": "sub", "id": "3", "of": 7},
+            {"t": "track", "kind": "sub", "id": True, "of": 7},
+            {"t": "track", "kind": "sub", "id": 3},  # from no list
+            {"t": "track", "kind": "sub", "id": 3, "of": -1},
+            {"t": "track", "kind": "sub", "id": 3, "of": 1.5},
+        ):
+            self.assertIsNone(parse_phone_message(bad), bad)
+
+    def test_ai_captions_turn_on_or_off_or_hear_a_language(self):  # 2.9
+        for on in (True, False):
+            message = {"t": "captions", "on": on, "of": 2}
+            self.assertEqual(parse_phone_message(message), message)
+        for lang in ("auto", "Turkish", "English", "Cantonese"):
+            message = {"t": "captions", "lang": lang, "of": 2}
+            self.assertEqual(parse_phone_message(message), message)
+        for bad in (
+            {"t": "captions", "on": 1, "of": 2},
+            {"t": "captions", "on": None, "of": 2},
+            {"t": "captions", "lang": "tr", "of": 2},  # Qwen's names only, as QiTV listed them
+            {"t": "captions", "lang": "Klingon", "of": 2},
+            {"t": "captions", "lang": ["Turkish"], "of": 2},
+            {"t": "captions", "on": True, "lang": "Turkish", "of": 2},  # one of the two
+            {"t": "captions", "of": 2},
+            {"t": "captions", "on": True},
+            {"t": "captions", "on": True, "of": "2"},
+        ):
+            self.assertIsNone(parse_phone_message(bad), bad)
+
     def test_a_programme_is_scheduled_or_cancelled(self):  # 2.8
         for do in ("once", "series", "cancel"):
             self.assertEqual(

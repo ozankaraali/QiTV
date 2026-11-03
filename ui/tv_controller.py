@@ -3925,6 +3925,11 @@ class TVController(QObject):
         """Casting (2.8; None without libVLC's renderers): the phone's Cast to… uses it too."""
         return self._cast
 
+    def track_controls(self) -> Optional[TrackControls]:
+        """The large picture's sound and subtitles (None once closed): the phone's Subtitles
+        and Sound sheets use them too (2.9)."""
+        return None if self._closed else self._tracks
+
     def _one_picture_for_cast(self) -> None:
         """One picture goes to the device: the multiview's grid leaves (its focused tile is the
         large picture) and the picture in picture closes, as for an external player."""

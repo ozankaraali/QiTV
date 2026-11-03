@@ -176,6 +176,8 @@ class FakeCaptions(QObject):
         self.status = ""
         self.lang = ("auto", "")
         self.asks = False  # turning on asks first (the download's question): it stays off
+        self.asked = False  # the question is up
+        self.going = False  # the model downloads (2.9: the phone's sheet says so)
         self.toggles = 0
         self.picked = []
 
@@ -185,14 +187,31 @@ class FakeCaptions(QObject):
     def enabled(self):
         return self.on
 
+    def downloading(self):
+        return self.going
+
+    def asking(self):
+        return self.asked
+
+    def question(self):
+        return ("A speech model: 0.9 GB to download once. Download it now?", "Download", "Not now")
+
+    def answer(self, yes):
+        """The question answered on a phone: the download begins, or nothing."""
+        self.asked, self.going = False, yes
+
     def status_text(self):
         return self.status
 
     def toggle(self):
         self.toggles += 1
-        if self.asks and not self.on:
+        if self.on or self.going:  # off, a download on its way called off too
+            self.on = self.going = False
             return
-        self.on = not self.on
+        if self.asks:
+            self.asked = True
+            return
+        self.on = True
 
     def release(self, then):
         """Settings' Delete: off, then the files (CaptionsController.release)."""
@@ -361,6 +380,163 @@ class CaptionRowsTests(PanelCase):
         self.captions = None
         self.click_button("subtitles")
         self.assertEqual(self.texts(), ["*Off", "English", "Français", "Load a file…"])
+
+
+class PhoneChoicesTests(PanelCase):
+    """2.9: the panels' choices as the phone remote's Subtitles and Sound sheets list them and
+    pick them (TrackControls' own words and rules: one subtitle source at a time)."""
+
+    def setUp(self):
+        self.captions = FakeCaptions()
+        super().setUp()
+
+    make_controls = CaptionRowsTests.make_controls
+
+    def test_the_choices_are_the_panels_rows(self):
+        self.player = InfoPlayer(
+            [(-1, "Disable"), (257, "Track 1 - [Turkish]"), (258, "Track 2 - [English]")],
+            [info(1, "tur"), info(2, "eng")],
+        )
+        self.player.playing = 258
+        self.player.spu = 3
+        controls = self.controls
+        self.assertTrue(controls.offers())
+        self.assertEqual(controls.sound_choices(), [(257, "Türkçe", False), (258, "English", True)])
+        self.assertEqual(
+            controls.subtitle_choices(), [(3, "English", True), (4, "Français", False)]
+        )
+        off = controls.captions_choice()
+        self.assertEqual((off.on, off.going, off.status, off.languages), (False, False, "", ()))
+        self.captions.on, self.captions.status = True, "Catching up…"
+        self.captions.lang = ("Turkish", "audio track")
+        on = controls.captions_choice()
+        self.assertEqual((on.on, on.status, on.language), (True, "Catching up…", "Turkish"))
+        self.assertEqual(on.language_text, "Türkçe · audio track")  # as the Language row's
+        self.assertEqual(on.languages[:2], (("auto", "Auto"), ("English", "English")))
+        self.captions.offered = False
+        self.assertIsNone(controls.captions_choice())
+
+    def test_nothing_plays_nothing_is_offered_or_chosen(self):
+        self.playing = False
+        controls = self.controls
+        self.assertFalse(controls.offers())
+        self.assertIsNone(controls.captions_choice())
+        self.assertFalse(controls.choose_sound(2))
+        self.assertFalse(controls.choose_subtitles(3))
+        controls.set_captions(True)
+        self.assertEqual((self.player.playing, self.player.spu, self.captions.toggles), (1, -1, 0))
+
+    def test_a_track_is_chosen_as_its_row_chooses_it(self):
+        controls = self.controls
+        self.assertTrue(controls.choose_sound(2))
+        self.assertEqual(self.player.playing, 2)
+        for gone in (9, -1):  # a track of another list, and no sound at all
+            self.assertFalse(controls.choose_sound(gone))
+        self.assertEqual(self.player.playing, 2)
+        self.captions.on = True
+        self.assertTrue(controls.choose_subtitles(4))
+        self.assertEqual(self.player.spu, 4)
+        self.assertFalse(self.captions.on)  # one subtitle source at a time
+        self.assertFalse(controls.choose_subtitles(9))
+        self.assertTrue(controls.choose_subtitles(-1))  # Off
+        self.assertEqual(self.player.spu, -1)
+
+    def test_an_open_panel_follows_the_phones_pick(self):
+        self.click_button("audio")
+        self.assertEqual(self.shown()[0], ["*English", "Deutsch"])
+        self.controls.choose_sound(2)
+        self.assertEqual(self.shown()[0], ["English", "*Deutsch"])
+
+    def test_ai_captions_are_said_on_or_off_never_toggled(self):
+        controls = self.controls
+        self.player.spu = 3
+        controls.set_captions(True)
+        self.assertTrue(self.captions.on)
+        self.assertEqual(self.player.spu, -1)  # the track shown went
+        controls.set_captions(True)  # the same again (a second tap, a late message)
+        self.assertEqual(self.captions.toggles, 1)
+        controls.set_captions(False)
+        self.assertFalse(self.captions.on)
+        controls.set_captions(False)
+        self.assertEqual(self.captions.toggles, 2)
+        self.captions.going = True  # the model downloads: on their way
+        controls.set_captions(True)
+        self.assertEqual(self.captions.toggles, 2)
+        controls.set_captions(False)  # calls the download off, as the row's tap does
+        self.assertEqual((self.captions.toggles, self.captions.going), (3, False))
+
+    def test_their_question_puts_the_panel_aside_and_a_second_on_waits_for_it(self):
+        self.captions.asks = True
+        self.click_button("subtitles")
+        self.controls.set_captions(True)
+        self.assertTrue(self.captions.asking())
+        self.assertFalse(self.subtitle_panel.isVisible())  # the question in front
+        self.controls.set_captions(True)  # another phone, while it asks: its answer decides
+        self.assertEqual(self.captions.toggles, 1)
+
+    def test_the_language_is_chosen_while_they_are_on(self):
+        controls = self.controls
+        self.assertFalse(controls.choose_caption_language("Turkish"))  # off: no Language row
+        self.captions.on = True
+        self.assertTrue(controls.choose_caption_language("Turkish"))
+        self.assertFalse(controls.choose_caption_language("Klingon"))
+        self.assertTrue(controls.choose_caption_language("auto"))
+        self.assertEqual(self.captions.picked, ["Turkish", "auto"])
+
+
+class DownloadQuestionTests(unittest.TestCase):
+    """2.9: AI captions' download question on the TV's card, answered there or elsewhere (the
+    phone remote that turned them on): either answer goes for both."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from ui.captions_controller import CaptionsController
+        from ui.overlays.question_card import QuestionCard
+
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.host.show()
+        self.addCleanup(self.host.deleteLater)
+        self.addCleanup(self.host.close)
+        self.card = QuestionCard(self.host)
+        self.captions = CaptionsController(self.host, card=self.card)
+        self.captions._choose_tier = lambda: "small"
+        self.begun = []
+        self.captions._begin_download = lambda: self.begun.append(True)
+        self.changes = []
+        self.captions.changed.connect(lambda: self.changes.append(True))
+        missing = mock.patch("services.captions.models.download_size", return_value=900_000_000)
+        missing.start()
+        self.addCleanup(missing.stop)
+
+    def test_the_question_is_asked_with_its_words(self):
+        self.assertFalse(self.captions.asking())
+        self.captions.toggle()
+        self.assertTrue(self.captions.asking())
+        text, yes, no = self.captions.question()
+        self.assertEqual((yes, no), ("Download", "Not now"))
+        self.assertIn("900 MB", text)
+        self.assertEqual(self.card.question(), text)
+        self.assertTrue(self.card.isVisible())
+
+    def test_answered_elsewhere_the_card_goes_and_the_download_begins(self):
+        self.captions.toggle()
+        self.captions.answer(True)
+        self.assertFalse(self.card.isVisible())
+        self.assertFalse(self.card._timer.isActive())  # nothing answers "Not now" later
+        self.assertFalse(self.captions.asking())
+        self.assertEqual(self.begun, [True])
+        self.captions.answer(True)  # answered once
+        self.assertEqual(self.begun, [True])
+
+    def test_not_now_on_the_card_says_the_question_is_gone(self):
+        self.captions.toggle()
+        self.card.escape()
+        self.assertFalse(self.captions.asking())
+        self.assertEqual((self.changes, self.begun), ([True], []))  # a phone's closes too
 
 
 class NoteRowTests(PanelCase):

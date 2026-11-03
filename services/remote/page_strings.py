@@ -145,6 +145,18 @@ PAGE_STRINGS: dict[str, str] = {
     "swap": N_("Swap pictures"),  # i18n: the phone remote: a button
     "multiview": N_("Multiview"),  # i18n: the phone remote: a button
     "picture": N_("Picture"),  # i18n: the phone remote: a button (aspect, sleep timer)
+    # 2.9: the TV's subtitles and sound, as its Subtitles and Sound panels list them (the same
+    # words: the desktop's translations).
+    # i18n: the phone remote: a button, and its sheet's title (the TV's subtitles, AI captions)
+    "subtitles": N_("Subtitles"),
+    # i18n: the phone remote: a button, and its sheet's title (the TV's audio tracks)
+    "sound": N_("Sound"),
+    "subtitles_off": N_("Off"),  # i18n: the phone remote's Subtitles: the row that shows none
+    "ai_captions": N_("AI captions"),  # i18n: the phone remote's Subtitles: a row
+    # i18n: the phone remote's Subtitles: the row naming the language AI captions hear
+    "language": N_("Language"),
+    "no_audio": N_("No audio tracks"),  # i18n: the phone remote's Sound, when there are none
+    "no_subtitles": N_("No subtitles"),  # i18n: the phone remote's Subtitles, with none to show
     "fullscreen": N_("Full screen"),  # i18n: the phone remote: a button
     "this_phone": N_("This phone"),  # i18n: the phone remote: its menu's title
     "guide_find": N_("Find a channel"),  # i18n: the phone remote's guide field
