@@ -62,6 +62,14 @@ others' distributions, which may have malware.**
 - **The Sound panel names each audio track's language** ("Türkçe", "English"…), with its
   format when two would read alike, and says so when a channel doesn't name it.
 
+## Player
+
+- **The channel list, a caption or a panel no longer opens as a small square:** the layer the
+  player's overlays are drawn in kept its old size while none showed, and the next one to open
+  measured that size (a new window's default, a few dozen pixels). It now follows the window
+  all the time, and what it shows is painted at once: no leftovers of an earlier caption flash
+  over the picture after the window changes size.
+
 ## Live TV
 
 - **A channel whose server loses its playlist for a moment keeps its time-shift:** an HLS

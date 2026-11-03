@@ -247,7 +247,10 @@ class OverlayHost(QWidget):
                 self._watch_platform()
                 if self._window.isMinimized() and animates_restore():
                     self._in_dock = True
-            if self.isVisible():
+            # Hidden too while the player shows (2.9: the channel list opened as a small
+            # square, a caption tiny, once the window had changed size with no overlay up: an
+            # overlay lays itself out against the host as it opens, before the host shows).
+            if self.isVisible() or (self._window_shown() and self._surface_shown()):
                 self.sync_geometry()
             self._update_visibility()
             if obj is self._window and kind in (QEvent.Type.WindowStateChange, QEvent.Type.Show):

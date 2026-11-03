@@ -87,6 +87,29 @@ class OverlayHostTests(HostCase):
         QTest.qWait(30)
         self.assertEqual(self.host.geometry(), surface_rect(self.surface))
 
+    def test_hidden_it_follows_the_window_so_an_overlay_opens_at_the_size_it_shows(self):
+        # 2.9, the owner: the channel list sometimes opened as a small square (fine when
+        # opened again), a caption tiny: the window changed size while no overlay showed, and
+        # the next one laid itself out against the host's old size as it opened.
+        self.assertFalse(self.host.isVisible())
+        self.window.resize(1200, 675)
+        QTest.qWait(30)
+        self.assertEqual(self.host.size(), self.surface.size())
+        sizes = []
+
+        class Sized(Overlay):
+            def showEvent(inner, event):
+                sizes.append(inner.parentWidget().size())
+                super().showEvent(event)
+
+        drawer = Sized()
+        self.host.add_overlay(drawer)
+        drawer.setGeometry(0, 0, self.host.width() // 3, self.host.height())  # as it opens
+        drawer.show()
+        QTest.qWait(20)
+        self.assertEqual(drawer.height(), self.surface.height())
+        self.assertEqual(sizes[0], self.surface.size())
+
     def test_mask_is_union_of_visible_overlays(self):
         self.panel.show()
         QTest.qWait(20)
