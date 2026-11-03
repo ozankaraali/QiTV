@@ -1296,14 +1296,23 @@ class Driver:
         if captions is None or live is None:
             self.report.check(CAPTIONS_LIVE_CHECK, False, "no AI captions in the window")
             return
+        from services.i18n import translate
+        from ui.captions_texts import STARTING
+
         captions.toggle()  # installed already (QITV_CAPTIONS_DIR): no download question
         shown: list = []
         shot = False
+        waited = 0.0  # the picture waited for the captions' distance (2.9), this long
         until = time.monotonic() + CAPTIONS_LIVE_S
         while time.monotonic() < until:
             yield POLL_MS
+            if live.caption_waiting():
+                waited += POLL_MS / 1000.0
+                continue
             text = captions._shown
             position = live.position()
+            if text == translate(STARTING):
+                continue
             if text and (not shown or shown[-1][1] != text):
                 cue = next((c for c in captions._cues if c[2] == text), None)
                 lead = captions._lead()
@@ -1326,17 +1335,21 @@ class Driver:
             floor=live.caption_floor(),
             tier=captions._tier,
             language=captions.language(),
+            waited_s=round(waited, 1),
         )
-        captions.toggle()  # off: the picture catches up
+        captions.toggle()  # off: the picture stays where it is, time-shifted
         # Never after its words (a caption in the next scene); in step once the lead is built.
         after_words = [s for s in shown if s[3] is not None and s[0] > s[3] + 1.0]
         built = [s for s in shown if s[4] is not None and s[4] >= CAPTIONS_BUILT_S]
         late = [s for s in built if s[2] is not None and s[0] - s[2] > 1.0]
+        late_all = [s for s in shown if s[2] is not None and s[0] - s[2] > 1.0]
+        facts["mode_after_off"] = live._stay.mode.value  # shifted: stays where it is
         self.report.check(
             CAPTIONS_LIVE_CHECK,
             len(shown) >= 3 and not after_words and not late,
-            f"{len(shown)} shown ({len(built)} with the lead built, {len(late)} of them late), "
-            f"{len(after_words)} after their words; language {captions.language()}: {shown[:6]}",
+            f"{len(shown)} shown ({len(built)} with the lead built, {len(late)} of them late; "
+            f"{len(late_all)} late in all), {len(after_words)} after their words; waited "
+            f"{waited:.1f} s; language {captions.language()}: {shown[:6]}",
         )
 
     def _capture_with_video(self, name: str) -> None:
