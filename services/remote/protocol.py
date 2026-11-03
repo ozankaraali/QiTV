@@ -15,6 +15,8 @@ import json
 import re
 from typing import Literal, Optional
 
+from services.captions.languages import QWEN_LANGUAGES
+
 RELAY_URL = "https://remote.qitv.app"
 DEFAULT_PORT = 5384
 PORTS = range(DEFAULT_PORT, DEFAULT_PORT + 10)
@@ -192,6 +194,10 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         if isinstance(to, str) and len(to) <= MAX_DEVICE:
             return {"t": "cast", "to": to}
         return None
+    if t == "track":  # 2.9: a sound or subtitle track of the list QiTV sent (its "of")
+        return _track(obj)
+    if t == "captions":  # 2.9: AI captions on or off, or the language they hear
+        return _captions(obj)
     if t == "sched":  # 2.8: a timetable row's programme recorded at its time, or cancelled
         if _short_id(obj.get("id")) and obj.get("do") in ("once", "series", "cancel"):
             return {"t": "sched", "id": obj["id"], "do": obj["do"]}
@@ -225,15 +231,50 @@ def parse_phone_message(obj: object) -> Optional[dict]:
             return {"t": "get", "what": "timetable", "id": obj["id"]}
         if what == "cast":  # 2.8: the devices QiTV can cast to
             return {"t": "get", "what": "cast"}
+        if what == "tracks":  # 2.9: the large picture's sound and subtitles, AI captions too
+            return {"t": "get", "what": "tracks"}
     return None
 
 
-MAX_ASK = 2**31 - 1  # an ask's number (see _numbered)
+MAX_ASK = 2**31 - 1  # an ask's number (see _numbered); also what a "tracks" list is "of"
 MAX_DEVICE = 200  # 2.8: a cast device's name, as the TV lists it
+MAX_TRACK = 2**31 - 1  # 2.9: a track's id, as libVLC numbers it (an MPEG-TS stream's: a PID)
+# 2.9: the languages AI captions hear, as the phone picks one: "auto", or Qwen's name
+CAPTION_LANGUAGES = frozenset(("auto", *QWEN_LANGUAGES))
 MAX_POS = 2 * 24 * 3600 * 1000  # a title's place or length, in ms: two days at most
 MAX_TIMER_TITLE = 80  # 2.8: a timer's name, as the phone typed it (cut there)
 DAY_MINUTES = 24 * 60
 _DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _of(obj: dict) -> Optional[int]:
+    """2.9: the number of the "tracks" list a pick was made in (what played large then)."""
+    of = _int(obj.get("of"))
+    return of if of is not None and 0 <= of <= MAX_ASK else None
+
+
+def _track(obj: dict) -> Optional[dict]:
+    """2.9: a track of the Sound sheet ("sound") or of the Subtitles sheet ("sub"; -1: Off), by
+    the id QiTV listed it with. No sound track is -1: that one is no sound at all."""
+    kind, track, of = obj.get("kind"), _int(obj.get("id")), _of(obj)
+    if kind not in ("sound", "sub") or track is None or of is None:
+        return None
+    if not (-1 if kind == "sub" else 0) <= track <= MAX_TRACK:
+        return None
+    return {"t": "track", "kind": kind, "id": track, "of": of}
+
+
+def _captions(obj: dict) -> Optional[dict]:
+    """2.9: AI captions on or off ("on"), or the language they hear ("lang"): one of the two."""
+    of = _of(obj)
+    if of is None or ("on" in obj) == ("lang" in obj):
+        return None
+    if "on" in obj:
+        return {"t": "captions", "on": obj["on"], "of": of} if isinstance(obj["on"], bool) else None
+    lang = obj["lang"]
+    if isinstance(lang, str) and lang in CAPTION_LANGUAGES:
+        return {"t": "captions", "lang": lang, "of": of}
+    return None
 
 
 def _timer(obj: dict) -> Optional[dict]:
@@ -437,6 +478,35 @@ class CastTo:
 
     sid: str
     to: str
+
+
+@dataclass(frozen=True)
+class TrackPick:
+    """2.9: the large picture's sound track (`kind` "sound") or subtitle track ("sub"; -1:
+    Off) `track`, from the "tracks" list QiTV numbered `of` (what played large then)."""
+
+    sid: str
+    kind: str
+    track: int
+    of: int
+
+
+@dataclass(frozen=True)
+class CaptionsSwitch:
+    """2.9: AI captions on or off, as the phone's Subtitles sheet asks (from the list `of`)."""
+
+    sid: str
+    on: bool
+    of: int
+
+
+@dataclass(frozen=True)
+class CaptionsLanguage:
+    """2.9: the language AI captions hear in what plays ("auto", or Qwen's name)."""
+
+    sid: str
+    language: str
+    of: int
 
 
 @dataclass(frozen=True)

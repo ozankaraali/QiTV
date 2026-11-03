@@ -1,6 +1,7 @@
-// The second screen: what QiTV says is on, the guide, the search's results and the Library,
-// drawn from QiTV's snapshots (ui/remote_snapshots.py). Taps send back the opaque handles QiTV
-// gave; nothing here knows a stream's address. Also the d-pad's touchpad mode.
+// The second screen: what QiTV says is on, the guide, the search's results, the Library and the
+// TV's subtitles and sound, drawn from QiTV's snapshots (ui/remote_snapshots.py). Taps send back
+// the opaque handles QiTV gave; nothing here knows a stream's address. Also the d-pad's touchpad
+// mode.
 import app, { banner, closeSheets, menuItem, nameField, openSheet, press, release, send, show, t, tap } from "./app.js";
 import * as store from "./store.js";
 
@@ -77,6 +78,13 @@ const words = {
   no_length: "From and To are the same.",
   timer_failed: "Couldn't schedule that recording",
   tv_clock: "Times are QiTV's clock: {time} there now.",
+  subtitles: "Subtitles",
+  sound: "Sound",
+  subtitles_off: "Off",
+  ai_captions: "AI captions",
+  language: "Language",
+  no_audio: "No audio tracks",
+  no_subtitles: "No subtitles",
 };
 const w = (key) => (t(key) === key ? words[key] || key : t(key));
 
@@ -182,6 +190,7 @@ function onState(message) {
 
 let recordings = []; // [{id, name, since}] from the TV's state
 let askId = null; // the number of the question shown, which the answer carries back
+let askOver = ""; // 2.9: the Subtitles or Sound sheet it came over, shown again once answered
 
 function recClock(seconds) {
   const s = Math.max(0, Math.floor(seconds));
@@ -214,6 +223,7 @@ function openRecMenu() {
 
 function onAsk(message) {
   if (typeof message.id !== "number") return;
+  if (askId === null) askOver = tracksShown(); // 2.9: AI captions' download, from Subtitles
   closeSheets();
   askId = message.id;
   $("askText").textContent = message.text || "";
@@ -223,24 +233,34 @@ function onAsk(message) {
   if (navigator.vibrate) navigator.vibrate(12);
 }
 
-function answer(yes) {
+// An answer from the sheet's buttons goes back to the sheet the question came over; one by a
+// tap beside it or a swipe (`back` false) closes everything, as the gesture says.
+function answer(yes, back = true) {
   if (askId === null) return;
   send({ t: "answer", id: askId, yes });
   askId = null;
   closeSheets();
+  backFromAsk(back);
 }
 
 function onUnask(message) {
   if (message.id !== askId) return;
   askId = null;
   closeSheets();
+  backFromAsk(true); // answered on the TV
+}
+
+function backFromAsk(back) {
+  const over = askOver;
+  askOver = "";
+  if (back && over) openTracks(over);
 }
 
 function bindRec() {
   $("recLine").addEventListener("click", openRecMenu);
   $("askYes").addEventListener("click", () => answer(true));
   $("askNo").addEventListener("click", () => answer(false));
-  app.ondismiss = () => answer(false); // tapped beside or swiped away: nothing stops
+  app.ondismiss = () => answer(false, false); // tapped beside or swiped away: nothing stops
 }
 
 function drawNow() {
@@ -738,6 +758,109 @@ function bindCast() {
     openSheet("menuSheet");
     send({ t: "get", what: "cast" });
   });
+}
+
+// ---- 2.9: the TV's subtitles and sound, as its Subtitles and Sound panels list them --------
+
+// What QiTV last said of the large picture: {of, playing, sound: [{id, name, on}], subs: [...],
+// ai: {on, going, note, lang, lang_note, langs}} (ui/remote_snapshots.py tracks). A pick carries
+// `of` back: one made in the list of what played before changes nothing. While the sheet shows
+// one of its lists ("subs", "sound", or "langs": AI captions' languages), QiTV sends each change.
+let trackList = null;
+let tracksView = "subs";
+const TRACK_TITLES = { subs: "subtitles", sound: "sound", langs: "language" };
+
+function tracksShown() {
+  return $("tracksSheet").hidden ? "" : tracksView;
+}
+
+function openTracks(view) {
+  closeSheets();
+  trackList = null; // until QiTV answers: what played when it was last open may be gone
+  showTracks(view);
+  openSheet("tracksSheet");
+  send({ t: "get", what: "tracks" });
+}
+
+function showTracks(view) {
+  tracksView = view;
+  drawTracks();
+  $("tracksSheet").scrollTop = 0;
+  const chosen = view === "langs" && $("tracksList").querySelector(".current");
+  if (chosen) chosen.scrollIntoView({ block: "nearest" }); // the language heard, further down
+}
+
+function onTracks(message) {
+  trackList = message;
+  if (!$("tracksSheet").hidden) drawTracks();
+}
+
+function pickTrack(message) {
+  if (navigator.vibrate) navigator.vibrate(8);
+  if (trackList) send({ ...message, of: trackList.of });
+}
+
+// A row as the panel's: ticked when chosen, a note at its right, › where it opens a list.
+function choiceRow(text, pick, { on = false, note = "", opens = false, up = false } = {}) {
+  const row = el("button", `choice${on ? " current" : ""}${opens ? " opens" : ""}${up ? " up" : ""}`);
+  row.type = "button";
+  if (up) row.insertAdjacentHTML("beforeend", '<svg><use href="#i-left"/></svg>');
+  row.append(el("span", "label", text));
+  if (note) row.append(el("span", "muted", note));
+  if (opens) row.insertAdjacentHTML("beforeend", '<svg><use href="#i-right"/></svg>');
+  if (on) row.setAttribute("aria-current", "true"); // a screen reader says which is chosen
+  pressable(row);
+  row.addEventListener("click", pick);
+  return row;
+}
+
+function drawTracks() {
+  const tracks = trackList;
+  const ai = tracks && tracks.ai;
+  if (tracksView === "langs" && !(ai && ai.on && Array.isArray(ai.langs))) tracksView = "subs"; // off meanwhile
+  $("tracksTitle").textContent = w(TRACK_TITLES[tracksView]);
+  const rows = [];
+  const note = (key) => rows.push(el("p", "step", w(key)));
+  if (!tracks) note("loading");
+  else if (!tracks.playing) note("nothing_playing");
+  else if (tracksView === "sound") {
+    const sound = tracks.sound || [];
+    for (const track of sound) {
+      rows.push(choiceRow(track.name, () => pickTrack({ t: "track", kind: "sound", id: track.id }), { on: track.on }));
+    }
+    if (!sound.length) note("no_audio");
+  } else if (tracksView === "langs") {
+    rows.push(choiceRow(w("subtitles"), () => showTracks("subs"), { up: true }));
+    for (const lang of ai.langs) {
+      const pick = () => {
+        pickTrack({ t: "captions", lang: lang.id });
+        showTracks("subs"); // as the panel's list, back to Subtitles
+      };
+      rows.push(choiceRow(lang.name, pick, { on: lang.id === ai.lang }));
+    }
+  } else {
+    const subs = tracks.subs || [];
+    const shown = subs.some((track) => track.on) || (ai && ai.on);
+    rows.push(choiceRow(w("subtitles_off"), () => pickTrack({ t: "track", kind: "sub", id: -1 }), { on: !shown }));
+    for (const track of subs) {
+      rows.push(choiceRow(track.name, () => pickTrack({ t: "track", kind: "sub", id: track.id }), { on: track.on }));
+    }
+    if (ai) {
+      // On or off as the TV's row is: a download on its way calls off too, as a tap there does.
+      const turn = () => pickTrack({ t: "captions", on: !(ai.on || ai.going) });
+      rows.push(choiceRow(w("ai_captions"), turn, { on: ai.on, note: ai.note }));
+      if (ai.on) rows.push(choiceRow(w("language"), () => showTracks("langs"), { note: ai.lang_note, opens: true }));
+    } else if (!subs.length) note("no_subtitles");
+  }
+  $("tracksList").replaceChildren(...rows);
+}
+
+function bindTracks() {
+  for (const [id, view] of [["subtitlesButton", "subs"], ["soundButton", "sound"]]) {
+    const button = $(id);
+    pressable(button);
+    button.addEventListener("click", () => openTracks(view));
+  }
 }
 
 function onTimetable(message) {
@@ -1309,6 +1432,7 @@ function onHello() {
   hellos += 1;
   if (zapping()) zap.reopen(); // the Remote tab's list, on the first hello too
   if (hellos === 1) return; // the first: nothing else is open yet
+  if (tracksShown()) send({ t: "get", what: "tracks" }); // its changes come to this session
   const shown = (document.querySelector("[data-screen]:not([hidden])") || {}).dataset;
   const screen = shown ? shown.screen : "";
   if (screen === "guide" || screen === "timetable") {
@@ -1331,6 +1455,7 @@ app.handlers.stop = onStop;
 app.handlers.ask = onAsk;
 app.handlers.unask = onUnask;
 app.handlers.cast = onCast;
+app.handlers.tracks = onTracks;
 app.handlers["tab:guide"] = openGuide;
 app.handlers["tab:library"] = openLibrary;
 app.menuExtras.push(() => {
@@ -1355,6 +1480,7 @@ export function install() {
   bindHere();
   bindRec();
   bindCast();
+  bindTracks();
   setInterval(() => {
     if (current && !document.hidden) drawNow();
     if (recordings.length && !document.hidden) drawRec();

@@ -99,6 +99,12 @@ class QuestionCard(Overlay):
         self._answer(False)
         return True
 
+    def withdraw(self) -> None:
+        """The question was answered elsewhere (2.9: on a phone remote): the card goes without
+        an answer of its own, and its wait for one ends."""
+        self._timer.stop()
+        self.hide()
+
     def handle(self, action: Action) -> bool:
         """A key while it shows: True when it is the card's (every key but the sound's and
         the window's waits for the answer)."""

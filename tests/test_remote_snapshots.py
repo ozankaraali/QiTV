@@ -8,15 +8,19 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import json
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 from PySide6.QtTest import QTest
+import test_captions_ui
+from test_captions_ui import FakeCaptions, InfoPlayer, info
+from test_track_panel import PanelCase
 from test_tv_window import LIBRARY_WAIT_MS, XTREAM, TwoProviderCase, WindowCase, wait_until
 
 from services.remote.protocol import Closed, Get, Opened, OpenItem, Press, Query
 from tests.fixtures import local_xtream
-from ui.remote_snapshots import Handles, state
+from ui.remote_snapshots import MAX_TRACKS, TITLE_CHARS, Handles, state, tracks
 
 
 class SnapshotTests(WindowCase):
@@ -68,6 +72,12 @@ class SnapshotTests(WindowCase):
     def test_state_before_anything_plays(self):
         snapshot = state(self.window)
         self.assertIsNone(snapshot["now"])
+
+    def test_the_tracks_before_anything_plays(self):  # 2.9
+        self.assertEqual(
+            tracks(self.window, 1),
+            {"t": "tracks", "of": 1, "playing": False, "sound": [], "subs": []},
+        )
 
     def test_handles_are_capped(self):
         handles = Handles(limit=2000)
@@ -258,3 +268,82 @@ class ChangeTests(unittest.TestCase):
         self.assertTrue(_changed(self.snapshot(10_000), self.snapshot(10_000, playing=False), 0))
         paused = self.snapshot(10_000, playing=False)
         self.assertFalse(_changed(paused, self.snapshot(10_000, playing=False), 5_000))
+
+
+class TracksTests(PanelCase):
+    """2.9: what the phone's Subtitles and Sound sheets list: the large picture's tracks as the
+    panels name them, and AI captions while they can be offered (their state, their language)."""
+
+    def setUp(self):
+        self.captions = FakeCaptions()
+        super().setUp()
+        controller = SimpleNamespace(track_controls=lambda: self.controls)
+        self.window = SimpleNamespace(controller=controller)
+
+    make_controls = test_captions_ui.CaptionRowsTests.make_controls
+
+    def test_the_tracks_as_the_panels_name_them(self):
+        self.player = InfoPlayer(
+            [(-1, "Disable"), (257, "Track 1 - [Turkish]"), (258, "Track 2 - [English]")],
+            [info(1, "tur"), info(2, "eng")],
+        )
+        self.player.playing, self.player.spu = 257, 4
+        message = tracks(self.window, 5)
+        self.assertEqual(
+            message,
+            {
+                "t": "tracks",
+                "of": 5,
+                "playing": True,
+                "sound": [
+                    {"id": 257, "name": "Türkçe", "on": True},
+                    {"id": 258, "name": "English", "on": False},
+                ],
+                "subs": [
+                    {"id": 3, "name": "English", "on": False},
+                    {"id": 4, "name": "Français", "on": True},
+                ],
+                "ai": {"on": False, "going": False, "note": ""},
+            },
+        )
+        for secret in ("http", "cmd", "tv/1"):
+            self.assertNotIn(secret, json.dumps(message))
+
+    def test_ai_captions_say_their_state_and_while_on_their_language(self):
+        self.captions.on, self.captions.status = True, "Preparing…"
+        self.captions.lang = ("Turkish", "automatic")
+        ai = tracks(self.window, 1)["ai"]
+        self.assertEqual(
+            {key: ai[key] for key in ("on", "going", "note", "lang", "lang_note")},
+            {
+                "on": True,
+                "going": False,
+                "note": "Preparing…",
+                "lang": "Turkish",
+                "lang_note": "Türkçe · automatic",
+            },
+        )
+        self.assertEqual(ai["langs"][0], {"id": "auto", "name": "Auto"})
+        self.assertEqual(
+            ai["langs"][1:], [{"id": n, "name": o} for n, o in FakeCaptions().languages()]
+        )
+        self.captions.on, self.captions.going = False, True  # the model downloads
+        self.captions.status = "Downloading 40%"
+        self.assertEqual(
+            tracks(self.window, 1)["ai"], {"on": False, "going": True, "note": "Downloading 40%"}
+        )
+        self.captions.offered = False  # a provider's film: none
+        self.assertNotIn("ai", tracks(self.window, 1))
+
+    def test_nothing_playing_lists_nothing(self):
+        self.playing = False
+        empty = {"t": "tracks", "of": 2, "playing": False, "sound": [], "subs": []}
+        self.assertEqual(tracks(self.window, 2), empty)
+        self.window.controller.track_controls = lambda: None  # QiTV closes
+        self.assertEqual(tracks(self.window, 2), empty)
+
+    def test_names_are_cut_and_the_lists_kept_frame_sized(self):
+        self.player.subtitles = [(-1, "Disable")] + [(i, "x" * 200) for i in range(60)]
+        subs = tracks(self.window, 1)["subs"]
+        self.assertEqual(len(subs), MAX_TRACKS)
+        self.assertEqual(len(subs[0]["name"]), TITLE_CHARS)

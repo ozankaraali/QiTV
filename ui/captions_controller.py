@@ -8,6 +8,8 @@ the buffer holds it; turned off, the picture stays where it is, time-shifted, wi
 so each caption is written before the picture gets to its words and shows when they start. The
 first time, the model is downloaded (services.captions.download) once the viewer says so;
 the tier (0.6B or 1.7B) follows the computer's speed (services.captions.tier) or Settings.
+Turned on from a phone remote, the question shows on the TV and on that phone: either answer
+goes for both (`answer`, ui/remote_controller.py).
 
 Cues are kept on the time-shift timeline: going back over a stretch shows its captions
 again, and a seek reads again from where the picture went. A caption that comes after its
@@ -88,6 +90,7 @@ class CaptionsController(QObject):
         self._resync_at: Optional[float] = None  # read again from past a jump here
         self._supported: Optional[bool] = None
         self._asking = False
+        self._question = ("", "", "")  # the download's question and its answers, as asked
         self._download: Any = None
         self._percent = 0
         self._unpacking = False
@@ -179,13 +182,35 @@ class CaptionsController(QObject):
                 return
             self._asking = True
             self._tier = tier
-            self._card.ask(
+            self._question = (
                 translate(DOWNLOAD_QUESTION, size=size_text(missing)),
                 translate(DOWNLOAD),
                 translate(NOT_NOW),
             )
+            self._card.ask(*self._question)
             return
         self._enable(tier)
+
+    def downloading(self) -> bool:
+        """The speech model downloads: they are on their way (the row's tap calls them off)."""
+        return self._download is not None
+
+    def asking(self) -> bool:
+        """The download's question is up: on the TV, and on a phone that turned them on."""
+        return self._asking
+
+    def question(self) -> tuple[str, str, str]:
+        """The download's question as asked, and its answers' words (yes, no)."""
+        return self._question
+
+    def answer(self, yes: bool) -> None:
+        """The question answered elsewhere (2.9: on a phone remote): the TV's card goes, and
+        it is as if it had been answered there."""
+        if not self._asking:
+            return
+        if self._card is not None:
+            self._card.withdraw()
+        self._on_answer(yes)
 
     def handle(self, action: Any) -> bool:
         """Keys go to the question while it shows."""
@@ -251,6 +276,7 @@ class CaptionsController(QObject):
             return
         self._asking = False
         if not yes:
+            self.changed.emit()  # the question is gone (a phone's closes too)
             return
         self._percent = 0
         self._unpacking = False

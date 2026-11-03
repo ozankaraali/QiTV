@@ -7,6 +7,8 @@ from services.remote.pairing import RemoteStore
 from services.remote.protocol import (
     MAX_MESSAGE,
     Answered,
+    CaptionsLanguage,
+    CaptionsSwitch,
     CastTo,
     Closed,
     CloseSearch,
@@ -25,6 +27,7 @@ from services.remote.protocol import (
     StoreSaved,
     Timer,
     ToTv,
+    TrackPick,
     WatchHere,
 )
 from services.remote.session import MessageTooBig, Session
@@ -226,6 +229,11 @@ class KkTests(SessionCase):
             {"t": "get", "what": "cast"},
             {"t": "refresh"},
             {"t": "closesearch"},
+            {"t": "get", "what": "tracks"},
+            {"t": "track", "kind": "sub", "id": -1, "of": 3},
+            {"t": "track", "kind": "sound", "id": 257, "of": 3},
+            {"t": "captions", "on": True, "of": 3},
+            {"t": "captions", "lang": "Turkish", "of": 3},
         ):
             got += session.receive(phone.seal(message)).events
         self.assertEqual(
@@ -252,6 +260,11 @@ class KkTests(SessionCase):
                 Get(sid, "cast", "", 0),
                 RefreshLists(sid),
                 CloseSearch(sid),
+                Get(sid, "tracks", "", 0),
+                TrackPick(sid, "sub", -1, 3),
+                TrackPick(sid, "sound", 257, 3),
+                CaptionsSwitch(sid, True, 3),
+                CaptionsLanguage(sid, "Turkish", 3),
             ],
         )
 

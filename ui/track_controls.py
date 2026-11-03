@@ -42,10 +42,16 @@ each language; "‹ Subtitles" or ← goes back). One subtitle source at a time:
 file turns AI captions off, and AI captions turned on turn the track shown off. Turning them on
 closes the panel first, as their first time asks a question (the download); it opens again once
 they are on or on their way.
+
+The phone remote's Subtitles and Sound sheets (2.9, ui/remote_controller.py) list the same
+choices, named the same (`sound_choices`, `subtitle_choices`, `captions_choice`), and choose
+them as the rows do (`choose_sound`, `choose_subtitles`, `set_captions`,
+`choose_caption_language`); an open panel follows.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import partial
 import logging
 import os
@@ -275,6 +281,18 @@ def audio_names(tracks: list[tuple[int, str]], infos: Optional[list] = None) -> 
         if counts[names[track_id]] > 1:
             names[track_id] = f"{names[track_id]} · " + tr("Track {n}", n=number)
     return names
+
+
+@dataclass(frozen=True)
+class CaptionsChoice:
+    """AI captions as the Subtitles panel offers them (2.9), for the phone remote's sheet."""
+
+    on: bool  # their row is ticked
+    going: bool  # on their way: the speech model downloads (a tap calls that off)
+    status: str  # what they wait for, as the row says it ("Downloading 40%"; "": nothing)
+    language: str  # the language they hear: "auto", or Qwen's name
+    language_text: str  # the Language row's note while on: "Türkçe · automatic"
+    languages: tuple[tuple[str, str], ...]  # while on, the list: ("auto", "Auto"), (name, own)
 
 
 class TrackControls(QObject):
@@ -537,12 +555,7 @@ class TrackControls(QObject):
 
     def _sound_model(self) -> PanelModel:
         """The tracks by their language (one track too: what it is), then the Sync row."""
-        session = self._session()
-        tracks = [t for t in session.audio_tracks() if t[0] != -1]  # -1: no sound
-        playing = session.audio_track()
-        info = getattr(session, "audio_track_info", None)
-        names = audio_names(tracks, info() if callable(info) and tracks else None)
-        rows = tuple(PanelRow(i, names[i], i == playing) for i, _name in tracks)
+        rows = tuple(PanelRow(i, name, on) for i, name, on in self.sound_choices())
         return PanelModel(translate(SOUND), rows, self._sync(AUDIO, self._delay(AUDIO)))
 
     def _subtitle_model(self) -> PanelModel:
@@ -552,19 +565,19 @@ class TrackControls(QObject):
         self._level = ""
         session = self._session()
         shown = session.subtitle_track()
-        tracks = [(i, name) for i, name in session.subtitle_tracks() if i != -1]
+        tracks = self.subtitle_choices()
         online, target = self._online, self._current()
         searchable = online is not None and online.available(target)
         ai_on = captions is not None and bool(captions.enabled())
         rows = []
         if searchable:
             pick = online.remembered(target)
-            if pick is not None and pick.name not in {name for _i, name in tracks}:
+            if pick is not None and pick.name not in {name for _i, name, _on in tracks}:
                 rows.append(
                     PanelRow(REMEMBERED, online.row_text(pick), action=True, icon="subtitles")
                 )
         rows.append(PanelRow(-1, translate(OFF), shown == -1 and not ai_on))
-        rows += [PanelRow(i, name, i == shown) for i, name in tracks]
+        rows += [PanelRow(i, name, on) for i, name, on in tracks]
         if captions is not None:
             rows += self._caption_rows(captions)
         if self._pick_file is not None:
@@ -574,6 +587,94 @@ class TrackControls(QObject):
             rows.append(PanelRow(SEARCH_ONLINE, text, action=True, icon="search"))
         sync = None if shown == -1 else self._sync(SUBTITLES, session.subtitle_delay())
         return PanelModel(translate(SUBTITLES_TITLE), tuple(rows), sync)
+
+    # ---- the panels' choices, for the phone remote too (2.9) ---------------------------------
+
+    def offers(self) -> bool:
+        """Something plays in the large picture: its tracks can be chosen."""
+        return bool(self._playing()) and self._current() is not None
+
+    def sound_choices(self) -> list[tuple[int, str, bool]]:
+        """The Sound panel's tracks, as it names them: (id, name, playing)."""
+        session = self._session()
+        tracks = [t for t in session.audio_tracks() if t[0] != -1]  # -1: no sound
+        playing = session.audio_track()
+        info = getattr(session, "audio_track_info", None)
+        names = audio_names(tracks, info() if callable(info) and tracks else None)
+        return [(i, names[i], i == playing) for i, _name in tracks]
+
+    def subtitle_choices(self) -> list[tuple[int, str, bool]]:
+        """The Subtitles panel's tracks, Off aside: (id, name, shown)."""
+        session = self._session()
+        shown = session.subtitle_track()
+        return [(i, name, i == shown) for i, name in session.subtitle_tracks() if i != -1]
+
+    def captions_choice(self) -> Optional[CaptionsChoice]:
+        """AI captions as the Subtitles panel offers them (None: it doesn't, for what plays)."""
+        captions = self._offered()
+        if captions is None or not self.offers():
+            return None
+        on = bool(captions.enabled())
+        languages: tuple[tuple[str, str], ...] = ()
+        if on:  # the Language row and its list, while they are on
+            languages = (("auto", auto_language_text()), *captions.languages())
+        return CaptionsChoice(
+            on=on,
+            going=bool(captions.downloading()),
+            status=str(captions.status_text() or ""),
+            language=str(captions.language()[0]),
+            language_text=self._language_text(captions) if on else "",
+            languages=languages,
+        )
+
+    def choose_sound(self, track_id: int) -> bool:
+        """A Sound track by its id, as the panel's row chooses it (False: none such now)."""
+        if not self.offers() or track_id not in {i for i, _name, _on in self.sound_choices()}:
+            return False
+        self._session().set_audio_track(track_id)
+        self._follow_player()
+        return True
+
+    def choose_subtitles(self, track_id: int) -> bool:
+        """A subtitle track by its id, or Off (-1), as the panel's rows choose them: AI
+        captions go off (one subtitle source at a time). False: no such track now."""
+        if not self.offers():
+            return False
+        if track_id != -1 and track_id not in {i for i, _n, _on in self.subtitle_choices()}:
+            return False
+        self._session().set_subtitle_track(track_id)
+        self._captions_off()
+        self._follow_player()
+        return True
+
+    def set_captions(self, on: bool) -> None:
+        """AI captions on or off, as their row turns them, said rather than toggled (the phone
+        remote's: a second "on" changes nothing, an "off" also calls off their download). The
+        first time asks the download's question first; the panels give way to it."""
+        captions = self._offered()
+        if captions is None or not self.offers():
+            return
+        wanted = bool(captions.enabled() or captions.downloading())
+        if on == wanted or (on and captions.asking()):  # asked already: its answer decides
+            return
+        captions.toggle()
+        self._one_source(captions)
+        if captions.asking():
+            self.close()  # the question in front, as their row's own
+        else:
+            self._follow_player()
+
+    def choose_caption_language(self, name: str) -> bool:
+        """The language AI captions hear, while they are on ("auto": found by itself), as the
+        language list picks it (False: they are off, or no such language)."""
+        captions = self._offered()
+        if captions is None or not self.offers() or not captions.enabled():
+            return False
+        if name != "auto" and name not in {qwen for qwen, _own in captions.languages()}:
+            return False
+        captions.set_language(name)
+        self._follow_player()
+        return True
 
     # ---- AI captions (2.9) -------------------------------------------------------------------
 

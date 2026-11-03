@@ -43,3 +43,12 @@ others' distributions, which may have malware.**
 
 - **The Sound panel names each audio track's language** ("Türkçe", "English"…), with its
   format when two would read alike, and says so when a channel doesn't name it.
+
+## Phone remote
+
+- **Subtitles and Sound from the phone:** the remote's **More** has **Subtitles** and
+  **Sound**, the TV's two panels: Off, the stream's subtitles and **AI captions** (on or off,
+  what they are waiting for, such as "Downloading 40%", and the language they hear, which you
+  can change), and the sound tracks by their language, named as on the TV. They follow what
+  the TV does while they are open. The first time AI captions are turned on from the phone, the
+  download question shows on the phone and on the TV: answer either one.
