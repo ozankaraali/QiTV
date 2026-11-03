@@ -277,14 +277,22 @@ class CaptionsTests(RelayTestCase):
         cues = len(FILM) - 30 * KIB
         self.assertEqual(self.read(self.relay.follower_url, cues, 30 * KIB), FILM[cues:])
         self.assertEqual(self.relay.stats["detours"], 1)
-        rest = 600 * KIB + 2 * MIB
-        self.assertEqual(picture.read(2 * MIB), FILM[600 * KIB : rest])  # the picture goes on
-        picture.close()
-        asks = self.provider.film_asks()
-        tail = [a for a in asks if a["first"] >= len(FILM) - SMALL.pin_tail]
+        tail = [a for a in self.provider.film_asks() if a["first"] >= len(FILM) - SMALL.pin_tail]
         self.assertEqual(len(tail), 1)
         self.assertIsNotNone(tail[0]["last"])  # a detour asks for its bytes only
-        resumed = asks[asks.index(tail[0]) + 1]
+
+        def after_detour():
+            asks = self.provider.film_asks()
+            return asks[asks.index(tail[0]) + 1 :]
+
+        # The picture goes on, past what was cached ahead before the detour (how far ahead
+        # depends on how busy the computer is: CI ran this under load and read only cache).
+        at = 600 * KIB
+        while not after_detour() and at + MIB <= len(FILM) - SMALL.pin_tail:
+            self.assertEqual(picture.read(MIB), FILM[at : at + MIB])
+            at += MIB
+        picture.close()
+        [resumed, *_] = after_detour()
         self.assertGreater(resumed["first"], 600 * KIB)  # from where the picture's run was
         self.assertIsNone(resumed["last"])
 
