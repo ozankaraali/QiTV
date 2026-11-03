@@ -596,7 +596,11 @@ class CaptionsController(QObject):
         if run != self._run:
             return
         self._newest, self._rtf = newest, rtf
-        if rtf >= _SLOW_RTF:
+        # Slow, and late for it: a short line ("Yes.") costs the model a fixed while, so a
+        # dialogue's speed reads slow while the silences between its lines keep the captions
+        # ahead of the picture (2.9: 1.06 while a film's were 3-60 s ahead, all in time).
+        lead = self._lead()
+        if rtf >= _SLOW_RTF and lead is not None and lead < LATE_LEAD_S:
             if self._slow_since is None:
                 self._slow_since = time.monotonic()
         else:

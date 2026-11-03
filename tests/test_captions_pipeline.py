@@ -407,6 +407,20 @@ class ControllerTimingTests(unittest.TestCase):
             self.captions._newest = newest
             self.assertEqual(self.captions.status_text(), said, newest)
 
+    def test_cant_keep_up_only_when_slow_and_late(self):
+        import time as clock
+
+        run = self.captions._run
+        self.window.live_session.position_s = 100.0
+        self.captions._on_progress(run, 140.0, 1.06)  # slow lines, but far ahead: in time
+        self.assertIsNone(self.captions._slow_since)
+        self.captions._on_progress(run, 100.5, 1.06)  # slow and about to be late
+        self.assertIsNotNone(self.captions._slow_since)
+        self.captions._slow_since = clock.monotonic() - 31.0
+        self.assertEqual(self.captions.status_text(), "Can't keep up")
+        self.captions._on_progress(run, 108.0, 1.06)  # ahead again
+        self.assertIsNone(self.captions._slow_since)
+
     def test_the_download_says_how_far_it_is_where_the_captions_will_be(self):
         # 2.9: answered, the question went and nothing said the download had begun.
         from services.captions.download import CANCELLED
