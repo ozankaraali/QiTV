@@ -785,6 +785,50 @@ class FilmCaptionsTests(unittest.TestCase):
         self.captions._tick()
         self.assertEqual(self.overlay.text, "Bonjour")
 
+    def test_another_audio_track_is_read_from_the_picture_in_its_own_language(self):
+        # 2.9: the owner switched a film's sound from English to Turkish with captions on,
+        # and they stayed English: the run read the first track, locked to its language.
+        tracks = {2: "eng", 5: "tur"}
+        session = self.window.session
+        session.playing = 2
+        session.audio_track = lambda: session.playing
+        session.audio_tracks = lambda: [(-1, "Disable"), (2, "English"), (5, "Türkçe")]
+        session.audio_track_info = lambda: [
+            unittest.mock.Mock(id=i, language_code=code) for i, code in tracks.items()
+        ]
+        self.captions._resolve_language()
+        self.captions._start_run()
+        run = self.captions._run
+        self.assertEqual(self.sent[0][4:6], (2, "English"))
+        self.captions._on_caption(run, 123.0, 125.0, "Hello")
+        self.captions._last = None
+        self.captions._tick()
+        self.assertEqual(self.captions._run, run)  # the same track: nothing read again
+        session.playing = -1  # the player busy for a moment: no change seen
+        self.captions._tick()
+        self.assertEqual(self.captions._run, run)
+        session.playing = 5
+        self.sent.clear()
+        self.captions._tick()
+        self.assertEqual(self.captions._run, run + 1)
+        kind, _run, _location, start, track, language = self.sent[0][:6]
+        self.assertEqual((kind, track, language), ("film", 5, "Turkish"))
+        self.assertAlmostEqual(start, 120.0 + self.ahead)
+        self.assertEqual(self.captions._cues, [])  # the English ones went
+        self.assertEqual(self.captions.language()[0], "Turkish")
+
+    def test_a_language_the_model_heard_is_forgotten_with_its_track(self):
+        session = self.window.session
+        session.playing = 2
+        session.audio_track = lambda: session.playing
+        self.captions._start_run()
+        self.captions._on_detected(self.captions._run, "English")
+        session.playing = 5  # a track that names no language
+        self.captions._last = None
+        self.captions._tick()
+        self.assertEqual(self.sent[-2][5], "")  # the model hears this one anew
+        self.assertEqual(self.captions._detected, {})
+
     def test_a_seek_in_the_film_reads_again_from_there(self):
         self.captions._start_run()
         run = self.captions._run

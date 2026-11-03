@@ -15,9 +15,11 @@ Turned on from a phone remote, the question shows on the TV and on that phone: e
 goes for both (`answer`, ui/remote_controller.py).
 
 Cues are kept on the time-shift timeline: going back over a stretch shows its captions
-again, and a seek reads again from where the picture went. A caption that comes after its
-words started shows for what is left of it (the picture's own pace decides); one that comes
-after they ended never shows (captions in the next scene are worse than none).
+again, and a seek reads again from where the picture went. Another audio track (the Sound
+panel, a key, a phone) is read from where the picture is, in its own language. A caption
+that comes after its words started shows for what is left of it (the picture's own pace
+decides); one that comes after they ended never shows (captions in the next scene are worse
+than none).
 
 A film or an episode has no helper: the process plays its sound from `FILM_AHEAD_S` past the
 picture (services.captions.film), on the film's own clock, from where the window's player reads
@@ -137,6 +139,7 @@ class CaptionsController(QObject):
         self._run = 0
         self._session_key = ""  # the stream base the run reads (another session: read again)
         self._run_start = 0.0  # the timeline second the run reads from
+        self._run_track: Optional[int] = None  # the audio track the run reads (None: default)
         self._cues: list[tuple[float, float, str]] = []  # (start, end, text) by start
         self._newest: Optional[float] = None
         self._rtf = 0.0
@@ -652,9 +655,10 @@ class CaptionsController(QObject):
         self._run += 1
         self._run_channel = self._channel_key()
         self._run_start = start
+        self._run_track = self._audio_track()
         self._session_key = url.rsplit("/side/", 1)[0]
         self._newest = None
-        self._process.send("start", self._run, url, start, self._audio_track(), self._language[0])
+        self._process.send("start", self._run, url, start, self._run_track, self._language[0])
         self._process.send("viewer", self._position())
 
     def _start_film(self) -> None:
@@ -668,10 +672,11 @@ class CaptionsController(QObject):
         self._run += 1
         self._run_channel = self._channel_key()
         self._run_start = start
+        self._run_track = self._audio_track()
         self._session_key = location
         self._newest = None
         self._process.send(
-            "film", self._run, location, start, self._audio_track(), self._language[0], options
+            "film", self._run, location, start, self._run_track, self._language[0], options
         )
         self._process.send("viewer", self._position())
 
@@ -744,6 +749,9 @@ class CaptionsController(QObject):
             self._start_run()
             self.changed.emit()
             return
+        if self._ready and self._track_changed():
+            self._hear_track()
+            return
         waiting = self._waiting()
         if waiting != self._was_waiting:
             self._was_waiting = waiting
@@ -768,6 +776,30 @@ class CaptionsController(QObject):
         self._process.send("viewer", position)
         self._show(self._cue_at(position))
         self._forget(position)
+
+    def _track_changed(self) -> bool:
+        """Another audio track plays than the run reads (2.9: the owner switched a film's
+        sound to another language, and the captions stayed in the first one's)."""
+        track = self._audio_track()
+        if track is None:
+            return False  # the player is busy (an opening, a seek): looked at again next tick
+        if self._run_track is None:
+            self._run_track = track  # the run reads the default track: the one playing then
+            return False
+        return track != self._run_track
+
+    def _hear_track(self) -> None:
+        """The audio track the viewer chose: read from where the picture is, in its own
+        language (the one the model heard was the other track's); what was written from the
+        other track goes."""
+        logger.info("AI captions: audio track %s, read again", self._audio_track())
+        self._detected.pop(self._channel_key(), None)
+        self._cues.clear()
+        self._last = None
+        self._show("")
+        self._resolve_language()
+        self._start_run()
+        self.changed.emit()  # the panel's language row says the track's
 
     def _waiting(self) -> bool:
         """The live picture waits for the captions' distance behind live (LiveSession)."""

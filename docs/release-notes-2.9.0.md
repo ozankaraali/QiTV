@@ -35,7 +35,8 @@ others' distributions, which may have malware.**
   faster one isn't on the computer yet, QiTV asks once before downloading it, and the captions
   keep going meanwhile. A model you chose yourself is never changed.
 - **The language:** QiTV takes it from the channel's audio track when the channel names it;
-  otherwise the model hears it. You can choose another in the panel, and QiTV remembers your
+  otherwise the model hears it. Choose another audio track (a film's other language) and the
+  captions follow it within a few seconds. You can choose another in the panel, and QiTV remembers your
   choice for that channel.
 - **Nothing made up:** what speech models write over music and silence (credits, repeated
   lines), or a line written in another language's letters, is kept off the screen.
