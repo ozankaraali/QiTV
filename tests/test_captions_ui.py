@@ -667,6 +667,8 @@ class SpeechModelTests(unittest.TestCase):
             ],
         )
         self.assertEqual(self.captions.model_text(), "Automatic · Faster (0.6B)")
+        self.disk["small"] = (False, 0)  # whole on disk, only to unpack: not "1 MB"
+        self.assertEqual(self.captions.model_choices()[1][2], "")
         self.captions._download, self.captions._tier = object(), "large"
         self.captions._percent = 40
         self.assertEqual(self.captions.model_choices()[2][2], "Downloading 40%")

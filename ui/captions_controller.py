@@ -288,7 +288,8 @@ class CaptionsController(QObject):
             if self._download is not None and name == self._tier:
                 note = self.status_text()
             else:
-                note = "" if here else size_text(missing)
+                # nothing to fetch (only to unpack: a cancel left it whole): nothing to say
+                note = "" if here or not missing else size_text(missing)
             choices.append((name, texts[name], note))
         return choices
 
