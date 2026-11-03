@@ -527,7 +527,6 @@ class StayLive:
         self._ref_now = self._ref_before = 0.0
         self._last: Optional[float] = None  # the last update's time
         self._outside = 0.0  # seconds outside the band, on `_side`, counted while playing
-        self._retarget = False  # `retarget_now()`: the next nudge starts at once, unbudgeted
         self._side = 0  # +1 behind the band, -1 ahead of it
         self._nudge: Optional[_Nudge] = None
         self._nudged_at: Optional[float] = None  # the last budgeted nudge's end
@@ -598,16 +597,6 @@ class StayLive:
         """The lag stepped (a reopen, say): count the time outside the band afresh."""
         self._outside, self._side, self._urgent = 0.0, 0, False
         self._waited = 0.0
-
-    def retarget_now(self) -> None:
-        """The target was moved on purpose (2.9: AI captions hold the picture further behind
-        while they are on, and let it go when they are off): steer to it at once, gently, as
-        a nudge the budget does not refuse, instead of waiting `_PERSIST_S` for the lag to
-        prove it is outside the band. A start's tolerance does not cover such a move."""
-        self._retarget = True
-        self._wide = 0.0
-        self._accepting = self._tolerant = False
-        self._start = 0.0  # not a start's build (capped at _START_BUILD_S): the whole move
 
     def landed(self, excess: float, *, build: bool = True) -> None:
         """A stream opened at the start Go live picks (after `user_go_live()` for a Go live):
@@ -926,13 +915,10 @@ class StayLive:
             self._waited = 0.0
         if side == 0:
             self._outside = max(0.0, self._outside - 2 * dt)  # back inside: it fades
-            self._retarget = False  # the moved target is reached: nothing owed
             return False
         if side != self._side:
             self._outside, self._side = 0.0, side
         self._outside += dt
-        if self._retarget:
-            self._outside = max(self._outside, _PERSIST_S)
         start = side < 0 and self._start > 0  # the start's shortfall: built once, gently
         urgent = far or short or start
         self._urgent = urgent
@@ -949,7 +935,7 @@ class StayLive:
                 grain = True
                 if self._outside < _PERSIST_S - 1e-9:
                     return False
-        if not urgent and not self._budget_free(now) and not self._retarget:
+        if not urgent and not self._budget_free(now):
             # Spent: tolerate this much rather than a second nudge within the budget. Not the
             # keyframes' grain: that lag is no drift, and a band that wide (both sides) would
             # tolerate a shortfall as large; the band stays as it was.
@@ -957,14 +943,13 @@ class StayLive:
                 self._wide = abs(error) + _WIDEN_S
             self.absorb()
             return False
-        if start and not self._retarget:
+        if start:
             self._start = 0.0  # one build per landing
             nudge = _Nudge(_GENTLE_DOWN, abs(error), self._centre(side), limit=_START_BUILD_S)
         else:
             peak = _FAST if far else _SLOW if short else _GENTLE_UP if side > 0 else _GENTLE_DOWN
             nudge = _Nudge(peak, abs(error), self._centre(side))
         self._nudge = nudge
-        self._retarget = False
         self.absorb()
         self._steer(0.0, lag, now)
         return False

@@ -15,14 +15,16 @@ others' distributions, which may have malware.**
   Polish, Russian and Arabic.
 - **In step with the picture:** QiTV reads a few seconds ahead of what it shows, so each
   caption appears when its words are said, not after them. While captions are on, live TV plays
-  about 8 seconds behind the broadcast: QiTV slows the picture very slightly (3%) until it has
-  those seconds, so nothing stops or jumps. Turn captions off and it catches up the same way,
-  or press Go live. A film needs no delay: after a seek, captions start a few seconds later.
+  8 to 10 seconds behind the broadcast: when you turn them on, or change channel, the picture
+  waits a few seconds once ("Starting captions…") and then plays on normally. Go live keeps
+  that distance while captions are on. Turn them off and the picture stays where it is, as
+  after a pause: the bar and Go live take you back to live. A film needs no delay: after a
+  seek, captions start a few seconds later.
 - **One download, sized for your computer:** the first time, QiTV asks before downloading the
-  speech model once: 0.9 GB on most computers, or a more accurate 2.4 GB one where the
-  computer is fast enough (Settings → AI captions can choose either). Nothing of it ships with
-  QiTV, nothing you watch leaves your computer, and Settings shows the space it takes and
-  deletes it.
+  speech model once: the more accurate one (2.4 GB) where the computer is fast enough and
+  has 12 GB of memory, as most from the last few years are, else a faster one (0.9 GB).
+  Settings → AI captions can choose either. Nothing of it ships with QiTV, nothing you watch leaves your computer,
+  and Settings shows the space it takes and deletes it.
 - **The language:** QiTV takes it from the channel's audio track when the channel names it;
   otherwise the model hears it. You can choose another in the panel, and QiTV remembers your
   choice for that channel.

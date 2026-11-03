@@ -2,16 +2,17 @@
 
 The speech model runs in its own process (services.captions.process) and reads the live
 channel from the time-shift helper's buffer, ahead of the picture. While captions are on the
-picture is held `LEAD_S` behind the live edge (LiveSession.set_caption_floor: stay-live
-builds it at 0.97x while it plays, and gives it back at 1.03x once they are off), so each
-caption is written before the picture gets to its words and shows when they start. The
+picture is held `LEAD_S` behind the live edge (LiveSession.set_caption_floor: the picture
+waits there once, "Starting captions…", then plays at 1x; Go live and a tune land there when
+the buffer holds it; turned off, the picture stays where it is, time-shifted, with Go live),
+so each caption is written before the picture gets to its words and shows when they start. The
 first time, the model is downloaded (services.captions.download) once the viewer says so;
 the tier (0.6B or 1.7B) follows the computer's speed (services.captions.tier) or Settings.
 
 Cues are kept on the time-shift timeline: going back over a stretch shows its captions
 again, and a seek reads again from where the picture went. A caption that comes after its
 words started shows for what is left of it (the picture's own pace decides); one that comes
-after they ended never shows (owner: captions in the next scene are worse than none).
+after they ended never shows (captions in the next scene are worse than none).
 """
 
 from __future__ import annotations
@@ -53,6 +54,7 @@ from ui.captions_texts import (  # noqa: E402  (the texts, with their translatio
     NOT_AVAILABLE,
     NOT_NOW,
     PREPARING,
+    STARTING,
     size_text,
 )
 
@@ -100,6 +102,7 @@ class CaptionsController(QObject):
         self._rtf = 0.0
         self._slow_since: Optional[float] = None
         self._last: Optional[tuple[float, float]] = None  # (position, monotonic) last tick
+        self._was_waiting = False  # the live picture waited for the captions' distance
         self._shown = ""
         self._language: tuple[str, str] = ("", FROM_MODEL)  # (qwen name or "", source)
         self._detected: dict[str, str] = {}  # channel: the language the model's pieces agreed on
@@ -153,6 +156,8 @@ class CaptionsController(QObject):
             return translate(PREPARING)
         if self._source() is None:
             return translate(NOT_AVAILABLE)
+        if self._waiting():
+            return translate(STARTING)
         if self._slow_since is not None and time.monotonic() - self._slow_since >= _SLOW_FOR_S:
             return translate(CANT_KEEP_UP)
         lead = self._lead()
@@ -496,6 +501,14 @@ class CaptionsController(QObject):
             self._start_run()
             self.changed.emit()
             return
+        waiting = self._waiting()
+        if waiting != self._was_waiting:
+            self._was_waiting = waiting
+            self.changed.emit()  # the row reads "Starting captions…", then as before
+        if waiting:
+            self._last = None  # the picture stands still on purpose: no seek, no caption
+            self._show(translate(STARTING))
+            return
         position = self._position()
         now = time.monotonic()
         if self._last is not None:
@@ -512,6 +525,14 @@ class CaptionsController(QObject):
         self._process.send("viewer", position)
         self._show(self._cue_at(position))
         self._forget(position)
+
+    def _waiting(self) -> bool:
+        """The live picture waits for the captions' distance behind live (LiveSession)."""
+        if not self._is_live():
+            return False
+        live = self._live()
+        waiting = getattr(live, "caption_waiting", None)
+        return bool(waiting()) if callable(waiting) else False
 
     def _cue_at(self, position: float) -> str:
         i = bisect.bisect_right(self._cues, (position, float("inf"), "")) - 1

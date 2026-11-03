@@ -139,6 +139,9 @@ MINUS = "−"
 WAITING = N_("Waiting for the channel…")
 # i18n: the Stay live indicator: a new connection to the channel is being opened
 RECONNECTING = N_("Reconnecting…")
+# 2.9: the picture waits once for the AI captions' distance behind live.
+from ui.captions_texts import STARTING as CAPTIONS_WAIT  # noqa: E402
+
 TOOLTIPS = {
     "quality": N_("Quality"),  # i18n: tooltip of the ⚙: a title's versions and conversions (2.8)
     "pip": N_("Second channel (P)"),  # i18n: tooltip; P is the key (picture in picture)
@@ -323,6 +326,7 @@ class _Timeline:
     target: float
     stalled: bool
     reconnecting: bool  # the helper opens a new connection (raw TS)
+    captions_wait: bool  # 2.9: it waits once to get the AI captions' distance behind live
     auto: bool  # Auto latency
     adjusted: bool  # the channel's Auto target moved from where Auto starts
     archive: bool = False  # the provider's archive plays (catch-up)
@@ -346,6 +350,7 @@ class _Timeline:
             target=float(state.get("target", TARGETS["normal"])),
             stalled=bool(state.get("stalled", False)),
             reconnecting=bool(state.get("reconnecting", False)),
+            captions_wait=bool(state.get("captions_wait", False)),
             auto=bool(state.get("auto", False)),
             adjusted=bool(state.get("adjusted", False)),
             archive=bool(state.get("archive", False)),
@@ -447,6 +452,7 @@ class Transport(Overlay):
         self._edge_lag: float | None = None
         self._catching_up = False
         self._stalled = False  # the source stalled at the live edge: `WAITING` ...
+        self._captions_wait = False  # 2.9: it waits for the AI captions' distance
         self._reconnecting = False  # ... and a new connection is being opened: `RECONNECTING`
         self._auto: bool | None = None  # Auto latency: whether its target moved (else None)
         self._rate = 1.0
@@ -529,6 +535,7 @@ class Transport(Overlay):
         self._auto = tl.adjusted if tl.auto else None
         self._stalled = live and tl.stalled
         self._reconnecting = self._stalled and tl.reconnecting
+        self._captions_wait = live and tl.captions_wait and not self._stalled
         # Steering: any rate but 1x (a nudge's ramp included), slower ones too.
         self._catching_up = live and (tl.rate != 1.0 or tl.nudge != 1.0) and not self._stalled
         self._rate = tl.nudge if tl.nudge != 1.0 else tl.rate  # the nudge's, not the ramp's
@@ -1027,6 +1034,9 @@ class Transport(Overlay):
         if self._stalled:
             tail = translate(RECONNECTING if self._reconnecting else WAITING)
             return [(head, tail), ("", tail)]
+        if self._captions_wait:
+            tail = translate(CAPTIONS_WAIT)
+            return [(head, tail), ("", tail)]
         seconds = i18n.decimal(f"{self._edge_lag:g}")
         adjusted = ""
         if self._auto is not None:
@@ -1206,7 +1216,7 @@ class Transport(Overlay):
             tr("catching up {rate}×", rate=i18n.decimal("1.05")),
         )
         busiest = lag + " · " + max(rates, key=fm.horizontalAdvance)
-        tails = (busiest, translate(RECONNECTING), translate(WAITING))
+        tails = (busiest, translate(RECONNECTING), translate(WAITING), translate(CAPTIONS_WAIT))
         head = tr("Stay live")
         return self._indicator_bare(un, fm, head) + max(fm.horizontalAdvance(t) for t in tails)
 
@@ -1852,7 +1862,11 @@ class Transport(Overlay):
             x += fm.horizontalAdvance(head) + un.px(0.6)
         d = un.px(0.8)
         # Green only at 1x: amber while stay-live steers the rate (either way) or reconnecting.
-        dot = qcolor(PALETTE.warn if self._catching_up or self._stalled else PALETTE.ok)
+        dot = qcolor(
+            PALETTE.warn
+            if self._catching_up or self._stalled or self._captions_wait
+            else PALETTE.ok
+        )
         fill_round(p, QRectF(x, box.center().y() - d / 2, d, d), dot, d / 2)
         x += d + un.px(0.6)
         tail = fm.elidedText(tail, Qt.ElideRight, max(0.0, box.right() - un.px(1.1) - x + 0.5))
@@ -2114,5 +2128,5 @@ class Transport(Overlay):
         self._edge_lag = None
         self._auto = None
         self._catching_up = False
-        self._stalled = self._reconnecting = False
+        self._stalled = self._reconnecting = self._captions_wait = False
         self._rate = 1.0

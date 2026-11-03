@@ -22,14 +22,16 @@ AUTO = "auto"
 SMALL = "small"
 LARGE = "large"
 
-# The large tier wants a CPU score of 2.0 (twice the reference below) or an arm64 Mac, and at
-# least 12 GB of memory on any machine. A "12 GB" computer reports a little less than 12 GiB
-# (firmware and kernel keep some), hence 11.5 GiB.
-LARGE_MIN_SCORE = 2.0
+# The large tier wants a CPU score of 0.9 (the reference below, less the benchmark's own
+# wander) or an arm64 Mac, and at least 12 GB of memory on any machine: on the reference the
+# 1.7B model keeps up 1.6-1.7x on its 4 threads, and the picture held 10 s behind live gives
+# its pieces the time. A "12 GB" computer reports a little less than 12 GiB (firmware and
+# kernel keep some), hence 11.5 GiB.
+LARGE_MIN_SCORE = 0.9
 LARGE_MIN_RAM = int(11.5 * 1024**3)
 
-# The reference, score 1.0: the owner's 2017 MacBook Pro, an Intel i7-7820HQ (4 cores, 8
-# threads), on which the 0.6B model keeps up 2-4x beside 1080p decoding. Calibrated on
+# The reference, score 1.0: a 2017 MacBook Pro, an Intel i7-7820HQ (4 cores, 8 threads), on
+# which the 0.6B model keeps up 2-4x beside 1080p decoding, and the 1.7B 1.6-1.7x. Calibrated on
 # 2026-11-03 under QiTV's Python 3.14.8 (uv's CPython, macOS 13): the best of _ROUNDS rounds
 # of _work(_ITERATIONS) took 66.0-66.5 ms in five runs (each run about 0.2 s in all).
 REFERENCE_THREADS = 8

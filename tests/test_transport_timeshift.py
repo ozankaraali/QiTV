@@ -376,6 +376,16 @@ class TimeShiftCase(unittest.TestCase):
         t.update_timeline(dict(at_edge(lag=2.6), stalled=False), PROGRAMME)
         self.assertEqual(t.texts()[1], "Stay live ● ≈ 2.5 s behind source")
 
+    def test_the_ai_captions_wait_reads_starting_captions_with_the_amber_dot(self):
+        # 2.9: the picture waits once for the captions' distance behind live.
+        t = self.make()
+        t.show_timeshift("104", "Nature")
+        t.update_timeline(dict(at_edge(lag=4.0), captions_wait=True), PROGRAMME)
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● Starting captions…"))
+        self.assertIn(PALETTE.warn.lower(), self.dot_colors(t))
+        t.update_timeline(dict(at_edge(lag=8.0), captions_wait=False), PROGRAMME)
+        self.assertEqual(t.texts()[1], "Stay live ● ≈ 8 s behind source")
+
     def test_a_stall_while_shifted_keeps_the_bar(self):
         t = self.shifted()
         t.update_timeline(timeline(stalled=True), PROGRAMME)

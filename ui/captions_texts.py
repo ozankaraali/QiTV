@@ -10,6 +10,10 @@ DOWNLOADING = N_("Downloading {percent}%")
 PREPARING = N_("Preparing…")  # i18n: the AI captions row's state while the speech model loads
 # i18n: the AI captions row: the picture slows a little to get the few seconds captions need
 CATCHING_UP = N_("Catching up…")
+# The live picture waits a few seconds once so that captions, made from the sound ahead of it,
+# come in time (the AI captions row, the captions' place and the Stay live indicator).
+# i18n: AI captions: the live picture waits a few seconds once so that captions come in time
+STARTING = N_("Starting captions…")
 CANT_KEEP_UP = N_("Can't keep up")  # i18n: the AI captions row: this computer is too slow
 # i18n: the AI captions row: a stream QiTV can't read ahead (it has no time-shift)
 NOT_AVAILABLE = N_("Not available for this stream")

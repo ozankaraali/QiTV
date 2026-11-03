@@ -627,8 +627,9 @@ class TierChoiceTests(unittest.TestCase):
         return tier.choose_tier(override, **machine)
 
     def test_a_fast_machine_with_the_memory_gets_the_large_tier(self):
-        self.assertEqual(self.choose(score=2.0, ram=16 * self.GB, arm_mac=False), "large")
-        self.assertEqual(self.choose(score=1.9, ram=64 * self.GB, arm_mac=False), "small")
+        self.assertEqual(self.choose(score=1.0, ram=16 * self.GB, arm_mac=False), "large")
+        self.assertEqual(self.choose(score=0.9, ram=16 * self.GB, arm_mac=False), "large")
+        self.assertEqual(self.choose(score=0.85, ram=64 * self.GB, arm_mac=False), "small")
         self.assertEqual(self.choose(score=4.0, ram=8 * self.GB, arm_mac=False), "small")
 
     def test_an_arm_mac_counts_as_fast_but_needs_the_memory_too(self):

@@ -318,6 +318,19 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.at(12.2), "Nasılsın")  # until the next one starts
         self.assertEqual(self.at(13.9), "")
 
+    def test_while_the_picture_waits_for_the_distance_it_says_starting_captions(self):
+        run = self.captions._run
+        self.captions._on_caption(run, 10.0, 12.0, "Merhaba")
+        changed = []
+        self.captions.changed.connect(lambda: changed.append(True))
+        self.window.live_session.caption_waiting = lambda: True
+        self.assertEqual(self.at(10.5), "Starting captions…")
+        self.assertEqual(self.captions.status_text(), "Starting captions…")
+        self.assertEqual(changed, [True])
+        self.window.live_session.caption_waiting = lambda: False
+        self.assertEqual(self.at(10.5), "Merhaba")
+        self.assertEqual(changed, [True, True])
+
     def test_a_caption_from_a_run_before_is_not_shown(self):
         self.captions._on_caption(self.captions._run - 1, 10.0, 12.0, "old")
         self.assertEqual(self.at(10.5), "")
