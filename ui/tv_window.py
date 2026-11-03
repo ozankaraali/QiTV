@@ -1573,6 +1573,11 @@ class TVWindow(QMainWindow):
             note.show()
             note.raise_()
             self._caption_the_floating_picture()
+            host = self._floating_captions
+            if host is not None:
+                # Once the floating window is placed: its Show came before (2.9, the review:
+                # the captions sat where it floated last time for a moment).
+                QTimer.singleShot(0, host, host.sync_geometry)
         else:
             note.hide()
 

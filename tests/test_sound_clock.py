@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import unittest
 
-from services.live.ts import _PTS_MODULO, PACKET, SoundClock
+from services.live.ts import _PTS_MODULO, _SOUND_WANDER_S, PACKET, SoundClock
 from tests.ts_fixtures import (
     AUDIO_PID,
     PMT_PID,
@@ -72,11 +72,13 @@ def stream(
     picture_every: int = 1,
     stall: tuple[float, float] | None = None,
     stall_pcr: bool = True,
+    lose_every: int = 0,
 ) -> bytes:
     """`seconds` of the program; the sound's PTS step `rate` times its frames' length and
     start `offset` ticks from the pictures' (a provider's clock). A picture each
     `picture_every` 25ths of a second (a PCR with each, and one every 0.1 s between); none
-    within `stall` (seconds), and with `stall_pcr` no PCR either."""
+    within `stall` (seconds), and with `stall_pcr` no PCR either. With `lose_every`, the
+    provider loses one sound frame in that many (its stamps go on as if it came)."""
     frame_ticks = FRAME[audio_type]
     frame = mpeg_frame() if audio_type == MPEG_AUDIO else adts_frame()
     out: list[bytes] = []
@@ -98,9 +100,10 @@ def stream(
             )
             out += ps
         while audio_i * frame_ticks <= real:
-            stamp = (video_start + offset + round(audio_i * frame_ticks * rate)) % _PTS_MODULO
-            ps, acc = pes_packets(AUDIO_PID, 0xC0, frame, stamp, cc_start=acc)
-            out += ps
+            if not lose_every or audio_i % lose_every != lose_every - 1:
+                stamp = (video_start + offset + round(audio_i * frame_ticks * rate)) % _PTS_MODULO
+                ps, acc = pes_packets(AUDIO_PID, 0xC0, frame, stamp, cc_start=acc)
+                out += ps
             audio_i += 1
     return b"".join(out)
 
@@ -224,6 +227,17 @@ class SoundClockTests(unittest.TestCase):
         self.assertTrue(nulls)  # dropped, not passed 500 s off
         first_pcr = out.index(bytes([SYNC, VIDEO_PID >> 8, VIDEO_PID & 0xFF]))
         self.assertLess(nulls[-1], first_pcr + 10 * PACKET)  # only until the clock came
+
+    def test_after_a_discontinuity_before_its_clock_lost_frames_are_still_pulled_back(self):
+        # 2.9, the review: restamped for drift alone, anchored on the new run's first sound
+        # before any PCR came, its distance from the pictures was never noted: a provider
+        # losing frames then left it 5 s behind them (VLC drops such sound as late).
+        clock = SoundClock()
+        through(clock, stream(40.0, rate=0.978))
+        clock.discontinuity()
+        later = stream(40.0, rate=0.978, video_start=5_000_000, stall=(0.0, 0.3), lose_every=8)
+        out = through(clock, later)
+        self.assertLess(max(abs(g) for g in gaps(out)[-30:]), _SOUND_WANDER_S + 0.1)
 
     def test_aac_too(self):
         data = stream(20.0, audio_type=AAC, rate=1.03, offset=40 * 90000)

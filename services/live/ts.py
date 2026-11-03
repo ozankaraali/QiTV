@@ -4276,6 +4276,11 @@ class SoundClock:
         assert track.anchor is not None
         anchor_ticks, anchor_pts = track.anchor
         written = (anchor_pts + round(ticks - anchor_ticks)) % _PTS_MODULO
+        if clock is not None and track.offset is None:
+            # Anchored for drift before the pictures' clock came (a discontinuity's sound
+            # ahead of its first PCR): its distance from them is the first one seen, else
+            # frames the provider lost were never pulled back (2.9, the review).
+            track.offset = float(pts_delta(clock, written))
         if clock is not None and track.offset is not None:
             track.offsets.append(pts_delta(clock, written))
             offsets = sorted(track.offsets)
