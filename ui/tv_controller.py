@@ -108,6 +108,7 @@ from services.provider_types import is_media_server
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot, records
 from services.sound_sync import SoundSync
+from services.track_memory import TrackMemory
 from services.vlc_profile import DEFAULT_USER_AGENT, classify
 from services.zapping import ZapContext
 from ui import item_provider
@@ -235,6 +236,7 @@ class TVController(QObject):
         sessions: Optional[SessionManager] = None,
         pip_frame=None,
         sound_sync: Optional[SoundSync] = None,
+        track_memory: Optional[TrackMemory] = None,
         channel_pictures: Optional[ChannelPictures] = None,
         catchup_memory: Optional[CatchupMemory] = None,
         pick_subtitle_file: Optional[Callable[[str], str]] = None,
@@ -250,7 +252,8 @@ class TVController(QObject):
     ):
         """With `sessions` (picture in picture), its large slot's player, live session and
         tuner stand for `session`, `live` and `budget`. `sound_sync` keeps each channel's
-        sound sync and `channel_pictures` its aspect ratio (None: for this run only),
+        sound sync, `track_memory` each title's tracks (2.9.1) and `channel_pictures` its
+        aspect ratio (None: for this run only),
         `catchup_memory` whether each channel's provider
         archive answered (None: alike); `pick_subtitle_file(folder)` asks for a subtitle
         file (the Subtitles panel's "Load a file…"); with `online_subtitles` (and the overlays'
@@ -454,6 +457,7 @@ class TVController(QObject):
             playing=self._has_media,
             keys=self._player_keys,
             store=sound_sync if sound_sync is not None else SoundSync(None),
+            memory=track_memory,
             toast=self._toast,
             show_transport=self._show_transport,
             parent=self,

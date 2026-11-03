@@ -79,7 +79,7 @@ import os
 from pathlib import Path
 import platform
 import time
-from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Protocol
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
@@ -1031,6 +1031,20 @@ class PlaybackSession(QObject):
         }
         self._tracks_due &= set(self._tracks_wanted)
 
+    def chosen_tracks(self) -> dict[str, tuple[int, str]]:
+        """The media's own tracks chosen ("audio", "spu"; -1: subtitles off), as chosen again
+        in each media this player opens: (id, libVLC's name). A subtitle file is none of them."""
+        return {kind: (track, name) for kind, (track, name, _l) in self._tracks_wanted.items()}
+
+    def want_tracks(
+        self, chosen: Mapping[str, tuple[int, str]], *, by_language: bool = False
+    ) -> None:
+        """Choose these tracks once the next media plays, as if chosen in the one before (a
+        title's kept choice, services.track_memory; `by_language`: another episode's)."""
+        for kind, (track, name) in chosen.items():
+            if kind in ("audio", "spu"):
+                self._tracks_wanted[kind] = (int(track), str(name), by_language)
+
     def _want_track(self, kind: str, track: int, tracks: list[tuple[int, str]]) -> None:
         name = next((n for i, n in tracks if i == track), "")
         self._tracks_wanted[kind] = (track, name, False)
@@ -1595,6 +1609,12 @@ class Session(Protocol):
 
     def forget_tracks(self, *, keep_language: bool = False) -> None: ...
 
+    def chosen_tracks(self) -> dict[str, tuple[int, str]]: ...
+
+    def want_tracks(
+        self, chosen: Mapping[str, tuple[int, str]], *, by_language: bool = False
+    ) -> None: ...
+
     def aspect(self) -> str: ...
 
     def set_aspect(self, aspect: str) -> None: ...
@@ -1767,6 +1787,14 @@ class NullSession(QObject):
         pass
 
     def forget_tracks(self, *, keep_language: bool = False) -> None:
+        pass
+
+    def chosen_tracks(self) -> dict[str, tuple[int, str]]:
+        return {}
+
+    def want_tracks(
+        self, chosen: Mapping[str, tuple[int, str]], *, by_language: bool = False
+    ) -> None:
         pass
 
     def aspect(self) -> str:

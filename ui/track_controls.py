@@ -63,6 +63,7 @@ from services import i18n
 from services.captions.languages import own_name, qwen_name
 from services.i18n import N_, tr, translate
 from services.sound_sync import LIMIT_MS, STEP_MS, SoundSync, clamp
+from services.track_memory import TrackMemory, title_key
 from services.zapping import ZapContext
 from ui.keymap import Action, key_hint
 from ui.link_lanes import Target
@@ -283,6 +284,14 @@ def audio_names(tracks: list[tuple[int, str]], infos: Optional[list] = None) -> 
     return names
 
 
+def _title_key(target: Target) -> str:
+    """Where a film's or an episode's tracks are kept (services.track_memory)."""
+    from services.provider_ids import provider_of
+
+    episode = target.section == "series"
+    return title_key(provider_of(target.item), target.item, episode=episode, context=target.context)
+
+
 def _chosen(captions) -> bool:
     """AI captions are the subtitle source chosen: on, or their download on its way."""
     return bool(captions.enabled() or captions.downloading())
@@ -320,6 +329,7 @@ class TrackControls(QObject):
         config: Any = None,
         online: Any = None,
         captions: Optional[Callable[[], Any]] = None,
+        memory: Optional[TrackMemory] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`sound_panel` and `subtitle_panel` are TrackPanels (None: toasts); `session()` the
@@ -328,7 +338,8 @@ class TrackControls(QObject):
         subtitle file ("" when none was chosen; None: no "Load a file…"); `config` keeps its
         folder (`subtitle_folder`). `online` is the OpenSubtitles search (an OnlineSubtitles;
         None: no "Search OpenSubtitles…"). `captions()` is the window's CaptionsController
-        (None: none yet, or no AI captions)."""
+        (None: none yet, or no AI captions). `memory` keeps the tracks chosen per title
+        (services.track_memory; None: for this run only)."""
         super().__init__(parent)
         self._panels = {
             name: panel
@@ -341,6 +352,8 @@ class TrackControls(QObject):
         self._playing = playing
         self._keys = keys  # each player's channel and its key as it opened (shared)
         self._store = store
+        self._memory = memory if memory is not None else TrackMemory(None)
+        self._title_keys: dict[Any, str] = {}  # per player: where its title's tracks are kept
         self._toast = toast
         self._show_transport = show_transport
         self._pick_file = pick_file
@@ -381,16 +394,38 @@ class TrackControls(QObject):
         if not target.live:
             self._keys.forget(session)
             session.set_audio_delay(0)
+            key = "" if target.local else _title_key(target)
         else:
-            session.set_audio_delay(self._store.audio_ms(self._keys.opens(session, target.item)))
+            key = self._keys.opens(session, target.item)
+            session.set_audio_delay(self._store.audio_ms(key))
         session.clear_subtitles()
         session.forget_tracks(keep_language=_same_series(previous, target))
+        self._recall(session, key, by_language=target.section == "series")
 
     def prepare_small(self, session, channel: dict) -> None:
         """A channel opens in the small picture's player: its sound as set last."""
-        session.set_audio_delay(self._store.audio_ms(self._keys.opens(session, channel)))
+        key = self._keys.opens(session, channel)
+        session.set_audio_delay(self._store.audio_ms(key))
         session.clear_subtitles()
         session.forget_tracks()
+        self._recall(session, key, by_language=False)
+
+    def _recall(self, session, key: str, *, by_language: bool) -> None:
+        """2.9.1: the tracks chosen for the title another time, chosen again once it plays (the
+        owner's film reopened on its first sound track, not the one picked the day before)."""
+        self._title_keys[session] = key
+        kept = self._memory.chosen(key)
+        if kept:
+            session.want_tracks(kept, by_language=by_language)
+
+    def _remember(self) -> None:
+        """The viewer chose a track: kept for the title's next time (its own tracks only)."""
+        session = self._session()
+        key = self._title_keys.get(session, "")
+        if not key:
+            return
+        for kind, (track, name) in session.chosen_tracks().items():
+            self._memory.choose(key, kind, track, name)
 
     # ---- the keys -----------------------------------------------------------------------------
 
@@ -642,6 +677,7 @@ class TrackControls(QObject):
         if not self.offers() or track_id not in {i for i, _name, _on in self.sound_choices()}:
             return False
         self._session().set_audio_track(track_id)
+        self._remember()
         self._follow_player()
         return True
 
@@ -653,6 +689,7 @@ class TrackControls(QObject):
         if track_id != -1 and track_id not in {i for i, _n, _on in self.subtitle_choices()}:
             return False
         self._session().set_subtitle_track(track_id)
+        self._remember()
         self._captions_off()
         self._follow_player()
         return True
@@ -885,6 +922,7 @@ class TrackControls(QObject):
         else:
             session.set_subtitle_track(int(key))
             self._captions_off()  # one subtitle source at a time
+        self._remember()
         self._open(name)
 
     def _step(self, name: str, steps: int) -> None:
@@ -972,3 +1010,4 @@ class TrackControls(QObject):
         else:
             session.set_subtitle_track(track_id)
             self._toast(_subtitles_text(translate(OFF) if track_id == -1 else track))
+        self._remember()

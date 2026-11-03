@@ -376,6 +376,18 @@ class FakeSession(QObject):
     def forget_tracks(self, *, keep_language=False):
         pass
 
+    def chosen_tracks(self):
+        """As PlaybackSession keeps them: the own tracks chosen (2.9.1)."""
+        chosen = {}
+        if getattr(self, "playing", None) is not None:
+            name = dict(self.audio_tracks()).get(self.playing)
+            if name is not None:
+                chosen["audio"] = (self.playing, name)
+        return chosen
+
+    def want_tracks(self, chosen, *, by_language=False):
+        self.wanted = (dict(chosen), by_language)
+
     def aspect(self):
         return self.shape
 

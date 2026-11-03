@@ -107,6 +107,7 @@ from services.sessions import SessionManager, Slot
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
 from services.thread_cleanup import has_pending_threads
+from services.track_memory import FILE_NAME as TRACKS_FILE, TrackMemory
 from services.update_checker import call_before_update, set_quit_note
 from services.watch_state import WatchState
 from services.zapping import ZapController
@@ -502,6 +503,8 @@ class TVWindow(QMainWindow):
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
         # Each channel's sound sync (J/K, the Sound panel), written off the GUI thread.
         self.sound_sync = SoundSync(os.path.join(config_manager.get_config_dir(), SOUND_SYNC_FILE))
+        # The tracks chosen for each film, series and channel (2.9.1), alike.
+        self.track_memory = TrackMemory(os.path.join(config_manager.get_config_dir(), TRACKS_FILE))
         # Each channel's aspect ratio (the Picture panel, 2.3), alike.
         self.channel_pictures = ChannelPictures(
             os.path.join(config_manager.get_config_dir(), PICTURE_FILE)
@@ -722,6 +725,7 @@ class TVWindow(QMainWindow):
             sessions=self.sessions,
             pip_frame=self.pip_frame,
             sound_sync=self.sound_sync,
+            track_memory=self.track_memory,
             channel_pictures=self.channel_pictures,
             catchup_memory=self.catchup_memory,
             pick_subtitle_file=self.pick_subtitle_file,
@@ -1859,6 +1863,7 @@ class TVWindow(QMainWindow):
         stores = (
             self.live_tuning,
             self.sound_sync,
+            self.track_memory,
             self.channel_pictures,
             self.catchup_memory,
             self.subtitle_picks,

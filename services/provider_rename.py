@@ -12,11 +12,12 @@ controls hide (`services.parental`, through the window's guard). Beside it: the 
 schedule (`services.recording_schedule`). While QiTV runs: the connection budget, the phone's
 own provider choice, the scheduler's recordings under way (the window's hooks).
 
-Kept by a hash of the name and the channel (or the film): live_tuning.json, sound_sync.json,
-picture.json, catchup.json, subtitle_picks.json and the kept buffers. A hash can't be renamed by
-itself: `HashedKeys` hashes the renamed provider's channels and films as its catalog holds them
-(off the GUI thread) and those stores move their entries by that map; a provider whose lists
-were not loaded keeps them under the old hash (they are only learned values: relearned).
+Kept by a hash of the name and the channel (or the film, or the series): live_tuning.json,
+sound_sync.json, picture.json, catchup.json, subtitle_picks.json, track_choices.json and the
+kept buffers. A hash can't be renamed by itself: `HashedKeys` hashes the renamed provider's
+channels, films and series as its catalog holds them (off the GUI thread) and those stores move
+their entries by that map; a provider whose lists were not loaded keeps them under the old hash
+(they are only learned values: relearned).
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from services.provider_ids import PROVIDER_KEY, mixed_group_id, split_group_id
 from services.redact import safe_message
 from services.search import iter_items
 from services.subtitle_picks import pick_key
+from services.track_memory import title_key
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +185,13 @@ def hashed_keys(
             key = pick_key(old, item, episode=False)
             if key and (wanted is None or key in wanted):
                 keys[key] = pick_key(new, item, episode=False)
+            key = title_key(old, item, episode=False)  # 2.9.1: its tracks
+            if key and (wanted is None or key in wanted):
+                keys[key] = title_key(new, item, episode=False)
+        for item in iter_items(content.get("series")):
+            key = title_key(old, {}, episode=True, context={"series": item})
+            if key and (wanted is None or key in wanted):
+                keys[key] = title_key(new, {}, episode=True, context={"series": item})
     return keys
 
 

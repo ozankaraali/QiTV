@@ -94,6 +94,18 @@ class FakePlayer(QObject):
     def forget_tracks(self, *, keep_language=False):
         self.forgets.append(keep_language)
 
+    def chosen_tracks(self):
+        """As PlaybackSession keeps them: the own tracks chosen (2.9.1)."""
+        chosen = {}
+        if getattr(self, "playing", None) is not None:
+            name = dict(self.audio_tracks()).get(self.playing)
+            if name is not None:
+                chosen["audio"] = (self.playing, name)
+        return chosen
+
+    def want_tracks(self, chosen, *, by_language=False):
+        self.wanted = (dict(chosen), by_language)
+
 
 class TextTests(unittest.TestCase):
     def test_the_sync_reads_in_plain_words(self):
@@ -566,6 +578,53 @@ class SubtitlesPanelTests(PanelCase):
         self.controls.prepare(self.player, FILM, other)
         self.controls.prepare_small(self.player, OTHER.item)
         self.assertEqual(self.player.forgets, [True, False, False, False])
+
+
+class TrackMemoryTests(PanelCase):
+    """2.9.1: the tracks chosen for a title, kept for the next time it plays (the owner's film
+    reopened on its first sound track, not the one picked the day before)."""
+
+    def setUp(self):
+        super().setUp()
+        from services.track_memory import TrackMemory
+
+        self.memory = TrackMemory(None)
+        self.controls = self.make_controls()
+        self.controls._memory = self.memory
+
+    def test_a_film_opens_with_the_sound_chosen_last_time(self):
+        self.controls.prepare(self.player, FILM, OTHER)
+        self.assertFalse(hasattr(self.player, "wanted"))  # nothing kept yet
+        self.assertTrue(self.controls.choose_sound(2))  # the Sound panel, a key, a phone
+        self.controls.prepare(self.player, OTHER, FILM)
+        self.controls.prepare(self.player, FILM, OTHER)  # another day
+        self.assertEqual(self.player.wanted, ({"audio": (2, "Deutsch")}, False))
+
+    def test_a_series_keeps_one_choice_for_its_episodes_by_language(self):
+        series = {"id": "s1", "name": "Harbour Lights"}
+        first, later = (
+            Target({"id": f"e{n}", "name": f"Episode {n}"}, "series", f"E{n}", context=context)
+            for n, context in ((1, {"series": series}), (7, {"series": dict(series)}))
+        )
+        self.controls.prepare(self.player, first, FILM)
+        self.controls.choose_sound(2)
+        self.controls.prepare(self.player, later, FILM)  # another day, another episode
+        self.assertEqual(self.player.wanted, ({"audio": (2, "Deutsch")}, True))
+
+    def test_a_channel_by_its_key_and_a_file_never(self):
+        self.controls.prepare(self.player, CHANNEL, OTHER)
+        self.controls.choose_sound(2)
+        self.controls.prepare_small(self.player, CHANNEL.item)  # in the small picture too
+        self.assertEqual(self.player.wanted[0], {"audio": (2, "Deutsch")})
+        local = Target({"id": "f", "name": "a.mkv", "cmd": "/films/a.mkv"}, "movies", "a")
+        local.local = True
+        del self.player.wanted
+        self.controls.prepare(self.player, local, CHANNEL)
+        self.controls.choose_sound(2)
+        self.controls.prepare(self.player, CHANNEL, local)
+        self.controls.prepare(self.player, local, CHANNEL)
+        self.assertEqual(self.player.wanted[0], {"audio": (2, "Deutsch")})  # the channel's
+        self.assertEqual(len(self.memory.keys()), 1)  # nothing kept for the file
 
 
 class ManyTracksTests(PanelCase):
