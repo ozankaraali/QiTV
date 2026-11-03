@@ -753,10 +753,7 @@ class SubtitleFontTests(unittest.TestCase):
             info.return_value.family.return_value = "Segoe UI"
             self.assertEqual(captions.subtitle_font(), "Segoe UI")
             info.return_value.family.return_value = ".AppleSystemUIFont"  # hidden from libVLC
-            with mock.patch.object(captions.sys, "platform", "darwin"):
-                self.assertEqual(captions.subtitle_font(), "System Font")
-            with mock.patch.object(captions.sys, "platform", "linux"):
-                self.assertEqual(captions.subtitle_font(), "")
+            self.assertEqual(captions.subtitle_font(), "")  # its own Helvetica, not "System Font"
 
 
 class OverlayTests(unittest.TestCase):

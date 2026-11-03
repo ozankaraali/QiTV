@@ -236,7 +236,8 @@ def software_options() -> list[str]:
 
 # 2.9: the subtitles libVLC draws (a stream's own tracks, a file, OpenSubtitles') look as
 # QiTV's AI captions do (ui.overlays.captions), as far as VLC 3's text renderer goes: their
-# text colour on their dark box, no outline and no shadow, in the app's font, as large (its
+# text colour on their dark box, no outline and no shadow, in the app's font (a Mac's: VLC's
+# Helvetica, see ui.overlays.captions.subtitle_font), as large (its
 # step 16, letters as tall as the captions' 3.2 units of a 16:9 picture). The box's rounded
 # corners and the text's medium weight are beyond it, and a styled subtitle (ASS/SSA) keeps
 # its own look. The colours are ui.theme's (a test holds them alike).

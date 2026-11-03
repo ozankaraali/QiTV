@@ -14,7 +14,6 @@ reads alike in a small window and at fullscreen. Clicks go through it to the pic
 
 from __future__ import annotations
 
-import sys
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt
@@ -50,14 +49,13 @@ _EVENTS = (QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.Resize)
 
 
 def subtitle_font() -> str:
-    """The family the captions are drawn in, as libVLC's text renderer finds it, for the
-    subtitles libVLC draws (services.playback.subtitle_args). A Mac's system font is hidden
-    from it under Qt's name (".AppleSystemUIFont": VLC found a serif instead), not as
-    "System Font"."""
+    """The family the captions are drawn in, for the subtitles libVLC draws
+    (services.playback.subtitle_args); "": libVLC's own. A Mac's system font is hidden from
+    libVLC under Qt's name (".AppleSystemUIFont": it found a serif instead), and asked for as
+    "System Font" it hung libVLC's text renderer as it opened (the packaged app on macOS 26
+    with libVLC 3.0.24, at a channel's third open): there libVLC's own Helvetica, the nearest."""
     family = QFontInfo(QFont()).family()
-    if family.startswith("."):
-        return "System Font" if sys.platform == "darwin" else ""
-    return family
+    return "" if family.startswith(".") else family
 
 
 def picture_units(host: QWidget) -> Units:
