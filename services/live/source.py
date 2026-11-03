@@ -1250,9 +1250,12 @@ class HlsSource:
         max_height: int = 0,
         after_seq: int | None = None,
         copy: bytes | None = None,
+        origin: str | None = None,
     ) -> None:
-        """`window` (2.7): a server part, `{"back_s": seconds, "until_seq": sequence}`: it
-        starts that far back from the playlist's end and its input ends before that media
+        """`origin` (2.9): the channel's own address when a master led to `url`, its variant:
+        asked again once the variant's playlist is gone (`_reload`). `window` (2.7): a server
+        part, `{"back_s": seconds, "until_seq": sequence}`: it starts that far back from the
+        playlist's end and its input ends before that media
         sequence (the live buffer's first), placed in time by `part_wall`; a provider
         archive's, `{"until_s": seconds}`, starts at its first segment (the helper ends it
         at that much media). `heights` and `height` (2.8): its master's picture sizes and the
@@ -1305,6 +1308,7 @@ class HlsSource:
         self._audio_remuxer = Fmp4Remuxer(pcr=False)
         self._audio_init: str | None = None
         self._url = url
+        self._origin = origin if origin != url else None
         self._live_delay = live_delay
         self._target = target  # the session's target (None: start at live_delay only)
         self._extra = extra  # what the session adds to its target (Auto's learned extra)
@@ -1640,11 +1644,48 @@ class HlsSource:
             if http.wait(interval - (time.monotonic() - loaded)):
                 raise _Closed()
             loaded = time.monotonic()
-            content, final = http.fetch(lambda: _load_playlist(http, url))
+            content, final = self._reload(http, url)
             playlist, url = self._reloaded(http, content, final)
             self._burst = float(playlist.target_duration or 0)
             self._finite = bool(playlist.is_endlist) or self._back is not None
             yield from self._emit(self._release())
+
+    def _reload(self, http: _Http, url: str) -> tuple[bytes, str]:
+        """The media playlist again. A 404 or 410 there (2.9: a public channel's CDN answered
+        one, and the session played the channel directly: no time-shift, no AI captions) is
+        asked again with the reconnect delays, then once at the channel's own address, whose
+        master names its variant anew (one whose address expired); then it fails as before. The
+        buffer plays on meanwhile."""
+
+        def gone(error: Exception) -> bool:
+            return isinstance(error, requests.exceptions.HTTPError) and (
+                _status(error) in _SKIPPABLE_STATUS
+            )
+
+        try:
+            return http.fetch(lambda: _load_playlist(http, url))
+        except Exception as error:
+            if not gone(error):
+                raise
+            status = _status(error)  # type: ignore[arg-type]
+            log.info("The HLS playlist answered HTTP %s; asking again.", status)
+            failure: Exception = error
+        backoff = _Backoff()
+        delay = backoff.next_delay()
+        while delay is not None:
+            if http.wait(delay):
+                raise _Closed()
+            try:
+                return http.fetch(lambda: _load_playlist(http, url))
+            except Exception as error:
+                if not gone(error):
+                    raise
+                failure = error
+            delay = backoff.next_delay()
+        if self._origin is None:
+            raise failure
+        log.info("The HLS variant's playlist is gone; asking the channel's master again.")
+        return http.fetch(lambda: _load_playlist(http, self._origin or url))
 
     def _reloaded(self, http: _Http, content: bytes, final: str) -> tuple[Any, str]:
         """A reload's media playlist and its URL. The same copy again (byte for byte, at the
@@ -2191,6 +2232,7 @@ def _open_http(
         max_height=max_height,
         after_seq=after_seq,
         copy=content if media.url == final else None,
+        origin=final,
     )
 
 
