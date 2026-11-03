@@ -271,6 +271,12 @@ CAPTIONS_CHECK = (
     f"{PIPELINE_PREFIX}AI captions: the captions process decodes {LIVE_CHANNEL}'s sound from "
     "the buffer, ahead of the picture"
 )
+# QITV_CAPTIONS_LIVE=1 (a developer's check, not CI: it needs the model, QITV_CAPTIONS_DIR):
+# AI captions on in the window for CAPTIONS_LIVE_S over the channel, every caption shown is
+# checked against the picture's place, and 07-captions.png shows one.
+CAPTIONS_LIVE_CHECK = f"{PIPELINE_PREFIX}AI captions show {LIVE_CHANNEL}'s words in step"
+CAPTIONS_LIVE_S = 75.0
+CAPTIONS_SHOT = "07-captions.png"
 CAPTIONS_LOAD_MS = 30_000
 CAPTIONS_AHEAD_MS = 15_000
 PIPELINE_CHECKS = (
@@ -1277,6 +1283,61 @@ class Driver:
         facts.update({k: seen[k] for k in ("ready", "failed", "newest", "pieces")})
         self.report.check(CAPTIONS_CHECK, bool(seen["ready"]) and ahead, facts)
 
+    def _check_captions_live(self) -> Generator[int, None, None]:
+        """The window's AI captions over the channel: each text the overlay shows is a cue
+        whose words have started where the picture is (in step), none after its words."""
+        w = self.window
+        captions, live = getattr(w, "captions", None), w.live_session
+        facts: dict = {}
+        self.report.data["captions_live"] = facts
+        if captions is None or live is None:
+            self.report.check(CAPTIONS_LIVE_CHECK, False, "no AI captions in the window")
+            return
+        captions.toggle()  # installed already (QITV_CAPTIONS_DIR): no download question
+        shown: list = []
+        shot = False
+        until = time.monotonic() + CAPTIONS_LIVE_S
+        while time.monotonic() < until:
+            yield POLL_MS
+            text = captions._shown
+            position = live.position()
+            if text and (not shown or shown[-1][1] != text):
+                cue = next((c for c in captions._cues if c[2] == text), None)
+                shown.append((round(position, 2), text, cue[0] if cue else None))
+                if not shot and len(text) > 12:
+                    shot = True
+                    self._capture_with_video(CAPTIONS_SHOT)
+        facts.update(
+            shown=shown,
+            cues=len(captions._cues),
+            status=captions.status_text(),
+            floor=live.caption_floor(),
+            tier=captions._tier,
+        )
+        captions.toggle()  # off: the picture catches up
+        in_step = [s for s in shown if s[2] is not None and s[0] - s[2] <= 1.0]
+        self.report.check(
+            CAPTIONS_LIVE_CHECK,
+            len(shown) >= 3 and len(in_step) == len(shown),
+            f"{len(shown)} shown, {len(in_step)} within 1 s of their words' start: {shown[:8]}",
+        )
+
+    def _capture_with_video(self, name: str) -> None:
+        """The overlay host over libVLC's snapshot of the video (the captions over the picture)."""
+        pixmap = self.window.host.grab()
+        image = QImage(pixmap.size(), QImage.Format.Format_ARGB32)
+        image.setDevicePixelRatio(pixmap.devicePixelRatio())
+        image.fill(0xFF000000)
+        painter = QPainter(image)
+        video = self._snapshot(self.window.session)
+        if video is not None:
+            size = pixmap.size() / pixmap.devicePixelRatio()
+            painter.drawImage(QRectF(0, 0, size.width(), size.height()), video)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.end()
+        self.report.data["screenshots"][name] = image.save(str(self.out / name))
+        self.report.save()
+
     def _check_media_keys(self) -> Generator[int, None, None]:
         session, keys = self.window.session, self.window.media_keys
         system = keys.system
@@ -1606,6 +1667,9 @@ class Driver:
 
         report.step("pipeline 2b. AI captions read the sound")
         yield from self._check_captions()
+        if os.environ.get("QITV_CAPTIONS_LIVE") == "1":
+            report.step("pipeline 2c. AI captions on, in step")
+            yield from self._check_captions_live()
 
         # 3. Pause for 4 s, then resume: it plays on time-shifted, at least 3 s behind.
         report.step("pipeline 3. pause and resume")
