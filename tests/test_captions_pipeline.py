@@ -473,6 +473,26 @@ class CutterTests(unittest.TestCase):
         cutter.set_max(60)
         self.assertEqual(cutter.max_s, 10.0)  # 2.9.3: 6 s pieces were written worse
 
+    def test_a_piece_cut_at_its_length_says_it_was_split(self):
+        # 2.9.4: its sentence goes on in the next; a pause's end is not a split.
+        cutter = self.cutter(lambda t: not (8.0 <= t < 9.0))
+        cutter.set_max(4.0)
+        pieces = self.push(cutter, 10.0)
+        self.assertTrue(pieces[0].split)  # at its length, mid-speech
+        self.assertFalse(pieces[-1].split)  # the pause at 8 s ended it
+
+    def test_a_split_piece_loses_the_full_stop_a_model_ends_it_with(self):
+        from services.captions.worker import unfinished
+
+        self.assertEqual(
+            unfinished("Rising food and fuel prices have been."),
+            "Rising food and fuel prices have been",
+        )
+        self.assertEqual(unfinished("Is it over?"), "Is it over?")
+        self.assertEqual(unfinished("And then..."), "And then...")
+        self.assertEqual(unfinished("通货膨胀是选民最关心的议题。"), "通货膨胀是选民最关心的议题")
+        self.assertEqual(unfinished("No stop here"), "No stop here")
+
     def test_a_comma_long_pause_no_longer_ends_a_piece(self):
         # 2.9.3: a 0.35 s pause ended a piece, and the models heard sentences in scraps.
         cutter = self.cutter(lambda t: 1.0 <= t < 3.0 or 3.4 <= t < 5.0)
