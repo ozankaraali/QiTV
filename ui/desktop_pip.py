@@ -15,16 +15,25 @@ desktop, the surface returns (`take_back`) and the floating window hides; a doub
 brings the fullscreen desktop back, which puts the picture back the same way. Leaving fullscreen or
 closing QiTV puts it back first. The floating window can be dragged; it shows on every desktop
 (`join_all_spaces`), above other windows, and never takes the keyboard.
+
+The floating window has its picture's shape, so it shows no bars: `shape()` (the lent player's
+`picture_ratio`) is asked as it floats and at each check while it does, and a new shape (the
+stream's picture becomes known, a zap, another aspect ratio) reshapes it, as large as it was,
+its corner nearest the screen's corner staying where it is. Its edges and corners resize it in
+that shape; while the shape is not known (or fits any: Fill) it keeps the one it has.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPalette
+from PySide6.QtGui import QColor, QGuiApplication, QMouseEvent, QPalette
 from PySide6.QtWidgets import QApplication, QWidget
+
+from services.picture import box_height, box_ratio, box_size, same_shape
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +41,7 @@ POLL_MS = 400  # how often the fullscreen window's desktop is asked about
 WIDTH_FRACTION = 0.25  # the floating window: a quarter of the screen's width, 16:9
 MARGIN = 24  # from the screen's corner
 EDGE_PX = 10  # a press this near an edge (or two: a corner) resizes the floating window
-MIN_WIDTH = 240  # the smallest it gets
+MIN_WIDTH = 240  # the smallest it gets in 16:9 (another shape: as large as that)
 AWAY_CHECKS = 2  # answers "another desktop" in a row before the picture floats (the
 # fullscreen animation may answer it once)
 CONFIRM_MS = 150  # the second answer is asked this soon after the first, not a poll later
@@ -58,8 +67,8 @@ class FloatingPlayer(QWidget):
     """A frameless panel on top that holds the large picture's surface; a click asks for the
     fullscreen desktop again on a double-click (`returnRequested`; a click alone does nothing, so
     a press to grab it never does), a drag moves it, a drag of an edge or a corner
-    resizes it in 16:9 (the pointer says so near them); where it ended up is told
-    (`placed`). A panel that takes no focus
+    resizes it in its picture's shape (`set_ratio`; the pointer says so near them); where it
+    ended up is told (`placed`). A panel that takes no focus
     (on macOS a non-activating one): a press on it leaves QiTV inactive and the desktop shown,
     so it can be dragged there."""
 
@@ -86,6 +95,8 @@ class FloatingPlayer(QWidget):
         self._dragged = False
         self._edges: tuple[bool, bool, bool, bool] = (False, False, False, False)  # l, t, r, b
         self._start = QRect()  # the window's geometry when a resize began
+        self._ratio: Optional[float] = None  # its picture's shape (None: it keeps its own)
+        self._reshape_due = False  # a new shape came during a press: once it ends
 
     def surface(self) -> Optional[QWidget]:
         return self._surface
@@ -105,9 +116,63 @@ class FloatingPlayer(QWidget):
         if surface is not None:
             surface.removeEventFilter(self)
         self._press, self._dragged = None, False
+        self._reshape_due = False
         if surface is not None:
             surface.unsetCursor()
         return surface
+
+    def set_ratio(self, ratio: Optional[float]) -> None:
+        """Its picture shows in `ratio`'s shape (width / height; None: not known, or it fits
+        any): the window takes it, as large as it was, the corner nearest its screen's corner
+        staying where it is, inside the screen. During a press, once the press ends."""
+        self._ratio = ratio
+        if self._press is not None:
+            self._reshape_due = True
+        else:
+            self._reshape()
+
+    def _reshape(self) -> None:
+        self._reshape_due = False
+        rect = self.geometry()
+        if self._ratio is None or rect.isEmpty():
+            return
+        shape = box_ratio(self._ratio)
+        if same_shape(shape, rect.width() / rect.height()):
+            return  # (as good as that shape already: no pixel of jitter)
+        available = self._available(rect)
+        width = self._clamped(round(math.sqrt(rect.width() * rect.height() * shape)), shape)
+        height = box_height(width, shape)
+        x, y = rect.x(), rect.y()
+        if available is not None and rect.center().x() > available.center().x():
+            x = rect.x() + rect.width() - width  # (its right edge stays)
+        if available is not None and rect.center().y() > available.center().y():
+            y = rect.y() + rect.height() - height
+        if available is not None:
+            x = max(available.x(), min(x, available.x() + available.width() - width))
+            y = max(available.y(), min(y, available.y() + available.height() - height))
+        self.setGeometry(QRect(x, y, width, height))
+
+    def _available(self, rect: QRect) -> Optional[QRect]:
+        """The available area of the screen under `rect` (None: no screen there)."""
+        screen = QGuiApplication.screenAt(rect.center()) or self.screen()
+        return screen.availableGeometry() if screen is not None else None
+
+    def _shape(self) -> float:
+        """The shape a resize keeps: its picture's, else the one the window has."""
+        if self._ratio is not None:
+            return box_ratio(self._ratio)
+        start = self._start if not self._start.isEmpty() else self.geometry()
+        return box_ratio(start.width() / start.height() if not start.isEmpty() else None)
+
+    def _clamped(self, width: int, shape: float) -> int:
+        """`width` between the smallest window (as large as a 16:9 one MIN_WIDTH wide) and the
+        widest one of `shape` the screen has room for."""
+        smallest = box_size(MIN_WIDTH, shape)[0]
+        available = self._available(self.geometry())
+        if available is None:
+            return max(smallest, min(width, 4096))
+        widest = min(available.width(), math.floor(available.height() * shape))
+        return max(smallest, min(width, max(smallest, widest)))
 
     def _edges_at(self, point: QPoint) -> tuple[bool, bool, bool, bool]:
         """The edges (left, top, right, bottom) `point` (window coordinates) is near."""
@@ -132,21 +197,21 @@ class FloatingPlayer(QWidget):
         return None
 
     def _resized(self, moved: QPoint) -> QRect:
-        """The geometry a resize by `moved` (global) gives: 16:9, the edges opposite those
-        dragged staying where they were, between MIN_WIDTH and the screen's width."""
+        """The geometry a resize by `moved` (global) gives: in its picture's shape (`_shape`),
+        the edges opposite those dragged staying where they were, between the smallest window
+        and the largest the screen has room for."""
         left, top, right, bottom = self._edges
         start = self._start
+        shape = self._shape()
         widths = []
         if left or right:
             widths.append(start.width() + (moved.x() if right else -moved.x()))
         if top or bottom:
             height = start.height() + (moved.y() if bottom else -moved.y())
-            widths.append(round(height * 16 / 9))
+            widths.append(round(height * shape))
         width = max(widths, key=lambda w: abs(w - start.width()))
-        screen = self.screen()
-        widest = screen.availableGeometry().width() if screen is not None else 4096
-        width = max(MIN_WIDTH, min(int(width), widest))
-        height = round(width * 9 / 16)
+        width = self._clamped(int(width), shape)
+        height = box_height(width, shape)
         x = start.x() + start.width() - width if left else start.x()
         y = start.y() + start.height() - height if top else start.y()
         return QRect(x, y, width, height)
@@ -186,12 +251,18 @@ class FloatingPlayer(QWidget):
             else:
                 watched.setCursor(shape)
         elif kind == QEvent.Type.MouseButtonRelease and event.button() == left:
-            # A click alone does nothing: a press to grab it must never send the user back.
-            dragged = self._press is not None and self._dragged
-            self._press, self._dragged = None, False
-            if dragged:
-                self.placed.emit(self.geometry())
+            self._end_press()
         return True  # the shell's clicks on the picture are for the fullscreen window
+
+    def _end_press(self) -> None:
+        """The left button came up: a move or a resize is told; a click alone does nothing (a
+        press to grab it must never send the user back). A shape that came meanwhile applies."""
+        dragged = self._press is not None and self._dragged
+        self._press, self._dragged = None, False
+        if dragged:
+            self.placed.emit(self.geometry())
+        if self._reshape_due:
+            self._reshape()
 
 
 class DesktopPip(QObject):
@@ -210,13 +281,15 @@ class DesktopPip(QObject):
         place: Callable[[], QRect],
         join_all_spaces: Callable[[QWidget], object],
         remember: Optional[Callable[[QRect], None]] = None,
+        shape: Optional[Callable[[], Optional[float]]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`on_active_space(window)`: whether the window is on the desktop shown (None: can't
         tell); `may_float()`: whether a picture may float now; `lend()`/`take_back(surface)`:
         the large surface out of and back into the player; `place()`: where the floating
         window goes (screen coordinates); `join_all_spaces(widget)`: show it on every desktop;
-        `remember(rect)`: where the user moved or resized it (`place` gives it back next time)."""
+        `remember(rect)`: where the user moved or resized it (`place` gives it back next time);
+        `shape()`: the shape the lent picture shows in (None: not known; it keeps its own)."""
         super().__init__(parent)
         self._window = window
         self._on_active_space = on_active_space
@@ -226,6 +299,7 @@ class DesktopPip(QObject):
         self._place = place
         self._join_all_spaces = join_all_spaces
         self._remember = remember
+        self._shape = shape
         self._floating: Optional[FloatingPlayer] = None
         self._shown = False
         self._away = 0  # "another desktop" answers in a row
@@ -271,6 +345,12 @@ class DesktopPip(QObject):
             self.dock()
         elif self._away == 1 and not self._shown and self._timer.isActive():
             QTimer.singleShot(CONFIRM_MS, self, self.nudge)  # (the poll would take longer)
+        elif self._shown:
+            self._follow_shape()  # it floats on: its picture's shape may have changed
+
+    def _follow_shape(self) -> None:
+        if self._floating is not None and self._shape is not None:
+            self._floating.set_ratio(self._shape())
 
     def dock(self) -> None:
         """The picture back in the fullscreen window (nothing when it is there)."""
@@ -295,6 +375,7 @@ class DesktopPip(QObject):
             if self._remember is not None:
                 floating.placed.connect(self._remember)
         floating.setGeometry(self._place())
+        self._follow_shape()  # in its picture's shape, before it shows
         floating.hold(surface)
         floating.winId()  # its native window, to be told before it shows
         self._join_all_spaces(floating)

@@ -670,7 +670,14 @@ class TVWindow(QMainWindow):
         self.captions_overlay.follow(self.overlays.transport)
         # After the window's surface filters: the frame takes the small surface's left button
         # before the window (its mini-player drag) and the surface (the drawer) see it.
-        self.pip_frame = PipFrame(self.player_page, self.surface, self.pip_surface, config_manager)
+        # Each small picture takes the shape its player's picture shows in (no bars).
+        self.pip_frame = PipFrame(
+            self.player_page,
+            self.surface,
+            self.pip_surface,
+            config_manager,
+            shape_of=self._picture_shape,
+        )
         # Desktop picture in picture (macOS): while the fullscreen window's desktop is not the
         # one shown, the large picture floats in a small window on every desktop.
         self.desktop_pip = DesktopPip(
@@ -682,6 +689,7 @@ class TVWindow(QMainWindow):
             place=self._floating_rect,
             join_all_spaces=macos_window.join_all_spaces,
             remember=self._remember_floating_rect,
+            shape=self.pip_frame.lent_shape,
             parent=self,
         )
         # i18n: shown on the fullscreen player while its picture floats on another desktop
@@ -1088,6 +1096,14 @@ class TVWindow(QMainWindow):
         for name, player in self._players():
             if self.surfaces.get(name) is surface:
                 player.set_video_size(surface.width(), surface.height())
+
+    def _picture_shape(self, name: str) -> Optional[float]:
+        """The shape (width / height) slot `name`'s picture shows in (None: not known yet, or
+        it fits any): the picture in picture's boxes take it."""
+        for slot_name, player in self._players():
+            if slot_name == name:
+                return player.picture_ratio()
+        return None
 
     def _players(self) -> list[tuple[str, Session]]:
         """Every player by its slot's name (the main one alone without libVLC)."""

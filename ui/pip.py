@@ -17,10 +17,18 @@ While the transport (or the mixer) shows, a bottom corner's PiP rises above the 
 controls (`set_lift`, animated over LIFT_MS) and settles back once they hide; a top corner's
 never moves. A drag in progress keeps the surface under the cursor: the lift applies when
 it ends.
+
+The small surface takes the shape its picture shows in, so it shows no bars: `shape_of(name)`
+(the player's `picture_ratio`) is asked as it lays out and every SHAPE_POLL_MS while it shows
+(a channel's picture becomes known, the stream or the aspect ratio changes), and the surface
+glides to its new shape as it does for the lift. Whatever its shape it is as large as the 16:9
+box (`services.picture.box_size`), never more than half the player either way; 16:9 while its
+shape is not known, or fits any (Fill).
 """
 
 from dataclasses import dataclass
 import logging
+from typing import Callable, Optional
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -31,6 +39,7 @@ from PySide6.QtCore import (
     QRect,
     QSize,
     Qt,
+    QTimer,
     QVariantAnimation,
     Signal,
 )
@@ -38,6 +47,7 @@ from PySide6.QtGui import QGuiApplication, QMouseEvent
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
 
+from services.picture import box_height, box_ratio, box_size, same_shape
 from services.redact import safe_message
 from ui.macos_window import reclaim_first_responder
 from ui.overlays.painting import ui_units
@@ -46,11 +56,12 @@ logger = logging.getLogger(__name__)
 
 CORNERS = ("br", "bl", "tr", "tl")
 DEFAULT_CORNER = "br"
-WIDTH_FRACTION = 0.25
-HEIGHT_PER_WIDTH = 9 / 16
+WIDTH_FRACTION = 0.25  # of the player's width, in 16:9 (another shape is as large)
 MARGIN_UNITS = 2.0  # from the nearest edges; u = 1% of the player width
 DRAG_START_PX = 8
 LIFT_MS = 150  # a bottom corner's PiP rises over the transport band, or settles, this fast
+SHAPE_POLL_MS = 500  # how often the small picture's shape is asked while it shows
+MAX_FRACTION = 0.5  # of the player's width and of its height: the most a PiP of any shape takes
 _LAYOUT_EVENTS = (QEvent.Type.Resize, QEvent.Type.Show)
 _MOUSE_EVENTS = (
     QEvent.Type.MouseButtonPress,
@@ -60,19 +71,28 @@ _MOUSE_EVENTS = (
 )
 
 
-def corner_rect(size: QSize, corner: str) -> QRect:
-    """The small surface's rect in a player of `size`: 25% wide, 16:9, 2u from the edges."""
-    width = round(size.width() * WIDTH_FRACTION)
-    height = round(width * HEIGHT_PER_WIDTH)
+def corner_rect(size: QSize, corner: str, ratio: Optional[float] = None) -> QRect:
+    """The small surface's rect in a player of `size`, 2u from the edges: 25% wide in 16:9, and
+    for a picture of another shape (`ratio`, width / height) as large in that shape, never more
+    than half the player's width or height."""
+    width, height = box_size(size.width() * WIDTH_FRACTION, ratio)
+    room = min(
+        1.0,
+        size.width() * MAX_FRACTION / max(1, width),
+        size.height() * MAX_FRACTION / max(1, height),
+    )
+    if room < 1.0:
+        width = round(width * room)
+        height = box_height(width, box_ratio(ratio))
     margin = ui_units(size.width()).px(MARGIN_UNITS)
     x = margin if corner.endswith("l") else size.width() - margin - width
     y = margin if corner.startswith("t") else size.height() - margin - height
     return QRect(x, y, width, height)
 
 
-def lifted_rect(size: QSize, corner: str, lift: int) -> QRect:
+def lifted_rect(size: QSize, corner: str, lift: int, ratio: Optional[float] = None) -> QRect:
     """`corner_rect`, raised by `lift` pixels for a bottom corner (never above the margin)."""
-    rect = corner_rect(size, corner)
+    rect = corner_rect(size, corner, ratio)
     if corner.startswith("b") and lift > 0:
         margin = ui_units(size.width()).px(MARGIN_UNITS)
         rect.moveTop(max(margin, rect.top() - lift))
@@ -110,8 +130,15 @@ class PipFrame(QObject):
     smallRectChanged = Signal(QRect)  # container coordinates, empty when hidden (the label)
 
     def __init__(
-        self, container: QWidget, main_surface: QWidget, pip_surface: QWidget, config
+        self,
+        container: QWidget,
+        main_surface: QWidget,
+        pip_surface: QWidget,
+        config,
+        shape_of: Optional[Callable[[str], Optional[float]]] = None,
     ) -> None:
+        """`shape_of(name)`: the shape (width / height) surface `name`'s picture shows in, None
+        while it is not known or fits any (the small surface is 16:9 then)."""
         super().__init__(container)
         self._container = container
         self._surfaces: dict[str, QWidget] = {"main": main_surface, "pip": pip_surface}
@@ -137,6 +164,10 @@ class PipFrame(QObject):
         self._lifting.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._lifting.valueChanged.connect(self._on_lift_step)
         self._lifting.finished.connect(self._on_lifted)
+        self._shape_of = shape_of
+        self._shape: Optional[float] = None  # the small picture's, as last asked
+        self._shape_poll = QTimer(self, interval=SHAPE_POLL_MS)
+        self._shape_poll.timeout.connect(self._follow_shape)
         # Removed by close(), or by Qt once this frame is deleted with the container.
         for watched in (container, main_surface, pip_surface):
             watched.installEventFilter(self)
@@ -173,6 +204,10 @@ class PipFrame(QObject):
             return None
         self._lent = self._large
         return self._surfaces[self._lent]
+
+    def lent_shape(self) -> Optional[float]:
+        """The shape the lent surface's picture shows in (None: none lent, or not known)."""
+        return self._ask_shape(self._lent) if self._lent is not None else None
 
     def take_back(self, surface: QWidget) -> None:
         """The lent surface is back: it fills the player again, as it was laid out."""
@@ -222,8 +257,14 @@ class PipFrame(QObject):
         if lift == self._lift:
             return
         self._lift = lift
+        self._glide()
+
+    def _glide(self) -> None:
+        """The small surface on its way to where it belongs now (a lift, a shape), animated."""
         if not self._shown or self._press is not None or self._closed or self._suspended:
-            return  # shown, or once the drag ends, it lays out with the new lift
+            return  # shown, or once the drag ends, it lays out with the new lift and shape
+        if self._small_name == self._lent:
+            return  # (its place is the other window's)
         small = self._small()
         target = self._small_target()
         self._lifting.stop()  # a lift on its way the other way ends where it is
@@ -250,6 +291,7 @@ class PipFrame(QObject):
             return
         self.suspending.emit()  # a lent surface comes back first (the desktop PiP's)
         self._lifting.stop()
+        self._shape_poll.stop()
         self._press = None
         self._swap_at = None
         self._shown = False
@@ -272,6 +314,7 @@ class PipFrame(QObject):
             return
         self._closed = True
         self._press = None
+        self._shape_poll.stop()
         for watched in (self._container, *self._surfaces.values()):
             if isValid(watched):
                 watched.removeEventFilter(self)
@@ -304,7 +347,24 @@ class PipFrame(QObject):
         return self._lifting.state() == QVariantAnimation.State.Running
 
     def _small_target(self) -> QRect:
-        return lifted_rect(self._container.size(), self._corner, self._lift)
+        return lifted_rect(self._container.size(), self._corner, self._lift, self._shape)
+
+    def _ask_shape(self, name: str) -> Optional[float]:
+        return self._shape_of(name) if self._shape_of is not None else None
+
+    def _follow_shape(self) -> None:
+        """Every SHAPE_POLL_MS while it shows: a new shape of the small picture glides it there
+        (during a press, its release lays it out)."""
+        if not self._shown or self._closed or self._suspended or self._small_name == self._lent:
+            self._shape_poll.stop()
+            return
+        shape = self._ask_shape(self._small_name)
+        if shape == self._shape or (
+            shape is not None and self._shape is not None and same_shape(shape, self._shape)
+        ):
+            return
+        self._shape = shape
+        self._glide()
 
     def _on_lift_step(self, rect) -> None:
         if isinstance(rect, QRect) and self._shown and self._press is None:
@@ -330,13 +390,17 @@ class PipFrame(QObject):
             if name not in (self._large, self._small_name, self._lent):
                 surface.hide()  # a tile's, outside the multiview
         if self._small_name == self._lent:
-            pass  # (a swap while it is out: its place is the other window's)
+            self._shape_poll.stop()  # (a swap while it is out: its place is the other window's)
         elif self._shown:
+            self._shape = self._ask_shape(self._small_name)
+            if self._shape_of is not None and not self._closed and not self._shape_poll.isActive():
+                self._shape_poll.start()
             small.setGeometry(self._small_target())
             small.show()
             # macOS can stack a native view under its sibling after a geometry change.
             small.raise_()
         else:
+            self._shape_poll.stop()
             small.hide()
         self._report()
 
