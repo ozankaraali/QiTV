@@ -7,7 +7,13 @@ from __future__ import annotations
 
 import unittest
 
-from services.live.ts import _PTS_MODULO, _SOUND_WANDER_S, PACKET, SoundClock
+from services.live.ts import (
+    _PTS_MODULO,
+    _SOUND_EARLY_S,
+    _SOUND_WANDER_S,
+    PACKET,
+    SoundClock,
+)
 from tests.ts_fixtures import (
     AUDIO_PID,
     PMT_PID,
@@ -108,6 +114,70 @@ def stream(
     return b"".join(out)
 
 
+def lumpy(
+    seconds: float,
+    *,
+    every: float = 10.0,
+    rate: float = 1.0,
+    offset: int = 0,
+    aac_from: int | None = None,
+) -> bytes:
+    """`seconds` of the program as one provider sent it after a stall (2.9.5): the first
+    `every` seconds interleaved by their real time, then every `every` seconds the sound for
+    the next `every` seconds in one run of packets (no PCR or picture between), then those
+    seconds' pictures (a PCR with each) and tables. The sound's stamps as in `stream`; from
+    picture `aac_from` on, the map declares the sound AAC (its frames stay MPEG audio)."""
+    frame_ticks = FRAME[MPEG_AUDIO]
+    frame = mpeg_frame()
+    out: list[bytes] = []
+    vcc = acc = psi = 0
+    audio_i = 0
+    pictures, per = round(seconds * 25), round(every * 25)
+
+    def sound(until: int) -> None:
+        nonlocal audio_i, acc
+        while audio_i * frame_ticks < until:
+            stamp = (START + offset + round(audio_i * frame_ticks * rate)) % _PTS_MODULO
+            ps, acc = pes_packets(AUDIO_PID, 0xC0, frame, stamp, cc_start=acc)
+            out.extend(ps)
+            audio_i += 1
+
+    for i in range(pictures):
+        real = i * PICTURE
+        if i % 12 == 0:
+            kind = AAC if aac_from is not None and i >= aac_from else MPEG_AUDIO
+            out += [pat(cc=psi), program_map(kind, psi)]
+            psi = (psi + 1) & 0x0F
+        if i >= per and i % per == 0:
+            sound(min(i + per, pictures) * PICTURE)  # the lump
+        pts = (START + real) % _PTS_MODULO
+        ps, vcc = pes_packets(
+            VIDEO_PID, 0xE0, h264_access_unit(i % 25 == 0), pts, cc_start=vcc, pcr=pts
+        )
+        out += ps
+        if i < per:
+            sound(real + 1)
+    return b"".join(out)
+
+
+def media(data: bytes) -> list[bytes]:
+    """The packets of the pictures and the sound, in order (no tables, no null packets)."""
+    found = []
+    for at in range(0, len(data) - PACKET + 1, PACKET):
+        pid = ((data[at + 1] & 0x1F) << 8) | data[at + 2]
+        if pid in (VIDEO_PID, AUDIO_PID):
+            found.append(data[at : at + PACKET])
+    return found
+
+
+def sound_packets(data: bytes) -> int:
+    return sum(
+        1
+        for at in range(0, len(data) - PACKET + 1, PACKET)
+        if ((data[at + 1] & 0x1F) << 8) | data[at + 2] == AUDIO_PID
+    )
+
+
 def stamps(data: bytes) -> list[tuple[int, int]]:
     """(PID, PTS) of each PES start, in order."""
     found = []
@@ -186,12 +256,82 @@ class SoundClockTests(unittest.TestCase):
         # it: a picture every 8 s, or none for 10 s, is no distance (seen restamped before).
         for data in (
             stream(120.0, picture_every=200),
-            stream(60.0, stall=(20.0, 30.0)),
             stream(60.0, stall=(20.0, 30.0), stall_pcr=False),
         ):
             clock = SoundClock()
             self.assertEqual(through(clock, data), data)
             self.assertEqual(list(clock.restamped), [])
+        # With no PCR either, the stall's sound may be a lump sent early (2.9.5): it waits,
+        # and the first PCR after the stall reaches all of it: it leaves just before it, as
+        # it came but for the tables sent meanwhile.
+        data = stream(60.0, stall=(20.0, 30.0))
+        clock = SoundClock()
+        out = through(clock, data)
+        self.assertEqual(media(out), media(data))
+        self.assertEqual(list(clock.restamped), [])
+
+    def test_sound_sent_in_a_lump_ahead_of_its_pictures_waits_for_them(self):
+        # 2.9.5: after a stall one provider sent 9.8 s of sound in one run of packets, then
+        # the pictures it plays with; libVLC 3 discarded most of each lump (silence).
+        data = lumpy(45.0)
+        self.assertGreater(max(gaps(data)), 9.0)  # as sent: up to 10 s ahead
+        clock = SoundClock()
+        out = through(clock, data)
+        self.assertLessEqual(max(gaps(out)), _SOUND_EARLY_S + 0.15)
+        self.assertGreater(min(gaps(out)), -0.1)  # not late either
+        self.assertEqual(sound_packets(out), sound_packets(data))  # every packet, in order
+        self.assertEqual(
+            [p for p in media(out) if p[2] == AUDIO_PID & 0xFF],
+            [p for p in media(data) if p[2] == AUDIO_PID & 0xFF],
+        )
+        self.assertEqual(list(clock.restamped), [])
+        self.assertGreater(clock.held_lumps, 0)
+        # Cut after a lump, before its pictures: what waits passes at the flush.
+        cut = data.index(bytes([SYNC, VIDEO_PID >> 8, VIDEO_PID & 0xFF]), len(data) * 2 // 3)
+        cut -= cut % PACKET
+        clock = SoundClock()
+        self.assertEqual(sound_packets(through(clock, data[:cut])), sound_packets(data[:cut]))
+
+    def test_a_restamped_sound_in_lumps_plays_with_its_pictures(self):
+        # The channel's sound after its reconnects: stamped 84 s behind its pictures, and
+        # then sent in lumps.
+        data = lumpy(45.0, offset=-84 * 90000)
+        clock = SoundClock()
+        out = through(clock, data)
+        self.assertEqual(len(clock.restamped), 1)
+        found = gaps(out)[42 * 3 :]
+        self.assertLessEqual(max(found), _SOUND_EARLY_S + 0.15)
+        self.assertGreater(min(found), -0.1)
+        tail = out[len(out) // 2 :]
+        self.assertEqual(sound_steps(tail[tail.find(b"\x47") :]) - {2160}, set())
+
+    def test_sound_waiting_when_the_map_drops_its_codec_leaves_before_the_map(self):
+        clock = SoundClock()
+        data = lumpy(30.0, aac_from=12 * 22)  # a map in the middle of a block's pictures
+        self.assertEqual(sound_packets(through(clock, data)), sound_packets(data))
+
+    def test_sound_with_no_pictures_to_wait_for_passes_after_a_while(self):
+        # No pictures or PCR for 30 s, the sound in real time: it waits at most 15 s.
+        data = stream(70.0, stall=(20.0, 50.0))
+        clock = SoundClock()
+        with self.assertLogs("services.live.ts", "INFO") as logs:
+            out = through(clock, data)
+        self.assertIn("did not come", "\n".join(logs.output))
+        self.assertEqual(media(out), media(data))
+
+    def test_the_sound_in_another_codec_is_restamped_from_its_first_frame(self):
+        # The channel alternates MPEG audio and AAC on one PID, both stamped minutes behind
+        # its pictures: the new codec's first 2 s passed as they came while it was judged
+        # anew (libVLC dropped them as late; the sound watch restarted the track).
+        first = stream(20.0, offset=-84 * 90000)
+        second = stream(20.0, audio_type=AAC, offset=-120 * 90000, video_start=START + 20 * 90000)
+        clock = SoundClock()
+        with self.assertLogs("services.live.ts", "INFO") as logs:
+            out = through(clock, first + second)
+        self.assertIn("from its first frame", "\n".join(logs.output))
+        self.assertEqual(len(clock.restamped), 1)  # not judged anew
+        before = sum(1 for pid, _ in stamps(first) if pid == AUDIO_PID)
+        self.assertLess(max(abs(g) for g in gaps(out)[before:]), 0.1)
 
     def test_a_sound_muxed_seconds_ahead_of_its_pictures_is_left_alone(self):
         data = stream(60.0, offset=6 * 90000)  # sent 6 s before it plays: a mux may
