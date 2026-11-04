@@ -18,9 +18,17 @@ CANT_KEEP_UP = N_("Can't keep up")  # i18n: the AI captions row: this computer i
 # i18n: the AI captions row: a stream QiTV can't read ahead (it has no time-shift)
 NOT_AVAILABLE = N_("Not available for this stream")
 COULDNT_START = N_("Couldn't start AI captions")  # i18n: a toast
-# i18n: the question before AI captions' first use; size: as "880 MB"
+# i18n: the question before AI captions' first use; size: what starts them, as "880 MB"; total:
+# with every language's own model, as "3.3 GB" (2.9.6: those come as their languages play)
 DOWNLOAD_QUESTION = N_(
-    "AI captions need a speech model on this computer: {size} to download once. Download it now?"
+    "AI captions need speech models on this computer: {size} to start, up to {total} with "
+    "every language's model, each downloaded once. Download them now?"
+)
+# 2.9.6: a language's own speech model (ufak AI's for Turkish, Cohere's, Parakeet), downloaded
+# once the language is wanted. i18n: language: its name, as "Turkish"; size: as "43 MB"
+SPECIALIST_QUESTION = N_(
+    "AI captions need another speech model for this language ({language}): {size} to download "
+    "once. Download it now?"
 )
 # AI captions fell behind with the larger speech model (Automatic) and the faster isn't here.
 # i18n: the question when AI captions fall behind with the larger speech model; size: "880 MB"

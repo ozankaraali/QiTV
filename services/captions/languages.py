@@ -129,6 +129,18 @@ _LOOKUP = {
 }
 
 
+def specialist_for(language: Optional[str]) -> Optional[str]:
+    """The model other than Qwen that writes `language` (services.captions.models.SPECIALISTS),
+    as the captions process picks it; None where Qwen writes it."""
+    if language == "Turkish":
+        return "turkish"
+    if language in COHERE:
+        return "cohere"
+    if language in EUROPEAN:
+        return "european"
+    return None
+
+
 def qwen_name(code_or_name: Optional[str]) -> Optional[str]:
     """The English name (Qwen's, or for a language only Parakeet writes, its own: 2.9.3) of a
     language given by its ISO 639 code (with a region or not), its English name or its own

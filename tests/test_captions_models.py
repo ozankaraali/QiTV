@@ -559,16 +559,11 @@ class InstalledTierTests(DownloadTestCase):
         with mock.patch.object(models, "sherpa_importable", return_value=True):
             self.assertIsNone(models.runtime_dir(self.root))
             names = [d.file.path for d in models.needed("small", self.root)]
-        self.assertEqual(
-            names,
-            [
-                "silero_vad.onnx",
-                "tokens.txt",
-                "joiner.int8.onnx",
-                "cohere.tar.bz2",
-                "model.tar.bz2",
-            ],
-        )  # the VAD, ufakzeka-kulak's (2.9.1), Parakeet's and Cohere's (2.9.3), the tier's
+            turkish = [d.file.path for d in models.needed("turkish", self.root)]
+            cohere = [d.file.path for d in models.needed("cohere", self.root)]
+        self.assertEqual(names, ["silero_vad.onnx", "model.tar.bz2"])  # the VAD, the tier's
+        # 2.9.6: each language's own model comes once that language is wanted
+        self.assertEqual((turkish, cohere), (["tokens.txt"], ["cohere.tar.bz2"]))
 
     def test_without_a_runtime_for_this_computer_nothing_is_installed(self):
         with mock.patch.object(models, "runtime_files", side_effect=models.Unsupported("x")):

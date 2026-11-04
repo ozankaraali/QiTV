@@ -66,7 +66,10 @@ READ_CPS = 15.0
 # both still fit two lines; and a line waits for the one before to be read (READ_CPS), by at
 # most LAG_S after its own first word, so the captions stay with the picture.
 JOIN_GAP_S = 0.3
-JOIN_LONGEST_S = 2.5  # a line spoken in this long at most joins the one before
+# a line spoken in this long at most joins the one before (2.9.6, the real-use review: "I think
+# that goes away", 2.9 s, came alone at 2.5 s); it may join one shown in parts when it adds no
+# part, and never one already on screen (it would wrap again under the viewer's eyes)
+JOIN_LONGEST_S = 3.5
 JOIN_CHARS = 84  # without an overlay to ask: what two lines hold
 LAG_S = 1.0
 _LAG_LOOK = 32  # cues looked back at for a wait that reaches the one asked about
@@ -75,6 +78,9 @@ SEEK_S = 2.0  # the position moved this much more than the clock: a seek, read a
 KEEP_S = 30 * 60.0  # cues kept this far behind the picture
 _RESTART_MS = 1000
 _SLOW_RTF = 0.9  # the model takes this long per second of speech: it can't keep up
+# 2.9.6: the first question's yes (it said every language's model may come): they download as
+# their languages play, unasked
+_LANGUAGE_MODELS_OK = "ai_captions_language_models"
 _BACKLOG_S = 2.0  # ... or this much sound read waits for it (2.9.1)
 _SLOW_FOR_S = 30.0
 
@@ -93,6 +99,7 @@ from ui.captions_texts import (  # noqa: E402  (the texts, with their translatio
     NOT_AVAILABLE,
     NOT_NOW,
     PREPARING,
+    SPECIALIST_QUESTION,
     STARTING,
     STEP_DOWN_QUESTION,
     STEPPED_DOWN,
@@ -169,10 +176,14 @@ class CaptionsController(QObject):
         self._run_start = 0.0  # the timeline second the run reads from
         self._run_track: Optional[int] = None  # the audio track the run reads (None: default)
         self._cues: list[tuple[float, float, str]] = []  # (start, end, text) by start
+        self._gone = float("-inf")  # the start of the latest cue whose time on screen ended
         self._newest: Optional[float] = None  # the newest second the run has read
         self._written: Optional[float] = None  # the second its captions are written to
         self._rtf = 0.0
         self._slow_since: Optional[float] = None
+        self._qwen_writes = True  # Qwen writes the run's language (no specialist does)
+        self._offered: set[str] = set()  # 2.9.6: the specialists asked for while QiTV runs
+        self._first_question = False  # the question up is the first one (all the sizes)
         self._last: Optional[tuple[float, float]] = None  # (position, monotonic) last tick
         self._was_waiting = False  # the live picture waited for the captions' distance
         self._floored: Any = None  # the live session holding the captions' distance
@@ -287,8 +298,13 @@ class CaptionsController(QObject):
         if self._card is not None:
             self._asking = True
             self._tier = self._fetching = tier
+            self._first_question = True  # its yes is for every language's model too (2.9.6)
             self._question = (
-                translate(DOWNLOAD_QUESTION, size=size_text(missing)),
+                translate(
+                    DOWNLOAD_QUESTION,
+                    size=size_text(missing),
+                    total=size_text(models.full_size(tier)),
+                ),
                 translate(DOWNLOAD),
                 translate(NOT_NOW),
             )
@@ -348,6 +364,7 @@ class CaptionsController(QObject):
         self._resolve_language()
         self._process.send("language", self._language[0])
         self.changed.emit()
+        self._offer_specialist()
 
     # ---- the speech model (2.9: on the AI captions row, a game's ‹ quality ›; Settings' too) --
     def model(self) -> str:
@@ -468,6 +485,7 @@ class CaptionsController(QObject):
                 return
             then()
             self._disk.clear()  # the files went
+            self._config_set(_LANGUAGE_MODELS_OK, False)  # the first question again, sizes and all
             self._stepped_down = False  # Automatic by this computer's speed again
             self.changed.emit()
 
@@ -478,9 +496,12 @@ class CaptionsController(QObject):
         if not self._asking:
             return
         self._asking = self._asking_step = False
+        first, self._first_question = self._first_question, False
         if not yes:
             self.changed.emit()  # the question is gone (a phone's closes too)
             return
+        if first:  # 2.9.6, the owner: asked once, the sizes said; each language's comes alone
+            self._config_set(_LANGUAGE_MODELS_OK, True)
         self._start_download()
 
     def _start_download(self) -> None:
@@ -539,6 +560,14 @@ class CaptionsController(QObject):
         self._disk.clear()
         self._unpacking = False
         self._download = None
+        from services.captions.models import SPECIALISTS
+
+        if self._fetching in SPECIALISTS:  # 2.9.6: a language's own model is here
+            if self._enabled:
+                self._reload()
+            else:
+                self.changed.emit()
+            return
         if self._enabled:  # Automatic's step down, fetched while the 1.7B captioned
             if self.model() == "auto" and self._fetching != self._tier:
                 self._switch(self._fetching)
@@ -599,7 +628,7 @@ class CaptionsController(QObject):
     def _enable(self, tier: str) -> None:
         self._tier = tier
         self._enabled = True
-        self._cues.clear()
+        self._forget_cues()
         self._resolve_language()
         self._hold_floor()
         self._route_film()  # a provider's film: through the film relay while the model loads
@@ -628,9 +657,10 @@ class CaptionsController(QObject):
                     "tokenizer": str(paths.tokenizer),
                 },
                 "vad": str(paths.vad),
-                "turkish": str(paths.turkish),  # 2.9.1: ufakzeka-kulak, for Turkish
-                "european": str(paths.european),  # 2.9.3: Parakeet, for its languages
-                "cohere": str(paths.cohere),  # 2.9.3: Cohere Transcribe, for its 14
+                # the specialists that are here (2.9.6: each comes once its language is wanted)
+                "turkish": self._folder("turkish", paths.turkish),  # 2.9.1: ufakzeka-kulak
+                "european": self._folder("european", paths.european),  # 2.9.3: Parakeet
+                "cohere": self._folder("cohere", paths.cohere),  # 2.9.3: Cohere Transcribe
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),
@@ -646,6 +676,7 @@ class CaptionsController(QObject):
         """Automatic's 1.7B can't keep up, and nothing has been tried for it yet."""
         return (
             not self._step_tried
+            and self._qwen_writes
             and self._behind()
             and self._ready
             and self._tier == "large"
@@ -681,6 +712,52 @@ class CaptionsController(QObject):
         )
         self._card.ask(*self._question)
         self.changed.emit()  # the phones ask too (asked_unprompted)
+
+    def _folder(self, key: str, folder: Any) -> Optional[str]:
+        return str(folder) if self._here(key) else None
+
+    def _offer_specialist(self) -> None:
+        """2.9.6: the run's language is written best by a model that isn't here: asked for
+        once while QiTV runs, on the TV and every phone (Qwen writes the language meanwhile,
+        where it knows it)."""
+        from services.captions import models
+        from services.captions.languages import own_name, specialist_for
+
+        key = specialist_for(self._language[0])
+        if key is None or key in self._offered or not self._enabled or self._here(key):
+            return
+        if self._asking or self._download is not None or self._card is None:
+            return
+        try:
+            missing = models.download_size(key)
+        except models.Unsupported:
+            return
+        self._offered.add(key)
+        self._fetching = key
+        if missing == 0 or self._config_get(_LANGUAGE_MODELS_OK, False):
+            # here already (only to be checked and unpacked), or the first question's yes was
+            # for it too: it downloads while Qwen writes, the row says how far
+            self._start_download()
+            return
+        self._asking = self._asking_step = True  # QiTV's own question: every phone hears it
+        self._question = (
+            translate(
+                SPECIALIST_QUESTION, language=own_name(self._language[0]), size=size_text(missing)
+            ),
+            translate(DOWNLOAD),
+            translate(NOT_NOW),
+        )
+        self._card.ask(*self._question)
+
+    def _reload(self) -> None:
+        """The captions process again, with the models that are here now: what it wrote stays,
+        and it reads on from the picture once loaded (`_on_ready`)."""
+        logger.info("AI captions: %s's model is here; loading it", self._fetching)
+        self._process.stop()
+        self._slow_since = None
+        self._newest = self._written = None
+        self._load_model()
+        self.changed.emit()
 
     def _switch(self, tier: str) -> None:
         """Captions on with `tier` instead, at once: the captions written so far stay (the
@@ -772,6 +849,7 @@ class CaptionsController(QObject):
         self._newest = self._written = None
         self._process.send("start", self._run, url, start, self._run_track, self._language[0])
         self._process.send("viewer", self._position())
+        self._offer_specialist()
 
     def _start_film(self) -> None:
         film = self._film()
@@ -803,7 +881,11 @@ class CaptionsController(QObject):
             return  # read again: it is the end of the line before, joined to it
         else:
             self._cues.insert(i, (start, end, text))
-        if i > 0 and self._joins(self._cues[i - 1], self._cues[i]):
+        if (
+            i > 0
+            and self._shows(i - 1) > self._position()
+            and self._joins(self._cues[i - 1], self._cues[i])
+        ):
             before = self._cues[i - 1]
             self._cues[i - 1] = (before[0], end, f"{before[2]} {text}")
             del self._cues[i]
@@ -817,14 +899,20 @@ class CaptionsController(QObject):
         overlay = next((o for o in self._overlays if hasattr(o, "pages")), None)
         if overlay is None:
             return len(joined) <= JOIN_CHARS
-        return len(overlay.pages(joined)) <= 1
+        return len(overlay.pages(joined)) <= max(1, len(overlay.pages(before[2])))
 
     def _on_progress(
-        self, run: int, newest: float, rtf: float, written: Optional[float] = None
+        self,
+        run: int,
+        newest: float,
+        rtf: float,
+        written: Optional[float] = None,
+        qwen_writes: bool = True,
     ) -> None:
         if run != self._run:
             return
         self._newest, self._rtf = newest, rtf
+        self._qwen_writes = qwen_writes  # 2.9.6: only then does a step down help
         self._written = newest if written is None else written
         # Late, and for the model: a short line ("Yes.") costs the model a fixed while, so a
         # dialogue's speed reads slow while the silences between its lines keep the captions
@@ -853,6 +941,7 @@ class CaptionsController(QObject):
         if self._language[1] == FROM_MODEL:
             self._language = (language, FROM_MODEL)
             self.changed.emit()
+        self._offer_specialist()
 
     def _on_resync(self, run: int, newest: float) -> None:
         """The stream's stamps jumped (a provider's restart): read again from the segment
@@ -882,7 +971,7 @@ class CaptionsController(QObject):
             self._show("")
             return  # a film opens (again) or goes to where it resumes: read from there after
         if self._ready and key != self._session_key:
-            self._cues.clear()  # another channel or a new session: its own captions
+            self._forget_cues()  # another channel or a new session: its own captions
             self._last = None
             self._resolve_language()  # its own language too
             self._start_run()
@@ -933,7 +1022,7 @@ class CaptionsController(QObject):
         other track goes."""
         logger.info("AI captions: audio track %s, read again", self._audio_track())
         self._detected.pop(self._channel_key(), None)
-        self._cues.clear()
+        self._forget_cues()
         self._last = None
         self._show("")
         self._start_run()  # in the language of the track it reads
@@ -954,6 +1043,8 @@ class CaptionsController(QObject):
         if i < 0:
             return ""
         start, end, text = self._cues[i]
+        if start <= self._gone:
+            return ""  # it went: a later line that came late can't bring it back (2.9.6)
         shows = self._shows(i)
         following = self._shows(i + 1) if i + 1 < len(self._cues) else None
         if following is not None and following - end <= BRIDGE_S:
@@ -962,9 +1053,16 @@ class CaptionsController(QObject):
             until = max(end + HOLD_S, shows + MIN_SHOW_S, shows + len(text) / READ_CPS)
             if following is not None:
                 until = min(until, following)
-        if not shows <= position < until:
+        if position >= until:
+            self._gone = max(self._gone, start)  # 2.9.6, the real-use review: it came back
+            return ""
+        if position < shows:
             return ""
         return self._part_at(text, position - shows, end - start - FIRST_WORD_S)
+
+    def _forget_cues(self) -> None:
+        self._cues.clear()
+        self._gone = float("-inf")
 
     def _shows(self, i: int) -> float:
         """When cue `i` shows: at its first word, or once the one before has been read, by at

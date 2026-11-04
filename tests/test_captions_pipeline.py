@@ -481,6 +481,40 @@ class CutterTests(unittest.TestCase):
         self.assertTrue(pieces[0].split)  # at its length, mid-speech
         self.assertFalse(pieces[-1].split)  # the pause at 8 s ended it
 
+    def test_a_language_only_a_model_not_here_writes_gets_no_guesses(self):
+        # 2.9.6: Parakeet (Ukrainian and eight more) comes once wanted; "Not now": nothing, not
+        # Qwen guessing at a language it doesn't know.
+        from services.captions.worker import _Model
+
+        model = object.__new__(_Model)
+        model.recognizer, model.turkish, model.european, model.cohere = object(), None, None, None
+        model._folders, model._loading = {}, {}
+        self.assertEqual(model.decode(array("f", bytes(64)), "Ukrainian"), "")
+
+    def test_ufaks_lone_i_joins_the_word_it_begins(self):
+        # 2.9.6, the real-use review: "i stanbul" (İstanbul), "i şte" (İşte).
+        from services.captions.worker import lone_i_joined
+
+        self.assertEqual(lone_i_joined("ı i stanbul i şte bir"), "ı istanbul işte bir")
+        self.assertEqual(lone_i_joined("bu iki ile"), "bu iki ile")  # i inside words stays
+        self.assertEqual(lone_i_joined("sonunda i"), "sonunda i")  # nothing after it
+
+    def test_qwen_writes_for_good_only_where_no_specialist_writes(self):
+        from services.captions.worker import TURKISH, _Run
+
+        run = object.__new__(_Run)
+        run.model = SimpleNamespace(
+            turkish=object(), writer=lambda language: "cohere" if language == "English" else None
+        )
+        for language, expected in (
+            ("", True),
+            ("English", False),
+            (TURKISH, False),
+            ("Hindi", True),
+        ):
+            run.language = language
+            self.assertIs(run.qwen_writes(), expected, language)
+
     def test_a_split_piece_loses_the_full_stop_a_model_ends_it_with(self):
         from services.captions.worker import unfinished
 
@@ -650,6 +684,35 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.at(16.5), joined)
         self.captions._on_caption(run, 16.0, 17.2, "ötesine geçiyor.")  # read again
         self.assertEqual(self.captions._cues, [(10.0, 17.2, joined)])  # not shown twice
+
+    def test_a_caption_that_went_does_not_come_back_when_the_next_comes_late(self):
+        # 2.9.6, the real-use review: cleared, then on again for 0.25 s when a late line moved
+        # its end to the late line's start.
+        run = self.captions._run
+        self.captions._on_caption(run, 10.0, 12.0, "Merhaba")
+        self.assertEqual(self.at(12.5), "Merhaba")
+        self.assertEqual(self.at(12.7), "")  # its time is over
+        self.captions._on_caption(run, 13.0, 14.0, "Nasılsın")  # late
+        self.assertEqual(self.at(12.8), "")  # not on again
+        self.assertEqual(self.at(13.4), "Nasılsın")
+
+    def test_a_late_end_does_not_join_a_line_already_on_screen(self):
+        run = self.captions._run
+        first = "Uzay aracı bu yıl ilk kez Mars'ın"
+        self.captions._on_caption(run, 10.0, 16.0, first)
+        self.assertEqual(self.at(11.0), first)  # on screen
+        self.captions._on_caption(run, 16.0, 17.2, "ötesine geçiyor.")
+        self.assertEqual(len(self.captions._cues), 2)  # its own line: nothing wraps again
+        self.assertEqual(self.at(12.0), first)
+        self.assertEqual(self.at(16.5), "ötesine geçiyor.")
+
+    def test_an_end_that_adds_no_part_joins_a_caption_in_parts(self):
+        self.overlay.pages = lambda text: [text[i : i + 40] for i in range(0, len(text), 40)]
+        run = self.captions._run
+        before = "x" * 60  # two parts, the second half empty
+        self.captions._on_caption(run, 10.0, 16.0, before)
+        self.captions._on_caption(run, 16.0, 19.0, "bunlar netlik")  # 3 s: within 3.5 s
+        self.assertEqual(self.captions._cues, [(10.0, 19.0, before + " bunlar netlik")])
 
     def test_a_line_joins_the_one_before_only_when_both_fit_and_nothing_parts_them(self):
         self.overlay.pages = lambda text: [text] if len(text) <= 40 else [text[:40], text[40:]]
@@ -942,7 +1005,13 @@ class StepDownTests(unittest.TestCase):
         self.config = {}
         self.captions._config_get = lambda name, default: self.config.get(name, default)
         self.captions._config_set = self.config.__setitem__
-        self.disk = {"small": True, "large": True}
+        self.disk = {
+            "small": True,
+            "large": True,
+            "turkish": True,
+            "european": True,
+            "cohere": True,
+        }
         self.captions._here = lambda name: self.disk[name]
         self.toasts = []
         self.captions._toast = lambda text, kind="info": self.toasts.append(text)
@@ -984,6 +1053,88 @@ class StepDownTests(unittest.TestCase):
         self.assertEqual(self.captions.status_text(), "Can't keep up")
         self.captions._disable()
         self.assertEqual(self.captions._auto_tier(), "small")  # while QiTV runs
+
+    def test_a_languages_own_model_not_here_is_asked_for_once_then_loaded(self):
+        # 2.9.6, the owner: all 3.3-4.8 GB came at once, and the question's size looked random.
+        from unittest import mock
+
+        self.disk["turkish"] = False
+        self.captions._language = ("Turkish", "")
+        with mock.patch("services.captions.models.download_size", return_value=43_000_000):
+            self.captions._offer_specialist()
+            self.captions._offer_specialist()  # once while QiTV runs
+        [(text, _yes, _no)] = self.card.asked
+        self.assertIn("43 MB", text)
+        self.assertTrue(self.captions.asked_unprompted())  # every phone hears it too
+        started = []
+        self.captions._start_download = lambda: started.append(self.captions._fetching)
+        self.captions.answer(True)
+        self.assertEqual(started, ["turkish"])
+        download = object()
+        self.captions._download = download
+        self.disk["turkish"] = True
+        self.captions._on_downloaded(download)
+        self.assertEqual(self.stopped, [True])  # the captions process again ...
+        self.assertTrue(self.loaded[-1]["turkish"].endswith("ufakzeka-kulak"))  # ... with it
+        self.assertEqual(self.captions._tier, "large")  # the same Qwen
+
+    def test_after_the_first_questions_yes_a_languages_model_comes_unasked(self):
+        # 2.9.6, the owner: say once what may come (880 MB to start, up to 3.3 GB), then each
+        # language's model downloads as its language plays.
+        from unittest import mock
+
+        self.config["ai_captions_language_models"] = True
+        self.disk["cohere"] = False
+        self.captions._language = ("English", "")
+        started = []
+        self.captions._start_download = lambda: started.append(self.captions._fetching)
+        with mock.patch("services.captions.models.download_size", return_value=1_700_000_000):
+            self.captions._offer_specialist()
+        self.assertEqual((self.card.asked, started), ([], ["cohere"]))
+
+    def test_the_first_question_says_what_it_starts_with_and_what_it_may_come_to(self):
+        from unittest import mock
+
+        self.captions._enabled = False
+        self.captions._process.running = lambda: False
+        self.captions._speed_unknown = lambda: False
+        self.captions._choose_tier = lambda: "small"
+        with (
+            mock.patch("services.captions.models.installed", return_value=False),
+            mock.patch("services.captions.models.download_size", return_value=893_000_000),
+            mock.patch("services.captions.models.full_size", return_value=3_330_000_000),
+        ):
+            self.captions.toggle()
+        [(text, _yes, _no)] = self.card.asked
+        self.assertIn("893 MB", text)
+        self.assertIn("3.3 GB", text)
+        self.captions._start_download = lambda: None
+        self.captions.answer(True)
+        self.assertIs(self.config.get("ai_captions_language_models"), True)
+
+    def test_a_model_that_is_here_is_not_asked_for_and_one_not_here_is_not_given(self):
+        from unittest import mock
+
+        self.captions._language = ("English", "")
+        self.disk["european"] = False
+        with mock.patch("services.captions.models.download_size", return_value=1):
+            self.captions._offer_specialist()  # Cohere writes English: it's here
+        self.assertEqual(self.card.asked, [])
+        self.captions._load_model()
+        self.assertIsNone(self.loaded[-1]["european"])  # the process never looks for it
+        self.assertTrue(self.loaded[-1]["cohere"])
+
+    def test_while_another_model_writes_the_language_qwen_is_not_stepped_down(self):
+        # 2.9.6, the real-use review: English is Cohere's; Qwen only wrote while Cohere loaded,
+        # and stepping it down restarted the process: Cohere loaded again, 101 s to a caption.
+        import time as clock
+
+        self.captions._on_progress(self.captions._run, 100.5, 1.06, 100.5, False)
+        self.captions._slow_since = clock.monotonic() - 31.0
+        self.captions._last = None
+        self.captions._tick()
+        self.assertEqual((self.loaded, self.stopped), ([], []))
+        self.assertEqual(self.captions.status_text(), "Can't keep up")  # it still says so
 
     def test_the_viewers_own_choice_never_changes(self):
         self.config["ai_captions_model"] = "large"
