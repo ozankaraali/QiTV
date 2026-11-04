@@ -83,6 +83,9 @@ TURKISH = "Turkish"  # Qwen's name for it: the language ufakzeka-kulak writes (2
 _COHERE, _EUROPEAN = "cohere", "european"  # 2.9.3: the specialists (their spec keys)
 _LOAD_WAIT_S = 60.0  # a language only a specialist writes waits this long for it to load
 _TURKISH_GAIN = 8.0  # the model card's input gain: its sherpa-onnx files want the sound louder
+# 2.9.5: the voice detector again, without its hold: it says where the pauses between words
+# and phrases are (pieces.Cutter's `is_voiced`)
+_VOICED_MIN_S = 0.05
 _UPPER = {"i": "İ", "ı": "I"}  # Turkish's own capitals of the dotted and the dotless i
 
 
@@ -158,12 +161,20 @@ class _Model:
         self.cohere: Any = None
         self.european: Any = None
         self._loading: dict[str, threading.Event] = {}
-        config = sherpa_onnx.VadModelConfig()
-        config.silero_vad.model = spec["vad"]
-        config.silero_vad.threshold = float(spec.get("vad_threshold", 0.5))
-        config.sample_rate = 16000
-        config.num_threads = 1
-        self.vad = sherpa_onnx.VadModel.create(config)
+
+        def detector(shortest: Optional[float] = None) -> Any:
+            config = sherpa_onnx.VadModelConfig()
+            config.silero_vad.model = spec["vad"]
+            config.silero_vad.threshold = float(spec.get("vad_threshold", 0.5))
+            if shortest is not None:
+                config.silero_vad.min_silence_duration = shortest
+                config.silero_vad.min_speech_duration = shortest
+            config.sample_rate = 16000
+            config.num_threads = 1
+            return sherpa_onnx.VadModel.create(config)
+
+        self.vad = detector()
+        self.voiced = detector(_VOICED_MIN_S)
         self._lock = threading.Lock()
         if self.recognizer is not None:
             # Warm up: the first decode is slow (graph optimisation), not the viewer's first.
@@ -174,6 +185,11 @@ class _Model:
     def is_speech(self, window: array) -> bool:
         with self._lock:
             return bool(self.vad.is_speech(window))
+
+    def is_voiced(self, window: array) -> bool:
+        """`is_speech` without the detector's hold: the pauses between words show."""
+        with self._lock:
+            return bool(self.voiced.is_speech(window))
 
     def writer(self, language: str) -> Optional[str]:
         """The specialist that writes `language` (_COHERE, _EUROPEAN), None for Qwen's."""
@@ -297,7 +313,7 @@ class _Run:
         self.viewer = viewer  # [position], shared with the command loop
         self.times = TsTimes(audio_pid=audio_track)
         self.clock = StreamClock(segment_start, self.times)
-        self.cutter = Cutter(model.is_speech)
+        self.cutter = Cutter(model.is_speech, getattr(model, "is_voiced", None))
         self.pieces: queue.Queue[Optional[Piece]] = queue.Queue()
         self.stopped = threading.Event()
         self.newest = segment_start

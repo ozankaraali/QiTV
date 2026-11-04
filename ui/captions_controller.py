@@ -59,6 +59,17 @@ MIN_SHOW_S = 1.2
 FIRST_WORD_S = 0.3  # services.captions.pieces.LEAD_IN_S
 BRIDGE_S = 3.0
 READ_CPS = 15.0
+# 2.9.5, the owner: "long sentences ... superseded with a short sentence after, not giving time
+# to read". A line stayed only until the next one's first word, and the next was often the
+# end of the same sentence, cut off on its own ("ötesine geçiyor"). A line that follows the one
+# before with no pause (it was cut, or ended at a phrase's pause) and is short joins it when
+# both still fit two lines; and a line waits for the one before to be read (READ_CPS), by at
+# most LAG_S after its own first word, so the captions stay with the picture.
+JOIN_GAP_S = 0.3
+JOIN_LONGEST_S = 2.5  # a line spoken in this long at most joins the one before
+JOIN_CHARS = 84  # without an overlay to ask: what two lines hold
+LAG_S = 1.0
+_LAG_LOOK = 32  # cues looked back at for a wait that reaches the one asked about
 TICK_MS = 250
 SEEK_S = 2.0  # the position moved this much more than the clock: a seek, read again there
 KEEP_S = 30 * 60.0  # cues kept this far behind the picture
@@ -788,8 +799,25 @@ class CaptionsController(QObject):
         i = bisect.bisect_left(self._cues, (start, end, text))
         if i < len(self._cues) and self._cues[i][0] == start:
             self._cues[i] = (start, end, text)  # read again over a stretch: the newer words
+        elif i > 0 and self._cues[i - 1][0] < start and self._cues[i - 1][1] == end:
+            return  # read again: it is the end of the line before, joined to it
         else:
             self._cues.insert(i, (start, end, text))
+        if i > 0 and self._joins(self._cues[i - 1], self._cues[i]):
+            before = self._cues[i - 1]
+            self._cues[i - 1] = (before[0], end, f"{before[2]} {text}")
+            del self._cues[i]
+
+    def _joins(self, before: tuple[float, float, str], line: tuple[float, float, str]) -> bool:
+        """Whether `line` is the end of `before`, on its own (2.9.5, JOIN_GAP_S)."""
+        start, end, text = line
+        if not 0.0 <= start - before[1] <= JOIN_GAP_S or end - start > JOIN_LONGEST_S:
+            return False
+        joined = f"{before[2]} {text}"
+        overlay = next((o for o in self._overlays if hasattr(o, "pages")), None)
+        if overlay is None:
+            return len(joined) <= JOIN_CHARS
+        return len(overlay.pages(joined)) <= 1
 
     def _on_progress(
         self, run: int, newest: float, rtf: float, written: Optional[float] = None
@@ -921,11 +949,13 @@ class CaptionsController(QObject):
 
     def _cue_at(self, position: float) -> str:
         i = bisect.bisect_right(self._cues, (position - FIRST_WORD_S, float("inf"), "")) - 1
+        while i >= 0 and self._shows(i) > position:
+            i -= 1  # it waits for the one before to be read
         if i < 0:
             return ""
         start, end, text = self._cues[i]
-        shows = start + FIRST_WORD_S
-        following = self._cues[i + 1][0] + FIRST_WORD_S if i + 1 < len(self._cues) else None
+        shows = self._shows(i)
+        following = self._shows(i + 1) if i + 1 < len(self._cues) else None
         if following is not None and following - end <= BRIDGE_S:
             until = following  # a short pause: on until the next line
         else:
@@ -934,7 +964,27 @@ class CaptionsController(QObject):
                 until = min(until, following)
         if not shows <= position < until:
             return ""
-        return self._part_at(text, position - shows, end - shows)
+        return self._part_at(text, position - shows, end - start - FIRST_WORD_S)
+
+    def _shows(self, i: int) -> float:
+        """When cue `i` shows: at its first word, or once the one before has been read, by at
+        most LAG_S later (2.9.5)."""
+        cues = self._cues
+        j = i
+        while j > 0 and i - j < _LAG_LOOK:
+            before_start, _, before_text = cues[j - 1]
+            if before_start + LAG_S + self._reading(before_text) <= cues[j][0]:
+                break  # the one before is read before this one's word: it starts on time
+            j -= 1
+        shows = cues[j][0] + FIRST_WORD_S
+        for k in range(j + 1, i + 1):
+            earliest = cues[k][0] + FIRST_WORD_S
+            shows = max(earliest, min(shows + self._reading(cues[k - 1][2]), earliest + LAG_S))
+        return shows
+
+    @staticmethod
+    def _reading(text: str) -> float:
+        return max(MIN_SHOW_S, len(text) / READ_CPS)
 
     def _part_at(self, text: str, elapsed: float, words_s: float) -> str:
         """`elapsed` into a caption whose words last `words_s`: the whole of it, or the part

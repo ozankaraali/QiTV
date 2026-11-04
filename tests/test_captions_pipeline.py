@@ -9,10 +9,10 @@ import shutil
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 import unittest.mock
-from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -499,6 +499,36 @@ class CutterTests(unittest.TestCase):
         pieces = self.push(cutter, 7.0)
         self.assertEqual(len(pieces), 1)
 
+    def voiced_cutter(self, voiced):
+        """A cutter whose detector holds "speech" all along, and whose detector without the
+        hold hears a voice where `voiced(t)` says (2.9.5)."""
+        clock = {"t": 0.0}
+
+        def is_voiced(window):
+            said = voiced(clock["t"])
+            clock["t"] += WINDOW / RATE
+            return said
+
+        return Cutter(lambda window: True, is_voiced)
+
+    def test_a_piece_that_reached_its_length_is_cut_at_its_longest_pause(self):
+        # 2.9.5: the held detector showed no pause between words: the cut fell anywhere.
+        cutter = self.voiced_cutter(lambda t: not (2.5 <= t < 2.6 or 3.2 <= t < 3.45))
+        cutter.set_max(4.0)
+        pieces = self.push(cutter, 6.0) + cutter.flush()
+        self.assertTrue(pieces[0].split)
+        self.assertAlmostEqual(pieces[0].end, 3.33, delta=0.07)  # inside the longer pause
+        self.assertAlmostEqual(pieces[1].start, pieces[0].end)
+
+    def test_a_phrase_pause_late_in_a_piece_ends_it_there(self):
+        cutter = self.voiced_cutter(lambda t: not (1.0 <= t < 1.4 or 3.0 <= t < 3.4))
+        cutter.set_max(4.0)
+        pieces = self.push(cutter, 6.0) + cutter.flush()
+        self.assertFalse(pieces[0].split)  # at a pause: the model's full stop stays
+        self.assertAlmostEqual(pieces[0].end, 3.25, delta=0.07)  # not at the early pause
+        self.assertGreaterEqual(pieces[1].start, pieces[0].end)  # the next one after it
+        self.assertLess(pieces[1].start, 3.45)
+
     def test_a_gap_in_the_sound_closes_the_open_piece(self):
         cutter = self.cutter(lambda t: True)
         pieces = self.push(cutter, 1.0) + self.push(cutter, 1.0, start=10.0)
@@ -602,13 +632,45 @@ class ControllerTimingTests(unittest.TestCase):
         run = self.captions._run
         self.assertEqual(self.sent[0][:4], ("start", run, "http://127.0.0.1:1/t/s1/side/3.ts", 0.0))
         self.captions._on_caption(run, 10.0, 12.0, "Merhaba")
-        self.captions._on_caption(run, 12.2, 13.0, "Nasılsın")
+        self.captions._on_caption(run, 12.5, 13.0, "Nasılsın")  # after a pause
         self.assertEqual(self.at(10.2), "")  # the piece's lead-in: not the words yet
         self.assertEqual(self.at(10.35), "Merhaba")  # its first word
-        self.assertEqual(self.at(12.45), "Merhaba")  # on until the next line's first word
-        self.assertEqual(self.at(12.55), "Nasılsın")
-        self.assertEqual(self.at(13.5), "Nasılsın")  # held a little after the words
-        self.assertEqual(self.at(13.7), "")
+        self.assertEqual(self.at(12.75), "Merhaba")  # on until the next line's first word
+        self.assertEqual(self.at(12.85), "Nasılsın")
+        self.assertEqual(self.at(13.9), "Nasılsın")  # held long enough to read
+        self.assertEqual(self.at(14.1), "")
+
+    def test_the_end_of_a_line_cut_off_on_its_own_joins_it(self):
+        # 2.9.5, the owner: a sentence's last words came alone ("ötesine geçiyor").
+        run = self.captions._run
+        self.captions._on_caption(run, 10.0, 16.0, "Uzay aracı bu yıl ilk kez Mars'ın")
+        self.captions._on_caption(run, 16.0, 17.2, "ötesine geçiyor.")  # cut, no pause
+        joined = "Uzay aracı bu yıl ilk kez Mars'ın ötesine geçiyor."
+        self.assertEqual(self.captions._cues, [(10.0, 17.2, joined)])
+        self.assertEqual(self.at(16.5), joined)
+        self.captions._on_caption(run, 16.0, 17.2, "ötesine geçiyor.")  # read again
+        self.assertEqual(self.captions._cues, [(10.0, 17.2, joined)])  # not shown twice
+
+    def test_a_line_joins_the_one_before_only_when_both_fit_and_nothing_parts_them(self):
+        self.overlay.pages = lambda text: [text] if len(text) <= 40 else [text[:40], text[40:]]
+        run = self.captions._run
+        self.captions._on_caption(run, 10.0, 16.0, "Uzay aracı bu yıl ilk kez Mars'ın")
+        self.captions._on_caption(run, 16.0, 17.2, "ötesine geçiyor.")  # two lines' worth
+        self.captions._on_caption(run, 20.0, 22.0, "Yeni bir cümle")
+        self.captions._on_caption(run, 22.8, 23.5, "başlıyor.")  # after a pause
+        self.assertEqual(len(self.captions._cues), 4)
+
+    def test_a_long_line_is_read_before_the_next_by_at_most_a_second(self):
+        # 2.9.5, the owner: "superseded ... not giving time to read".
+        run = self.captions._run
+        first = "Beyaz saray seçim sonuçlarını bekliyor, İran politikasında belirsizlik var."
+        second = "Dışişleri bakanı bugün yaptığı açıklamada görüşmelerin süreceğini söyledi."
+        self.captions._on_caption(run, 10.0, 13.0, first)  # 75 letters in 3 s
+        self.captions._on_caption(run, 13.6, 17.0, second)
+        self.captions._on_caption(run, 30.0, 31.0, "Sonra.")
+        self.assertEqual(self.at(14.5), first)  # its words gone, still being read
+        self.assertEqual(self.at(14.95), second)  # 1 s after its first word at most
+        self.assertEqual(self.at(30.35), "Sonra.")  # after a pause: on time again
 
     def test_a_long_caption_shows_in_parts_across_its_words(self):
         # 2.9.1: the overlay's parts (pages), each for its share of the words by its letters.

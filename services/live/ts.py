@@ -3962,6 +3962,10 @@ _SOUND_KEEP = 16  # the latest offsets from the pictures' clock the wander is ju
 _SOUND_SEEN = 4096  # PES starts noted at most (frames that can't be counted keep no window)
 _SOUND_STALE_S = 1.0  # no PCR over this much sound: the pictures' clock is not known
 _SOUND_BLIND_S = 2.0  # restamped sound waits this long for a clock to anchor on, dropped
+# 2.9.5: sound sent this far ahead of the pictures' clock waits in the stream until they come
+# (libVLC 3 discards sound that reaches its decoder much more than 3 s early) ...
+_SOUND_EARLY_S = 1.5
+_SOUND_HOLD_S = 15.0  # ... while at most this much of it waits (more: no pictures to wait for)
 _SOUND_KINDS = {0x03: "mpeg", 0x04: "mpeg", 0x0F: "aac"}
 _SOUND_HEAD = {"mpeg": 4, "aac": 7}  # the bytes a frame header is read from
 _MPEG_RATES = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000), 0: (11025, 12000, 8000)}
@@ -4016,6 +4020,9 @@ class _SoundTrack:
     resyncs: deque = field(default_factory=deque)  # ticks where a header was not
     # (provider's PTS, ticks, the pictures' clock as it came) per PES start
     seen: deque = field(default_factory=lambda: deque(maxlen=_SOUND_SEEN))
+    # (provider's PTS, ticks, the pictures' clock) of the latest PES starts that came with
+    # one (2.9.5: in a lump of sound the latest come with none)
+    clocked: deque = field(default_factory=lambda: deque(maxlen=_SOUND_KEEP))
     last: tuple[int, float] | None = None  # (provider's PTS, ticks) of the PES before
     active: bool = False
     by_clock: bool = False  # restamped for its distance from the pictures (not drift alone)
@@ -4025,6 +4032,12 @@ class _SoundTrack:
     pcr_mark: tuple[int, float] = (-1, 0.0)  # (PCRs counted, ticks) when one last came
     blind: float | None = None  # ticks since which restamped sound waits for a clock
     dropping: bool = False  # this PES's packets go as null packets (no clock to stamp on)
+    # 2.9.5: [when it's due on the pictures' clock, the ticks where it began, its packets] of
+    # each PES waiting for the pictures, oldest first; the last one is the PES being read
+    held: deque = field(default_factory=deque)
+    due: int | None = None  # when this PES is due on the pictures' clock (None: unknown)
+    leaves: int | None = None  # this PES's PTS as it leaves
+    unheld: bool = False  # waited too long: passes as it comes until it is in step again
 
     def restart(self) -> None:
         """Measured and anchored afresh (a discontinuity, or a step in the provider's stamps);
@@ -4032,6 +4045,7 @@ class _SoundTrack:
         self.head, self.skip, self.synced = b"", 0, False
         self.resyncs.clear()
         self.seen.clear()
+        self.clocked.clear()
         self.offsets.clear()
         self.last = self.anchor = self.blind = None
         self.pcr_mark = (-1, 0.0)
@@ -4069,6 +4083,27 @@ class SoundClock:
     `_SOUND_CALM_DRIFT` of the sound's length and `_SOUND_CALM_GAP_S` of the pictures over a
     window pass as they come again. Healthy sound passes untouched: nothing is written while
     the stamps agree with it. It runs after the codec relabeler (its PIDs and types).
+
+    2.9.5: the same channel, after a stall, sent its sound in lumps: 9.8 s of it in one run of
+    packets with no PCR or picture between, then the pictures it plays with. libVLC 3 discards
+    sound that reaches its decoder much more than 3 s ahead of its clock, so most of each lump
+    went: seconds of silence every ten (the sound watch restarted the track, then reopened).
+    So a PES of sound that comes more than `_SOUND_EARLY_S` ahead of the pictures' clock (the
+    earlier of its PTS as it leaves and the clock plus the sound that came since the latest
+    PCR: both must say it is early, so sound stamped ahead but sent in real time, which a mux
+    may do, is left alone) waits, with every later packet of its PID, until a PCR brings the
+    clock within `_SOUND_EARLY_S` of it; it then leaves just before that PCR's packet. Sound
+    sent in real time while the pictures stalled, PCR and all, so leaves just before the first
+    PCR after the stall, which reaches all of it: as it came, but for the tables between. More
+    than `_SOUND_HOLD_S` of it waiting says the pictures stopped: it all passes, and the sound
+    passes as it comes until it is in step with the pictures again. A sound waiting when its
+    PID leaves the map (another codec, the relabeler's move) leaves before that map;
+    `flush()` passes what waits. And restamped on the pictures' clock, the same sound in
+    another codec or on another PID (the PMT replaces the one sound with one other) is so from
+    its first PES, not passed minutes off its pictures while it is judged anew (the channel
+    alternates MPEG audio and AAC, both stamped minutes behind); restamped sound to be
+    anchored while the clock stands still (in a lump) is anchored at the clock plus the sound
+    that came since the latest PCR.
     """
 
     def __init__(self) -> None:
@@ -4081,12 +4116,20 @@ class SoundClock:
         self._pcr: int | None = None  # the latest PCR base
         self._pcrs = 0  # PCRs seen, to tell a PCR that stood still
         self._leads: deque[int] = deque(maxlen=_SOUND_KEEP)  # pictures' stamps less the PCR
+        self._orphans = bytearray()  # waiting sound of a PID the map dropped: it leaves next
         self.restamped: deque[tuple[int, float, float]] = deque(maxlen=_TRIMS_KEPT)
+        self.held_lumps = 0  # 2.9.5: times sound came early and waited for its pictures
 
     def feed(self, chunk: bytes) -> bytes:
         """Take bytes; return what passes on (a partial packet waits for the next bytes)."""
         data = self._buf + chunk if self._buf else bytes(chunk)
         out: bytearray | None = None
+        # The output so far once a packet waits or leaves out of turn, else None, and where
+        # the packets not yet in it start.
+        pieces: list[bytes] | None = None
+        run = 0
+        if self._orphans:  # (a discontinuity came with sound still waiting)
+            pieces, self._orphans = [bytes(self._orphans)], bytearray()
         n = len(data)
         off = 0
         while off + PACKET <= n:
@@ -4105,6 +4148,11 @@ class SoundClock:
             ):
                 self._pcr = _pcr_base(data, off + 6)
                 self._pcrs += 1
+                due = self._release()
+                if due:  # sound this PCR's clock reaches leaves just before it
+                    pieces = _cut(pieces, out if out is not None else data, run, off)
+                    pieces.append(due)
+                    run = off
             if b1 & 0x80:
                 pass  # a transport error: nothing read from it
             elif pid == 0:
@@ -4121,6 +4169,12 @@ class SoundClock:
             else:
                 track = self._tracks.get(pid)
                 if track is not None:
+                    start = bool(b1 & 0x40)
+                    if start and track.held and self._waited_too_long(pid, track):
+                        pieces = _cut(pieces, out if out is not None else data, run, off)
+                        pieces.append(b"".join(bytes(entry[2]) for entry in track.held))
+                        track.held.clear()
+                        run = off
                     writes = self._on_sound(pid, track, data, off)
                     if writes or track.dropping:
                         if out is None:
@@ -4130,22 +4184,119 @@ class SoundClock:
                         if track.dropping:
                             out[off + 1] = (out[off + 1] & 0xE0) | 0x1F  # a null packet
                             out[off + 2] = 0xFF
+                    if not track.dropping and self._waits(pid, track, start):
+                        source = out if out is not None else data
+                        pieces = _cut(pieces, source, run, off)
+                        track.held[-1][2] += source[off : off + PACKET]
+                        run = off + PACKET
+            if self._orphans:  # a map dropped a PID whose sound waited: it leaves before it
+                pieces = _cut(pieces, out if out is not None else data, run, off)
+                pieces.append(bytes(self._orphans))
+                self._orphans = bytearray()
+                run = off
             off += PACKET
         self._buf = data[off:]
-        return bytes(out[:off]) if out is not None else data[:off]
+        if pieces is None:
+            return bytes(out[:off]) if out is not None else data[:off]
+        pieces.append(bytes((out if out is not None else data)[run:off]))
+        return b"".join(pieces)
 
     def flush(self) -> bytes:
-        """A discontinuity or the end comes next: a partial packet held passes as it came."""
+        """A discontinuity or the end comes next: the sound waiting passes, and a partial
+        packet held as it came."""
         held, self._buf = self._buf, b""
-        return held
+        return self._take_held() + held
 
     def discontinuity(self) -> None:
         """The stream starts afresh: each sound is measured and anchored again, on the
         pictures' clock that comes next (a sound restamped stays so; how far the pictures run
-        ahead of the PCR is the mux's, kept)."""
+        ahead of the PCR is the mux's, kept). Sound still waiting (no `flush()` before) leaves
+        first in the next output."""
         self._pcr = None
+        self._orphans += self._take_held()
         for track in self._tracks.values():
             track.restart()
+
+    def _take_held(self) -> bytes:
+        """Every sound waiting, oldest first per sound."""
+        out = bytearray()
+        for track in self._tracks.values():
+            for entry in track.held:
+                out += entry[2]
+            track.held.clear()
+            track.unheld = False
+        return bytes(out)
+
+    def _clock(self) -> int | None:
+        """The pictures' clock: the latest PCR plus how far the pictures' stamps run ahead of
+        it (the median of the latest); None without both."""
+        if self._pcr is None or not self._leads:
+            return None
+        leads = sorted(self._leads)
+        return (self._pcr + leads[len(leads) // 2]) % _PTS_MODULO
+
+    def _estimate(self, track: _SoundTrack) -> int | None:
+        """The pictures' clock as this sound's PES comes, the clock standing still or not: the
+        clock plus the sound that came since the latest PCR (the sound in step at that PCR)."""
+        clock = self._clock()
+        if clock is None:
+            return None
+        count, since = track.pcr_mark
+        came = track.ticks - since if count == self._pcrs else 0.0
+        return (clock + round(came)) % _PTS_MODULO
+
+    def _waits(self, pid: int, track: _SoundTrack, start: bool) -> bool:
+        """Whether this packet of the sound waits for its pictures (class docstring); a PES
+        that starts waiting gets its entry in `track.held`."""
+        if track.held:
+            if start:  # a later PES: it waits behind the earlier ones
+                due = track.due if track.due is not None else track.held[-1][0]
+                track.held.append([due, track.ticks, bytearray()])
+            return True
+        if not start or track.due is None:
+            return False
+        clock = self._clock()
+        if clock is None or pts_delta(clock, track.due) <= _SOUND_EARLY_S * _CLOCK:
+            track.unheld = False  # in step: it may wait again
+            return False
+        if track.unheld:
+            return False
+        track.held.append([track.due, track.ticks, bytearray()])
+        self.held_lumps += 1
+        (logger.info if self.held_lumps == 1 else logger.debug)(
+            "Audio PID %#x came %.1f s ahead of its pictures: it waits for them.",
+            pid,
+            pts_delta(clock, track.due) / _CLOCK,
+        )
+        return True
+
+    def _waited_too_long(self, pid: int, track: _SoundTrack) -> bool:
+        """More than `_SOUND_HOLD_S` of the sound waits: the pictures stopped. It then passes as
+        it comes until it is in step with them again."""
+        if track.ticks - track.held[0][1] <= _SOUND_HOLD_S * _CLOCK:
+            return False
+        track.unheld = True
+        logger.info(
+            "Audio PID %#x waited %.0f s for pictures that did not come: it passes as it comes.",
+            pid,
+            (track.ticks - track.held[0][1]) / _CLOCK,
+        )
+        return True
+
+    def _release(self) -> bytes:
+        """The waiting sound the pictures' clock (a PCR just came) is now within
+        `_SOUND_EARLY_S` of, oldest first per sound."""
+        if not any(track.held for track in self._tracks.values()):
+            return b""
+        clock = self._clock()
+        if clock is None:
+            return b""
+        out = bytearray()
+        for track in self._tracks.values():
+            held = track.held
+            while held and pts_delta(clock, held[0][0]) <= _SOUND_EARLY_S * _CLOCK:
+                out += held.popleft()[2]
+        return bytes(out)
 
     def _on_pat(self, data: bytes, off: int) -> None:
         section = _section_at(data, off)
@@ -4157,6 +4308,7 @@ class SoundClock:
                 pmt_pid = ((section[i + 2] & 0x1F) << 8) | section[i + 3]
                 if pmt_pid != self._pmt_pid:
                     self._pmt_pid, self._video_pid, self._pcr_pid = pmt_pid, None, None
+                    self._orphans += self._take_held()
                     self._tracks.clear()
                     self._leads.clear()
                 self._program = program
@@ -4183,11 +4335,28 @@ class SoundClock:
         self._video_pid = video
         self._pcr_pid = ((section[8] & 0x1F) << 8) | section[9]
         tracks = {}
+        fresh = []
         for pid, kind in sounds.items():
             track = self._tracks.get(pid)
             if track is None or track.kind != kind:
                 track = _SoundTrack(kind)  # another codec: its frames are counted afresh
+                fresh.append(pid)
             tracks[pid] = track
+        gone = [track for pid, track in self._tracks.items() if tracks.get(pid) is not track]
+        for track in gone:
+            for entry in track.held:  # it waited: it leaves before this map
+                self._orphans += entry[2]
+            track.held.clear()
+        if len(fresh) == 1 and len(gone) == 1 and gone[0].active and gone[0].by_clock:
+            # The one sound in another codec or on another PID: on the pictures' clock still.
+            heir = tracks[fresh[0]]
+            heir.active = heir.by_clock = True
+            logger.info(
+                "Audio PID %#x is the sound restamped before, in %s: stamped from its length"
+                " from its first frame.",
+                fresh[0],
+                "AAC" if heir.kind == "aac" else "MPEG audio",
+            )
         self._tracks = tracks
 
     def _on_sound(
@@ -4205,8 +4374,11 @@ class SoundClock:
             places = _stamps(data, off)
             pts = next((value for kind, _, value in places if kind == _PTS), None)
             track.dropping = False
+            track.due = track.leaves = None
             if pts is not None:
                 writes = self._stamp(pid, track, pts, places)
+                if track.leaves is not None:
+                    track.due = self._due(track)
             if not track.synced:
                 track.head, track.skip = b"", 0  # frames are looked for from the PES's start
             at = off + start
@@ -4252,27 +4424,37 @@ class SoundClock:
         self, pid: int, track: _SoundTrack, pts: int, places: list[tuple[int, int, int]]
     ) -> list[tuple[int, int]] | None:
         """A PES of the sound starts with the provider's `pts`: noted, judged, and what its
-        PTS and DTS become (None: as they came; `track.dropping`: the PES goes)."""
+        PTS and DTS become (None: as they came; `track.dropping`: the PES goes), and its PTS
+        as it leaves (`track.leaves`)."""
         ticks, clock = track.ticks, self._arrival(track)
         track.dropping = False
+        track.leaves = pts
         if track.last is not None:
             last_pts, last_ticks = track.last
             if abs(pts_delta(last_pts, pts) - (ticks - last_ticks)) > _SOUND_STEP_S * _CLOCK:
                 # A step in the provider's stamps: measured and anchored afresh from here.
                 track.seen.clear()
+                track.clocked.clear()
                 track.offsets.clear()
                 track.anchor = None
         track.last = (pts, ticks)
         track.seen.append((pts, ticks, clock))
+        if clock is not None:
+            track.clocked.append((pts, ticks, clock))
         while ticks - track.seen[0][1] > _SOUND_WINDOW_S * _CLOCK:
             track.seen.popleft()
+        while track.clocked and track.clocked[0][1] < track.seen[0][1]:
+            track.clocked.popleft()
         while track.resyncs and track.resyncs[0] < track.seen[0][1]:
             track.resyncs.popleft()  # before the window: counted for nothing now
         self._judge(pid, track)
         if not track.active:
             return None
-        if track.anchor is None and not self._anchor(pid, track, ticks, clock):
-            return None
+        if track.anchor is None:
+            # The clock standing still (a lump of sound): the clock plus the sound since it.
+            on = clock if clock is not None else self._estimate(track)
+            if not self._anchor(pid, track, ticks, on):
+                return None
         assert track.anchor is not None
         anchor_ticks, anchor_pts = track.anchor
         written = (anchor_pts + round(ticks - anchor_ticks)) % _PTS_MODULO
@@ -4294,6 +4476,7 @@ class SoundClock:
                 written = (clock + round(track.offset)) % _PTS_MODULO
                 track.anchor = (ticks, written)
                 track.offsets.clear()
+        track.leaves = written
         shift = pts_delta(pts, written)
         return [
             (at, (value + shift) % _PTS_MODULO)
@@ -4338,15 +4521,21 @@ class SoundClock:
             track.pcr_mark = (self._pcrs, track.ticks)
         elif track.ticks - since > _SOUND_STALE_S * _CLOCK:
             return None
-        leads = sorted(self._leads)
-        return (self._pcr + leads[len(leads) // 2]) % _PTS_MODULO
+        return self._clock()
+
+    def _due(self, track: _SoundTrack) -> int | None:
+        """When this PES is due on the pictures' clock: the earlier of its PTS as it leaves and
+        `_estimate` (both must say it came early); None without a clock."""
+        estimate = self._estimate(track)
+        if estimate is None or track.leaves is None:
+            return None
+        return track.leaves if pts_delta(estimate, track.leaves) < 0 else estimate
 
     @staticmethod
     def _gap(track: _SoundTrack) -> float | None:
-        """The provider's stamps less the pictures' clock they came with (median, ticks)."""
-        gaps = sorted(
-            pts_delta(c, p) for p, _, c in list(track.seen)[-_SOUND_KEEP:] if c is not None
-        )
+        """The provider's stamps less the pictures' clock they came with (median of the latest
+        that came with one, in the window; ticks)."""
+        gaps = sorted(pts_delta(c, p) for p, _, c in track.clocked)
         return float(gaps[len(gaps) // 2]) if gaps else None
 
     def _judge(self, pid: int, track: _SoundTrack) -> None:
@@ -4384,6 +4573,15 @@ class SoundClock:
             track.active = track.by_clock = False
             track.anchor = None
             logger.info("Audio PID %#x is stamped by its length again: as it comes.", pid)
+
+
+def _cut(pieces: list[bytes] | None, source: bytes | bytearray, run: int, off: int) -> list[bytes]:
+    """`SoundClock.feed`'s output so far with the packets from `run` to `off` added."""
+    if pieces is None:
+        pieces = []
+    if off > run:
+        pieces.append(bytes(source[run:off]))
+    return pieces
 
 
 def _section_at(data: bytes, off: int) -> bytes | None:
