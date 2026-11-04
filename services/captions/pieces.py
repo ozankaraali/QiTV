@@ -44,6 +44,7 @@ class Piece:
     end: float
     samples: array
     speech_share: float
+    split: bool = False  # 2.9.4: cut mid-speech (it reached its length), not at a pause
 
 
 class Cutter:
@@ -119,7 +120,7 @@ class Cutter:
             start = self._piece
             at = self._cut_point(start, i + 1)
             self._piece = at
-            return self._cut(start, at)
+            return self._cut(start, at, split=True)
         return None
 
     def _cut_point(self, start: int, end: int) -> int:
@@ -139,7 +140,7 @@ class Cutter:
         quietest = min(range(lo, end), key=lambda i: self._loud[i])
         return quietest + 1
 
-    def _cut(self, start: int, end: int) -> Optional[Piece]:
+    def _cut(self, start: int, end: int, *, split: bool = False) -> Optional[Piece]:
         end = min(end, len(self._flags))
         if end - start < _windows(MIN_PIECE_S) or self._buf_start is None:
             return None
@@ -150,6 +151,7 @@ class Cutter:
             end=self._buf_start + end * WINDOW / RATE,
             samples=samples,
             speech_share=speech / max(1, end - start),
+            split=split,
         )
 
     def _trim(self) -> None:

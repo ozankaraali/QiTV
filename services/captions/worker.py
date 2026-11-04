@@ -90,6 +90,16 @@ _SENTENCE_ENDS = (".", "!", "?", "…")
 SENTENCE_GAP_S = 1.0  # a pause this long before a line: it starts a sentence
 
 
+def unfinished(text: str) -> str:
+    """A piece cut mid-speech without the full stop a model ends every piece with (2.9.4, the
+    owner on Cohere Transcribe: "puts dots ... at the end of all sub frames even though it is
+    just the split"); a question, an exclamation, an ellipsis stay."""
+    stripped = text.rstrip()
+    if stripped.endswith(("...", "…")) or not stripped.endswith((".", "。", "।")):
+        return text
+    return stripped[:-1].rstrip()
+
+
 def turkish_capital(text: str) -> str:
     """`text` with its first letter a capital, as Turkish writes it (i: İ)."""
     for i, char in enumerate(text):
@@ -418,6 +428,8 @@ class _Run:
                 continue  # in another language's letters: not what the channel says
             if not self.language and not self._heard(text, length):
                 continue
+            if piece.split:
+                text = unfinished(text)
             if self.language == TURKISH and self.model.turkish is not None:
                 text = self.sentence_case(text, piece.start, piece.end)
             self.link.send(("caption", self.run, piece.start, piece.end, text))
