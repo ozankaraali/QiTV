@@ -35,4 +35,28 @@ others' distributions, which may have malware.**
 - **The Library's search is where you look first:** a wide field in the middle of the
   Library's top bar instead of a small "Search" button, so the genre filter no longer looks like
   the place to search. Typing in the top bar searches, and the results say what was found
-  ("“salt” 3 results").
+  ("“salt” 3 results"). Letters typed anywhere in the Library go to the search, unless you
+  chose the genre filter, and a ✕ clears it.
+
+## Easier with the mouse
+
+- **A film's picture:** a click plays or pauses it instead of opening the channel list, the
+  controls have a TV button that brings back live TV, and a right-click offers what plays (its
+  players, its link; a channel's own menu on live TV).
+- **A wider window shows more, not the same bigger:** past a 1600-pixel-wide window, lists show
+  more rows, the Library more posters and the guide more hours.
+- **Series:** a click on a season shows it, a click on "Start over" starts the episode over, and
+  a ‹ at the series' title goes back.
+- **The guide:** a click on a channel's name tunes it, a right-click opens its menu, "Now" (or
+  Home) comes back to now, and "Today" opens a menu of the days to go to.
+- **Lists:** the row under the pointer is lit, a thin scrollbar shows while you scroll, a name
+  cut short shows whole in its tooltip, and the Library's sort reads as buttons.
+- **The channel list's names read in full** ("All providers › Live TV"), and its Library search
+  button no longer looks like the Find box.
+- **The volume panel stays while the pointer is on it,** and the wheel over it changes the
+  volume.
+- **With two or more providers, Movies and Series find the provider that has them** instead of
+  saying that the one shown has none.
+- **Settings:** every tab scrolls (it fits a small screen), the guide source "STB" is now called
+  the provider's own guide (it is Xtream's too), Apply Change is gone (Save keeps everything), and
+  Clear Image Cache asks first.
