@@ -177,7 +177,13 @@ class _Model:
             stream = self.european.create_stream()
             stream.accept_waveform(16000, samples)
             self.european.decode_stream(stream)
-            return str(stream.result.text).strip()  # its own capitals and full stops
+            text = str(stream.result.text).strip()  # its own capitals and full stops
+            # 2.9.3: Parakeet can't be told the language. On a French broadcast with English
+            # words in it, it wrote English ("And I've been at the bank", "We're deposing the
+            # same sum"): such a piece is Qwen's, told the language (Qwen knows it).
+            drifted = language != "English" and text_language.guess(text) == "English"
+            if not drifted or self.recognizer is None or language not in QWEN_LANGUAGES:
+                return text
         stream = self.recognizer.create_stream()
         if language in QWEN_LANGUAGES:  # not one only Parakeet knows (its files not given)
             stream.set_option("language", language)

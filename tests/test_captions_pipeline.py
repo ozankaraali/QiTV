@@ -220,6 +220,23 @@ class TurkishModelTests(unittest.TestCase):
         model.decode(array("f", [0.1]), "Ukrainian")
         self.assertNotIn("language", [key for _name, key, *_ in heard])
 
+    def test_a_piece_parakeet_wrote_in_english_is_qwens_told_the_language(self):
+        # 2.9.3: on a French broadcast with English words in it, Parakeet (never told the
+        # language) wrote English: "And I've been at the bank."
+        model, heard = self.model()
+        model.european = type(model.turkish)("parakeet", "And I've been at the bank, you know.")
+        model.recognizer = type(model.turkish)("qwen", "Et je vais à la banque.")
+        self.assertEqual(model.decode(array("f", [0.1]), "French"), "Et je vais à la banque.")
+        self.assertIn(("qwen", "language", "French"), heard)
+        heard.clear()
+        self.assertEqual(  # English, as it should be: Parakeet's
+            model.decode(array("f", [0.1]), "English"), "And I've been at the bank, you know."
+        )
+        self.assertEqual({name for name, *_ in heard}, {"parakeet"})
+        heard.clear()
+        model.european = type(model.turkish)("parakeet", "Love money, forcément, dans un bureau.")
+        self.assertEqual(model.decode(array("f", [0.1]), "French")[:10], "Love money")  # French
+
     def test_turkish_goes_to_ufak_louder_and_starts_with_a_capital(self):
         model, heard = self.model()
         self.assertEqual(model.decode(array("f", [0.1, 0.05]), "Turkish"), "iyi akşamlar")

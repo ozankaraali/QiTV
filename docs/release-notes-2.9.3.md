@@ -20,6 +20,9 @@ others' distributions, which may have malware.**
   too: choose one in the subtitles panel or in Settings, or play a sound track that names it.
   It comes with the speech model (670 MB more); if you already have AI captions, the next
   time you turn them on QiTV asks once to download it.
+- **French (or German, Italian…) with English words in it stays in its language:** the
+  European model can't be told the language, and on a French broadcast with some English it
+  wrote whole lines in English; such a line is now written by the other model, told the language.
 - **Hindi, Arabic and Greek captions no longer cut short:** the model could only write so much
   for each piece, too little for scripts whose words take many letters' worth of its tokens.
 - **No more flash of the controls or of old captions:** as a caption went at a silence, the
