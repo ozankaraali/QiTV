@@ -429,9 +429,12 @@ class DrawerTests(unittest.TestCase):
         self.assertFalse(crumb.isEmpty())  # the provider's name is on the row
         self.assertAlmostEqual(gear.right(), left.right() + 1 - side, delta=1)  # right-aligned
         self.assertLess(refresh.right(), gear.left())  # refresh just left of the gear
+        # 2.9.3: the names have their own row, level with the Find box beside it; the buttons
+        # the row under it, above the list.
+        self.assertAlmostEqual(crumb.center().y(), d.find_rect().center().y(), delta=1)
         for icon in (gear, refresh):
-            self.assertAlmostEqual(icon.center().y(), crumb.center().y(), delta=1)  # its row
-        self.assertLessEqual(crumb.right(), refresh.left())  # the name never runs under them
+            self.assertGreaterEqual(icon.top(), crumb.bottom())
+            self.assertLessEqual(icon.bottom(), d._columns["left"].view.geometry().top())
         self.click(gear.center())
         self.click(refresh.center())
         self.assertEqual(self.actions, [SETTINGS_ROW, REFRESH_ACTION])
@@ -443,8 +446,8 @@ class DrawerTests(unittest.TestCase):
         d = self.drawer
         search, refresh, crumb = d.search_rect(), d.refresh_rect(), d.breadcrumb_text_rect()
         self.assertLess(search.right(), refresh.left())
-        self.assertAlmostEqual(search.center().y(), crumb.center().y(), delta=1)  # its row
-        self.assertLessEqual(crumb.right(), search.left())  # the names never run under it
+        self.assertAlmostEqual(search.center().y(), refresh.center().y(), delta=1)  # one row
+        self.assertGreaterEqual(search.top(), crumb.bottom())  # under the names (2.9.3)
         self.click(search.center())
         self.assertEqual(self.actions, [SEARCH_ACTION])
         self.assertEqual(self.library, [])
@@ -456,8 +459,8 @@ class DrawerTests(unittest.TestCase):
         d = self.drawer
         library, search, crumb = d.library_rect(), d.search_rect(), d.breadcrumb_text_rect()
         self.assertLess(library.right(), search.left())  # ▤ ⌕ ↻ ⚙
-        self.assertAlmostEqual(library.center().y(), crumb.center().y(), delta=1)
-        self.assertLessEqual(crumb.right(), library.left())  # the names never run under it
+        self.assertAlmostEqual(library.center().y(), search.center().y(), delta=1)
+        self.assertGreaterEqual(library.top(), crumb.bottom())  # under the names (2.9.3)
         hit = d.header_hit_rect(library)
         self.assertGreaterEqual(min(hit.width(), hit.height()), 28)
         self.assertEqual(d.tooltip_at(library.center()), key_hint("Movies and series", "Ctrl+2"))
@@ -490,12 +493,15 @@ class DrawerTests(unittest.TestCase):
         self.assertLessEqual(
             d.header_hit_rect(d.back_rect()).right(), d.breadcrumb_text_rect().left()
         )
-        self.assertLessEqual(d.breadcrumb_text_rect().right(), hits[0].left())
+        self.assertLessEqual(d.breadcrumb_text_rect().bottom(), hits[0].top())
 
     def test_the_header_buttons_name_their_keys(self):
         self.drawer.open_drawer("1")
         d = self.drawer
-        self.assertEqual(d.tooltip_at(d.search_rect().center()), key_hint("Search", "Ctrl+F"))
+        self.assertEqual(  # 2.9.3: the Library's search, said as its field says it
+            d.tooltip_at(d.search_rect().center()),
+            key_hint("Search movies, series and channels", "Ctrl+F"),
+        )
         self.assertEqual(
             d.tooltip_at(d.settings_gear_rect().center()), key_hint("Settings", "Ctrl+,")
         )
@@ -620,9 +626,9 @@ class DrawerTests(unittest.TestCase):
         self.nav.reset_to("live", "10")
         self.drawer.open_drawer("1")
         d = self.drawer
-        back, library, text = d.back_rect(), d.library_rect(), d.breadcrumb_text_rect()
+        back, gear, text = d.back_rect(), d.settings_gear_rect(), d.breadcrumb_text_rect()
         self.assertLessEqual(back.right(), text.left())
-        self.assertLessEqual(text.right(), library.left())  # never under the buttons
+        self.assertLessEqual(text.right(), gear.right())  # within the column (2.9.3: its row)
         parts = d.breadcrumb_parts()
         self.assertEqual([i for i, _t, _r in parts], [0, 1])
         self.assertTrue(name.startswith(parts[0][1][:-1]), parts[0][1])
@@ -658,7 +664,7 @@ class DrawerTests(unittest.TestCase):
         parts = d.breadcrumb_parts()
         self.assertEqual([i for i, _t, _r in parts], [0, None, 2])
         self.assertEqual(parts[1][1], "… › ")
-        self.assertLessEqual(d.breadcrumb_text_rect().right(), d.library_rect().left())
+        self.assertLessEqual(d.breadcrumb_text_rect().right(), d.settings_gear_rect().right())
         self.click(parts[1][2].center())  # a layer up
         self.assertEqual([n.layer for n in self.nav.path], ["source", "section", "group"])
 
@@ -1712,6 +1718,71 @@ class FindTests(unittest.TestCase):
         self.assertEqual(self.data("Sports", CountRole), "300 channels")
         self.assertEqual(self.data("Northwind Sport 1", ChannelRowsModel.ProviderRole), "")
         self.assertNotIn(("found_genre", "TR: Spor"), self.rows())
+
+
+class ChannelMenuElsewhereTests(unittest.TestCase):
+    """2.9.3: a channel's menu where the channel list is not: the guide's rows and the picture
+    of what plays (ui.context_actions)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from ui.context_actions import ContextActions
+
+        config = SimpleNamespace(favorites=[], watch_history=[])
+        self.nav = NavModel(FakeCatalog(), config)
+        self.actions = ContextActions(
+            nav=self.nav,
+            config=config,
+            lanes=None,
+            external=None,
+            toggle_favorite=lambda item: None,
+            play_external=lambda *args: None,
+            notify=lambda text, kind: None,
+            open_pip=lambda node: None,
+        )
+        self.shown = []
+        patcher = mock.patch(
+            "ui.context_actions.QMenu.popup", lambda menu, pos: self.shown.append(menu)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def texts(self, menu):
+        return [a.text() for a in menu.actions() if not a.isSeparator()]
+
+    def test_a_guides_channel_has_its_rows_entries_whatever_the_list_shows(self):
+        self.nav.focus_source("Home")  # the channel list on its sources: no live section
+        channel = {"id": 1, "name": "One", "cmd": "x"}
+        self.actions.show_channel(channel, QPoint(1, 1), group_key="10")
+        self.assertEqual(
+            self.texts(self.shown[0]),
+            [
+                "Add to favorites",
+                "Open in picture-in-picture",
+                "Play in VLC",
+                "Play in MPV",
+                "Copy stream link",
+            ],
+        )
+
+    def test_the_picture_offers_what_plays(self):
+        from ui.link_lanes import Target
+
+        live = Target({"id": 1, "name": "One", "cmd": "x"}, "live", "One", group_key="10")
+        self.actions.show_playing(live, QPoint(1, 1))
+        self.assertNotIn("Open in picture-in-picture", self.texts(self.shown[-1]))  # itself
+        self.assertIn("Add to favorites", self.texts(self.shown[-1]))
+        film = Target({"id": "m", "name": "Heat", "cmd": "y"}, "movies", "Heat")
+        self.actions.show_playing(film, QPoint(1, 1))
+        self.assertEqual(
+            self.texts(self.shown[-1]), ["Play in VLC", "Play in MPV", "Copy stream link"]
+        )
+        local = Target({"cmd": "file:///f.mkv", "name": "f"}, "movies", "f", local=True)
+        self.actions.show_playing(local, QPoint(1, 1))
+        self.assertEqual(self.texts(self.shown[-1]), ["Play in VLC", "Play in MPV"])
 
 
 if __name__ == "__main__":

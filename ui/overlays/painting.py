@@ -377,6 +377,28 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             handle = QPainterPath(QPointF(0.6, 0.6))
             handle.lineTo(0.86, 0.86)
             line(handle)
+        elif name == "library_search":
+            # 2.9.3: the Library's search (films, series and channels), never the channel list's
+            # Find beside it: a poster's corner behind a magnifier.
+            poster = QPainterPath(QPointF(0.36, 0.72))
+            poster.lineTo(0.12, 0.72)
+            poster.lineTo(0.12, 0.1)
+            poster.lineTo(0.56, 0.1)
+            poster.lineTo(0.56, 0.3)
+            line(poster)
+            lens = QPainterPath()
+            lens.addEllipse(QRectF(0.38, 0.38, 0.36, 0.36))
+            line(lens)
+            handle = QPainterPath(QPointF(0.7, 0.7))
+            handle.lineTo(0.9, 0.9)
+            line(handle)
+        elif name == "tv":  # 2.9.3: live TV (the player controls' way back from a film)
+            line(_rrect(0.08, 0.26, 0.84, 0.56, 0.08))
+            aerial = QPainterPath(QPointF(0.34, 0.08))
+            aerial.lineTo(0.5, 0.24)
+            aerial.lineTo(0.66, 0.08)
+            line(aerial)
+            fill(_rrect(0.3, 0.86, 0.4, 0.07, 0.03))
         elif name == "star":
             pts = []
             for i in range(10):
