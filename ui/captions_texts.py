@@ -22,6 +22,12 @@ COULDNT_START = N_("Couldn't start AI captions")  # i18n: a toast
 DOWNLOAD_QUESTION = N_(
     "AI captions need a speech model on this computer: {size} to download once. Download it now?"
 )
+# 2.9.6: a language's own speech model (ufak AI's for Turkish, Cohere's, Parakeet), downloaded
+# once the language is wanted. i18n: language: its name, as "Turkish"; size: as "43 MB"
+SPECIALIST_QUESTION = N_(
+    "AI captions need another speech model for this language ({language}): {size} to download "
+    "once. Download it now?"
+)
 # AI captions fell behind with the larger speech model (Automatic) and the faster isn't here.
 # i18n: the question when AI captions fall behind with the larger speech model; size: "880 MB"
 STEP_DOWN_QUESTION = N_(

@@ -274,6 +274,8 @@ class _Model:
             self.turkish.decode_stream(stream)
             return lone_i_joined(str(stream.result.text).strip())  # its case: sentence_case
         specialist = self._specialist(language) if language else None
+        if specialist is None and language and language not in QWEN_LANGUAGES:
+            return ""  # 2.9.6: only its own model writes it, and that isn't here (not now)
         if specialist is not None and specialist is self.cohere:
             stream = specialist.create_stream()
             stream.set_option("language", iso_code(language))

@@ -18,6 +18,7 @@
   "AI captions": "Субтитри с ИИ",
   "AI captions can't keep up on this computer. Download the faster speech model ({size}) and switch to it?": "Субтитрите с ИИ не смогват на този компютър. Да се изтегли ли по-бързият речеви модел ({size}) и да се премине към него?",
   "AI captions need a speech model on this computer: {size} to download once. Download it now?": "Субтитрите с ИИ се нуждаят от речеви модел на този компютър: {size} за еднократно изтегляне. Да се изтегли ли сега?",
+  "AI captions need another speech model for this language ({language}): {size} to download once. Download it now?": "Субтитрите с ИИ се нуждаят от друг речеви модел за този език ({language}): {size} за еднократно изтегляне. Да се изтегли ли сега?",
   "AI captions switched to the faster speech model to keep up": "Субтитрите с ИИ преминаха към по-бързия речеви модел, за да смогват",
   "AI captions write down what is said, in the language spoken. A speech model makes them on this computer: the sound never leaves it. Turn them on in the Subtitles panel; the first time downloads the speech model.": "Субтитрите с ИИ записват казаното на говоримия език. Създава ги речеви модел на този компютър: звукът никога не го напуска. Включете ги от панела със субтитри; първия път се изтегля речевият модел.",
   "API key": "API ключ",

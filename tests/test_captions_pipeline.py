@@ -481,6 +481,16 @@ class CutterTests(unittest.TestCase):
         self.assertTrue(pieces[0].split)  # at its length, mid-speech
         self.assertFalse(pieces[-1].split)  # the pause at 8 s ended it
 
+    def test_a_language_only_a_model_not_here_writes_gets_no_guesses(self):
+        # 2.9.6: Parakeet (Ukrainian and eight more) comes once wanted; "Not now": nothing, not
+        # Qwen guessing at a language it doesn't know.
+        from services.captions.worker import _Model
+
+        model = object.__new__(_Model)
+        model.recognizer, model.turkish, model.european, model.cohere = object(), None, None, None
+        model._folders, model._loading = {}, {}
+        self.assertEqual(model.decode(array("f", bytes(64)), "Ukrainian"), "")
+
     def test_ufaks_lone_i_joins_the_word_it_begins(self):
         # 2.9.6, the real-use review: "i stanbul" (İstanbul), "i şte" (İşte).
         from services.captions.worker import lone_i_joined
@@ -995,7 +1005,13 @@ class StepDownTests(unittest.TestCase):
         self.config = {}
         self.captions._config_get = lambda name, default: self.config.get(name, default)
         self.captions._config_set = self.config.__setitem__
-        self.disk = {"small": True, "large": True}
+        self.disk = {
+            "small": True,
+            "large": True,
+            "turkish": True,
+            "european": True,
+            "cohere": True,
+        }
         self.captions._here = lambda name: self.disk[name]
         self.toasts = []
         self.captions._toast = lambda text, kind="info": self.toasts.append(text)
@@ -1037,6 +1053,42 @@ class StepDownTests(unittest.TestCase):
         self.assertEqual(self.captions.status_text(), "Can't keep up")
         self.captions._disable()
         self.assertEqual(self.captions._auto_tier(), "small")  # while QiTV runs
+
+    def test_a_languages_own_model_not_here_is_asked_for_once_then_loaded(self):
+        # 2.9.6, the owner: all 3.3-4.8 GB came at once, and the question's size looked random.
+        from unittest import mock
+
+        self.disk["turkish"] = False
+        self.captions._language = ("Turkish", "")
+        with mock.patch("services.captions.models.download_size", return_value=43_000_000):
+            self.captions._offer_specialist()
+            self.captions._offer_specialist()  # once while QiTV runs
+        [(text, _yes, _no)] = self.card.asked
+        self.assertIn("43 MB", text)
+        self.assertTrue(self.captions.asked_unprompted())  # every phone hears it too
+        started = []
+        self.captions._start_download = lambda: started.append(self.captions._fetching)
+        self.captions.answer(True)
+        self.assertEqual(started, ["turkish"])
+        download = object()
+        self.captions._download = download
+        self.disk["turkish"] = True
+        self.captions._on_downloaded(download)
+        self.assertEqual(self.stopped, [True])  # the captions process again ...
+        self.assertTrue(self.loaded[-1]["turkish"].endswith("ufakzeka-kulak"))  # ... with it
+        self.assertEqual(self.captions._tier, "large")  # the same Qwen
+
+    def test_a_model_that_is_here_is_not_asked_for_and_one_not_here_is_not_given(self):
+        from unittest import mock
+
+        self.captions._language = ("English", "")
+        self.disk["european"] = False
+        with mock.patch("services.captions.models.download_size", return_value=1):
+            self.captions._offer_specialist()  # Cohere writes English: it's here
+        self.assertEqual(self.card.asked, [])
+        self.captions._load_model()
+        self.assertIsNone(self.loaded[-1]["european"])  # the process never looks for it
+        self.assertTrue(self.loaded[-1]["cohere"])
 
     def test_while_another_model_writes_the_language_qwen_is_not_stepped_down(self):
         # 2.9.6, the real-use review: English is Cohere's; Qwen only wrote while Cohere loaded,

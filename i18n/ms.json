@@ -18,6 +18,7 @@
   "AI captions": "Sari kata AI",
   "AI captions can't keep up on this computer. Download the faster speech model ({size}) and switch to it?": "Sari kata AI tidak dapat mengikut pada komputer ini. Muat turun model pertuturan yang lebih pantas ({size}) dan beralih kepadanya?",
   "AI captions need a speech model on this computer: {size} to download once. Download it now?": "Sari kata AI memerlukan model pertuturan pada komputer ini: {size} untuk dimuat turun sekali. Muat turun sekarang?",
+  "AI captions need another speech model for this language ({language}): {size} to download once. Download it now?": "Sari kata AI memerlukan model pertuturan lain untuk bahasa ini ({language}): {size} untuk dimuat turun sekali. Muat turun sekarang?",
   "AI captions switched to the faster speech model to keep up": "Sari kata AI beralih kepada model pertuturan yang lebih pantas supaya dapat mengikut",
   "AI captions write down what is said, in the language spoken. A speech model makes them on this computer: the sound never leaves it. Turn them on in the Subtitles panel; the first time downloads the speech model.": "Sari kata AI menulis apa yang dituturkan, dalam bahasa yang dituturkan. Model pertuturan pada komputer ini yang menghasilkannya: bunyi tidak pernah meninggalkan komputer. Hidupkannya dalam panel sari kata; kali pertama, model pertuturan dimuat turun.",
   "API key": "Kunci API",

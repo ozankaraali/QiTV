@@ -508,11 +508,20 @@ def has_contents(folder: Path, contents: tuple[tuple[str, Optional[int]], ...]) 
     return True
 
 
-def needed(tier: str, root: Optional[Path] = None) -> list[Download]:
-    """Everything the tier needs to run, in download order: the runtime (unless this Python
-    has one), the VAD, the Turkish model, the tier's files. Unsupported without a runtime for
-    this computer."""
+# 2.9.6: the specialists, each downloaded once a language it writes is wanted (the owner: the
+# question said 43 MB, 832 MB or 2.3 GB, and all 3.3-4.8 GB came at once, whatever was watched)
+TURKISH_KEY, EUROPEAN_KEY, COHERE_KEY = "turkish", "european", "cohere"
+SPECIALISTS = (TURKISH_KEY, EUROPEAN_KEY, COHERE_KEY)
+
+
+def needed(key: str, root: Optional[Path] = None) -> list[Download]:
+    """What `key` needs to run, in download order. A tier ("small", "large"): the runtime
+    (unless this Python has one), the VAD and Qwen's files, what captions need to start. A
+    specialist (`SPECIALISTS`): its own files. Unsupported without a runtime for this
+    computer."""
     base = _root(root)
+    if key in SPECIALISTS:
+        return _specialist(key, base)
     downloads: list[Download] = []
     runtime = runtime_dir(base)
     if runtime is not None:
@@ -520,14 +529,7 @@ def needed(tier: str, root: Optional[Path] = None) -> list[Download]:
         downloads.append(Download(runtime, main, _RUNTIME_CONTENTS))
         downloads.append(Download(runtime, core))
     downloads.append(Download(base, VAD, ((VAD.path, VAD.size),)))
-    turkish = base / TURKISH_FOLDER
-    for file in TURKISH_FILES:
-        downloads.append(Download(turkish, file, ((file.path, file.size),)))
-    european = base / EUROPEAN_FOLDER
-    for file in EUROPEAN_FILES:
-        downloads.append(Download(european, file, ((file.path, file.size),)))
-    downloads.append(Download(base / COHERE_FOLDER, COHERE_FILE, COHERE_CONTENTS))
-    info = TIERS[tier]
+    info = TIERS[key]
     folder = base / info.folder
     for file in info.files:
         if file.extract == EXTRACT_TAR_BZ2:
@@ -535,6 +537,15 @@ def needed(tier: str, root: Optional[Path] = None) -> list[Download]:
         else:
             downloads.append(Download(folder, file, ((file.path, file.size),)))
     return downloads
+
+
+def _specialist(key: str, base: Path) -> list[Download]:
+    if key == COHERE_KEY:
+        return [Download(base / COHERE_FOLDER, COHERE_FILE, COHERE_CONTENTS)]
+    folder, files = (
+        (TURKISH_FOLDER, TURKISH_FILES) if key == TURKISH_KEY else (EUROPEAN_FOLDER, EUROPEAN_FILES)
+    )
+    return [Download(base / folder, file, ((file.path, file.size),)) for file in files]
 
 
 def missing(tier: str, root: Optional[Path] = None) -> list[Download]:

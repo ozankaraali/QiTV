@@ -18,6 +18,7 @@
   "AI captions": "Sous-titres IA",
   "AI captions can't keep up on this computer. Download the faster speech model ({size}) and switch to it?": "Les sous-titres IA n'arrivent pas à suivre sur cet ordinateur. Télécharger le modèle vocal plus rapide ({size}) et passer à celui-ci ?",
   "AI captions need a speech model on this computer: {size} to download once. Download it now?": "Les sous-titres IA ont besoin d'un modèle vocal sur cet ordinateur : {size} à télécharger une seule fois. Le télécharger maintenant ?",
+  "AI captions need another speech model for this language ({language}): {size} to download once. Download it now?": "Les sous-titres IA ont besoin d'un autre modèle vocal pour cette langue ({language}) : {size} à télécharger une seule fois. Le télécharger maintenant ?",
   "AI captions switched to the faster speech model to keep up": "Les sous-titres IA sont passés au modèle vocal plus rapide pour suivre",
   "AI captions write down what is said, in the language spoken. A speech model makes them on this computer: the sound never leaves it. Turn them on in the Subtitles panel; the first time downloads the speech model.": "Les sous-titres IA écrivent ce qui est dit, dans la langue parlée. Un modèle vocal les crée sur cet ordinateur : le son ne le quitte jamais. Activez-les dans le panneau des sous-titres ; la première fois télécharge le modèle vocal.",
   "API key": "Clé API",

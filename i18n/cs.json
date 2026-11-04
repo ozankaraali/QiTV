@@ -18,6 +18,7 @@
   "AI captions": "Titulky s AI",
   "AI captions can't keep up on this computer. Download the faster speech model ({size}) and switch to it?": "Titulky s AI na tomto počítači nestíhají. Stáhnout rychlejší model řeči ({size}) a přepnout na něj?",
   "AI captions need a speech model on this computer: {size} to download once. Download it now?": "Titulky s AI potřebují v tomto počítači model řeči: {size} ke stažení jen jednou. Stáhnout ho teď?",
+  "AI captions need another speech model for this language ({language}): {size} to download once. Download it now?": "Titulky s AI potřebují pro tento jazyk ({language}) další model řeči: {size} ke stažení jen jednou. Stáhnout ho teď?",
   "AI captions switched to the faster speech model to keep up": "Titulky s AI přepnuly na rychlejší model řeči, aby stíhaly",
   "AI captions write down what is said, in the language spoken. A speech model makes them on this computer: the sound never leaves it. Turn them on in the Subtitles panel; the first time downloads the speech model.": "Titulky s AI zapisují, co zaznívá, v mluveném jazyce. Vytváří je model řeči v tomto počítači: zvuk ho nikdy neopustí. Zapněte je v panelu titulků; poprvé se stáhne model řeči.",
   "API key": "Klíč API",

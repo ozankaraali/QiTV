@@ -18,6 +18,7 @@
   "AI captions": "Legendas por IA",
   "AI captions can't keep up on this computer. Download the faster speech model ({size}) and switch to it?": "As legendas por IA não estão dando conta neste computador. Baixar o modelo de fala mais rápido ({size}) e mudar para ele?",
   "AI captions need a speech model on this computer: {size} to download once. Download it now?": "As legendas por IA precisam de um modelo de fala neste computador: {size} para baixar uma única vez. Baixar agora?",
+  "AI captions need another speech model for this language ({language}): {size} to download once. Download it now?": "As legendas por IA precisam de outro modelo de fala para este idioma ({language}): {size} para baixar uma única vez. Baixar agora?",
   "AI captions switched to the faster speech model to keep up": "As legendas por IA mudaram para o modelo de fala mais rápido para dar conta",
   "AI captions write down what is said, in the language spoken. A speech model makes them on this computer: the sound never leaves it. Turn them on in the Subtitles panel; the first time downloads the speech model.": "As legendas por IA escrevem o que é dito, no idioma falado. Um modelo de fala as cria neste computador: o áudio nunca sai dele. Ative-as no painel de legendas; na primeira vez, o modelo de fala é baixado.",
   "API key": "Chave de API",

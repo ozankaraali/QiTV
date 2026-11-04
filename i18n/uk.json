@@ -18,6 +18,7 @@
   "AI captions": "ШІ-субтитри",
   "AI captions can't keep up on this computer. Download the faster speech model ({size}) and switch to it?": "ШІ-субтитри не встигають на цьому комп'ютері. Завантажити швидшу мовленнєву модель ({size}) і перейти на неї?",
   "AI captions need a speech model on this computer: {size} to download once. Download it now?": "Для ШІ-субтитрів на цьому комп'ютері потрібна мовленнєва модель: {size}, завантажується один раз. Завантажити зараз?",
+  "AI captions need another speech model for this language ({language}): {size} to download once. Download it now?": "Для ШІ-субтитрів цією мовою ({language}) потрібна інша мовленнєва модель: {size}, завантажується один раз. Завантажити зараз?",
   "AI captions switched to the faster speech model to keep up": "ШІ-субтитри перейшли на швидшу мовленнєву модель, щоб встигати",
   "AI captions write down what is said, in the language spoken. A speech model makes them on this computer: the sound never leaves it. Turn them on in the Subtitles panel; the first time downloads the speech model.": "ШІ-субтитри записують сказане мовою мовлення. Їх створює мовленнєва модель на цьому комп'ютері: звук ніколи його не залишає. Увімкніть їх на панелі субтитрів; першого разу завантажиться мовленнєва модель.",
   "API key": "Ключ API",

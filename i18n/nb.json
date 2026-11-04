@@ -18,6 +18,7 @@
   "AI captions": "KI-undertekster",
   "AI captions can't keep up on this computer. Download the faster speech model ({size}) and switch to it?": "KI-undertekster henger ikke med på denne datamaskinen. Vil du laste ned den raskere talemodellen ({size}) og bytte til den?",
   "AI captions need a speech model on this computer: {size} to download once. Download it now?": "KI-undertekster trenger en talemodell på denne datamaskinen: {size} å laste ned én gang. Vil du laste den ned nå?",
+  "AI captions need another speech model for this language ({language}): {size} to download once. Download it now?": "KI-undertekster trenger en annen talemodell for dette språket ({language}): {size} å laste ned én gang. Vil du laste den ned nå?",
   "AI captions switched to the faster speech model to keep up": "KI-undertekster byttet til den raskere talemodellen for å henge med",
   "AI captions write down what is said, in the language spoken. A speech model makes them on this computer: the sound never leaves it. Turn them on in the Subtitles panel; the first time downloads the speech model.": "KI-undertekster skriver ned det som blir sagt, på språket som snakkes. En talemodell lager dem på denne datamaskinen: lyden forlater den aldri. Slå dem på i undertekstpanelet; første gang lastes talemodellen ned.",
   "API key": "API-nøkkel",

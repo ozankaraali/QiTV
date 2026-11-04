@@ -784,6 +784,7 @@
   "AI captions": "",
   "AI captions can't keep up on this computer. Download the faster speech model ({size}) and switch to it?": "",
   "AI captions need a speech model on this computer: {size} to download once. Download it now?": "",
+  "AI captions need another speech model for this language ({language}): {size} to download once. Download it now?": "",
   "AI captions switched to the faster speech model to keep up": "",
   "AI captions write down what is said, in the language spoken. A speech model makes them on this computer: the sound never leaves it. Turn them on in the Subtitles panel; the first time downloads the speech model.": "",
   "API key": "",
