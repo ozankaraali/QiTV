@@ -696,6 +696,9 @@ class TVController(QObject):
         self._guide.tuneRequested.connect(self._on_guide_tune)
         self._guide.catchupRequested.connect(self._on_guide_catchup)
         self.overlays.guide.fullscreenRequested.connect(self.window_actions.toggle_fullscreen)
+        guide_menu = getattr(self.overlays.guide, "contextRequested", None)
+        if guide_menu is not None:  # 2.9.3: a right-click on a channel of the guide
+            guide_menu.connect(self._on_guide_context)
         transport.nextRequested.connect(self._on_next_requested)
         transport.playPauseRequested.connect(self._toggle_pause)
         transport.stopRequested.connect(self.stop)
@@ -1273,10 +1276,24 @@ class TVController(QObject):
             notice.hide()
 
     def video_clicked(self) -> None:
+        """A click on the picture: the channel list closes; else on live TV it opens, and
+        during a movie or an episode (2.9.3: the list came up over a film; the owner: never
+        the channel list there) the film pauses or plays on, its controls showing."""
         if self.overlays.drawer.isVisible():
             self.overlays.drawer.close_drawer()
+        elif self._on_demand():
+            self._play_pause()
         else:
             self.handle(Action.OPEN_DRAWER)
+
+    def video_context(self, global_pos: QPoint) -> None:
+        """2.9.3: a right-click on the picture: the menu of what plays (a channel's as its row
+        has it in the channel list, a film's or an episode's players and link). Nothing over
+        the multiview's grid (its tiles are the pictures), nor with nothing playing."""
+        target = self._current
+        if self._closed or target is None or self.multiview_shown():
+            return
+        self._context.show_playing(target, global_pos, self.overlays.transport)
 
     def video_double_clicked(self) -> None:
         """Fullscreen; on the multiview's grid, back to one picture (its first click focused
@@ -3987,6 +4004,13 @@ class TVController(QObject):
         """A right-click on a drawer row: its context menu."""
         if not self._closed:
             self._context.show(node, global_pos, self.overlays.drawer)
+
+    def _on_guide_context(self, channel: dict, global_pos: QPoint) -> None:
+        """2.9.3: a right-click on a channel of the guide: its menu, as its row's in the
+        channel list."""
+        if not self._closed:
+            guide = self.overlays.guide
+            self._context.show_channel(channel, global_pos, guide, group_key=self._guide.group())
 
     def show_library_menu(
         self, item: dict, section: str, global_pos: QPoint, parent: Optional[QObject] = None

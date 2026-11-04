@@ -1970,6 +1970,30 @@ class VodTests(ControllerTestCase):
         self.assertEqual(self.toast.messages()[-1], ("Finished", "info"))
         self.assertEqual(self.watch.flushes, 1)
 
+    def test_a_click_on_the_picture_pauses_a_film_never_opening_the_channel_list(self):
+        # 2.9.3 (the owner): during a film a click plays or pauses it, its controls showing.
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        toggles = self.session.toggles
+        self.controller.video_clicked()
+        self.assertEqual(self.session.toggles, toggles + 1)
+        self.assertFalse(self.drawer.visible)
+        self.assertIn(("poke",), self.transport.calls)
+
+    def test_a_right_click_on_the_picture_offers_what_plays(self):  # 2.9.3
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        shown = []
+        with mock.patch.object(
+            self.controller._context, "show_playing", lambda *a: shown.append(a[:2])
+        ):
+            self.controller.video_context(QPoint(3, 4))
+        self.assertEqual(len(shown), 1)
+        target, pos = shown[0]
+        self.assertEqual(
+            (target.item["name"], target.section, pos), ("Heat", "movies", QPoint(3, 4))
+        )
+
     def test_a_new_quality_opens_the_film_again_where_it_is(self):  # 2.8: the ⚙ menu
         self.play_movie()
         self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
