@@ -135,6 +135,14 @@ against pinned SHA-256 sums:
   (<https://huggingface.co/ufakai/ufakzeka-kulak>), its sherpa-onnx export; trained on openly
   licensed Turkish speech (Common Voice, ISSAI Turkish Speech Corpus, antalia-voice-corpus,
   YODAS), each source and its licence listed in the model's ATTRIBUTION.md.
+- **Parakeet TDT 0.6B v3** (NVIDIA), the speech model for 25 European languages: Creative
+  Commons Attribution 4.0 (CC-BY-4.0) (<https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3>),
+  as converted to int8 ONNX by the sherpa-onnx project
+  (`csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`). NVIDIA and Parakeet are
+  trademarks of NVIDIA Corporation.
+- **Cohere Transcribe** (03-2026, Cohere Labs), the speech model for 14 languages: Apache
+  License 2.0 (<https://huggingface.co/CohereLabs/cohere-transcribe-03-2026>), as converted to
+  int8 ONNX by the sherpa-onnx project (its GitHub releases). Cohere is a trademark of Cohere Inc.
 - **sherpa-onnx** and **sherpa-onnx-core** 2.0.1 (k2-fsa), which run the model and include
   ONNX Runtime (Microsoft, MIT License): Apache License 2.0, from PyPI.
 - **Silero VAD** (Silero Team), the voice detector: MIT License, from sherpa-onnx's releases.

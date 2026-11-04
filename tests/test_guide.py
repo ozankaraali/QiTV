@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -446,11 +447,52 @@ class GuideMouseTests(unittest.TestCase):
         self.assertIs(self.guide.current_channel(), self.chans[0])
         self.assertEqual(self.host_events, [])
 
+    # 2.9.3 -------------------------------------------------------------------------------
+    def channel_point(self, row):
+        return QPoint(round(CHANNEL_U * self.guide.width() / 100 / 2), self.row_point(row).y())
+
+    def test_a_click_on_a_channels_name_tunes_it(self):
+        # As a channel row of the channel list: one click (the rule: ui/library/poster_grid.py).
+        left, none = Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+        QTest.mouseClick(self.guide, left, none, self.channel_point(4))
+        self.assertEqual(self.tuned, [self.chans[4]])
+        self.wait_past_double_click()
+        self.assertEqual(self.host_events, [])
+
+    def test_a_right_click_asks_for_the_channels_menu_and_the_highlight_stays(self):
+        menus = []
+        self.guide.contextRequested.connect(lambda channel, pos: menus.append((channel, pos)))
+        point = self.row_point(6)
+        QTest.mouseClick(
+            self.guide, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, point
+        )
+        self.assertEqual(menus, [(self.chans[6], self.guide.mapToGlobal(point))])
+        self.assertIs(self.guide.current_channel(), self.chans[0])
+        self.assertEqual(self.tuned, [])
+
+    def test_a_name_or_a_programme_cut_short_reads_whole(self):
+        long = "A channel with an extraordinarily long name that never ends HD"
+        chans = [{"id": "1", "name": long, "number": "1"}, {"id": "2", "name": "Two"}]
+        self.guide.open_guide(chans, 1)
+        self.assertEqual(self.guide.tooltip_at(QPointF(self.channel_point(0))), long)
+        self.assertEqual(self.guide.tooltip_at(QPointF(self.channel_point(1))), "")
+
+    def test_the_rows_show_a_scrollbar_that_moves_them(self):
+        indicator = self.guide._indicator
+        self.guide.move_by(20)  # the rows scroll: it shows
+        self.assertTrue(indicator.isVisible())
+        top = self.guide.visible_channels()[0]
+        indicator._scroll_to(0)
+        self.assertIs(self.guide.visible_channels()[0], self.chans[0])
+        self.assertIsNot(top, self.chans[0])
+        self.assertIs(self.guide.current_channel(), self.chans[20])  # the highlight stays
+
 
 class GuideHeaderTests(unittest.TestCase):
     """Every key has a control on screen (2.0.1): the guide's keys have buttons in its header."""
 
-    BUTTONS = ("earlier", "later", "search", "fullscreen", "close")
+    # 2.9.3: the day (its menu of days) and Now (Home) before ‹ ›.
+    BUTTONS = ("day", "now", "earlier", "later", "search", "fullscreen", "close")
 
     @classmethod
     def setUpClass(cls):
@@ -482,9 +524,11 @@ class GuideHeaderTests(unittest.TestCase):
         self.assertEqual(list(buttons), list(self.BUTTONS))
         u = self.guide.width() / 100
         header_bottom = (TOP_U + HEADER_U) * u
+        self.assertEqual(self.guide.tooltip_at(buttons["day"].center()), "")  # it reads as it is
         for name, (what, keys) in zip(
-            self.BUTTONS,
+            self.BUTTONS[1:],
             (
+                ("Now", "Home"),
                 ("Earlier", "Left"),
                 ("Later", "Right"),
                 ("Search", "Ctrl+F"),
@@ -549,6 +593,40 @@ class GuideHeaderTests(unittest.TestCase):
         self.assertFalse(self.guide.isVisible())
         self.assertEqual(closed, [True])
         self.assertEqual(self.tuned, [])
+
+    def test_now_brings_the_window_back_to_now(self):  # 2.9.3
+        start = self.guide.window_start()
+        self.click("later")
+        self.click("later")
+        self.click("now")
+        self.assertEqual(self.guide.window_start(), start)
+        self.guide.shift(3)
+        self.guide.go_now()  # Home
+        self.assertEqual(self.guide.window_start(), start)
+
+    def test_the_day_lists_the_days_the_window_reaches(self):  # 2.9.3
+        self.assertEqual(
+            [label for label, _start in self.guide.day_choices()], ["Today", "Tomorrow"]
+        )
+        start = self.guide.window_start()
+        label, tomorrow = self.guide.day_choices()[1]
+        self.assertEqual(tomorrow - start, timedelta(days=1))  # the same time of day
+        self.guide._go_to(tomorrow)
+        self.assertEqual(self.guide.window_start(), tomorrow)
+        self.assertEqual(self.guide.day_choices()[0][1], start)  # today: now
+        shown = []
+        with mock.patch("ui.overlays.guide.QMenu.popup", lambda menu, pos: shown.append(menu)):
+            self.click("day")
+        self.assertEqual([a.text() for a in shown[0].actions()], ["Today", "Tomorrow"])
+        self.assertEqual([a.isChecked() for a in shown[0].actions()], [False, True])
+
+    def test_a_window_wider_than_the_cap_shows_more_time_not_wider_boxes(self):  # 2.9.3
+        self.host.resize(1280, 720)
+        self.assertEqual(self.guide._layout().slots, 5)  # 2.5 h, as before
+        self.host.resize(2560, 1440)
+        layout = self.guide._layout()
+        self.assertEqual(layout.slots, 8)  # 4 h
+        self.assertGreater(layout.full_rows(), 10)
 
     def test_the_buttons_fit_a_small_guide(self):
         for width in (360, 640, 960):

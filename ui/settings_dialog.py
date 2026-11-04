@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication, QIntValidator
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -47,7 +47,7 @@ from services import (
     system_open,
 )
 from services.account_check import check_account
-from services.captions.languages import QWEN_LANGUAGES, own_name
+from services.captions.languages import CAPTION_LANGUAGES, own_name
 from services.config_manager import ConfigManager
 from services.epg_view import (
     GUIDE_OFFSET_KEY,
@@ -132,8 +132,12 @@ REMOVE_QUESTION = N_("Remove the provider “{name}”?")
 # i18n: added to "Remove the provider …?" when it has scheduled recordings
 REMOVE_RECORDINGS_NOTE = N_("Its scheduled recordings will be cancelled.")
 PLAYLIST_TYPES = ("M3UPLAYLIST", "M3USTREAM")
-# i18n: under Settings' Apply Change: this provider's edits are kept until Save uses them
-APPLIED_TEXT = N_("Changes kept. Press Save to use them.")
+# 2.9.3: the EPG Source setting's choice "STB" (its value in the config): the guide of the
+# provider QiTV is on (an STB portal's or an Xtream panel's).
+# i18n: the EPG Source setting's choice: the guide the provider itself gives
+PROVIDER_GUIDE_TEXT = N_("Provider's own guide")
+# i18n: asked by Settings' Clear Image Cache before it clears it (2.9.3)
+CLEAR_CACHE_QUESTION = N_("Clear the image cache? Posters and logos download again as they show.")
 GUIDE_OFFSET_TIP = N_(
     "When this provider's guide is off by whole hours, move its programmes here: with +1 h,"
     " a programme the guide lists at 20:00 shows at 21:00 (the guide, the banner, now and next"
@@ -397,6 +401,58 @@ class AddXmltvMappingDialog(QDialog):
         )
 
 
+class _TabScroll(QScrollArea):
+    """A Settings tab's page, scrolling (2.9.3: the window could not be made smaller than its
+    longest tab, 710×722 on a Mac, taller than a 768 px laptop's screen leaves). It asks for
+    the page's own size, so the window opens as before where there is room."""
+
+    def __init__(self, page: QWidget, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setWidget(page)
+
+    def sizeHint(self) -> QSize:
+        page = self.widget()
+        hint = page.sizeHint() if page is not None else QSize()
+        bar = self.verticalScrollBar().sizeHint().width()
+        return QSize(hint.width() + bar, hint.height())
+
+
+class _ScrollingTabs(QTabWidget):
+    """The Settings window's tabs: each page in a scroll area (2.9.3), the pages themselves
+    still the tabs' widgets for the window's code (`setCurrentWidget(dialog.providers_tab)`).
+    A page that scrolls by itself (Time-shift, Subtitles) is a tab as it is."""
+
+    def addTab(self, page: QWidget, *args) -> int:
+        if not isinstance(page, QScrollArea):
+            page = _TabScroll(page, self)
+        return super().addTab(page, *args)
+
+    def _scroll_of(self, page: QWidget) -> QWidget:
+        for index in range(self.count()):
+            tab = super().widget(index)
+            if tab is page or (isinstance(tab, _TabScroll) and tab.widget() is page):
+                return tab
+        return page
+
+    def widget(self, index: int) -> QWidget | None:
+        tab = super().widget(index)
+        page = tab.widget() if isinstance(tab, _TabScroll) else None
+        return page if page is not None else tab
+
+    def currentWidget(self) -> QWidget:
+        page = self.widget(self.currentIndex())
+        return page if page is not None else super().currentWidget()
+
+    def indexOf(self, page: QWidget) -> int:
+        return super().indexOf(self._scroll_of(page))
+
+    def setCurrentWidget(self, page: QWidget) -> None:
+        super().setCurrentWidget(self._scroll_of(page))
+
+
 class OptionsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -460,9 +516,25 @@ class OptionsDialog(QDialog):
 
         self.load_providers()
         self._mark_saved()
+        self._fit_screen()
+
+    def _fit_screen(self) -> None:
+        """2.9.3: open at the pages' size, or the screen's room when that is less (each tab
+        scrolls then)."""
+        screen = self.screen()
+        if screen is None:
+            return
+        room = screen.availableGeometry()
+        hint = self.sizeHint()
+        width = min(hint.width(), max(320, room.width() - 40))
+        height = min(hint.height(), max(240, room.height() - 60))
+        self.resize(width, height)
 
     def create_options_ui(self):
-        self.options_tab = QTabWidget(self)
+        self.options_tab = _ScrollingTabs(self)
+        # The EPG tab shows the guide's fetch period only where it applies (an STB portal is
+        # listed): the list may have changed on the Providers tab meanwhile.
+        self.options_tab.currentChanged.connect(lambda _index: self._refresh_epg_rows())
 
         # Add tab with settings
         self.create_settings_ui()
@@ -817,7 +889,7 @@ class OptionsDialog(QDialog):
         self.ai_captions_language_combo = QComboBox(group)
         self.ai_captions_language_combo.setObjectName("aiCaptionsLanguage")
         self.ai_captions_language_combo.addItem(auto_language_text(), "auto")
-        for name in sorted(QWEN_LANGUAGES, key=lambda name: own_name(name).casefold()):
+        for name in sorted(CAPTION_LANGUAGES, key=lambda name: own_name(name).casefold()):
             self.ai_captions_language_combo.addItem(own_name(name), name)
         self.ai_captions_language_combo.setCurrentIndex(
             max(
@@ -1236,12 +1308,12 @@ class OptionsDialog(QDialog):
         # i18n: a button: check that the provider answers (verb)
         self.verify_button = QPushButton(tr("Verify Provider"), self.verify_apply_group)
         self.verify_button.clicked.connect(self.verify_provider)
-        # i18n: a button: keep this provider's edits (verb)
-        self.apply_button = QPushButton(tr("Apply Change"), self.verify_apply_group)
-        self.apply_button.clicked.connect(self.apply_provider)
+        # 2.9.3: no "Apply Change" beside it: Save keeps the form's edits (as switching to
+        # another provider does) and loads the lists of a provider whose address or account
+        # changed; the button only said so, beside Save, which read as two ways to save.
         verify_apply_layout = QHBoxLayout(self.verify_apply_group)
         verify_apply_layout.addWidget(self.verify_button)
-        verify_apply_layout.addWidget(self.apply_button)
+        verify_apply_layout.addStretch(1)
         self.verify_result = QLabel("", self.providers_tab)
         self.providers_layout.addWidget(self.verify_apply_group)
         self.providers_layout.addWidget(self.verify_result)
@@ -1288,7 +1360,7 @@ class OptionsDialog(QDialog):
         # Shown in the language, saved as the config's value (the item's data).
         for source, label in (
             ("No Source", tr("No Source")),  # i18n: the EPG Source setting's choice: no guide
-            ("STB", "STB"),
+            ("STB", translate(PROVIDER_GUIDE_TEXT)),  # 2.9.3: STB and Xtream (was "STB")
             ("Local File", tr("Local File")),  # i18n: the EPG Source setting's choice
             ("URL", tr("URL")),  # i18n: the EPG Source setting's choice: a web address
         ):
@@ -1504,7 +1576,17 @@ class OptionsDialog(QDialog):
             self.xmltv_group_widget.show()
         elif epg_source == "STB":
             self._epg_expiration_group.show()
-            self._epg_stb_period_group.show()
+            if self._lists_a_portal():  # 2.9.3: the period is an STB portal's guide's only
+                self._epg_stb_period_group.show()
+
+    def _lists_a_portal(self) -> bool:
+        """Whether an STB portal is among the providers (as edited in the window)."""
+        providers = getattr(self, "providers", [])
+        return any(str(p.get("type", "")).upper() == "STB" for p in providers)
+
+    def _refresh_epg_rows(self) -> None:
+        if hasattr(self, "_epg_stb_period_group"):
+            self.on_epg_source_changed()
 
     def update_radio_buttons(self):
         provider_type = self.edited_provider.get("type", "")
@@ -2113,15 +2195,17 @@ class OptionsDialog(QDialog):
         if follow is not None and (renames or removed):
             follow(renames, removed)
 
-    def apply_provider(self):
-        """Apply Change: the form's edits are kept for this provider (Save writes them and
-        loads its lists again); the line under the buttons says so."""
-        self._store_provider_edits()
-        self._refresh_provider_ids.add(id(self.edited_provider))
-        self.verify_result.setText(translate(APPLIED_TEXT))
-        self.verify_result.setStyleSheet("")
-
     def clear_image_cache(self):
+        """Clear Image Cache, once asked (2.9.3: it cleared at the click)."""
+        answer = QMessageBox.question(
+            self,
+            tr("Clear Image Cache"),
+            translate(CLEAR_CACHE_QUESTION),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
         self.parent().image_manager.clear_cache()
         self.cache_image_size_label.setText(self._cache_image_size_text())
 

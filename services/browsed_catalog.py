@@ -435,6 +435,10 @@ class BrowsedCatalog(QObject):
         self._catalogs.shutdown()
 
     # --- sections and content ------------------------------------------------------------
+    def sections_of(self, name: str) -> list[str]:
+        """The sections provider `name` has (from its entry: known before its setup)."""
+        return self._sections_of(name)
+
     def _sections_of(self, name: str) -> list[str]:
         """The sections a provider has, from its entry in the list (known before its setup)."""
         try:

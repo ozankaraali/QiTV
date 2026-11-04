@@ -780,6 +780,20 @@ class OnScreenKeysTests(unittest.TestCase):
         self.click(t, rect.center())
         self.assertEqual(spy.count(), 1)
 
+    def test_a_movie_has_a_way_back_to_live_tv(self):  # 2.9.3 (the owner's)
+        t = self.make()
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        rect = t.button_rect("live_tv")
+        self.assert_big_enough(rect, "live_tv")
+        self.assertEqual(t.tooltip_at(rect.center()), key_hint("Live TV", "Ctrl+1"))
+        self.assertLess(rect.right(), t.button_rect("search").left())  # where live has the guide
+        spy = QSignalSpy(t.liveTvRequested)
+        self.click(t, rect.center())
+        self.assertEqual(spy.count(), 1)
+        t.show_live("One", "")
+        self.assertNotIn("live_tv", t._layout())  # live TV: the guide and the previous channel
+
     def test_the_way_back_to_the_library_shows_only_for_its_titles(self):
         host = _Host()
         self.addCleanup(host.deleteLater)

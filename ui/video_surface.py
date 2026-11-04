@@ -5,7 +5,7 @@ page). macOS never repaints under an opaque native view, so an opaque surface wo
 showing whatever the window drew there last (the Library page) until libVLC draws.
 """
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtWidgets import QWidget
 
 from ui.pointer import PointerInput
@@ -18,6 +18,7 @@ class VideoSurface(QWidget):
     wheelSteps = Signal(int, object)  # steps, Qt.KeyboardModifier
     backPressed = Signal()  # the mouse's Back and Forward buttons
     forwardPressed = Signal()
+    contextRequested = Signal(QPoint)  # 2.9.3: a right-click (global position): its menu
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -36,6 +37,8 @@ class VideoSurface(QWidget):
 
     def mousePressEvent(self, event):
         self._pointer.press(event.button())
+        if event.button() == Qt.MouseButton.RightButton:
+            self.contextRequested.emit(event.globalPosition().toPoint())
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):

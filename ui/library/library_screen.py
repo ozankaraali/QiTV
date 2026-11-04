@@ -6,16 +6,19 @@ paints the search field; the LibraryController decides what they show and routes
 
 import logging
 
-from PySide6.QtCore import QObject, QRectF, Qt, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from services.i18n import tr
+from ui.keymap import key_hint
 from ui.library.genre_list import GenreList
-from ui.library.poster_grid import HEADER_H_U, PAD_U, PosterGrid
+from ui.library.poster_grid import PosterGrid
 from ui.library.series_view import SeriesView
 from ui.library.top_nav import TopNav
-from ui.overlays.painting import Units, draw_field_icon, elided, fill_round
+from ui.overlays.base import TooltipWidget
+from ui.overlays.painting import Units, draw_field_icon, draw_icon, elided, fill_round, ui_units
+from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, paint_edit
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
@@ -23,11 +26,7 @@ logger = logging.getLogger(__name__)
 MODES = ("browse", "series", "search")
 DEFAULT_HOST_WIDTH = 1280
 LIVE_TILE = "live-tile:"  # routes a grid URL to the channel logo cache
-FIELD_W_U = 46.0
-FIELD_H_U = 3.2
-FIELD_RADIUS_U = 0.8
 FIELD_FONT_U = 1.15
-COUNT_FONT_U = 1.0
 FOCUS_RING_PX = 1.5
 
 
@@ -84,46 +83,97 @@ class GridPosters(QObject):
         self.logoReady.emit(LIVE_TILE + url)
 
 
-class SearchField(QWidget):
-    """The search field painted over the grid's header in search mode."""
+class SearchField(TooltipWidget):
+    """The Library's search field, in the top bar (2.9.3: it was a "Search" pill there and a
+    field over the grid, so the genre filter looked like the place to type; the owner: "i kinda
+    default to genre search instead of library search"). The top bar paints its look while the
+    Library browses; this field shows over it while it searches: the query, its caret and
+    selection (ui.text_edit). A click on it, or typing, searches."""
 
     clicked = Signal()
+    clearRequested = Signal()  # 2.9.3: its ✕: what was typed goes (nothing typed: Esc's)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)
         self.setAccessibleName(tr("Search movies, series and channels"))  # as its placeholder
-        self.query = ""
-        self.count_text = ""
+        self.setCursor(Qt.IBeamCursor)
+        self.setMouseTracking(True)  # the ✕ under the pointer
+        self.edit = TextEdit()
+        self._drag = Dragging()
         self._focused = False
+        self._caret = False
+        self._over_clear = False
+
+    @property
+    def query(self) -> str:
+        return self.edit.text
 
     def set_query(self, text: str) -> None:
-        self.query = text
+        self.edit.set_text(text)
         self.setAccessibleDescription(text)  # a screen reader says what is searched
         self.update()
 
-    def set_count_text(self, text: str) -> None:
-        self.count_text = text
-        self.update()
-
-    def set_focused(self, focused: bool) -> None:
+    def set_focused(self, focused: bool, *, caret: bool | None = None) -> None:
+        """The keys' focus ring; `caret` (by default as `focused`): the keys type here."""
         self._focused = focused
+        self._caret = focused if caret is None else caret
         self.update()
 
     def _units(self) -> Units:
-        parent = self.parentWidget()
-        width = parent.width() if parent is not None and parent.width() > 0 else 0
-        return Units(width or DEFAULT_HOST_WIDTH)
+        top = self.parentWidget()
+        host = top.parentWidget() if top is not None else None
+        width = host.width() if host is not None and host.width() > 0 else 0
+        return ui_units(width or DEFAULT_HOST_WIDTH)
 
     def field_rect(self) -> QRectF:
-        u = self._units().u
-        pad = PAD_U * u
-        width = min(FIELD_W_U * u, self.width() - 2 * pad)
-        return QRectF(pad, (self.height() - FIELD_H_U * u) / 2, max(0.0, width), FIELD_H_U * u)
+        return QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+    def clear_rect(self) -> QRectF:
+        """2.9.3: the ✕ at the field's right end (the field shows while the Library searches):
+        it clears what was typed, or with nothing typed closes the search, as Esc."""
+        box = self.field_rect()
+        size = box.height()
+        return QRectF(box.right() - size, box.top(), size, size)
+
+    def tooltip_at(self, pos: QPointF) -> str | None:
+        if self.clear_rect().contains(pos):
+            return key_hint(tr("Clear"), "Esc")  # i18n: a tooltip: empties the field (verb)
+        return None
 
     def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self.clear_rect().contains(event.position()):
+            self.clearRequested.emit()
+            return
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
+            if self.edit.text:
+                shift = bool(event.modifiers() & Qt.ShiftModifier)
+                self._drag.press(self.edit, event.position().x(), shift=shift)
+            self.update()
+
+    def mouseMoveEvent(self, event) -> None:
+        over = self.clear_rect().contains(event.position())
+        if over != self._over_clear:
+            self._over_clear = over
+            self.setCursor(Qt.PointingHandCursor if over else Qt.IBeamCursor)
+            self.update()
+        if event.buttons() & Qt.LeftButton and self._drag.move(event.position().x()):
+            self.update()
+
+    def leaveEvent(self, event) -> None:
+        if self._over_clear:
+            self._over_clear = False
+            self.update()
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag.release()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self.edit.text:
+            self._drag.double(self.edit, event.position().x())
+            self.update()
 
     def paintEvent(self, event) -> None:
         units = self._units()
@@ -132,37 +182,45 @@ class SearchField(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         p.fillRect(self.rect(), qcolor(PALETTE.canvas))
         box = self.field_rect()
-        radius = FIELD_RADIUS_U * u
+        radius = box.height() / 2
         if self._focused:
             fill_round(p, box, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA), radius)
             p.setPen(QPen(qcolor(PALETTE.accent), FOCUS_RING_PX))
         else:
-            p.setPen(qcolor(PALETTE.text, 0.12))
+            p.setPen(qcolor(PALETTE.text, 0.15))
         p.setBrush(Qt.NoBrush)
         half = FOCUS_RING_PX / 2
         p.drawRoundedRect(box.adjusted(half, half, -half, -half), radius, radius)
-        inner = box.adjusted(1.2 * u, 0, -1.2 * u, 0)
+        clear = self.clear_rect()
+        mark = clear.height() * 0.36
+        tone = qcolor(PALETTE.accent) if self._over_clear else qcolor(PALETTE.text, 0.6)
+        draw_icon(
+            p,
+            "close",
+            QRectF(clear.center().x() - mark / 2, clear.center().y() - mark / 2, mark, mark),
+            tone,
+        )
+        inner = box.adjusted(1.4 * u, 0, -1.4 * u, 0)
+        inner.setRight(min(inner.right(), clear.left()))
         p.setFont(units.font(FIELD_FONT_U))
-        if self.query or self._focused:
+        if self.edit.text or self._caret:
             tone = qcolor(PALETTE.text)
-            text = self.query + ("▏" if self._focused else "")
+            inner = draw_field_icon(p, inner, tone)  # the magnifier the other finds draw
+            paint_edit(
+                p,
+                inner,
+                self.edit,
+                tone,
+                caret=self._caret,
+                selection=qcolor(PALETTE.accent, SELECTION_ALPHA),
+            )
         else:
             tone = qcolor(PALETTE.text, PALETTE.text_muted_alpha)
+            inner = draw_field_icon(p, inner, tone)
+            p.setPen(tone)
             # i18n: placeholder of the Library's search field
             text = tr("Search movies, series and channels")
-        inner = draw_field_icon(p, inner, tone)  # the magnifier the other finds draw
-        p.setPen(tone)
-        p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))
-        if self.count_text:
-            p.setFont(units.font(COUNT_FONT_U))
-            p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
-            left = box.right() + 2 * u
-            right = self.width() - PAD_U * u
-            p.drawText(
-                QRectF(left, 0, max(0.0, right - left), self.height()),
-                Qt.AlignRight | Qt.AlignVCenter,
-                elided(p, self.count_text, right - left),
-            )
+            p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))
         p.end()
 
 
@@ -182,7 +240,8 @@ class LibraryScreen(QWidget):
         self.genres = GenreList(self)
         self.grid = PosterGrid(self.grid_posters, self)
         self.series = SeriesView(posters, self)
-        self.search_field = SearchField(self)
+        self.search_field = SearchField(self.nav)
+        self.nav.attach_search(self.search_field)  # the top bar places it on its search
         self.set_mode("browse")
 
     @property
@@ -214,9 +273,6 @@ class LibraryScreen(QWidget):
         content = (left, top, max(0, width - left), max(0, height - top))
         self.grid.setGeometry(*content)
         self.series.setGeometry(*content)
-        header = Units(width or DEFAULT_HOST_WIDTH).px(HEADER_H_U)
-        self.search_field.setGeometry(left, top, content[2], header)
-        self.search_field.raise_()
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)

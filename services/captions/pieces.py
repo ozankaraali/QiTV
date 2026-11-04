@@ -23,12 +23,18 @@ from typing import Optional
 
 RATE = 16_000
 WINDOW = 512  # Silero's window at 16 kHz: 32 ms
-END_PAUSE_S = 0.35
+# 2.9.3: pieces were cut too short, and the models wrote them worse than whole sentences
+# (FLEURS, joined into a stream: ufakzeka-kulak's Turkish 15.5 % of words wrong in QiTV's
+# pieces, 8.5 % in whole sentences; Parakeet's French 26.5 %, Qwen's Russian 37 %). A pause of
+# 0.6 s ends a piece (sherpa-onnx's detector: 0.5 s; faster-whisper: 2 s), 0.3 s of sound
+# before the speech and 0.25 s after it go with it (faster-whisper: 0.4 s), and a piece may
+# be 10 s long when the lead allows: Turkish 8.5 %, French 10.2 %, Russian 14.5 %.
+END_PAUSE_S = 0.6
 WORD_PAUSE_S = 0.08
-LEAD_IN_S = 0.2
-TAIL_S = 0.15
+LEAD_IN_S = 0.3
+TAIL_S = 0.25
 MIN_PIECE_S = 0.4
-MAX_PIECE_S = 6.0  # the longest a piece may ever be (the model's token cap is sized for it)
+MAX_PIECE_S = 10.0  # the longest a piece may ever be (the models' token caps follow its length)
 MIN_MAX_S = 2.0
 
 

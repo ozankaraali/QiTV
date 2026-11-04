@@ -63,7 +63,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from services import favorites, free_channels, system_open, thread_cleanup
+from services import favorites, free_channels, secure_dns, system_open, thread_cleanup
 from services.account_check import AccountChecks
 from services.browsed_catalog import BrowsedCatalog
 from services.casting import CastDevices, LibVlcDiscovery
@@ -72,7 +72,6 @@ from services.catchup_memory import FILE_NAME as CATCHUP_FILE, CatchupMemory
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.find import Preferences, preferences_for
-from services import secure_dns
 from services.hidden_groups import HiddenGroups
 from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
@@ -802,6 +801,7 @@ class TVWindow(QMainWindow):
         self.overlays.transport.searchRequested.connect(self.screens.open_search)
         # ‹ Library on the player controls: back to the Library a title came from, as Esc.
         self.overlays.transport.libraryRequested.connect(self.screens.back_to_library)
+        self.overlays.transport.liveTvRequested.connect(self.screens.back_to_tv)  # 2.9.3
         self.overlays.guide.searchRequested.connect(self.screens.open_search)
         # The corner player (the Library with what plays in a corner of it): ⤢ and a click on
         # it bring the player back, × stops it, the speaker mutes.
@@ -881,6 +881,7 @@ class TVWindow(QMainWindow):
         controller = self.controller
         source.clicked.connect(self._on_video_clicked)
         source.doubleClicked.connect(controller.video_double_clicked)
+        source.contextRequested.connect(controller.video_context)  # 2.9.3: a right-click
         source.mouseMoved.connect(self.pointer.moved)  # its realMoved: controller.mouse_moved
         source.wheelSteps.connect(controller.wheel)
         source.backPressed.connect(controller.mouse_back)

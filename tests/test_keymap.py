@@ -218,7 +218,7 @@ class OpenKeymapTests(unittest.TestCase):
         self.assertEqual(opened(K.Key_C, "ç", ALT), (Action.NAV_TEXT, "ç"))
 
     def test_modifiers_other_than_shift_do_not_type(self):
-        self.assertIsNone(opened(K.Key_A, "a", CTRL))
+        self.assertIsNone(opened(K.Key_B, "b", CTRL))
         self.assertIsNone(opened(K.Key_7, "7", ALT))
         self.assertIsNone(opened(K.Key_Tab, "\t"))
 
@@ -229,7 +229,7 @@ class OpenKeymapTests(unittest.TestCase):
                 resolve(key.value, altgr, text, drawer_open=True, platform="win32"),
                 (Action.NAV_TEXT, text),
             )
-        self.assertIsNone(opened(K.Key_A, "\x01", CTRL))  # Ctrl+A is a control character
+        self.assertIsNone(opened(K.Key_B, "\x02", CTRL))  # Ctrl+B is a control character
 
     def test_ctrl_alt_is_a_shortcut_outside_windows(self):
         for platform in ("darwin", "linux"):  # ⌘⌥ on macOS; Linux reports AltGr otherwise
@@ -441,11 +441,46 @@ class SubtitleSearchKeymapTests(unittest.TestCase):
         self.assertEqual(subtitles(K.Key_Backspace, "\x08"), (Action.NAV_BACKSPACE, ""))
         self.assertEqual(subtitles(K.Key_Escape, "\x1b"), (Action.ESCAPE, ""))
 
-    def test_ctrl_v_pastes_there_only(self):
+    def test_ctrl_v_pastes_where_text_is_typed(self):
+        # 2.9.3: the channel list's find and the Library's fields paste too.
         self.assertEqual(subtitles(K.Key_V, "\x16", CTRL), (Action.PASTE, ""))
-        self.assertIsNone(opened(K.Key_V, "\x16", CTRL))
+        self.assertEqual(opened(K.Key_V, "\x16", CTRL), (Action.PASTE, ""))
+        self.assertEqual(library(K.Key_V, "\x16", CTRL), (Action.PASTE, ""))
         self.assertIsNone(closed(K.Key_V, "\x16", CTRL))
-        self.assertIsNone(library(K.Key_V, "\x16", CTRL))
+        self.assertIsNone(resolve(K.Key_V.value, CTRL, "\x16", context="guide"))
+
+
+class FieldKeymapTests(unittest.TestCase):
+    """2.9.3 (the owner: "ctrl a and click to change cursor place do not work"): where text is
+    typed, ⌘/Ctrl+A, C and X are the field's, and an arrow says how it moves a caret."""
+
+    def test_select_all_copy_and_cut_where_text_is_typed(self):
+        for resolve_in in (opened, library, subtitles):
+            self.assertEqual(resolve_in(K.Key_A, "\x01", CTRL), (Action.SELECT_ALL, ""))
+            self.assertEqual(resolve_in(K.Key_C, "\x03", CTRL), (Action.COPY, ""))
+            self.assertEqual(resolve_in(K.Key_X, "\x18", CTRL), (Action.CUT, ""))
+        self.assertIsNone(closed(K.Key_C, "\x03", CTRL))  # the player types nothing
+        self.assertEqual(closed(K.Key_A, "a"), (Action.PICTURE, ""))  # A still the picture's
+
+    def test_an_arrow_says_how_it_moves_the_caret(self):
+        def mac(key, mods):
+            return resolve(int(key), mods, "", context="drawer", platform="darwin")
+
+        def other(key, mods):
+            return resolve(int(key), mods, "", context="library", platform="win32")
+
+        self.assertEqual(mac(K.Key_Left, SHIFT | KEYPAD), (Action.NAV_LEFT, "select"))
+        self.assertEqual(mac(K.Key_Left, ALT), (Action.NAV_LEFT, "word"))
+        self.assertEqual(mac(K.Key_Right, CTRL | SHIFT), (Action.NAV_RIGHT, "select line"))
+        self.assertEqual(other(K.Key_Right, CTRL), (Action.NAV_RIGHT, "word"))
+        self.assertEqual(other(K.Key_End, SHIFT), (Action.NAV_END, "select"))
+        self.assertEqual(subtitles(K.Key_Home), (Action.NAV_HOME, ""))
+        self.assertEqual(opened(K.Key_End), (Action.NAV_END, ""))
+
+    def test_delete_deletes_forward_where_it_isnt_the_lists(self):
+        self.assertEqual(library(K.Key_Delete, "\x7f"), (Action.NAV_DELETE, ""))
+        self.assertEqual(subtitles(K.Key_Delete, "\x7f"), (Action.NAV_DELETE, ""))
+        self.assertEqual(opened(K.Key_Delete, "\x7f"), (Action.FORGET, ""))  # the list's
 
     def test_the_shortcuts_every_screen_has_still_work(self):
         self.assertEqual(subtitles(K.Key_F, "", CTRL), (Action.SEARCH, ""))

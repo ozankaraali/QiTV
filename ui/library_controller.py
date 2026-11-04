@@ -11,7 +11,16 @@ runs once it is ready (no source switch, no notice). Leaving the Library, or pla
 else, drops it.
 
 The Library's source is a provider or All providers (the source menu); it never touches the
-TV page's source and never stops what plays.
+TV page's source and never stops what plays. 2.9.3: with two providers or more, Movies or Series
+asked of a source without them (an M3U playlist) shows the provider that has them (several: All
+providers) instead of "… has no movies", and the tabs show while any provider has them; with one
+provider it is as before.
+
+Typing (2.9.3; the owner: "i kinda default to genre search instead of library search"): letters
+typed anywhere in the Library (the grid, the top bar, a series, the genres' rows) go to the top
+bar's search, which shows what they find; only once the genre filter is chosen (a click on it,
+or ↑ from the first genre: it shows its ring and caret then) do they filter the genres. The A–Z
+rail jumps to a letter.
 
 A right-click on a film's poster or an episode row asks the shell for its menu (Play in VLC,
 Play in MPV, Copy stream link: `context_menu(item, section, global position)`, section "movies"
@@ -60,6 +69,7 @@ from ui.library.library_screen import LibraryScreen
 from ui.library.poster_grid import poster_url
 from ui.library.search_session import DEBOUNCE_MS, SearchSession
 from ui.library.top_nav import REFRESH_TEXT
+from ui.text_edit import edit_key
 from ui.tick_menu import TickMenu
 
 logger = logging.getLogger(__name__)
@@ -158,6 +168,7 @@ class LibraryController(QObject):
         self._closed = False
         self._mode = "browse"
         self._zone = "grid"
+        self._genre_field = False  # 2.9.3: the keys type in the genre filter (it was chosen)
         self._nav_return = "grid"  # the zone ↓ returns to from the top nav
         self._section: Optional[str] = None  # the Movies/Series section last opened
         self._opened: Optional[tuple[str, str]] = None  # (provider, section) the model shows
@@ -235,6 +246,8 @@ class LibraryController(QObject):
         genres.genreMenuRequested.connect(self._show_genre_menu)
         nav.refreshRequested.connect(self.refresh_lists)
         screen.search_field.clicked.connect(lambda: self._focus("search"))
+        screen.search_field.clearRequested.connect(self._clear_or_leave_search)  # 2.9.3: its ✕
+        genres.fieldClicked.connect(lambda: self._focus("genres", field=True))  # 2.9.3
         self._search.changed.connect(self._show_hits)
         self._search.changed.connect(self.searchChanged)
         if self._tmdb is not None:  # 2.8
@@ -321,25 +334,61 @@ class LibraryController(QObject):
         """The Movies or Series section opened last; None until one was."""
         return self._section
 
-    def _focus(self, zone: str) -> None:
+    def _focus(self, zone: str, *, field: bool = False) -> None:
+        """The keys to `zone`; with `field`, the genres' filter (2.9.3: chosen, it alone
+        takes typing, and shows its ring and caret)."""
         if zone == "nav" and self._zone != "nav":
             self._nav_return = self._zone
         self._zone = zone
-        self._screen.genres.set_focused(zone == "genres")
+        self._genre_field = field and zone == "genres"
+        self._screen.genres.set_focused(zone == "genres", field=self._genre_field)
         self._screen.nav.set_focused(zone == "nav")
         self._screen.grid.set_focused(zone == "grid")
-        self._screen.search_field.set_focused(zone == "search")
+        self._sync_search_focus()
+
+    def _sync_search_focus(self) -> None:
+        """The search field's ring: the keys type in it, or the top bar's focus is on it."""
+        on_it = self._zone == "nav" and self._screen.nav.focus_item() == "search"
+        self._screen.search_field.set_focused(
+            self._zone == "search" or on_it, caret=self._zone == "search"
+        )
 
     def _set_mode(self, mode: str) -> None:
         self._mode = mode
         self._screen.set_mode(mode)
 
     def _tabs(self) -> list[str]:
-        """The provider's sections, and Movies for the recordings when it has no films (2.8)."""
+        """The provider's sections, and Movies for the recordings when it has no films (2.8);
+        2.9.3: with two providers or more, Movies and Series while any of them has them (the
+        tab shows the one that has: `_source_for`)."""
         tabs = list(self._catalog.sections())
         if "movies" not in tabs and self._model.lists_recordings():
             tabs.append("movies")
+        for section in ("movies", "series"):
+            if section not in tabs and self._others_with(section):
+                tabs.append(section)
         return tabs
+
+    def _others_with(self, section: str) -> list[str]:
+        """The providers that have `section` (in Settings order), when there are two
+        providers or more (one provider: none, as in 2.0)."""
+        names = self._catalog.provider_names()
+        sections_of = getattr(self._catalog, "sections_of", None)
+        if len(names) < 2 or sections_of is None:
+            return []
+        return [name for name in names if section in sections_of(name)]
+
+    def _source_for(self, section: str) -> None:
+        """2.9.3: Movies or Series asked of a source without them (an M3U playlist): the
+        provider that has them is shown instead, or All providers when several have them, not
+        "… has no movies" (with one provider, that, as before)."""
+        if section not in ("movies", "series") or section in self._catalog.sections():
+            return
+        having = self._others_with(section)
+        if len(having) == 1:
+            self._choose_source(having[0])
+        elif having:
+            self._mix_sources([])  # every provider: those without it add nothing
 
     def _sync_nav(self, active: str) -> None:
         nav = self._screen.nav
@@ -372,6 +421,7 @@ class LibraryController(QObject):
         """Show Movies or Series. Re-opening the section on screen keeps its genre and title."""
         if self._closed:
             return
+        self._source_for(section)
         self._section = section
         self._series = None
         self._set_mode("browse")
@@ -490,7 +540,7 @@ class LibraryController(QObject):
         if self._closed:
             return False
         if action is Action.SEARCH:
-            if payload and self._zone in ("search", "genres"):
+            if payload and (self._zone == "search" or self._genre_field):
                 return self.handle(Action.NAV_TEXT, payload)  # "/" types where text goes
             self.open_search()
             return True
@@ -531,23 +581,40 @@ class LibraryController(QObject):
                 self._toggle_favorite(grid.current_index())
         elif action is Action.ESCAPE:
             self._focus("search" if self._mode == "search" else "genres")
-        elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE):
-            if self._mode == "search":
-                self._focus("search")
-                return self._handle_search(action, payload)
-            if action is Action.NAV_TEXT and payload.strip():
-                grid.jump_to_letter(payload.strip()[0])
+        elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
+            return self._type_in_search(action, payload)  # 2.9.3: never a hidden letter jump
         else:
             return False
         return True
 
+    def _type_in_search(self, action: Action, payload: str) -> bool:
+        """2.9.3: typing where no field is chosen: the top bar's search takes it (it opens
+        with what was typed). Backspace with nothing typed yet does nothing."""
+        if action is Action.NAV_BACKSPACE and self._mode != "search":
+            return True
+        if self._mode != "search":
+            self.open_search()
+        self._focus("search")
+        return self._handle_search(action, payload)
+
     def _handle_genres(self, action: Action, payload: str) -> bool:
         genres = self._screen.genres
+        if self._genre_field:
+            if genres.field_key(action, payload):
+                return True  # 2.9.3: the filter's caret, selection and clipboard
+            if action in (Action.NAV_DOWN, Action.NAV_ACTIVATE):
+                self._focus("genres")  # its rows, the filter kept
+                return True
+            if action is Action.NAV_UP:
+                self._focus("nav")
+                return True
+        elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
+            return self._type_in_search(action, payload)  # 2.9.3: the filter wasn't chosen
         if action in (Action.NAV_UP, Action.NAV_DOWN):
             before = genres.current_id()
             genres.move_by(-1 if action is Action.NAV_UP else 1)
             if action is Action.NAV_UP and genres.current_id() == before:
-                self._focus("nav")  # ↑ on the first genre
+                self._focus("genres", field=True)  # ↑ on the first genre: its filter
         elif action in (Action.NAV_PAGE_UP, Action.NAV_PAGE_DOWN):
             genres.page(-1 if action is Action.NAV_PAGE_UP else 1)
         elif action in (Action.NAV_RIGHT, Action.NAV_ACTIVATE):
@@ -555,10 +622,6 @@ class LibraryController(QObject):
                 self._focus("grid")
             else:
                 genres.activate()  # genreActivated focuses the grid
-        elif action is Action.NAV_TEXT:
-            genres.type_text(payload)
-        elif action is Action.NAV_BACKSPACE:
-            genres.backspace()
         elif action is Action.ESCAPE:
             if not genres.escape():
                 self._go_back_to_tv()
@@ -568,8 +631,12 @@ class LibraryController(QObject):
 
     def _handle_nav(self, action: Action, payload: str) -> bool:
         nav = self._screen.nav
+        if action in (Action.NAV_TEXT, Action.PASTE):  # 2.9.3: typing in the top bar searches
+            self.open_search()
+            return self._handle_search(action, payload)
         if action in (Action.NAV_LEFT, Action.NAV_RIGHT):
             nav.move_by(-1 if action is Action.NAV_LEFT else 1)
+            self._sync_search_focus()
         elif action is Action.NAV_ACTIVATE:
             nav.activate()
         elif action is Action.NAV_DOWN:
@@ -593,19 +660,23 @@ class LibraryController(QObject):
             series.activate()
         elif action in (Action.ESCAPE, Action.NAV_BACKSPACE):
             series.escape()  # backRequested
+        elif action in (Action.NAV_TEXT, Action.PASTE):
+            return self._type_in_search(action, payload)  # 2.9.3: typing searches
         else:
             return False
         return True
 
     def _handle_search(self, action: Action, payload: str) -> bool:
         search, field = self._search, self._screen.search_field
-        if action is Action.NAV_TEXT:
-            search.set_query(search.query + payload)
-            field.set_query(search.query)
-        elif action is Action.NAV_BACKSPACE:
-            if search.query:
-                search.set_query(search.query[:-1])
+        changed = edit_key(field.edit, action, payload, arrows=True)  # 2.9.3: a caret
+        if changed is not None:
+            if changed:
+                search.set_query(field.edit.text)
                 field.set_query(search.query)
+            field.update()
+            return True
+        if action in (Action.NAV_TEXT, Action.NAV_BACKSPACE):
+            pass  # nothing to type or to take out
         elif action is Action.NAV_DOWN:
             if self._screen.grid.current_index() >= 0:
                 self._focus("grid")
@@ -616,14 +687,23 @@ class LibraryController(QObject):
             if self._screen.grid.current_index() >= 0:
                 self._focus("grid")
         elif action is Action.ESCAPE:
-            if search.query:
-                search.clear()
-                field.set_query("")
-            else:
-                self._leave_search()
+            self._clear_or_leave_search()
         else:
             return False
         return True
+
+    def _clear_or_leave_search(self) -> None:
+        """Esc in the search, and its ✕ (2.9.3): what was typed goes; with nothing typed,
+        the search closes, back to where it came from."""
+        if self._closed:
+            return
+        search, field = self._search, self._screen.search_field
+        if search.query:
+            search.clear()
+            field.set_query("")
+            self._focus("search")
+        else:
+            self._leave_search()
 
     # ---- zone edges, tabs and source ----------------------------------------------------------
 
@@ -879,6 +959,7 @@ class LibraryController(QObject):
     def _on_filter_changed(self, text: str) -> None:
         genres = self._screen.genres
         genres.set_genres(self._model.genres(text) if self._section_available() else [])
+        genres.update()  # (no match: its line says so)
 
     def _current_item(self) -> Optional[dict]:
         grid = self._screen.grid
@@ -1252,4 +1333,7 @@ class LibraryController(QObject):
         grid = self._screen.grid
         grid.set_sections(self._search.sections())
         grid.set_message(self._search.message())
-        self._screen.search_field.set_count_text(self._search.count_text())
+        # 2.9.3: the field is in the top bar; the grid's header says what it found, as a
+        # genre's says its titles.
+        query = self._search.query.strip()
+        grid.set_header(f"“{query}”" if query else "", self._search.count_text(), [], "")

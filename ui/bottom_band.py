@@ -13,7 +13,7 @@ from typing import Optional
 
 from PySide6.QtCore import QEvent, QObject
 
-from ui.overlays.painting import Units
+from ui.overlays.painting import ui_units
 from ui.pip import MARGIN_UNITS
 
 GAP_U = 1.0  # between the transport's controls (or the banner's row) and the PiP above them
@@ -55,6 +55,6 @@ class BottomBand(QObject):
     def _lift_above(overlay, top: int) -> int:
         """How far a bottom corner's PiP rises to end GAP_U above `top` (`overlay` reaches the
         host's bottom, so its width and bottom are the player's)."""
-        un = Units(overlay.width())
+        un = ui_units(overlay.width())
         bottom: int = overlay.geometry().bottom() + 1 - un.px(MARGIN_UNITS)  # the PiP's
         return max(0, bottom - (top - un.px(GAP_U)))

@@ -5,7 +5,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
+from PySide6.QtGui import QEnterEvent, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, timeline
@@ -104,6 +105,36 @@ class MixerTests(MixerCase):
         elapse(250)  # past the restarted wait however late it started
         self.assertFalse(mixer.isVisible())
         self.assertEqual(closed.count(), 1)
+
+    def test_it_stays_while_the_pointer_is_over_it(self):  # 2.9.3
+        _host, mixer = self.make(idle_ms=60)
+        mixer.show_rows([MAIN], 0)
+        QApplication.sendEvent(mixer, QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
+        elapse(150)
+        self.assertTrue(mixer.isVisible())  # on its way to the slider: never from under it
+        QApplication.sendEvent(mixer, QEvent(QEvent.Type.Leave))
+        elapse(150)
+        self.assertFalse(mixer.isVisible())
+
+    def test_the_wheel_over_a_row_asks_for_its_level(self):  # 2.9.3
+        _host, mixer = self.make()
+        mixer.show_rows([MAIN, PIP], 0)
+        asked = QSignalSpy(mixer.wheelRequested)
+        point = mixer.slider_rect(1).center()
+        event = QWheelEvent(
+            point,
+            QPointF(mixer.mapToGlobal(point.toPoint())),
+            QPoint(0, 0),
+            QPoint(0, 120),  # up: louder
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
+        QApplication.sendEvent(mixer, event)
+        self.assertTrue(event.isAccepted())  # never a zap behind it
+        self.assertEqual(asked.count(), 1)
+        self.assertEqual(asked.at(0), [1, -1])  # the PiP's row, a notch up
 
     def test_a_click_on_a_speaker_asks_to_mute_that_row(self):
         _host, mixer = self.make()

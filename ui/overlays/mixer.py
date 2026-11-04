@@ -5,7 +5,9 @@ picture, "PiP" for the small one, each with its channel's name). Each row has a 
 (a click mutes or unmutes it; crossed out when muted, else a wave per third of its level), a
 slider (a click or a drag sets its level) and the level. The selected row is outlined; the keys
 act on it (the shell routes them while the mixer shows). It hides itself 3 s after the last
-change, and says so (`closed`).
+change, and says so (`closed`); 2.9.3: never while the pointer is over it (it went from under
+a pointer on its way to the slider), and the wheel over a row changes that row's level
+(`wheelRequested`: up is louder), never a zap behind it.
 
 Bottom-centre: 4u from the bottom, or just above the transport's controls while the
 transport shows (`set_floor`), so both can show at once. Never over the PiP (`avoid`): over
@@ -28,8 +30,8 @@ from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, draw_icon, draw_progress, fill_round, volume_icon
-from ui.pointer import NAV_BUTTONS
+from ui.overlays.painting import Units, draw_icon, draw_progress, fill_round, ui_units, volume_icon
+from ui.pointer import NAV_BUTTONS, PointerInput
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 HIDE_MS = 3000  # after the last change
@@ -82,6 +84,8 @@ class Mixer(Overlay):
     rowSelected = Signal(int)  # a click on a row selects it
     followRequested = Signal()  # the mode line's action: the sound follows the focus again
     closed = Signal()  # it hid itself (or was dismissed)
+    # 2.9.3: the wheel over a row (row, steps as PointerInput's: +1 a notch down, quieter)
+    wheelRequested = Signal(int, int)
 
     def __init__(self, parent: QWidget | None = None, idle_ms: int = HIDE_MS) -> None:
         super().__init__(parent)
@@ -93,7 +97,13 @@ class Mixer(Overlay):
         self._avoid = QRect()
         self._floor: int | None = None  # the transport's controls' top while it shows
         self._idle = QTimer(self, singleShot=True, interval=idle_ms)
-        self._idle.timeout.connect(self.dismiss)
+        self._idle.timeout.connect(self._on_idle)
+        self._hovered = False  # 2.9.3: the pointer is over it: it stays
+        self._wheel_row = 0
+        self._wheel = PointerInput(self)
+        self._wheel.wheelSteps.connect(
+            lambda steps, _mods: self.wheelRequested.emit(self._wheel_row, steps)
+        )
         if parent is not None:
             parent.installEventFilter(self)
         self.hide()
@@ -119,6 +129,12 @@ class Mixer(Overlay):
 
     def selected(self) -> int:
         return self._selected
+
+    def _on_idle(self) -> None:
+        """The wait after the last change: it hides, but not from under the pointer (it waits
+        again once the pointer left)."""
+        if not self._hovered and self._drag is None:
+            self.dismiss()
 
     def dismiss(self) -> None:
         self._idle.stop()
@@ -158,7 +174,7 @@ class Mixer(Overlay):
 
     def _units(self) -> Units:
         parent = self.parentWidget()
-        return Units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
+        return ui_units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
 
     def _fonts(self, un: Units) -> tuple[QFont, QFont, QFont]:
         return (
@@ -241,7 +257,7 @@ class Mixer(Overlay):
         parent = self.parentWidget()
         if parent is None:
             return
-        un = Units(parent.width())
+        un = ui_units(parent.width())
         width, height = self._size()
         width = min(width, parent.width())
         x = (parent.width() - width) // 2
@@ -418,9 +434,27 @@ class Mixer(Overlay):
         else:
             self._idle.start()
 
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        if not self.isHidden() and self._drag is None:
+            self._idle.start()  # its 3 s from now
+        super().leaveEvent(event)
+
+    def wheelEvent(self, event) -> None:
+        """2.9.3: the wheel over a row: its level (the selected row's beside the rows)."""
+        event.accept()  # never a zap behind the mixer
+        row = self._row_at(event.position())
+        self._wheel_row = self._selected if row is None else row
+        self._wheel.wheel_event(event)
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         row = self._drag
         if row is None:
+            self._hovered = True  # (a move inside without an Enter: a window shown under it)
             event.ignore()  # the host shows the transport
             return
         event.accept()
@@ -444,4 +478,5 @@ class Mixer(Overlay):
 
     def hideEvent(self, event) -> None:
         self._drag = None
+        self._hovered = False
         super().hideEvent(event)

@@ -237,7 +237,7 @@ class MaxStreamsTests(base.WindowCase):
         self.assertEqual(spin.specialValueText(), "Automatic")
         self.assertEqual(spin.value(), 0)
         spin.setValue(3)
-        dialog.apply_provider()
+        dialog._store_provider_edits()  # (as Save and a switch of provider keep them)
         self.assertEqual(dialog.edited_provider["max_streams"], 3)
         dialog.save_settings()
         self.assertEqual(self.provider_manager.providers[0]["max_streams"], 3)
@@ -259,7 +259,7 @@ class MaxStreamsTests(base.WindowCase):
         self.addCleanup(dialog.deleteLater)
         dialog.max_streams_input.setValue(2)
         dialog.max_streams_input.setValue(0)
-        dialog.apply_provider()
+        dialog._store_provider_edits()
         self.assertEqual(dialog.edited_provider.get("max_streams", 0), 0)
 
 

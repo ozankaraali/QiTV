@@ -117,6 +117,29 @@ class GenreListTests(unittest.TestCase):
         self.assertFalse(self.list.escape())
         self.assertEqual(changes, ["doc", ""])
 
+    def test_the_filter_takes_a_click_a_caret_and_command_a(self):
+        # 2.9.3: a click on the filter is where the keys type, and puts the caret.
+        from ui.keymap import Action
+        from ui.text_edit import text_rect
+
+        clicked = []
+        self.list.fieldClicked.connect(lambda: clicked.append(True))
+        self.list.type_text("doc")
+        self.list.grab()
+        start = text_rect(self.list.edit)
+        QTest.mouseClick(
+            self.list,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(int(start.left()) + 1, int(start.center().y())),
+        )
+        self.assertEqual(clicked, [True])
+        self.assertTrue(self.list.field_key(Action.NAV_TEXT, "a"))
+        self.assertEqual(self.list.filter_text, "adoc")
+        self.assertTrue(self.list.field_key(Action.SELECT_ALL))
+        self.assertTrue(self.list.field_key(Action.NAV_BACKSPACE))
+        self.assertEqual(self.list.filter_text, "")
+
     def test_backspace(self):
         self.list.type_text("ab")
         self.list.backspace()

@@ -18,6 +18,12 @@ import re
 # room for that and stops a loop early.
 TOKENS_PER_S = 6.0
 TOKENS_BASE = 8
+# 2.9.3: in these scripts Qwen's tokens are a few letters each, and the cap cut its captions
+# short (FLEURS, QiTV's pieces: Hindi 57 % of words wrong with the cap, 34 % without it;
+# Arabic and Greek too; English, Russian, Turkish and Japanese unchanged). While the language
+# isn't known yet, as much room as for Russian or Korean.
+_DENSE = {"Hindi": 3.0, "Greek": 3.0, "Arabic": 3.0, "Persian": 3.0, "Thai": 3.0}
+_UNKNOWN = 2.0
 
 # The model's own heading: the language it heard, then its text marker (once, at the start).
 _HEADING = re.compile(r"^\s*(?:language\s+[^<]{0,40})?<asr_text>", re.IGNORECASE)
@@ -33,9 +39,11 @@ _FALSE_CAPTIONS = re.compile(
 _REPEATS = re.compile(r"((?:\S+\s+){0,7}?\S+?[.!?,…]?)(?:\s+\1){2,}", re.IGNORECASE)
 
 
-def token_cap(seconds: float) -> int:
-    """The most tokens a piece of `seconds` of speech may produce."""
-    return int(TOKENS_BASE + TOKENS_PER_S * max(0.0, seconds))
+def token_cap(seconds: float, language: str | None = "") -> int:
+    """The most tokens a piece of `seconds` of speech in `language` (Qwen3-ASR's English name;
+    None: not known yet) may produce."""
+    rate = _UNKNOWN if language is None else _DENSE.get(language, 1.0)
+    return int(TOKENS_BASE + TOKENS_PER_S * rate * max(0.0, seconds))
 
 
 def clean(text: str) -> str:

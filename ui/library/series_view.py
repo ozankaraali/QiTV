@@ -5,6 +5,11 @@ the episodes list is a model/view that only paints the visible rows. The widget 
 keyboard focus: the Library controller routes keys to ``move_by``/``activate``/``escape``/
 ``page``.
 
+The mouse (2.9.3: the review found the chips and the Start over pill were paint only): ‹ before
+the title goes back as Esc does, a click on a season's chip shows that season, and a click on
+an episode plays it from where it stopped; a click on its "↺ Start over" pill (on the row
+highlighted, or under the pointer, of an episode begun) plays it from its beginning.
+
 The poster is 14u wide at 2:3 (21u tall), but is capped to the header height minus 2u so it
 never overflows the 34% header: at 16:9 it comes out slightly narrower than 14u.
 """
@@ -17,6 +22,7 @@ from PySide6.QtCore import (
     QAbstractListModel,
     QModelIndex,
     QPoint,
+    QPointF,
     QRectF,
     QSize,
     Qt,
@@ -24,16 +30,26 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter
-from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QWidget
+from PySide6.QtWidgets import QStyle, QStyledItemDelegate
 
 from services.catalog import shown_label
 from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE, shown_message
 from services.i18n import N_, tr, translate
 from services.library import Details
 from services.navigation import episode_key, item_key
+from ui.keymap import key_hint
 from ui.library.poster_grid import poster_url
-from ui.overlays.channel_rows import ChannelListView
-from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round
+from ui.overlays.base import TooltipWidget
+from ui.overlays.channel_rows import ChannelListView, CutTexts, is_hovered, paint_hover
+from ui.overlays.painting import (
+    Units,
+    draw_icon,
+    draw_logo,
+    draw_progress,
+    elided,
+    fill_round,
+    ui_units,
+)
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, RADIUS_CARD, qcolor
 
 logger = logging.getLogger(__name__)
@@ -50,6 +66,9 @@ CHIP_FONT_U = 1.1
 CHIP_PAD_U = 1.3
 CHIP_GAP_U = 0.8
 ROW_H_U = 5.0
+BACK_U = 2.4  # 2.9.3: ‹ before the title (Esc), this square
+BACK_GAP_U = 0.8
+CHIP_HOVER_ALPHA = 0.13  # a chip (or ‹) under the pointer; the others' 0.07
 SEASON_DEBOUNCE_MS = 250
 WATCHED_AT = 0.9
 # What the series view shows instead of its episodes: shown with translate().
@@ -186,9 +205,18 @@ class EpisodesModel(QAbstractListModel):
         return None
 
 
-class EpisodeRowDelegate(QStyledItemDelegate):
+def start_over_rect(units: Units, row: QRectF) -> QRectF:
+    """Where an episode row begun (resumable, so never watched: no ✓) draws its "↺ Start
+    over" pill, in the row's coordinates: left of its running time."""
+    u = units.u
+    right = row.right() - 1.8 * u - 7.0 * u
+    width = 9.5 * u
+    return QRectF(right - width, row.center().y() - 1.5 * u, width - 0.8 * u, 3.0 * u)
+
+
+class EpisodeRowDelegate(CutTexts, QStyledItemDelegate):
     def _units(self, widget) -> Units:
-        return Units(getattr(widget, "units_width", 100) or 100)
+        return ui_units(getattr(widget, "units_width", 100) or 100)
 
     def sizeHint(self, option, index) -> QSize:
         return QSize(0, self._units(option.widget).px(ROW_H_U))
@@ -200,6 +228,7 @@ class EpisodeRowDelegate(QStyledItemDelegate):
         selected = bool(option.state & QStyle.State_Selected)
         active = bool(getattr(option.widget, "focus_active", False))
         p.save()
+        paint_hover(p, option, index, u, 1.0, (0.3, 0.25))
         if selected:
             box = rect.adjusted(0.3 * u, 0.25 * u, -0.3 * u, -0.25 * u)
             if active:
@@ -214,7 +243,9 @@ class EpisodeRowDelegate(QStyledItemDelegate):
         progress = index.data(ProgressRole)
         watched = progress is not None and progress >= WATCHED_AT
         resuming = is_resumable(progress)
-        show_button = resuming and selected and active
+        # The pill shows on the highlighted row, and (2.9.3) on the row under the pointer,
+        # where a click on it starts the episode over.
+        show_button = resuming and ((selected and active) or is_hovered(option, index))
         left = rect.x() + 1.8 * u
         right = rect.right() - 1.8 * u
 
@@ -248,13 +279,8 @@ class EpisodeRowDelegate(QStyledItemDelegate):
 
         btn_w = 9.5 * u if show_button else 0.0
         if show_button:
-            btn = QRectF(
-                right - dur_w - check_w - btn_w,
-                rect.center().y() - 1.5 * u,
-                btn_w - 0.8 * u,
-                3.0 * u,
-            )
-            if getattr(option.widget, "button_active", False):
+            btn = start_over_rect(units, rect)
+            if selected and getattr(option.widget, "button_active", False):
                 fill_round(p, btn, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA), 1.5 * u)
                 p.setRenderHint(QPainter.Antialiasing, True)
                 p.setPen(qcolor(PALETTE.accent))
@@ -272,10 +298,13 @@ class EpisodeRowDelegate(QStyledItemDelegate):
         p.setFont(units.font(1.2))
         p.setPen(qcolor(PALETTE.text))
         shift = -0.55 * u if resuming else 0.0
+        title = str(index.data(TitleRole) or "")
+        shown = elided(p, title, title_w)
+        self.note_cut(index, [(title, shown)])
         p.drawText(
             QRectF(title_x, rect.y() + shift, title_w, rect.height()),
             Qt.AlignLeft | Qt.AlignVCenter,
-            elided(p, str(index.data(TitleRole) or ""), title_w),
+            shown,
         )
         if resuming:
             bar = QRectF(title_x, rect.center().y() + 1.35 * u, title_w, 0.35 * u)
@@ -290,16 +319,30 @@ class EpisodesView(ChannelListView):
         super().__init__(parent)
         self.focus_active = False
         self.button_active = False  # the focused row's "Start over" button has focus
+        self.pressed_at: QPointF | None = None  # the last left press (the viewport's)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.RightButton:
             event.accept()  # not a selection: the row's menu follows, the current row stays
             return
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.pressed_at = event.position()
         super().mousePressEvent(event)
 
+    def start_over_rect(self, row: int) -> QRectF:
+        """The row's "↺ Start over" pill (the viewport's coordinates); empty when the
+        episode is not begun."""
+        model = self.model()
+        if not isinstance(model, EpisodesModel) or not 0 <= row < model.rowCount():
+            return QRectF()
+        if not is_resumable(model.progress(row)):
+            return QRectF()
+        units = ui_units(self.units_width or 100)
+        return start_over_rect(units, QRectF(self.visualRect(model.index(row))))
 
-class SeriesView(QWidget):
+
+class SeriesView(TooltipWidget):
     seasonSelected = Signal(object)  # season dict (preview/load)
     episodeActivated = Signal(object, object)  # (season, episode)
     startOverRequested = Signal(object, object)
@@ -324,6 +367,8 @@ class SeriesView(QWidget):
         self._moved = False  # the user chose a zone; don't pull focus back to the episodes
         self._poster_url = ""
         self._plot_lines_cache: tuple[int, str, list[str]] | None = None
+        self._hover: str | int | None = None  # 2.9.3: "back", or a season chip's index
+        self.setMouseTracking(True)
 
         self._model = EpisodesModel(self)
         self._delegate = EpisodeRowDelegate(self)
@@ -520,16 +565,37 @@ class SeriesView(QWidget):
                 return
             idx = min(len(seasons) - 1, max(0, self._season_idx + dx))
             if seasons and idx != self._season_idx:
-                self._season_idx = idx
-                self._season = seasons[idx]
-                self._episodes = None
-                self._episodes_error = None
-                self._model.set_episodes([])
+                self._show_season(idx)
                 self._debounce.start()
-                self._sync()
         elif dy > 0 and self._episodes:
             self._moved = True
             self._zone = EPISODES
+            self._sync()
+
+    def _show_season(self, idx: int) -> None:
+        """Season `idx` is the current one; its episodes are asked for by the caller."""
+        seasons = self._seasons or []
+        self._season_idx = idx
+        self._season = seasons[idx]
+        self._episodes = None
+        self._episodes_error = None
+        self._model.set_episodes([])
+        self._sync()
+
+    def select_season(self, idx: int) -> None:
+        """2.9.3: a click on a season's chip: that season at once (the keys' wait is for
+        stepping through the chips), the keys' focus on the chips, where the click was."""
+        seasons = self._seasons or []
+        if not 0 <= idx < len(seasons):
+            return
+        self._moved = True
+        self._button = False
+        self._zone = SEASONS
+        self._debounce.stop()
+        if idx != self._season_idx or self._episodes is None:
+            self._show_season(idx)
+            self._emit_season()
+        else:
             self._sync()
 
     def _move_episodes(self, dy: int) -> None:
@@ -579,10 +645,55 @@ class SeriesView(QWidget):
         return event.button() == Qt.MouseButton.LeftButton and below and self._is_error()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            target = self._target_at(event.position())
+            if target == "back":
+                event.accept()
+                self.backRequested.emit()
+                return
+            if isinstance(target, int):
+                event.accept()
+                self.select_season(target)
+                return
         if self._on_notice(event):
             event.accept()  # its release retries
             return
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if self._target_at(event.position()) is not None:
+            event.accept()  # a quick second click on a chip: the same season, not twice
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        self._set_hover(self._target_at(event.position()))
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._set_hover(None)
+        super().leaveEvent(event)
+
+    def _set_hover(self, target: str | int | None) -> None:
+        if target != self._hover:
+            self._hover = target
+            self.setCursor(Qt.PointingHandCursor if target is not None else Qt.ArrowCursor)
+            self.update()
+
+    def _target_at(self, point: QPointF) -> str | int | None:
+        """What a click at `point` presses: "back" (‹), a season chip's index, or None."""
+        if self.back_rect().contains(point):
+            return "back"
+        for idx, rect in enumerate(self.chip_rects()):
+            if rect.contains(point):
+                return idx
+        return None
+
+    def tooltip_at(self, pos: QPointF) -> str | None:
+        """‹ names what it does and its key; elsewhere QWidget's (none)."""
+        if self.back_rect().contains(pos):
+            return key_hint(tr("Back"), "Esc")
+        return None
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if self._on_notice(event):  # retries, as Enter does
@@ -592,9 +703,11 @@ class SeriesView(QWidget):
         super().mouseReleaseEvent(event)
 
     def _on_row_clicked(self, row: int) -> None:
+        pressed = self._view.pressed_at
+        start_over = pressed is not None and self._view.start_over_rect(row).contains(pressed)
         self._moved = True
         self._zone = EPISODES
-        self._button = False
+        self._button = start_over  # a click on its ↺ Start over pill: from the beginning
         self._view.setCurrentIndex(self._model.index(row))
         self._sync()
         self.activate()
@@ -612,10 +725,47 @@ class SeriesView(QWidget):
 
     # ---- geometry ------------------------------------------------------------------------
     def _units(self) -> Units:
-        return Units(max(1, self.width()))
+        return ui_units(max(1, self.width()))
 
     def _header_h(self) -> float:
-        return self.height() * HEADER_FRACTION
+        """34% of the view's height, but (2.9.3) never taller than the whole poster and its
+        margin: past the controls' cap the units stop growing, the height does not."""
+        full = (POSTER_W_U * 1.5 + 2.0) * self._units().u
+        return min(self.height() * HEADER_FRACTION, full)
+
+    def _poster_rect(self, units: Units) -> QRectF:
+        u = units.u
+        ph = min(POSTER_W_U * 1.5 * u, self._header_h() - 2.0 * u)
+        return QRectF(MARGIN_U * u, 1.0 * u, ph * 2 / 3, ph)
+
+    def back_rect(self) -> QRectF:
+        """‹ (2.9.3): before the title, on its line: back where the series was opened from."""
+        units = self._units()
+        u = units.u
+        x = self._poster_rect(units).right() + 2.5 * u
+        size = BACK_U * u
+        middle = 1.0 * u + TITLE_U * u * 1.4 / 2  # the title line's
+        return QRectF(x, middle - size / 2, size, size)
+
+    def chip_rects(self) -> list[QRectF]:
+        """The season chips as painted (this widget's coordinates), cut to the chips' row:
+        it scrolls so that the current one shows."""
+        seasons = self._seasons or []
+        if not seasons:
+            return []
+        units = self._units()
+        u = units.u
+        area = self._chips_rect()
+        fm = QFontMetrics(units.font(CHIP_FONT_U, QFont.Weight.DemiBold))
+        rects: list[QRectF] = []
+        x = 0.0
+        for i, season in enumerate(seasons):
+            w = fm.horizontalAdvance(self.season_label(season, i)) + 2 * CHIP_PAD_U * u
+            rects.append(QRectF(x, 0, w, area.height()))
+            x += w + CHIP_GAP_U * u
+        cur = rects[min(self._season_idx, len(rects) - 1)]
+        shift = max(0.0, cur.right() - area.width())
+        return [r.translated(area.x() - shift, area.y()).intersected(area) for r in rects]
 
     def _chips_rect(self) -> QRectF:
         u = self._units().u
@@ -703,16 +853,19 @@ class SeriesView(QWidget):
 
     def _paint_header(self, p: QPainter, units: Units) -> None:
         u = units.u
-        header_h = self._header_h()
-        ph = min(POSTER_W_U * 1.5 * u, header_h - 2.0 * u)
-        pw = ph * 2 / 3
-        poster = QRectF(MARGIN_U * u, 1.0 * u, pw, ph)
+        poster = self._poster_rect(units)
         name = str((self._details.title if self._details else "") or self._series.get("name") or "")
         pixmap = (
             self._posters.pixmap(self._poster_url) if self._posters and self._poster_url else None
         )
         draw_logo(p, poster, name, pixmap, RADIUS_CARD * u / 10)
-        x = poster.right() + 2.5 * u
+        back = self.back_rect()
+        hovered = self._hover == "back"
+        if hovered:
+            fill_round(p, back, qcolor(PALETTE.text, CHIP_HOVER_ALPHA), back.height() / 2)
+        tone = qcolor(PALETTE.accent) if hovered else qcolor(PALETTE.text, 0.75)
+        draw_icon(p, "chevron_left", back.adjusted(0.3 * u, 0.3 * u, -0.3 * u, -0.3 * u), tone)
+        x = back.right() + BACK_GAP_U * u
         width = self.width() - x - MARGIN_U * u
         y = 1.0 * u
         p.setFont(units.font(TITLE_U, QFont.Weight.Bold))
@@ -767,14 +920,17 @@ class SeriesView(QWidget):
         for i, (season, r) in enumerate(zip(seasons, rects)):
             box = r.translated(area.x() - shift, area.y())
             current = i == self._season_idx
+            hovered = self._hover == i
             if current and focused:
                 fill_round(p, box, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA), radius)
                 p.setPen(qcolor(PALETTE.accent))
                 p.setBrush(Qt.NoBrush)
                 p.drawRoundedRect(box.adjusted(0.75, 0.75, -0.75, -0.75), radius, radius)
             else:
-                fill_round(p, box, qcolor(PALETTE.text, 0.07), radius)
-            p.setPen(qcolor(PALETTE.text, 1.0 if current else 0.62))
+                fill_round(
+                    p, box, qcolor(PALETTE.text, CHIP_HOVER_ALPHA if hovered else 0.07), radius
+                )
+            p.setPen(qcolor(PALETTE.text, 1.0 if current or hovered else 0.62))
             p.drawText(box, Qt.AlignCenter, self.season_label(season, i))
             if current and not focused:
                 underline = QRectF(

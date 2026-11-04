@@ -56,7 +56,7 @@ MIN_SHOW_S = 1.2
 # word: its caption shows from the word. A pause up to BRIDGE_S between two lines keeps the
 # first on until the next; after a longer one it stays as long as it takes to read (READ_CPS
 # characters a second), and never over the next.
-FIRST_WORD_S = 0.2  # services.captions.pieces.LEAD_IN_S
+FIRST_WORD_S = 0.3  # services.captions.pieces.LEAD_IN_S
 BRIDGE_S = 3.0
 READ_CPS = 15.0
 TICK_MS = 250
@@ -317,9 +317,9 @@ class CaptionsController(QObject):
         return False
 
     def languages(self) -> list[tuple[str, str]]:
-        from services.captions.languages import QWEN_LANGUAGES, own_name
+        from services.captions.languages import CAPTION_LANGUAGES, own_name
 
-        return [(name, own_name(name)) for name in QWEN_LANGUAGES]
+        return [(name, own_name(name)) for name in CAPTION_LANGUAGES]
 
     def language(self) -> tuple[str, str]:
         name, source = self._language
@@ -618,6 +618,8 @@ class CaptionsController(QObject):
                 },
                 "vad": str(paths.vad),
                 "turkish": str(paths.turkish),  # 2.9.1: ufakzeka-kulak, for Turkish
+                "european": str(paths.european),  # 2.9.3: Parakeet, for its languages
+                "cohere": str(paths.cohere),  # 2.9.3: Cohere Transcribe, for its 14
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),
