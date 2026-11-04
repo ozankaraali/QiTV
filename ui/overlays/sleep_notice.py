@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QWidget
 from services.i18n import N_, translate
 from ui.keymap import key_hint
 from ui.overlays.base import Overlay, announce
-from ui.overlays.painting import Units, fill_round
+from ui.overlays.painting import Units, fill_round, ui_units
 from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
 
@@ -68,7 +68,7 @@ class SleepNotice(Overlay):
 
     def _units(self) -> Units:
         parent = self.parentWidget()
-        return Units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
+        return ui_units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
 
     @staticmethod
     def _fonts(un: Units) -> tuple[QFont, QFont]:
@@ -78,7 +78,7 @@ class SleepNotice(Overlay):
         parent = self.parentWidget()
         if parent is None:
             return
-        un = Units(parent.width())
+        un = ui_units(parent.width())
         text_font, button_font = self._fonts(un)
         text_w = QFontMetricsF(text_font).horizontalAdvance(self._text)
         button_w = QFontMetricsF(button_font).horizontalAdvance(self.button_text())

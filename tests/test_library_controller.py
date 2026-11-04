@@ -23,7 +23,7 @@ from services.provider_ids import (
 )
 from services.thread_cleanup import has_pending_threads
 from services.watch_state import WatchState
-from ui.keymap import Action
+from ui.keymap import Action, key_hint
 from ui.library.library_screen import LIVE_TILE, GridPosters, LibraryScreen
 from ui.library.poster_grid import FAVORITE
 from ui.library.search_session import SEARCH_PROMPT
@@ -505,6 +505,101 @@ class LibraryControllerTests(unittest.TestCase):
         self.screen.nav.searchRequested.emit()
         self.assertEqual(ctl.mode, "search")
 
+    # 2.9.3: typing goes to the top bar's search unless the genre filter was chosen ----------
+    def test_typing_on_the_grid_searches_with_the_letters(self):
+        ctl = self.open_movies()
+        self.type_text("sal")
+        self.assertEqual(ctl.mode, "search")
+        self.assertEqual(ctl.zone, "search")
+        self.assertEqual(ctl.query, "sal")
+        self.assertEqual(self.screen.search_field.query, "sal")
+        self.assertEqual(self.screen.genres.filter_text, "")
+
+    def test_after_esc_the_genre_rows_never_type_in_their_filter(self):
+        ctl = self.open_movies()
+        ctl.handle(Action.ESCAPE)  # from the grid: the genres' rows
+        self.assertEqual(ctl.zone, "genres")
+        self.assertFalse(self.screen.genres.field_focused())
+        self.type_text("dune")
+        self.assertEqual(self.screen.genres.filter_text, "")
+        self.assertEqual((ctl.mode, ctl.query), ("search", "dune"))
+
+    def test_a_click_on_the_genre_filter_types_there(self):
+        ctl = self.open_movies()
+        self.screen.genres.fieldClicked.emit()
+        self.assertEqual(ctl.zone, "genres")
+        self.assertTrue(self.screen.genres.field_focused())
+        self.type_text("co")
+        self.assertEqual(self.screen.genres.filter_text, "co")
+        self.assertEqual(ctl.mode, "browse")
+        self.assertEqual(self.screen.genres.rows(), ["GENRES · 1", "Comedy"])
+
+    def test_a_genre_filter_matching_nothing_says_so(self):
+        ctl = self.open_movies()
+        self.screen.genres.fieldClicked.emit()
+        self.type_text("zzz")
+        genres = self.screen.genres
+        self.assertEqual(genres.current_id(), None)
+        self.assertEqual(genres.no_match_text(), "Nothing matches “zzz”")
+        self.assertFalse(genres.grab().isNull())
+        ctl.handle(Action.ESCAPE)
+        self.assertEqual(genres.no_match_text(), "")
+
+    def test_typing_in_a_series_searches(self):
+        ctl = self.build()
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        ctl.handle(Action.NAV_ACTIVATE)  # the series view
+        self.assertEqual(ctl.mode, "series")
+        self.type_text("q")
+        self.assertEqual((ctl.mode, ctl.query), ("search", "q"))
+
+    def test_the_search_fields_x_clears_then_closes_the_search(self):
+        ctl = self.open_movies()
+        self.type_text("sal")
+        field = self.screen.search_field
+        self.assertFalse(field.clear_rect().isEmpty())
+        self.assertEqual(field.tooltip_at(field.clear_rect().center()), key_hint("Clear", "Esc"))
+        field.clearRequested.emit()
+        self.assertEqual((ctl.mode, ctl.query, field.query), ("search", "", ""))
+        field.clearRequested.emit()  # nothing to clear: back to the section, as Esc
+        self.assertEqual(ctl.mode, "browse")
+
+    # 2.9.3: two providers or more: Movies and Series show the provider that has them ---------
+    def two_providers_one_with_films(self):
+        sections = {"P": ["live"], "Q": ["live", "movies", "series"]}
+        self.catalog.section_list = ["live"]
+        self.catalog.sections_of = lambda name: sections.get(name, [])
+        self.catalog.name = "P"
+
+    def test_movies_of_a_source_without_them_shows_the_provider_that_has_them(self):
+        self.two_providers_one_with_films()
+        ctl = self.build()
+        ctl.open_search()
+        self.assertIn("movies", self.screen.nav._tabs)  # the tabs stay: Q has them
+        ctl.open("movies")
+        self.assertEqual(self.catalog.selected[-1], "Q")
+        self.assertEqual(self.catalog.current_provider_name(), "Q")
+
+    def test_several_providers_with_films_show_all_providers(self):
+        sections = {"P": ["live"], "Q": ["live", "movies"], "R": ["movies", "series"]}
+        self.catalog.names = ["P", "Q", "R"]
+        self.catalog.section_list = ["live"]
+        self.catalog.sections_of = lambda name: sections.get(name, [])
+        ctl = self.build()
+        ctl.open("movies")
+        self.assertEqual(self.catalog.mixes[-1], [])  # every provider
+        self.assertTrue(self.catalog.all_providers())
+
+    def test_with_one_provider_movies_says_it_has_none_as_before(self):
+        self.catalog.names = ["P"]
+        self.catalog.section_list = ["live"]
+        self.catalog.sections_of = lambda name: ["live"]
+        ctl = self.build()
+        ctl.open("movies")
+        self.assertEqual(self.catalog.selected, [])
+        self.assertNotIn("movies", self.screen.nav._tabs)
+
     def test_m3u_providers_show_live_tv_and_search_only(self):
         self.catalog.section_list = ["live"]
         ctl = self.build()
@@ -660,6 +755,7 @@ class LibraryControllerTests(unittest.TestCase):
     def test_escape_from_genres_goes_back_to_tv_once_the_filter_is_empty(self):
         ctl = self.open_movies()
         ctl.handle(Action.NAV_LEFT)
+        ctl.handle(Action.NAV_UP)  # 2.9.3: ↑ from the first genre: its filter
         self.type_text("co")
         self.assertEqual(self.screen.genres.rows(), ["GENRES · 1", "Comedy"])
         ctl.handle(Action.ESCAPE)  # clears the filter
@@ -1429,17 +1525,25 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.played[-1][0]["name"], "Dune Songs")
 
     # focus, typing, layout and failures --------------------------------------------------
-    def test_up_from_the_first_genre_reaches_nav_and_down_returns(self):
+    def test_up_from_the_first_genre_reaches_its_filter_then_nav_and_down_returns(self):
         ctl = self.open_movies()
+        genres = self.screen.genres
         ctl.handle(Action.NAV_LEFT)
-        ctl.handle(Action.NAV_UP)  # the first genre
+        self.assertFalse(genres.field_focused())  # the rows: typing searches the Library
+        ctl.handle(Action.NAV_UP)  # the first genre: 2.9.3, its filter (its ring and caret)
+        self.assertEqual(ctl.zone, "genres")
+        self.assertTrue(genres.field_focused())
+        ctl.handle(Action.NAV_UP)
         self.assertEqual(ctl.zone, "nav")
+        self.assertFalse(genres.field_focused())
         ctl.handle(Action.NAV_DOWN)
         self.assertEqual(ctl.zone, "genres")
+        self.assertFalse(genres.field_focused())  # back on the rows
 
     def test_slash_types_where_text_goes_and_searches_elsewhere(self):
         ctl = self.open_movies()
         ctl.handle(Action.NAV_LEFT)
+        ctl.handle(Action.NAV_UP)  # the genre filter, chosen
         ctl.handle(Action.SEARCH, "/")
         self.assertEqual(self.screen.genres.filter_text, "/")
         self.assertEqual(ctl.mode, "browse")

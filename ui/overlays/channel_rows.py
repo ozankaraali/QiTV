@@ -7,6 +7,7 @@ from typing import cast
 
 from PySide6.QtCore import (
     QAbstractListModel,
+    QEvent,
     QModelIndex,
     QPersistentModelIndex,
     QRectF,
@@ -15,6 +16,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QCursor,
     QFont,
     QFontMetrics,
     QFontMetricsF,
@@ -23,12 +25,21 @@ from PySide6.QtGui import (
     QPainterPath,
     QPixmap,
 )
-from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QStyle, QStyledItemDelegate
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QFrame,
+    QListView,
+    QStyle,
+    QStyledItemDelegate,
+    QToolTip,
+)
 
 from services.catalog import shown_label
 from services.provider_ids import provider_of
 from services.zapping import ZapContext
-from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round
+from ui.overlays.base import plain_tooltip
+from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round, ui_units
+from ui.overlays.scroll_indicator import for_scroll_area
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -243,6 +254,48 @@ class ChannelRowsModel(QAbstractListModel):
             self.dataChanged.emit(idx, idx, [LogoRole])
 
 
+HOVER_ALPHA = 0.06  # 2.9.3: the row under the pointer, a faint tint (the highlight's is accent)
+
+
+def is_hovered(option, index) -> bool:
+    """Whether the row is under the pointer (ChannelListView's `hover_row`)."""
+    row = int(getattr(option.widget, "hover_row", -1))
+    return row == index.row() and row >= 0
+
+
+def paint_hover(
+    p: QPainter, option, index, u: float, radius_u: float = 1.0, inset_u=(0.3, 0.2)
+) -> None:
+    """2.9.3: a row under the pointer, when it is not the highlighted one, takes a faint tint
+    (the review: rows gave no sign they could be clicked), drawn where the highlight would be
+    (`inset_u`: the highlight's inset from the row, in u)."""
+    if not is_hovered(option, index) or option.state & QStyle.State_Selected:
+        return
+    dx, dy = inset_u[0] * u, inset_u[1] * u
+    box = QRectF(option.rect).adjusted(dx, dy, -dx, -dy)
+    fill_round(p, box, qcolor(PALETTE.text, HOVER_ALPHA), radius_u * u)
+
+
+class CutTexts:
+    """2.9.3: a delegate keeps what its rows cut short ("…") as it painted them, so that the
+    list's tooltip names them whole (the review: a long name could never be read in full).
+    Kept by row with the row's text then: a row whose text changed since says nothing."""
+
+    def note_cut(self, index, parts) -> None:
+        """`parts`: each (whole text, as painted) of the row's."""
+        cut = self.__dict__.setdefault("_cut_texts", {})
+        whole = [text for text, shown in parts if text and shown != text]
+        if whole:
+            cut[index.row()] = (index.data(Qt.DisplayRole), "\n".join(whole))
+        else:
+            cut.pop(index.row(), None)
+
+    def cut_text(self, index) -> str:
+        """The row's texts it cut short, whole (one a line); "" when none was."""
+        kept = self.__dict__.get("_cut_texts", {}).get(index.row())
+        return kept[1] if kept is not None and kept[0] == index.data(Qt.DisplayRole) else ""
+
+
 def column_focused(widget) -> bool:
     """Whether a row's list has the focus: the drawer marks its two columns; a list it does
     not mark (the fast-zap column) counts as focused."""
@@ -250,7 +303,7 @@ def column_focused(widget) -> bool:
     return True if focused is None else bool(focused)
 
 
-class ChannelRowDelegate(QStyledItemDelegate):
+class ChannelRowDelegate(CutTexts, QStyledItemDelegate):
     def __init__(self, scale: float = 1.0, parent=None, *, provider_below: bool = False) -> None:
         """`provider_below`: the provider's name starts the second line ("Harbor IPTV · what
         is on") instead of following the channel's in a chip, which leaves the name the row's
@@ -261,7 +314,7 @@ class ChannelRowDelegate(QStyledItemDelegate):
 
     def _units(self, widget) -> Units:
         width = getattr(widget, "units_width", 100) or 100
-        return Units(round(width * self._scale))
+        return ui_units(width, self._scale)
 
     def sizeHint(self, option, index) -> QSize:
         units = self._units(option.widget)
@@ -274,6 +327,7 @@ class ChannelRowDelegate(QStyledItemDelegate):
         selected = bool(option.state & QStyle.State_Selected)
         focused = column_focused(option.widget)
         p.save()
+        paint_hover(p, option, index, u)
         if selected:
             box = rect.adjusted(0.3 * u, 0.2 * u, -0.3 * u, -0.2 * u)
             fill_round(
@@ -332,11 +386,8 @@ class ChannelRowDelegate(QStyledItemDelegate):
             # The provider's name follows the channel's, in a chip; the name elides first.
             chip_font = tag_font(units)
             name_w, chip_dx, chip_w = tag_layout(units, name_font, chip_font, name, tag, width)
-            p.drawText(
-                QRectF(x, y, name_w, name_h),
-                Qt.AlignLeft | Qt.AlignVCenter,
-                elided(p, name, name_w),
-            )
+            shown_name = elided(p, name, name_w)
+            p.drawText(QRectF(x, y, name_w, name_h), Qt.AlignLeft | Qt.AlignVCenter, shown_name)
             chip_h = min(name_h, QFontMetricsF(chip_font).height() + 0.4 * u)
             chip = QRectF(x + chip_dx, y + (name_h - chip_h) / 2, chip_w, chip_h)
             fill_round(p, chip, qcolor(PALETTE.text, 0.10), chip_h / 2)
@@ -348,22 +399,18 @@ class ChannelRowDelegate(QStyledItemDelegate):
                 QFontMetricsF(chip_font).elidedText(tag, Qt.ElideRight, max(0.0, chip_w - 1.6 * u)),
             )
         else:
-            p.drawText(
-                QRectF(x, y, width, name_h),
-                Qt.AlignLeft | Qt.AlignVCenter,
-                elided(p, name, width),
-            )
+            shown_name = elided(p, name, width)
+            p.drawText(QRectF(x, y, width, name_h), Qt.AlignLeft | Qt.AlignVCenter, shown_name)
         y += name_h
         x, width = text_x, text_w
+        shown_now = now
         if now:
             p.setFont(units.font(1.25))
             p.setPen(qcolor(PALETTE.text, 0.65))
-            p.drawText(
-                QRectF(x, y, width, now_h),
-                Qt.AlignLeft | Qt.AlignVCenter,
-                elided(p, now, width),
-            )
+            shown_now = elided(p, now, width)
+            p.drawText(QRectF(x, y, width, now_h), Qt.AlignLeft | Qt.AlignVCenter, shown_now)
             y += now_h
+        self.note_cut(index, [(name, shown_name), (now, shown_now)])
         if has_bar:
             draw_progress(p, QRectF(x, y + gap, width, bar_h), progress)
         p.restore()
@@ -371,13 +418,18 @@ class ChannelRowDelegate(QStyledItemDelegate):
 
 class ChannelListView(QListView):
     """The rows' list. A row's height follows the list's width (`units_width`), never its data:
-    a change of data repaints the rows and lays none of them out again (see dataChanged)."""
+    a change of data repaints the rows and lays none of them out again (see dataChanged).
+
+    2.9.3: the row under the pointer is `hover_row` (its delegate tints it: `paint_hover`), and
+    a thin scrollbar shows over the right edge while the list scrolls or the pointer is over it
+    (`indicator`, ui.overlays.scroll_indicator), which drags it."""
 
     rowClicked = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.units_width = 100
+        self.hover_row = -1
         self._scroll_due: tuple[QPersistentModelIndex, QAbstractItemView.ScrollHint] | None = None
         self._row_h = 0  # a row's height at the last layout (rows of one height), else 0
         # Where a long list laid out again comes back to: its top row and how much of that row
@@ -398,13 +450,60 @@ class ChannelListView(QListView):
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setStyleSheet("QListView { background: transparent; border: none; }")
         self.viewport().setAutoFillBackground(False)
+        self.viewport().setAttribute(Qt.WA_Hover, True)  # hover events: `hover_row`
         self.clicked.connect(lambda idx: self.rowClicked.emit(idx.row()))
+        self.indicator = for_scroll_area(self)
+
+    def viewportEvent(self, event) -> bool:
+        kind = event.type()
+        if kind in (QEvent.Type.HoverEnter, QEvent.Type.HoverMove):
+            self._set_hover(self.indexAt(event.position().toPoint()).row())
+        elif kind == QEvent.Type.HoverLeave:
+            self._set_hover(-1)
+        if kind in (QEvent.Type.HoverEnter, QEvent.Type.HoverLeave):
+            self.indicator.pointer_over(kind == QEvent.Type.HoverEnter)
+        if kind == QEvent.Type.ToolTip:
+            self._tooltip(event)
+            return True
+        return super().viewportEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.indicator.refit()
+
+    def _set_hover(self, row: int) -> None:
+        if row == self.hover_row:
+            return
+        model = self.model()
+        old, self.hover_row = self.hover_row, row
+        for changed in (old, row):
+            if model is not None and 0 <= changed < model.rowCount(self.rootIndex()):
+                rect = self.visualRect(model.index(changed, 0, self.rootIndex()))
+                self.viewport().update(rect)
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:
+        super().scrollContentsBy(dx, dy)
+        if self.hover_row >= 0:  # the row under a still pointer is another one now
+            point = self.viewport().mapFromGlobal(QCursor.pos())
+            self._set_hover(self.indexAt(point).row())
+
+    def _tooltip(self, event) -> None:
+        """2.9.3: a row whose texts its delegate cut short names them whole (`CutTexts`)."""
+        index = self.indexAt(event.pos())
+        delegate = self.itemDelegateForIndex(index) if index.isValid() else None
+        cut_text = getattr(delegate, "cut_text", None)
+        text = cut_text(index) if callable(cut_text) else ""
+        if text:
+            QToolTip.showText(event.globalPos(), plain_tooltip(text), self.viewport())
+        else:
+            QToolTip.hideText()
 
     def reset(self) -> None:
         """A new list (and a new model): laid out at once when short. In batches a row past
         the first batch would have no place yet when the highlight is scrolled to it, and the
         scroll position would be cut back to the first batch."""
         self._scroll_due = None
+        self.hover_row = -1
         model = self.model()
         rows = model.rowCount() if model is not None else 0
         mode = QListView.LayoutMode

@@ -18,7 +18,7 @@ from services.remote.protocol import CODE_ROTATE_S
 from ui.brand import logo_aspect, logo_pixmap
 from ui.keymap import key_hint
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, fill_round
+from ui.overlays.painting import Units, fill_round, ui_units
 from ui.theme import PALETTE, RADIUS_PANEL, qcolor
 
 # i18n: the title of the phone remote's pairing screen over the TV
@@ -118,7 +118,7 @@ class PairOverlay(Overlay):
     # ---- painting --------------------------------------------------------------------------
 
     def paintEvent(self, event: QPaintEvent) -> None:
-        un = Units(max(1, self.width()))
+        un = ui_units(max(1, self.width()))
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)

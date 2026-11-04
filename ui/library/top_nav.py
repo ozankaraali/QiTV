@@ -25,7 +25,15 @@ from services.i18n import N_, tr, translate
 from ui.brand import BRAND_NAME, logo_aspect, logo_available, logo_pixmap
 from ui.keymap import key_hint
 from ui.overlays.base import TooltipWidget
-from ui.overlays.painting import Units, draw_field_icon, draw_icon, draw_refresh, elided, fill_round
+from ui.overlays.painting import (
+    Units,
+    draw_field_icon,
+    draw_icon,
+    draw_refresh,
+    elided,
+    fill_round,
+    ui_units,
+)
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 HEIGHT_U = 6.0
@@ -43,6 +51,7 @@ LOGO_LEFT_U = 2.0
 LOGO_GAP_U = 3.0  # between the logo and the first tab
 FULLSCREEN_KEYS = "Ctrl+Meta+F" if sys.platform == "darwin" else "F11"  # macOS keeps F11
 REFRESH_KEYS = "Ctrl+Shift+R"  # 2.8: the films and series shown load again
+HOVER_ALPHA = 0.08  # 2.9.3: a pill or button under the pointer
 # i18n: tooltip of the Library's ↻ (before its key), and its entry in the source menu
 REFRESH_TEXT = N_("Refresh films and series")
 
@@ -74,6 +83,8 @@ class TopNav(TooltipWidget):
         self._focused = False
         self._focus_item = "live"
         self._pressed: str | None = None
+        self._hover: str | None = None  # 2.9.3: the item under the pointer is lit
+        self.setMouseTracking(True)
         self._search_field: QWidget | None = None
         if parent is not None:
             parent.installEventFilter(self)
@@ -139,7 +150,7 @@ class TopNav(TooltipWidget):
 
     def logo_rect(self) -> QRectF:
         """Where the logo is drawn: whole pixels, so it stays crisp."""
-        units = Units(self._host_width())
+        units = ui_units(self._host_width())
         brand_font = units.font(BRAND_FONT_U, QFont.Weight.Bold)
         if not logo_available():  # the asset is missing: the name, as before
             width = QFontMetrics(brand_font).horizontalAdvance(BRAND_NAME)
@@ -179,7 +190,7 @@ class TopNav(TooltipWidget):
         return (self._source or tr("Source")) + " ▾"
 
     def _item_rects(self) -> dict[str, QRectF]:
-        units = Units(self._host_width())
+        units = ui_units(self._host_width())
         u = units.u
         height = self.height()
         rects: dict[str, QRectF] = {}
@@ -221,13 +232,13 @@ class TopNav(TooltipWidget):
         return rects
 
     def _search_is_field(self, rect: QRectF) -> bool:
-        fm = QFontMetrics(Units(self._host_width()).font(1.1))
+        fm = QFontMetrics(ui_units(self._host_width()).font(1.1))
         return (
             rect.width() > fm.horizontalAdvance(_search_label()) + _icon_room(fm) + 4 * fm.height()
         )
 
     def _item_at(self, pos) -> str | None:
-        u = Units(self._host_width()).u
+        u = ui_units(self._host_width()).u
         for item, rect in self._item_rects().items():
             # tabs are text-wide, so widen them; pills are already padded and 1u apart
             hit = rect.adjusted(-0.8 * u, 0, 0.8 * u, 0) if item in ALL_TABS else rect
@@ -245,6 +256,20 @@ class TopNav(TooltipWidget):
             event.accept()  # a quick second click: not in and straight out again
             return
         super().mouseDoubleClickEvent(event)  # one more press
+
+    def mouseMoveEvent(self, event) -> None:
+        item = self._item_at(event.position())
+        if item != self._hover:
+            self._hover = item
+            self.setCursor(Qt.PointingHandCursor if item is not None else Qt.ArrowCursor)
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self._hover is not None:
+            self._hover = None
+            self.update()
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         item, self._pressed = self._pressed, None
@@ -279,7 +304,7 @@ class TopNav(TooltipWidget):
         self.update()
 
     def _relayout(self) -> None:
-        self.setFixedHeight(Units(self._host_width()).px(HEIGHT_U))
+        self.setFixedHeight(ui_units(self._host_width()).px(HEIGHT_U))
         self.update()
 
     def _paint_search_field(self, p: QPainter, units: Units, rect: QRectF) -> None:
@@ -307,7 +332,7 @@ class TopNav(TooltipWidget):
         p.restore()
 
     def paintEvent(self, event) -> None:
-        units = Units(self._host_width())
+        units = ui_units(self._host_width())
         u = units.u
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
@@ -336,7 +361,8 @@ class TopNav(TooltipWidget):
                     1.0 * u,
                 )
             p.setFont(units.font(1.3, QFont.Weight.DemiBold))
-            p.setPen(qcolor(PALETTE.text, 1.0 if active else PALETTE.text_muted_alpha))
+            lit = active or self._hover == tab  # 2.9.3: under the pointer, as the one shown
+            p.setPen(qcolor(PALETTE.text, 1.0 if lit else PALETTE.text_muted_alpha))
             p.drawText(rect, Qt.AlignCenter, translate(TAB_LABELS[tab]))
             if active:
                 p.fillRect(
@@ -351,6 +377,8 @@ class TopNav(TooltipWidget):
             if self._focused and self._focus_item == item:
                 self._paint_focus(p, rect, radius)
             else:
+                if self._hover == item:  # 2.9.3: a faint ground under the pointer
+                    fill_round(p, rect, qcolor(PALETTE.text, HOVER_ALPHA), radius)
                 p.setPen(qcolor(PALETTE.text, 0.15))
                 p.setBrush(Qt.NoBrush)
                 p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
@@ -373,6 +401,8 @@ class TopNav(TooltipWidget):
             p.drawText(inner, Qt.AlignCenter, elided(p, text, inner.width()))
         for name in ("refresh", "fullscreen"):
             rect = rects[name]
+            if self._hover == name:
+                fill_round(p, rect, qcolor(PALETTE.text, HOVER_ALPHA), 1.6 * u)
             p.setPen(qcolor(PALETTE.text, 0.15))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 1.6 * u, 1.6 * u)

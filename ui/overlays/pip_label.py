@@ -36,7 +36,7 @@ from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_, translate
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, draw_icon, fill_round, volume_icon
+from ui.overlays.painting import Units, draw_icon, fill_round, ui_units, volume_icon
 from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
 
@@ -261,7 +261,7 @@ class PipLabel(Overlay):
 
     def _units(self) -> Units:
         parent = self.parentWidget()
-        return Units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
+        return ui_units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
 
     def _layout(self) -> _Layout:
         un = self._units()

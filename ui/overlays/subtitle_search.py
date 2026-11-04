@@ -49,7 +49,7 @@ from services.i18n import N_, tr_n, translate
 from services.opensubtitles import SubtitleFile, shown_release
 from ui.keymap import Action, key_hint
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, draw_icon, fill_round
+from ui.overlays.painting import Units, draw_icon, fill_round, ui_units
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -500,7 +500,7 @@ class SubtitleSearchPage(Overlay):
 
     def _units(self) -> Units:
         parent = self.parentWidget()
-        return Units(parent.width() if parent is not None else 1280)
+        return ui_units(parent.width() if parent is not None else 1280)
 
     @staticmethod
     def _fonts(un: Units) -> dict[str, QFont]:

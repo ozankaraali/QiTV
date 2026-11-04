@@ -2,7 +2,10 @@
 
 The player controls' "Open in external player" offers the two players for what plays now
 (`show_players`): the same plays as the menu's, opening upwards from the button. A right-click
-on a Library title or episode offers the players and its link (`show_target`).
+on a Library title or episode offers the players and its link (`show_target`). 2.9.3: a
+right-click on a channel of the guide offers its row's menu as the channel list has it
+(`show_channel`), and one on the picture the menu of what plays (`show_playing`: the channel's,
+without picture-in-picture of itself; a film's or an episode's players and link).
 
 - "Add to favorites" / "Remove from favorites" (channels only);
 - "Open in picture-in-picture" (channels, when the shell offers picture in picture): the
@@ -31,7 +34,14 @@ from PySide6.QtWidgets import QMenu, QWidget
 
 from services import external_players, favorites, i18n
 from services.i18n import N_, tr, tr_n, translate
-from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode
+from services.navigation import (
+    FAVORITES_GROUP,
+    RECENT_GROUP,
+    NavModel,
+    NavNode,
+    item_key,
+    item_title,
+)
 from ui.link_lanes import LinkLanes, Target
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -162,6 +172,59 @@ class ContextActions(QObject):
         menu.aboutToHide.connect(menu.deleteLater)
         menu.popup(global_pos)
 
+    def show_channel(
+        self,
+        item: dict,
+        global_pos: QPoint,
+        parent: Optional[QObject] = None,
+        *,
+        group_key: str = "",
+    ) -> None:
+        """2.9.3: a live channel's menu where the channel list is not (the guide's rows): its
+        row's entries, whatever the channel list shows now."""
+        menu = self.channel_menu(item, parent if isinstance(parent, QWidget) else None, group_key)
+        menu.aboutToHide.connect(menu.deleteLater)
+        menu.popup(global_pos)
+
+    def show_playing(
+        self, target: Target, global_pos: QPoint, parent: Optional[QObject] = None
+    ) -> None:
+        """2.9.3: a right-click on the picture: the menu of what plays. A live channel's as
+        its row's (no picture-in-picture of the channel itself), a film's or an episode's the
+        players and its link, a file's the players."""
+        widget = parent if isinstance(parent, QWidget) else None
+        if target.live and not target.local:
+            menu = self.channel_menu(target.item, widget, target.group_key, playing=target)
+        else:
+            menu = QMenu(widget)
+            menu.setStyleSheet(menu_style())
+            if target.local:
+                self._add_players(menu, target)
+            else:
+                self._add_link_actions(menu, target)
+        menu.aboutToHide.connect(menu.deleteLater)
+        menu.popup(global_pos)
+
+    def channel_menu(
+        self,
+        item: dict,
+        parent: Optional[QWidget] = None,
+        group_key: str = "",
+        *,
+        playing: Optional[Target] = None,
+    ) -> QMenu:
+        """A live channel's menu wherever it is listed (2.9.3): favorites, picture-in-picture
+        (not for `playing`: the channel playing itself), Record at a time…, Hide, then the
+        players and its link (`playing`'s own, else the channel's live one)."""
+        node = NavNode("item", item_key(item), item_title(item), item)
+        menu = QMenu(parent)
+        menu.setStyleSheet(menu_style())
+        self._add_channel_actions(menu, node, pip=playing is None, recent=False)
+        menu.addSeparator()
+        target = playing or Target(item, "live", node.title, group_key=group_key)
+        self._add_link_actions(menu, target)
+        return menu
+
     def menu(self, node: NavNode, parent: Optional[QWidget] = None) -> Optional[QMenu]:
         """`node`'s menu; None when it has nothing to offer (a series)."""
         if node.layer == "group" and node.key == RECENT_GROUP:
@@ -187,35 +250,43 @@ class ContextActions(QObject):
             return None
         menu = QMenu(parent)
         menu.setStyleSheet(menu_style())
-        item: dict = node.payload
         if channel:
-            kept = favorites.is_favorite(self.config, item)
-            text = tr("Remove from favorites") if kept else tr("Add to favorites")
-            menu.addAction(text).triggered.connect(lambda _=False: self._toggle_favorite(item))
-            open_pip = self._open_pip
-            if open_pip is not None:
-                menu.addAction(translate(OPEN_PIP_TEXT)).triggered.connect(
-                    lambda _=False: open_pip(node)
-                )
-            record_at = self._record_at() if self._record_at is not None else None
-            if record_at is not None:
-                menu.addAction(translate(RECORD_AT_TEXT)).triggered.connect(
-                    lambda _=False: record_at(item)
-                )
-            forget = self._forget_recent
-            if forget is not None and self.nav.is_recent_row(node):
-                menu.addSeparator()
-                menu.addAction(translate(REMOVE_RECENT_TEXT)).triggered.connect(
-                    lambda _=False: forget(item)
-                )
-                self._add_clear_recents(menu)
-            if hide is not None:
-                menu.addAction(translate(HIDE_TEXT)).triggered.connect(lambda _=False: hide(node))
+            self._add_channel_actions(menu, node)
         if playable:
             if channel:
                 menu.addSeparator()
             self._add_link_actions(menu, self._target(node))
         return menu
+
+    def _add_channel_actions(
+        self, menu: QMenu, node: NavNode, *, pip: bool = True, recent: bool = True
+    ) -> None:
+        """A channel's own entries: favorites, picture-in-picture (with `pip`), Record at a
+        time…, Remove from Recents (with `recent`, on a row of ⟲ Recent) and Hide."""
+        item: dict = node.payload
+        kept = favorites.is_favorite(self.config, item)
+        text = tr("Remove from favorites") if kept else tr("Add to favorites")
+        menu.addAction(text).triggered.connect(lambda _=False: self._toggle_favorite(item))
+        open_pip = self._open_pip if pip else None
+        if open_pip is not None:
+            menu.addAction(translate(OPEN_PIP_TEXT)).triggered.connect(
+                lambda _=False: open_pip(node)
+            )
+        record_at = self._record_at() if self._record_at is not None else None
+        if record_at is not None:
+            menu.addAction(translate(RECORD_AT_TEXT)).triggered.connect(
+                lambda _=False: record_at(item)
+            )
+        forget = self._forget_recent
+        if recent and forget is not None and self.nav.is_recent_row(node):
+            menu.addSeparator()
+            menu.addAction(translate(REMOVE_RECENT_TEXT)).triggered.connect(
+                lambda _=False: forget(item)
+            )
+            self._add_clear_recents(menu)
+        hide = self._hide if self._may_hide() else None
+        if hide is not None:
+            menu.addAction(translate(HIDE_TEXT)).triggered.connect(lambda _=False: hide(node))
 
     def _recents_menu(self, parent: Optional[QWidget]) -> Optional[QMenu]:
         """A right-click on the ⟲ Recent row: "Clear Recents ›"."""

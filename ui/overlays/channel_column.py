@@ -9,13 +9,13 @@ from PySide6.QtWidgets import QAbstractItemView
 from services.i18n import N_
 from ui.overlays.base import Overlay
 from ui.overlays.channel_rows import ChannelListView, ChannelRowDelegate, ChannelRowsModel
-from ui.overlays.painting import Units, elided
+from ui.overlays.painting import elided, ui_units
 from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
 
-COLUMN_FRACTION = 0.4
+COLUMN_U = 40.0  # its width (2.9.3: in u; 40% of the width up to UNIT_CAP_PX)
 
 
 class ChannelColumn(Overlay):
@@ -28,7 +28,7 @@ class ChannelColumn(Overlay):
         self.setFocusPolicy(Qt.NoFocus)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self._title = ""
-        self._units = Units(100)
+        self._units = ui_units(100)
         self._laid_out_for: tuple[int, int] | None = None  # the host size _relayout last fitted
         self._model = ChannelRowsModel(logos, now_provider, self)
         self._view = ChannelListView(self)
@@ -159,8 +159,8 @@ class ChannelColumn(Overlay):
         if (host_w, host_h) == self._laid_out_for:
             return  # opened again at the same size: forcing a layout of the list would be waste
         self._laid_out_for = (host_w, host_h)
-        self.setGeometry(QRect(0, 0, round(host_w * COLUMN_FRACTION), host_h))
-        units = Units(host_w)
+        self.setGeometry(QRect(0, 0, round(COLUMN_U * ui_units(host_w).u), host_h))
+        units = ui_units(host_w)
         self._units = units
         self._view.units_width = host_w
         top = units.px(2.6) + units.px(2.4) + units.px(1.0)

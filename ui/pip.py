@@ -40,7 +40,7 @@ from shiboken6 import isValid
 
 from services.redact import safe_message
 from ui.macos_window import reclaim_first_responder
-from ui.overlays.painting import Units
+from ui.overlays.painting import ui_units
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ def corner_rect(size: QSize, corner: str) -> QRect:
     """The small surface's rect in a player of `size`: 25% wide, 16:9, 2u from the edges."""
     width = round(size.width() * WIDTH_FRACTION)
     height = round(width * HEIGHT_PER_WIDTH)
-    margin = Units(size.width()).px(MARGIN_UNITS)
+    margin = ui_units(size.width()).px(MARGIN_UNITS)
     x = margin if corner.endswith("l") else size.width() - margin - width
     y = margin if corner.startswith("t") else size.height() - margin - height
     return QRect(x, y, width, height)
@@ -74,7 +74,7 @@ def lifted_rect(size: QSize, corner: str, lift: int) -> QRect:
     """`corner_rect`, raised by `lift` pixels for a bottom corner (never above the margin)."""
     rect = corner_rect(size, corner)
     if corner.startswith("b") and lift > 0:
-        margin = Units(size.width()).px(MARGIN_UNITS)
+        margin = ui_units(size.width()).px(MARGIN_UNITS)
         rect.moveTop(max(margin, rect.top() - lift))
     return rect
 

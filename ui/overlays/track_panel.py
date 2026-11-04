@@ -61,7 +61,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from services.i18n import N_, translate
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, draw_icon, fill_round
+from ui.overlays.painting import Units, draw_icon, fill_round, ui_units
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -343,7 +343,7 @@ class TrackPanel(Overlay):
 
     def _units(self) -> Units:
         parent = self.parentWidget()
-        return Units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
+        return ui_units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
 
     @staticmethod
     def _fonts(un: Units) -> dict[str, QFont]:
@@ -441,7 +441,7 @@ class TrackPanel(Overlay):
         parent = self.parentWidget()
         if parent is None:
             return
-        un = Units(parent.width())
+        un = ui_units(parent.width())
         edge = un.px(_EDGE_U)
         bottom = (
             parent.height() - un.px(_BOTTOM_U)

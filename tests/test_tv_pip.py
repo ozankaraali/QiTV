@@ -151,6 +151,7 @@ class FakeMixer(FakeOverlay):
     muteRequested = Signal(int)
     rowSelected = Signal(int)
     followRequested = Signal()  # the multiview's "Follow focus"
+    wheelRequested = Signal(int, int)  # 2.9.3: the wheel over a row
     closed = Signal()
     rows = ()
     selected = 0
@@ -1724,6 +1725,19 @@ class MixerTests(PipCase):
         self.mixer.dismiss()
         self.controller.handle(Action.MUTE)
         self.assertFalse(self.sessions.muted("main"))
+
+    def test_the_wheel_over_a_row_changes_that_rows_level(self):  # 2.9.3
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.VOL_DOWN)  # the mixer shows
+        (main, pip), _selected = self.mixer.shown()
+        self.mixer.wheelRequested.emit(1, -2)  # over the PiP's row, two notches up: louder
+        (main_now, pip_now), selected = self.mixer.shown()
+        self.assertEqual(selected, 1)
+        self.assertEqual(main_now, main)  # Main's untouched
+        self.assertEqual(pip_now[2], min(100, pip[2] + 10))
+        self.mixer.wheelRequested.emit(1, 1)  # a notch down: quieter
+        self.assertEqual(self.mixer.shown()[0][1][2], pip_now[2] - 5)
 
     def test_a_swap_keeps_each_rows_level_with_its_role(self):
         self.start_large(0)

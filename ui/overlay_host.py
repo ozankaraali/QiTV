@@ -32,6 +32,7 @@ class OverlayHost(QWidget):
     wheelSteps = Signal(int, object)  # steps, Qt.KeyboardModifier
     backPressed = Signal()  # the mouse's Back and Forward buttons, over the video or overlays
     forwardPressed = Signal()
+    contextRequested = Signal(QPoint)  # 2.9.3: a right-click that reaches the host itself
 
     def __init__(self, window: QWidget, surface: QWidget):
         flags = (
@@ -278,6 +279,8 @@ class OverlayHost(QWidget):
     # and the Back/Forward buttons, which the overlays pass on).
     def mousePressEvent(self, event):
         self._pointer.press(event.button())
+        if event.button() == Qt.MouseButton.RightButton:  # 2.9.3: what plays, its menu
+            self.contextRequested.emit(event.globalPosition().toPoint())
 
     def mouseDoubleClickEvent(self, event):
         self._pointer.double_click(event.button())

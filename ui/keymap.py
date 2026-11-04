@@ -161,6 +161,7 @@ _CTRL_KEYS = {
 # The guide (spec §5.1): the drawer's keys but Backspace, digits (a channel number to jump
 # to) and Ch± (one row), G closes it, and the playback keys keep working; nothing types.
 _GUIDE_KEYS = {k: a for k, a in _DRAWER_KEYS.items() if a is not Action.NAV_BACKSPACE}
+_GUIDE_KEYS[_K.Key_Home.value] = Action.NAV_HOME  # 2.9.3: the time window back to now
 _GUIDE_CHARS = {
     key: _PLAYER_CHARS[key]
     for key in (
@@ -376,6 +377,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
     "guide": [
         ("Up, Down", N_("Move between channels")),
         ("Left, Right", N_("Earlier / later")),
+        ("Home", N_("Now")),  # 2.9.3: the time window back to now (the header's Now)
         ("0…9", N_("Jump to a channel number")),
         ("Return", N_("Watch the channel; a past programme from its start")),
         ("R", N_("Record the programme at its time, or cancel its recording")),
@@ -387,7 +389,8 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Up, Down, Left, Right", N_("Move")),
         ("Return", N_("Play or open")),
         ("Home, End", N_("First / last title")),
-        ("A…Z", N_("Jump to a letter, or filter the genres")),
+        # 2.9.3: typing searches (it jumped to a letter, or filtered the genres unseen)
+        ("A…Z", N_("Type to search every provider's movies, series and channels")),
         ("Ctrl+F", N_("Search")),
         ("/", N_("Search, or type it in the search")),
         ("Ctrl+D", N_("Add to or remove from My list")),

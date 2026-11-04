@@ -4,9 +4,20 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import time
 import unittest
+from unittest import mock
 
-from PySide6.QtCore import QModelIndex, QObject, QPoint, QPointF, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QFontMetricsF, QImage, QPainter, QPixmap
+from PySide6.QtCore import QEvent, QModelIndex, QObject, QPoint, QPointF, QRect, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFontMetrics,
+    QFontMetricsF,
+    QHelpEvent,
+    QHoverEvent,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPixmap,
+)
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem, QWidget
 from timer_fixtures import elapse, timeline, wait_until
@@ -195,8 +206,9 @@ class DelegateTests(unittest.TestCase):
         view.units_width = 2000
         h2 = delegate.sizeHint(option, QModelIndex()).height()
         self.assertEqual(h1, 66)
-        self.assertEqual(h2, 132)
-        self.assertEqual(ChannelRowDelegate(2.0).sizeHint(option, QModelIndex()).height(), 264)
+        # 2.9.3: past UNIT_CAP_PX (1600) a row grows no more: a wider list shows more rows.
+        self.assertEqual(h2, 106)
+        self.assertEqual(ChannelRowDelegate(2.0).sizeHint(option, QModelIndex()).height(), 211)
 
 
 def tagged(n=1, long_name=False):
@@ -765,6 +777,103 @@ class HostedColumnInputTests(unittest.TestCase):
         for point in (QPoint(200, 30), view.geometry().center()):
             QTest.wheelEvent(self.host.windowHandle(), QPointF(point), QPoint(0, -120))
         self.assertEqual(self.events, [])
+
+
+class PointerOverRowsTests(unittest.TestCase):
+    """2.9.3: the row under the pointer is tinted, a name cut short reads whole as a tooltip,
+    and a thin scrollbar shows over a list longer than its room, which drags it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.host = QWidget()
+        self.host.resize(600, 400)
+        self.addCleanup(self.host.deleteLater)
+        self.addCleanup(self.host.close)
+        self.view = ChannelListView(self.host)
+        self.view.units_width = 1280
+        self.view.setGeometry(0, 0, 300, 400)
+        self.delegate = ChannelRowDelegate(1.0, self.view)
+        self.view.setItemDelegate(self.delegate)
+        self.model = ChannelRowsModel(None, now_provider, self.view)
+        self.view.setModel(self.model)
+        self.host.show()
+
+    def hover(self, point, kind=QEvent.Type.HoverMove):
+        viewport = self.view.viewport()
+        event = QHoverEvent(
+            kind, QPointF(point), QPointF(viewport.mapToGlobal(point)), QPointF(point)
+        )
+        QApplication.sendEvent(viewport, event)
+
+    def test_the_row_under_the_pointer_is_known_and_tinted(self):
+        self.model.set_channels(items(5))
+        rect = self.view.visualRect(self.model.index(1))
+        before = (
+            self.view.viewport().grab().toImage().pixelColor(rect.left() + 8, rect.center().y())
+        )
+        self.hover(rect.center(), QEvent.Type.HoverEnter)
+        self.assertEqual(self.view.hover_row, 1)
+        after = self.view.viewport().grab().toImage().pixelColor(rect.left() + 8, rect.center().y())
+        self.assertNotEqual(before, after)
+        self.hover(QPoint(-1, -1), QEvent.Type.HoverLeave)
+        self.assertEqual(self.view.hover_row, -1)
+
+    def test_a_name_cut_short_reads_whole_as_its_tooltip(self):
+        long = "A channel with an extraordinarily long name that goes on and on HD"
+        self.model.set_channels([{"name": "Short", "number": 1}, {"name": long, "number": 2}])
+        self.view.viewport().grab()  # painted: what each row cut short is known
+        self.assertEqual(self.delegate.cut_text(self.model.index(0)), "")
+        self.assertEqual(self.delegate.cut_text(self.model.index(1)), long)
+        shown = []
+        rect = self.view.visualRect(self.model.index(1))
+        with mock.patch(
+            "ui.overlays.channel_rows.QToolTip.showText", lambda *a: shown.append(a[1])
+        ):
+            event = QHelpEvent(
+                QEvent.Type.ToolTip, rect.center(), self.view.viewport().mapToGlobal(rect.center())
+            )
+            QApplication.sendEvent(self.view.viewport(), event)
+        self.assertEqual(shown, [long])
+        self.model.set_channels([{"name": "Short", "number": 1}, {"name": "Two", "number": 2}])
+        self.assertEqual(self.delegate.cut_text(self.model.index(1)), "")  # another row now
+
+    def test_a_long_list_shows_a_scrollbar_that_drags_it(self):
+        self.model.set_channels(items(200))
+        QApplication.processEvents()  # laid out: its scroll range
+        indicator = self.view.indicator
+        self.hover(QPoint(-1, -1), QEvent.Type.HoverLeave)  # (the pointer is elsewhere)
+        indicator.hide()
+        self.view.verticalScrollBar().setValue(300)  # it scrolls: the thumb shows
+        self.assertTrue(indicator.isVisible())
+        thumb = indicator.thumb_rect()
+        self.assertFalse(thumb.isEmpty())
+        self.assertLessEqual(indicator.geometry().right(), self.view.geometry().right())
+        start = self.view.verticalScrollBar().value()
+        press = thumb.center().toPoint()
+        QTest.mousePress(indicator, Qt.MouseButton.LeftButton, pos=press)
+        QTest.mouseMove(indicator, press + QPoint(0, 60))
+        move = QMouseEvent(
+            QEvent.Type.MouseMove,
+            QPointF(press + QPoint(0, 60)),
+            QPointF(indicator.mapToGlobal(press + QPoint(0, 60))),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(indicator, move)
+        QTest.mouseRelease(indicator, Qt.MouseButton.LeftButton, pos=press + QPoint(0, 60))
+        self.assertGreater(self.view.verticalScrollBar().value(), start)
+        elapse(1200)  # it fades once the list rests and the pointer is elsewhere
+        self.assertFalse(indicator.isVisible())
+
+    def test_a_list_that_fits_shows_no_scrollbar(self):
+        self.model.set_channels(items(3))
+        self.hover(QPoint(10, 10), QEvent.Type.HoverEnter)
+        self.assertFalse(self.view.indicator.isVisible())
+        self.assertTrue(self.view.indicator.thumb_rect().isEmpty())
 
 
 if __name__ == "__main__":

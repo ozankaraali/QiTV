@@ -109,6 +109,9 @@ class MixerControls(QObject):
             overlay.levelRequested.connect(self._on_level)
             overlay.muteRequested.connect(self._on_mute)
             overlay.rowSelected.connect(self._on_selected)
+            wheel = getattr(overlay, "wheelRequested", None)
+            if wheel is not None:  # 2.9.3: the wheel over a row
+                wheel.connect(self._on_wheel)
             overlay.closed.connect(self.save)
             followed = getattr(overlay, "followRequested", None)
             if followed is not None:
@@ -275,6 +278,12 @@ class MixerControls(QObject):
 
     def _on_selected(self, row: int) -> None:
         self._row = row
+
+    def _on_wheel(self, row: int, steps: int) -> None:
+        """2.9.3: the wheel over the mixer's row: its level, VOLUME_STEP a notch (up: louder)."""
+        if steps and row < len(self._slots()):
+            self._row = row
+            self._on_level(row, max(0, min(100, self._level(row) - VOLUME_STEP * steps)))
 
     # ---- levels and mutes ---------------------------------------------------------------------
 

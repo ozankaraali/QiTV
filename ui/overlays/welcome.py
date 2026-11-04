@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QWidget
 from services.i18n import N_, translate
 from ui.brand import logo_aspect, logo_available, logo_pixmap
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, fill_round
+from ui.overlays.painting import Units, fill_round, ui_units
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, RADIUS_CARD, RADIUS_PANEL, qcolor
 
@@ -81,7 +81,7 @@ class WelcomeCard(Overlay):
 
     def logo_rect(self) -> QRectF:
         """The logo, centred above the title (empty when the asset is missing)."""
-        units = Units(self._host_width())
+        units = ui_units(self._host_width())
         if not logo_available():
             return QRectF(self.width() / 2, units.px(PAD_U), 0, 0)
         height = units.px(LOGO_U)
@@ -89,7 +89,7 @@ class WelcomeCard(Overlay):
         return QRectF(round((self.width() - width) / 2), units.px(PAD_U), width, height)
 
     def title_rect(self) -> QRectF:
-        units = Units(self._host_width())
+        units = ui_units(self._host_width())
         pad = units.px(PAD_U)
         logo = self.logo_rect()
         top = logo.bottom() + (units.px(LOGO_GAP_U) if logo.height() else 0)
@@ -131,7 +131,7 @@ class WelcomeCard(Overlay):
         return parent.width() if parent is not None else DEFAULT_HOST_WIDTH
 
     def _units(self) -> Units:
-        return Units(self._host_width())
+        return ui_units(self._host_width())
 
     @staticmethod
     def _title_font(units: Units) -> QFont:
@@ -159,7 +159,7 @@ class WelcomeCard(Overlay):
         parent = self.parentWidget()
         if parent is None:
             return
-        units = Units(parent.width())
+        units = ui_units(parent.width())
         pad = units.px(PAD_U)
         first, second = self._button_widths(units)
         # Wide enough for both buttons (their text has a floor size on a small host).

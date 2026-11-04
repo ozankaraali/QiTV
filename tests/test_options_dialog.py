@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QTabWidget
 
 from services.config_manager import ConfigManager
 from services.provider_link import parse_provider_link
@@ -93,7 +93,8 @@ class SaveTests(OptionsDialogCase):
         label = dialog.settings_layout.labelForField(dialog.cache_image_size_input)
         self.assertIs(label, dialog.cache_image_size_label)
         self.assertIn("5.00 MB", label.text())
-        dialog.clear_image_cache_button.click()
+        with mock.patch(ASK, return_value=QMessageBox.StandardButton.Yes):
+            dialog.clear_image_cache_button.click()
         self.assertIn("0.00 MB", label.text())  # the label shown, not a new hidden one
         self.assertEqual(len([w for w in dialog.findChildren(QLabel) if "MB)" in w.text()]), 1)
 
@@ -110,14 +111,60 @@ class SaveTests(OptionsDialogCase):
             again.save_settings()
         check.assert_not_called()
 
-    def test_apply_change_says_the_edits_are_kept_until_save(self):
+    def test_clear_image_cache_asks_first(self):  # 2.9.3: it cleared at the click
+        self.window.image_manager.current_cache_size = 5 * 1024 * 1024
+        dialog = self.dialog()
+        with mock.patch(ASK, return_value=QMessageBox.StandardButton.No) as ask:
+            dialog.clear_image_cache_button.click()
+        ask.assert_called_once()
+        self.assertEqual(ask.call_args.args[1], "Clear Image Cache")
+        self.assertIn("5.00 MB", dialog.cache_image_size_label.text())  # nothing cleared
+
+    def test_save_is_the_one_way_to_keep_a_providers_edits(self):
+        # 2.9.3: no "Apply Change" beside Save (it only said the edits were kept).
         dialog = self.dialog()
         dialog.options_tab.setCurrentWidget(dialog.providers_tab)
+        self.assertFalse(hasattr(dialog, "apply_button"))
+        texts = [b.text() for b in dialog.findChildren(QPushButton)]
+        self.assertNotIn("Apply Change", texts)
         dialog.name_input.setText("Renamed")
-        dialog.apply_button.click()
-        self.assertEqual(dialog.verify_result.text(), "Changes kept. Press Save to use them.")
-        self.assertEqual(dialog.providers[dialog.selected_provider_index]["name"], "Renamed")
-        self.assertNotEqual(self.provider_manager.providers[0]["name"], "Renamed")  # not yet
+        dialog.save_settings()
+        self.assertEqual(self.provider_manager.providers[0]["name"], "Renamed")
+
+    def test_the_epg_source_names_the_providers_own_guide(self):
+        dialog = self.dialog()
+        combo = dialog.epg_source_combo
+        index = combo.findData("STB")  # the config's value stays "STB"
+        self.assertGreaterEqual(index, 0)
+        self.assertEqual(combo.itemText(index), "Provider's own guide")
+
+    def test_the_portal_guides_period_shows_only_with_a_portal(self):
+        dialog = self.dialog()
+        dialog.epg_source_combo.setCurrentIndex(dialog.epg_source_combo.findData("STB"))
+        dialog.options_tab.setCurrentWidget(dialog.epg_tab)
+        portal = any(p.get("type") == "STB" for p in dialog.providers)
+        self.assertEqual(dialog.epg_stb_period_spinner.isVisibleTo(dialog), portal)
+        dialog.providers.append({"type": "STB", "name": "Portal", "url": "http://portal.test"})
+        dialog.options_tab.setCurrentWidget(dialog.providers_tab)
+        dialog.options_tab.setCurrentWidget(dialog.epg_tab)
+        self.assertTrue(dialog.epg_stb_period_spinner.isVisibleTo(dialog))
+
+    def test_each_tab_scrolls_so_the_window_fits_a_laptops_screen(self):
+        # 2.9.3: it could not be made smaller than its longest tab (710×722 on a Mac).
+        dialog = self.dialog()
+        from PySide6.QtWidgets import QScrollArea
+
+        tabs = dialog.options_tab
+        for index in range(tabs.count()):
+            with self.subTest(tab=tabs.tabText(index)):
+                self.assertIsInstance(QTabWidget.widget(tabs, index), QScrollArea)
+        self.assertLessEqual(dialog.minimumSizeHint().height(), 600)
+        dialog.resize(700, 600)
+        QApplication.processEvents()
+        self.assertLessEqual(dialog.height(), 600)
+        self.assertIs(tabs.currentWidget(), tabs.widget(tabs.currentIndex()))
+        tabs.setCurrentWidget(dialog.providers_tab)  # the page itself, as before
+        self.assertIs(tabs.currentWidget(), dialog.providers_tab)
 
 
 class ClosingTests(OptionsDialogCase):
@@ -173,8 +220,6 @@ class ClosingTests(OptionsDialogCase):
         dialog = self.dialog()
         dialog.options_tab.setCurrentWidget(dialog.providers_tab)
         dialog.name_input.setText("Renamed")
-        self.close_with(dialog, QMessageBox.StandardButton.Cancel).assert_called_once()
-        dialog.apply_button.click()  # kept in the window, not saved: still asks
         self.close_with(dialog, QMessageBox.StandardButton.Cancel).assert_called_once()
 
     def test_add_providers_empty_form_alone_does_not_ask_but_a_dropped_link_does(self):

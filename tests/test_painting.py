@@ -15,6 +15,7 @@ from ui.logos import LogoCache
 from ui.overlays import painting
 from ui.overlays.painting import (
     MIN_FONT_PX,
+    UNIT_CAP_PX,
     Units,
     badge_color,
     draw_icon,
@@ -199,6 +200,25 @@ class PaintingTest(unittest.TestCase):
         )
         p.end()
         self.assertTrue(painted(image))
+
+
+class UnitCapTest(unittest.TestCase):
+    """2.9.3: the controls' unit stops growing past UNIT_CAP_PX: a wider window shows more."""
+
+    def test_below_the_cap_a_unit_is_a_hundredth_of_the_width(self):
+        from ui.overlays.painting import ui_units
+
+        for width in (360, 1280, UNIT_CAP_PX):
+            self.assertEqual(ui_units(width).u, Units(width).u)
+        self.assertEqual(ui_units(1280, 0.5).u, 6.4)
+
+    def test_past_the_cap_it_stays_and_the_width_is_the_hosts(self):
+        from ui.overlays.painting import ui_units
+
+        wide = ui_units(2560)
+        self.assertEqual(wide.u, UNIT_CAP_PX / 100)
+        self.assertEqual(wide.width, 2560)  # what spans or centres uses the whole width
+        self.assertEqual(Units(2560).u, 25.6)  # the picture's own (the captions) still grow
 
 
 class LogoCacheTest(unittest.TestCase):

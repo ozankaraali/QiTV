@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QWidget
 
 from ui.keymap import Action
 from ui.overlays.base import Overlay, announce
-from ui.overlays.painting import Units, fill_round
+from ui.overlays.painting import Units, fill_round, ui_units
 from ui.theme import PALETTE, RADIUS_PANEL, qcolor
 
 QUESTION_MS = 60_000  # unanswered for a minute: the safe answer
@@ -145,7 +145,7 @@ class QuestionCard(Overlay):
     def _units(self) -> Units:
         parent = self.parentWidget()
         width = parent.width() if parent is not None else 0
-        return Units(width or _FALLBACK_HOST_WIDTH)
+        return ui_units(width or _FALLBACK_HOST_WIDTH)
 
     def _text_rect(self, un: Units) -> QRectF:
         pad = un.px(_PAD_U)

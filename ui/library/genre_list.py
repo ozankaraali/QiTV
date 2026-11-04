@@ -11,14 +11,14 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QFont, QFontMetricsF, QPainter
+from PySide6.QtGui import QFont, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QWidget
 
 from services import i18n
 from services.i18n import tr
 from services.library import CONTINUE, MY_LIST, NEW, RECORDINGS, Genre
-from ui.overlays.channel_rows import ChannelListView
-from ui.overlays.painting import Units, draw_field_icon, draw_icon, elided, fill_round
+from ui.overlays.channel_rows import ChannelListView, CutTexts, paint_hover
+from ui.overlays.painting import Units, draw_field_icon, draw_icon, elided, fill_round, ui_units
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -100,9 +100,9 @@ class _GenreModel(QAbstractListModel):
         return [row[1] for row in self._rows]
 
 
-class _GenreDelegate(QStyledItemDelegate):
+class _GenreDelegate(CutTexts, QStyledItemDelegate):
     def _units(self, widget) -> Units:
-        return Units(getattr(widget, "units_width", DEFAULT_HOST_WIDTH) or DEFAULT_HOST_WIDTH)
+        return ui_units(getattr(widget, "units_width", DEFAULT_HOST_WIDTH) or DEFAULT_HOST_WIDTH)
 
     def sizeHint(self, option, index) -> QSize:
         return QSize(0, self._units(option.widget).px(ROW_H_U))
@@ -127,6 +127,7 @@ class _GenreDelegate(QStyledItemDelegate):
             p.restore()
             return
         focused = bool(option.widget.property("columnFocused")) if option.widget else True
+        paint_hover(p, option, index, u, 0.8, (0.6, 0.15))
         if option.state & QStyle.State_Selected:
             box = rect.adjusted(0.6 * u, 0.15 * u, -0.6 * u, -0.15 * u)
             if focused:
@@ -158,10 +159,13 @@ class _GenreDelegate(QStyledItemDelegate):
             color = qcolor(PALETTE.accent) if icon == "star" else qcolor(PALETTE.text)
             draw_icon(p, icon, QRectF(left, rect.center().y() - size / 2, size, size), color)
             left += size + ICON_GAP_U * u
+        title = str(index.data(Qt.DisplayRole) or "")
+        shown = elided(p, title, right - left)
+        self.note_cut(index, [(title, shown)])
         p.drawText(
             QRectF(left, rect.y(), max(0.0, right - left), rect.height()),
             Qt.AlignLeft | Qt.AlignVCenter,
-            elided(p, str(index.data(Qt.DisplayRole) or ""), right - left),
+            shown,
         )
         p.restore()
 
@@ -180,6 +184,7 @@ class GenreList(QWidget):
         self.edit = TextEdit()  # the filter's text, caret and selection (2.9.3)
         self._drag = Dragging()
         self._focused = False
+        self._field = False  # 2.9.3: the keys type in the filter (it was chosen)
         self._current: str | None = None
         self._ids: list[str] = []
         self._genres: list[Genre] | None = None  # what set_genres last showed
@@ -302,7 +307,7 @@ class GenreList(QWidget):
 
     def field_rect(self) -> QRectF:
         """The filter's box (this widget's coordinates)."""
-        u = Units(self._host_width()).u
+        u = ui_units(self._host_width()).u
         margin = FIELD_MARGIN_U * u
         return QRectF(margin, margin, self.width() - 1 - 2 * margin, FIELD_H_U * u)
 
@@ -334,11 +339,27 @@ class GenreList(QWidget):
             return
         super().mouseDoubleClickEvent(event)
 
-    def set_focused(self, focused: bool) -> None:
+    def set_focused(self, focused: bool, *, field: bool = False) -> None:
+        """The keys on the column; `field` (2.9.3): on its filter, which then shows a ring and
+        a caret (the rows' highlight dims), else on the rows (typing searches the Library)."""
         self._focused = focused
-        self._view.setProperty("columnFocused", focused)
+        self._field = focused and field
+        if not self._field:
+            self.edit.leave()
+        self._view.setProperty("columnFocused", focused and not self._field)
         self._view.viewport().update()
         self.update()
+
+    def no_match_text(self) -> str:
+        """2.9.3: what the column says when its filter matches no genre ("" when one does)."""
+        if not self.filter_text.strip() or self._ids:
+            return ""
+        # i18n: {query} is what was typed
+        return tr("Nothing matches “{query}”", query=self.filter_text.strip())
+
+    def field_focused(self) -> bool:
+        """Whether the keys type in the filter."""
+        return self._field
 
     # ---- internals --------------------------------------------------------------------------
 
@@ -389,7 +410,7 @@ class GenreList(QWidget):
         self._relayout()
 
     def _relayout(self) -> None:
-        units = Units(self._host_width())
+        units = ui_units(self._host_width())
         self.setFixedWidth(units.px(WIDTH_U))
         top = units.px(FIELD_MARGIN_U * 2 + FIELD_H_U - 0.4)
         self._view.units_width = units.width
@@ -398,21 +419,24 @@ class GenreList(QWidget):
         self.update()
 
     def paintEvent(self, event) -> None:
-        units = Units(self._host_width())
+        units = ui_units(self._host_width())
         u = units.u
         p = QPainter(self)
         p.fillRect(self.rect(), qcolor(PALETTE.panel_raised))
         p.fillRect(self.width() - 1, 0, 1, self.height(), qcolor(PALETTE.text, 0.06))
         box = self.field_rect()
         p.setRenderHint(QPainter.Antialiasing, True)
-        p.setPen(qcolor(PALETTE.text, 0.12))
+        radius = FIELD_RADIUS_U * u
+        if self._field:  # 2.9.3: the keys type here: the ring says so
+            fill_round(p, box, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA), radius)
+            p.setPen(QPen(qcolor(PALETTE.accent), 1.5))
+        else:
+            p.setPen(qcolor(PALETTE.text, 0.12))
         p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(
-            box.adjusted(0.5, 0.5, -0.5, -0.5), FIELD_RADIUS_U * u, FIELD_RADIUS_U * u
-        )
+        p.drawRoundedRect(box.adjusted(0.75, 0.75, -0.75, -0.75), radius, radius)
         p.setFont(units.font(1.05))
         inner = box.adjusted(1.0 * u, 0, -1.0 * u, 0)
-        if self.filter_text:
+        if self.filter_text or self._field:
             tone = qcolor(PALETTE.text)
             inner = draw_field_icon(p, inner, tone)  # the magnifier the other finds draw
             paint_edit(
@@ -420,9 +444,15 @@ class GenreList(QWidget):
                 inner,
                 self.edit,
                 tone,
-                caret=self._focused,
+                caret=self._field,
                 selection=qcolor(PALETTE.accent, SELECTION_ALPHA),
             )
+            nothing = self.no_match_text()
+            if nothing:  # 2.9.3: no genre has it: say so
+                p.setFont(units.font(1.05))
+                p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
+                below = QRectF(box.left(), self._view.y() + 1.0 * u, box.width(), 4.0 * u)
+                p.drawText(below, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, nothing)
         else:
             tone = qcolor(PALETTE.text, PALETTE.text_muted_alpha)
             text = tr("Find a genre…")  # i18n: placeholder of the Library's genre filter

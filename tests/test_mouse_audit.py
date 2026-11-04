@@ -26,9 +26,11 @@ Screens and their controls:
   its "rows", and the rows of its sources and sections columns by title ("Settings", "Movies" …);
 - "context": the channel list's right-click menu, by entry (a channel of a genre's, and one of
   ⟲ Recent's);
-- "guide": its header's buttons and its "rows";
+- "guide": its header's buttons (2.9.3: the "day" and "now" too) and its "rows";
 - "library": the top bar's items ("live", "search", "fullscreen" …), the grid's "posters", the
-  highlighted title's strip buttons ("favorite", "play") and the A–Z "rail".
+  highlighted title's strip buttons ("favorite", "play") and the A–Z "rail";
+- "series" (2.9.3): the series view's "back" (‹), its season "chips", its episode "rows" and a
+  begun episode's "start_over" pill.
 """
 
 import os
@@ -47,6 +49,7 @@ from tests.test_poster_grid import FakePosters, details, titles
 from ui.context_actions import OPEN_PIP_TEXT, REMOVE_RECENT_TEXT, ContextActions
 from ui.keymap import SHORTCUTS
 from ui.library.poster_grid import PosterGrid
+from ui.library.series_view import SeriesView
 from ui.library.top_nav import TopNav
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import Drawer
@@ -129,6 +132,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     # ---- Guide -----------------------------------------------------------------------------
     ("guide", "Up, Down"): (("guide", "rows"),),
     ("guide", "Left, Right"): (("guide", "earlier"), ("guide", "later")),
+    ("guide", "Home"): (("guide", "now"),),  # 2.9.3
     ("guide", "Return"): (("guide", "rows"), ("guide", "live")),  # a double-click, ▶ Watch
     # 2.8: the footer's ● Record (Cancel recording for a scheduled programme)
     ("guide", "R"): (("guide", "record"),),
@@ -136,18 +140,35 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("guide", "F, F11, Ctrl+Meta+F"): (("guide", "fullscreen"),),
     ("guide", "G, Esc"): (("guide", "close"),),
     # ---- Movies and Series -----------------------------------------------------------------
-    ("library", "Up, Down, Left, Right"): (("library", "posters"),),
-    ("library", "Return"): (("library", "posters"), ("library", "play")),
+    ("library", "Up, Down, Left, Right"): (
+        ("library", "posters"),
+        ("series", "chips"),
+        ("series", "rows"),
+    ),
+    ("library", "Return"): (
+        ("library", "posters"),
+        ("library", "play"),
+        ("series", "rows"),
+        ("series", "start_over"),
+    ),
     ("library", "Home, End"): (("library", "rail"),),  # # and Z; the wheel scrolls
-    ("library", "A…Z"): (("library", "rail"),),
+    # 2.9.3: typing searches (the top bar's field); the A–Z rail jumps to a letter.
+    ("library", "A…Z"): (("library", "search"), ("library", "rail")),
     ("library", "Ctrl+F"): (("library", "search"),),
     ("library", "/"): (("library", "search"),),
     ("library", "Ctrl+D"): (("library", "favorite"),),
     ("library", "F11, Ctrl+Meta+F"): (("library", "fullscreen"),),
-    # Back to the grid (from a series or the search): its tab; to live TV: Live TV.
-    ("library", "Esc"): (("library", "live"), ("library", "movies"), ("library", "series")),
+    # Back to the grid (from a series or the search): its tab, or the series' ‹ (2.9.3); to
+    # live TV: Live TV.
+    ("library", "Esc"): (
+        ("library", "live"),
+        ("library", "movies"),
+        ("library", "series"),
+        ("series", "back"),
+    ),
     # ---- Anywhere ----------------------------------------------------------------------------
-    ("menu", "Ctrl+1"): (("library", "live"), ("drawer", "rows")),
+    # Live TV: the Library's tab, a channel row; during a movie, its TV button (2.9.3).
+    ("menu", "Ctrl+1"): (("library", "live"), ("drawer", "rows"), ("transport", "live_tv")),
     ("menu", "Ctrl+2"): (("drawer", "Movies"), ("library", "movies")),
     ("menu", "Ctrl+3"): (("drawer", "Series"), ("library", "series")),
     ("menu", "Ctrl+4"): (("transport", "grid"),),
@@ -412,6 +433,30 @@ def _library(host: QWidget) -> set[str]:
     return found
 
 
+def _series(host: QWidget) -> set[str]:
+    """The series view (2.9.3): ‹, the season chips, the episodes, a begun one's Start over."""
+    from services.library import Details
+
+    view = SeriesView(None, host)
+    view.setGeometry(0, 0, 1280, 720)
+    view.show()
+    view.set_series({"id": "s"}, Details("Show", "", "", "", "", "", None, None, False, "series"))
+    seasons = [{"id": "1", "name": "Season 1"}, {"id": "2", "name": "Season 2"}]
+    view.set_seasons(seasons)
+    view.set_progress_provider(lambda episode: 0.4)  # begun: its Start over pill
+    view.set_episodes(seasons[0], [{"id": "e1", "ename": "One"}, {"id": "e2", "ename": "Two"}])
+    found = set()
+    if not view.back_rect().isEmpty():
+        found.add("back")
+    if len(view.chip_rects()) == 2:
+        found.add("chips")
+    if view.current_episode() is not None:
+        found.add("rows")
+    if not view._view.start_over_rect(0).isEmpty():
+        found.add("start_over")
+    return found
+
+
 class MouseOnlyAuditTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -433,6 +478,7 @@ class MouseOnlyAuditTests(unittest.TestCase):
             "context": context,
             "guide": _guide(_child(host)),
             "library": _library(_child(host)),
+            "series": _series(_child(host)),
         }
 
     def test_every_key_has_a_control_on_screen_or_a_reason(self):

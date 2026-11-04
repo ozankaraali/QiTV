@@ -12,8 +12,11 @@ sections, which the Library shows (`libraryRequested`). Highlighting them previe
 The left column's top row starts with ‹ (a layer up, as ← on the left column; hidden on the
 sources), then names where the left column is, each a link: a name shows its node's children
 in the left column, and the provider's name shows the sources, the provider highlighted, to
-pick another. A head cut short ("…") goes a layer up. ⌕ (Search, as Ctrl/⌘+F), ↻ (refresh) and
-⚙ (Settings) end it; each takes clicks over at least MIN_HIT_PX and names its key when hovered.
+pick another. A head cut short ("…") goes a layer up. The buttons sit on the row under it
+(2.9.3: beside them the names were cut short at any size, "All pr… › Live TV"), at its right
+end: the Library, its search (films, series and channels: Ctrl/⌘+F, drawn apart from the Find
+box's magnifier, which finds in the list), ↻ (refresh) and ⚙ (Settings); each takes clicks
+over at least MIN_HIT_PX and names its key when hovered.
 
 The find: typing (or a click on the ⌕ Find box above the right column) finds genres and
 channels at every provider, whichever column had the focus. The right column then lists the
@@ -99,10 +102,12 @@ from ui.overlays.channel_rows import (
     ChannelListView,
     ChannelRowDelegate,
     ChannelRowsModel,
+    CutTexts,
     LazyNumbers,
     column_focused,
+    paint_hover,
 )
-from ui.overlays.painting import Units, draw_icon, draw_refresh, elided, fill_round
+from ui.overlays.painting import Units, draw_icon, draw_refresh, elided, fill_round, ui_units
 from ui.pointer import NAV_BUTTONS
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
@@ -113,18 +118,19 @@ _CONTEXT_LAYERS = ("item", "episode")  # rows with a context menu (channels are 
 _CONTEXT_GROUPS = (RECENT_GROUP,)  # and these groups' rows ("Clear Recents")
 _RIGHT_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 DRAG_OPACITY = 0.25  # the list while a channel is dragged out of it onto the grid
-LEFT_FRACTION = 0.25
-RIGHT_FRACTION = 0.58
+LEFT_U = 25.0  # the left column (2.9.3: in u; a quarter of the width up to UNIT_CAP_PX)
+RIGHT_U = 58.0  # the right column's right edge
 FADE_U = 7.0
 PAD_TOP_U = 2.4
 PAD_SIDE_U = 1.6
 CRUMB_H_U = 2.2
 FOUND_GENRE_H_U = 5.0  # a genre the find found: its name, then its provider and count
 FOUND_CHANNEL_SCALE = 0.7  # its channels: a long name (and a 5-digit number) fits whole
-FILTER_H_U = 3.4  # the ⌕ Find box above the right column (the left column's room stays empty)
+FILTER_H_U = 3.4  # the ⌕ Find box above the right column (the left column's: its buttons)
 FIND_X_U = 2.2  # its ✕, this wide at its right end
-GEAR_U = 1.9  # the header row's buttons (Search, refresh, Settings) at its right end, this wide
+GEAR_U = 1.9  # the header's buttons (Library, Search, refresh, Settings), this wide
 GEAR_GAP_U = 0.7
+ICONS_TOP_U = 0.6  # 2.9.3: the buttons' row, this far under the Find box's bottom
 MIN_HIT_PX = 28  # the header's buttons take clicks over this square at least
 REFRESH_ACTION = "refresh"  # the header's refresh button: the provider's channels and guide
 SEARCH_ACTION = "search"  # the header's ⌕: the Library's search
@@ -175,7 +181,8 @@ _ACTION_ICONS = {
     OPEN_FILE_ROW: "file",
 }
 _HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key (see _hint)
-    SEARCH_ACTION: (N_("Search"), "Ctrl+F"),  # i18n: a button's tooltip (verb)
+    # 2.9.3: the Library's search, said as its field says it (the Find box finds in the list)
+    SEARCH_ACTION: (N_("Search movies, series and channels"), "Ctrl+F"),
     # i18n: a button's tooltip: it opens the Library (2.8)
     LIBRARY_ACTION: (N_("Movies and series"), "Ctrl+2"),
     REFRESH_ACTION: (N_("Refresh channels and guide"), "Ctrl+R"),
@@ -412,6 +419,7 @@ def _found_kind(node: NavNode) -> str:
 
 
 class _FoundRowDelegate(QStyledItemDelegate):
+    # (each kind's delegate keeps what it cut short: `cut_text` asks the row's)
     """The find's rows: channels as the channel column paints them (the provider's name on
     their second line), genres on two lines, the rest as titles.
 
@@ -445,6 +453,10 @@ class _FoundRowDelegate(QStyledItemDelegate):
     def paint(self, p: QPainter, option, index) -> None:
         self._delegates[self._kind(index)].paint(p, option, index)
 
+    def cut_text(self, index) -> str:
+        delegate = self._delegates[self._kind(index)]
+        return delegate.cut_text(index) if isinstance(delegate, CutTexts) else ""
+
 
 def _paint_highlight(p: QPainter, rect: QRectF, u: float, focused: bool) -> None:
     """A row's highlight: the accent, stronger in the focused column."""
@@ -456,9 +468,9 @@ def _paint_highlight(p: QPainter, rect: QRectF, u: float, focused: bool) -> None
     p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 1.0 * u, 1.0 * u)
 
 
-class _SimpleRowDelegate(QStyledItemDelegate):
+class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
     def _units(self, widget) -> Units:
-        return Units(getattr(widget, "units_width", 100) or 100)
+        return ui_units(getattr(widget, "units_width", 100) or 100)
 
     def sizeHint(self, option, index) -> QSize:
         return QSize(0, self._units(option.widget).px(3.6))
@@ -503,6 +515,7 @@ class _SimpleRowDelegate(QStyledItemDelegate):
                 QRectF(rect.x() + 1.2 * u, rect.y(), rect.width() - 2.4 * u, 1),
                 qcolor(PALETTE.text, 0.12),
             )
+        paint_hover(p, option, index, u)
         if selected:
             _paint_highlight(p, rect, u, focused)
         x = rect.x() + 0.9 * u + 0.3 * u
@@ -533,10 +546,12 @@ class _SimpleRowDelegate(QStyledItemDelegate):
             right -= width + 0.8 * u
         p.setFont(units.font(1.35))
         p.setPen(qcolor(PALETTE.text))
+        shown = elided(p, title, right - x)
+        self.note_cut(index, [(title, shown)])
         p.drawText(
             QRectF(x, rect.y(), max(0.0, right - x), rect.height()),
             Qt.AlignLeft | Qt.AlignVCenter,
-            elided(p, title, right - x),
+            shown,
         )
         p.restore()
 
@@ -554,6 +569,7 @@ class _FoundGenreDelegate(_SimpleRowDelegate):
         u = units.u
         rect = QRectF(option.rect)
         p.save()
+        paint_hover(p, option, index, u)
         if option.state & QStyle.State_Selected:
             _paint_highlight(p, rect, u, column_focused(option.widget))
         left, width = rect.x() + 1.2 * u, max(0.0, rect.width() - 2.4 * u)
@@ -565,17 +581,19 @@ class _FoundGenreDelegate(_SimpleRowDelegate):
         p.setFont(title_font)
         p.setPen(qcolor(PALETTE.text))
         title = str(index.data(Qt.DisplayRole) or "")
-        p.drawText(
-            QRectF(left, y, width, title_h), Qt.AlignLeft | Qt.AlignVCenter, elided(p, title, width)
-        )
+        shown = elided(p, title, width)
+        p.drawText(QRectF(left, y, width, title_h), Qt.AlignLeft | Qt.AlignVCenter, shown)
+        shown_label = label
         if label:
             p.setFont(label_font)
             p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
+            shown_label = elided(p, label, width)
             p.drawText(
                 QRectF(left, y + title_h, width, label_h),
                 Qt.AlignLeft | Qt.AlignVCenter,
-                elided(p, label, width),
+                shown_label,
             )
+        self.note_cut(index, [(title, shown), (label, shown_label)])
         p.restore()
 
 
@@ -602,6 +620,9 @@ class _LabelledChannelDelegate(ChannelRowDelegate):
             self._label.paint(p, option, index)
         else:
             super().paint(p, option, index)
+
+    def cut_text(self, index) -> str:
+        return self._label.cut_text(index) if self._is_label(index) else super().cut_text(index)
 
 
 class _RowIndex:
@@ -686,7 +707,7 @@ class Drawer(Overlay):
         self.setFocusPolicy(Qt.NoFocus)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self._nav = nav
-        self._units = Units(100)
+        self._units = ui_units(100)
         self._columns = {
             "left": _Column("left", self, logos, now_provider),
             "right": _Column("right", self, logos, now_provider),
@@ -1600,14 +1621,14 @@ class Drawer(Overlay):
         if (host_w, host_h) == self._laid_out_for:
             return  # opened again at the same size: forcing a layout of the lists would be waste
         self._laid_out_for = (host_w, host_h)
-        units = Units(host_w)
+        units = ui_units(host_w)
         self._units = units
-        left_w = round(host_w * LEFT_FRACTION)
-        right_w = round(host_w * RIGHT_FRACTION) - left_w
+        left_w = round(LEFT_U * units.u)
+        right_w = round(RIGHT_U * units.u) - left_w
         self.setGeometry(QRect(0, 0, left_w + right_w + units.px(FADE_U), host_h))
         side = units.px(PAD_SIDE_U)
         for col, x, width, top_u in (
-            (self._columns["left"], 0, left_w, PAD_TOP_U + CRUMB_H_U + FILTER_H_U + 1.0),
+            (self._columns["left"], 0, left_w, PAD_TOP_U + FILTER_H_U + ICONS_TOP_U + GEAR_U + 1.4),
             (self._columns["right"], left_w, right_w, PAD_TOP_U + FILTER_H_U + 1.0),
         ):
             top = units.px(top_u)
@@ -1637,29 +1658,31 @@ class Drawer(Overlay):
 
     def _header(self) -> _Header:
         """The left column's top row: ‹ at its left (but on the sources), then the names of
-        the left column's path, then the Library (2.8), Search, the refresh button and the
-        Settings gear at its right end. The names elide before they reach the buttons, each at
-        its end: the provider's (the first, which shows the sources to switch provider) and the
+        the left column's path across the row, level with the Find box beside it; under it,
+        at its right end, the Library (2.8), Search, the refresh button and the Settings gear
+        (2.9.3: they shared the names' row). The names elide at the row's end, each at its
+        end: the provider's (the first, which shows the sources to switch provider) and the
         last share the room, and any names between them fold into "…", which goes a layer up."""
         units = self._units
         col = self._columns["left"]
         side = units.px(PAD_SIDE_U)
         row = QRectF(
             col.rect.x() + side,
-            units.px(PAD_TOP_U),
+            units.px(PAD_TOP_U) + (units.px(FILTER_H_U) - units.px(CRUMB_H_U)) / 2,
             col.rect.width() - 2 * side,
             units.px(CRUMB_H_U),
         )
         size, gap = units.px(GEAR_U), units.px(GEAR_GAP_U)
         top = row.center().y() - size / 2
-        gear = QRectF(row.right() - size, top, size, size)
-        refresh = QRectF(gear.left() - gap - size, top, size, size)
-        search = QRectF(refresh.left() - gap - size, top, size, size)
-        library = QRectF(search.left() - gap - size, top, size, size)
+        icons = units.px(PAD_TOP_U + FILTER_H_U + ICONS_TOP_U)  # the buttons' row
+        gear = QRectF(row.right() - size, icons, size, size)
+        refresh = QRectF(gear.left() - gap - size, icons, size, size)
+        search = QRectF(refresh.left() - gap - size, icons, size, size)
+        library = QRectF(search.left() - gap - size, icons, size, size)
         path = self._nav.path
         back = QRectF(row.x(), top, size, size) if len(path) > 1 else QRectF()
         x = back.right() + gap if not back.isEmpty() else row.x()
-        room = max(0.0, library.left() - gap - x)  # never under the buttons
+        room = max(0.0, row.right() - x)
         fm = QFontMetrics(units.font(CRUMB_FONT_U))
         titles = [n.title for n in path[:-1]]
         names: list[tuple[int | None, str, QRectF]] = []
@@ -1689,7 +1712,7 @@ class Drawer(Overlay):
                 width = fm.horizontalAdvance(title)
                 names.append((index, title, QRectF(x, row.y(), width, row.height())))
                 x += width + sep_w
-            last_room = max(0.0, library.left() - gap - x)
+            last_room = max(0.0, row.right() - x)
             last = fm.elidedText(titles[-1], Qt.ElideRight, int(last_room))
             last_w = fm.horizontalAdvance(last)
             names.append((len(titles) - 1, last, QRectF(x, row.y(), last_w, row.height())))
@@ -1733,7 +1756,7 @@ class Drawer(Overlay):
         if not header.names:  # the sources: the column's title (no path to name, no link)
             p.setFont(self._units.font(CRUMB_FONT_U, QFont.Weight.DemiBold))
             p.setPen(qcolor(PALETTE.text, 0.6))
-            room = header.library.left() - self._units.px(GEAR_GAP_U) - header.text.left()
+            room = header.gear.right() - header.text.left()
             title = QRectF(header.text.left(), header.text.top(), room, header.text.height())
             p.drawText(title, align, elided(p, translate(PROVIDERS_TITLE), room))
         for name in header.names:
@@ -1766,7 +1789,7 @@ class Drawer(Overlay):
             if key == SETTINGS_ROW:
                 draw_icon(p, "gear", rect, tone)
             elif key == SEARCH_ACTION:
-                draw_icon(p, "search", rect, tone)
+                draw_icon(p, "library_search", rect, tone)
             elif key == LIBRARY_ACTION:
                 draw_icon(p, "clapper", rect, tone)
             elif key == BACK_BUTTON:
