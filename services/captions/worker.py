@@ -13,7 +13,8 @@ Messages to it: ("load", {...}), ("start", run, url, segment_start, audio_track,
 ("film", run, location, start_s, audio_track, language, vlc_options): a film's run,
 ("viewer", position), ("language", name), ("stop",), ("quit",).
 From it: ("ready",), ("failed", reason), ("caption", run, start, end, text),
-("progress", run, newest, rtf, written_to), ("resync", run, newest), ("ended", run, reason),
+("progress", run, newest, rtf, written_to, qwen_writes), ("resync", run, newest),
+("ended", run, reason),
 ("detected", run, language) once the pieces agree on one (none was given),
 ("log", level, text); loaded without a model (`load` with "model": None, the packaged smoke
 test's probe), ("piece", run, start, end, speech_share) for each piece instead. No traceback
@@ -29,6 +30,7 @@ from multiprocessing.connection import Connection, wait
 import os
 from pathlib import Path
 import queue
+import re
 import sys
 import threading
 import time
@@ -91,6 +93,17 @@ _UPPER = {"i": "İ", "ı": "I"}  # Turkish's own capitals of the dotted and the 
 
 _SENTENCE_ENDS = (".", "!", "?", "…")
 SENTENCE_GAP_S = 1.0  # a pause this long before a line: it starts a sentence
+
+
+_LONE_I = re.compile(r"(?<!\w)i (?=\w)")
+
+
+def lone_i_joined(text: str) -> str:
+    """ufak's words that start with a capital İ ("İstanbul", "İşte") come as a lone "i" and
+    the rest ("i stanbul": its training text lower-cased İ to i and a combining dot, which
+    its tokenizer took for a word's start); a lone "i" is no Turkish word, so it joins the
+    word after it (2.9.6, the real-use review: "i stanbul" three times on a news channel)."""
+    return _LONE_I.sub("i", text)
 
 
 def unfinished(text: str) -> str:
@@ -259,7 +272,7 @@ class _Model:
             stream = self.turkish.create_stream()
             stream.accept_waveform(16000, array("f", (v * _TURKISH_GAIN for v in samples)))
             self.turkish.decode_stream(stream)
-            return str(stream.result.text).strip()  # its case: `_Run.sentence_case`
+            return lone_i_joined(str(stream.result.text).strip())  # its case: sentence_case
         specialist = self._specialist(language) if language else None
         if specialist is not None and specialist is self.cohere:
             stream = specialist.create_stream()
@@ -414,7 +427,14 @@ class _Run:
             if now - last_progress >= _PROGRESS_S:
                 last_progress = now
                 self.link.send(
-                    ("progress", self.run, self.newest, round(self.rtf, 3), self.written_to())
+                    (
+                        "progress",
+                        self.run,
+                        self.newest,
+                        round(self.rtf, 3),
+                        self.written_to(),
+                        self.qwen_writes(),
+                    )
                 )
             if piece is None or self.stopped.is_set():
                 continue
@@ -461,6 +481,19 @@ class _Run:
         )
         self._said = (text, end)
         return turkish_capital(text) if begins else text
+
+    def qwen_writes(self) -> bool:
+        """Qwen writes this run's language for good: no specialist (ufak, Cohere, Parakeet)
+        writes it, or none is known yet (2.9.6, the real-use review: Automatic stepped Qwen
+        down while it only wrote English until Cohere was loaded, and the step down's restart
+        made Cohere load again: the first caption came 101 s after captions were on)."""
+        language = self.language
+        if not language:
+            return True
+        if language == TURKISH and getattr(self.model, "turkish", None) is not None:
+            return False
+        writer = getattr(self.model, "writer", None)
+        return writer is None or writer(language) is None
 
     def written_to(self) -> float:
         """How far the captions are written: to the piece being recognized, else to the oldest

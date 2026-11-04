@@ -481,6 +481,30 @@ class CutterTests(unittest.TestCase):
         self.assertTrue(pieces[0].split)  # at its length, mid-speech
         self.assertFalse(pieces[-1].split)  # the pause at 8 s ended it
 
+    def test_ufaks_lone_i_joins_the_word_it_begins(self):
+        # 2.9.6, the real-use review: "i stanbul" (İstanbul), "i şte" (İşte).
+        from services.captions.worker import lone_i_joined
+
+        self.assertEqual(lone_i_joined("ı i stanbul i şte bir"), "ı istanbul işte bir")
+        self.assertEqual(lone_i_joined("bu iki ile"), "bu iki ile")  # i inside words stays
+        self.assertEqual(lone_i_joined("sonunda i"), "sonunda i")  # nothing after it
+
+    def test_qwen_writes_for_good_only_where_no_specialist_writes(self):
+        from services.captions.worker import TURKISH, _Run
+
+        run = object.__new__(_Run)
+        run.model = SimpleNamespace(
+            turkish=object(), writer=lambda language: "cohere" if language == "English" else None
+        )
+        for language, expected in (
+            ("", True),
+            ("English", False),
+            (TURKISH, False),
+            ("Hindi", True),
+        ):
+            run.language = language
+            self.assertIs(run.qwen_writes(), expected, language)
+
     def test_a_split_piece_loses_the_full_stop_a_model_ends_it_with(self):
         from services.captions.worker import unfinished
 
@@ -650,6 +674,35 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.at(16.5), joined)
         self.captions._on_caption(run, 16.0, 17.2, "ötesine geçiyor.")  # read again
         self.assertEqual(self.captions._cues, [(10.0, 17.2, joined)])  # not shown twice
+
+    def test_a_caption_that_went_does_not_come_back_when_the_next_comes_late(self):
+        # 2.9.6, the real-use review: cleared, then on again for 0.25 s when a late line moved
+        # its end to the late line's start.
+        run = self.captions._run
+        self.captions._on_caption(run, 10.0, 12.0, "Merhaba")
+        self.assertEqual(self.at(12.5), "Merhaba")
+        self.assertEqual(self.at(12.7), "")  # its time is over
+        self.captions._on_caption(run, 13.0, 14.0, "Nasılsın")  # late
+        self.assertEqual(self.at(12.8), "")  # not on again
+        self.assertEqual(self.at(13.4), "Nasılsın")
+
+    def test_a_late_end_does_not_join_a_line_already_on_screen(self):
+        run = self.captions._run
+        first = "Uzay aracı bu yıl ilk kez Mars'ın"
+        self.captions._on_caption(run, 10.0, 16.0, first)
+        self.assertEqual(self.at(11.0), first)  # on screen
+        self.captions._on_caption(run, 16.0, 17.2, "ötesine geçiyor.")
+        self.assertEqual(len(self.captions._cues), 2)  # its own line: nothing wraps again
+        self.assertEqual(self.at(12.0), first)
+        self.assertEqual(self.at(16.5), "ötesine geçiyor.")
+
+    def test_an_end_that_adds_no_part_joins_a_caption_in_parts(self):
+        self.overlay.pages = lambda text: [text[i : i + 40] for i in range(0, len(text), 40)]
+        run = self.captions._run
+        before = "x" * 60  # two parts, the second half empty
+        self.captions._on_caption(run, 10.0, 16.0, before)
+        self.captions._on_caption(run, 16.0, 19.0, "bunlar netlik")  # 3 s: within 3.5 s
+        self.assertEqual(self.captions._cues, [(10.0, 19.0, before + " bunlar netlik")])
 
     def test_a_line_joins_the_one_before_only_when_both_fit_and_nothing_parts_them(self):
         self.overlay.pages = lambda text: [text] if len(text) <= 40 else [text[:40], text[40:]]
@@ -984,6 +1037,18 @@ class StepDownTests(unittest.TestCase):
         self.assertEqual(self.captions.status_text(), "Can't keep up")
         self.captions._disable()
         self.assertEqual(self.captions._auto_tier(), "small")  # while QiTV runs
+
+    def test_while_another_model_writes_the_language_qwen_is_not_stepped_down(self):
+        # 2.9.6, the real-use review: English is Cohere's; Qwen only wrote while Cohere loaded,
+        # and stepping it down restarted the process: Cohere loaded again, 101 s to a caption.
+        import time as clock
+
+        self.captions._on_progress(self.captions._run, 100.5, 1.06, 100.5, False)
+        self.captions._slow_since = clock.monotonic() - 31.0
+        self.captions._last = None
+        self.captions._tick()
+        self.assertEqual((self.loaded, self.stopped), ([], []))
+        self.assertEqual(self.captions.status_text(), "Can't keep up")  # it still says so
 
     def test_the_viewers_own_choice_never_changes(self):
         self.config["ai_captions_model"] = "large"
