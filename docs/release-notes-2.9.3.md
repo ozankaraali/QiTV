@@ -11,18 +11,26 @@ others' distributions, which may have malware.**
   and the models got many more words wrong than they do on whole sentences. Pieces now end at
   real pauses and may be up to 10 seconds long. Measured on spoken sentences: Turkish went from
   15.5% of words wrong to 8.5%, Russian from 37% to 14.5%, French from 26.5% to 10%.
-- **European languages written by a model made for them:** English, German, French, Spanish,
-  Portuguese, Italian, Russian, Dutch, Swedish, Danish, Finnish, Polish, Czech, Greek,
-  Hungarian and Romanian are now written by NVIDIA's Parakeet TDT 0.6B v3, which gets more
-  words right than the model before (English 5.7% of words wrong against 8%, French 14%
-  against 28%, Polish 11% against 45%) and is four to five times faster. Ukrainian, Bulgarian,
-  Croatian, Slovak, Slovenian, Estonian, Latvian, Lithuanian and Maltese can now be captioned
-  too: choose one in the subtitles panel or in Settings, or play a sound track that names it.
-  It comes with the speech model (670 MB more); if you already have AI captions, the next
-  time you turn them on QiTV asks once to download it.
-- **French (or German, Italian…) with English words in it stays in its language:** the
-  European model can't be told the language, and on a French broadcast with some English it
-  wrote whole lines in English; such a line is now written by the other model, told the language.
+- **Better speech models for most languages, chosen on real broadcasts:** QiTV now picks the
+  model that writes each language best, measured on spoken sentences and on news, talk shows and
+  dramas from many countries:
+  - English, French, German, Italian, Spanish, Portuguese, Greek, Dutch, Polish, Chinese,
+    Japanese, Korean, Vietnamese and Arabic: Cohere Labs' Cohere Transcribe (French went from
+    28% of words wrong to under 4%, Greek from 63% to 21%, Japanese from 12% to 5%, and names on
+    the news come out right);
+  - the other European languages (Danish, Swedish, Finnish, Czech, Hungarian, Romanian, Russian
+    and more): NVIDIA's Parakeet, more accurate than before and five times faster; Ukrainian,
+    Bulgarian, Croatian, Slovak, Slovenian, Estonian, Latvian, Lithuanian and Maltese can now be
+    captioned too (choose one in the subtitles panel or in Settings, or play a sound track that
+    names it);
+  - Turkish: ufak AI's model, as in 2.9.2; every other language, and telling which one is
+    spoken: Qwen3-ASR, as before.
+  Only the model a language needs is loaded, once that language is known (Qwen writes the first
+  half minute or so meanwhile). They come with the speech model (2.3 GB more to download); if
+  you already have AI captions, the next time you turn them on QiTV asks once to download them.
+- **A language with English words in it stays in its language:** Parakeet can't be told the
+  language, and on a broadcast with some English it wrote whole lines in English; such a line is
+  now written by Qwen, told the language.
 - **Hindi, Arabic and Greek captions no longer cut short:** the model could only write so much
   for each piece, too little for scripts whose words take many letters' worth of its tokens.
 - **No more flash of the controls or of old captions:** as a caption went at a silence, the

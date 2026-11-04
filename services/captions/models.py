@@ -112,6 +112,7 @@ class ModelPaths:
     vad: Path
     turkish: Path  # ufakzeka-kulak's folder (its transducer's files, TURKISH_FILES)
     european: Path  # 2.9.3: Parakeet TDT 0.6B v3's folder (EUROPEAN_FILES)
+    cohere: Path  # 2.9.3: Cohere Transcribe's folder (COHERE_FILE, unpacked)
 
 
 # ---- what is downloaded -------------------------------------------------------------------
@@ -290,6 +291,26 @@ EUROPEAN_FILES = (
 )
 
 
+# 2.9.3: Cohere Labs' Cohere Transcribe (Apache-2.0), 14 languages, sherpa-onnx's int8 export,
+# one archive of its asr-models release. Size and sha256 as GitHub gives them (2026-11-04).
+_COHERE_ARCHIVE = "sherpa-onnx-cohere-transcribe-14-lang-int8-2026-04-01.tar.bz2"
+COHERE_FOLDER = "cohere-transcribe"
+COHERE_FILE = RemoteFile(
+    _SHERPA_RELEASE + _COHERE_ARCHIVE,
+    _COHERE_ARCHIVE,
+    1699791751,
+    "bd582588d50685a795dcd2807ab77e11361b8312d96c53884682def45ab4206d",
+    EXTRACT_TAR_BZ2,
+)
+# As the archive above unpacks (measured 2026-11-04).
+COHERE_CONTENTS: tuple[tuple[str, Optional[int]], ...] = (
+    ("encoder.int8.onnx", 3090822),
+    ("encoder.int8.onnx.data", 2731503072),
+    ("decoder.int8.onnx", 153250705),
+    ("tokens.txt", 207437),
+)
+
+
 def _wheel(folder: str, name: str, size: int, sha256: str) -> RemoteFile:
     return RemoteFile(f"{_PYPI_FILES}{folder}/{name}", name, size, sha256, EXTRACT_WHEEL)
 
@@ -439,6 +460,7 @@ def model_paths(tier: str, root: Optional[Path] = None) -> ModelPaths:
         vad=base / VAD.path,
         turkish=base / TURKISH_FOLDER,
         european=base / EUROPEAN_FOLDER,
+        cohere=base / COHERE_FOLDER,
     )
 
 
@@ -504,6 +526,7 @@ def needed(tier: str, root: Optional[Path] = None) -> list[Download]:
     european = base / EUROPEAN_FOLDER
     for file in EUROPEAN_FILES:
         downloads.append(Download(european, file, ((file.path, file.size),)))
+    downloads.append(Download(base / COHERE_FOLDER, COHERE_FILE, COHERE_CONTENTS))
     info = TIERS[tier]
     folder = base / info.folder
     for file in info.files:

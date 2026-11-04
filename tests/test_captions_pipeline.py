@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -200,13 +201,58 @@ class TurkishModelTests(unittest.TestCase):
         model = object.__new__(_Model)
         model.recognizer = Recognizer("qwen", "Good evening.")
         model.turkish = Recognizer("ufak", "iyi akşamlar")
-        model.european = None
+        model.european = model.cohere = None
+        model._folders, model._loading = {}, {}
         return model, heard
+
+    @staticmethod
+    def given(model, name, recognizer):
+        """`recognizer` as the loaded specialist `name` ("cohere", "european")."""
+        model._folders[name] = Path("unused")
+        setattr(model, name, recognizer)
+
+    def test_coheres_languages_go_to_it_told_the_language(self):
+        # 2.9.3: Cohere Transcribe wrote its 14 languages best (FLEURS and broadcasts).
+        model, heard = self.model()
+        self.given(model, "cohere", type(model.turkish)("cohere", "Bonsoir."))
+        self.given(model, "european", type(model.turkish)("parakeet", "God aften."))
+        self.assertEqual(model.decode(array("f", [0.1]), "French"), "Bonsoir.")
+        self.assertEqual(heard[0], ("cohere", "language", "fr"))
+        heard.clear()
+        self.assertEqual(model.decode(array("f", [0.1]), "Danish"), "God aften.")  # not Cohere's
+        self.assertEqual(heard[0][0], "parakeet")
+        heard.clear()
+        model.decode(array("f", [0.1]), "Hindi")  # neither's: Qwen's
+        self.assertEqual(heard[0], ("qwen", "language", "Hindi"))
+
+    def test_a_specialist_loads_once_needed_and_qwen_writes_meanwhile(self):
+        model, heard = self.model()
+        model._folders = {"cohere": Path("unused"), "european": Path("unused")}
+        loads = []
+        go = threading.Event()
+
+        def load(name, done):
+            loads.append(name)
+            go.wait(5)
+            setattr(model, name, type(model.turkish)(name, "loaded"))
+            done.set()
+
+        model._load = load
+        self.assertEqual(model.decode(array("f", [0.1]), "French"), "Good evening.")  # Qwen's
+        self.assertEqual(loads, ["cohere"])
+        model.decode(array("f", [0.1]), "French")
+        self.assertEqual(loads, ["cohere"])  # once
+        go.set()
+        model._loading["cohere"].wait(5)
+        self.assertEqual(model.decode(array("f", [0.1]), "French"), "loaded")
+        # A language only Parakeet writes waits for it (Qwen can't write it at all).
+        self.assertEqual(model.decode(array("f", [0.1]), "Ukrainian"), "loaded")
+        self.assertEqual(loads, ["cohere", "european"])
 
     def test_parakeets_languages_go_to_it_and_qwen_is_never_told_one_it_doesnt_know(self):
         # 2.9.3: Parakeet TDT 0.6B v3 writes its European languages, better than Qwen.
         model, heard = self.model()
-        model.european = type(model.turkish)("parakeet", "Good evening.")
+        self.given(model, "european", type(model.turkish)("parakeet", "Good evening."))
         self.assertEqual(model.decode(array("f", [0.1]), "English"), "Good evening.")
         self.assertEqual([name for name, *_ in heard], ["parakeet"])  # no gain, no language
         heard.clear()
@@ -217,6 +263,7 @@ class TurkishModelTests(unittest.TestCase):
         self.assertEqual(heard[0], ("qwen", "language", "Japanese"))
         heard.clear()
         model.european = None  # its files not given: Qwen writes, with no language set
+        model._folders.clear()
         model.decode(array("f", [0.1]), "Ukrainian")
         self.assertNotIn("language", [key for _name, key, *_ in heard])
 
@@ -224,7 +271,11 @@ class TurkishModelTests(unittest.TestCase):
         # 2.9.3: on a French broadcast with English words in it, Parakeet (never told the
         # language) wrote English: "And I've been at the bank."
         model, heard = self.model()
-        model.european = type(model.turkish)("parakeet", "And I've been at the bank, you know.")
+        self.given(
+            model,
+            "european",
+            type(model.turkish)("parakeet", "And I've been at the bank, you know."),
+        )
         model.recognizer = type(model.turkish)("qwen", "Et je vais à la banque.")
         self.assertEqual(model.decode(array("f", [0.1]), "French"), "Et je vais à la banque.")
         self.assertIn(("qwen", "language", "French"), heard)

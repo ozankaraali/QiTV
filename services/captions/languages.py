@@ -95,6 +95,29 @@ EUROPEAN = frozenset(
     }
 )
 
+# 2.9.3: those Cohere Transcribe writes, told the language: the best of the models tried there,
+# on FLEURS and on broadcasts (French 3.6 % of words wrong against Parakeet's 13.3 %, Greek 21
+# against 46, Japanese 5.2 against Qwen's 12, Vietnamese 6 against 12, Arabic 11 against 28;
+# names right on the news); Parakeet keeps the European languages it doesn't know.
+COHERE = frozenset(
+    {
+        "English",
+        "French",
+        "German",
+        "Italian",
+        "Spanish",
+        "Portuguese",
+        "Greek",
+        "Dutch",
+        "Polish",
+        "Chinese",
+        "Japanese",
+        "Korean",
+        "Vietnamese",
+        "Arabic",
+    }
+)
+
 _ALL = (*_TABLE, *_EUROPEAN_ONLY)
 _OWN = {english: own for _code, english, own, _others in _ALL}
 _CODE = {english: code for code, english, _own, _others in _ALL}

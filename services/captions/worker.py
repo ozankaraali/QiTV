@@ -36,7 +36,7 @@ from typing import Any, Optional
 import urllib.request
 
 from services.captions import guards, text_language
-from services.captions.languages import EUROPEAN, QWEN_LANGUAGES
+from services.captions.languages import COHERE, EUROPEAN, QWEN_LANGUAGES, iso_code
 from services.captions.pieces import END_PAUSE_S, MAX_PIECE_S, Cutter, Piece
 from services.captions.stream_clock import StreamClock, TsTimes
 
@@ -80,6 +80,8 @@ class _LogToOwner(logging.Handler):
 
 
 TURKISH = "Turkish"  # Qwen's name for it: the language ufakzeka-kulak writes (2.9.1)
+_COHERE, _EUROPEAN = "cohere", "european"  # 2.9.3: the specialists (their spec keys)
+_LOAD_WAIT_S = 60.0  # a language only a specialist writes waits this long for it to load
 _TURKISH_GAIN = 8.0  # the model card's input gain: its sherpa-onnx files want the sound louder
 _UPPER = {"i": "İ", "ı": "I"}  # Turkish's own capitals of the dotted and the dotless i
 
@@ -134,20 +136,18 @@ class _Model:
                 num_threads=min(2, threads),
                 model_type="nemo_transducer",
             )
-        # 2.9.3: NVIDIA's Parakeet TDT 0.6B v3 writes the European languages it knows, better
-        # and four to five times faster than Qwen (FLEURS); Qwen still tells the language.
+        # 2.9.3: the specialists, each loaded once a run's language needs it (in its own thread;
+        # Qwen writes meanwhile): Cohere Transcribe for its 14 languages, told the language,
+        # and NVIDIA's Parakeet TDT 0.6B v3 for the other European ones. Qwen still tells the
+        # language, and writes the rest. Both at once would hold some 4 GB.
+        self._sherpa = sherpa_onnx
+        self._threads = threads
+        self._folders = {
+            name: Path(spec[name]) for name in (_COHERE, _EUROPEAN) if paths and spec.get(name)
+        }
+        self.cohere: Any = None
         self.european: Any = None
-        european = spec.get("european")
-        if paths and european:
-            folder = Path(european)
-            self.european = sherpa_onnx.OfflineRecognizer.from_transducer(
-                encoder=str(folder / "encoder.int8.onnx"),
-                decoder=str(folder / "decoder.int8.onnx"),
-                joiner=str(folder / "joiner.int8.onnx"),
-                tokens=str(folder / "tokens.txt"),
-                num_threads=threads,
-                model_type="nemo_transducer",
-            )
+        self._loading: dict[str, threading.Event] = {}
         config = sherpa_onnx.VadModelConfig()
         config.silero_vad.model = spec["vad"]
         config.silero_vad.threshold = float(spec.get("vad_threshold", 0.5))
@@ -160,12 +160,73 @@ class _Model:
             self.decode(array("f", bytes(16000 * 4)), "")
             if self.turkish is not None:
                 self.decode(array("f", bytes(16000 * 4)), TURKISH)
-            if self.european is not None:
-                self.decode(array("f", bytes(16000 * 4)), "English")
 
     def is_speech(self, window: array) -> bool:
         with self._lock:
             return bool(self.vad.is_speech(window))
+
+    def writer(self, language: str) -> Optional[str]:
+        """The specialist that writes `language` (_COHERE, _EUROPEAN), None for Qwen's."""
+        if language in COHERE and _COHERE in self._folders:
+            return _COHERE
+        if language in EUROPEAN and _EUROPEAN in self._folders:
+            return _EUROPEAN
+        return None
+
+    def prepare(self, language: str) -> None:
+        """The specialist for `language` loads now, in its own thread, unless it has."""
+        name = self.writer(language)
+        if name is None or name in self._loading:
+            return
+        done = self._loading[name] = threading.Event()
+        threading.Thread(
+            target=self._load, args=(name, done), name=f"qitv-captions-{name}", daemon=True
+        ).start()
+
+    def _load(self, name: str, done: threading.Event) -> None:
+        folder, sherpa_onnx = self._folders[name], self._sherpa
+        try:
+            if name == _COHERE:
+                recognizer = sherpa_onnx.OfflineRecognizer.from_cohere_transcribe(
+                    encoder=str(folder / "encoder.int8.onnx"),
+                    decoder=str(folder / "decoder.int8.onnx"),
+                    tokens=str(folder / "tokens.txt"),
+                    num_threads=self._threads,
+                    language="en",
+                    use_punct=True,
+                )
+            else:
+                recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
+                    encoder=str(folder / "encoder.int8.onnx"),
+                    decoder=str(folder / "decoder.int8.onnx"),
+                    joiner=str(folder / "joiner.int8.onnx"),
+                    tokens=str(folder / "tokens.txt"),
+                    num_threads=self._threads,
+                    model_type="nemo_transducer",
+                )
+            stream = recognizer.create_stream()  # warm up, as the others at load
+            stream.accept_waveform(16000, array("f", bytes(16000 * 4)))
+            recognizer.decode_stream(stream)
+            setattr(self, name, recognizer)
+            logger.info("AI captions: %s is loaded", name)
+        except Exception as error:  # Qwen goes on writing its languages
+            logger.warning("AI captions: %s did not load: %s", name, type(error).__name__)
+        finally:
+            done.set()
+
+    def _specialist(self, language: str) -> Any:
+        """The loaded specialist for `language`, else None (Qwen's piece): it starts loading;
+        one Qwen can't write at all (only Parakeet knows it) waits for it."""
+        name = self.writer(language)
+        if name is None:
+            return None
+        loaded = getattr(self, name)
+        if loaded is not None:
+            return loaded
+        self.prepare(language)
+        if language not in QWEN_LANGUAGES or self.recognizer is None:
+            self._loading[name].wait(_LOAD_WAIT_S)
+        return getattr(self, name)
 
     def decode(self, samples: array, language: str) -> str:
         if language == TURKISH and self.turkish is not None:
@@ -173,10 +234,17 @@ class _Model:
             stream.accept_waveform(16000, array("f", (v * _TURKISH_GAIN for v in samples)))
             self.turkish.decode_stream(stream)
             return str(stream.result.text).strip()  # its case: `_Run.sentence_case`
-        if language in EUROPEAN and self.european is not None:
-            stream = self.european.create_stream()
+        specialist = self._specialist(language) if language else None
+        if specialist is not None and specialist is self.cohere:
+            stream = specialist.create_stream()
+            stream.set_option("language", iso_code(language))
             stream.accept_waveform(16000, samples)
-            self.european.decode_stream(stream)
+            specialist.decode_stream(stream)
+            return str(stream.result.text).strip()
+        if specialist is not None:
+            stream = specialist.create_stream()
+            stream.accept_waveform(16000, samples)
+            specialist.decode_stream(stream)
             text = str(stream.result.text).strip()  # its own capitals and full stops
             # 2.9.3: Parakeet can't be told the language. On a French broadcast with English
             # words in it, it wrote English ("And I've been at the bank", "We're deposing the
@@ -214,6 +282,8 @@ class _Run:
         self.run = run
         self.url = url
         self.language = language
+        if language:
+            model.prepare(language)  # 2.9.3: its specialist loads while the sound comes
         self.viewer = viewer  # [position], shared with the command loop
         self.times = TsTimes(audio_pid=audio_track)
         self.clock = StreamClock(segment_start, self.times)
@@ -384,6 +454,7 @@ class _Run:
         locked = self.votes.add(heard)
         if locked is not None:
             self.language = locked
+            self.model.prepare(locked)  # 2.9.3: Qwen writes until its specialist is loaded
             self.link.send(("detected", self.run, locked))
             return True
         return heard is not None and heard == self.votes.leading()

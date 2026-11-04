@@ -619,6 +619,7 @@ class CaptionsController(QObject):
                 "vad": str(paths.vad),
                 "turkish": str(paths.turkish),  # 2.9.1: ufakzeka-kulak, for Turkish
                 "european": str(paths.european),  # 2.9.3: Parakeet, for its languages
+                "cohere": str(paths.cohere),  # 2.9.3: Cohere Transcribe, for its 14
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),
