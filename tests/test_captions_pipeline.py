@@ -1078,6 +1078,40 @@ class StepDownTests(unittest.TestCase):
         self.assertTrue(self.loaded[-1]["turkish"].endswith("ufakzeka-kulak"))  # ... with it
         self.assertEqual(self.captions._tier, "large")  # the same Qwen
 
+    def test_after_the_first_questions_yes_a_languages_model_comes_unasked(self):
+        # 2.9.6, the owner: say once what may come (880 MB to start, up to 3.3 GB), then each
+        # language's model downloads as its language plays.
+        from unittest import mock
+
+        self.config["ai_captions_language_models"] = True
+        self.disk["cohere"] = False
+        self.captions._language = ("English", "")
+        started = []
+        self.captions._start_download = lambda: started.append(self.captions._fetching)
+        with mock.patch("services.captions.models.download_size", return_value=1_700_000_000):
+            self.captions._offer_specialist()
+        self.assertEqual((self.card.asked, started), ([], ["cohere"]))
+
+    def test_the_first_question_says_what_it_starts_with_and_what_it_may_come_to(self):
+        from unittest import mock
+
+        self.captions._enabled = False
+        self.captions._process.running = lambda: False
+        self.captions._speed_unknown = lambda: False
+        self.captions._choose_tier = lambda: "small"
+        with (
+            mock.patch("services.captions.models.installed", return_value=False),
+            mock.patch("services.captions.models.download_size", return_value=893_000_000),
+            mock.patch("services.captions.models.full_size", return_value=3_330_000_000),
+        ):
+            self.captions.toggle()
+        [(text, _yes, _no)] = self.card.asked
+        self.assertIn("893 MB", text)
+        self.assertIn("3.3 GB", text)
+        self.captions._start_download = lambda: None
+        self.captions.answer(True)
+        self.assertIs(self.config.get("ai_captions_language_models"), True)
+
     def test_a_model_that_is_here_is_not_asked_for_and_one_not_here_is_not_given(self):
         from unittest import mock
 

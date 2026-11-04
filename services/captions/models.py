@@ -539,6 +539,13 @@ def needed(key: str, root: Optional[Path] = None) -> list[Download]:
     return downloads
 
 
+def full_size(tier: str, root: Optional[Path] = None) -> int:
+    """Bytes the tier and every language's own model take in all, here or not (what the first
+    question says AI captions may come to). Unsupported as `needed`."""
+    keys = (tier, *SPECIALISTS)
+    return sum(d.file.size for key in keys for d in needed(key, root))
+
+
 def _specialist(key: str, base: Path) -> list[Download]:
     if key == COHERE_KEY:
         return [Download(base / COHERE_FOLDER, COHERE_FILE, COHERE_CONTENTS)]

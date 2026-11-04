@@ -6,15 +6,16 @@ others' distributions, which may have malware.**
 
 ## AI captions
 
-- **Only the speech models your languages need:** turning AI captions on now downloads one
-  speech model, about 880 MB (2.4 GB for the more accurate one). The models that write
-  particular languages best come only when a channel or film in one of their languages plays,
-  after a question that names the language and the size:
+- **Only the speech models your languages need:** the first time you turn AI captions on, one
+  question says what it comes to: about 880 MB to start (2.4 GB with the more accurate model),
+  up to 3.3 GB (4.8 GB) with every language's own model. The models that write particular
+  languages best then download by themselves, once, when a channel or film in one of their
+  languages first plays; the captions row shows how far:
   - ufak AI's model for Turkish (43 MB);
   - Cohere Transcribe for English and 13 more languages (1.7 GB);
   - NVIDIA's Parakeet for the other European languages (670 MB).
-  Until now all of them came at once: 3.3 to 4.8 GB, whatever you watched. If you already
-  have them, nothing changes.
+  Until now all of them came at once, whatever you watched. If you already have them, nothing
+  changes; if you have some, QiTV asks before fetching the rest.
 - **English captions start sooner on a busy computer:** QiTV switched to its faster model while
   the English model was still loading, and the switch made the English model load again: the
   first caption could take over a minute and a half. QiTV now switches only when the faster

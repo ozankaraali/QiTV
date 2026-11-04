@@ -78,6 +78,9 @@ SEEK_S = 2.0  # the position moved this much more than the clock: a seek, read a
 KEEP_S = 30 * 60.0  # cues kept this far behind the picture
 _RESTART_MS = 1000
 _SLOW_RTF = 0.9  # the model takes this long per second of speech: it can't keep up
+# 2.9.6: the first question's yes (it said every language's model may come): they download as
+# their languages play, unasked
+_LANGUAGE_MODELS_OK = "ai_captions_language_models"
 _BACKLOG_S = 2.0  # ... or this much sound read waits for it (2.9.1)
 _SLOW_FOR_S = 30.0
 
@@ -180,6 +183,7 @@ class CaptionsController(QObject):
         self._slow_since: Optional[float] = None
         self._qwen_writes = True  # Qwen writes the run's language (no specialist does)
         self._offered: set[str] = set()  # 2.9.6: the specialists asked for while QiTV runs
+        self._first_question = False  # the question up is the first one (all the sizes)
         self._last: Optional[tuple[float, float]] = None  # (position, monotonic) last tick
         self._was_waiting = False  # the live picture waited for the captions' distance
         self._floored: Any = None  # the live session holding the captions' distance
@@ -294,8 +298,13 @@ class CaptionsController(QObject):
         if self._card is not None:
             self._asking = True
             self._tier = self._fetching = tier
+            self._first_question = True  # its yes is for every language's model too (2.9.6)
             self._question = (
-                translate(DOWNLOAD_QUESTION, size=size_text(missing)),
+                translate(
+                    DOWNLOAD_QUESTION,
+                    size=size_text(missing),
+                    total=size_text(models.full_size(tier)),
+                ),
                 translate(DOWNLOAD),
                 translate(NOT_NOW),
             )
@@ -476,6 +485,7 @@ class CaptionsController(QObject):
                 return
             then()
             self._disk.clear()  # the files went
+            self._config_set(_LANGUAGE_MODELS_OK, False)  # the first question again, sizes and all
             self._stepped_down = False  # Automatic by this computer's speed again
             self.changed.emit()
 
@@ -486,9 +496,12 @@ class CaptionsController(QObject):
         if not self._asking:
             return
         self._asking = self._asking_step = False
+        first, self._first_question = self._first_question, False
         if not yes:
             self.changed.emit()  # the question is gone (a phone's closes too)
             return
+        if first:  # 2.9.6, the owner: asked once, the sizes said; each language's comes alone
+            self._config_set(_LANGUAGE_MODELS_OK, True)
         self._start_download()
 
     def _start_download(self) -> None:
@@ -721,7 +734,9 @@ class CaptionsController(QObject):
             return
         self._offered.add(key)
         self._fetching = key
-        if missing == 0:  # here already, only to be checked and unpacked: nothing to ask
+        if missing == 0 or self._config_get(_LANGUAGE_MODELS_OK, False):
+            # here already (only to be checked and unpacked), or the first question's yes was
+            # for it too: it downloads while Qwen writes, the row says how far
             self._start_download()
             return
         self._asking = self._asking_step = True  # QiTV's own question: every phone hears it
