@@ -3,7 +3,8 @@
 The guide lists the zap group's channels (every live channel when nothing was tuned yet) on
 the channel tuned last; in all providers mode, when the drawer shows another live group, that
 group's channels (any provider's) instead. While it is open it takes the keys:
-- ↑/↓, PgUp/PgDn and Ch± move the highlight; ←/→ move the time window;
+- ↑/↓, PgUp/PgDn and Ch± move the highlight; ←/→ move the time window, Home brings it back
+  to now (2.9.3);
 - digits jump to a channel number (the fast way through thousands of channels), Enter tunes
   the highlighted channel and closes the guide (on a channel with a provider archive, a past
   programme chosen in the guide plays from its start instead: `catchupRequested`);
@@ -88,6 +89,10 @@ class GuideController(QObject):
     def current_channel(self) -> Optional[dict]:
         return self.guide.current_channel() if self.is_open() else None
 
+    def group(self) -> str:
+        """The group the guide lists (its zap group's key)."""
+        return self._group
+
     def visible_channels(self) -> list[dict]:
         """The channels on screen while the guide is open (any provider's)."""
         return self.guide.visible_channels() if self.is_open() else []
@@ -112,6 +117,8 @@ class GuideController(QObject):
             move(delta)
         elif action is Action.DIGIT:
             self._digit(payload)
+        elif action is Action.NAV_HOME:
+            guide.go_now()
         elif action is Action.NAV_ACTIVATE:
             guide.activate()
         elif action is Action.RECORD:

@@ -5,7 +5,18 @@ rows, so groups with thousands of channels stay cheap.
 
 Its header has a button for each of its keys (every key has a control on screen): ‹ and ›
 beside the day move the time window (← →, dimmed at its ends), and ⌕ (Search), ⛶ (Fullscreen)
-and × (close, as G or Esc) sit at its right end. Each names its key when hovered.
+and × (close, as G or Esc) sit at its right end. Each names its key when hovered. 2.9.3: the
+day ("Today ⌄") is a button too, which lists the days the window reaches (the archive's back,
+tomorrow ahead) to go to one at the same time of day (today: now), and "Now" (Home) brings the
+window back to now; ‹ › step half an hour, as before.
+
+The mouse (2.9.3): a click on a channel's name (its number and logo) tunes it, as a click on
+a channel of the channel list does (the rule: ui/library/poster_grid.py); a click on a
+programme highlights it and the footer describes it (a double-click plays it, as Enter). A
+right-click on a row asks for the channel's menu (`contextRequested`), the highlight staying
+where it is. The row under the pointer is tinted, hovering a name or a programme cut short
+names it whole, and a thin scrollbar shows over the right edge while the rows move or the
+pointer is over them (ui.overlays.scroll_indicator).
 
 Catch-up (2.2): when a listed channel's provider keeps an archive (`archive_days(channel)`:
 its days, 0 for none or one that did not answer lately), the window also moves back, as far
@@ -30,7 +41,18 @@ import logging
 import math
 from typing import NamedTuple
 
-from PySide6.QtCore import QDate, QEvent, QLocale, QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QDate,
+    QEvent,
+    QLocale,
+    QObject,
+    QPoint,
+    QPointF,
+    QRectF,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QFont,
     QFontMetrics,
@@ -42,7 +64,7 @@ from PySide6.QtGui import (
     QTextLayout,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QMenu, QWidget
 
 from services import i18n
 from services.catalog import shown_label
@@ -55,7 +77,8 @@ from ui.keymap import key_hint
 from ui.overlays.base import Overlay
 from ui.overlays.channel_rows import draw_playing_mark
 from ui.overlays.painting import Units, draw_icon, draw_logo, elided, fill_round, fmt_clock
-from ui.pointer import PointerInput
+from ui.overlays.scroll_indicator import ScrollIndicator
+from ui.pointer import PointerInput, SecondClickGuard
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
@@ -96,6 +119,8 @@ BUTTON_GAP_U = 0.6
 # The header's buttons, left to right: what they do and their key (ui.keymap.SHORTCUTS);
 # what they do is shown with translate().
 HEADER_BUTTONS = {
+    # i18n: the guide's "Now" button (2.9.3): the time window back to now; Home is its key
+    "now": (N_("Now"), "Home"),
     "earlier": (N_("Earlier"), "Left"),  # i18n: the guide's ‹ (tooltip): an earlier time
     "later": (N_("Later"), "Right"),  # i18n: the guide's › (tooltip): a later time
     "search": (N_("Search"), "Ctrl+F"),
@@ -103,6 +128,9 @@ HEADER_BUTTONS = {
     "close": (N_("Close the guide"), "G"),
 }
 _BUTTON_ICONS = {"earlier": "chevron_left", "later": "chevron_right"}
+HOVER_ALPHA = 0.05  # 2.9.3: the row under the pointer
+CHIP_ALPHA = 0.1  # the day's and Now's ground (under the pointer: CHIP_HOVER_ALPHA)
+CHIP_HOVER_ALPHA = 0.18
 
 # (channel key, row when the channel has no key, window start)
 _Key = tuple[str, int | None, datetime]
@@ -240,6 +268,8 @@ class Guide(Overlay):
     accessible_name = N_("Programme guide")
     tuneRequested = Signal(object)  # channel dict
     programmeRequested = Signal(object, object)  # channel dict, Programme: from its start
+    # 2.9.3: a right-click on a row (channel dict, global position): its menu, as the list's
+    contextRequested = Signal(object, QPoint)
     closed = Signal()
     searchRequested = Signal()  # the header's ⌕
     fullscreenRequested = Signal()  # the header's ⛶
@@ -300,6 +330,18 @@ class Guide(Overlay):
         self._row_wheel.wheelSteps.connect(self._on_row_wheel)
         self._time_wheel = PointerInput(self)
         self._time_wheel.wheelSteps.connect(self._on_time_wheel)
+        self._hover_row: int | None = None  # 2.9.3: the row under the pointer
+        self._hover_button: str | None = None  # the header's button under it
+        # A click on a channel's name tunes it and the guide closes: a double-click's second
+        # click would land on the picture (fullscreen), so it reaches nothing.
+        self._second_click = SecondClickGuard(self)
+        self._indicator = ScrollIndicator(
+            self,
+            lambda: (float(self._top), float(self._layout().full_rows()), len(self._channels)),
+            self._scroll_rows_to,
+            lambda: self._layout().rows.toAlignedRect(),
+        )
+        self.setMouseTracking(True)
         if logos is not None:
             logos.logoReady.connect(self._on_logo_ready)
         if parent is not None:
@@ -324,6 +366,7 @@ class Guide(Overlay):
         self._relayout()
         full = self._layout().full_rows()
         self._top = self._clamped_top(self._current - full // 2, full)
+        self._indicator.refit()
         self._repaint.start()
         self.show()
         self.raise_()
@@ -372,6 +415,60 @@ class Guide(Overlay):
             self._forget_lookups()
             self.update()
 
+    def go_now(self) -> None:
+        """2.9.3: "Now" (Home): the window back to the half-hour on now."""
+        self._go_to(slot_start(self._now()))
+
+    def _go_to(self, start: datetime) -> None:
+        if start != self._window_start or not self._window_follows:
+            self._window_start = start
+            self._picked = self._upcoming = None
+            self._forget_lookups()
+            self.update()
+
+    def day_choices(self) -> list[tuple[str, datetime]]:
+        """2.9.3: the days the window reaches (its archive's days back, tomorrow ahead) as
+        (label, where the window goes): the day at the window's time of day (within the
+        reach), and today at now."""
+        now = slot_start(self._now())
+        earliest, latest = now - self._back, now + MAX_AHEAD
+        shown = self._window_start.astimezone()
+        day = earliest.astimezone().date()
+        choices: list[tuple[str, datetime]] = []
+        while day <= latest.astimezone().date():
+            if day == now.astimezone().date():
+                start = now
+            else:
+                moment = shown.replace(year=day.year, month=day.month, day=day.day)
+                start = min(max(slot_start(moment), earliest), latest)
+            choices.append((day_label(start, self._now()), start))
+            day += timedelta(days=1)
+        return choices
+
+    def _show_day_menu(self) -> None:
+        """The day's button: a menu of the days (the one shown ticked)."""
+        menu = QMenu(self)
+        from ui.context_actions import menu_style  # (the drawer's menus' look)
+
+        menu.setStyleSheet(menu_style())
+        shown = self._window_start.astimezone().date()
+        for label, start in self.day_choices():
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(start.astimezone().date() == shown)
+            action.triggered.connect(lambda _=False, at=start: self._go_to(at))
+        rect = self.header_buttons()["day"]
+        menu.aboutToHide.connect(menu.deleteLater)
+        menu.popup(self.mapToGlobal(QPoint(int(rect.left()), int(rect.bottom()))))
+
+    def _scroll_rows_to(self, first: float) -> None:
+        """The scroll indicator's drag: these rows on screen (the highlight stays its own)."""
+        top = self._clamped_top(round(first), self._layout().full_rows())
+        if top != self._top:
+            self._top = top
+            self.update()
+            self.rowsMoved.emit()
+
     def _shifted(self, delta: int) -> datetime:
         now = slot_start(self._now())
         earliest = now - self._back
@@ -393,18 +490,28 @@ class Guide(Overlay):
         self._window_follows = start == slot_start(self._now())
 
     def header_buttons(self) -> dict[str, QRectF]:
-        """The header's buttons, left to right: ‹ › at the right of the channels' column, then
-        ⌕ ⛶ × at the header's right end."""
+        """The header's buttons, left to right: the day (2.9.3: its menu of days), "Now", then
+        ‹ › at the right of the channels' column, then ⌕ ⛶ × at the header's right end."""
         layout = self._layout()
         u = layout.units.u
         size, gap = BUTTON_U * u, BUTTON_GAP_U * u
         top = layout.header.top() + 1.3 * u - size / 2  # centred on the day's line
         later = QRectF(layout.times.left() - SIDE_U * u - size, top, size, size)
         earlier = QRectF(later.left() - gap - size, top, size, size)
+        chip_font = layout.units.font(1.0, QFont.Weight.DemiBold)
+        now_w = QFontMetrics(chip_font).horizontalAdvance(translate(HEADER_BUTTONS["now"][0]))
+        now = QRectF(earlier.left() - gap - now_w - 1.6 * u, top, now_w + 1.6 * u, size)
+        day_font = layout.units.font(1.1, QFont.Weight.DemiBold)
+        label = day_label(self._window_start, self._now())
+        day_w = QFontMetrics(day_font).horizontalAdvance(label) + 1.2 * u + 1.6 * u  # and ⌄
+        day_left = SIDE_U * u - 0.6 * u
+        day = QRectF(day_left, top, max(0.0, min(day_w, now.left() - gap - day_left)), size)
         close = QRectF(layout.times.right() - size, top, size, size)
         fullscreen = QRectF(close.left() - gap - size, top, size, size)
         search = QRectF(fullscreen.left() - gap - size, top, size, size)
         return {
+            "day": day,
+            "now": now,
             "earlier": earlier,
             "later": later,
             "search": search,
@@ -413,9 +520,13 @@ class Guide(Overlay):
         }
 
     def tooltip_at(self, point: QPointF) -> str:
-        """What hovering `point` says: a header button's name and key, or nothing."""
+        """What hovering `point` says: a header button's name and key, a footer button's, a
+        channel's or a programme's whole name where its row cuts it short (2.9.3), else
+        nothing."""
         for name, rect in self.header_buttons().items():
             if rect.contains(point):
+                if name == "day":
+                    return ""  # it reads what it is; ⌄ says it opens
                 what, keys = HEADER_BUTTONS[name]
                 return key_hint(translate(what), keys)
         for name, rect in self.footer_buttons().items():
@@ -431,7 +542,43 @@ class Guide(Overlay):
             if name == "timer":
                 return translate(TIMER_TEXT)
             return key_hint(translate(RECORD_TEXT if name == "record" else CANCEL_TEXT), RECORD_KEY)
+        return self._row_tooltip(point)
+
+    def _row_tooltip(self, point: QPointF) -> str:
+        """A row's channel name or programme where its row cuts it short: whole (2.9.3)."""
+        row = self._row_at(point.y())
+        if row is None:
+            return ""
+        layout = self._layout()
+        units = layout.units
+        if point.x() < layout.times.left():
+            name = shown_label(str(self._channels[row].get("name") or ""))
+            width = self._channel_name_width(layout, self._channels[row])
+            font = units.font(1.1, QFont.Weight.DemiBold)
+            return name if QFontMetrics(font).horizontalAdvance(name) > width else ""
+        for span in programme_spans(
+            self._programmes_for(row),
+            self._window_start,
+            layout.times.left(),
+            layout.times.width(),
+            MIN_BOX_U * units.u,
+        ):
+            if span.x <= point.x() < span.x + span.width:
+                programme = span.programme
+                on_now = programme.is_on(self._now())
+                font = units.font(1.05, QFont.Weight.DemiBold if on_now else QFont.Weight.Normal)
+                room = span.width - 0.4 * units.u - 1.4 * units.u - (0.2 * units.u if on_now else 0)
+                cut = QFontMetrics(font).horizontalAdvance(programme.title) > room
+                return f"{programme.title}\n{fmt_span(programme)}" if cut else ""
         return ""
+
+    def _channel_name_width(self, layout: _Layout, channel: dict) -> float:
+        """The room a row's channel name has (as `_paint_channel` lays it out)."""
+        u = layout.units.u
+        x = SIDE_U * u + self._number_width(layout.units) + 0.9 * u + 3.0 * u + 0.9 * u
+        if ZapContext.same(channel, self._playing()):
+            x += 0.9 * u * 0.87 + 0.5 * u
+        return layout.times.left() - 0.8 * u - x
 
     def activate(self) -> None:
         """Enter: the chosen past programme from its start (see `chosen`), else the channel."""
@@ -644,6 +791,7 @@ class Guide(Overlay):
             if self._top != top:
                 self.update()  # the rows scrolled
                 self.rowsMoved.emit()
+                self._indicator.poke()
                 return
             # Only the two rows' highlight and the footer change: repaint just them.
             layout = self._layout()
@@ -743,6 +891,10 @@ class Guide(Overlay):
     def _press_button(self, name: str) -> None:
         if name in ("earlier", "later"):
             self.shift(-1 if name == "earlier" else 1)
+        elif name == "now":
+            self.go_now()
+        elif name == "day":
+            self._show_day_menu()
         elif name == "search":
             self.searchRequested.emit()
         elif name == "fullscreen":
@@ -761,9 +913,50 @@ class Guide(Overlay):
                 self._press_button(button)
             elif footer is not None:
                 self._press_footer(footer)
-            else:
-                self._select_at(event)
+            elif self._select_at(event) and self._on_channel_cell(event.position()):
+                # 2.9.3: a channel's name tunes it, as in the channel list (one click).
+                channel = self.current_channel()
+                if channel is not None:
+                    self._second_click.arm()
+                    self.tuneRequested.emit(channel)
+        elif event.button() == Qt.MouseButton.RightButton:
+            row = self._row_at(event.position().y())
+            if row is not None:  # its menu; the highlight stays where the keys put it
+                self.contextRequested.emit(
+                    self._channels[row], self.mapToGlobal(event.position().toPoint())
+                )
         event.accept()
+
+    def _on_channel_cell(self, point: QPointF) -> bool:
+        return self._row_at(point.y()) is not None and point.x() < self._layout().times.left()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        """2.9.3: the row and the header's button under the pointer are tinted; the move
+        goes on to the host (the pointer's own wait)."""
+        point = event.position()
+        row = self._row_at(point.y())
+        button = next((n for n, r in self.header_buttons().items() if r.contains(point)), None)
+        if row != self._hover_row or button != self._hover_button:
+            layout = self._layout()
+            for changed in (self._hover_row, row):
+                if changed is not None and changed in self._visible_rows(layout):
+                    self.update(self._row_rect(layout, changed).toAlignedRect())
+            if button != self._hover_button:
+                self.update(layout.header.toAlignedRect())
+            self._hover_row, self._hover_button = row, button
+        clickable = button is not None or (
+            row is not None and point.x() < self._layout().times.left()
+        )
+        self.setCursor(Qt.PointingHandCursor if clickable else Qt.ArrowCursor)
+        self._indicator.pointer_over(self._layout().rows.contains(point))
+        event.ignore()
+
+    def leaveEvent(self, event) -> None:
+        if self._hover_row is not None or self._hover_button is not None:
+            self._hover_row = self._hover_button = None
+            self.update()
+        self._indicator.pointer_over(False)
+        super().leaveEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -806,6 +999,7 @@ class Guide(Overlay):
         self.setGeometry(parent.rect())
         if self._channels:
             self._ensure_visible()
+        self._indicator.refit()
         self.update()
 
     def _layout(self) -> _Layout:
@@ -863,12 +1057,30 @@ class Guide(Overlay):
         u = units.u
         buttons = self.header_buttons()
         label_top, label_h = header.top() + 0.4 * u, 1.8 * u
+        # 2.9.3: the day is a button (its menu of days), and "Now" one beside it.
+        day = buttons["day"]
+        hover = self._hover_button
+        fill_round(
+            p, day, qcolor(PALETTE.text, CHIP_HOVER_ALPHA if hover == "day" else 0.0), 0.8 * u
+        )
         p.setFont(units.font(1.1, QFont.Weight.DemiBold))
         p.setPen(qcolor(PALETTE.text, 0.85))
-        day_w = buttons["earlier"].left() - BUTTON_GAP_U * u - SIDE_U * u
-        day = QRectF(SIDE_U * u, label_top, max(0.0, day_w), label_h)
         label = day_label(self._window_start, now)
-        p.drawText(day, Qt.AlignLeft | Qt.AlignVCenter, elided(p, label, day.width()))
+        caret = 1.0 * u
+        text = QRectF(day.left() + 0.6 * u, day.top(), day.width() - 1.2 * u - caret, day.height())
+        p.drawText(text, Qt.AlignLeft | Qt.AlignVCenter, elided(p, label, text.width()))
+        written = min(
+            text.width(), p.fontMetrics().horizontalAdvance(elided(p, label, text.width()))
+        )
+        mark = QRectF(text.left() + written + 0.3 * u, day.center().y() - caret / 2, caret, caret)
+        draw_icon(p, "chevron_down", mark, qcolor(PALETTE.text, 0.7))
+        chip = buttons["now"]
+        at_now = self._window_follows
+        tint = CHIP_HOVER_ALPHA if hover == "now" and not at_now else CHIP_ALPHA
+        fill_round(p, chip, qcolor(PALETTE.text, tint), chip.height() / 2)
+        p.setFont(units.font(1.0, QFont.Weight.DemiBold))
+        p.setPen(qcolor(PALETTE.text, 0.35 if at_now else 0.9))  # dim at now, as ‹ at its end
+        p.drawText(chip, Qt.AlignCenter, translate(HEADER_BUTTONS["now"][0]))
         slot_w = times.width() / SLOTS
         p.setFont(units.font(1.0))
         labels_end = buttons["search"].left() - BUTTON_GAP_U * u  # never under ⌕ ⛶ ×
@@ -887,11 +1099,14 @@ class Guide(Overlay):
                     elided(p, fmt_clock((self._window_start + i * SLOT).astimezone()), width),
                 )
         for name, rect in buttons.items():
+            if name in ("day", "now"):
+                continue
             movable = {"earlier": -1, "later": 1}.get(name)
             dim = movable is not None and self._shifted(movable) == self._window_start
-            draw_icon(
-                p, _BUTTON_ICONS.get(name, name), rect, qcolor(PALETTE.text, 0.3 if dim else 0.85)
-            )
+            tone = qcolor(PALETTE.text, 0.3 if dim else 0.85)
+            if self._hover_button == name and not dim:
+                tone = qcolor(PALETTE.accent)
+            draw_icon(p, _BUTTON_ICONS.get(name, name), rect, tone)
         now_x = self._now_x(layout, now)
         if now_x is not None:
             font = units.font(0.85, QFont.Weight.Bold)
@@ -913,6 +1128,9 @@ class Guide(Overlay):
         p.fillRect(
             QRectF(rect.left(), rect.bottom() - 1, rect.width(), 1), qcolor(PALETTE.text, 0.06)
         )
+        if row == self._hover_row and row != self._current:  # 2.9.3: under the pointer
+            box = rect.adjusted(0.6 * u, 0.1 * u, -0.6 * u, -0.1 * u)
+            fill_round(p, box, qcolor(PALETTE.text, HOVER_ALPHA), 1.0 * u)
         if row == self._current:
             box = rect.adjusted(0.6 * u, 0.1 * u, -0.6 * u, -0.1 * u)
             fill_round(p, box, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA), 1.0 * u)

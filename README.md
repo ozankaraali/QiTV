@@ -153,6 +153,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | --- | --- |
 | <kbd>↑</kbd> / <kbd>↓</kbd> | Move between channels |
 | <kbd>←</kbd> / <kbd>→</kbd> | Earlier / later |
+| <kbd>Home</kbd> | Now |
 | <kbd>0–9</kbd> | Jump to a channel number |
 | <kbd>Enter</kbd> | Watch the channel; a past programme from its start |
 | <kbd>R</kbd> | Record the programme at its time, or cancel its recording |
@@ -167,7 +168,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>↑</kbd> / <kbd>↓</kbd> / <kbd>←</kbd> / <kbd>→</kbd> | Move |
 | <kbd>Enter</kbd> | Play or open |
 | <kbd>Home</kbd> / <kbd>End</kbd> | First / last title |
-| <kbd>A–Z</kbd> | Jump to a letter, or filter the genres |
+| <kbd>A–Z</kbd> | Type to search every provider's movies, series and channels |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>/</kbd> | Search, or type it in the search |
 | <kbd>Ctrl/⌘+D</kbd> | Add to or remove from My list |
