@@ -50,6 +50,7 @@ from services.opensubtitles import SubtitleFile, shown_release
 from ui.keymap import Action, key_hint
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, draw_icon, fill_round
+from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 KEY_PAGE, RESULTS_PAGE = "key", "results"
@@ -164,9 +165,10 @@ class SubtitleSearchPage(Overlay):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMouseTracking(True)
         self._page = RESULTS_PAGE
-        self._key = ""
+        self._key_edit = TextEdit()  # 2.9.3: the fields' carets and selections
+        self._query_edit = TextEdit()
+        self._drag = Dragging()
         self._message = ""  # the key page's problem
-        self._query = ""
         self._status = ""
         self._status_kind = "info"  # "info", "error" or "busy"
         self._busy = False  # a download is on its way: nothing more is chosen
@@ -251,6 +253,25 @@ class SubtitleSearchPage(Overlay):
     def page(self) -> str:
         return self._page
 
+    @property
+    def _key(self) -> str:
+        return self._key_edit.text
+
+    @_key.setter
+    def _key(self, text: str) -> None:
+        self._key_edit.set_text(text)
+
+    @property
+    def _query(self) -> str:
+        return self._query_edit.text
+
+    @_query.setter
+    def _query(self, text: str) -> None:
+        self._query_edit.set_text(text)
+
+    def _edit(self) -> TextEdit:
+        return self._key_edit if self._page == KEY_PAGE else self._query_edit
+
     def key_text(self) -> str:
         return self._key
 
@@ -293,6 +314,8 @@ class SubtitleSearchPage(Overlay):
             return False
         if action is Action.ESCAPE:
             self.dismiss()
+        elif self._field_key(action, payload):
+            pass  # 2.9.3: the field's caret, selection and clipboard
         elif action is Action.NAV_TEXT:
             self.type_text(payload)
         elif action is Action.NAV_BACKSPACE:
@@ -312,20 +335,34 @@ class SubtitleSearchPage(Overlay):
             return False
         return True
 
+    def _field_key(self, action: Action, payload: str) -> bool:
+        """⌘A, copy and cut in the field, and its caret once put in the text (not the key's:
+        it shows as dots); True when the field took the key."""
+        if action not in (Action.SELECT_ALL, Action.COPY, Action.CUT):
+            if self._page == KEY_PAGE or self._focus != "field":
+                return False
+            if action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
+                return False  # typed and pasted as before: type_text, backspace, paste
+        changed = edit_key(self._edit(), action, payload)
+        if changed is None:
+            return False
+        self._focus = "field"
+        if changed and self._page == KEY_PAGE:
+            self._message = ""
+        self.update()
+        return True
+
     def type_text(self, text: str) -> None:
         if self._page == KEY_PAGE:
-            self._key += text.strip()
+            self._key_edit.insert(text.strip())
             self._message = ""
         else:
-            self._query += text
+            self._query_edit.insert(text)
         self._focus = "field"
         self.update()
 
     def backspace(self) -> None:
-        if self._page == KEY_PAGE:
-            self._key = self._key[:-1]
-        else:
-            self._query = self._query[:-1]
+        self._edit().backspace()
         self._focus = "field"
         self.update()
 
@@ -349,7 +386,7 @@ class SubtitleSearchPage(Overlay):
             self._message = ""
             self._focus = "save"
         else:
-            self._query += line
+            self._query_edit.insert(line)  # at the caret, over the selection
             self._focus = "field"
         self.update()
 
@@ -700,17 +737,23 @@ class SubtitleSearchPage(Overlay):
         inner = QRectF(x, box.top(), max(0.0, right - x), box.height())
         p.setFont(fonts["field"])
         if shown:
-            p.setPen(qcolor(PALETTE.text))
-            label = shown + ("▏" if focused else "")
-            # The end of a long text shows (where it is typed).
-            fm = QFontMetricsF(fonts["field"])
-            while len(label) > 1 and fm.horizontalAdvance(label) > inner.width():
-                label = label[1:]
+            # 2.9.3: the caret where it was put, the selection, moved so the caret shows (the
+            # key's dots: its caret stays at the end)
+            edit = self._edit()
+            paint_edit(
+                p,
+                inner,
+                edit,
+                qcolor(PALETTE.text),
+                caret=focused,
+                selection=qcolor(PALETTE.accent, SELECTION_ALPHA),
+                shown=None if shown == edit.text else shown,
+            )
         else:
             p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             label = ("▏" if focused else "") + placeholder
             label = self._elided(fonts["field"], label, inner.width())
-        p.drawText(inner, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
+            p.drawText(inner, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
         if not rects.clear.isEmpty():
             self._paint_icon_button(p, un, rects.clear, "close", self._hover == ("clear", 0))
 
@@ -924,6 +967,9 @@ class SubtitleSearchPage(Overlay):
             self.clear_field()
         elif name == "field":
             self._focus = "field"
+            if self._page == RESULTS_PAGE and self._query:  # 2.9.3: the caret where clicked
+                shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                self._drag.press(self._query_edit, event.position().x(), shift=shift)
             self.update()
         elif name in BUTTONS:
             self._focus = name if self._page == KEY_PAGE or name == "paste" else self._focus
@@ -943,12 +989,21 @@ class SubtitleSearchPage(Overlay):
             if hit is not None and hit[0] == "files":
                 event.accept()  # the first click downloads it already
                 return
+            if hit is not None and hit[0] == "field" and self._page == RESULTS_PAGE:
+                event.accept()
+                if self._query:
+                    self._drag.double(self._query_edit, event.position().x())  # a word
+                    self.update()
+                return
         self.mousePressEvent(event)  # never fullscreen
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._drag.release()
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton and self._drag.move(event.position().x()):
+            self.update()  # a drag in the field selects
         hit = self._hit(event.position())
         hover = hit if hit is not None and hit[0] not in ("panel", "field") else None
         if hover != self._hover:

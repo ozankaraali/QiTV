@@ -60,6 +60,7 @@ from ui.library.library_screen import LibraryScreen
 from ui.library.poster_grid import poster_url
 from ui.library.search_session import DEBOUNCE_MS, SearchSession
 from ui.library.top_nav import REFRESH_TEXT
+from ui.text_edit import edit_key
 from ui.tick_menu import TickMenu
 
 logger = logging.getLogger(__name__)
@@ -235,6 +236,7 @@ class LibraryController(QObject):
         genres.genreMenuRequested.connect(self._show_genre_menu)
         nav.refreshRequested.connect(self.refresh_lists)
         screen.search_field.clicked.connect(lambda: self._focus("search"))
+        genres.fieldClicked.connect(lambda: self._focus("genres"))  # 2.9.3: its filter
         self._search.changed.connect(self._show_hits)
         self._search.changed.connect(self.searchChanged)
         if self._tmdb is not None:  # 2.8
@@ -328,7 +330,14 @@ class LibraryController(QObject):
         self._screen.genres.set_focused(zone == "genres")
         self._screen.nav.set_focused(zone == "nav")
         self._screen.grid.set_focused(zone == "grid")
-        self._screen.search_field.set_focused(zone == "search")
+        self._sync_search_focus()
+
+    def _sync_search_focus(self) -> None:
+        """The search field's ring: the keys type in it, or the top bar's focus is on it."""
+        on_it = self._zone == "nav" and self._screen.nav.focus_item() == "search"
+        self._screen.search_field.set_focused(
+            self._zone == "search" or on_it, caret=self._zone == "search"
+        )
 
     def _set_mode(self, mode: str) -> None:
         self._mode = mode
@@ -543,6 +552,8 @@ class LibraryController(QObject):
 
     def _handle_genres(self, action: Action, payload: str) -> bool:
         genres = self._screen.genres
+        if genres.field_key(action, payload):
+            return True  # 2.9.3: the filter's caret, selection and clipboard
         if action in (Action.NAV_UP, Action.NAV_DOWN):
             before = genres.current_id()
             genres.move_by(-1 if action is Action.NAV_UP else 1)
@@ -568,8 +579,12 @@ class LibraryController(QObject):
 
     def _handle_nav(self, action: Action, payload: str) -> bool:
         nav = self._screen.nav
+        if action in (Action.NAV_TEXT, Action.PASTE):  # 2.9.3: typing in the top bar searches
+            self.open_search()
+            return self._handle_search(action, payload)
         if action in (Action.NAV_LEFT, Action.NAV_RIGHT):
             nav.move_by(-1 if action is Action.NAV_LEFT else 1)
+            self._sync_search_focus()
         elif action is Action.NAV_ACTIVATE:
             nav.activate()
         elif action is Action.NAV_DOWN:
@@ -599,13 +614,15 @@ class LibraryController(QObject):
 
     def _handle_search(self, action: Action, payload: str) -> bool:
         search, field = self._search, self._screen.search_field
-        if action is Action.NAV_TEXT:
-            search.set_query(search.query + payload)
-            field.set_query(search.query)
-        elif action is Action.NAV_BACKSPACE:
-            if search.query:
-                search.set_query(search.query[:-1])
+        changed = edit_key(field.edit, action, payload, arrows=True)  # 2.9.3: a caret
+        if changed is not None:
+            if changed:
+                search.set_query(field.edit.text)
                 field.set_query(search.query)
+            field.update()
+            return True
+        if action in (Action.NAV_TEXT, Action.NAV_BACKSPACE):
+            pass  # nothing to type or to take out
         elif action is Action.NAV_DOWN:
             if self._screen.grid.current_index() >= 0:
                 self._focus("grid")
@@ -1252,4 +1269,7 @@ class LibraryController(QObject):
         grid = self._screen.grid
         grid.set_sections(self._search.sections())
         grid.set_message(self._search.message())
-        self._screen.search_field.set_count_text(self._search.count_text())
+        # 2.9.3: the field is in the top bar; the grid's header says what it found, as a
+        # genre's says its titles.
+        query = self._search.query.strip()
+        grid.set_header(f"“{query}”" if query else "", self._search.count_text(), [], "")

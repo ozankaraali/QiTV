@@ -1,5 +1,10 @@
-"""The Library's top bar: the QiTV logo, Live TV / Movies / Series, the Search and source pills,
-a refresh button (2.8: the films and series shown load again) and a fullscreen button.
+"""The Library's top bar: the QiTV logo, Live TV / Movies / Series, the search field, the source
+pill, a refresh button (2.8: the films and series shown load again) and a fullscreen button.
+
+The search field (2.9.3, a pill before) is as wide as there is room for, up to SEARCH_MAX_U, in
+the middle of the bar: the first place to type. The bar paints its look while the Library
+browses; the Library's SearchField, attached here (`attach_search`), shows over it while it
+searches. Where there is no room for it, the "Search" pill as before.
 
 The logo is about the height of the old "QiTV" wordmark's capitals ×1.6, vertically centred; the
 tabs start the same gap after it as they did after the wordmark. Its name stays for assistive
@@ -14,6 +19,7 @@ import sys
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QFontMetricsF, QPainter
+from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_, tr, translate
 from ui.brand import BRAND_NAME, logo_aspect, logo_available, logo_pixmap
@@ -29,6 +35,8 @@ TAB_LABELS = {"live": N_("Live TV"), "movies": N_("Movies"), "series": N_("Serie
 ALL_TABS = ["live", "movies", "series"]
 PILL_H_U = 3.2
 MAX_SOURCE_U = 22.0
+SEARCH_MAX_U = 44.0  # 2.9.3: the search field's widest
+SEARCH_GAP_U = 2.0  # between it and the tabs, and the source pill
 BRAND_FONT_U = 1.6  # the old wordmark's size: the logo is sized from its capitals
 LOGO_CAP_FACTOR = 1.6
 LOGO_LEFT_U = 2.0
@@ -66,6 +74,7 @@ class TopNav(TooltipWidget):
         self._focused = False
         self._focus_item = "live"
         self._pressed: str | None = None
+        self._search_field: QWidget | None = None
         if parent is not None:
             parent.installEventFilter(self)
         self._relayout()
@@ -87,13 +96,33 @@ class TopNav(TooltipWidget):
 
     def set_source_name(self, name: str) -> None:
         self._source = name
+        self._place_search()
         self.update()
 
     def set_tabs(self, tabs: list[str]) -> None:
         self._tabs = [t for t in ALL_TABS if t in tabs]
         if self._focus_item in ALL_TABS and self._focus_item not in self._tabs:
             self._focus_item = "search"
+        self._place_search()
         self.update()
+
+    def attach_search(self, field: QWidget) -> None:
+        """The Library's search field: placed on the bar's search, over it while it shows."""
+        field.setParent(self)
+        self._search_field = field
+        self._place_search()
+
+    def search_rect(self) -> QRectF:
+        return self._item_rects()["search"]
+
+    def focus_item(self) -> str:
+        """What the keys' focus is on in the bar (when it has the focus)."""
+        return self._focus_item
+
+    def _place_search(self) -> None:
+        if self._search_field is not None:
+            self._search_field.setGeometry(self.search_rect().toAlignedRect())
+            self._search_field.raise_()
 
     def set_focused(self, focused: bool) -> None:
         self._focused = focused
@@ -170,16 +199,32 @@ class TopNav(TooltipWidget):
         rects["refresh"] = QRectF(x, top, pill_h, pill_h)  # 2.8: ↻, after the source's pill
         x -= 1.0 * u + source_w
         rects["source"] = QRectF(x, top, source_w, pill_h)
-        x -= 1.0 * u + search_w
-        rects["search"] = QRectF(x, top, search_w, pill_h)
         # tabs
         x = self.logo_rect().right() + LOGO_GAP_U * u
+        tabs_end = x
         tab_fm = QFontMetrics(units.font(1.3, QFont.Weight.DemiBold))
         for tab in self._tabs:
             width = tab_fm.horizontalAdvance(translate(TAB_LABELS[tab]))
             rects[tab] = QRectF(x, 0, width, height)
+            tabs_end = x + width
             x += width + 2.6 * u
+        # the search: as wide as fits between them, in the middle of the bar
+        left = tabs_end + SEARCH_GAP_U * u
+        right = rects["source"].left() - SEARCH_GAP_U * u
+        field_w = min(SEARCH_MAX_U * u, right - left)
+        if field_w < search_w * 1.6:  # no room for a field: the pill, before the source's
+            field_w = search_w
+            field_x = rects["source"].left() - 1.0 * u - field_w
+        else:
+            field_x = max(left, min((self.width() - field_w) / 2, right - field_w))
+        rects["search"] = QRectF(field_x, top, field_w, pill_h)
         return rects
+
+    def _search_is_field(self, rect: QRectF) -> bool:
+        fm = QFontMetrics(Units(self._host_width()).font(1.1))
+        return (
+            rect.width() > fm.horizontalAdvance(_search_label()) + _icon_room(fm) + 4 * fm.height()
+        )
 
     def _item_at(self, pos) -> str | None:
         u = Units(self._host_width()).u
@@ -230,11 +275,27 @@ class TopNav(TooltipWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._place_search()
         self.update()
 
     def _relayout(self) -> None:
         self.setFixedHeight(Units(self._host_width()).px(HEIGHT_U))
         self.update()
+
+    def _paint_search_field(self, p: QPainter, units: Units, rect: QRectF) -> None:
+        """The search field's look while the Library browses: a magnifier and what it finds."""
+        field = self._search_field
+        if field is not None and field.isVisible():
+            return  # the Library's field shows over it: the query, its caret
+        p.save()
+        p.setFont(units.font(1.15))
+        tone = qcolor(PALETTE.text, PALETTE.text_muted_alpha)
+        inner = draw_field_icon(p, rect.adjusted(1.4 * units.u, 0, -1.4 * units.u, 0), tone)
+        p.setPen(tone)
+        # i18n: placeholder of the Library's search field
+        text = tr("Search movies, series and channels")
+        p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))
+        p.restore()
 
     def _paint_focus(self, p: QPainter, rect: QRectF, radius: float) -> None:
         fill_round(p, rect, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA), radius)
@@ -297,6 +358,9 @@ class TopNav(TooltipWidget):
             tone = qcolor(PALETTE.accent if active else PALETTE.text, 1.0 if active else 0.85)
             p.setPen(tone)
             inner = rect.adjusted(pad, 0, -pad, 0)
+            if item == "search" and self._search_is_field(rect):
+                self._paint_search_field(p, units, rect)
+                continue
             if item == "search":  # the magnifier, then the word, centred together
                 fm = p.fontMetrics()
                 room = _icon_room(fm)

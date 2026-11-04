@@ -93,7 +93,7 @@ from services.navigation import (
 from services.provider_ids import mixed_group_id, provider_of
 from services.zapping import ZapContext
 from ui.find_session import FindSession
-from ui.keymap import key_hint
+from ui.keymap import Action, key_hint
 from ui.overlays.base import Overlay
 from ui.overlays.channel_rows import (
     ChannelListView,
@@ -104,6 +104,7 @@ from ui.overlays.channel_rows import (
 )
 from ui.overlays.painting import Units, draw_icon, draw_refresh, elided, fill_round
 from ui.pointer import NAV_BUTTONS
+from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
@@ -691,6 +692,8 @@ class Drawer(Overlay):
             "right": _Column("right", self, logos, now_provider),
         }
         self.focus_side = "right"
+        self._find_edit = TextEdit()  # the Find box's caret and selection (2.9.3)
+        self._find_drag = Dragging()
         self.find_text = ""
         self._find_open = False  # the ⌕ Find box was clicked (or typed into): it shows a caret
         self._find_moved = False  # ↑/↓ in the find: its highlight no longer follows the results
@@ -852,20 +855,51 @@ class Drawer(Overlay):
         else:
             self.right()
 
+    @property
+    def find_text(self) -> str:
+        """What is found (the Find box's text)."""
+        return self._find_value
+
+    @find_text.setter
+    def find_text(self, text: str) -> None:
+        self._find_value = text
+        self._find_edit.set_text(text)
+
     def type_text(self, text: str) -> None:
-        """Typing finds genres and channels, whichever column has the focus."""
+        """Typing finds genres and channels, whichever column has the focus (at the caret)."""
         self._find_open = True
-        self._set_find(self.find_text + text)
+        self._find_edit.insert(text)
+        self._set_find(self._find_edit.text)
 
     def backspace(self) -> None:
-        if self.find_text:
-            if len(self.find_text) == 1:
+        if self.find_text and self._find_edit.backspace():
+            if not self._find_edit.text:
                 self._find_open = False  # nothing left to find: the box closes too
-            self._set_find(self.find_text[:-1])
+            self._set_find(self._find_edit.text)
 
-    def start_find(self) -> None:
-        """A click on the ⌕ Find box: it shows a caret; typing finds."""
+    def field_key(self, action: Action, payload: str = "") -> bool:
+        """A key for the Find box's caret or selection (2.9.3: ⌘A, copy, cut, paste; ←/→ once
+        the caret was put in the text): True when it took it."""
+        edit = self._find_edit
+        if action is Action.FORGET:  # Delete: forward in the text the caret was put in
+            action = Action.NAV_DELETE
+        if not (self._find_open or self.find_text) and action is not Action.PASTE:
+            return False
+        changed = edit_key(edit, action, payload)
+        if changed is None:
+            return False
+        if changed:
+            self._find_open = bool(edit.text)  # pasted in: it shows; all cut: it closes
+            self._set_find(edit.text)
+        self.update()
+        return True
+
+    def start_find(self, x: float | None = None, *, shift: bool = False) -> None:
+        """A click on the ⌕ Find box: it shows a caret; typing finds. A click on its text
+        (`x`) puts the caret there; a drag from it selects."""
         self._find_open = True
+        if x is not None and self.find_text:
+            self._find_drag.press(self._find_edit, x, shift=shift)
         self.update()
 
     def clear_find(self) -> None:
@@ -1329,7 +1363,8 @@ class Drawer(Overlay):
             if button in (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION):
                 self.actionRequested.emit(button)
             elif button == FIND_ACTION:
-                self.start_find()
+                shift = bool(event.modifiers() & Qt.ShiftModifier)
+                self.start_find(event.position().x(), shift=shift)
             elif button == FIND_CLEAR:
                 self.clear_find()
             elif button in (BACK_BUTTON, _crumb_key(None)):
@@ -1348,14 +1383,22 @@ class Drawer(Overlay):
             return
         event.accept()  # never the video's fullscreen toggle
         point = event.position()
+        if event.button() == Qt.LeftButton and self._header_button_at(point) == FIND_ACTION:
+            if self.find_text:
+                self._find_drag.double(self._find_edit, point.x())  # a word selected
+                self.update()
+            return
         if event.button() == Qt.LeftButton and self._header_button_at(point) == BACK_BUTTON:
             self.go_up()  # as the guide's ‹ ›: a quick second click goes up again
             self._hover_at(point)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._find_drag.release()
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if event.buttons() & Qt.LeftButton and self._find_drag.move(event.position().x()):
+            self.update()  # a drag in the Find box selects
         self._hover_at(event.position())
         event.ignore()  # the host still hears the pointer move (the transport, the cursor)
 
@@ -1761,12 +1804,18 @@ class Drawer(Overlay):
         inner.setRight(max(inner.left(), right))
         p.setFont(units.font(1.35))
         if active:
-            p.setPen(qcolor(PALETTE.text))
-            text = elided(p, self.find_text + "▏", inner.width())
+            paint_edit(
+                p,
+                inner,
+                self._find_edit,
+                qcolor(PALETTE.text),
+                caret=True,
+                selection=qcolor(PALETTE.accent, SELECTION_ALPHA),
+            )
         else:
             p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             text = elided(p, translate(FIND_PLACEHOLDER), inner.width())
-        p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, text)
+            p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, text)
         if not clear.isEmpty():
             mark = 1.1 * u
             tone = (

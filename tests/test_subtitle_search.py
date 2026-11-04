@@ -202,6 +202,16 @@ class KeyPageTests(Case):
         self.page = SubtitleSearchPage(self.host)
         self.page.show_key_page()
 
+    def test_command_a_then_typing_replaces_the_key(self):
+        # 2.9.3: ⌘A in the field; the key's caret stays at its end (it shows as dots).
+        page_ = self.page
+        for ch in "abcd":
+            page_.handle(Action.NAV_TEXT, ch)
+        page_.handle(Action.NAV_LEFT)  # the page's: the key has no caret to move
+        page_.handle(Action.SELECT_ALL)
+        page_.handle(Action.NAV_TEXT, "z")
+        self.assertEqual(page_.key_text(), "z")
+
     def test_typing_and_pasting_fill_the_key_shown_masked(self):
         page_ = self.page
         self.assertEqual((page_.page(), page_.focus()), (KEY_PAGE, "field"))
@@ -284,6 +294,28 @@ class ResultsPageTests(Case):
         chosen = QSignalSpy(page_.fileChosen)
         page_.handle(Action.NAV_ACTIVATE)
         self.assertEqual(chosen.at(0)[0].file_id, 20)
+
+    def test_a_click_puts_the_caret_in_the_search_and_the_arrows_move_it(self):
+        # 2.9.3, as the channel list's find: typing at the caret, ⌘A then typing replaces.
+        from ui.text_edit import text_rect
+
+        page_ = self.page
+        page_.handle(Action.NAV_TEXT, "!")  # the field takes the focus
+        page_.grab()
+        start = text_rect(page_._query_edit)
+        QTest.mouseClick(
+            page_,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(int(start.left()) + 1, int(start.center().y())),
+        )
+        page_.handle(Action.NAV_RIGHT)  # the caret's now, not the lists'
+        page_.handle(Action.NAV_TEXT, "x")
+        self.assertEqual(page_.query(), "Hxarbour Lights (2019)!")
+        self.assertEqual(page_.focus(), "field")
+        page_.handle(Action.SELECT_ALL)
+        page_.handle(Action.NAV_TEXT, "Tide")
+        self.assertEqual(page_.query(), "Tide")
 
     def test_up_from_the_top_goes_to_the_field_and_typing_searches_again(self):
         page_ = self.page

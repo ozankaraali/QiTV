@@ -86,6 +86,33 @@ class DrawerTests(unittest.TestCase):
         self.drawer.playRequested.connect(lambda *a: self.played.append(a))
         self.drawer.closed.connect(lambda: self.closed.append(True))
 
+    def test_the_find_box_has_a_caret_a_click_puts_and_command_a_selects_all(self):
+        # 2.9.3, the owner: "ctrl a and click to change cursor place do not work".
+        from ui.keymap import Action
+        from ui.text_edit import text_rect
+
+        drawer = self.drawer
+        drawer.open_drawer()
+        drawer.type_text("tw")
+        drawer.grab()  # painted: where its text is
+        self.assertFalse(drawer.field_key(Action.NAV_LEFT))  # ← is the lists' until a click
+        start = text_rect(drawer._find_edit)
+        QTest.mouseClick(
+            drawer,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(int(start.left()) - 2, int(start.center().y())),
+        )
+        self.assertTrue(drawer.field_key(Action.NAV_TEXT, "o"))
+        self.assertEqual(drawer.find_text, "otw")
+        self.assertTrue(drawer.field_key(Action.NAV_RIGHT))  # the caret's, once put there
+        self.assertTrue(drawer.field_key(Action.NAV_TEXT, "-"))
+        self.assertEqual(drawer.find_text, "ot-w")
+        self.assertTrue(drawer.field_key(Action.SELECT_ALL))
+        self.assertTrue(drawer.field_key(Action.NAV_TEXT, "o"))
+        self.assertEqual(drawer.find_text, "o")
+        self.assertFalse(drawer.field_key(Action.NAV_DOWN))  # on to the rows: the lists'
+
     def test_the_mixed_lists_tag_their_rows_with_the_provider_and_a_provider_group_does_not(self):
         for channel in self.catalog.live["10"]:
             channel["_provider"] = "Home"

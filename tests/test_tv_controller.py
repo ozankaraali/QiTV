@@ -482,6 +482,9 @@ class FakeDrawer(FakeOverlay):
     def highlighted(self):
         return self.highlight
 
+    def field_key(self, action, payload=""):
+        return False  # no Find box caret here (2.9.3: the real one's in test_drawer)
+
     def finding(self):
         return self.found
 

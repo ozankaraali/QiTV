@@ -695,6 +695,38 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(len(self.jobs.workers), 2)
         self.assertEqual(self.pm.loads, 1)  # the second search reused the caches and index
 
+    def test_the_search_is_a_wide_field_in_the_top_bar_and_a_click_searches(self):
+        # 2.9.3, the owner: "i kinda default to genre search instead of library search".
+        ctl = self.open_movies()
+        nav = self.screen.nav
+        rect = nav.search_rect()
+        self.assertGreater(rect.width(), self.screen.genres.width())  # wider than the filter
+        QTest.mouseClick(nav, Qt.MouseButton.LeftButton, pos=rect.center().toPoint())
+        self.assertEqual(ctl.mode, "search")
+        self.assertTrue(self.screen.search_field.isVisible())
+        self.assertEqual(self.screen.search_field.geometry(), rect.toAlignedRect())
+
+    def test_typing_while_the_top_bar_has_the_keys_searches(self):
+        ctl = self.open_movies()
+        ctl.handle(Action.NAV_UP)  # from the grid's first row to the top bar
+        self.type_text("sa")
+        self.assertEqual((ctl.mode, ctl.query), ("search", "sa"))
+
+    def test_the_search_has_a_caret_and_its_header_says_what_was_found(self):
+        ctl = self.build()
+        ctl.open_search()
+        self.type_text("slt")
+        ctl.handle(Action.NAV_LEFT)  # the search's arrows are its caret's
+        ctl.handle(Action.NAV_LEFT)
+        self.type_text("a")
+        self.assertEqual((ctl.query, self.screen.search_field.query), ("salt", "salt"))
+        ctl.handle(Action.SELECT_ALL)
+        self.type_text("sal")
+        self.assertEqual(ctl.query, "sal")
+        elapse(WAIT_MS)
+        self.assertEqual(self.screen.grid._title, "“sal”")
+        self.assertEqual(self.screen.grid._count_text, "3 results")
+
     def test_words_from_the_channel_lists_find_are_searched_at_once(self):
         ctl = self.build()
         ctl.open_search("sal")  # its films-and-series row
@@ -735,7 +767,7 @@ class LibraryControllerTests(unittest.TestCase):
         elapse(WAIT_MS)
         self.assertEqual(self.jobs.workers, [])
         self.assertEqual(self.screen.grid._message, SEARCH_PROMPT)
-        self.assertEqual(self.screen.search_field.count_text, "")
+        self.assertEqual(self.screen.grid._count_text, "")  # 2.9.3: the header's, not the field's
 
     def test_provider_ready_searches_the_visible_query_again(self):
         ctl = self.build()

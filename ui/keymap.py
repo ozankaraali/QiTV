@@ -55,7 +55,12 @@ class Action(str, Enum):
     SOUND_LATER = "sound_later"  # K: 50 ms later (VLC's keys)
     SUBTITLES_EARLIER = "subtitles_earlier"  # Shift+J: the subtitles 50 ms earlier
     SUBTITLES_LATER = "subtitles_later"  # Shift+K (VLC's G and H: G is the guide here)
-    PASTE = "paste"  # Ctrl/⌘+V: the clipboard into the subtitles search's field
+    PASTE = "paste"  # Ctrl/⌘+V: the clipboard into the field (the find, a search, a key)
+    # 2.9.3: a field's own keys (ui.text_edit): ⌘A/Ctrl+A, ⌘C, ⌘X and the Delete key forward.
+    SELECT_ALL = "select_all"
+    COPY = "copy"
+    CUT = "cut"
+    NAV_DELETE = "nav_delete"
     RECORD = "record"  # R: record the channel being watched, or stop (2.2)
     FORGET = "forget"  # Delete in the channel list: the highlighted channel leaves ⟲ Recent
     PICTURE = "picture"  # A: the Picture panel; again while it shows, the next aspect (2.3)
@@ -178,6 +183,15 @@ _LIBRARY_KEYS = {
     _K.Key_End.value: Action.NAV_END,
 }
 _DIGITS = "0123456789"
+# A field's keys, where text is typed (2.9.3, ui.text_edit): with Ctrl (⌘ on macOS).
+_EDIT_KEYS = {
+    _K.Key_A.value: Action.SELECT_ALL,
+    _K.Key_C.value: Action.COPY,
+    _K.Key_X.value: Action.CUT,
+    _K.Key_V.value: Action.PASTE,
+}
+_TYPING = ("drawer", "library", "subtitles")
+_CARET_KEYS = (_K.Key_Left.value, _K.Key_Right.value, _K.Key_Home.value, _K.Key_End.value)
 
 
 def as_int(value: Any) -> int:
@@ -217,6 +231,14 @@ def resolve(
     if held == _CTRL and key == _K.Key_P.value and context in ("player", "drawer"):
         # The drawer types P into its find: Ctrl/⌘+P opens the highlighted channel small.
         return Action.PIP, ""
+    if context in _TYPING:
+        if held == _CTRL and key in _EDIT_KEYS:
+            return _EDIT_KEYS[key], ""
+        if key in _CARET_KEYS and (context == "library" or key in _DRAWER_KEYS or not held):
+            action = _LIBRARY_KEYS[key]
+            return action, _caret_mods(key, mods, platform)
+        if key == _K.Key_Delete.value and not held and context != "drawer":
+            return Action.NAV_DELETE, ""
     if context == "library":
         if key in _LIBRARY_KEYS:
             return _LIBRARY_KEYS[key], ""
@@ -232,8 +254,6 @@ def resolve(
     if context == "subtitles":
         if key in _DRAWER_KEYS:
             return _DRAWER_KEYS[key], ""
-        if held == _CTRL and key == _K.Key_V.value:
-            return Action.PASTE, ""
         return _text(text, mods, windows=platform.startswith("win"))
     keys, chars = (
         (_GUIDE_KEYS, _GUIDE_CHARS) if context == "guide" else (_PLAYER_KEYS, _PLAYER_CHARS)
@@ -253,6 +273,21 @@ def resolve(
     if key in chars:
         return chars[key], ""
     return None
+
+
+def _caret_mods(key: int, mods: int, platform: str) -> str:
+    """How an arrow or Home/End moves a field's caret, as words: "select" (Shift), "word"
+    (⌥ on macOS, Ctrl elsewhere), "line" (⌘ on macOS: to an end); "" for a plain move."""
+    words = []
+    if mods & _SHIFT:
+        words.append("select")
+    if key in (_K.Key_Left.value, _K.Key_Right.value):
+        mac = platform == "darwin"
+        if mods & (_ALT if mac else _CTRL):
+            words.append("word")
+        elif mac and mods & _CTRL:
+            words.append("line")
+    return " ".join(words)
 
 
 def _text(text: str, mods: int, *, windows: bool) -> tuple[Action, str] | None:

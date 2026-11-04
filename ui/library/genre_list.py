@@ -19,6 +19,7 @@ from services.i18n import tr
 from services.library import CONTINUE, MY_LIST, NEW, RECORDINGS, Genre
 from ui.overlays.channel_rows import ChannelListView
 from ui.overlays.painting import Units, draw_field_icon, draw_icon, elided, fill_round
+from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 WIDTH_U = 18.0
@@ -170,12 +171,14 @@ class GenreList(QWidget):
     genreActivated = Signal(str)  # Enter / → / click: move focus to the grid
     filterChanged = Signal(str)
     genreMenuRequested = Signal(str, QPoint)  # 2.8: a right-click on a genre (global point)
+    fieldClicked = Signal()  # 2.9.3: a click on the filter: the keys type there
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)
         self.setAccessibleName(tr("Genres"))  # what a screen reader calls it
-        self.filter_text = ""
+        self.edit = TextEdit()  # the filter's text, caret and selection (2.9.3)
+        self._drag = Dragging()
         self._focused = False
         self._current: str | None = None
         self._ids: list[str] = []
@@ -266,22 +269,70 @@ class GenreList(QWidget):
             self._emit_preview()
         self.genreActivated.emit(self._current)
 
+    @property
+    def filter_text(self) -> str:
+        return self.edit.text
+
     def type_text(self, text: str) -> None:
-        if text:
-            self.filter_text += text
+        if text and self.edit.insert(text):
             self._filter_changed()
 
     def backspace(self) -> None:
-        if self.filter_text:
-            self.filter_text = self.filter_text[:-1]
+        if self.edit.backspace():
             self._filter_changed()
 
     def escape(self) -> bool:
         if not self.filter_text:
             return False
-        self.filter_text = ""
+        self.edit.set_text("")
         self._filter_changed()
         return True
+
+    def field_key(self, action, payload: str = "") -> bool:
+        """A key for the filter (2.9.3: typing at its caret, ⌘A, copy, cut, paste; ←/→ once
+        the caret was put in it): True when it took it."""
+        changed = edit_key(self.edit, action, payload)
+        if changed is None:
+            return False
+        if changed:
+            self._filter_changed()
+        else:
+            self.update()
+        return True
+
+    def field_rect(self) -> QRectF:
+        """The filter's box (this widget's coordinates)."""
+        u = Units(self._host_width()).u
+        margin = FIELD_MARGIN_U * u
+        return QRectF(margin, margin, self.width() - 1 - 2 * margin, FIELD_H_U * u)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self.field_rect().contains(event.position()):
+            self.fieldClicked.emit()
+            if self.filter_text:
+                shift = bool(event.modifiers() & Qt.ShiftModifier)
+                self._drag.press(self.edit, event.position().x(), shift=shift)
+            self.update()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if event.buttons() & Qt.LeftButton and self._drag.move(event.position().x()):
+            self.update()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag.release()
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        inside = self.field_rect().contains(event.position())
+        if event.button() == Qt.LeftButton and inside and self.filter_text:
+            self._drag.double(self.edit, event.position().x())
+            self.update()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def set_focused(self, focused: bool) -> None:
         self._focused = focused
@@ -352,8 +403,7 @@ class GenreList(QWidget):
         p = QPainter(self)
         p.fillRect(self.rect(), qcolor(PALETTE.panel_raised))
         p.fillRect(self.width() - 1, 0, 1, self.height(), qcolor(PALETTE.text, 0.06))
-        margin = FIELD_MARGIN_U * u
-        box = QRectF(margin, margin, self.width() - 1 - 2 * margin, FIELD_H_U * u)
+        box = self.field_rect()
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setPen(qcolor(PALETTE.text, 0.12))
         p.setBrush(Qt.NoBrush)
@@ -364,11 +414,19 @@ class GenreList(QWidget):
         inner = box.adjusted(1.0 * u, 0, -1.0 * u, 0)
         if self.filter_text:
             tone = qcolor(PALETTE.text)
-            text = self.filter_text + "▏"
+            inner = draw_field_icon(p, inner, tone)  # the magnifier the other finds draw
+            paint_edit(
+                p,
+                inner,
+                self.edit,
+                tone,
+                caret=self._focused,
+                selection=qcolor(PALETTE.accent, SELECTION_ALPHA),
+            )
         else:
             tone = qcolor(PALETTE.text, PALETTE.text_muted_alpha)
             text = tr("Find a genre…")  # i18n: placeholder of the Library's genre filter
-        inner = draw_field_icon(p, inner, tone)  # the magnifier the other finds draw
-        p.setPen(tone)
-        p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))
+            inner = draw_field_icon(p, inner, tone)
+            p.setPen(tone)
+            p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))
         p.end()

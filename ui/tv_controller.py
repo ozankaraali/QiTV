@@ -1103,6 +1103,8 @@ class TVController(QObject):
         if self._guide.is_open() and self._guide.handle(action, payload):
             return
         drawer = self.overlays.drawer
+        if drawer.isVisible() and drawer.field_key(action, payload):
+            return  # 2.9.3: the Find box's caret, selection and clipboard
         if not drawer.isVisible() and self._tracks.handle(action, key):
             return  # a Sound or Subtitles panel shows: the arrows, Enter and Esc are its own
         if not drawer.isVisible() and self._picture.handle(action, key):
