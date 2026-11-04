@@ -3,6 +3,16 @@
 Everything is painted: only the visible rows are drawn. Once the view has settled, only they
 (plus one row ahead) ask the poster cache for images. 1 u = 1% of the parent (Library screen)
 width.
+
+2.9.3: the sort chips are drawn as a segmented control (the one under the pointer tinted), a thin
+scrollbar shows over the right edge while the grid scrolls or the pointer is over it (left of
+the A–Z rail when it shows), and hovering a poster whose title is cut short (or covered by its
+picture) names it; the strip's ★ names what it does.
+
+One click and two (the rule, 2.9.3): a click on a poster makes it current and shows its strip,
+whose Play plays it (as Enter); a click on the current poster, or a double-click, plays it. A
+list of channels plays on one click (the channel list, the guide's channel column): a channel
+has nothing to read first, a title has its strip.
 """
 
 from bisect import bisect_right
@@ -24,12 +34,22 @@ from PySide6.QtGui import (
     QPixmap,
     QTransform,
 )
-from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QFrame, QPushButton, QWidget
+from PySide6.QtWidgets import (
+    QAbstractScrollArea,
+    QApplication,
+    QFrame,
+    QPushButton,
+    QToolTip,
+    QWidget,
+)
 
 from services.i18n import tr
 from services.library import Details, letter_of, title_of
 from services.text_fold import fold
+from ui.keymap import key_hint
+from ui.overlays.base import plain_tooltip
 from ui.overlays.painting import Units, draw_icon, draw_progress, elided, fill_round, fmt_duration
+from ui.overlays.scroll_indicator import for_scroll_area
 from ui.theme import PALETTE, RADIUS_CARD, accent_button_style, qcolor
 
 logger = logging.getLogger(__name__)
@@ -39,7 +59,12 @@ HEADER_H_U = 5.0
 HEADER_TITLE_U = 1.7
 HEADER_COUNT_U = 1.0
 CHIP_FONT_U = 1.0
-SEPARATOR = " · "  # between sort chips and between meta parts
+CHIP_PAD_U = 0.9  # 2.9.3: a sort chip's side padding (the chips are a segmented control)
+CHIP_H_U = 2.4
+CHIP_ALPHA = 0.06  # the control's ground; the active chip's and one under the pointer:
+CHIP_ACTIVE_ALPHA = 0.16
+CHIP_HOVER_ALPHA = 0.1
+SEPARATOR = " · "  # between meta parts
 PAD_U = 2.2  # side margin of the grid content; the rail sits in the right one
 TOP_PAD_U = 0.6  # room above the first row for the focus lift
 BOTTOM_PAD_U = 1.2
@@ -201,6 +226,8 @@ class _Header(QWidget):
         super().__init__(grid)
         self._grid = grid
         self.setFocusPolicy(Qt.NoFocus)
+        self.setMouseTracking(True)  # the chip under the pointer is tinted (2.9.3)
+        self.hovered: str | None = None
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)
@@ -212,6 +239,19 @@ class _Header(QWidget):
         value = self._grid._chip_at(event.position())
         if value is not None:
             self._grid.sortRequested.emit(value)
+
+    def mouseMoveEvent(self, event) -> None:
+        self._hover(self._grid._chip_at(event.position()))
+
+    def leaveEvent(self, event) -> None:
+        self._hover(None)
+        super().leaveEvent(event)
+
+    def _hover(self, value: str | None) -> None:
+        if value != self.hovered:
+            self.hovered = value
+            self.setCursor(Qt.PointingHandCursor if value is not None else Qt.ArrowCursor)
+            self.update()
 
 
 class PosterGrid(QAbstractScrollArea):
@@ -295,6 +335,7 @@ class PosterGrid(QAbstractScrollArea):
         self._press_activated = False
         # The last mouse activation: (target, time.monotonic()), target ("poster", i) or a button.
         self._last_activation: tuple[object, float] = (None, float("-inf"))
+        self._indicator = for_scroll_area(self, self._indicator_area)  # 2.9.3
         if posters is not None:
             posters.logoReady.connect(self._on_poster_ready)
         if parent is not None:
@@ -355,6 +396,7 @@ class PosterGrid(QAbstractScrollArea):
         if keep_current and pressed is not None:
             self._pressed = self._find(items, pressed, pressed_index)
         self._layout_rows()
+        self._indicator.refit()
         bar = self.verticalScrollBar()
         if not (keep_current and same):
             bar.setValue(0)
@@ -427,6 +469,7 @@ class PosterGrid(QAbstractScrollArea):
     def set_letter_index(self, index: dict[str, int] | None) -> None:
         """Letter ('#', 'a'…'z') -> first flat index; None or {} hides the A–Z rail."""
         self._letters = dict(index) if index else {}
+        self._indicator.refit()  # left of the rail while it shows
         self.viewport().update()
 
     def set_message(self, text: str | None, action: str | None = None) -> None:
@@ -630,6 +673,7 @@ class PosterGrid(QAbstractScrollArea):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._relayout()
+        self._indicator.refit()
         if self._message_button.isVisible():
             self._place_message_button()
 
@@ -760,6 +804,14 @@ class PosterGrid(QAbstractScrollArea):
             value = bottom - view_h
         bar.setValue(round(value))
 
+    def _indicator_area(self) -> QRect:
+        """Where the scroll indicator runs (2.9.3): the viewport's right edge, left of the
+        A–Z rail while it shows (this widget's coordinates)."""
+        view = self.viewport().geometry()
+        if self._rail_visible():
+            view.setRight(view.right() - round(self._rail_rect().width()))
+        return view
+
     def _rail_visible(self) -> bool:
         return bool(self._letters) and len(self._items) >= RAIL_MIN_ITEMS
 
@@ -857,9 +909,41 @@ class PosterGrid(QAbstractScrollArea):
         self._hover = -1
 
     def viewportEvent(self, event) -> bool:
-        if event.type() == QEvent.Leave:
+        kind = event.type()
+        if kind == QEvent.Leave:
             self._cancel_hover()
+            self._indicator.pointer_over(False)
+        elif kind == QEvent.Enter:
+            self._indicator.pointer_over(True)
+        elif kind == QEvent.ToolTip:
+            text = self.tooltip_at(event.pos())
+            if text:
+                QToolTip.showText(event.globalPos(), plain_tooltip(text), self.viewport())
+            else:
+                QToolTip.hideText()
+            return True
         return super().viewportEvent(event)
+
+    def tooltip_at(self, pos: QPoint) -> str:
+        """2.9.3: what hovering `pos` (the viewport's) says: the strip's ★ what it does, a
+        poster its whole title when its card cuts it short or its picture covers it."""
+        if self._message is not None or self._rail_letter_at(pos) is not None:
+            return ""
+        if self.button_at(pos) == FAVORITE:
+            return key_hint(tr("Add to or remove from My list"), "Ctrl+D")
+        i = self.index_at(pos)
+        if i < 0:
+            return ""
+        item = self._items[i]
+        title = title_of(item)
+        url = self._poster_url(item)
+        pixmap = self._posters.pixmap(url) if url and self._posters is not None else None
+        if pixmap is not None and not pixmap.isNull():
+            return title  # the picture shows no title
+        font = self._units.font(CARD_TITLE_U, QFont.Weight.Bold)
+        width = self._pw - 2 * CARD_MARGIN_U * self._units.u
+        lines = self._card_lines(QFontMetricsF(font), font, title, width)
+        return title if " ".join(lines) != " ".join(title.split()) else ""
 
     def mouseMoveEvent(self, event) -> None:
         i = self.index_at(event.position().toPoint())
@@ -946,25 +1030,28 @@ class PosterGrid(QAbstractScrollArea):
     # ---- painting ---------------------------------------------------------------------------
 
     def _chip_rects(self) -> list[tuple[str, str, QRectF]]:
-        """Right-aligned sort chips; only the active one when the row does not fit."""
+        """Right-aligned sort chips, side by side as a segmented control (2.9.3: plain words
+        with dots between did not look like buttons); only the active one when the row does
+        not fit."""
+        u = self._units.u
         fm = QFontMetricsF(self._units.font(CHIP_FONT_U))
-        height = self._units.px(HEADER_H_U)
-        sep_w = fm.horizontalAdvance(SEPARATOR)
+        height = CHIP_H_U * u
+        top = (self._units.px(HEADER_H_U) - height) / 2
+        pad = CHIP_PAD_U * u
         available = self.width() - 2 * self._pad
 
         def total(sorts: list[tuple[str, str]]) -> float:
-            widths = sum(fm.horizontalAdvance(label) for _value, label in sorts)
-            return widths + sep_w * max(0, len(sorts) - 1)
+            return sum(fm.horizontalAdvance(label) + 2 * pad for _value, label in sorts)
 
         sorts = self._sorts
         if total(sorts) > available:
             sorts = [(value, label) for value, label in sorts if value == self._active_sort]
-        widths = [fm.horizontalAdvance(label) for _value, label in sorts]
         x = max(self._pad, self.width() - self._pad - total(sorts))
         out = []
-        for (value, label), width in zip(sorts, widths):
-            out.append((value, label, QRectF(x, 0, width, height)))
-            x += width + sep_w
+        for value, label in sorts:
+            width = fm.horizontalAdvance(label) + 2 * pad
+            out.append((value, label, QRectF(x, top, width, height)))
+            x += width
         return out
 
     def _chip_at(self, pos: QPointF) -> str | None:
@@ -994,17 +1081,20 @@ class PosterGrid(QAbstractScrollArea):
             p.drawText(QPointF(x, baseline), elided(p, self._count_text, right - x))
         if not chips:
             return
+        p.setRenderHint(QPainter.Antialiasing, True)
+        whole = chips[0][2].united(chips[-1][2])
+        radius = whole.height() / 2
+        fill_round(p, whole, qcolor(PALETTE.text, CHIP_ALPHA), radius)
         p.setFont(units.font(CHIP_FONT_U))
-        muted = qcolor(PALETTE.text, 0.5)
-        for k, (value, label, chip) in enumerate(chips):
-            if k:
-                p.setPen(muted)
-                p.drawText(
-                    QPointF(chip.left() - p.fontMetrics().horizontalAdvance(SEPARATOR), baseline),
-                    SEPARATOR,
-                )
-            p.setPen(qcolor(PALETTE.text) if value == self._active_sort else muted)
-            p.drawText(QPointF(chip.left(), baseline), label)
+        muted = qcolor(PALETTE.text, 0.6)
+        hovered = self._header.hovered
+        for value, label, chip in chips:
+            active = value == self._active_sort
+            if active or value == hovered:
+                alpha = CHIP_ACTIVE_ALPHA if active else CHIP_HOVER_ALPHA
+                fill_round(p, chip, qcolor(PALETTE.text, alpha), radius)
+            p.setPen(qcolor(PALETTE.text) if active or value == hovered else muted)
+            p.drawText(chip, Qt.AlignCenter, label)
 
     def paintEvent(self, event) -> None:
         p = QPainter(self.viewport())

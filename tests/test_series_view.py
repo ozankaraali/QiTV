@@ -11,6 +11,7 @@ from timer_fixtures import elapse
 
 from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE
 from services.library import Details
+from ui.keymap import key_hint
 from ui.library.series_view import SEASON_DEBOUNCE_MS, SeriesView, episode_duration
 
 app = QApplication.instance() or QApplication([])
@@ -297,6 +298,56 @@ class SeriesViewTests(unittest.TestCase):
         view.move_by(-1, 0)
         view.activate()
         self.assertEqual(got_play[-1], (ss[0], eps[1]))
+
+    # 2.9.3: the mouse: the chips, the Start over pill and ‹ ---------------------------------
+    def test_a_click_on_a_season_chip_shows_that_season_at_once(self):
+        view = self.make()
+        view.show()
+        got = []
+        view.seasonSelected.connect(got.append)
+        ss = seasons()
+        view.set_seasons(ss)
+        view.set_episodes(ss[0], episodes())
+        chips = view.chip_rects()
+        self.assertEqual(len(chips), 3)
+        QTest.mouseClick(view, Qt.LeftButton, Qt.NoModifier, chips[2].center().toPoint())
+        self.assertEqual(got, [ss[2]])  # no wait: the keys' debounce is for stepping
+        self.assertIs(view.current_season(), ss[2])
+        self.assertEqual(view.focus_zone, "seasons")
+        QTest.mouseClick(view, Qt.LeftButton, Qt.NoModifier, chips[2].center().toPoint())
+        self.assertEqual(got, [ss[2], ss[2]])  # its episodes not here yet: asked again
+
+    def test_a_click_on_start_over_starts_over_and_elsewhere_resumes(self):
+        view = self.make()
+        view.show()
+        starts, plays = [], []
+        view.startOverRequested.connect(lambda s, e: starts.append(e))
+        view.episodeActivated.connect(lambda s, e: plays.append(e))
+        ss, eps = seasons(), episodes(3)
+        view.set_seasons(ss)
+        view.set_progress_provider(lambda ep: {2: 0.4}.get(ep["series"]))
+        view.set_episodes(ss[0], eps)
+        rows = view._view
+        self.assertTrue(rows.start_over_rect(0).isEmpty())  # not begun: no pill
+        pill = rows.start_over_rect(1)
+        self.assertFalse(pill.isEmpty())
+        QTest.mouseClick(rows.viewport(), Qt.LeftButton, Qt.NoModifier, pill.center().toPoint())
+        self.assertEqual((starts, plays), ([eps[1]], []))
+        row = rows.visualRect(rows.model().index(1, 0))
+        title = QPoint(row.left() + 120, row.center().y())
+        QTest.mouseClick(rows.viewport(), Qt.LeftButton, Qt.NoModifier, title)
+        self.assertEqual((starts, plays), ([eps[1]], [eps[1]]))  # resumes, as before
+
+    def test_back_goes_back_and_names_its_key(self):
+        view = self.make()
+        view.show()
+        backs = []
+        view.backRequested.connect(lambda: backs.append(True))
+        back = view.back_rect()
+        self.assertFalse(back.isEmpty())
+        self.assertEqual(view.tooltip_at(back.center()), key_hint("Back", "Esc"))
+        QTest.mouseClick(view, Qt.LeftButton, Qt.NoModifier, back.center().toPoint())
+        self.assertEqual(backs, [True])
 
     def test_duration_shapes(self):
         self.assertEqual(episode_duration({"duration": "45"}), "45 min")

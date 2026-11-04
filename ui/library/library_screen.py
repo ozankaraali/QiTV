@@ -6,16 +6,18 @@ paints the search field; the LibraryController decides what they show and routes
 
 import logging
 
-from PySide6.QtCore import QObject, QRectF, Qt, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from services.i18n import tr
+from ui.keymap import key_hint
 from ui.library.genre_list import GenreList
 from ui.library.poster_grid import PosterGrid
 from ui.library.series_view import SeriesView
 from ui.library.top_nav import TopNav
-from ui.overlays.painting import Units, draw_field_icon, elided, fill_round
+from ui.overlays.base import TooltipWidget
+from ui.overlays.painting import Units, draw_field_icon, draw_icon, elided, fill_round
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, paint_edit
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -81,7 +83,7 @@ class GridPosters(QObject):
         self.logoReady.emit(LIVE_TILE + url)
 
 
-class SearchField(QWidget):
+class SearchField(TooltipWidget):
     """The Library's search field, in the top bar (2.9.3: it was a "Search" pill there and a
     field over the grid, so the genre filter looked like the place to type; the owner: "i kinda
     default to genre search instead of library search"). The top bar paints its look while the
@@ -89,16 +91,19 @@ class SearchField(QWidget):
     selection (ui.text_edit). A click on it, or typing, searches."""
 
     clicked = Signal()
+    clearRequested = Signal()  # 2.9.3: its ✕: what was typed goes (nothing typed: Esc's)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)
         self.setAccessibleName(tr("Search movies, series and channels"))  # as its placeholder
         self.setCursor(Qt.IBeamCursor)
+        self.setMouseTracking(True)  # the ✕ under the pointer
         self.edit = TextEdit()
         self._drag = Dragging()
         self._focused = False
         self._caret = False
+        self._over_clear = False
 
     @property
     def query(self) -> str:
@@ -124,7 +129,22 @@ class SearchField(QWidget):
     def field_rect(self) -> QRectF:
         return QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
 
+    def clear_rect(self) -> QRectF:
+        """2.9.3: the ✕ at the field's right end (the field shows while the Library searches):
+        it clears what was typed, or with nothing typed closes the search, as Esc."""
+        box = self.field_rect()
+        size = box.height()
+        return QRectF(box.right() - size, box.top(), size, size)
+
+    def tooltip_at(self, pos: QPointF) -> str | None:
+        if self.clear_rect().contains(pos):
+            return key_hint(tr("Clear"), "Esc")  # i18n: a tooltip: empties the field (verb)
+        return None
+
     def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self.clear_rect().contains(event.position()):
+            self.clearRequested.emit()
+            return
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
             if self.edit.text:
@@ -133,8 +153,19 @@ class SearchField(QWidget):
             self.update()
 
     def mouseMoveEvent(self, event) -> None:
+        over = self.clear_rect().contains(event.position())
+        if over != self._over_clear:
+            self._over_clear = over
+            self.setCursor(Qt.PointingHandCursor if over else Qt.IBeamCursor)
+            self.update()
         if event.buttons() & Qt.LeftButton and self._drag.move(event.position().x()):
             self.update()
+
+    def leaveEvent(self, event) -> None:
+        if self._over_clear:
+            self._over_clear = False
+            self.update()
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         self._drag.release()
@@ -160,7 +191,17 @@ class SearchField(QWidget):
         p.setBrush(Qt.NoBrush)
         half = FOCUS_RING_PX / 2
         p.drawRoundedRect(box.adjusted(half, half, -half, -half), radius, radius)
+        clear = self.clear_rect()
+        mark = clear.height() * 0.36
+        tone = qcolor(PALETTE.accent) if self._over_clear else qcolor(PALETTE.text, 0.6)
+        draw_icon(
+            p,
+            "close",
+            QRectF(clear.center().x() - mark / 2, clear.center().y() - mark / 2, mark, mark),
+            tone,
+        )
         inner = box.adjusted(1.4 * u, 0, -1.4 * u, 0)
+        inner.setRight(min(inner.right(), clear.left()))
         p.setFont(units.font(FIELD_FONT_U))
         if self.edit.text or self._caret:
             tone = qcolor(PALETTE.text)

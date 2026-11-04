@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, timeline
 
 from services.library import Details
+from ui.keymap import key_hint
 from ui.library.poster_grid import (
     CANCEL,
     FAVORITE,
@@ -131,6 +132,53 @@ class PosterGridTests(unittest.TestCase):
 
     def named(self, name):
         return [v for n, v in self.events if n == name]
+
+    # 2.9.3 -------------------------------------------------------------------------------
+    def test_a_title_cut_short_or_under_its_picture_reads_whole(self):
+        long = "A fictional film whose title runs on far past what a poster card can hold " * 2
+        self.grid.set_sections([("", [{"name": "Dune"}, {"name": long.strip()}])])
+        self.grid.set_details_provider(lambda item: details())
+        short = self.grid.item_rect(0).center()
+        cut = self.grid.item_rect(1).center()
+        self.assertEqual(self.grid.tooltip_at(short), "")  # its card shows it whole
+        self.assertEqual(self.grid.tooltip_at(cut), long.strip())
+        buttons = self.grid._strip_buttons(QRectF(self.grid.strip_rect()))
+        star = next(r for n, _l, _s, r in buttons if n == FAVORITE)
+        self.assertEqual(
+            self.grid.tooltip_at(star.center().toPoint()),
+            key_hint("Add to or remove from My list", "Ctrl+D"),
+        )
+
+    def test_the_sort_chips_are_a_segmented_control_lit_under_the_pointer(self):
+        sorts = [("az", "A–Z"), ("year", "Year"), ("rating", "Rating")]
+        self.grid.set_header("Documentary", "3 titles", sorts, "az")
+        rects = [self.grid.chip_rect(value) for value, _label in sorts]
+        for left, right in zip(rects, rects[1:]):
+            self.assertLessEqual(abs(right.left() - left.right()), 2)  # side by side
+        header = self.grid._header
+        before = header.grab().toImage()
+        point = QPointF(header.mapFrom(self.grid, rects[1].center()))
+        move = QMouseEvent(
+            QEvent.Type.MouseMove,
+            point,
+            QPointF(header.mapToGlobal(point.toPoint())),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(header, move)
+        self.assertEqual(header.hovered, "year")
+        self.assertNotEqual(header.grab().toImage(), before)
+
+    def test_the_scrollbar_runs_left_of_the_a_to_z_rail(self):
+        self.grid.set_sections([("", titles(200))])
+        self.grid.set_letter_index({"t": 0})
+        self.assertTrue(self.grid._rail_visible())
+        area = self.grid._indicator.geometry()
+        rail = self.grid._rail_rect().translated(self.grid.viewport().pos())
+        self.assertLessEqual(area.right(), rail.left())
+        self.grid.verticalScrollBar().setValue(200)
+        self.assertTrue(self.grid._indicator.isVisible())
 
     def test_card_titles_are_wrapped_once_per_title_and_width(self):
         from ui.library import poster_grid

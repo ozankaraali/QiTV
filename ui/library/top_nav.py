@@ -43,6 +43,7 @@ LOGO_LEFT_U = 2.0
 LOGO_GAP_U = 3.0  # between the logo and the first tab
 FULLSCREEN_KEYS = "Ctrl+Meta+F" if sys.platform == "darwin" else "F11"  # macOS keeps F11
 REFRESH_KEYS = "Ctrl+Shift+R"  # 2.8: the films and series shown load again
+HOVER_ALPHA = 0.08  # 2.9.3: a pill or button under the pointer
 # i18n: tooltip of the Library's ↻ (before its key), and its entry in the source menu
 REFRESH_TEXT = N_("Refresh films and series")
 
@@ -74,6 +75,8 @@ class TopNav(TooltipWidget):
         self._focused = False
         self._focus_item = "live"
         self._pressed: str | None = None
+        self._hover: str | None = None  # 2.9.3: the item under the pointer is lit
+        self.setMouseTracking(True)
         self._search_field: QWidget | None = None
         if parent is not None:
             parent.installEventFilter(self)
@@ -246,6 +249,20 @@ class TopNav(TooltipWidget):
             return
         super().mouseDoubleClickEvent(event)  # one more press
 
+    def mouseMoveEvent(self, event) -> None:
+        item = self._item_at(event.position())
+        if item != self._hover:
+            self._hover = item
+            self.setCursor(Qt.PointingHandCursor if item is not None else Qt.ArrowCursor)
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self._hover is not None:
+            self._hover = None
+            self.update()
+        super().leaveEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:
         item, self._pressed = self._pressed, None
         if item is None or self._item_at(event.position()) != item:
@@ -336,7 +353,8 @@ class TopNav(TooltipWidget):
                     1.0 * u,
                 )
             p.setFont(units.font(1.3, QFont.Weight.DemiBold))
-            p.setPen(qcolor(PALETTE.text, 1.0 if active else PALETTE.text_muted_alpha))
+            lit = active or self._hover == tab  # 2.9.3: under the pointer, as the one shown
+            p.setPen(qcolor(PALETTE.text, 1.0 if lit else PALETTE.text_muted_alpha))
             p.drawText(rect, Qt.AlignCenter, translate(TAB_LABELS[tab]))
             if active:
                 p.fillRect(
@@ -351,6 +369,8 @@ class TopNav(TooltipWidget):
             if self._focused and self._focus_item == item:
                 self._paint_focus(p, rect, radius)
             else:
+                if self._hover == item:  # 2.9.3: a faint ground under the pointer
+                    fill_round(p, rect, qcolor(PALETTE.text, HOVER_ALPHA), radius)
                 p.setPen(qcolor(PALETTE.text, 0.15))
                 p.setBrush(Qt.NoBrush)
                 p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
@@ -373,6 +393,8 @@ class TopNav(TooltipWidget):
             p.drawText(inner, Qt.AlignCenter, elided(p, text, inner.width()))
         for name in ("refresh", "fullscreen"):
             rect = rects[name]
+            if self._hover == name:
+                fill_round(p, rect, qcolor(PALETTE.text, HOVER_ALPHA), 1.6 * u)
             p.setPen(qcolor(PALETTE.text, 0.15))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 1.6 * u, 1.6 * u)
