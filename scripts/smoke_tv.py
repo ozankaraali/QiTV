@@ -42,8 +42,9 @@ hang has its live helper killed too.
 `--pip` adds picture in picture and swap (spec §7) after that, on the same two sources (it
 serves them without --pipeline too): Channel 3 (A), then Down to Channel 4 (B), and P opens
 A small, muted. Checked: both play from the loopback stream; A's mute, asked for before its
-media opened, holds once it plays; the small picture is a quarter of the player's width in
-the bottom-right corner (raised above the transport while that shows) and the PiP label
+media opened, holds once it plays; the small picture has the shape its player's picture shows
+in (the fixture's 16:9: a quarter of the player's width), as large as a quarter-width 16:9
+one, in the bottom-right corner (raised above the transport while that shows) and the PiP label
 covers it in the overlay host's coordinates; S makes A large without restarting either
 player (their play and open counts stay) and moves the sound to A; after a 4 s pause of A
 and two more swaps A is still at least 3 s behind live; the two players keep a volume and a
@@ -370,8 +371,8 @@ def gate_checks(cocoa: bool) -> list[str]:
 
 def pip_corner_check(when: str) -> str:
     return (
-        f"{PIP_PREFIX}the small picture is a quarter of the width, in the bottom-right corner "
-        f"{when}"
+        f"{PIP_PREFIX}the small picture has its picture's shape, as large as a quarter-width "
+        f"16:9 one, in the bottom-right corner {when}"
     )
 
 
@@ -2405,17 +2406,17 @@ class Driver:
         yield from self._wait(still, GEOMETRY_TIMEOUT_MS)
         rect, size = frame.small_rect(), page.size()
         lift = int(getattr(frame, "_lift", 0))  # raised above the transport while it shows
-        expected = lifted_rect(size, DEFAULT_CORNER, lift)
-        width = round(size.width() * WIDTH_FRACTION)
+        # The shape its player's picture shows in, read from that player (libVLC's track list).
+        shape = w._picture_shape(getattr(frame, "_small_name", "pip"))
+        expected = lifted_rect(size, DEFAULT_CORNER, lift, shape)
+        width = round(size.width() * WIDTH_FRACTION)  # a 16:9 one's
         self.report.check(
             pip_corner_check(when),
-            not rect.isEmpty()
-            and rect.width() == width
-            and frame.corner() == DEFAULT_CORNER
-            and rect == expected,
+            not rect.isEmpty() and frame.corner() == DEFAULT_CORNER and rect == expected,
             f"small picture {_rect(rect)} in a {size.width()}x{size.height()} player; expected "
             f"{_rect(expected)} ({f'raised {lift} px above the transport' if lift else 'unraised'}"
-            f"), width {width}, corner {frame.corner()}",
+            f"), its picture's shape {f'{shape:.3f}' if shape else 'not known (16:9)'}, a 16:9 "
+            f"one {width} wide, corner {frame.corner()}",
         )
         in_host = QRect(host.mapFromGlobal(page.mapToGlobal(rect.topLeft())), rect.size())
         self.report.check(
