@@ -63,6 +63,13 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(guards.token_cap(0), guards.TOKENS_BASE)
         self.assertGreater(guards.token_cap(6.0), guards.token_cap(2.0))
 
+    def test_a_script_of_many_tokens_a_word_has_room_for_its_words(self):
+        # 2.9.3: the cap cut Qwen's Hindi short (57 % of words wrong, 34 % without the cap).
+        english = guards.token_cap(6.0, "English")
+        self.assertGreaterEqual(guards.token_cap(6.0, "Hindi"), 2.5 * english)
+        self.assertGreater(guards.token_cap(6.0, None), english)  # not known yet: more room
+        self.assertEqual(guards.token_cap(6.0, "Russian"), english)
+
 
 class TextLanguageTests(unittest.TestCase):
     """The language a caption is written in, from what the model wrote on the broadcasts."""
@@ -202,6 +209,8 @@ class TurkishModelTests(unittest.TestCase):
         heard.clear()
         self.assertEqual(model.decode(array("f", [0.1]), "English"), "Good evening.")
         self.assertEqual(heard[0], ("qwen", "language", "English"))
+        cap = guards.token_cap(1 / 16000, "English")  # 2.9.3: each piece's own cap
+        self.assertEqual(heard[1], ("qwen", "max_new_tokens", str(cap)))
         model.turkish = None  # its files not given: Qwen writes Turkish too
         self.assertEqual(model.decode(array("f", [0.1]), "Turkish"), "Good evening.")
 
@@ -358,9 +367,9 @@ class CutterTests(unittest.TestCase):
         cutter = self.cutter(lambda t: 1.0 <= t < 3.0 or 4.0 <= t < 5.0)
         pieces = self.push(cutter, 6.0)
         self.assertEqual(len(pieces), 2)
-        self.assertAlmostEqual(pieces[0].start, 0.8, delta=0.07)
-        self.assertAlmostEqual(pieces[0].end, 3.15, delta=0.07)
-        self.assertGreater(pieces[0].speech_share, 0.8)
+        self.assertAlmostEqual(pieces[0].start, 0.7, delta=0.07)  # 2.9.3: 0.3 s before
+        self.assertAlmostEqual(pieces[0].end, 3.25, delta=0.07)  # and 0.25 s after
+        self.assertGreater(pieces[0].speech_share, 0.75)
 
     def test_speech_without_a_pause_is_cut_at_the_length_the_lead_allows(self):
         cutter = self.cutter(lambda t: not (3.0 <= t < 3.1))  # one short pause between words
@@ -371,12 +380,18 @@ class CutterTests(unittest.TestCase):
         for piece in pieces:
             self.assertLessEqual(piece.end - piece.start, 4.0 + 1e-6)
 
-    def test_the_length_stays_between_two_and_six_seconds(self):
+    def test_the_length_stays_between_two_and_ten_seconds(self):
         cutter = self.cutter(lambda t: True)
         cutter.set_max(0.5)
         self.assertEqual(cutter.max_s, 2.0)
         cutter.set_max(60)
-        self.assertEqual(cutter.max_s, 6.0)
+        self.assertEqual(cutter.max_s, 10.0)  # 2.9.3: 6 s pieces were written worse
+
+    def test_a_comma_long_pause_no_longer_ends_a_piece(self):
+        # 2.9.3: a 0.35 s pause ended a piece, and the models heard sentences in scraps.
+        cutter = self.cutter(lambda t: 1.0 <= t < 3.0 or 3.4 <= t < 5.0)
+        pieces = self.push(cutter, 7.0)
+        self.assertEqual(len(pieces), 1)
 
     def test_a_gap_in_the_sound_closes_the_open_piece(self):
         cutter = self.cutter(lambda t: True)
@@ -482,10 +497,10 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.sent[0][:4], ("start", run, "http://127.0.0.1:1/t/s1/side/3.ts", 0.0))
         self.captions._on_caption(run, 10.0, 12.0, "Merhaba")
         self.captions._on_caption(run, 12.2, 13.0, "Nasılsın")
-        self.assertEqual(self.at(10.1), "")  # the piece's lead-in: not the words yet
-        self.assertEqual(self.at(10.2), "Merhaba")  # its first word
-        self.assertEqual(self.at(12.3), "Merhaba")  # on until the next line's first word
-        self.assertEqual(self.at(12.4), "Nasılsın")
+        self.assertEqual(self.at(10.2), "")  # the piece's lead-in: not the words yet
+        self.assertEqual(self.at(10.35), "Merhaba")  # its first word
+        self.assertEqual(self.at(12.45), "Merhaba")  # on until the next line's first word
+        self.assertEqual(self.at(12.55), "Nasılsın")
         self.assertEqual(self.at(13.5), "Nasılsın")  # held a little after the words
         self.assertEqual(self.at(13.7), "")
 
@@ -509,14 +524,14 @@ class ControllerTimingTests(unittest.TestCase):
         run = self.captions._run
         long_line = "Beyaz saray seçim sonuçlarını bekliyor, İran politikasında belirsizlik var."
         self.captions._on_caption(run, 50.0, 52.0, "Kısa.")
-        self.captions._on_caption(run, 54.8, 56.0, long_line)  # a 2.8 s pause before it
+        self.captions._on_caption(run, 54.5, 56.0, long_line)  # a 2.8 s pause before it
         self.captions._on_caption(run, 80.0, 81.0, "Sonra.")  # 24 s of music before it
-        self.assertEqual(self.at(54.9), "Kısa.")  # bridged
-        self.assertEqual(self.at(55.0), long_line)
-        reading = 55.0 + len(long_line) / 15.0  # longer than its words and the hold
+        self.assertEqual(self.at(54.7), "Kısa.")  # bridged
+        self.assertEqual(self.at(54.9), long_line)
+        reading = 54.8 + len(long_line) / 15.0  # longer than its words and the hold
         self.assertEqual(self.at(reading - 0.1), long_line)
         self.assertEqual(self.at(reading + 0.1), "")  # not on over the music
-        self.assertEqual(self.at(80.2), "Sonra.")
+        self.assertEqual(self.at(80.35), "Sonra.")
 
     def test_the_distance_follows_the_large_picture_after_a_swap(self):
         import types

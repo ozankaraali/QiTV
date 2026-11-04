@@ -56,7 +56,7 @@ MIN_SHOW_S = 1.2
 # word: its caption shows from the word. A pause up to BRIDGE_S between two lines keeps the
 # first on until the next; after a longer one it stays as long as it takes to read (READ_CPS
 # characters a second), and never over the next.
-FIRST_WORD_S = 0.2  # services.captions.pieces.LEAD_IN_S
+FIRST_WORD_S = 0.3  # services.captions.pieces.LEAD_IN_S
 BRIDGE_S = 3.0
 READ_CPS = 15.0
 TICK_MS = 250

@@ -119,7 +119,7 @@ class _Model:
                 decoder=paths["decoder"],
                 tokenizer=paths["tokenizer"],
                 num_threads=threads,
-                max_new_tokens=guards.token_cap(MAX_PIECE_S),
+                max_new_tokens=guards.token_cap(MAX_PIECE_S, "Hindi"),  # each piece: its own
             )
         self.turkish: Any = None
         turkish = spec.get("turkish")
@@ -159,6 +159,9 @@ class _Model:
         stream = self.recognizer.create_stream()
         if language:
             stream.set_option("language", language)
+        # 2.9.3: as many tokens as the piece's length and its language's script take
+        cap = guards.token_cap(len(samples) / 16000, language or None)
+        stream.set_option("max_new_tokens", str(cap))
         stream.accept_waveform(16000, samples)
         self.recognizer.decode_stream(stream)
         return str(stream.result.text)
