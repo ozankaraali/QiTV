@@ -28,7 +28,7 @@ from PySide6.QtWidgets import QWidget
 from shiboken6 import isValid
 
 from ui.macos_window import reclaim_first_responder
-from ui.overlays.painting import Units
+from ui.overlays.painting import ui_units
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def grid_rects(size: QSize, cells: int) -> list[QRect]:
     columns, rows = LAYOUTS[cells]
     if size.width() <= 0 or size.height() <= 0:
         return [QRect() for _ in range(cells)]
-    gap = Units(size.width()).px(GAP_UNITS)
+    gap = ui_units(size.width()).px(GAP_UNITS)
     room_w = size.width() - gap * (columns - 1)
     room_h = size.height() - gap * (rows - 1)
     width = max(1.0, min(room_w / columns, room_h / rows * ASPECT))

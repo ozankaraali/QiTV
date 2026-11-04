@@ -24,7 +24,7 @@ from PySide6.QtWidgets import QWidget
 
 from services.i18n import translate
 from ui.overlays.base import Overlay, announce
-from ui.overlays.painting import Units, fill_round
+from ui.overlays.painting import Units, fill_round, ui_units
 from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
 
@@ -129,7 +129,7 @@ class Toast(Overlay):
 
     def _units(self) -> Units:
         parent = self.parentWidget()
-        return Units(parent.width() if parent is not None else 1280)
+        return ui_units(parent.width() if parent is not None else 1280)
 
     def _font(self) -> QFont:
         return self._units().font(1.4)

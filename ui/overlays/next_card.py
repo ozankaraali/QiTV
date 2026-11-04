@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QWidget
 
 from services.i18n import tr, tr_n
 from ui.overlays.base import Overlay, announce
-from ui.overlays.painting import Units, elided, fill_round
+from ui.overlays.painting import Units, elided, fill_round, ui_units
 from ui.theme import PALETTE, RADIUS_PANEL, qcolor
 
 
@@ -105,7 +105,7 @@ class NextCard(Overlay):
 
     def _place(self) -> None:
         host_w, host_h = self._host_size()
-        un = Units(host_w)
+        un = ui_units(host_w)
         width = un.px(30)
         height = un.px(14.5)
         self.setGeometry(host_w - un.px(2.4) - width, host_h - un.px(14) - height, width, height)
@@ -117,7 +117,7 @@ class NextCard(Overlay):
         return False
 
     def button_rect(self, name: str) -> QRectF:
-        un = Units(self._host_size()[0] or 1280)
+        un = ui_units(self._host_size()[0] or 1280)
         pad = un.px(1.6)
         height = un.px(3.6)
         y = self.height() - un.px(1.8) - height - un.px(0.6)
@@ -131,7 +131,7 @@ class NextCard(Overlay):
     # ---- painting -----------------------------------------------------------------------
 
     def paintEvent(self, event: QPaintEvent) -> None:
-        un = Units(self._host_size()[0] or 1280)
+        un = ui_units(self._host_size()[0] or 1280)
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         radius = float(RADIUS_PANEL)

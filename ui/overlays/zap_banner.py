@@ -19,7 +19,15 @@ from PySide6.QtWidgets import QGraphicsOpacityEffect, QWidget
 from services.epg_view import Programme
 from services.i18n import tr
 from ui.overlays.base import Overlay, announce
-from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round, fmt_clock
+from ui.overlays.painting import (
+    Units,
+    draw_logo,
+    draw_progress,
+    elided,
+    fill_round,
+    fmt_clock,
+    ui_units,
+)
 from ui.theme import PALETTE, qcolor
 
 
@@ -137,7 +145,7 @@ class ZapBanner(Overlay):
         A bottom corner's PiP rises above it while the banner shows (BottomBand). The
         tallest row, not this channel's: the PiP keeps its place through a zap.
         """
-        units = Units(self.width())
+        units = ui_units(self.width())
         row_h, _body = _row_height(units, has_epg=True)
         return math.floor(self.y() + self.height() - _BOTTOM_U * units.u - row_h)
 
@@ -180,7 +188,7 @@ class ZapBanner(Overlay):
         info = self._info
         if info is None and not self._digits:
             return
-        units = Units(self.width())
+        units = ui_units(self.width())
         u = units.u
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)

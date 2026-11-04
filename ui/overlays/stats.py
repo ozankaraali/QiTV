@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units
+from ui.overlays.painting import Units, ui_units
 from ui.theme import PALETTE, qcolor
 
 _FALLBACK_HOST_WIDTH = 1280
@@ -62,7 +62,7 @@ class StatsOverlay(Overlay):
 
     def _units(self) -> Units:
         parent = self.parentWidget()
-        return Units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
+        return ui_units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
 
     @staticmethod
     def _fonts(un: Units) -> tuple[QFont, QFont, QFont]:
@@ -87,7 +87,7 @@ class StatsOverlay(Overlay):
         parent = self.parentWidget()
         if parent is None:
             return
-        un = Units(parent.width())
+        un = ui_units(parent.width())
         title_font = self._fonts(un)[0]
         name_w, value_w = self._columns(un)
         title_w = QFontMetricsF(title_font).horizontalAdvance(self._title)

@@ -41,7 +41,15 @@ from ui.keymap import key_hint
 from ui.library.poster_grid import poster_url
 from ui.overlays.base import TooltipWidget
 from ui.overlays.channel_rows import ChannelListView, CutTexts, is_hovered, paint_hover
-from ui.overlays.painting import Units, draw_icon, draw_logo, draw_progress, elided, fill_round
+from ui.overlays.painting import (
+    Units,
+    draw_icon,
+    draw_logo,
+    draw_progress,
+    elided,
+    fill_round,
+    ui_units,
+)
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, RADIUS_CARD, qcolor
 
 logger = logging.getLogger(__name__)
@@ -208,7 +216,7 @@ def start_over_rect(units: Units, row: QRectF) -> QRectF:
 
 class EpisodeRowDelegate(CutTexts, QStyledItemDelegate):
     def _units(self, widget) -> Units:
-        return Units(getattr(widget, "units_width", 100) or 100)
+        return ui_units(getattr(widget, "units_width", 100) or 100)
 
     def sizeHint(self, option, index) -> QSize:
         return QSize(0, self._units(option.widget).px(ROW_H_U))
@@ -330,7 +338,7 @@ class EpisodesView(ChannelListView):
             return QRectF()
         if not is_resumable(model.progress(row)):
             return QRectF()
-        units = Units(self.units_width or 100)
+        units = ui_units(self.units_width or 100)
         return start_over_rect(units, QRectF(self.visualRect(model.index(row))))
 
 
@@ -717,10 +725,13 @@ class SeriesView(TooltipWidget):
 
     # ---- geometry ------------------------------------------------------------------------
     def _units(self) -> Units:
-        return Units(max(1, self.width()))
+        return ui_units(max(1, self.width()))
 
     def _header_h(self) -> float:
-        return self.height() * HEADER_FRACTION
+        """34% of the view's height, but (2.9.3) never taller than the whole poster and its
+        margin: past the controls' cap the units stop growing, the height does not."""
+        full = (POSTER_W_U * 1.5 + 2.0) * self._units().u
+        return min(self.height() * HEADER_FRACTION, full)
 
     def _poster_rect(self, units: Units) -> QRectF:
         u = units.u

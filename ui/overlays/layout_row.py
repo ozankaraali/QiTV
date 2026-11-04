@@ -44,7 +44,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from services.i18n import N_
 from ui.overlays.base import Overlay
-from ui.overlays.painting import LAYOUT_ICONS, Units, draw_icon, fill_round, layout_frame
+from ui.overlays.painting import LAYOUT_ICONS, Units, draw_icon, fill_round, layout_frame, ui_units
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -205,7 +205,7 @@ class LayoutRow(Overlay):
 
     def _units(self) -> Units:
         parent = self.parentWidget()
-        return Units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
+        return ui_units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
 
     @staticmethod
     def _font(un: Units) -> QFont:
@@ -233,7 +233,7 @@ class LayoutRow(Overlay):
         parent = self.parentWidget()
         if parent is None:
             return
-        un = Units(parent.width())
+        un = ui_units(parent.width())
         width, height = self._size()
         width = min(width, parent.width())
         edge = un.px(_EDGE_U)

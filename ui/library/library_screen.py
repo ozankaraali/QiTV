@@ -17,7 +17,7 @@ from ui.library.poster_grid import PosterGrid
 from ui.library.series_view import SeriesView
 from ui.library.top_nav import TopNav
 from ui.overlays.base import TooltipWidget
-from ui.overlays.painting import Units, draw_field_icon, draw_icon, elided, fill_round
+from ui.overlays.painting import Units, draw_field_icon, draw_icon, elided, fill_round, ui_units
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, paint_edit
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -124,7 +124,7 @@ class SearchField(TooltipWidget):
         top = self.parentWidget()
         host = top.parentWidget() if top is not None else None
         width = host.width() if host is not None and host.width() > 0 else 0
-        return Units(width or DEFAULT_HOST_WIDTH)
+        return ui_units(width or DEFAULT_HOST_WIDTH)
 
     def field_rect(self) -> QRectF:
         return QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)

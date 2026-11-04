@@ -107,7 +107,7 @@ from ui.overlays.channel_rows import (
     column_focused,
     paint_hover,
 )
-from ui.overlays.painting import Units, draw_icon, draw_refresh, elided, fill_round
+from ui.overlays.painting import Units, draw_icon, draw_refresh, elided, fill_round, ui_units
 from ui.pointer import NAV_BUTTONS
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
@@ -118,8 +118,8 @@ _CONTEXT_LAYERS = ("item", "episode")  # rows with a context menu (channels are 
 _CONTEXT_GROUPS = (RECENT_GROUP,)  # and these groups' rows ("Clear Recents")
 _RIGHT_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 DRAG_OPACITY = 0.25  # the list while a channel is dragged out of it onto the grid
-LEFT_FRACTION = 0.25
-RIGHT_FRACTION = 0.58
+LEFT_U = 25.0  # the left column (2.9.3: in u; a quarter of the width up to UNIT_CAP_PX)
+RIGHT_U = 58.0  # the right column's right edge
 FADE_U = 7.0
 PAD_TOP_U = 2.4
 PAD_SIDE_U = 1.6
@@ -470,7 +470,7 @@ def _paint_highlight(p: QPainter, rect: QRectF, u: float, focused: bool) -> None
 
 class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
     def _units(self, widget) -> Units:
-        return Units(getattr(widget, "units_width", 100) or 100)
+        return ui_units(getattr(widget, "units_width", 100) or 100)
 
     def sizeHint(self, option, index) -> QSize:
         return QSize(0, self._units(option.widget).px(3.6))
@@ -707,7 +707,7 @@ class Drawer(Overlay):
         self.setFocusPolicy(Qt.NoFocus)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self._nav = nav
-        self._units = Units(100)
+        self._units = ui_units(100)
         self._columns = {
             "left": _Column("left", self, logos, now_provider),
             "right": _Column("right", self, logos, now_provider),
@@ -1621,10 +1621,10 @@ class Drawer(Overlay):
         if (host_w, host_h) == self._laid_out_for:
             return  # opened again at the same size: forcing a layout of the lists would be waste
         self._laid_out_for = (host_w, host_h)
-        units = Units(host_w)
+        units = ui_units(host_w)
         self._units = units
-        left_w = round(host_w * LEFT_FRACTION)
-        right_w = round(host_w * RIGHT_FRACTION) - left_w
+        left_w = round(LEFT_U * units.u)
+        right_w = round(RIGHT_U * units.u) - left_w
         self.setGeometry(QRect(0, 0, left_w + right_w + units.px(FADE_U), host_h))
         side = units.px(PAD_SIDE_U)
         for col, x, width, top_u in (

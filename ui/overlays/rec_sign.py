@@ -34,7 +34,7 @@ from services.i18n import N_, tr_n, translate
 from services.recording import clock_text
 from ui.context_actions import menu_style
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, elided, fill_round
+from ui.overlays.painting import Units, elided, fill_round, ui_units
 from ui.overlays.pip_label import REC
 from ui.stream_question import STOP_RECORDING
 from ui.theme import PALETTE, qcolor
@@ -160,7 +160,7 @@ class RecSign(Overlay):
     def _units(self) -> Units:
         parent = self.parentWidget()
         width = parent.width() if parent is not None else 0
-        return Units(width or _FALLBACK_HOST_WIDTH)
+        return ui_units(width or _FALLBACK_HOST_WIDTH)
 
     def _layout(self) -> None:
         parent = self.parentWidget()

@@ -38,7 +38,7 @@ from services.catalog import shown_label
 from services.provider_ids import provider_of
 from services.zapping import ZapContext
 from ui.overlays.base import plain_tooltip
-from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round
+from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round, ui_units
 from ui.overlays.scroll_indicator import for_scroll_area
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
@@ -314,7 +314,7 @@ class ChannelRowDelegate(CutTexts, QStyledItemDelegate):
 
     def _units(self, widget) -> Units:
         width = getattr(widget, "units_width", 100) or 100
-        return Units(round(width * self._scale))
+        return ui_units(width, self._scale)
 
     def sizeHint(self, option, index) -> QSize:
         units = self._units(option.widget)

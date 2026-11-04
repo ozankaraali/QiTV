@@ -25,7 +25,7 @@ from PySide6.QtWidgets import QWidget
 
 from services.redact import safe_message
 from ui.macos_window import reclaim_first_responder
-from ui.overlays.painting import Units
+from ui.overlays.painting import ui_units
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ class PageStack(QWidget):
         size = self.size()
         width = round(size.width() * self.CORNER_WIDTH_FRACTION)
         height = round(width * 9 / 16)
-        margin = Units(size.width()).px(self.CORNER_MARGIN_U)
+        margin = ui_units(size.width()).px(self.CORNER_MARGIN_U)
         x = margin if self._corner.endswith("left") else size.width() - margin - width
         y = margin if self._corner.startswith("top") else size.height() - margin - height
         return QRect(x, y, width, height)

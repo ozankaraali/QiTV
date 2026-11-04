@@ -18,7 +18,7 @@ from services import i18n
 from services.i18n import tr
 from services.library import CONTINUE, MY_LIST, NEW, RECORDINGS, Genre
 from ui.overlays.channel_rows import ChannelListView, CutTexts, paint_hover
-from ui.overlays.painting import Units, draw_field_icon, draw_icon, elided, fill_round
+from ui.overlays.painting import Units, draw_field_icon, draw_icon, elided, fill_round, ui_units
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -102,7 +102,7 @@ class _GenreModel(QAbstractListModel):
 
 class _GenreDelegate(CutTexts, QStyledItemDelegate):
     def _units(self, widget) -> Units:
-        return Units(getattr(widget, "units_width", DEFAULT_HOST_WIDTH) or DEFAULT_HOST_WIDTH)
+        return ui_units(getattr(widget, "units_width", DEFAULT_HOST_WIDTH) or DEFAULT_HOST_WIDTH)
 
     def sizeHint(self, option, index) -> QSize:
         return QSize(0, self._units(option.widget).px(ROW_H_U))
@@ -307,7 +307,7 @@ class GenreList(QWidget):
 
     def field_rect(self) -> QRectF:
         """The filter's box (this widget's coordinates)."""
-        u = Units(self._host_width()).u
+        u = ui_units(self._host_width()).u
         margin = FIELD_MARGIN_U * u
         return QRectF(margin, margin, self.width() - 1 - 2 * margin, FIELD_H_U * u)
 
@@ -410,7 +410,7 @@ class GenreList(QWidget):
         self._relayout()
 
     def _relayout(self) -> None:
-        units = Units(self._host_width())
+        units = ui_units(self._host_width())
         self.setFixedWidth(units.px(WIDTH_U))
         top = units.px(FIELD_MARGIN_U * 2 + FIELD_H_U - 0.4)
         self._view.units_width = units.width
@@ -419,7 +419,7 @@ class GenreList(QWidget):
         self.update()
 
     def paintEvent(self, event) -> None:
-        units = Units(self._host_width())
+        units = ui_units(self._host_width())
         u = units.u
         p = QPainter(self)
         p.fillRect(self.rect(), qcolor(PALETTE.panel_raised))

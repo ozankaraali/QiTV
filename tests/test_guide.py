@@ -620,6 +620,14 @@ class GuideHeaderTests(unittest.TestCase):
         self.assertEqual([a.text() for a in shown[0].actions()], ["Today", "Tomorrow"])
         self.assertEqual([a.isChecked() for a in shown[0].actions()], [False, True])
 
+    def test_a_window_wider_than_the_cap_shows_more_time_not_wider_boxes(self):  # 2.9.3
+        self.host.resize(1280, 720)
+        self.assertEqual(self.guide._layout().slots, 5)  # 2.5 h, as before
+        self.host.resize(2560, 1440)
+        layout = self.guide._layout()
+        self.assertEqual(layout.slots, 8)  # 4 h
+        self.assertGreater(layout.full_rows(), 10)
+
     def test_the_buttons_fit_a_small_guide(self):
         for width in (360, 640, 960):
             self.host.resize(width, round(width * 9 / 16))

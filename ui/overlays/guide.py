@@ -76,7 +76,16 @@ from services.zapping import ZapContext
 from ui.keymap import key_hint
 from ui.overlays.base import Overlay
 from ui.overlays.channel_rows import draw_playing_mark
-from ui.overlays.painting import Units, draw_icon, draw_logo, elided, fill_round, fmt_clock
+from ui.overlays.painting import (
+    UNIT_CAP_PX,
+    Units,
+    draw_icon,
+    draw_logo,
+    elided,
+    fill_round,
+    fmt_clock,
+    ui_units,
+)
 from ui.overlays.scroll_indicator import ScrollIndicator
 from ui.pointer import PointerInput, SecondClickGuard
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
@@ -85,7 +94,7 @@ logger = logging.getLogger(__name__)
 
 SLOT = timedelta(minutes=30)
 SLOTS = 5
-WINDOW = SLOTS * SLOT  # 2.5 h on screen
+WINDOW = SLOTS * SLOT  # 2.5 h on screen (2.9.3: up to the controls' cap; more past it)
 MAX_AHEAD = timedelta(hours=24)
 MAX_BACK = timedelta(days=7)  # the furthest back the window goes (a channel's archive)
 LOOKUP_LIMIT = 12
@@ -146,17 +155,22 @@ def slot_start(moment: datetime) -> datetime:
 
 
 def box_span(
-    start: datetime, stop: datetime, window_start: datetime, left: float, width: float
+    start: datetime,
+    stop: datetime,
+    window_start: datetime,
+    left: float,
+    width: float,
+    window: timedelta = WINDOW,
 ) -> tuple[float, float] | None:
-    """The x and width of a programme in a time area `width` px wide showing WINDOW.
+    """The x and width of a programme in a time area `width` px wide showing `window`.
 
     The span is clipped to the window; None when the programme is entirely outside it.
     """
-    window_stop = window_start + WINDOW
+    window_stop = window_start + window
     first, last = max(start, window_start), min(stop, window_stop)
     if last <= first:
         return None
-    scale = width / WINDOW.total_seconds()
+    scale = width / window.total_seconds()
     return (
         left + (first - window_start).total_seconds() * scale,
         (last - first).total_seconds() * scale,
@@ -175,12 +189,13 @@ def programme_spans(
     left: float,
     width: float,
     min_width: float,
+    window: timedelta = WINDOW,
 ) -> list[Span]:
     """A row's boxes, on the channel's timeline (overlaps end where the next programme starts,
     as the details bar and the info line see them); slivers are dropped."""
     spans = []
     for programme in timeline(programmes):
-        span = box_span(programme.start, programme.stop, window_start, left, width)
+        span = box_span(programme.start, programme.stop, window_start, left, width, window)
         if span is not None and span[1] >= min_width:
             spans.append(Span(programme, *span))
     return spans
@@ -236,9 +251,14 @@ class _Layout:
     units: Units
     header: QRectF
     rows: QRectF  # the area the rows scroll in (full width)
-    times: QRectF  # the time columns: x and width of the 2.5 h window
+    times: QRectF  # the time columns: x and width of the window (2.5 h, or more: `slots`)
     footer: QRectF
     row_h: float
+    slots: int = SLOTS  # the window's half-hours (2.9.3: more in a window wider than the cap)
+
+    @property
+    def window(self) -> timedelta:
+        return self.slots * SLOT
 
     def full_rows(self) -> int:
         return max(1, int(self.rows.height() // self.row_h))
@@ -562,6 +582,7 @@ class Guide(Overlay):
             layout.times.left(),
             layout.times.width(),
             MIN_BOX_U * units.u,
+            layout.window,
         ):
             if span.x <= point.x() < span.x + span.width:
                 programme = span.programme
@@ -749,6 +770,7 @@ class Guide(Overlay):
                 layout.times.left(),
                 layout.times.width(),
                 MIN_BOX_U * layout.units.u,
+                layout.window,
             )
             for span in spans:
                 if not span.x <= x < span.x + span.width:
@@ -1003,7 +1025,7 @@ class Guide(Overlay):
         self.update()
 
     def _layout(self) -> _Layout:
-        units = Units(self.width())
+        units = ui_units(self.width())
         u = units.u
         width, height = float(self.width()), float(self.height())
         header = QRectF(0, TOP_U * u, width, HEADER_U * u)
@@ -1011,7 +1033,13 @@ class Guide(Overlay):
         rows = QRectF(0, header.bottom(), width, max(0.0, footer.top() - header.bottom()))
         left = CHANNEL_U * u
         times = QRectF(left, rows.top(), max(0.0, width - SIDE_U * u - left), rows.height())
-        return _Layout(units, header, rows, times, footer, ROW_U * u)
+        slots = SLOTS
+        if width > UNIT_CAP_PX:
+            # 2.9.3: wider than the controls' cap, the window shows more half-hours, each as
+            # wide as at the cap, not the same 2.5 h in wider boxes.
+            slot_w = (UNIT_CAP_PX - (CHANNEL_U + SIDE_U) * u) / SLOTS
+            slots = max(SLOTS, int(times.width() // max(1.0, slot_w)))
+        return _Layout(units, header, rows, times, footer, ROW_U * u, slots)
 
     # ---- painting ---------------------------------------------------------------------------
 
@@ -1048,9 +1076,10 @@ class Guide(Overlay):
 
     def _now_x(self, layout: _Layout, now: datetime) -> float | None:
         offset = (now - self._window_start).total_seconds()
-        if not 0 <= offset < WINDOW.total_seconds():
+        span = layout.window.total_seconds()
+        if not 0 <= offset < span:
             return None
-        return layout.times.left() + offset * layout.times.width() / WINDOW.total_seconds()
+        return layout.times.left() + offset * layout.times.width() / span
 
     def _paint_header(self, p: QPainter, layout: _Layout, now: datetime) -> None:
         units, header, times = layout.units, layout.header, layout.times
@@ -1081,10 +1110,10 @@ class Guide(Overlay):
         p.setFont(units.font(1.0, QFont.Weight.DemiBold))
         p.setPen(qcolor(PALETTE.text, 0.35 if at_now else 0.9))  # dim at now, as ‹ at its end
         p.drawText(chip, Qt.AlignCenter, translate(HEADER_BUTTONS["now"][0]))
-        slot_w = times.width() / SLOTS
+        slot_w = times.width() / layout.slots
         p.setFont(units.font(1.0))
         labels_end = buttons["search"].left() - BUTTON_GAP_U * u  # never under ⌕ ⛶ ×
-        for i in range(SLOTS):
+        for i in range(layout.slots):
             x = times.left() + i * slot_w
             p.fillRect(
                 QRectF(x, header.top() + 0.5 * u, 1, header.height() - 0.5 * u),
@@ -1143,7 +1172,7 @@ class Guide(Overlay):
             p, layout, self._channels[row], QRectF(0, rect.top(), times.left(), rect.height())
         )
         programmes = self._programmes_for(row)
-        start, stop = self._window_start, self._window_start + WINDOW
+        start, stop = self._window_start, self._window_start + layout.window
         if not any(prog.stop > start and prog.start < stop for prog in programmes):
             box = QRectF(times.left(), rect.top(), times.width(), rect.height()).adjusted(
                 0.2 * u, 0.2 * u, -0.2 * u, -0.2 * u
@@ -1152,7 +1181,9 @@ class Guide(Overlay):
             return [(box, None, False)]
         boxes: list[_Box] = []
         chosen = self.chosen() if row == self._current else None
-        for span in programme_spans(programmes, start, times.left(), times.width(), MIN_BOX_U * u):
+        for span in programme_spans(
+            programmes, start, times.left(), times.width(), MIN_BOX_U * u, layout.window
+        ):
             box = QRectF(span.x, rect.top(), span.width, rect.height()).adjusted(
                 0.2 * u, 0.2 * u, -0.2 * u, -0.2 * u
             )

@@ -25,7 +25,15 @@ from services.i18n import N_, tr, translate
 from ui.brand import BRAND_NAME, logo_aspect, logo_available, logo_pixmap
 from ui.keymap import key_hint
 from ui.overlays.base import TooltipWidget
-from ui.overlays.painting import Units, draw_field_icon, draw_icon, draw_refresh, elided, fill_round
+from ui.overlays.painting import (
+    Units,
+    draw_field_icon,
+    draw_icon,
+    draw_refresh,
+    elided,
+    fill_round,
+    ui_units,
+)
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 HEIGHT_U = 6.0
@@ -142,7 +150,7 @@ class TopNav(TooltipWidget):
 
     def logo_rect(self) -> QRectF:
         """Where the logo is drawn: whole pixels, so it stays crisp."""
-        units = Units(self._host_width())
+        units = ui_units(self._host_width())
         brand_font = units.font(BRAND_FONT_U, QFont.Weight.Bold)
         if not logo_available():  # the asset is missing: the name, as before
             width = QFontMetrics(brand_font).horizontalAdvance(BRAND_NAME)
@@ -182,7 +190,7 @@ class TopNav(TooltipWidget):
         return (self._source or tr("Source")) + " ▾"
 
     def _item_rects(self) -> dict[str, QRectF]:
-        units = Units(self._host_width())
+        units = ui_units(self._host_width())
         u = units.u
         height = self.height()
         rects: dict[str, QRectF] = {}
@@ -224,13 +232,13 @@ class TopNav(TooltipWidget):
         return rects
 
     def _search_is_field(self, rect: QRectF) -> bool:
-        fm = QFontMetrics(Units(self._host_width()).font(1.1))
+        fm = QFontMetrics(ui_units(self._host_width()).font(1.1))
         return (
             rect.width() > fm.horizontalAdvance(_search_label()) + _icon_room(fm) + 4 * fm.height()
         )
 
     def _item_at(self, pos) -> str | None:
-        u = Units(self._host_width()).u
+        u = ui_units(self._host_width()).u
         for item, rect in self._item_rects().items():
             # tabs are text-wide, so widen them; pills are already padded and 1u apart
             hit = rect.adjusted(-0.8 * u, 0, 0.8 * u, 0) if item in ALL_TABS else rect
@@ -296,7 +304,7 @@ class TopNav(TooltipWidget):
         self.update()
 
     def _relayout(self) -> None:
-        self.setFixedHeight(Units(self._host_width()).px(HEIGHT_U))
+        self.setFixedHeight(ui_units(self._host_width()).px(HEIGHT_U))
         self.update()
 
     def _paint_search_field(self, p: QPainter, units: Units, rect: QRectF) -> None:
@@ -324,7 +332,7 @@ class TopNav(TooltipWidget):
         p.restore()
 
     def paintEvent(self, event) -> None:
-        units = Units(self._host_width())
+        units = ui_units(self._host_width())
         u = units.u
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)

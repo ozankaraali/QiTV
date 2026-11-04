@@ -30,7 +30,7 @@ from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, draw_icon, draw_progress, fill_round, volume_icon
+from ui.overlays.painting import Units, draw_icon, draw_progress, fill_round, ui_units, volume_icon
 from ui.pointer import NAV_BUTTONS, PointerInput
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -174,7 +174,7 @@ class Mixer(Overlay):
 
     def _units(self) -> Units:
         parent = self.parentWidget()
-        return Units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
+        return ui_units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
 
     def _fonts(self, un: Units) -> tuple[QFont, QFont, QFont]:
         return (
@@ -257,7 +257,7 @@ class Mixer(Overlay):
         parent = self.parentWidget()
         if parent is None:
             return
-        un = Units(parent.width())
+        un = ui_units(parent.width())
         width, height = self._size()
         width = min(width, parent.width())
         x = (parent.width() - width) // 2

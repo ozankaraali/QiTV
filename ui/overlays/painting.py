@@ -45,12 +45,19 @@ _BADGE_COLORS = [
 ]
 
 
-class Units:
-    """1 unit u = 1% of the overlay host width (the mockups' cqw)."""
+# 2.9.3: the controls' unit stops growing past this width (the owner: "scale the stuff instead
+# of making it unlimited big"): a wider window shows more rows, posters and picture, not the
+# same ones bigger. Up to it, as before: u is 1% of the width.
+UNIT_CAP_PX = 1600
 
-    def __init__(self, width: int) -> None:
+
+class Units:
+    """1 unit u = 1% of the overlay host width (the mockups' cqw); `u` given: that unit.
+    The captions follow the picture with these; the controls use `ui_units`."""
+
+    def __init__(self, width: int, u: float | None = None) -> None:
         self.width = width
-        self.u = width / 100.0
+        self.u = width / 100.0 if u is None else u
 
     def px(self, units: float) -> int:
         return max(1, round(units * self.u))
@@ -61,6 +68,13 @@ class Units:
         font.setPixelSize(max(MIN_FONT_PX, self.px(units)))
         font.setWeight(weight)
         return font
+
+
+def ui_units(width: int, scale: float = 1.0) -> Units:
+    """The controls' units for a host `width` wide: 1% of it up to UNIT_CAP_PX, then no more
+    (2.9.3); `scale` makes them smaller still (a list's rows drawn smaller). `width` stays the
+    host's: what spans or centres in it uses the whole width."""
+    return Units(width, min(width, UNIT_CAP_PX) * scale / 100.0)
 
 
 def fill_round(p: QPainter, rect: QRectF, color: QColor, radius: float) -> None:

@@ -115,6 +115,7 @@ from ui.overlays.painting import (
     fill_round,
     fmt_clock,
     fmt_duration,
+    ui_units,
     volume_icon,
 )
 from ui.pointer import NAV_BUTTONS, PointerHider
@@ -521,7 +522,7 @@ class Transport(Overlay):
         """The title row's logo/initials badge (empty for VOD)."""
         if not self._live:
             return QRectF()
-        un = Units(self.width())
+        un = ui_units(self.width())
         size = QFontMetricsF(un.font(1.8, QFont.Weight.Bold)).height() * 1.9
         y = un.px(2.4) + (un.px(2.6) - size) / 2
         return QRectF(un.px(3), y, size, size)
@@ -754,7 +755,7 @@ class Transport(Overlay):
             if not row.rec.isEmpty():
                 region = region.united(QRegion(row.rec.toAlignedRect()))
             if self._subtitle:
-                width = row.clock_rect.left() - Units(self.width()).px(2) - row.subtitle_x
+                width = row.clock_rect.left() - ui_units(self.width()).px(2) - row.subtitle_x
                 subtitle = QRectF(row.subtitle_x, row.name_rect.y(), width, row.name_rect.height())
                 region = region.united(QRegion(subtitle.toAlignedRect()))
         return region.translated(self.geometry().topLeft())
@@ -768,7 +769,7 @@ class Transport(Overlay):
         top = min(rect.top() for rect in rects.values())
         seek = rects.get("seek")
         if seek is not None:  # the wall-clock bubble over the knob, and the ticks' labels
-            un = Units(self.width())
+            un = ui_units(self.width())
             bubble = max(
                 float(un.px(2.1)), QFontMetricsF(un.font(1.05, QFont.Weight.Bold)).height()
             )
@@ -887,7 +888,7 @@ class Transport(Overlay):
         """`pos` (this widget's coordinates) is on the controls: the bottom band from the bar's
         time bubble (or the row) down, or the title row's band. Not the rest of the shades
         (the bottom one reaches 42% up the picture: a pointer left there keeps nothing up)."""
-        un = Units(self.width())
+        un = ui_units(self.width())
         top = self.controls_top() - self.geometry().top()
         title_bottom = max(
             (r.bottom() for r in self.title_rects().values()),
@@ -940,7 +941,7 @@ class Transport(Overlay):
         if box is None:
             head, tail = self._indicator_parts()
         else:
-            head, tail, _ = self._indicator_fit(Units(self.width()), box.width() + 0.01)
+            head, tail, _ = self._indicator_fit(ui_units(self.width()), box.width() + 0.01)
         if not tail:
             return ""
         return f"{head} ● {tail}" if head else f"● {tail}"
@@ -1137,7 +1138,7 @@ class Transport(Overlay):
         return un.font(1.15, QFont.Weight.Bold)
 
     def _title_row(self) -> _TitleRow:
-        un = Units(self.width())
+        un = ui_units(self.width())
         left, right = float(un.px(3)), float(self.width() - un.px(3))
         y, row_h = float(un.px(2.4)), float(un.px(2.6))
         clock = fmt_clock(self._wall(0.0))
@@ -1205,7 +1206,7 @@ class Transport(Overlay):
             return False
         if self._edge_lag is None and (row is None or self._timeline is None):
             return False  # no indicator (yet): nothing to make room for
-        un = Units(self.width())
+        un = ui_units(self.width())
         live, back = rects.get("live"), rects.get("back10")
         if live is None or back is None:
             return True
@@ -1237,7 +1238,10 @@ class Transport(Overlay):
         if not (self._grid_shown and self._grid_layout):
             return False
         chip = rects.get("layout")
-        if chip is None or chip.width() < self._layout_chip_width(Units(self.width()), True) - 0.5:
+        if (
+            chip is None
+            or chip.width() < self._layout_chip_width(ui_units(self.width()), True) - 0.5
+        ):
             return True
         return self._grid_restorable and "restore" not in rects
 
@@ -1248,7 +1252,7 @@ class Transport(Overlay):
         whether the chips at their left (LIVE, Go live, ‹ Library) run into the buttons at the
         row's left. `row`: the bar's row (True, with Go live on a time-shifted channel) or the
         live edge's (False) whichever shows now; None: the one that shows."""
-        un = Units(self.width())
+        un = ui_units(self.width())
         left, right = un.px(3), self.width() - un.px(3)
         bottom = self.height() - un.px(3)
         icon = un.px(2.2)
@@ -1425,7 +1429,7 @@ class Transport(Overlay):
         chip = self._layout().get("layout")
         if chip is None:
             return False
-        return chip.width() >= self._layout_chip_width(Units(self.width()), True) - 0.5
+        return chip.width() >= self._layout_chip_width(ui_units(self.width()), True) - 0.5
 
     def _right_buttons(self, extras: bool = True) -> tuple[str, ...]:
         """The icon buttons from the right edge inwards: the window's and the picture's, the
@@ -1453,7 +1457,7 @@ class Transport(Overlay):
         seek = self._layout().get("seek")
         if seek is None or not self._timeshift:
             return []
-        return self._tick_marks(Units(self.width()), seek)
+        return self._tick_marks(ui_units(self.width()), seek)
 
     @staticmethod
     def _tick_font(un: Units) -> QFont:
@@ -1492,7 +1496,7 @@ class Transport(Overlay):
     def paintEvent(self, event: QPaintEvent) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        un = Units(self.width())
+        un = ui_units(self.width())
         self._paint_scrims(p)
         self._paint_title(p, un)
         rects = self._layout()
@@ -1598,7 +1602,7 @@ class Transport(Overlay):
         grad = QLinearGradient(0, 0, 0, top_h)
         # Flat behind the title row (its logo ends near 5.7u, wider windows run lower in the
         # band), then fading out.
-        flat = min(0.85, max(0.5, Units(self.width()).px(6.2) / top_h)) if top_h > 0 else 0.5
+        flat = min(0.85, max(0.5, ui_units(self.width()).px(6.2) / top_h)) if top_h > 0 else 0.5
         grad.setColorAt(0, qcolor("#000000", _TOP_SHADE))
         grad.setColorAt(flat, qcolor("#000000", _TOP_SHADE))
         grad.setColorAt(1, qcolor("#000000", 0.0))

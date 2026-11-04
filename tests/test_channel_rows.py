@@ -206,8 +206,9 @@ class DelegateTests(unittest.TestCase):
         view.units_width = 2000
         h2 = delegate.sizeHint(option, QModelIndex()).height()
         self.assertEqual(h1, 66)
-        self.assertEqual(h2, 132)
-        self.assertEqual(ChannelRowDelegate(2.0).sizeHint(option, QModelIndex()).height(), 264)
+        # 2.9.3: past UNIT_CAP_PX (1600) a row grows no more: a wider list shows more rows.
+        self.assertEqual(h2, 106)
+        self.assertEqual(ChannelRowDelegate(2.0).sizeHint(option, QModelIndex()).height(), 211)
 
 
 def tagged(n=1, long_name=False):

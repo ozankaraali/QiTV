@@ -48,7 +48,14 @@ from services.library import Details, letter_of, title_of
 from services.text_fold import fold
 from ui.keymap import key_hint
 from ui.overlays.base import plain_tooltip
-from ui.overlays.painting import Units, draw_icon, draw_progress, elided, fill_round, fmt_duration
+from ui.overlays.painting import (
+    draw_icon,
+    draw_progress,
+    elided,
+    fill_round,
+    fmt_duration,
+    ui_units,
+)
 from ui.overlays.scroll_indicator import for_scroll_area
 from ui.theme import PALETTE, RADIUS_CARD, accent_button_style, qcolor
 
@@ -280,7 +287,7 @@ class PosterGrid(QAbstractScrollArea):
         viewport.setMouseTracking(True)
         viewport.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self._header = _Header(self)
-        self._units = Units(DEFAULT_HOST_WIDTH)
+        self._units = ui_units(DEFAULT_HOST_WIDTH)
         # header
         self._title = ""
         self._count_text = ""
@@ -678,7 +685,7 @@ class PosterGrid(QAbstractScrollArea):
             self._place_message_button()
 
     def _relayout(self) -> None:
-        self._units = Units(self._host_width())
+        self._units = ui_units(self._host_width())
         header_h = self._units.px(HEADER_H_U)
         self.setViewportMargins(0, header_h, 0, 0)
         self._header.setGeometry(0, 0, self.width(), header_h)
