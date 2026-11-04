@@ -317,9 +317,9 @@ class CaptionsController(QObject):
         return False
 
     def languages(self) -> list[tuple[str, str]]:
-        from services.captions.languages import QWEN_LANGUAGES, own_name
+        from services.captions.languages import CAPTION_LANGUAGES, own_name
 
-        return [(name, own_name(name)) for name in QWEN_LANGUAGES]
+        return [(name, own_name(name)) for name in CAPTION_LANGUAGES]
 
     def language(self) -> tuple[str, str]:
         name, source = self._language
@@ -618,6 +618,7 @@ class CaptionsController(QObject):
                 },
                 "vad": str(paths.vad),
                 "turkish": str(paths.turkish),  # 2.9.1: ufakzeka-kulak, for Turkish
+                "european": str(paths.european),  # 2.9.3: Parakeet, for its languages
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),

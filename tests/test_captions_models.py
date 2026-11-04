@@ -450,10 +450,12 @@ class InstalledTierTests(DownloadTestCase):
         )
         vad = self.remote("silero_vad.onnx", blob(400, seed=14))
         turkish = (self.remote("tokens.txt", blob(300, seed=15)),)  # 2.9.1: ufakzeka-kulak's
+        european = (self.remote("joiner.int8.onnx", blob(300, seed=16)),)  # 2.9.3: Parakeet's
         for patch in (
             mock.patch.dict(models.TIERS, {"small": tiny}),
             mock.patch.object(models, "VAD", vad),
             mock.patch.object(models, "TURKISH_FILES", turkish),
+            mock.patch.object(models, "EUROPEAN_FILES", european),
             mock.patch.object(models, "runtime_files", return_value=(main, core)),
             mock.patch.object(models, "sherpa_importable", return_value=False),
         ):
@@ -551,7 +553,9 @@ class InstalledTierTests(DownloadTestCase):
         with mock.patch.object(models, "sherpa_importable", return_value=True):
             self.assertIsNone(models.runtime_dir(self.root))
             names = [d.file.path for d in models.needed("small", self.root)]
-        self.assertEqual(names, ["silero_vad.onnx", "tokens.txt", "model.tar.bz2"])
+        self.assertEqual(
+            names, ["silero_vad.onnx", "tokens.txt", "joiner.int8.onnx", "model.tar.bz2"]
+        )  # the VAD, ufakzeka-kulak's (2.9.1), Parakeet's (2.9.3), the tier's
 
     def test_without_a_runtime_for_this_computer_nothing_is_installed(self):
         with mock.patch.object(models, "runtime_files", side_effect=models.Unsupported("x")):

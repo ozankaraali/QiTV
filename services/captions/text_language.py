@@ -89,6 +89,8 @@ def _script(text: str) -> Counter:
 
 # The scripts each of Qwen's languages is written in (Latin for the rest).
 _SCRIPTS = {
+    "Ukrainian": {"Cyrillic"},  # 2.9.3: Parakeet's own (the rest of them: Latin)
+    "Bulgarian": {"Cyrillic"},
     "Chinese": {"Han"},
     "Cantonese": {"Han"},
     "Japanese": {"Han", "Kana"},

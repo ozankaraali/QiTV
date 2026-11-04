@@ -200,7 +200,25 @@ class TurkishModelTests(unittest.TestCase):
         model = object.__new__(_Model)
         model.recognizer = Recognizer("qwen", "Good evening.")
         model.turkish = Recognizer("ufak", "iyi akşamlar")
+        model.european = None
         return model, heard
+
+    def test_parakeets_languages_go_to_it_and_qwen_is_never_told_one_it_doesnt_know(self):
+        # 2.9.3: Parakeet TDT 0.6B v3 writes its European languages, better than Qwen.
+        model, heard = self.model()
+        model.european = type(model.turkish)("parakeet", "Good evening.")
+        self.assertEqual(model.decode(array("f", [0.1]), "English"), "Good evening.")
+        self.assertEqual([name for name, *_ in heard], ["parakeet"])  # no gain, no language
+        heard.clear()
+        model.decode(array("f", [0.1]), "Ukrainian")
+        self.assertEqual(heard[0][0], "parakeet")
+        heard.clear()
+        model.decode(array("f", [0.1]), "Japanese")
+        self.assertEqual(heard[0], ("qwen", "language", "Japanese"))
+        heard.clear()
+        model.european = None  # its files not given: Qwen writes, with no language set
+        model.decode(array("f", [0.1]), "Ukrainian")
+        self.assertNotIn("language", [key for _name, key, *_ in heard])
 
     def test_turkish_goes_to_ufak_louder_and_starts_with_a_capital(self):
         model, heard = self.model()

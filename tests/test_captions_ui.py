@@ -81,9 +81,21 @@ class LanguagesTests(unittest.TestCase):
         self.assertEqual(qwen_name("per"), "Persian")
 
     def test_codes_that_name_none_of_them(self):
-        for given in ("", None, "und", "mul", "qaa", "uk", "ukr", "Swahili", "xx"):
+        for given in ("", None, "und", "mul", "qaa", "Swahili", "xx"):
             with self.subTest(given):
                 self.assertIsNone(qwen_name(given))
+
+    def test_the_european_languages_only_parakeet_writes(self):
+        # 2.9.3: a sound track in Ukrainian (or one chosen by hand) is written by Parakeet.
+        from services.captions.languages import CAPTION_LANGUAGES, EUROPEAN, QWEN_LANGUAGES
+
+        for given in ("uk", "ukr", "uk-UA", "Українська"):
+            with self.subTest(given):
+                self.assertEqual(qwen_name(given), "Ukrainian")
+        self.assertEqual(own_name("Slovak"), "Slovenčina")
+        self.assertNotIn("Ukrainian", QWEN_LANGUAGES)  # never Qwen's language lock
+        self.assertIn("Ukrainian", CAPTION_LANGUAGES)
+        self.assertTrue(set(CAPTION_LANGUAGES) - set(QWEN_LANGUAGES) <= EUROPEAN)
 
     def test_own_names(self):
         self.assertEqual(own_name("Turkish"), "Türkçe")
@@ -1015,7 +1027,8 @@ class CaptionsSettingsTests(base.WindowCase):
         dialog = self.dialog()
         self.assertEqual(dialog.ai_captions_model_combo.currentData(), "auto")
         self.assertEqual(dialog.ai_captions_language_combo.currentData(), "auto")
-        self.assertEqual(dialog.ai_captions_language_combo.count(), 31)  # Auto and Qwen's 30
+        # Auto, Qwen's 30 and the 9 only Parakeet writes (2.9.3)
+        self.assertEqual(dialog.ai_captions_language_combo.count(), 40)
         group = dialog.ai_captions_model_combo.parentWidget()
         self.assertEqual(group.objectName(), "aiCaptionsSettings")
         dialog.ai_captions_model_combo.setCurrentIndex(

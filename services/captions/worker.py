@@ -36,6 +36,7 @@ from typing import Any, Optional
 import urllib.request
 
 from services.captions import guards, text_language
+from services.captions.languages import EUROPEAN, QWEN_LANGUAGES
 from services.captions.pieces import END_PAUSE_S, MAX_PIECE_S, Cutter, Piece
 from services.captions.stream_clock import StreamClock, TsTimes
 
@@ -133,6 +134,20 @@ class _Model:
                 num_threads=min(2, threads),
                 model_type="nemo_transducer",
             )
+        # 2.9.3: NVIDIA's Parakeet TDT 0.6B v3 writes the European languages it knows, better
+        # and four to five times faster than Qwen (FLEURS); Qwen still tells the language.
+        self.european: Any = None
+        european = spec.get("european")
+        if paths and european:
+            folder = Path(european)
+            self.european = sherpa_onnx.OfflineRecognizer.from_transducer(
+                encoder=str(folder / "encoder.int8.onnx"),
+                decoder=str(folder / "decoder.int8.onnx"),
+                joiner=str(folder / "joiner.int8.onnx"),
+                tokens=str(folder / "tokens.txt"),
+                num_threads=threads,
+                model_type="nemo_transducer",
+            )
         config = sherpa_onnx.VadModelConfig()
         config.silero_vad.model = spec["vad"]
         config.silero_vad.threshold = float(spec.get("vad_threshold", 0.5))
@@ -145,6 +160,8 @@ class _Model:
             self.decode(array("f", bytes(16000 * 4)), "")
             if self.turkish is not None:
                 self.decode(array("f", bytes(16000 * 4)), TURKISH)
+            if self.european is not None:
+                self.decode(array("f", bytes(16000 * 4)), "English")
 
     def is_speech(self, window: array) -> bool:
         with self._lock:
@@ -156,8 +173,13 @@ class _Model:
             stream.accept_waveform(16000, array("f", (v * _TURKISH_GAIN for v in samples)))
             self.turkish.decode_stream(stream)
             return str(stream.result.text).strip()  # its case: `_Run.sentence_case`
+        if language in EUROPEAN and self.european is not None:
+            stream = self.european.create_stream()
+            stream.accept_waveform(16000, samples)
+            self.european.decode_stream(stream)
+            return str(stream.result.text).strip()  # its own capitals and full stops
         stream = self.recognizer.create_stream()
-        if language:
+        if language in QWEN_LANGUAGES:  # not one only Parakeet knows (its files not given)
             stream.set_option("language", language)
         # 2.9.3: as many tokens as the piece's length and its language's script take
         cap = guards.token_cap(len(samples) / 16000, language or None)

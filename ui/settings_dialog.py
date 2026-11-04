@@ -47,7 +47,7 @@ from services import (
     system_open,
 )
 from services.account_check import check_account
-from services.captions.languages import QWEN_LANGUAGES, own_name
+from services.captions.languages import CAPTION_LANGUAGES, own_name
 from services.config_manager import ConfigManager
 from services.epg_view import (
     GUIDE_OFFSET_KEY,
@@ -817,7 +817,7 @@ class OptionsDialog(QDialog):
         self.ai_captions_language_combo = QComboBox(group)
         self.ai_captions_language_combo.setObjectName("aiCaptionsLanguage")
         self.ai_captions_language_combo.addItem(auto_language_text(), "auto")
-        for name in sorted(QWEN_LANGUAGES, key=lambda name: own_name(name).casefold()):
+        for name in sorted(CAPTION_LANGUAGES, key=lambda name: own_name(name).casefold()):
             self.ai_captions_language_combo.addItem(own_name(name), name)
         self.ai_captions_language_combo.setCurrentIndex(
             max(

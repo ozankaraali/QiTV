@@ -111,6 +111,7 @@ class ModelPaths:
     tokenizer: Path  # a folder
     vad: Path
     turkish: Path  # ufakzeka-kulak's folder (its transducer's files, TURKISH_FILES)
+    european: Path  # 2.9.3: Parakeet TDT 0.6B v3's folder (EUROPEAN_FILES)
 
 
 # ---- what is downloaded -------------------------------------------------------------------
@@ -249,6 +250,42 @@ TURKISH_FILES = (
         "tokens.txt",
         10138,
         "af3092629f214e420ee9a4b563663227cd1998cdd23e1a08a41d489142499c03",
+    ),
+)
+
+
+# 2.9.3: NVIDIA's Parakeet TDT 0.6B v3 (CC-BY-4.0), 25 European languages, sherpa-onnx's int8
+# export. Sizes and sha256 as Hugging Face served them on 2026-11-04 (revision 2bda32ec, the
+# files of sherpa-onnx's asr-models release).
+_PARAKEET = (
+    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/"
+    "2bda32ec70b097a55adaa07d9a7173915b43cc78/"
+)
+EUROPEAN_FOLDER = "parakeet-tdt-0.6b-v3"
+EUROPEAN_FILES = (
+    RemoteFile(
+        _PARAKEET + "encoder.int8.onnx",
+        "encoder.int8.onnx",
+        652184281,
+        "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247",
+    ),
+    RemoteFile(
+        _PARAKEET + "decoder.int8.onnx",
+        "decoder.int8.onnx",
+        11845275,
+        "179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e",
+    ),
+    RemoteFile(
+        _PARAKEET + "joiner.int8.onnx",
+        "joiner.int8.onnx",
+        6355277,
+        "3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3",
+    ),
+    RemoteFile(
+        _PARAKEET + "tokens.txt",
+        "tokens.txt",
+        93939,
+        "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
     ),
 )
 
@@ -401,6 +438,7 @@ def model_paths(tier: str, root: Optional[Path] = None) -> ModelPaths:
         tokenizer=folder / "tokenizer",
         vad=base / VAD.path,
         turkish=base / TURKISH_FOLDER,
+        european=base / EUROPEAN_FOLDER,
     )
 
 
@@ -463,6 +501,9 @@ def needed(tier: str, root: Optional[Path] = None) -> list[Download]:
     turkish = base / TURKISH_FOLDER
     for file in TURKISH_FILES:
         downloads.append(Download(turkish, file, ((file.path, file.size),)))
+    european = base / EUROPEAN_FOLDER
+    for file in EUROPEAN_FILES:
+        downloads.append(Download(european, file, ((file.path, file.size),)))
     info = TIERS[tier]
     folder = base / info.folder
     for file in info.files:

@@ -11,7 +11,7 @@ import tomllib
 import orjson as json
 
 from services.atomic_write import atomic_write, set_aside
-from services.captions.languages import QWEN_LANGUAGES
+from services.captions.languages import CAPTION_LANGUAGES
 from services.config_writer import ConfigWriter
 from services.free_channels import ALL_NAME, ALL_URL
 from services.multikeydict import MultiKeyDict
@@ -543,12 +543,13 @@ class ConfigManager:
     # 2.9, optional (older builds ignore them): AI captions. The speech model's tier ("auto":
     # chosen by the computer's speed; "small": faster, 0.6B; "large": more accurate, 1.7B), and
     # the language they hear when nothing names it ("auto": the speech model's own guess, else
-    # one of services.captions.languages.QWEN_LANGUAGES, Qwen's English names).
+    # one of services.captions.languages.CAPTION_LANGUAGES: Qwen's English names, and 2.9.3's
+    # European ones only Parakeet writes; an older build reads those as "auto").
     ai_captions_model = _config_property(
         "ai_captions_model", "auto", coerce=_one_of(AI_CAPTIONS_MODELS, "auto")
     )
     ai_captions_language = _config_property(
-        "ai_captions_language", "auto", coerce=_one_of(("auto", *QWEN_LANGUAGES), "auto")
+        "ai_captions_language", "auto", coerce=_one_of(("auto", *CAPTION_LANGUAGES), "auto")
     )
     # 2.9: the AI captions language the viewer chose per channel ("<source>|<channel>": a
     # Qwen language name); optional, so older builds keep reading the config.
@@ -556,7 +557,7 @@ class ConfigManager:
         "ai_captions_picks",
         {},
         coerce=lambda v: (
-            {str(k): str(n) for k, n in v.items() if str(n) in QWEN_LANGUAGES}
+            {str(k): str(n) for k, n in v.items() if str(n) in CAPTION_LANGUAGES}
             if isinstance(v, dict)
             else {}
         ),
