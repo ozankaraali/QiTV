@@ -170,14 +170,16 @@ class OverlayHost(QWidget):
         # shows; once it changed, all it shows is painted at once, in the same frame as the
         # mask (2.9: painted later, the owner saw a caption, then stretched leftovers of older
         # ones and flicker, after a window size change most), and after a resize all of it.
+        # 2.9.3: the last overlay to hide is cleared too (the owner: as a caption went at a
+        # silence, the controls showed "for a snap second", and old captions now and then):
+        # before, nothing was, and a cleared mask then showed the window's whole buffers for a
+        # frame before it hid, with every older overlay still in them. With nothing to show,
+        # the mask stays as it was, all of it cleared, and the window hides.
         old = self.mask() if not self.mask().isEmpty() else QRegion(self.rect())
-        leaving = old.subtracted(region) if not region.isEmpty() else QRegion()
+        leaving = old.subtracted(region)
         if not leaving.isEmpty() and self.isVisible():
             self.repaint(leaving)
         if region.isEmpty():
-            self.clearMask()
-            if repaint and self.isVisible():
-                self.repaint()
             return
         changed = region != self.mask()
         self.setMask(region)

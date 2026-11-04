@@ -155,6 +155,26 @@ class OverlayHostTests(HostCase):
             self.assertTrue(mask_then.contains(QRect(300, 50, 300, 120)))  # once it shows there
             self.assertNotIn("update", [n for n, _r, _m in calls])  # never a frame later
 
+    def test_the_last_overlay_to_hide_is_cleared_and_never_shows_the_whole_window(self):
+        # 2.9.3, the owner: when a caption went at a silence, the controls flashed "for a snap
+        # second", and old captions now and then. The last overlay to hide was never cleared,
+        # and the mask was cleared: the window's whole buffers showed for a frame.
+        self.panel.show()
+        QTest.qWait(20)
+        calls = []
+        real_repaint = self.host.repaint
+
+        def repaint(*args):
+            calls.append((QRegion(args[0]) if args else None, QRegion(self.host.mask())))
+            real_repaint(*args)
+
+        with mock.patch.object(self.host, "repaint", side_effect=repaint):
+            self.panel.hide()
+        region, mask_then = calls[0]
+        self.assertEqual(region.boundingRect(), QRect(0, 0, 200, 100))  # cleared ...
+        self.assertTrue(mask_then.contains(QRect(0, 0, 200, 100)))  # ... while it showed
+        self.assertFalse(self.host.mask().isEmpty())  # never the whole window, unmasked
+
     def test_a_resize_paints_all_it_shows_at_once(self):
         # 2.9: the owner's window left fullscreen; leftovers of older captions showed stretched.
         self.panel.show()
