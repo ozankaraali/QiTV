@@ -494,7 +494,20 @@ class LiveControls(QObject):
         # its own, so no limit to refuse it.
         borrowed = self._borrow(target.item, name, self._tuner.purpose)
         if borrowed is None and self.refuse_over_limit(target):
+            logger.info(
+                "Not tuning %s (%s): its provider has no stream to spare.",
+                _log_name(target.item),
+                name,
+            )
             return False
+        # 2.9.7: each tune named in the log (no address): what was watched, and how.
+        logger.info(
+            "Tuning %s (%s) in the %s player: %s.",
+            _log_name(target.item),
+            name,
+            self._tuner.purpose,
+            "the scheduled recording's stream" if borrowed is not None else "a stream of its own",
+        )
         self._tuner.tune(self.live_start(target, url), name, self.limit(target.item), borrowed)
         return True
 
@@ -976,3 +989,8 @@ class LiveControls(QObject):
             timeline = self.catchup.extend(timeline, target)  # into an archive, if any
             self._ticks = self._programme_ticks(target.item, timeline)
             transport.update_timeline(timeline, self._ticks)
+
+
+def _log_name(item: Optional[dict]) -> str:
+    """A channel's name for the log (2.9.7), quoted; never its address."""
+    return f"“{str((item or {}).get('name') or '?')[:80]}”"

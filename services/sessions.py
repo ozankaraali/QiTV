@@ -424,6 +424,12 @@ class SessionManager(QObject):
             return None
         self._aside.append(name)
         self._set_background(slot, True)
+        logger.info(
+            "The %s player records “%s” on in the background; the %s player takes its place.",
+            name,
+            str((slot.channel or {}).get("name") or "?")[:80],
+            fresh.name,
+        )
         if slot is self._large:
             users_mute = self._muted[name]
             self._large = fresh
@@ -443,6 +449,11 @@ class SessionManager(QObject):
         if self._grid or name not in self._aside:
             return None
         slot, old = self._slot(name), self._large
+        logger.info(
+            "The %s player recording “%s” in the background is the big picture again.",
+            name,
+            str((slot.channel or {}).get("name") or "?")[:80],
+        )
         self._aside.remove(name)
         self._set_background(slot, False)
         users_mute = self._muted[old.name]
@@ -467,6 +478,11 @@ class SessionManager(QObject):
         old = self._small
         self._stop(old)
         slot = self._slot(name)
+        logger.info(
+            "The %s player recording “%s” in the background shows small.",
+            name,
+            str((slot.channel or {}).get("name") or "?")[:80],
+        )
         self._aside.remove(name)
         self._set_background(slot, False)
         self._small = slot
@@ -755,6 +771,17 @@ class SessionManager(QObject):
         slot.channel = channel
         limit = self._budget.limit_for(provider, xtream_max)
         name = str(provider.get("name", ""))
+        logger.info(  # 2.9.7: each tune named in the log (no address)
+            "Opening “%s” (%s) small in the %s player: %s.",
+            str(channel.get("name") or "?")[:80],
+            name,
+            slot.name,
+            (
+                "the scheduled recording's stream"
+                if start_kwargs.get("borrowed") is not None
+                else "a stream of its own"
+            ),
+        )
         self._drop_pending()
         self._pending = _Open(slot.name, name, limit, dict(start_kwargs))
         self._proceed()

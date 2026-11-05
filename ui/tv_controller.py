@@ -1975,6 +1975,7 @@ class TVController(QObject):
             self._current, self._cid = kept
             target = replace(target, archive_at=None, archive_until=None)
         if target.live and self.multiview_shown():
+            logger.info("Tuning “%s” (%s) in a multiview tile.", _log_name(item), provider_name)
             self._open_in_tile(target, url, previous, provider_name)
             if self.overlays.transport.isVisible():
                 self._live_controls.show_live_transport(target)
@@ -1998,6 +1999,11 @@ class TVController(QObject):
                 target = replace(target, max_height=None)  # 2.8: asked once (see above)
                 self._current, self._cid = target, None
                 session = self.session  # the large picture's, whatever swaps before it opens
+                logger.info(
+                    "Tuning “%s” (%s) in the big picture: played directly, without the buffer.",
+                    _log_name(item),
+                    provider_name,
+                )
 
                 def play_direct() -> None:
                     self._prepare(session, target, previous)
@@ -4282,3 +4288,8 @@ class TVController(QObject):
         logger.warning("Could not %s: %s (%s)", what, scrub(error), type(error).__name__)
         # The frames only: the exception's text can carry a provider URL with credentials.
         logger.debug("Could not %s:\n%s", what, safe_traceback(error))
+
+
+def _log_name(item: Optional[dict]) -> str:
+    """A channel's name for the log (2.9.7); never its address."""
+    return str((item or {}).get("name") or "?")[:80]
