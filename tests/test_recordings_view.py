@@ -195,6 +195,32 @@ class CornerPlayerTests(unittest.TestCase):  # the Library's corner player cover
         self.assertGreater(view.button_rects(0)[0][1].left(), 440)
 
 
+class FindViewTests(unittest.TestCase):  # 2.9.7: the rail's find, each part headed
+    def test_each_part_has_its_own_header_and_an_empty_one_is_left_out(self):
+        view = RecordingsView()
+        self.addCleanup(view.deleteLater)
+        view.resize(1280, 720)
+        recorded = [entry(f"file:/r/{k}.ts", desk.RECORDED, f"R{k}") for k in range(3)]
+        found = [entry("found:0", desk.FOUND, "Late News", b("record"), b("record_series"))]
+        view.set_content(recorded + found, [], "")
+        view.set_section((desk.RECORDED, desk.FOUND), headed=True)
+        self.assertEqual(view.header_text(), "")
+        self.assertEqual(view.section_headers(), ["Recorded  ·  3", "In the guide  ·  1"])
+        self.assertEqual(view.current_key(), "file:/r/0.ts")  # the first entry, not a header
+        view.set_content(found, [], "")
+        self.assertEqual(view.section_headers(), ["In the guide  ·  1"])
+        self.assertNotIn("empty", [block.kind for block in view._blocks])  # no "No recordings"
+        view.grab()
+
+    def test_sections_together_say_their_last_as_the_filter(self):
+        view = RecordingsView()
+        self.addCleanup(view.deleteLater)
+        said = []
+        view.filterChanged.connect(said.append)
+        view.set_section((desk.NOW, desk.COMING))  # a tuple can't cross a str signal
+        self.assertEqual(said, [desk.COMING])
+
+
 if __name__ == "__main__":
     unittest.main()
 

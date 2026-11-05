@@ -460,7 +460,9 @@ class LibraryController(QObject):
         self._screen.set_recordings_content("find")
         self._fill_found()
         # its first row once per query: what a slice finds later keeps the row the keys are on
-        self._screen.rec_found.set_section((recording_desk.RECORDED, recording_desk.FOUND))
+        self._screen.rec_found.set_section(
+            (recording_desk.RECORDED, recording_desk.FOUND), headed=True
+        )
         self._guide_search.start(query, self.find_sources())
 
     def _on_found(self, hits: list) -> None:

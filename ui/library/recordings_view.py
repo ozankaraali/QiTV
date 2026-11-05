@@ -153,6 +153,7 @@ class RecordingsView(TooltipWidget):
         self._filter = desk.ALL
         self._section_alone = False  # 2.9.7: one section as a row of the tab's rail
         self._together: tuple[str, ...] = ()  # ... with those shown before it
+        self._headed = False  # 2.9.7: the find: each part its own header, no page header
         self._shown: list[desk.Entry] = []
         self._blocks: list[_Block] = []
         self._entry_blocks: dict[int, _Block] = {}  # each shown entry's block, by its index
@@ -238,27 +239,32 @@ class RecordingsView(TooltipWidget):
     def section_filter(self) -> str:
         return self._filter
 
-    def set_section(self, section: "str | tuple[str, ...]") -> None:
+    def set_section(self, section: "str | tuple[str, ...]", headed: bool = False) -> None:
         """2.9.7: one section alone (a row of the Recordings tab's rail), or a few in order
         (Coming up: what records or waits now, then the airings): no title, summary or
         chips, a header naming the last, the streams only on Folders & streams; the keys
-        start on its first row, ↑ from it goes to the top bar, Esc to the rail."""
+        start on its first row, ↑ from it goes to the top bar, Esc to the rail. `headed`
+        (the rail's find): each section with entries under its own name and count, one
+        without left out, and no header above them."""
         sections = (section,) if isinstance(section, str) else tuple(section)
         if not sections or any(s not in desk.SECTIONS + (desk.FOUND,) for s in sections):
             raise ValueError(f"Unknown section: {section!r}")
         self._section_alone = True
         self._together = sections
+        self._headed = headed
         self._filter = sections[-1]
         self._scroll = 0.0
         self._chips_at = None
         self._relayout()
         self._row = 0 if self._shown else -1
         self._button = self._fit_button(self._row, 0)
-        self.filterChanged.emit(section)
+        self.filterChanged.emit(self._filter)  # the last of those together (a str)
         self.update()
 
     def header_text(self) -> str:
         """2.9.7: the section's name and its count, as the header of the section alone."""
+        if self._headed:
+            return ""
         name = translate(desk.SECTION_TITLES.get(self._filter, "")) if self._filter else ""
         counts = self.counts()
         count = sum(counts.get(s, 0) for s in (self._together or (self._filter,)))
@@ -274,6 +280,7 @@ class RecordingsView(TooltipWidget):
         if section == self._filter:
             return
         self._filter = section
+        self._headed = False
         self._scroll = 0.0
         if self._row >= 0:
             self._row = 0
@@ -283,6 +290,10 @@ class RecordingsView(TooltipWidget):
         self._button = self._fit_button(self._row, 0)
         self.filterChanged.emit(section)
         self.update()
+
+    def section_headers(self) -> list[str]:
+        """The headers within the list, in order (the find's parts; All's sections)."""
+        return [self._section_text(block) for block in self._blocks if block.kind == "header"]
 
     def counts(self) -> dict[str, int]:
         """Each section's entries (rows of buttons alone not counted)."""
@@ -456,6 +467,8 @@ class RecordingsView(TooltipWidget):
         units = self._units()
         if self._section_alone:  # 2.9.7: its header, as the Library grid's
             height = QFontMetricsF(units.font(HEADER_U, QFont.Weight.Bold)).height()
+            if self._headed:  # the find: its parts' headers alone
+                height = 0.0
             return QRectF(self._left(), HEADER_TOP_U * units.u, self._width(), height)
         height = QFontMetricsF(units.font(TITLE_U, QFont.Weight.Bold)).height()
         return QRectF(self._left(), TOP_U * units.u, self._width(), height)
@@ -544,7 +557,7 @@ class RecordingsView(TooltipWidget):
         for section in wanted:
             own = [e for e in self._entries if e.section == section]
             listed = [e for e in own if e.title]
-            if self._filter == desk.ALL and not own:
+            if (self._filter == desk.ALL or self._headed) and not own:
                 continue
             if self._filter == desk.ALL and not listed and section in (desk.NOW, desk.ATTENTION):
                 continue  # nothing to say: All leaves them out
@@ -552,6 +565,13 @@ class RecordingsView(TooltipWidget):
                 name = translate(desk.SECTION_TITLES[section])
                 self._blocks.append(_Block("header", y, HEADER_ROW_U * u, section, name))
                 y += HEADER_ROW_U * u
+            elif self._headed:  # the first where the page's header would be
+                name = translate(desk.SECTION_TITLES[section])
+                units = self._units()
+                first = QFontMetricsF(units.font(HEADER_U, QFont.Weight.Bold)).height()
+                height = first if y == 0 else HEADER_ROW_U * u
+                self._blocks.append(_Block("header", y, height, section, name))
+                y += height + (0.6 * u if y == 0 else 0.0)
             quiet = section == desk.NOW and len(wanted) > 1  # Coming up: the airings say it
             if not listed and EMPTY_TEXTS.get(section) and not quiet:
                 text = translate(EMPTY_TEXTS[section])
@@ -878,16 +898,21 @@ class RecordingsView(TooltipWidget):
                 p.setPen(qcolor(PALETTE.text, 0.85))
             p.drawText(rect, Qt.AlignCenter, self.chip_text(section))
 
+    def _section_text(self, block: _Block) -> str:
+        count = self.counts()[block.section]
+        if not count or block.section == desk.PLACES:
+            return block.text
+        return f"{block.text}  ·  {number(count)}"
+
     def _paint_section(self, p: QPainter, units: Units, block: _Block, top: float) -> None:
         rect = QRectF(self._left(), top, self._width(), block.h)
-        p.setFont(units.font(1.25, QFont.Weight.DemiBold))
-        p.setPen(qcolor(PALETTE.text, 0.85))
-        count = self.counts()[block.section]
-        text = (
-            block.text
-            if not count or block.section == desk.PLACES
-            else f"{block.text}  ·  {number(count)}"
-        )
+        if self._headed:  # the find's parts: as the page's own header
+            p.setFont(units.font(HEADER_U, QFont.Weight.Bold))
+            p.setPen(qcolor(PALETTE.text))
+        else:
+            p.setFont(units.font(1.25, QFont.Weight.DemiBold))
+            p.setPen(qcolor(PALETTE.text, 0.85))
+        text = self._section_text(block)
         p.drawText(rect.adjusted(0.4 * units.u, 0, 0, 0), Qt.AlignLeft | Qt.AlignBottom, text)
 
     def _paint_entry(self, p: QPainter, units: Units, index: int) -> None:
