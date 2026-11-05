@@ -171,6 +171,20 @@ class RecordingsDeskTests(unittest.TestCase):
         self.assertEqual([i["id"] for i in self.schedule.items()], [item["id"]])
         self.assertNotIn(first.key, self.keys())
 
+    def test_skip_goes_through_the_scheduler_when_qitv_records(self):  # 2.9.7 review
+        item = self.schedule.add_timer(NEWS, begin=21 * 60, minutes=60, days=range(7))
+        asked = []
+        self.window.scheduler = SimpleNamespace(
+            skip_airing=lambda item_id, at: asked.append((item_id, at)) or "skipped",
+            recording_details=lambda: [],
+            waiting=lambda: [],
+            hosted_players=lambda: set(),
+        )
+        self.show()
+        first = next(e for e in self.view.entries() if e.key.startswith(f"airing:{item['id']}@"))
+        self.view.buttonClicked.emit(first.key, desk.SKIP)
+        self.assertEqual(asked, [(item["id"], float(first.key.rpartition("@")[2]))])
+
     def test_remove_on_a_rule_cancels_it(self):  # 2.9.7
         item = self.schedule.add_series(NEWS, "Late news")
         self.show()

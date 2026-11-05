@@ -482,6 +482,33 @@ class RecordingScheduler(QObject):
             self.schedule.started(job)  # this airing is never due again
         self.changed.emit()
 
+    def skip_airing(self, item_id: str, start: float) -> str:
+        """2.9.7: the airing of item `item_id` starting at `start` (unix) is not recorded; the
+        item goes on. One waiting for a stream waits no more and is never said missed; one
+        whose stream or link is on its way is let go; one that records stops (its file kept,
+        as the REC sign's Stop). "stopped" when it recorded, else "skipped"."""
+        key = f"{item_id}@{int(start)}"
+        self._tries.pop(key, None)
+        self._said_busy.discard(key)
+        for run in list(self._runs):
+            if run.job.key != key or run.stopping:
+                continue
+            if run.rid and not run.ended:
+                run.user_stopped = True
+                self._stop(run)
+                self.changed.emit()
+                return "stopped"
+            run.user_stopped = True  # not recording yet: nothing to keep, nothing to say
+            run.link_id = 0
+            if run.sid:
+                run.stopping = True
+                self._engine.close_session(run.sid)  # `_on_closed` releases it
+            else:
+                self._release(run)
+        self.schedule.skip(item_id, start)
+        self.changed.emit()
+        return "skipped"
+
     def edit(self, item_id: str, **fields: Any) -> Optional[dict]:
         """2.9.7: the Recordings page's Edit (`Schedule.edit`'s fields): a try under way of
         the item is dropped (it is due at its new time); what records now is never edited (the

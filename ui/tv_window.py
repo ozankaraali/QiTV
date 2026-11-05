@@ -928,7 +928,9 @@ class TVWindow(QMainWindow):
         schedule = self.recording_schedule
         name = str(channel.get("name") or "")
         if series:
-            schedule.add_series(channel, programme.title, account=self._account_of(channel))
+            item = schedule.add_series(channel, programme.title, account=self._account_of(channel))
+            # 2.9.7: this airing records again if it was skipped
+            schedule.unskip(str(item.get("id") or ""), programme.start.timestamp())
             # i18n: a toast: every airing of the programme on the channel will be recorded
             text = tr(
                 "Every “{title}” on {channel} will be recorded.",
@@ -1006,15 +1008,24 @@ class TVWindow(QMainWindow):
         if item.get("kind") == "once":
             self.cancel_scheduled(str(item.get("id") or ""))
             return
-        self.recording_schedule.skip(str(item.get("id") or ""), programme.start.timestamp())
-        self.screens.notify(
+        item_id, start = str(item.get("id") or ""), programme.start.timestamp()
+        if self.scheduler is not None:  # it ends a wait, or stops the airing that records
+            done = self.scheduler.skip_airing(item_id, start)
+        else:
+            self.recording_schedule.skip(item_id, start)
+            done = "skipped"
+        time = programme.start.astimezone().strftime("%H:%M")
+        if done == "stopped":
+            # i18n: a toast: one airing of a series stopped recording ({title}: its own)
+            text = tr("“{title}” stopped recording; the series goes on.", title=programme.title)
+        else:
             # i18n: a toast: one airing of a series won't be recorded ({title}, {time}: its own)
-            tr(
+            text = tr(
                 "“{title}” at {time} won't be recorded; the series goes on.",
                 title=programme.title,
-                time=programme.start.astimezone().strftime("%H:%M"),
+                time=time,
             )
-        )
+        self.screens.notify(text)
         self._schedule_changed()
 
     def cancel_scheduled(self, item_id: str) -> None:

@@ -74,3 +74,17 @@ class RecordingsIndexTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PathKeyTests(unittest.TestCase):  # Stage 1 review: one file, however its path is written
+    def setUp(self):
+        self.folder = Path(tempfile.mkdtemp(prefix="qitv-index-keys-"))
+        self.addCleanup(shutil.rmtree, self.folder, True)
+
+    def test_a_path_written_another_way_finds_the_same_entry(self):
+        index = RecordingsIndex(str(self.folder / FILE_NAME), write=rs.write_now)
+        decomposed = "/r/Café Channel 2026-11-05 19.00.ts"  # NFD, as some volumes list it
+        index.note("/r/./Café Channel 2026-11-05 19.00.ts", **NEWS)
+        self.assertEqual(index.get(decomposed)["title"], "Evening News")
+        index.forget(decomposed)
+        self.assertIsNone(index.get("/r/Café Channel 2026-11-05 19.00.ts"))

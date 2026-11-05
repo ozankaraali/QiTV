@@ -177,6 +177,17 @@ class AiringRowTests(unittest.TestCase):  # 2.9.7: Coming up, one row per airing
         row, _add = desk.coming_entries([a], local(26, 12), limits={})
         self.assertEqual([b.name for b in row.buttons], [desk.EDIT, desk.CANCEL])
 
+    def test_rows_name_the_provider_only_with_two_providers_or_more(self):  # review
+        a = once("a", NEWS, local(26, 20), local(26, 21))
+        row, _add = desk.coming_entries([a], local(26, 12), limits={})
+        self.assertNotIn(" · P", row.detail)
+        row, _add = desk.coming_entries([a], local(26, 12), limits={}, name_providers=True)
+        self.assertTrue(row.detail.endswith(" · P"))
+        rules = desk.rule_entries([self.TIMER], local(26, 12))
+        self.assertNotIn(" · P", rules[0].detail)
+        rules = desk.rule_entries([self.TIMER], local(26, 12), name_providers=True)
+        self.assertTrue(rules[0].detail.endswith(" · P"))
+
     def test_a_skipped_airing_is_not_listed(self):
         skipped = {("t", int(local(26, 21)))}
         entries = desk.coming_entries(

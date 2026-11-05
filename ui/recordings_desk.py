@@ -326,13 +326,24 @@ class RecordingsDesk(QObject):
             recording_ids=scheduled_ids,
             guide=self._guide,
             skipped=skipped,
+            name_providers=self._mixed(),
         )
-        entries += desk.rule_entries(items, now, guide=self._guide)  # 2.9.7
+        entries += desk.rule_entries(  # 2.9.7
+            items, now, guide=self._guide, skipped=skipped, name_providers=self._mixed()
+        )
         outcomes = self._schedule().outcomes()
         entries += desk.attention_entries(outcomes, failure_reason, self._listed_file)
         entries += desk.recorded_entries(files, many_places=len(places) > 1)
         entries += desk.place_entries(self._places(files, places), os.path.expanduser("~"))
         return entries
+
+    def _mixed(self) -> bool:
+        """Two providers or more: rows name their provider (one: none, as in 2.0)."""
+        catalog = getattr(self._window, "catalog", None)
+        try:
+            return catalog is not None and len(catalog.provider_names()) > 1
+        except Exception:  # a catalog being made: none named
+            return False
 
     def entries_of(self, section: str) -> list[desk.Entry]:
         """2.9.7: one section's entries (a row of the Recordings tab's rail)."""
@@ -456,7 +467,11 @@ class RecordingsDesk(QObject):
                 start = float(at)
             except ValueError:
                 return
-            self._schedule().skip(item_id, start)
+            scheduler = self._scheduler()
+            if scheduler is not None:  # it ends a wait, or stops the airing that records
+                scheduler.skip_airing(item_id, start)
+            else:
+                self._schedule().skip(item_id, start)
             changed = getattr(self._window, "schedule_changed", None)
             if callable(changed):
                 changed()  # the guides and the scheduler follow

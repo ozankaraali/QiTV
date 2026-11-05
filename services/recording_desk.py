@@ -511,6 +511,7 @@ def coming_entries(
     guide: Optional[Callable[[dict, float], Sequence[Programme]]] = None,
     days: int = DAYS,
     skipped: Callable[[str, float], bool] = lambda item_id, start: False,
+    name_providers: bool = False,
 ) -> list[Entry]:
     """2.9.7: one row per airing in the next `days` (a series' as its guide says, a timer's on
     its days), soonest first, skipped ones (`skipped(item_id, start)`) left out, with clashes;
@@ -532,7 +533,9 @@ def coming_entries(
     for item, times in timed:
         records_now = str(item.get("id")) in recording
         for start, stop in times:
-            entries.append(_airing_entry(item, start, stop, now, found, records_now))
+            entries.append(
+                _airing_entry(item, start, stop, now, found, records_now, name_providers)
+            )
     entries.sort(key=lambda e: e.sort)
     entries.append(
         Entry(
@@ -553,6 +556,7 @@ def _airing_entry(
     now: float,
     found: Mapping[str, Clash],
     records_now: bool,
+    name_providers: bool = False,
 ) -> Entry:
     kind = item.get("kind")
     item_id = str(item.get("id") or "")
@@ -570,7 +574,7 @@ def _airing_entry(
     else:
         pill, buttons = "series", (button(SKIP, enabled=not on_now),)
     detail = f"{short_when(start)}–{clock(stop)} · {channel}"
-    if provider and provider not in detail:
+    if name_providers and provider and provider not in detail:  # one provider: none named
         detail = f"{detail} · {provider}"
     notes: list[str] = []
     if on_now:
@@ -615,6 +619,8 @@ def rule_entries(
     zone: Optional[tzinfo] = None,
     guide: Optional[Callable[[dict, float], Sequence[Programme]]] = None,
     days: int = DAYS,
+    skipped: Callable[[str, float], bool] = lambda item_id, start: False,
+    name_providers: bool = False,
 ) -> list[Entry]:
     """2.9.7: Series & timers: each series and each timer once, with its next airing, Edit… (a
     timer) and Remove; the last row adds a timer."""
@@ -625,10 +631,11 @@ def rule_entries(
             continue
         channel = str((item.get("channel") or {}).get("name") or "")
         provider = str(item.get("provider") or "")
+        item_id = str(item.get("id") or "")
         upcoming = [
             start
             for start, _stop in airings(item, now, days=days, zone=zone, guide=guide)
-            if start - rs.PRE_S > now
+            if start - rs.PRE_S > now and not skipped(item_id, start)
         ]
         buttons: tuple[Button, ...]
         if kind == rs.SERIES:
@@ -637,7 +644,7 @@ def rule_entries(
         else:
             detail = timer_text(dict(item))
             pill, buttons = "repeats", (button(EDIT), button(REMOVE_RULE, DANGER))
-        if provider and provider not in detail:
+        if name_providers and provider and provider not in detail:  # one provider: none named
             detail = f"{detail} · {provider}"
         if upcoming:
             note = translate(NEXT_TEXT, when=short_when(upcoming[0]))

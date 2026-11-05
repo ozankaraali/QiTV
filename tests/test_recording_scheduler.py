@@ -577,6 +577,48 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(item_id, self.schedule.items()[0]["id"])
         self.scheduler.shutdown()
 
+    # ---- 2.9.7: one airing skipped (Stage 1 review) -----------------------------------------------
+
+    def series_now(self):
+        """A series whose airing at 20:30 is in its window now (it airs on the guide)."""
+        item = self.schedule.add_series(CHANNEL, "The News")
+        show = programme("The News", 30)
+        self.catalogs.programmes = lambda channel, now, limit=8: [show]
+        return item, show.start.timestamp()
+
+    def test_skipping_an_airing_waiting_for_a_stream_ends_its_wait_unsaid(self):
+        held = self.budget.request("P", 1, purpose="main")
+        item, start = self.series_now()
+        self.scheduler.tick()
+        key = f"{item['id']}@{int(start)}"
+        self.assertEqual([job.key for job, _why in self.scheduler.waiting()], [key])
+        self.assertEqual(self.scheduler.skip_airing(item["id"], start), "skipped")
+        self.assertEqual(self.scheduler.waiting(), [])
+        self.assertTrue(self.schedule.is_skipped(item["id"], start))
+        said = len(self.toasts)
+        self.at(63, 1)  # its window ends: nothing said, nothing noted
+        self.assertEqual(len(self.toasts), said)
+        self.assertEqual(self.schedule.outcomes(), [])
+        self.budget.release(held)
+
+    def test_skipping_an_airing_whose_stream_is_on_its_way_lets_it_go(self):
+        item, start = self.series_now()
+        self.scheduler.tick()  # its link asked for
+        self.assertEqual(self.scheduler.skip_airing(item["id"], start), "skipped")
+        self.catalogs.linkReady.emit(1, CHANNEL["cmd"])
+        self.assertEqual(self.engine.opened, [])  # nothing opens for it
+        self.assertEqual(self.budget.holders("P"), [])
+
+    def test_skipping_an_airing_that_records_stops_it_and_the_series_goes_on(self):
+        item, start = self.series_now()
+        self.scheduler.tick()
+        self.catalogs.linkReady.emit(1, CHANNEL["cmd"])
+        sid = self.engine.opened[0][0]
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.scheduler.skip_airing(item["id"], start), "stopped")
+        self.assertEqual(self.engine.stops, [sid])  # its file is kept
+        self.assertEqual([i["id"] for i in self.schedule.items()], [item["id"]])
+
     # ---- 2.9.7: watching what records, with no second stream ------------------------------------
 
     LISTED = {"id": "7", "name": "News One", "cmd": "http://panel.test/live/u/p/7.ts"}

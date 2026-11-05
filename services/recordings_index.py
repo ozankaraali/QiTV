@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Callable, Optional
+import unicodedata
 
 from services import recording_schedule as rs
 
@@ -50,7 +52,7 @@ class RecordingsIndex:
         entries = data.get("entries")
         if isinstance(entries, dict):
             self._entries = {
-                str(path): entry for path, entry in entries.items() if isinstance(entry, dict)
+                _key(str(path)): entry for path, entry in entries.items() if isinstance(entry, dict)
             }
 
     def _save(self) -> None:
@@ -77,6 +79,7 @@ class RecordingsIndex:
         """A recording to `path` started: what it holds."""
         if not path:
             return
+        path = _key(path)
         entry: dict[str, Any] = {
             key: str(value or "")
             for key, value in zip(_FIELDS, (title, channel, provider, channel_id, logo))
@@ -88,19 +91,25 @@ class RecordingsIndex:
 
     def moved(self, old: str, new: str) -> None:
         """The recording meant for `old` was saved as `new` (the helper's " (2)")."""
-        entry = self._entries.pop(old, None)
+        entry = self._entries.pop(_key(old), None)
         if entry is not None and new:
-            self._entries[new] = entry
+            self._entries[_key(new)] = entry
             self._save()
 
     def forget(self, path: str) -> None:
-        if self._entries.pop(path, None) is not None:
+        if self._entries.pop(_key(path), None) is not None:
             self._save()
 
     def get(self, path: str) -> Optional[dict[str, Any]]:
-        entry = self._entries.get(path)
+        entry = self._entries.get(_key(path))
         return dict(entry) if entry is not None else None
 
 
 def _number(value: Any) -> float:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
+def _key(path: str) -> str:
+    """One key per file, however its path is written: the system's separators and case
+    (Windows), no "." parts, and composed letters (a volume may list "é" decomposed)."""
+    return os.path.normcase(os.path.normpath(unicodedata.normalize("NFC", path)))

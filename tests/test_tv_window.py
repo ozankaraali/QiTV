@@ -1214,6 +1214,42 @@ class SkipAiringWindowTests(WindowCase):  # 2.9.7
         self.assertEqual([i["id"] for i in schedule.items()], [item["id"]])
         self.assertTrue(schedule.is_skipped(item["id"], start.timestamp()))
 
+    def test_the_guide_cancel_on_a_series_airing_goes_through_the_scheduler(self):
+        from datetime import datetime, timedelta
+        from types import SimpleNamespace
+
+        from services.epg_view import Programme
+
+        channel = {"name": "Northwind News", "id": "7", "_provider": "P"}
+        start = datetime.now().astimezone() - timedelta(minutes=5)
+        airing = Programme("Evening News", start, start + timedelta(hours=1), "", None)
+        item = self.window.recording_schedule.add_series(channel, "Evening News")
+        asked = []
+        self.window.scheduler = SimpleNamespace(
+            skip_airing=lambda item_id, at: asked.append((item_id, at)) or "stopped"
+        )
+        self.addCleanup(setattr, self.window, "scheduler", None)
+        notes = []
+        self.window.screens.notify = lambda text, *a, **k: notes.append(text)
+        self.window.cancel_programme(channel, airing)
+        self.assertEqual(asked, [(item["id"], start.timestamp())])
+        self.assertIn("stopped recording", notes[-1])  # it was recording: said so
+
+    def test_record_series_on_a_skipped_airing_brings_it_back(self):  # review
+        from datetime import datetime, timedelta
+
+        from services.epg_view import Programme
+
+        channel = {"name": "Northwind News", "id": "7", "_provider": "P"}
+        start = datetime.now().astimezone() + timedelta(hours=2)
+        airing = Programme("Evening News", start, start + timedelta(hours=1), "", None)
+        schedule = self.window.recording_schedule
+        item = schedule.add_series(channel, "Evening News")
+        schedule.skip(item["id"], start.timestamp())
+        self.window.schedule_programme(channel, airing, True)
+        self.assertFalse(schedule.is_skipped(item["id"], start.timestamp()))
+        self.assertTrue(schedule.is_scheduled(channel, airing))
+
     def test_the_guide_cancel_on_a_one_time_recording_cancels_it(self):
         from datetime import datetime, timedelta
 
