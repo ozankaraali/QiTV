@@ -493,11 +493,20 @@ class RecordingsDesk(QObject):
             self._save(window.config_manager)
         self._view.set_filter(desk.PLACES)
 
+    def records_now(self, item_id: str) -> bool:
+        """Schedule item `item_id` records now (its Edit… waits for its end)."""
+        scheduler = self._scheduler()
+        if scheduler is None:
+            return False
+        return any(detail[5] == item_id for detail in scheduler.recording_details())
+
     def edit(self, item_id: str) -> None:
         """Edit… on a one-time recording or a timer: Record at a time, filled in with it."""
         item = self._schedule().item(item_id)
         if item is None or item.get("kind") not in (rs.ONCE, rs.TIMER):
             return
+        if self.records_now(item_id):
+            return  # as the page's Edit…: not while it records (its window is the recording's)
         channel = str((item.get("channel") or {}).get("name") or "")
         if item.get("kind") == rs.ONCE:
             start = datetime.fromtimestamp(float(item.get("start") or 0))

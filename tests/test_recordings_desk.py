@@ -7,6 +7,7 @@ import shutil
 import tempfile
 from types import SimpleNamespace
 import unittest
+import unittest.mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -122,6 +123,17 @@ class RecordingsDeskTests(unittest.TestCase):
         ((streams, _rect),) = zip(self.view._streams, self.view.stream_rects())
         self.assertEqual((streams.provider, streams.limit), ("P", 1))
         self.assertEqual([u.kind for u in streams.uses], ["probe"])
+
+    def test_edit_waits_while_the_item_records(self):
+        item = self.schedule.add_once(NEWS, self.programme("Late news", -10))
+        details = [("sched:x", "Late news", "News One", 0.0, 0.0, item["id"])]
+        self.window.scheduler = SimpleNamespace(recording_details=lambda: details)
+        self.assertTrue(self.desk.records_now(item["id"]))
+        with unittest.mock.patch("ui.recordings_desk.RecordTimerDialog") as dialog:
+            self.desk.edit(item["id"])  # the right-click's Edit… too: not while it records
+            dialog.assert_not_called()
+        details.clear()
+        self.assertFalse(self.desk.records_now(item["id"]))
 
     def test_its_buttons_cancel_dismiss_play_and_delete(self):
         item = self.schedule.add_once(NEWS, self.programme("Late news", 120))

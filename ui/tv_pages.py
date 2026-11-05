@@ -408,7 +408,8 @@ class TVPages(QObject):
             scheduled = window.recording_schedule.item(item_id) or {}
             if scheduled.get("kind") in ("once", "timer"):  # 2.9.7: its time, days or name
                 edit = translate(desk.BUTTON_TEXTS[desk.EDIT])
-                menu.addAction(edit, lambda: self.recordings_desk.edit(item_id))
+                action = menu.addAction(edit, lambda: self.recordings_desk.edit(item_id))
+                action.setEnabled(not self.recordings_desk.records_now(item_id))
             self._manage_entry(menu, COMING)
             menu.popup(global_pos)
             return

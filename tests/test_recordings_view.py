@@ -2,6 +2,7 @@
 
 import os
 import unittest
+import unittest.mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -146,6 +147,28 @@ class RecordingsViewTests(unittest.TestCase):
         )
         self.view.grab()
         self.assertTrue(self.view.tooltip_at(self.view.stream_rects()[0].center()).startswith("P"))
+
+    def test_a_mouse_move_over_many_recordings_measures_one_card(self):
+        # Hundreds of recorded files: each move over the page measured every card's buttons
+        # and every chip again per card (it grew with the square of the recordings).
+        many = [entry(f"file:/r/{n}.ts", desk.RECORDED, f"R{n}", b("play")) for n in range(400)]
+        self.view.set_content(many, [], "")
+        self.view.chip_rects()  # the chips are placed once for this content and size
+        measured = []
+        real = RecordingsView.button_rects
+
+        def counted(view, index):
+            measured.append(index)
+            return real(view, index)
+
+        rect = self.view.entry_rect(1)  # the second card, on screen
+        with unittest.mock.patch.object(RecordingsView, "button_rects", counted):
+            with unittest.mock.patch.object(RecordingsView, "chip_text") as chip_text:
+                target = self.view._target_at(rect.center())
+        self.assertEqual(target[:2], ("entry", "file:/r/1.ts"))
+        self.assertEqual(measured, [1])
+        chip_text.assert_not_called()
+        self.assertEqual(self.view.counts()[desk.RECORDED], 400)
 
 
 class CornerPlayerTests(unittest.TestCase):  # the Library's corner player covers no button

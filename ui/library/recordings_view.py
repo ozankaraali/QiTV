@@ -152,6 +152,11 @@ class RecordingsView(TooltipWidget):
         self._filter = desk.ALL
         self._shown: list[desk.Entry] = []
         self._blocks: list[_Block] = []
+        self._entry_blocks: dict[int, _Block] = {}  # each shown entry's block, by its index
+        # What every mouse move and paint asks for, made once per content and size: the
+        # sections' counts, and the chips' places (keyed by what they depend on).
+        self._counted: Optional[dict[str, int]] = None
+        self._chips_at: Optional[tuple[tuple, dict[str, QRectF]]] = None
         self._content_h = 0.0
         self._focused = False
         self._row = -1  # -1: the chips; else an entry of `_shown`
@@ -211,6 +216,7 @@ class RecordingsView(TooltipWidget):
         current = self.current_key()
         self._entries = list(entries)
         self._streams = list(streams)
+        self._counted = None
         self._summary = summary
         self._relayout()
         if current is not None:
@@ -247,11 +253,13 @@ class RecordingsView(TooltipWidget):
 
     def counts(self) -> dict[str, int]:
         """Each section's entries (rows of buttons alone not counted)."""
-        found = {section: 0 for section in desk.SECTIONS}
-        for entry in self._entries:
-            if entry.title:
-                found[entry.section] += 1
-        return found
+        if self._counted is None:
+            found = {section: 0 for section in desk.SECTIONS}
+            for entry in self._entries:
+                if entry.title:
+                    found[entry.section] += 1
+            self._counted = found
+        return dict(self._counted)
 
     def chips(self) -> list[str]:
         return [desk.ALL, *desk.SECTIONS]
@@ -428,6 +436,19 @@ class RecordingsView(TooltipWidget):
         return rects
 
     def chip_rects(self) -> dict[str, QRectF]:
+        counts = self.counts()
+        key = (
+            self.width(),
+            self.height(),
+            self._reserve,
+            len(self._streams),
+            tuple(counts[section] for section in desk.SECTIONS),
+        )
+        if self._chips_at is None or self._chips_at[0] != key:
+            self._chips_at = (key, self._lay_chips())
+        return dict(self._chips_at[1])
+
+    def _lay_chips(self) -> dict[str, QRectF]:
         units = self._units()
         u = units.u
         streams = self.stream_rects()
@@ -453,6 +474,7 @@ class RecordingsView(TooltipWidget):
         wanted = desk.SECTIONS if self._filter == desk.ALL else (self._filter,)
         self._shown = []
         self._blocks = []
+        self._entry_blocks = {}
         y = 0.0
         for section in wanted:
             own = [e for e in self._entries if e.section == section]
@@ -471,7 +493,9 @@ class RecordingsView(TooltipWidget):
                 y += EMPTY_H_U * u
             for entry in own:
                 height = self._entry_height(entry, len(self._shown))
-                self._blocks.append(_Block("entry", y, height, section, index=len(self._shown)))
+                block = _Block("entry", y, height, section, index=len(self._shown))
+                self._blocks.append(block)
+                self._entry_blocks[block.index] = block
                 self._shown.append(entry)
                 y += height + CARD_GAP_U * u
         self._content_h = y + 2 * u
@@ -527,7 +551,7 @@ class RecordingsView(TooltipWidget):
 
     def entry_rect(self, index: int) -> Optional[QRectF]:
         """Where entry `index` is painted now (None: not laid out)."""
-        block = next((b for b in self._blocks if b.kind == "entry" and b.index == index), None)
+        block = self._entry_blocks.get(index)
         if block is None:
             return None
         top = self._list_rect().top() + block.y - self._scroll
@@ -583,9 +607,13 @@ class RecordingsView(TooltipWidget):
         for section, rect in self.chip_rects().items():
             if rect.contains(point):
                 return ("chip", section)
-        if not self._list_rect().contains(point):
+        listed = self._list_rect()
+        if not listed.contains(point):
             return None
-        for index in range(len(self._shown)):
+        y = point.y() - listed.top() + self._scroll  # on the list, as its blocks are placed
+        for index, block in self._entry_blocks.items():
+            if not block.y <= y <= block.y + block.h:
+                continue  # only the card under the pointer is measured (many recordings)
             for chosen, rect in self.button_rects(index):
                 if rect.contains(point):
                     return ("button", self._shown[index].key, chosen.name, index)

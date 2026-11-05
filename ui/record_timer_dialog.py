@@ -138,7 +138,8 @@ class RecordTimerDialog(QDialog):
             self.day_buttons.append(button)
         self.day = QDateEdit(QDate(start.date()), self)
         self.day.setCalendarPopup(True)
-        self.day.setMinimumDate(QDate(now().date()))
+        # Today at the earliest; an item still recording past midnight keeps its own day.
+        self.day.setMinimumDate(QDate(min(now().date(), start.date())))
         self.begin = QTimeEdit(QTime(start.hour, start.minute), self)
         self.end = QTimeEdit(QTime(stop.hour, stop.minute), self)
         for edit in (self.begin, self.end):
