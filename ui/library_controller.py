@@ -408,7 +408,7 @@ class LibraryController(QObject):
             self._fill_rec_grid()
         else:
             screen.set_recordings_content("list")
-            screen.recordings.set_filter(rl.SECTIONS.get(row, "coming"))
+            screen.recordings.set_section(rl.SECTIONS.get(row, recording_desk.COMING))
 
     def _fill_rec_grid(self) -> None:
         library = self._rec_library

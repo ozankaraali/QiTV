@@ -38,6 +38,9 @@ MARGIN_U = 3.0
 TOP_U = 2.2
 MAX_W_U = 124.0  # the cards' widest (a wide window keeps them readable)
 TITLE_U = 2.4
+HEADER_U = 1.6  # 2.9.7: a section alone's header, as the Library grid's
+HEADER_TOP_U = 1.4
+BUTTON_RADIUS_U = 0.8  # 2.9.7: as the Library's strip buttons
 SUMMARY_U = 1.15
 STREAM_W_U = 28.0
 STREAM_H_U = 8.4
@@ -131,9 +134,7 @@ def tone_color(tone: str):
         return qcolor(PALETTE.live)
     if tone == desk.WARN:
         return qcolor(PALETTE.warn)
-    if tone == desk.OK:
-        return qcolor(PALETTE.ok)
-    return qcolor(PALETTE.text, PALETTE.text_muted_alpha)
+    return qcolor(PALETTE.text, PALETTE.text_muted_alpha)  # 2.9.7: ok as the quiet ones
 
 
 class RecordingsView(TooltipWidget):
@@ -150,6 +151,7 @@ class RecordingsView(TooltipWidget):
         self._streams: list[desk.Streams] = []
         self._summary = ""
         self._filter = desk.ALL
+        self._section_alone = False  # 2.9.7: one section as a row of the tab's rail
         self._shown: list[desk.Entry] = []
         self._blocks: list[_Block] = []
         self._entry_blocks: dict[int, _Block] = {}  # each shown entry's block, by its index
@@ -235,6 +237,32 @@ class RecordingsView(TooltipWidget):
     def section_filter(self) -> str:
         return self._filter
 
+    def set_section(self, section: str) -> None:
+        """2.9.7: one section alone (a row of the Recordings tab's rail): no title, summary or
+        chips, a header naming it, the streams only on Folders & streams; the keys start on
+        its first row, ↑ from it goes to the top bar, Esc to the rail."""
+        if section not in desk.SECTIONS:
+            raise ValueError(f"Unknown section: {section!r}")
+        self._section_alone = True
+        self._filter = section
+        self._scroll = 0.0
+        self._chips_at = None
+        self._relayout()
+        self._row = 0 if self._shown else -1
+        self._button = self._fit_button(self._row, 0)
+        self.filterChanged.emit(section)
+        self.update()
+
+    def header_text(self) -> str:
+        """2.9.7: the section's name and its count, as the header of the section alone."""
+        name = translate(desk.SECTION_TITLES[self._filter]) if self._filter in desk.SECTIONS else ""
+        count = self.counts().get(self._filter, 0)
+        return f"{name}  ·  {number(count)}" if count and self._filter != desk.PLACES else name
+
+    def button_radius(self) -> float:
+        """2.9.7: the Library's buttons: rounded rectangles, not pills."""
+        return BUTTON_RADIUS_U * self._units().u
+
     def set_filter(self, section: str) -> None:
         if section != desk.ALL and section not in desk.SECTIONS:
             raise ValueError(f"Unknown section: {section!r}")
@@ -307,15 +335,18 @@ class RecordingsView(TooltipWidget):
 
     def move_by(self, dx: int, dy: int) -> None:
         if dy:
-            if self._row < 0 and dy < 0:
+            if (self._row < 0 or (self._section_alone and self._row == 0)) and dy < 0:
                 self.upEdge.emit()
                 return
-            target = max(-1, min(len(self._shown) - 1, self._row + dy))
+            lowest = 0 if self._section_alone and self._shown else -1
+            target = max(lowest, min(len(self._shown) - 1, self._row + dy))
             if target != self._row:
                 self._row = target
                 self._button = self._fit_button(target, 0)
                 self._reveal()
         elif dx:
+            if self._row < 0 and self._section_alone:
+                return
             if self._row < 0:
                 chips = self.chips()
                 at = chips.index(self._filter)
@@ -364,7 +395,10 @@ class RecordingsView(TooltipWidget):
             self.buttonClicked.emit(entry.key, chosen.name)
 
     def escape(self) -> bool:
-        """Esc on an entry: back to the chips (True); on the chips: False (the caller leaves)."""
+        """Esc on an entry: back to the chips (True); on the chips, or in a section alone
+        (2.9.7: the tab's rail), False (the caller leaves)."""
+        if self._section_alone:
+            return False
         if self._row >= 0:
             self._row = -1
             self._scroll = 0.0
@@ -415,17 +449,25 @@ class RecordingsView(TooltipWidget):
 
     def _title_rect(self) -> QRectF:
         units = self._units()
+        if self._section_alone:  # 2.9.7: its header, as the Library grid's
+            height = QFontMetricsF(units.font(HEADER_U, QFont.Weight.Bold)).height()
+            return QRectF(self._left(), HEADER_TOP_U * units.u, self._width(), height)
         height = QFontMetricsF(units.font(TITLE_U, QFont.Weight.Bold)).height()
         return QRectF(self._left(), TOP_U * units.u, self._width(), height)
 
     def _summary_rect(self) -> QRectF:
         units = self._units()
+        if self._section_alone:  # no summary: the header alone
+            return QRectF(self._left(), self._title_rect().bottom(), self._width(), 0.0)
         top = self._title_rect().bottom() + 0.2 * units.u
         height = QFontMetricsF(units.font(SUMMARY_U)).height()
         return QRectF(self._left(), top, self._width(), height)
 
     def stream_rects(self) -> list[QRectF]:
-        """Each provider's card (or the one that says none is in use), wrapped in rows."""
+        """Each provider's card (or the one that says none is in use), wrapped in rows; a
+        section alone has them on Folders & streams only (2.9.7)."""
+        if self._section_alone and self._filter != desk.PLACES:
+            return []
         units = self._units()
         u = units.u
         top = self._summary_rect().bottom() + GAP_U * u
@@ -444,6 +486,8 @@ class RecordingsView(TooltipWidget):
         return rects
 
     def chip_rects(self) -> dict[str, QRectF]:
+        if self._section_alone:
+            return {}  # 2.9.7: the tab's rail chooses
         counts = self.counts()
         key = (
             self.width(),
@@ -473,7 +517,12 @@ class RecordingsView(TooltipWidget):
     def _list_rect(self) -> QRectF:
         u = self._units().u
         chips = self.chip_rects()
-        top = max(r.bottom() for r in chips.values()) + GAP_U * u
+        if chips:
+            top = max(r.bottom() for r in chips.values()) + GAP_U * u
+        else:  # 2.9.7: a section alone: under its header (and its streams)
+            streams = self.stream_rects()
+            above = streams[-1].bottom() if streams else self._title_rect().bottom()
+            top = above + GAP_U * u
         return QRectF(0, top, self.width(), max(0.0, self.height() - top))
 
     def _relayout(self) -> None:
@@ -722,8 +771,14 @@ class RecordingsView(TooltipWidget):
 
     def _paint_header(self, p: QPainter, units: Units) -> None:
         p.setPen(qcolor(PALETTE.text))
-        p.setFont(units.font(TITLE_U, QFont.Weight.Bold))
         title = self._title_rect()
+        if self._section_alone:  # 2.9.7: the section's name and count, as the grid's header
+            p.setFont(units.font(HEADER_U, QFont.Weight.Bold))
+            p.drawText(
+                title, Qt.AlignLeft | Qt.AlignVCenter, elided(p, self.header_text(), title.width())
+            )
+            return
+        p.setFont(units.font(TITLE_U, QFont.Weight.Bold))
         p.drawText(title, Qt.AlignLeft | Qt.AlignVCenter, translate(TITLE_TEXT))
         if self._summary:
             rect = self._summary_rect()
@@ -902,18 +957,18 @@ class RecordingsView(TooltipWidget):
     def _paint_button(
         self, p, units: Units, chosen: desk.Button, box: QRectF, focused: bool, hover: bool
     ) -> None:
-        radius = box.height() / 2
+        radius = self.button_radius()  # 2.9.7: the Library's rounded rectangles
         alpha = 1.0 if chosen.enabled else 0.35
         if chosen.style == desk.ACCENT:
             fill_round(
                 p, box, qcolor(PALETTE.accent, (1.0 if hover or focused else 0.88) * alpha), radius
             )
             pen = qcolor(PALETTE.canvas, alpha)
-        elif chosen.style == desk.DANGER:
+        elif chosen.style == desk.DANGER:  # 2.9.7: raised, its words in the live red
             fill_round(
-                p, box, qcolor(PALETTE.live, (0.3 if hover or focused else 0.16) * alpha), radius
+                p, box, qcolor(PALETTE.text, (0.2 if hover or focused else 0.11) * alpha), radius
             )
-            pen = qcolor(PALETTE.text, alpha)
+            pen = qcolor(PALETTE.live, alpha)
         else:
             fill_round(
                 p, box, qcolor(PALETTE.text, (0.2 if hover or focused else 0.11) * alpha), radius

@@ -197,3 +197,40 @@ class CornerPlayerTests(unittest.TestCase):  # the Library's corner player cover
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SectionViewTests(unittest.TestCase):  # 2.9.7: one section, as a row of the tab's rail
+    def setUp(self):
+        self.view = RecordingsView()
+        self.view.resize(1280, 720)
+        self.addCleanup(self.view.deleteLater)
+        self.view.set_content(ENTRIES, [desk.Streams("P", 2, ())], "")
+        self.ups = []
+        self.view.upEdge.connect(lambda: self.ups.append(True))
+        self.view.set_focused(True)
+
+    def test_a_section_alone_shows_without_title_or_chips(self):
+        self.view.set_section(desk.COMING)
+        self.assertEqual(self.view.chip_rects(), {})
+        self.assertEqual(self.view.stream_rects(), [])
+        self.assertEqual(self.view.header_text(), "Coming up  ·  2")
+        self.assertEqual([e.key for e in self.view.entries()], ["item:a", "item:b", "add:coming"])
+        self.assertLess(self.view.entry_rect(0).top(), 0.15 * 720)  # no title, summary, chips
+        self.view.grab()  # paints
+
+    def test_settings_shows_places_and_streams(self):
+        self.view.set_section(desk.SETTINGS)
+        self.assertEqual(len(self.view.stream_rects()), 1)
+        self.assertEqual([e.key for e in self.view.entries()], ["add:places"])
+
+    def test_buttons_are_rounded_rectangles_as_the_librarys(self):
+        self.view.set_section(desk.COMING)
+        (_button, box), *_ = self.view.button_rects(0)
+        self.assertLess(self.view.button_radius(), box.height() / 2)
+
+    def test_up_from_the_first_row_goes_to_the_top_bar(self):
+        self.view.set_section(desk.COMING)
+        self.assertEqual(self.view.current_key(), "item:a")  # no chips: the first row
+        self.view.move_by(0, -1)
+        self.assertEqual(self.ups, [True])
+        self.assertFalse(self.view.escape())  # Esc: the tab's rail
