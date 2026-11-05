@@ -16,7 +16,9 @@ from services.library import Details
 from ui.keymap import key_hint
 from ui.library.poster_grid import (
     CANCEL,
+    DELETE,
     FAVORITE,
+    FOLDER,
     HOVER_DWELL_MS,
     PLAY,
     REQUEST_DELAY_MS,
@@ -382,12 +384,49 @@ class PosterGridTests(unittest.TestCase):
         self.grid.set_current_index(1)
         self.assertEqual([n for n, _ in self.grid.button_labels()], [FAVORITE, PLAY])
 
-    def test_a_recording_has_no_star(self):
+    def test_a_recordings_strip_offers_delete_and_folder_before_play(self):  # 2.9.7
         self.grid.set_sections([("", titles(3))])
         self.grid.set_details_provider(lambda item: details("recording", None))
-        self.assertEqual(self.grid.button_labels(), [(PLAY, "Play")])
+        self.assertEqual(
+            self.grid.button_labels(),
+            [(DELETE, "Delete…"), (FOLDER, "Show in Folder"), (PLAY, "Play")],
+        )  # no star
         self.grid.set_details_provider(lambda item: details("recording", 60_000))
-        self.assertEqual([n for n, _ in self.grid.button_labels()], [START_OVER, PLAY])
+        self.assertEqual(
+            [n for n, _ in self.grid.button_labels()], [DELETE, FOLDER, START_OVER, PLAY]
+        )
+
+    def test_its_delete_and_folder_buttons_emit_their_signals(self):  # 2.9.7
+        self.grid.set_sections([("", titles(3))])
+        self.grid.set_details_provider(lambda item: details("recording", None))
+        deleted, shown = [], []
+        self.grid.deleteRequested.connect(deleted.append)
+        self.grid.folderRequested.connect(shown.append)
+        self.grid.set_current_index(1)
+        buttons = dict(self.buttons())
+        QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, buttons[DELETE])
+        QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, buttons[FOLDER])
+        self.assertEqual((deleted, shown), ([1], [1]))
+        self.assertEqual(self.named("activated"), [])
+
+    def test_badges_paint_on_the_cards_shown(self):  # 2.9.7
+        self.grid.set_sections([("", titles(200))])
+        asked = []
+
+        def badges(item):
+            asked.append(item["name"])
+            return ("1 h 52", "NEW")
+
+        self.grid.set_badge_provider(badges)
+        self.assertFalse(self.grid.grab().isNull())
+        self.assertTrue(asked)
+        self.assertLess(len(set(asked)), 200)  # only the cards painted are asked
+
+    def test_wide_tiles_take_their_shape(self):  # 2.9.7: the Recordings tab's 16:9 tiles
+        self.grid.set_sections([("", titles(8))])
+        self.grid.set_shape(9 / 16, 16.0)
+        rect = self.grid.item_rect(0)
+        self.assertAlmostEqual(rect.height() / rect.width(), 9 / 16, places=2)
 
     def test_clicks_select_then_activate(self):
         self.grid.set_sections([("", titles(30))])

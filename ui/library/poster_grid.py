@@ -78,6 +78,7 @@ BOTTOM_PAD_U = 1.2
 GAP_U = 1.2
 POSTER_TARGET_U = 9.5
 POSTER_ASPECT = 1.5
+BADGE_FONT_U = 0.8  # 2.9.7: a card's small labels
 MIN_COLUMNS = 3
 SECTION_H_U = 3.0
 SECTION_FONT_U = 1.3
@@ -129,6 +130,7 @@ REQUEST_DELAY_MS = 120  # poster requests wait until the view settles
 PLAY, START_OVER, FAVORITE = "play", "start_over", "favorite"
 # 2.8.12: a scheduled recording's: Cancel, and its time where Play is (a label, no button).
 CANCEL, WHEN = "cancel", "when"
+DELETE, FOLDER = "delete", "folder"  # 2.9.7: a recording's file: deleted (asked), shown
 _ACCENT, _RAISED, _SQUARE, _LABEL = "accent", "raised", "square", "label"
 
 
@@ -203,7 +205,13 @@ def _button_specs(details: Details | None, when: str = "") -> list[tuple[str, st
         return [(FAVORITE, "", _SQUARE), (PLAY, tr("Episodes"), _ACCENT)]
     start_over = tr("Start over")  # i18n: button: play the title from its beginning
     resume = tr("Resume")  # i18n: button: play the title from where it was left
-    if details.kind in ("episode", "recording"):
+    if details.kind == "recording":  # 2.9.7: its file deleted (asked first) or shown
+        # i18n: button on a recording's detail strip: deletes its file (asks first)
+        files = [(DELETE, tr("Delete…"), _RAISED), (FOLDER, tr("Show in Folder"), _RAISED)]
+        if details.resume_ms:
+            return files + [(START_OVER, start_over, _RAISED), (PLAY, resume, _ACCENT)]
+        return files + [(PLAY, play, _ACCENT)]
+    if details.kind == "episode":
         if details.resume_ms:
             return [(START_OVER, start_over, _RAISED), (PLAY, resume, _ACCENT)]
         return [(PLAY, play, _ACCENT)]
@@ -266,6 +274,8 @@ class PosterGrid(QAbstractScrollArea):
     startOverRequested = Signal(int)
     favoriteToggled = Signal(int)
     cancelRequested = Signal(int)  # 2.8.12: a scheduled recording's Cancel (flat index)
+    deleteRequested = Signal(int)  # 2.9.7: a recording's Delete… (flat index)
+    folderRequested = Signal(int)  # 2.9.7: a recording's Show in Folder (flat index)
     focusChanged = Signal(int)
     sortRequested = Signal(str)  # a Sort value
     leftEdge = Signal()  # ← in the first column
@@ -309,6 +319,8 @@ class PosterGrid(QAbstractScrollArea):
         self._poster_url: Callable[[dict], str] = poster_url
         self._progress_provider: Callable[[dict], float | None] | None = None
         self._tile_provider: Callable[[dict], bool] | None = None
+        self._badge_provider: Callable[[dict], tuple[str, str]] | None = None  # 2.9.7
+        self._aspect, self._target_u = POSTER_ASPECT, POSTER_TARGET_U  # 2.9.7: set_shape
         self._key_provider: Callable[[dict], object] | None = None
         self._settled: Callable[[list[dict]], None] | None = None  # see set_settled_handler
         self._focused = True
@@ -459,6 +471,18 @@ class PosterGrid(QAbstractScrollArea):
         self._progress_provider = fn
         self._progress_cache.clear()
         self.viewport().update()
+
+    def set_badge_provider(self, fn: Callable[[dict], tuple[str, str]] | None) -> None:
+        """2.9.7: two small labels on a card, (top left, top right), either may be "": a
+        recording's length and NEW. Asked only for the cards painted."""
+        self._badge_provider = fn
+        self.viewport().update()
+
+    def set_shape(self, aspect: float, target_u: float) -> None:
+        """2.9.7: the cards' height over width and the width they aim at (in units): posters
+        by default (POSTER_ASPECT, POSTER_TARGET_U); the Recordings tab's 16:9 tiles."""
+        self._aspect, self._target_u = aspect, target_u
+        self._relayout()
 
     def set_tile_provider(self, fn: Callable[[dict], bool] | None) -> None:
         """Titles for which `fn` is True are channel logos: their image is drawn centred on a
@@ -701,9 +725,9 @@ class PosterGrid(QAbstractScrollArea):
         self._pad = pad = PAD_U * u
         self._strip_h = STRIP_H_U * u
         content_w = max(1.0, self.viewport().width() - 2 * pad)
-        self._cols = cols = max(MIN_COLUMNS, int((content_w + gap) // (POSTER_TARGET_U * u + gap)))
+        self._cols = cols = max(MIN_COLUMNS, int((content_w + gap) // (self._target_u * u + gap)))
         self._pw = max(1.0, (content_w - (cols - 1) * gap) / cols)
-        self._ph = self._pw * POSTER_ASPECT
+        self._ph = self._pw * self._aspect
         lines: list[_Line] = []
         row_lines: list[int] = []
         sec_starts: list[int] = []
@@ -989,6 +1013,9 @@ class PosterGrid(QAbstractScrollArea):
         if button == CANCEL:
             self.cancelRequested.emit(self._cur)
             return
+        if button in (DELETE, FOLDER):  # 2.9.7
+            (self.deleteRequested if button == DELETE else self.folderRequested).emit(self._cur)
+            return
         if button == WHEN:
             return  # a label: when it records
         if button is not None:
@@ -1218,6 +1245,29 @@ class PosterGrid(QAbstractScrollArea):
                 rect.left() + inset, rect.bottom() - inset - bar_h, rect.width() - 2 * inset, bar_h
             )
             draw_progress(p, bar, progress, track_alpha=PROGRESS_TRACK_ALPHA)
+        if self._badge_provider is not None:
+            self._paint_badges(p, rect, *self._badge_provider(item))
+
+    def _paint_badges(self, p: QPainter, rect: QRectF, left: str, right: str) -> None:
+        """2.9.7: a dark label at the card's top left, an accent one at its top right."""
+        u = self._units.u
+        font = self._units.font(BADGE_FONT_U, QFont.Weight.Bold)
+        fm = QFontMetricsF(font)
+        p.save()
+        p.setFont(font)
+        height = fm.height() + 0.3 * u
+        top = rect.top() + 0.6 * u
+        for text, at_left in ((left, True), (right, False)):
+            if not text:
+                continue
+            width = fm.horizontalAdvance(text) + 1.0 * u
+            x = rect.left() + 0.6 * u if at_left else rect.right() - 0.6 * u - width
+            box = QRectF(x, top, width, height)
+            fill = qcolor(PALETTE.canvas, 0.72) if at_left else qcolor(PALETTE.accent)
+            fill_round(p, box, fill, 0.4 * u)
+            p.setPen(qcolor(PALETTE.text) if at_left else qcolor(PALETTE.canvas))
+            p.drawText(box, Qt.AlignCenter, text)
+        p.restore()
 
     def _paint_cover(self, p: QPainter, rect: QRectF, pixmap: QPixmap) -> None:
         """Scale to cover the rect (centre crop) with rounded corners."""
