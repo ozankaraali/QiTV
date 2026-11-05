@@ -720,6 +720,39 @@ class RecordOnPlayerTests(unittest.TestCase):
         self.assertEqual(len(self.player.started), 2)
         self.assertEqual(self.player.started[1][1], broke)  # the rest, not again from its start
 
+    def test_a_players_stream_that_ended_while_it_airs_records_the_rest(self):
+        # The provider closed the stream, or the player fell back to direct play (its
+        # recording "stopped" with no buffer to play): not a finished recording.
+        for reason, buffered in (("ended", True), ("stopped", False)):
+            with self.subTest(reason=reason):
+                self.setUp()
+                self.watch()
+                self.schedule.add_once(CHANNEL, programme("The News", 30))
+                self.scheduler.tick()
+                rid, _sid, path, *_ = self.engine.recordings[0]
+                self.at(40)
+                self.player.rid, self.player.playing = None, buffered
+                self.engine.recordingEnded.emit(rid, reason, path, 50_000)
+                (outcome,) = self.schedule.outcomes()
+                self.assertEqual(outcome["state"], rs.FAILED)  # its part kept, noted
+                self.player.playing = True  # the channel plays from its buffer again
+                self.at(41, 30)
+                self.assertEqual(len(self.player.started), 2)
+                self.budget.release(self.held)
+
+    def test_a_recording_stopped_on_its_player_is_done_for_this_airing(self):
+        self.watch()
+        self.schedule.add_once(CHANNEL, programme("The News", 30))
+        self.scheduler.tick()
+        rid, _sid, path, *_ = self.engine.recordings[0]
+        self.at(40)
+        self.player.stop_recording()  # the viewer pressed R; the player plays on
+        self.engine.recordingEnded.emit(rid, "stopped", path, 50_000)
+        self.at(41, 30)
+        self.assertEqual(len(self.player.started), 1)
+        (outcome,) = self.schedule.outcomes()
+        self.assertEqual(outcome["state"], rs.RECORDED)
+
 
 if __name__ == "__main__":
     unittest.main()

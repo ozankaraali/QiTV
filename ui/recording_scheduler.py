@@ -60,7 +60,15 @@ from services.catalog import EMPTY_LINK_MESSAGE, NO_STREAM_MESSAGE, PROVIDER_LOA
 from services.connection_budget import DENIED
 from services.i18n import N_, translate
 from services.live.live_session import Borrowed
-from services.live.recorder import FAILED, LIMIT, MAX_SECONDS, MIN_FREE_BYTES, STOPPED
+from services.live.recorder import (
+    ENDED,
+    FAILED,
+    LIMIT,
+    MAX_SECONDS,
+    MIN_FREE_BYTES,
+    SPACE,
+    STOPPED,
+)
 from services.live.refusals import STREAM_LIMIT, STREAM_REFUSED
 from services.provider_api import known_http_only, portal_http_only
 from services.vlc_profile import user_agent_for
@@ -91,6 +99,8 @@ NO_STREAM_YET_TEXT = N_(
 )
 # i18n: a toast: QiTV's time-shift helper is not running, so a scheduled recording can't start
 NO_HELPER = N_("the time-shift helper is not running")
+
+LOST = "lost"  # a recording's end when the helper went (services.live.engine)
 
 # Why a scheduled recording failed, as FAILED_TEXT's {why} says it: by the code the scheduler,
 # the helper (a session's failure kind, the recorder's end) or the catalog gives.
@@ -802,6 +812,15 @@ class RecordingScheduler(QObject):
         if run is None or run.ended:
             return
         run.ended = True
+        if run.host is not None and not (run.stopping or run.user_stopped or run.cut):
+            # 2.9.7: a player's recording that ended unasked. One whose player still plays its
+            # buffer was stopped there (R): this airing is done. Else its stream broke (it
+            # ended, the player fell back to direct play or was refused, the helper went): the
+            # rest is recorded again, as a session's own break is.
+            if reason == STOPPED and run.host.recordable():
+                run.user_stopped = True
+            elif reason != SPACE:
+                run.cut = {ENDED: "ended", LOST: "helper"}.get(reason, FAILED)
         cut = run.cut or (reason if reason == FAILED else "")
         self._settle(run, written, path, cut or reason)
         left = rs.window(run.job)[1] - self._clock()
