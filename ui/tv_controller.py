@@ -2376,6 +2376,21 @@ class TVController(QObject):
             if slot.name == name:
                 slot.live.stop_recording()
 
+    def players_showing(self) -> list[tuple[str, str, dict, Any]]:
+        """2.9.7: each player showing a live channel: (its name, the channel's provider, the
+        channel, its LiveSession), for a scheduled recording to record on (no stream of its
+        own)."""
+        sessions = self.sessions
+        if sessions is None or self._closed:
+            return []
+        found = []
+        for slot in sessions.slots():
+            channel = slot.channel
+            if channel:
+                provider = item_provider.provider_name(self.catalog, channel)
+                found.append((slot.name, provider, channel, slot.live))
+        return found
+
     def _recordings(self) -> list[Slot]:
         """Every player that records, the oldest recording first."""
         sessions = self.sessions

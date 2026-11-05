@@ -192,12 +192,14 @@ class RecordingsDesk(QObject):
             return []
 
     def _recording_now(self) -> list[desk.Recording]:
+        scheduler = self._scheduler()
+        # 2.9.7: a player a scheduled recording records on is listed once, as the programme.
+        hosting = scheduler.hosted_players() if scheduler is not None else set()
         found = [
             desk.Recording(name, str(channel.get("name") or ""), since, role)
             for name, role, channel, since in self._players()
-            if since is not None
+            if since is not None and name not in hosting
         ]
-        scheduler = self._scheduler()
         if scheduler is not None:
             for name, title, channel, since, until, _item in scheduler.recording_details():
                 found.append(desk.Recording(name, channel, since, "scheduled", title, until))

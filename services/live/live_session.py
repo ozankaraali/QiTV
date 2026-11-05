@@ -1489,21 +1489,33 @@ class LiveSession(QObject):
         """When the recording under way started (this object's clock); None without one."""
         return self._recording_since if self._recording is not None else None
 
+    def recording_id(self) -> Optional[str]:
+        """2.9.7: the helper's id of the recording under way (its `recordingEnded` names it);
+        None without one."""
+        return self._recording
+
     def start_recording(
-        self, path: str, *, max_s: float = MAX_SECONDS, min_free: int = MIN_FREE_BYTES
+        self,
+        path: str,
+        *,
+        max_s: float = MAX_SECONDS,
+        min_free: int = MIN_FREE_BYTES,
+        since: Optional[float] = None,
     ) -> bool:
         """Record the channel to a new file at `path` from where it plays (rewound or not:
         the clean start a seek there would open) on, following the live edge, until
         `stop_recording()`, a channel change, a fallback, its input's end or a limit; the
-        helper writes it from the buffer, opening no connection. False when it cannot start
-        (not `recordable()`, or it records already)."""
+        helper writes it from the buffer, opening no connection. 2.9.7: `since` (a Unix
+        second: a scheduled programme's start) records from the clean start at that time of
+        day instead, as far back as the buffer goes. False when it cannot start (not
+        `recordable()`, or it records already)."""
         if not self.recordable() or self._recording is not None:
             return False
         if self._live_parked:
             self.notice.emit(PART_NOT_RECORDED)  # 2.7: its stream is parked for a part
             return False
         assert self._sid is not None
-        seq = self._record_from()
+        seq = self._record_from() if since is None else self._record_since(since)
         if seq is None:
             return False
         rid = self._engine.start_recording(self._sid, path, seq, max_s=max_s, min_free=min_free)
@@ -1540,6 +1552,28 @@ class LiveSession(QObject):
         if isinstance(open_seq, int):
             return open_seq
         return spans[-1].seq if spans else self._oldest_seq()
+
+    def _record_since(self, since: float) -> Optional[int]:
+        """2.9.7: the segment a recording from `since` (a Unix second) starts at: the clean
+        start at or before that time of day in the buffer, its oldest segment when the buffer
+        begins later, the open segment when that time is still to come."""
+        assert self._sid is not None
+        spans = self._engine.spans(self._sid)
+        if not spans:
+            return self._record_from()
+        snapshot = self._snapshot()
+        parts = live_parts.from_state(snapshot.get("parts"))
+        now = self._wall()
+        t = live_parts.t_at(parts, since, live_edge=self._live_edge(snapshot), now=now)
+        if t is None:  # no time of day on the buffer: the newest segment ends about now
+            t = spans[-1].end - max(0.0, now - since)
+        if t <= spans[0].start:
+            return spans[0].seq
+        if t >= spans[-1].end:
+            open_seq = snapshot.get("open")
+            return open_seq if isinstance(open_seq, int) else spans[-1].seq
+        span = self._seek_start(t, hi=t + 1e-6)
+        return span.seq if span is not None else spans[0].seq
 
     def _on_recording_ended(self, rid: str, reason: str, path: str, written: int) -> None:
         if rid not in self._recordings:

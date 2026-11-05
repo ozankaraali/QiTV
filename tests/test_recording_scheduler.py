@@ -609,5 +609,117 @@ class SchedulerTests(unittest.TestCase):
         self.scheduler.shutdown()
 
 
+class FakePlayer:
+    """A player's LiveSession as the scheduler sees it (2.9.7): it records on its own session."""
+
+    def __init__(self, engine, sid="main-sid"):
+        self.engine, self.sid = engine, sid
+        self.playing = True  # from its buffer
+        self.rid = None
+        self.started = []  # (path, since)
+
+    def recordable(self):
+        return self.playing
+
+    def recording(self):
+        return self.rid is not None
+
+    def recording_id(self):
+        return self.rid
+
+    def start_recording(self, path, *, since=None):
+        if not self.recordable() or self.rid is not None:
+            return False
+        self.started.append((path, since))
+        self.rid = self.engine.start_recording(self.sid, path, 0, max_s=0, min_free=0)
+        return True
+
+    def stop_recording(self):
+        self.rid = None
+        self.engine.stop_recording(self.sid)
+
+
+class RecordOnPlayerTests(unittest.TestCase):
+    """2.9.7: a programme due on a channel a player shows records on that player: no stream
+    of its own (a one-stream provider records the channel watched)."""
+
+    LISTED = dict(CHANNEL, cmd="http://panel.test/live/real-user/real-pass/7.ts")
+
+    setUp = SchedulerTests.setUp
+    pump = SchedulerTests.pump
+    at = SchedulerTests.at
+
+    def watch(self, channel=None, provider="P"):
+        self.held = self.budget.request("P", 1, purpose="main")  # the channel watched holds it
+        self.player = FakePlayer(self.engine)
+        self.scheduler.players = lambda: [("main", provider, channel or self.LISTED, self.player)]
+
+    def test_a_programme_on_the_channel_watched_records_on_its_player(self):
+        self.watch()
+        self.schedule.add_once(CHANNEL, programme("The News", 30))
+        self.scheduler.tick()
+        self.assertEqual(self.catalogs.asked, [])  # no link, no stream of its own
+        self.assertEqual(self.engine.opened, [])
+        self.assertEqual(self.budget.holders("P"), ["main"])
+        ((path, since),) = self.player.started
+        self.assertLessEqual(since, (T0 + timedelta(minutes=30)).timestamp())  # its start
+        self.assertTrue(os.path.basename(path).startswith("News One "))
+        self.assertEqual(self.toasts[-1][1], "info")  # it records: no "no stream" said
+        self.assertEqual(self.scheduler.recording_now(), [])  # the player's REC counts it
+        self.assertEqual(self.scheduler.hosted_players(), {"main"})
+        self.assertEqual(len(self.scheduler.recording_details()), 1)  # the Recordings page
+
+    def test_its_window_end_stops_the_players_recording_and_the_player_plays_on(self):
+        self.watch()
+        self.schedule.add_once(CHANNEL, programme("The News", 30))
+        self.scheduler.tick()
+        rid, sid, path, *_ = self.engine.recordings[0]
+        said = len(self.toasts)
+        self.at(63, 1)
+        self.assertEqual(self.engine.stops, [sid])
+        self.assertFalse(self.player.recording())
+        self.engine.recordingEnded.emit(rid, ENDED, path, 1_000_000)
+        self.assertEqual(self.engine.closed, [])  # the player's session stays the player's
+        (outcome,) = self.schedule.outcomes()
+        self.assertEqual((outcome["state"], outcome["path"]), (rs.RECORDED, path))
+        self.assertEqual(len(self.toasts), said)  # the player says how it ended
+        self.assertEqual(self.scheduler.hosted_players(), set())
+        self.assertEqual(self.budget.holders("P"), ["main"])
+
+    def test_one_that_found_no_stream_records_once_the_channel_is_watched(self):
+        held = self.budget.request("P", 1, purpose="main")  # another channel holds it
+        self.schedule.add_once(CHANNEL, programme("The News", 30))
+        self.scheduler.tick()
+        self.assertIn("no stream", self.toasts[-1][0])
+        self.player = FakePlayer(self.engine)
+        self.scheduler.players = lambda: [("main", "P", self.LISTED, self.player)]
+        self.at(30, 10)  # tried again: the viewer tuned its channel meanwhile
+        self.assertEqual(len(self.player.started), 1)
+        self.assertEqual(self.engine.opened, [])
+        self.assertEqual(self.scheduler.waiting(), [])
+        self.budget.release(held)
+
+    def test_a_player_already_recording_or_another_providers_is_not_used(self):
+        self.catalogs.max = 2
+        self.watch(provider="Q")  # the same channel at another provider
+        self.schedule.add_once(CHANNEL, programme("The News", 30))
+        self.scheduler.tick()
+        self.assertEqual(self.player.started, [])
+        self.assertEqual(len(self.catalogs.asked), 1)  # a stream of its own
+
+    def test_a_recording_cut_while_it_airs_goes_on_from_where_it_broke(self):
+        self.watch()
+        self.schedule.add_once(CHANNEL, programme("The News", 30))
+        self.scheduler.tick()
+        rid, _sid, path, *_ = self.engine.recordings[0]
+        self.at(40)
+        self.player.rid = None  # its stream failed: the player's recording ends
+        self.engine.recordingEnded.emit(rid, "failed", path, 50_000)
+        broke = self.now
+        self.at(41, 30)
+        self.assertEqual(len(self.player.started), 2)
+        self.assertEqual(self.player.started[1][1], broke)  # the rest, not again from its start
+
+
 if __name__ == "__main__":
     unittest.main()
