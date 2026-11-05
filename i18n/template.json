@@ -482,7 +482,7 @@
     "Recording stopped: the disk is almost full. Saved: {name}": "a toast: the disk is nearly full, so the recording stopped; it was saved as this file",
     "Recording stopped: the file couldn't be written. Saved: {name}": "a toast: writing the recording's file failed; what was written is saved as this file",
     "Recording the channel you're watching": "a recording's line on the Recordings page: a player records the channel it shows",
-    "Recordings": "what a key does: the Library's Recordings page; the Recordings page's title (the Library's tab of the same name); the Library's tab of everything recorded, recording and scheduled (2.9.7); a group's title: recorded channels; a View menu entry (2.9.7): the Library's Recordings page; a row of the channel list (2.9.7): what is recorded, recording and scheduled",
+    "Recordings": "what a key does: the Library's Recordings page; the Recordings page's title (the Library's tab of the same name); the Library's tab of everything recorded, recording and scheduled (2.9.7); a group's title: recorded channels; a View menu entry (2.9.7): the Library's Recordings page; a row of the channel list (2.9.7): what is recorded, recording and scheduled; the phone remote: a section button (2.9.7)",
     "Recordings folder": "the accessible name of the Recordings folder's field in Settings",
     "Recordings in {folder} are listed too.": "a toast: a folder was added to the Recordings page's places",
     "Records every airing on {channel}": "a series recording's details in the Library: every airing of it on the channel",

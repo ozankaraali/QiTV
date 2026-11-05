@@ -31,6 +31,7 @@ from services.remote.protocol import (
     CastTo,
     Closed,
     CloseSearch,
+    DeskAct,
     Forgot,
     Get,
     Held,
@@ -311,6 +312,8 @@ class Session:
             return Reply(events=[CaptionsLanguage(sid, m["lang"], m["of"])])
         if t == "sched":  # 2.8
             return Reply(events=[Schedule(sid, m["id"], m["do"])])
+        if t == "desk":  # 2.9.7: the phone's Recordings: an airing's action
+            return Reply(events=[DeskAct(sid, m["id"], m["do"])])
         if t == "timer":  # 2.8: Record at a time
             days = tuple(m["days"])
             event = Timer(sid, m["id"], m["title"], m["begin"], m["minutes"], days, m["day"])

@@ -1164,6 +1164,63 @@ def scenario_library_open(rig: Rig) -> None:
     assert (ask.section, ask.page) == ("series", 0), ask
 
 
+def scenario_recordings(rig: Rig) -> None:
+    """2.9.7: the Library's Recordings: its rows, a recording that plays, an airing's own
+    actions (a menu of what QiTV listed), each sent back by its row's handle."""
+    from services.remote.protocol import DeskAct
+
+    sid = paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=library]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark), GENRES)
+    mark = rig.events.mark()
+    rig.page.click("#libraryChips [data-lib=recordings]")
+    ask = rig.events.wait(
+        Get, where=lambda e: e.what == "genres" and e.section == "recordings", after=mark
+    )
+    rows = [
+        {"id": "k1", "title": "Coming up", "count": 2},
+        {"id": "k2", "title": "All", "count": 3},
+        {"id": "k3", "title": "Northwind News", "count": 2},
+    ]
+    head = {"t": "genres", "section": "recordings", "find": "", "page": 0, "pages": 1}
+    answer(rig, sid, ask, {**head, "rows": rows, "loading": False})
+    rig.page.wait_for_selector("#libraryRows .row.branch >> nth=2")
+    rig.shot("recordings")
+    mark = rig.events.mark()
+    rig.page.locator("#libraryRows .row.branch", has_text="Coming up").click()
+    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
+    assert (ask.section, ask.genre) == ("recordings", "k1"), ask
+    stop = {"do": "stop", "label": "Stop", "danger": True}
+    skip = {"do": "skip", "label": "Skip", "danger": False}
+    rec = {"text": "REC", "tone": "live"}
+    items = [
+        {
+            "id": "a1",
+            "title": "Evening News",
+            "sub": "Northwind News",
+            "acts": [stop],
+            "badge": rec,
+        },
+        {"id": "a2", "title": "Late film", "sub": "Fri 01:00 · Harbor News 24", "acts": [skip]},
+    ]
+    page = {"t": "library", "section": "recordings", "genre": "k1", "title": "Coming up"}
+    answer(rig, sid, ask, {**page, "count": 2, "find": "", "page": 0, "pages": 1, "items": items})
+    rig.page.wait_for_selector("#libraryRows .row >> nth=1")
+    assert rig.page.inner_text("#libraryUp") == "Recordings"  # back up to Recordings' rows
+    assert rig.page.locator("#libraryRows .tag.live", has_text="REC").count() == 1  # as the TV's
+    rig.shot("recordings-coming")
+    mark = rig.events.mark()
+    rig.page.locator("#libraryRows .row", has_text="Late film").click()
+    rig.page.wait_for_selector("#menuList button")
+    assert rig.page.inner_text("#menuTitle") == "Late film"
+    rig.shot("recordings-acts")
+    rig.page.locator("#menuList button", has_text="Skip").click()
+    act = rig.events.wait(DeskAct, after=mark)
+    assert (act.handle, act.do) == ("a2", "skip"), act
+    assert rig.events.of(OpenItem, after=mark) == []  # an airing doesn't open as a title
+
+
 def scenario_lists_after_reconnect(rig: Rig) -> None:
     """An answer to an earlier ask shows nothing; after a reconnect (the phone slept) the list
     shown comes again, asked by its key, which holds across sessions."""
@@ -1880,6 +1937,7 @@ SCENARIOS.update(
         "timetable": scenario_timetable,
         "search-mirror": scenario_search_mirror,
         "library-open": scenario_library_open,
+        "recordings": scenario_recordings,
         "lists-after-reconnect": scenario_lists_after_reconnect,
         "more-numpad": scenario_more_numpad,
         "pip-close": scenario_pip_close,

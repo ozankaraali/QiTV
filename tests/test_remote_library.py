@@ -477,3 +477,123 @@ def titles(message):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def rec_file(path, channel, title, start):
+    return {
+        "id": f"recording:{path.rsplit('/', 1)[-1]}",
+        "name": title,
+        "path": path,
+        "added": str(int(start)),
+        "_recording": True,
+        "_title": title,
+        "_channel": channel,
+        "_provider": "Demo TV",
+        "_logo": "",
+        "_start": start,
+        "_stop": start + 2700,
+        "_size": 10,
+    }
+
+
+class PhoneRecordingsTests(unittest.TestCase):  # 2.9.7: the phone's Recordings section
+    def setUp(self):
+        from services import recording_desk as desk
+        from services.recordings_library import RecordingsLibrary
+
+        self.desk = desk
+        self.config = make_config()
+        self.sent = []
+        files = [
+            rec_file("/r/c.ts", "Harbor Sports", "Night Match", 3_000.0),
+            rec_file("/r/b.ts", "Northwind News", "Evening News", 2_000.0),
+            rec_file("/r/a.ts", "Northwind News", "Kitchen Stories", 1_000.0),
+        ]
+        self.entries = [
+            desk.Entry(
+                "rec:sched:x",
+                desk.NOW,
+                "Evening News",
+                tone=desk.REC,
+                status="REC",
+                buttons=(desk.button(desk.WATCH), desk.button(desk.STOP, desk.DANGER)),
+                channel="Northwind News",
+            ),
+            desk.Entry(
+                "airing:t@100000",
+                desk.COMING,
+                "Late film",
+                buttons=(desk.button(desk.EDIT), desk.button(desk.SKIP)),
+                start=100_000.0,
+                channel="Harbor News 24",
+            ),
+            desk.Entry("add:coming", desk.COMING, "", buttons=(desk.button(desk.ADD_TIMER),)),
+            desk.Entry("rule:s", desk.RULES, "Kitchen Stories"),
+        ]
+        rec_library = RecordingsLibrary(
+            lambda: files, lambda: {}, WatchState(self.config), self.config
+        )
+        self.library = PhoneLibrary(
+            catalog_with(),
+            self.config,
+            WatchState(self.config),
+            self.sent.append,
+            rec_library=rec_library,
+            rec_entries=lambda: list(self.entries),
+        )
+        self.addCleanup(self.library.deleteLater)
+
+    def last(self, kind):
+        return [m for m in self.sent if m["t"] == kind][-1]
+
+    def rows(self, find=""):
+        self.library.genres("recordings", 0, find)
+        return self.last("genres")
+
+    def test_its_rows_are_coming_up_all_and_each_channel(self):
+        rows = [(r["title"], r.get("count")) for r in self.rows()["rows"]]
+        self.assertEqual(
+            rows,
+            [("Coming up", 2), ("All", 3), ("Northwind News", 2), ("Harbor Sports", 1)],
+        )
+        self.assertEqual(self.last("genres")["section"], "recordings")
+
+    def test_a_channels_recordings_play_and_say_when(self):
+        keys = {r["title"]: r["id"] for r in self.rows()["rows"]}
+        self.library.titles("recordings", keys["Northwind News"], 0, "")
+        page = self.last("library")
+        self.assertEqual([i["title"] for i in page["items"]], ["Evening News", "Kitchen Stories"])
+        self.assertTrue(all(i["plays"] for i in page["items"]))
+        self.assertTrue(page["items"][0]["sub"].startswith("Northwind News · "))
+        kind, (item, item_kind, _items) = self.library.handles.get(page["items"][0]["id"])
+        self.assertEqual((kind, item_kind, item["path"]), ("title", "recording", "/r/b.ts"))
+
+    def test_coming_up_lists_airings_with_their_own_actions(self):
+        keys = {r["title"]: r["id"] for r in self.rows()["rows"]}
+        self.library.titles("recordings", keys["Coming up"], 0, "")
+        items = self.last("library")["items"]
+        self.assertEqual([i["title"] for i in items], ["Evening News", "Late film"])
+        self.assertNotIn("plays", items[0])
+        self.assertEqual(items[0]["acts"], [{"do": "stop", "label": "Stop", "danger": True}])
+        self.assertEqual(items[1]["acts"], [{"do": "skip", "label": "Skip", "danger": False}])
+        self.assertEqual(
+            self.library.handles.get(items[1]["id"]), ("desk", ("airing:t@100000", ("skip",)))
+        )
+
+    def test_rows_carry_the_desktops_badges_and_their_channel(self):  # 2.9.7: one look
+        keys = {r["title"]: r["id"] for r in self.rows()["rows"]}
+        self.library.titles("recordings", keys["Coming up"], 0, "")
+        now, late = self.last("library")["items"]
+        self.assertEqual(now["badge"], {"text": "REC", "tone": "live"})
+        self.assertEqual(now["ch"], "Northwind News")
+        self.assertNotIn("badge", late)  # no status of its own: none
+        self.library.titles("recordings", keys["Northwind News"], 0, "")
+        first = self.last("library")["items"][0]
+        self.assertEqual(first["badge"], {"text": "NEW", "tone": "accent"})
+        self.assertEqual(first["len"], "45 min")
+        self.assertEqual(first["ch"], "Northwind News")
+
+    def test_a_find_narrows_the_channels_and_finds_recordings(self):
+        message = self.rows("night")
+        self.assertEqual([t["title"] for t in message["titles"]], ["Night Match"])
+        self.assertTrue(message["titles"][0]["plays"])

@@ -41,6 +41,7 @@ from services.remote.protocol import (
     Closed,
     CloseSearch,
     Code,
+    DeskAct,
     Get,
     Held,
     Opened,
@@ -420,6 +421,8 @@ class RemoteController(QObject):
             self._timer_from_phone(event)
         elif isinstance(event, Schedule):
             self._schedule_from_phone(event.sid, event.handle, event.do)
+        elif isinstance(event, DeskAct):  # 2.9.7: the phone's Recordings
+            self._desk_from_phone(event.sid, event.handle, event.do)
         elif isinstance(event, StoreSaved):
             self._persist(event.data)
         elif isinstance(event, Paired):
@@ -655,8 +658,12 @@ class RemoteController(QObject):
                 self,
                 cache=window.screens.library_model.cache,  # the TV's: a sorted list serves both
                 searcher=self._searcher(),
-                recordings=window.screens.recordings,  # the TV's Recordings shelf (2.8)
+                recordings=window.screens.recordings,  # the recordings' folders (2.8)
+                rec_library=window.screens.recordings_library,  # 2.9.7: the Recordings tab's
+                rec_entries=window.screens.recordings_desk.entries,
             )
+            window.screens.recordings_desk.refreshed.connect(library.recordings_changed)
+            window.screens.recordings.changed.connect(library.recordings_changed)
             self._libraries[sid] = library
         return library
 
@@ -1142,6 +1149,22 @@ class RemoteController(QObject):
         guide = self._guides.get(event.sid)
         if guide is not None:
             guide.refresh_timetable()
+
+    def _desk_from_phone(self, sid: str, handle: str, do: str) -> None:
+        """2.9.7: an action of the phone's Recordings, as the desktop page's button (only one
+        its row offered); the phones' Recordings come again."""
+        found = self._find_handle(sid, handle)
+        if found is None or found[0] != "desk":
+            return
+        key, allowed = cast(tuple, found[1])
+        if do not in allowed:
+            return
+        try:
+            self._window.screens.recordings_desk.press(key, do)
+        except Exception as error:  # a phone's ask must never take QiTV down
+            logger.error("Phone remote: a Recordings action failed: %s", safe_message(error))
+        for library in self._libraries.values():
+            library.recordings_changed()
 
     def _find_handle(self, sid: str, handle: str) -> Optional[tuple[str, object]]:
         found = self.result_handles.get(handle)

@@ -156,7 +156,9 @@ def _short_id(value: object) -> bool:
 
 # ---- phone messages --------------------------------------------------------------------------
 
-LIBRARY_SECTIONS = ("movies", "series")
+LIBRARY_SECTIONS = ("movies", "series", "recordings")  # 2.9.7: the phone's Recordings
+# 2.9.7: what a phone may press on an airing of its Recordings (never Edit: a desktop dialog)
+DESK_ACTIONS = ("stop", "try_now", "skip", "cancel", "remove_rule")
 
 
 def _int(value: object) -> Optional[int]:
@@ -204,6 +206,10 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         return None
     if t == "timer":  # 2.8: a timetable's channel recorded at a time (no guide needed)
         return _timer(obj)
+    if t == "desk":  # 2.9.7: an airing's (or a recording's now) action, by its row's handle
+        if _short_id(obj.get("id")) and obj.get("do") in DESK_ACTIONS:
+            return {"t": "desk", "id": obj["id"], "do": obj["do"]}
+        return None
     if t == "watch":  # what the TV plays, or a channel of the phone's list by its handle
         if "id" not in obj:
             return {"t": "watch"}
@@ -531,6 +537,16 @@ class CaptionsModel:
 class Schedule:
     """2.8: the timetable row `handle`'s programme recorded at its time ("once"), every airing
     of it ("series"), or no longer ("cancel")."""
+
+    sid: str
+    handle: str
+    do: str
+
+
+@dataclass(frozen=True)
+class DeskAct:
+    """2.9.7: the phone's Recordings: the row `handle`'s action `do` (one of DESK_ACTIONS,
+    and one the row offered)."""
 
     sid: str
     handle: str

@@ -123,10 +123,15 @@ function share(programme, nowS = Date.now() / 1000) {
   return Math.min(1, Math.max(0, (nowS - programme.start) / (programme.stop - programme.start)));
 }
 
-function logoTile(name, className = "logo") {
+function logoTile(name, className = "logo", hue = name) {
   const tile = el("div", className, initials(name));
-  tile.style.background = colour(name);
+  tile.style.background = colour(hue); // 2.9.7: a recording's: its channel's, as on the TV
   return tile;
+}
+
+// 2.9.7: a recording's or an airing's label, as its tile on the TV says it (REC, ONCE, NEW…)
+function tag(text, tone = "quiet") {
+  return el("span", `tag ${tone}`, text);
 }
 
 function pressable(node) {
@@ -1145,6 +1150,7 @@ let libraryTimer = null;
 function showLibraryLevel() {
   const genres = library.level === "genres";
   $("libraryUp").hidden = genres;
+  $("libraryUp").querySelector("span").textContent = w(library.section === "recordings" ? "recordings" : "genres");
   $("libraryChips").hidden = !genres;
   setTitle($("libraryTitle"), genres ? w("library") : library.title, genres ? null : library.total);
   $("libraryFind").placeholder = genres ? w("find_genre") : w("find_title");
@@ -1174,10 +1180,12 @@ function askLibrary(page) {
 function libraryRow(item) {
   const row = el("button", "row");
   row.type = "button";
-  row.append(logoTile(item.title, "poster"));
+  row.append(logoTile(item.title, "poster", item.ch || item.title));
   const main = el("div", "row-main");
   const top = el("div", "row-top");
   top.append(el("span", "title", item.title));
+  if (item.badge && item.badge.text) top.append(tag(item.badge.text, item.badge.tone || "quiet"));
+  if (item.len) top.append(tag(item.len));
   main.append(top);
   if (item.sub) main.append(el("div", "row-next", item.sub));
   if (typeof item.progress === "number") {
@@ -1188,8 +1196,25 @@ function libraryRow(item) {
     main.append(bar);
   }
   row.append(main);
+  if (Array.isArray(item.acts)) {  // 2.9.7: an airing of Recordings: its own actions, here
+    row.addEventListener("click", () => openActs(item));
+    pressable(row);
+    return row;
+  }
   tapRow(row, item.id, { plays: !!item.plays, name: item.title });
   return row;
+}
+
+// 2.9.7: what an airing (or a recording now) lets the phone do, as QiTV listed it, in its
+// language: each goes back by the row's handle, and the list comes again.
+function openActs(item) {
+  const list = $("menuList");
+  list.replaceChildren();
+  $("menuTitle").textContent = item.title;
+  for (const act of item.acts) {
+    list.append(menuItem(act.label, () => send({ t: "desk", id: item.id, do: act.do }), act.danger ? "danger" : ""));
+  }
+  openSheet("menuSheet");
 }
 
 function onGenres(message) {

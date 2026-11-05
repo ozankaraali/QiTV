@@ -38,6 +38,7 @@ SECTIONS: dict[str, Any] = {
 SECTIONS[SETTINGS] = desk.SETTINGS
 # i18n: the Recordings tab's first row: its home (what records now, next, tonight's guide)
 TONIGHT_TEXT = N_("Tonight")
+COMING_TEXT = desk.SECTION_TITLES[desk.COMING]  # "Coming up"
 # i18n: the Recordings tab's caption over the recordings, with their number; in capitals
 RECORDED_TEXT = N_("Recorded · {n}")
 # i18n: the Recordings tab's caption over its settings; in capitals

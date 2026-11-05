@@ -185,6 +185,21 @@ class MessageTests(unittest.TestCase):
         ):
             self.assertIsNone(parse_phone_message(bad), bad)
 
+    def test_the_recordings_section_and_an_airings_action(self):  # 2.9.7
+        ask = {"t": "get", "what": "genres", "section": "recordings", "page": 0, "find": ""}
+        self.assertEqual(parse_phone_message(ask)["section"], "recordings")
+        for do in ("stop", "try_now", "skip", "cancel", "remove_rule"):
+            self.assertEqual(
+                parse_phone_message({"t": "desk", "id": "h4", "do": do}),
+                {"t": "desk", "id": "h4", "do": do},
+            )
+        for bad in (
+            {"t": "desk", "id": "h4", "do": "edit"},  # a desktop dialog: never from a phone
+            {"t": "desk", "id": "", "do": "skip"},
+            {"t": "desk", "id": ["h4"], "do": "skip"},
+        ):
+            self.assertIsNone(parse_phone_message(bad), bad)
+
     def test_a_channel_is_recorded_at_a_time(self):  # 2.8 (owner)
         every = {"t": "timer", "id": "h2", "title": "Late", "begin": 1260, "minutes": 60}
         self.assertEqual(

@@ -26,6 +26,7 @@ PAGE_STRINGS: dict[str, str] = {
     "tv": N_("TV"),
     "movies": N_("Movies"),  # i18n: the phone remote: a section button
     "series": N_("Series"),  # i18n: the phone remote: a section button
+    "recordings": N_("Recordings"),  # i18n: the phone remote: a section button (2.9.7)
     "guide": N_("Guide"),  # i18n: the phone remote: a section button and a tab
     "ok": N_("OK"),  # i18n: the phone remote: the middle of the arrows (Enter)
     # i18n: the phone remote's touchpad, small, under it
