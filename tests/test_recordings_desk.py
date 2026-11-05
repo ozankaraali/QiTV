@@ -12,11 +12,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from services import recording_desk as desk, recording_schedule as rs
+from services import recording, recording_desk as desk, recording_schedule as rs
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.recordings_list import RecordingsList
-from tests.timer_fixtures import wait_until
 from ui.library.recordings_view import RecordingsView
 from ui.recordings_desk import RecordingsDesk
 
@@ -99,8 +98,11 @@ class RecordingsDeskTests(unittest.TestCase):
         return Programme(title, start, start + timedelta(minutes=length), "", None)
 
     def show(self):
+        """The page shows, its folders read: here, on this thread (the list's own thread is
+        tests/test_recording_desk.py's PlaceTests'); the read it started may come after."""
         self.desk.show()
-        self.assertTrue(wait_until(lambda: bool(self.recordings.places()), 5000))
+        self.recordings._read(tuple(recording.places(self.config)), frozenset())
+        self.assertTrue(self.recordings.places())
         self.desk.refresh()
 
     def keys(self):

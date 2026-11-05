@@ -81,6 +81,7 @@ class RecordingsDesk(QObject):
         self._files.setInterval(FILES_MS)
         self._files.timeout.connect(self.refresh_files)
         self._dialog: Any = None  # Record at a time, open from here
+        self._builtin: Optional[str] = None  # QiTV's own folder, looked up once
         self._mark = ""
         self._marks = QTimer(self)  # the tab's dot, while the Library shows
         self._marks.setInterval(REFRESH_MS)
@@ -337,7 +338,9 @@ class RecordingsDesk(QObject):
         listed: list[Any] = list(places)
         if not listed:  # not read yet: the folders, nothing known of them
             listed = [_Unread(path) for path in recording.places(self._window.config_manager)]
-        builtin = recording.default_folder()
+        if self._builtin is None:
+            self._builtin = recording.default_folder()
+        builtin = self._builtin
         found = []
         for k, place in enumerate(listed):
             own = [f for f in files if _inside(str(f.get("path") or ""), place.path)]
