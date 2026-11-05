@@ -597,6 +597,7 @@ class TVWindow(QMainWindow):
                 deepest_window=deepest_window,
                 # 2.8: QiTV records programmes at their time (with the time-shift helper)
                 scheduled=self._programme_scheduled if self._instance is not None else None,
+                repeating=self._programme_repeats,  # 2.9.7: its Cancel skips the airing
             ),
             next_card=NextCard(host),
             welcome=WelcomeCard(host),
@@ -991,10 +992,30 @@ class TVWindow(QMainWindow):
             self.scheduler.tick()  # one on now starts at once
         return text
 
-    def cancel_programme(self, channel: dict, programme: Programme) -> None:
+    def _programme_repeats(self, channel: dict, programme: Programme) -> bool:
+        """2.9.7: `programme` records as an airing of a series (its Cancel skips it)."""
         item = self.recording_schedule.scheduled_item(channel, programme)
-        if item is not None:
+        return item is not None and item.get("kind") != "once"
+
+    def cancel_programme(self, channel: dict, programme: Programme) -> None:
+        """The guide's Cancel: a one-time recording is cancelled; an airing of a series is
+        skipped, the series going on (2.9.7)."""
+        item = self.recording_schedule.scheduled_item(channel, programme)
+        if item is None:
+            return
+        if item.get("kind") == "once":
             self.cancel_scheduled(str(item.get("id") or ""))
+            return
+        self.recording_schedule.skip(str(item.get("id") or ""), programme.start.timestamp())
+        self.screens.notify(
+            # i18n: a toast: one airing of a series won't be recorded ({title}, {time}: its own)
+            tr(
+                "“{title}” at {time} won't be recorded; the series goes on.",
+                title=programme.title,
+                time=programme.start.astimezone().strftime("%H:%M"),
+            )
+        )
+        self._schedule_changed()
 
     def cancel_scheduled(self, item_id: str) -> None:
         """A scheduled recording is cancelled (the guide's, the Library's right-click)."""

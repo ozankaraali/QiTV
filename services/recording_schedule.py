@@ -271,6 +271,8 @@ class Schedule:
         self._zone = zone  # the clock timers keep (None: this computer's)
         self._items: list[dict] = []
         self._done: list[str] = []  # job keys started (series airings never twice)
+        # 2.9.7: the airings skipped (their keys are in `done` too: an older QiTV skips them)
+        self._skipped: list[str] = []
         self._outcomes: list[dict] = []
         self._load()
 
@@ -290,6 +292,9 @@ class Schedule:
         items, done, outcomes = data.get("items"), data.get("done"), data.get("outcomes")
         self._items = [i for i in (items if isinstance(items, list) else []) if _valid(i)]
         self._done = [str(k) for k in (done if isinstance(done, list) else [])][-DONE:]
+        skipped = data.get("skipped")
+        kept_skips = [str(k) for k in (skipped if isinstance(skipped, list) else [])]
+        self._skipped = [k for k in kept_skips if k in self._done]
         kept = outcomes if isinstance(outcomes, list) else []
         self._outcomes = [o for o in kept if isinstance(o, dict)][-OUTCOMES:]
 
@@ -300,6 +305,8 @@ class Schedule:
             "done": self._done[-DONE:],
             "outcomes": self._outcomes[-OUTCOMES:],
         }
+        if self._skipped:  # 2.9.7: optional, an older QiTV ignores it
+            data["skipped"] = [k for k in self._skipped if k in self._done[-DONE:]]
         self._write(self._path, json.loads(json.dumps(data)))  # a copy for the writing thread
 
     # ---- what is scheduled -----------------------------------------------------------------
@@ -539,7 +546,34 @@ class Schedule:
         return None
 
     def is_scheduled(self, channel: dict, programme: Programme) -> bool:
-        return self.scheduled_item(channel, programme) is not None
+        """`programme` records (its airing not skipped, 2.9.7)."""
+        item = self.scheduled_item(channel, programme)
+        return item is not None and not self.is_skipped(item["id"], programme.start.timestamp())
+
+    # ---- 2.9.7: one airing skipped ----------------------------------------------------------
+
+    def skip(self, item_id: str, start: float) -> None:
+        """The airing of item `item_id` starting at `start` (unix) is not recorded; the item
+        goes on. One already started is left as it is."""
+        key = f"{item_id}@{int(start)}"
+        if key in self._done:
+            return
+        self._done.append(key)
+        self._done = self._done[-DONE:]
+        self._skipped.append(key)
+        self._save()
+
+    def unskip(self, item_id: str, start: float) -> None:
+        """A skipped airing records again (never one that started)."""
+        key = f"{item_id}@{int(start)}"
+        if key not in self._skipped:
+            return
+        self._skipped.remove(key)
+        self._done = [k for k in self._done if k != key]
+        self._save()
+
+    def is_skipped(self, item_id: str, start: float) -> bool:
+        return f"{item_id}@{int(start)}" in self._skipped
 
     # ---- what is due -----------------------------------------------------------------------
 

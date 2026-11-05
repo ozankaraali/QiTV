@@ -1,6 +1,7 @@
 """Scheduled recordings (2.8): what is to be recorded, when each is due, and what became of it."""
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -77,6 +78,41 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(self.schedule.due((T0 + timedelta(minutes=31)).timestamp(), guide), [])
         (second,) = self.schedule.due((T0 + timedelta(minutes=121)).timestamp(), guide)
         self.assertEqual(second.start, airings[2].start.timestamp())
+
+    def test_a_skipped_series_airing_is_not_due_and_the_series_stays(self):  # 2.9.7
+        item = self.schedule.add_series(CHANNEL, "The News")
+        airings = [programme("The News", 30), programme("The News", 120)]
+        guide = lambda channel, since: airings  # noqa: E731
+        self.schedule.skip(item["id"], airings[0].start.timestamp())
+        self.assertTrue(self.schedule.is_skipped(item["id"], airings[0].start.timestamp()))
+        self.assertEqual(self.schedule.due((T0 + timedelta(minutes=30)).timestamp(), guide), [])
+        self.assertFalse(self.schedule.is_scheduled(CHANNEL, airings[0]))
+        self.assertTrue(self.schedule.is_scheduled(CHANNEL, airings[1]))
+        (later,) = self.schedule.due((T0 + timedelta(minutes=121)).timestamp(), guide)
+        self.assertEqual(later.start, airings[1].start.timestamp())
+        self.assertEqual([i["id"] for i in self.schedule.items()], [item["id"]])
+        self.schedule.unskip(item["id"], airings[0].start.timestamp())
+        self.assertTrue(self.schedule.is_scheduled(CHANNEL, airings[0]))
+
+    def test_skip_is_kept_in_the_file_an_older_build_reads(self):  # 2.9.7
+        item = self.schedule.add_series(CHANNEL, "The News")
+        start = programme("The News", 30).start.timestamp()
+        self.schedule.skip(item["id"], start)
+        data = json.loads((self.folder / rs.FILE_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], 1)
+        self.assertIn(f"{item['id']}@{int(start)}", data["done"])
+        again = rs.Schedule(str(self.folder / rs.FILE_NAME), write=rs.write_now)
+        self.assertTrue(again.is_skipped(item["id"], start))
+
+    def test_skipping_an_airing_under_way_does_not_unstart_it(self):  # 2.9.7
+        item = self.schedule.add_series(CHANNEL, "The News")
+        airing = programme("The News", 30)
+        guide = lambda channel, since: [airing]  # noqa: E731
+        (job,) = self.schedule.due((T0 + timedelta(minutes=30)).timestamp(), guide)
+        self.schedule.started(job)
+        self.schedule.skip(item["id"], airing.start.timestamp())
+        self.schedule.unskip(item["id"], airing.start.timestamp())  # never undoes a start
+        self.assertEqual(self.schedule.due((T0 + timedelta(minutes=31)).timestamp(), guide), [])
 
     def test_a_series_is_found_among_short_programmes(self):  # 2.8 review M6
         # Five-minute programmes all day: the guide lists 48 at a time from the moment asked;
@@ -262,6 +298,13 @@ class TimerTests(unittest.TestCase):  # 2.8 (owner): a time on chosen days, no g
         self.schedule.add_timer(CHANNEL, begin=23 * 60 + 30, minutes=90, days=[0])
         (job,) = self.due(local(27, 0, 30))  # Tuesday night, the Monday slot
         self.assertEqual((job.start, job.stop), (local(26, 23, 30), local(27, 1)))
+
+    def test_a_skipped_timer_day_is_not_due_and_the_next_one_is(self):  # 2.9.7
+        item = self.schedule.add_timer(CHANNEL, begin=21 * 60, minutes=90, days=[0, 2])
+        self.schedule.skip(item["id"], local(26, 21))
+        self.assertEqual(self.due(local(26, 21, 30)), [])  # Monday's skipped
+        (wednesday,) = self.due(local(28, 21, 0))
+        self.assertEqual(wednesday.start, local(28, 21))
 
     def test_a_timer_stays_after_it_records_and_records_each_time_once(self):
         item = self.schedule.add_timer(

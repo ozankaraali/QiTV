@@ -1199,6 +1199,35 @@ class RecordingsIndexWindowTests(WindowCase):  # 2.9.7
         self.assertIs(self.window.screens.recordings._index, self.window.recordings_index)
 
 
+class SkipAiringWindowTests(WindowCase):  # 2.9.7
+    def test_the_guide_cancel_on_a_series_airing_skips_it_and_the_series_stays(self):
+        from datetime import datetime, timedelta
+
+        from services.epg_view import Programme
+
+        channel = {"name": "Northwind News", "id": "7", "_provider": "P"}
+        start = datetime.now().astimezone() + timedelta(hours=2)
+        airing = Programme("Evening News", start, start + timedelta(hours=1), "", None)
+        schedule = self.window.recording_schedule
+        item = schedule.add_series(channel, "Evening News")
+        self.window.cancel_programme(channel, airing)
+        self.assertEqual([i["id"] for i in schedule.items()], [item["id"]])
+        self.assertTrue(schedule.is_skipped(item["id"], start.timestamp()))
+
+    def test_the_guide_cancel_on_a_one_time_recording_cancels_it(self):
+        from datetime import datetime, timedelta
+
+        from services.epg_view import Programme
+
+        channel = {"name": "Northwind News", "id": "7", "_provider": "P"}
+        start = datetime.now().astimezone() + timedelta(hours=2)
+        once = Programme("Evening News", start, start + timedelta(hours=1), "", None)
+        schedule = self.window.recording_schedule
+        schedule.add_once(channel, once)
+        self.window.cancel_programme(channel, once)
+        self.assertEqual(schedule.items(), [])
+
+
 class FarChannelWindowTests(WindowCase):
     """Channel 9594 of a provider's 11,000, typed while another plays: the channel list and
     the fast-zap column rest on it through the guide's and the logos' updates (reported on
