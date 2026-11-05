@@ -2047,6 +2047,55 @@ class GridPostersTests(unittest.TestCase):
         self.assertEqual(ready, ["http://p/1"])
 
 
+class FakeDesk:
+    """The Recordings page's controller, as the Library sees it (2.9.7)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def show(self):
+        self.calls.append("show")
+
+    def hide(self):
+        self.calls.append("hide")
+
+
+class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings page
+    def setUp(self):
+        LibraryControllerTests.setUp(self)  # its fakes, not its tests
+        self.ctl = LibraryControllerTests.build(self)
+        self.desk = FakeDesk()
+        self.ctl.set_recordings_desk(self.desk)
+
+    def test_the_tab_shows_once_the_library_has_the_page(self):
+        self.assertIn("recordings", self.screen.nav._tabs)
+        self.ctl.open("recordings")
+        self.assertEqual((self.ctl.mode, self.ctl.zone), ("recordings", "recordings"))
+        self.assertTrue(self.screen.recordings.isVisible())
+        self.assertFalse(self.screen.grid.isVisible())
+        self.assertEqual(self.desk.calls, ["show"])
+        self.screen.nav.tabRequested.emit("movies")
+        self.assertEqual(self.desk.calls[-1], "hide")  # it stops looking while hidden
+
+    def test_its_keys_up_to_the_top_bar_and_esc_back_to_tv(self):
+        self.ctl.open_recordings("places")
+        self.assertEqual(self.screen.recordings.section_filter(), "places")
+        self.assertTrue(self.ctl.handle(Action.NAV_UP))  # from the chips
+        self.assertEqual(self.ctl.zone, "nav")
+        self.ctl.handle(Action.NAV_DOWN)
+        self.assertEqual(self.ctl.zone, "recordings")
+        self.ctl.handle(Action.ESCAPE)
+        self.assertEqual(self.backs, [True])
+
+    def test_typing_searches_and_esc_comes_back_to_the_page(self):
+        self.ctl.open("recordings")
+        self.ctl.handle(Action.NAV_TEXT, "s")
+        self.assertEqual(self.ctl.mode, "search")
+        self.ctl.handle(Action.ESCAPE)  # what was typed goes
+        self.ctl.handle(Action.ESCAPE)  # then the search closes
+        self.assertEqual(self.ctl.mode, "recordings")
+
+
 class LogoTilePaintTests(unittest.TestCase):
     def test_a_channel_logo_is_centred_on_a_raised_tile(self):
         posters = FakePosters()

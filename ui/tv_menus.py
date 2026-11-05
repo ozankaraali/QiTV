@@ -9,7 +9,8 @@ Settings closes, then Add provider and the free-channels menu (the welcome card 
 both shows only without providers, and the last one stays). The drawer's Settings and Add
 provider rows open the same dialogs, its Free channels row the free-channels menu, its Open
 file row the same file dialog, and its header's ⌕ the same search. File → Open Recordings
-Folder opens where recordings go (2.2), as Settings' Open folder does.
+Folder opens where recordings go (2.2), as Settings' Open folder does; View → Recordings
+(2.9.7) the Library's Recordings page, as the drawer's Recordings row.
 """
 
 from __future__ import annotations
@@ -33,7 +34,13 @@ from services import log_file, recording, system_open
 from services.config_manager import get_app_version
 from services.exporter import ExportKind
 from services.i18n import N_, tr, translate
-from services.navigation import ADD_PROVIDER_ROW, FREE_CHANNELS_ROW, OPEN_FILE_ROW, SETTINGS_ROW
+from services.navigation import (
+    ADD_PROVIDER_ROW,
+    FREE_CHANNELS_ROW,
+    OPEN_FILE_ROW,
+    RECORDINGS_ROW,
+    SETTINGS_ROW,
+)
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
 from ui.brand import logo_pixmap, scaled_asset
 from ui.free_channels_menu import (
@@ -224,6 +231,8 @@ class TVMenus(QObject):
         # The multiview's grid over live TV (V on the player), or back to one picture.
         add(view, tr("Multiview"), "Ctrl+4", screens.toggle_multiview)
         add(view, tr("Restore Last Multiview"), "", screens.restore_multiview)
+        # i18n: a View menu entry (2.9.7): the Library's Recordings page
+        add(view, tr("Recordings"), "Ctrl+5", screens.open_recordings)
         add(view, tr("Search"), "Ctrl+F", screens.open_search)  # i18n: a menu entry (verb)
         add(view, tr("Refresh Channels and Guide"), "Ctrl+R", self.refresh_content)
         # i18n: a menu entry: the Library's films and series load again (2.8)
@@ -406,8 +415,8 @@ class TVMenus(QObject):
         open_folder(str(log_file.log_dir()))
 
     def on_drawer_action(self, row: str) -> None:
-        """The drawer's Settings, Add provider, Free channels and Open file rows, and its
-        header's Library, ⌕ and refresh buttons."""
+        """The drawer's Settings, Add provider, Free channels, Open file and Recordings rows,
+        and its header's Library, ⌕ and refresh buttons."""
         if row == SETTINGS_ROW:
             self._window.options_dialog()
         elif row == ADD_PROVIDER_ROW:
@@ -417,6 +426,8 @@ class TVMenus(QObject):
             self._window.show_free_channels(drawer.row_anchor(row))
         elif row == OPEN_FILE_ROW:
             self._window.screens.open_file()
+        elif row == RECORDINGS_ROW:  # 2.9.7
+            self._window.screens.open_recordings()
         elif row == SEARCH_ACTION:
             self._window.screens.open_search()
         elif row == LIBRARY_ACTION:  # 2.8: the section opened last, Movies the first time

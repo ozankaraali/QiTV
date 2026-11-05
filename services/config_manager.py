@@ -509,6 +509,17 @@ class ConfigManager:
     recordings_dir = _config_property(
         "recordings_dir", "", coerce=lambda value: value if isinstance(value, str) else ""
     )
+    # 2.9.7, optional (older builds ignore it): more folders whose recordings the Library and
+    # the Recordings page list (where new recordings go is `recordings_dir`'s).
+    recording_places = _config_property(
+        "recording_places",
+        [],
+        coerce=lambda value: (
+            [v for v in value if isinstance(v, str) and v.strip()]
+            if isinstance(value, list)
+            else []
+        ),
+    )
     # 2.8, optional (older builds ignore it): Jellyfin and Emby. Which version of a title plays
     # ("screen": the 4K one on a 4K screen, or when it's the only one; "always", "never"); the
     # file plays as it is (the player's ⚙ quality menu asks the server to convert).

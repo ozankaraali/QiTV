@@ -39,8 +39,16 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 HEIGHT_U = 6.0
 DEFAULT_HOST_WIDTH = 1280
 # The tabs' names (the search's section names), shown with translate().
-TAB_LABELS = {"live": N_("Live TV"), "movies": N_("Movies"), "series": N_("Series")}
-ALL_TABS = ["live", "movies", "series"]
+TAB_LABELS = {
+    "live": N_("Live TV"),
+    "movies": N_("Movies"),
+    "series": N_("Series"),
+    # i18n: the Library's tab of everything recorded, recording and scheduled (2.9.7)
+    "recordings": N_("Recordings"),
+}
+ALL_TABS = ["live", "movies", "series", "recordings"]
+DEFAULT_TABS = ["live", "movies", "series"]  # Recordings once the Library has its page
+MARK_U = 0.55  # 2.9.7: the Recordings tab's dot (red: something records; amber: a problem)
 PILL_H_U = 3.2
 MAX_SOURCE_U = 22.0
 SEARCH_MAX_U = 44.0  # 2.9.3: the search field's widest
@@ -76,7 +84,7 @@ class TopNav(TooltipWidget):
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)
         self.setAccessibleName(BRAND_NAME)
-        self._tabs = list(ALL_TABS)
+        self._tabs = list(DEFAULT_TABS)
         self._active = "live"
         self._describe()
         self._source = ""
@@ -84,6 +92,7 @@ class TopNav(TooltipWidget):
         self._focus_item = "live"
         self._pressed: str | None = None
         self._hover: str | None = None  # 2.9.3: the item under the pointer is lit
+        self._marks: dict[str, str] = {}  # 2.9.7: a tab's dot: "rec" or "warn"
         self.setMouseTracking(True)
         self._search_field: QWidget | None = None
         if parent is not None:
@@ -104,6 +113,16 @@ class TopNav(TooltipWidget):
         """A screen reader says the section it shows after its name: "QiTV, Movies"."""
         label = TAB_LABELS.get(self._active)
         self.setAccessibleDescription(translate(label) if label else tr("Search"))
+
+    def set_mark(self, tab: str, mark: str) -> None:
+        """2.9.7: a dot after `tab`'s name: "rec" (red: something records), "warn" (amber:
+        something needs attention), "" none."""
+        if self._marks.get(tab, "") != mark:
+            self._marks[tab] = mark
+            self.update()
+
+    def mark(self, tab: str) -> str:
+        return self._marks.get(tab, "")
 
     def set_source_name(self, name: str) -> None:
         self._source = name
@@ -364,6 +383,13 @@ class TopNav(TooltipWidget):
             lit = active or self._hover == tab  # 2.9.3: under the pointer, as the one shown
             p.setPen(qcolor(PALETTE.text, 1.0 if lit else PALETTE.text_muted_alpha))
             p.drawText(rect, Qt.AlignCenter, translate(TAB_LABELS[tab]))
+            mark = self._marks.get(tab, "")
+            if mark:  # 2.9.7: a dot at the name's top right
+                color = PALETTE.live if mark == "rec" else PALETTE.warn
+                size = MARK_U * u
+                text_h = QFontMetrics(p.font()).capHeight()
+                dot = QRectF(rect.right() + 0.25 * u, (height - text_h) / 2 - size / 2, size, size)
+                fill_round(p, dot, qcolor(color), size / 2)
             if active:
                 p.fillRect(
                     QRectF(rect.x(), height - 1.25 * u, rect.width(), 0.25 * u),

@@ -183,6 +183,7 @@ class PagesForTest(TVPages):
         self._second_click = mock.Mock()
         self._keys_level = None
         self.library_controller = mock.Mock()
+        self.recordings_desk = mock.Mock()  # 2.9.7: the Recordings page's
 
 
 class PipCase(ControllerTestCase):

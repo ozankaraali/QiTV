@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
+from tests.timer_fixtures import wait_until
 from ui.overlays.painting import Units
 from ui.overlays.rec_sign import RecSign
 
@@ -52,7 +53,14 @@ class RecSignTests(unittest.TestCase):
         menu = self.sign.menu()
         texts = [a.text() for a in menu.actions() if not a.isSeparator()]
         self.assertEqual(
-            texts, ["Go back to One", "Stop recording", "Go back to Two", "Stop recording"]
+            texts,
+            [
+                "Go back to One",
+                "Stop recording",
+                "Go back to Two",
+                "Stop recording",
+                "Manage Recordings…",  # 2.9.7: the Library's Recordings page
+            ],
         )
         actions = [a for a in menu.actions() if not a.isSeparator()]
         actions[0].trigger()
@@ -105,6 +113,56 @@ class RecSignTests(unittest.TestCase):
         self.sign.open_menu = lambda: opened.append(True)
         QTest.mouseClick(self.sign, Qt.MouseButton.LeftButton, pos=self.sign.rect().center())
         self.assertEqual(opened, [True])
+
+
+class RecSignHudTests(unittest.TestCase):  # 2.9.7: on the player, it comes and goes with the HUD
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.hud = QWidget(self.host)
+        self.hud.hide()
+        self.host.show()  # a hidden window's children get no show event
+        self.sign = RecSign(self.host, clock=lambda: 163.0)
+        self.sign._brief.setInterval(30)
+        self.sign.follow_hud(self.hud)
+        self.managed = []
+        self.sign.manageRequested.connect(lambda: self.managed.append(True))
+
+    def tearDown(self):
+        self.host.deleteLater()
+
+    def shown(self):
+        return self.sign.isVisibleTo(self.host)
+
+    def test_a_new_recording_shows_it_a_moment_then_it_goes(self):
+        self.sign.set_recordings([("main", "One", 100.0), ("b1", "Two", 120.0)])
+        self.assertTrue(self.shown())
+        self.assertTrue(wait_until(lambda: not self.shown(), 2000))
+        self.sign.set_recordings([("main", "One", 100.0), ("b1", "Two", 120.0)])
+        self.assertFalse(self.shown())  # the same recordings: nothing new to say
+        self.sign.set_recordings([("main", "One", 100.0)])  # one ended
+        self.assertTrue(self.shown())
+
+    def test_it_shows_while_the_controls_show(self):
+        self.sign.set_recordings([("main", "One", 100.0)])
+        self.assertTrue(wait_until(lambda: not self.shown(), 2000))
+        self.hud.show()
+        self.assertTrue(self.shown())
+        QTest.qWait(80)
+        self.assertTrue(self.shown())  # the controls up: it stays
+        self.hud.hide()
+        self.assertFalse(self.shown())
+
+    def test_its_menu_ends_with_the_recordings_page(self):
+        self.sign.set_recordings([])
+        actions = [a for a in self.sign.menu().actions() if not a.isSeparator()]
+        self.assertEqual([a.text() for a in actions], ["Manage Recordings…"])
+        actions[0].trigger()
+        self.assertEqual(self.managed, [True])
 
 
 if __name__ == "__main__":

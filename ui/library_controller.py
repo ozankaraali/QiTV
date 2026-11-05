@@ -22,6 +22,10 @@ bar's search, which shows what they find; only once the genre filter is chosen (
 or ↑ from the first genre: it shows its ring and caret then) do they filter the genres. The A–Z
 rail jumps to a letter.
 
+Recordings (2.9.7): the top bar's last tab (once the shell gives it its page) opens the
+Recordings page (`ui.library.recordings_view`, filled by `ui.recordings_desk`): the keys go to
+it (zone "recordings"), ↑ from its chips to the top bar, Esc from its chips back to live TV.
+
 A right-click on a film's poster or an episode row asks the shell for its menu (Play in VLC,
 Play in MPV, Copy stream link: `context_menu(item, section, global position)`, section "movies"
 or "series"). Links are asked of the provider QiTV is on, so a title of another provider, or
@@ -31,7 +35,7 @@ any title during a provider switch, has no menu; nor has a series or a channel.
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QPoint, Signal
 from PySide6.QtWidgets import QMenu
@@ -151,6 +155,8 @@ class LibraryController(QObject):
         `cancel_scheduled(id)` cancels a scheduled recording (its strip's Cancel, 2.8.12)."""
         super().__init__(parent)
         self._cancel_scheduled = cancel_scheduled
+        self._desk: Optional[Any] = None  # 2.9.7: the Recordings page's (`set_recordings_desk`)
+        self._search_from = ""  # 2.9.7: "recordings" while the search was opened from that page
         self._config = config
         self._tmdb = tmdb
         self._catalog = catalog
@@ -241,6 +247,7 @@ class LibraryController(QObject):
         series.backRequested.connect(self._leave_series)
         series.episodeContextRequested.connect(self._on_episode_context)
         nav.tabRequested.connect(self._on_tab)
+        screen.recordings.upEdge.connect(lambda: self._focus("nav"))  # 2.9.7
         nav.searchRequested.connect(self.open_search)
         nav.sourceRequested.connect(self._show_source_menu)
         genres.genreMenuRequested.connect(self._show_genre_menu)
@@ -314,6 +321,28 @@ class LibraryController(QObject):
     def leave(self) -> None:
         """The window left the Library: nothing waiting for a provider plays any more."""
         self._pending.cancel()
+        if self._desk is not None:
+            self._desk.hide()
+
+    # ---- 2.9.7: the Recordings page ----------------------------------------------------------
+
+    def set_recordings_desk(self, desk: Any) -> None:
+        """The Recordings page's controller (`ui.recordings_desk`): its tab shows from now on."""
+        self._desk = desk
+        self._screen.nav.set_tabs(self._tabs())
+
+    def open_recordings(self, section: Optional[str] = None) -> None:
+        """The Recordings page, on `section`'s chip when one is given (the REC sign's opens on
+        Recording now)."""
+        if self._closed or self._desk is None:
+            return
+        self._series = None
+        self._set_mode("recordings")
+        self._sync_nav("recordings")
+        if section is not None:
+            self._screen.recordings.set_filter(section)
+        self._desk.show()
+        self._focus("recordings")
 
     # ---- state --------------------------------------------------------------------------------
 
@@ -344,6 +373,7 @@ class LibraryController(QObject):
         self._screen.genres.set_focused(zone == "genres", field=self._genre_field)
         self._screen.nav.set_focused(zone == "nav")
         self._screen.grid.set_focused(zone == "grid")
+        self._screen.recordings.set_focused(zone == "recordings")
         self._sync_search_focus()
 
     def _sync_search_focus(self) -> None:
@@ -356,6 +386,8 @@ class LibraryController(QObject):
     def _set_mode(self, mode: str) -> None:
         self._mode = mode
         self._screen.set_mode(mode)
+        if mode != "recordings" and self._desk is not None:
+            self._desk.hide()  # 2.9.7: the page stops looking while it is hidden
 
     def _tabs(self) -> list[str]:
         """The provider's sections, and Movies for the recordings when it has no films (2.8);
@@ -367,6 +399,8 @@ class LibraryController(QObject):
         for section in ("movies", "series"):
             if section not in tabs and self._others_with(section):
                 tabs.append(section)
+        if self._desk is not None:
+            tabs.append("recordings")  # 2.9.7: whatever the providers have
         return tabs
 
     def _others_with(self, section: str) -> list[str]:
@@ -418,8 +452,12 @@ class LibraryController(QObject):
     # ---- opening ------------------------------------------------------------------------------
 
     def open(self, section: str) -> None:
-        """Show Movies or Series. Re-opening the section on screen keeps its genre and title."""
+        """Show Movies or Series. Re-opening the section on screen keeps its genre and title.
+        2.9.7: "recordings" is the Recordings page."""
         if self._closed:
+            return
+        if section == "recordings":
+            self.open_recordings()
             return
         self._source_for(section)
         self._section = section
@@ -488,6 +526,8 @@ class LibraryController(QObject):
             self._search.run_now()
         if self._grid_content == "browse":  # the series view keeps its series current
             self._restore_item = self._current_item()
+        if self._mode != "search":  # 2.9.7: Esc from the search goes back to that page
+            self._search_from = "recordings" if self._mode == "recordings" else ""
         self._series = None
         self._set_mode("search")
         self._sync_nav("search")
@@ -550,6 +590,7 @@ class LibraryController(QObject):
             "grid": self._handle_grid,
             "series": self._handle_series,
             "search": self._handle_search,
+            "recordings": self._handle_recordings,
         }[self._zone]
         return handler(action, payload)
 
@@ -643,6 +684,10 @@ class LibraryController(QObject):
             back = self._nav_return
             if back == "genres" and self._mode != "browse":
                 back = "grid"
+            if self._mode == "recordings":  # 2.9.7: its chips
+                back = "recordings"
+            elif back == "recordings":
+                back = "grid"
             self._focus(back if back != "nav" else "grid")
         elif action is Action.ESCAPE:
             self._go_back_to_tv()
@@ -662,6 +707,28 @@ class LibraryController(QObject):
             series.escape()  # backRequested
         elif action in (Action.NAV_TEXT, Action.PASTE):
             return self._type_in_search(action, payload)  # 2.9.3: typing searches
+        else:
+            return False
+        return True
+
+    def _handle_recordings(self, action: Action, payload: str) -> bool:
+        """2.9.7: the Recordings page: its chips and its entries' buttons."""
+        page = self._screen.recordings
+        if action in _MOVES:
+            page.move_by(*_MOVES[action])
+        elif action in (Action.NAV_PAGE_UP, Action.NAV_PAGE_DOWN):
+            page.page(-1 if action is Action.NAV_PAGE_UP else 1)
+        elif action is Action.NAV_HOME:
+            page.home()
+        elif action is Action.NAV_END:
+            page.end()
+        elif action is Action.NAV_ACTIVATE:
+            page.activate()
+        elif action is Action.ESCAPE:
+            if not page.escape():
+                self._go_back_to_tv()
+        elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
+            return self._type_in_search(action, payload)  # typing searches, as elsewhere
         else:
             return False
         return True
@@ -721,7 +788,10 @@ class LibraryController(QObject):
             self.open(tab)
 
     def _leave_search(self) -> None:
-        if self._section is None:
+        if self._search_from == "recordings" and self._desk is not None:
+            self._search_from = ""
+            self.open_recordings()  # 2.9.7: the page the search came from
+        elif self._section is None:
             self._go_back_to_tv()
         else:
             self.open(self._section)

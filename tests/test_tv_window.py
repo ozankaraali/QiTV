@@ -508,6 +508,7 @@ class TVWindowTests(WindowCase):
                 ("Series", "Ctrl+3"),
                 ("Multiview", "Ctrl+4"),
                 ("Restore Last Multiview", ""),
+                ("Recordings", "Ctrl+5"),  # 2.9.7: the Library's Recordings page
                 ("Search", "Ctrl+F"),
                 ("Refresh Channels and Guide", "Ctrl+R"),
                 ("Refresh Films and Series", "Ctrl+Shift+R"),  # 2.8: the Library's
@@ -543,6 +544,7 @@ class TVWindowTests(WindowCase):
             "Movies",
             "Series",
             "Multiview",
+            "Recordings",  # 2.9.7
             "Search",
             "Refresh Channels and Guide",
             "Refresh Films and Series",

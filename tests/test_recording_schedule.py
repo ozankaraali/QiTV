@@ -339,5 +339,66 @@ class TimerTests(unittest.TestCase):  # 2.8 (owner): a time on chosen days, no g
         self.assertEqual(rs.slot_text(5, 24 * 60), "00:05–00:05")
 
 
+class EditTests(unittest.TestCase):  # 2.9.7: the Recordings page's Edit… and Dismiss
+    def setUp(self):
+        self.folder = Path(tempfile.mkdtemp(prefix="qitv-edits-"))
+        self.addCleanup(shutil.rmtree, self.folder, True)
+        self.path = str(self.folder / rs.FILE_NAME)
+        self.schedule = rs.Schedule(self.path, write=rs.write_now, clock=at(local(26, 12)))
+
+    def test_a_once_recording_moves_and_keeps_its_id_and_channel(self):
+        item = self.schedule.add_once(
+            CHANNEL,
+            Programme(
+                "Film",
+                datetime.fromtimestamp(local(26, 20)).astimezone(),
+                datetime.fromtimestamp(local(26, 22)).astimezone(),
+                "",
+                None,
+            ),
+        )
+        edited = self.schedule.edit(
+            item["id"], title="Late film", start=local(26, 21), stop=local(26, 23)
+        )
+        self.assertEqual(edited["id"], item["id"])
+        self.assertEqual(edited["channel"], item["channel"])
+        self.assertEqual((edited["title"], edited["start"]), ("Late film", local(26, 21)))
+        reread = rs.Schedule(self.path, write=rs.write_now, clock=at(local(26, 12)))
+        self.assertEqual(reread.item(item["id"])["stop"], local(26, 23))
+
+    def test_a_once_recording_becomes_a_timer_and_back(self):
+        item = self.schedule.add_timer(CHANNEL, begin=21 * 60, minutes=60, days=[0])
+        edited = self.schedule.edit(item["id"], title="", begin=20 * 60, minutes=30, days=[4, 0])
+        self.assertEqual(
+            (edited["kind"], edited["days"], edited["begin"]), (rs.TIMER, [0, 4], 1200)
+        )
+        once = self.schedule.edit(item["id"], title="Once", start=local(27, 9), stop=local(27, 10))
+        self.assertEqual(once["kind"], rs.ONCE)
+        self.assertNotIn("days", once)
+        self.assertEqual(len(self.schedule.items()), 1)
+
+    def test_an_edit_into_the_past_or_of_a_series_changes_nothing(self):
+        item = self.schedule.add_timer(CHANNEL, begin=21 * 60, minutes=60, days=[0])
+        self.assertIsNone(
+            self.schedule.edit(item["id"], title="", start=local(26, 9), stop=local(26, 10))
+        )
+        self.assertEqual(self.schedule.item(item["id"])["kind"], rs.TIMER)
+        series = self.schedule.add_series(CHANNEL, "News")
+        self.assertIsNone(self.schedule.edit(series["id"], title="x", begin=0, minutes=5, days=[1]))
+        self.assertIsNone(self.schedule.edit("gone", title="x", begin=0, minutes=5, days=[1]))
+
+    def test_a_problem_dismissed_is_kept_marked_and_an_older_build_reads_the_file(self):
+        job = rs.Job("a", "News", CHANNEL, "P", local(26, 9), local(26, 10))
+        self.schedule.finished(job, rs.MISSED, why="closed")
+        self.schedule.finished(job, rs.FAILED, why="link")
+        first, second = self.schedule.outcomes()
+        self.schedule.dismiss(first["at"])
+        self.assertEqual([bool(o.get("seen")) for o in self.schedule.outcomes()], [True, False])
+        self.schedule.dismiss_all()
+        reread = rs.Schedule(self.path, write=rs.write_now, clock=at(local(26, 12)))
+        self.assertTrue(all(o.get("seen") for o in reread.outcomes()))
+        self.assertEqual(len(reread.outcomes()), 2)  # kept: the Library names files by them
+
+
 if __name__ == "__main__":
     unittest.main()

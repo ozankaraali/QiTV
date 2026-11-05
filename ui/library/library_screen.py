@@ -2,6 +2,7 @@
 
 Mockup 05, option 1. 1 u = 1% of this screen's width. The screen only lays its parts out and
 paints the search field; the LibraryController decides what they show and routes the keys.
+2.9.7: the Recordings tab's page (`recordings`) fills it under the top nav, no genre column.
 """
 
 import logging
@@ -14,6 +15,7 @@ from services.i18n import tr
 from ui.keymap import key_hint
 from ui.library.genre_list import GenreList
 from ui.library.poster_grid import PosterGrid
+from ui.library.recordings_view import RecordingsView
 from ui.library.series_view import SeriesView
 from ui.library.top_nav import TopNav
 from ui.overlays.base import TooltipWidget
@@ -23,7 +25,7 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
 
-MODES = ("browse", "series", "search")
+MODES = ("browse", "series", "search", "recordings")
 DEFAULT_HOST_WIDTH = 1280
 LIVE_TILE = "live-tile:"  # routes a grid URL to the channel logo cache
 FIELD_FONT_U = 1.15
@@ -240,6 +242,7 @@ class LibraryScreen(QWidget):
         self.genres = GenreList(self)
         self.grid = PosterGrid(self.grid_posters, self)
         self.series = SeriesView(posters, self)
+        self.recordings = RecordingsView(self)  # 2.9.7
         self.search_field = SearchField(self.nav)
         self.nav.attach_search(self.search_field)  # the top bar places it on its search
         self.set_mode("browse")
@@ -253,8 +256,9 @@ class LibraryScreen(QWidget):
             raise ValueError(f"Unknown library mode: {mode!r}")
         self._mode = mode
         self.genres.setVisible(mode == "browse")
-        self.grid.setVisible(mode != "series")
+        self.grid.setVisible(mode in ("browse", "search"))
         self.series.setVisible(mode == "series")
+        self.recordings.setVisible(mode == "recordings")
         self.search_field.setVisible(mode == "search")
         self._layout()
 
@@ -273,6 +277,7 @@ class LibraryScreen(QWidget):
         content = (left, top, max(0, width - left), max(0, height - top))
         self.grid.setGeometry(*content)
         self.series.setGeometry(*content)
+        self.recordings.setGeometry(*content)
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)

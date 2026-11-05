@@ -351,6 +351,23 @@ class RecordingScheduler(QObject):
             if run.rid and not run.ended and not run.stopping
         ]
 
+    def recording_details(self) -> list[tuple[str, str, str, float, float, str]]:
+        """2.9.7: what records now, for the Recordings page: (its name for `stop_now`, the
+        programme, the channel's name, since when (time.monotonic), its window's end (unix),
+        its schedule item's id)."""
+        return [
+            (
+                _purpose(run.job),
+                run.job.title,
+                str(run.job.channel.get("name") or ""),
+                run.since,
+                rs.window(run.job)[1],
+                run.job.item_id,
+            )
+            for run in self._runs
+            if run.rid and not run.ended and not run.stopping
+        ]
+
     def stop_now(self, name: str) -> None:
         """The REC sign's Stop recording: this airing's recording stops and is kept (a series
         records its next airing)."""
@@ -380,6 +397,53 @@ class RecordingScheduler(QObject):
             run.covers = [moved(job) for job in run.covers]
         for attempt in self._tries.values():
             attempt.job = moved(attempt.job)
+
+    def waiting(self) -> list[tuple[rs.Job, str]]:
+        """2.9.7: the scheduled recordings due now that wait to be tried again, and why the
+        last try failed ("stream": no stream was free), the soonest to end first."""
+        trying = {run.job.key for run in self._runs}  # tried again now: not waiting
+        tries = [t for key, t in self._tries.items() if key not in trying]
+        tries.sort(key=lambda attempt: rs.window(attempt.job)[1])
+        return [(attempt.job, attempt.why) for attempt in tries]
+
+    def try_now(self, key: str) -> None:
+        """2.9.7: the Recordings page's Try now: the job `key` waits no more."""
+        attempt = self._tries.get(key)
+        if attempt is not None and not self._closed:
+            attempt.at = self._clock()
+            self.tick()
+            self.changed.emit()
+
+    def skip(self, key: str) -> None:
+        """2.9.7: the Recordings page's Skip: the job `key` is not recorded and waits no more
+        (nothing is noted: it was the user's choice). A one-time one leaves the schedule; a
+        timer or a series records its next airing."""
+        attempt = self._tries.pop(key, None)
+        if attempt is None:
+            return
+        self._said_busy.discard(key)
+        job = attempt.job
+        item = self.schedule.item(job.item_id)
+        if item is not None and item.get("kind") == rs.ONCE:
+            self.schedule.cancel(job.item_id)
+        else:
+            self.schedule.started(job)  # this airing is never due again
+        self.changed.emit()
+
+    def edit(self, item_id: str, **fields: Any) -> Optional[dict]:
+        """2.9.7: the Recordings page's Edit (`Schedule.edit`'s fields): a try under way of
+        the item is dropped (it is due at its new time); what records now is never edited (the
+        page offers no Edit for it)."""
+        item = self.schedule.edit(item_id, **fields)
+        if item is None:
+            return None
+        for key, attempt in list(self._tries.items()):
+            if attempt.job.item_id == item_id:
+                del self._tries[key]
+                self._said_busy.discard(key)
+        self.changed.emit()
+        self.tick()  # one on now starts at once
+        return item
 
     def cancel(self, item_id: str) -> None:
         """A scheduled recording is no longer wanted: off the schedule, and stopped (what it

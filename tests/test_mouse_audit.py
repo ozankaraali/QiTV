@@ -50,7 +50,7 @@ from ui.context_actions import OPEN_PIP_TEXT, REMOVE_RECENT_TEXT, ContextActions
 from ui.keymap import SHORTCUTS
 from ui.library.poster_grid import PosterGrid
 from ui.library.series_view import SeriesView
-from ui.library.top_nav import TopNav
+from ui.library.top_nav import ALL_TABS, TopNav
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import Drawer
 from ui.overlays.guide import Guide
@@ -172,6 +172,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("menu", "Ctrl+2"): (("drawer", "Movies"), ("library", "movies")),
     ("menu", "Ctrl+3"): (("drawer", "Series"), ("library", "series")),
     ("menu", "Ctrl+4"): (("transport", "grid"),),
+    ("menu", "Ctrl+5"): (("library", "recordings"), ("drawer", "Recordings")),  # 2.9.7
     ("menu", "Ctrl+O"): (("drawer", "Open file"),),
     ("menu", "Ctrl+,"): (("drawer", "settings"), ("drawer", "Settings")),
     ("menu", "Ctrl+R"): (("drawer", "refresh"),),
@@ -417,6 +418,7 @@ def _guide(host: QWidget) -> set[str]:
 
 def _library(host: QWidget) -> set[str]:
     nav = TopNav(host)
+    nav.set_tabs(ALL_TABS)  # 2.9.7: Recordings shows once the Library has its page
     nav.setGeometry(0, 0, 1280, nav.height())
     found = {n for n, r in nav._item_rects().items() if not r.isEmpty()}
     grid = PosterGrid(FakePosters(), host)

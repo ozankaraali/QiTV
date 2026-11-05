@@ -619,6 +619,7 @@ class TVWindow(QMainWindow):
         )
         # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
         self.rec_sign.cover_with(self.overlays.drawer, self.overlays.guide, self.grid_tiles)
+        self.rec_sign.follow_hud(self.overlays.transport)  # 2.9.7: up with the controls
         for listing in (self.overlays.column, self.overlays.drawer, self.overlays.guide):
             listing.set_playing(playing)
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
@@ -998,6 +999,11 @@ class TVWindow(QMainWindow):
         self.screens.notify(tr("Recording cancelled."))
         self._schedule_changed()
 
+    def schedule_changed(self) -> None:
+        """2.9.7: the schedule was changed without the scheduler (the Recordings page's Edit
+        when QiTV can't record): as its own change."""
+        self._schedule_changed()
+
     def _schedule_changed(self) -> None:
         """The guide's dots, the Library's Recordings shelf and the guides in use follow."""
         if self._closing:
@@ -1028,6 +1034,7 @@ class TVWindow(QMainWindow):
         controller = self.controller
         scheduler.changed.connect(self._schedule_changed)
         scheduler.changed.connect(controller.scheduled_changed)
+        self.screens.recordings_desk.follow_scheduler(scheduler)  # 2.9.7: the Recordings page
         controller.extra_guides = scheduler.providers
         controller.scheduled_now = scheduler.recording_now
         controller.stop_scheduled = scheduler.stop_now

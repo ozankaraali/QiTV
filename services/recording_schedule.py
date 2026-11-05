@@ -418,6 +418,68 @@ class Schedule:
         if len(self._items) != before:
             self._save()
 
+    def edit(
+        self,
+        item_id: str,
+        *,
+        title: str,
+        start: Optional[float] = None,
+        stop: Optional[float] = None,
+        begin: Optional[int] = None,
+        minutes: Optional[int] = None,
+        days: Optional[Iterable[int]] = None,
+    ) -> Optional[dict]:
+        """The Recordings page's Edit (2.9.7): a one-time recording or a timer changed in
+        place (its id, channel and provider kept): once from `start` to `stop` (unix), or
+        with `days` a timer from `begin` (minutes after midnight) for `minutes` on them. The
+        item as it is now; None when it is gone, a series, or the change makes no recording
+        (once: its time is over)."""
+        item = next((i for i in self._items if i.get("id") == item_id), None)
+        if item is None or item.get("kind") not in (ONCE, TIMER):
+            return None
+        kept = {key: item[key] for key in ("id", "provider", "channel", "created") if key in item}
+        if days:
+            changed = dict(
+                kept,
+                kind=TIMER,
+                title=title.strip(),
+                begin=int(begin or 0),
+                minutes=int(minutes or 0),
+                days=sorted({int(day) for day in days}),
+            )
+        else:
+            if start is None or stop is None or stop <= max(start, self._clock()):
+                return None
+            changed = dict(kept, kind=ONCE, title=title.strip(), start=start, stop=stop)
+        if not _valid(changed):
+            return None
+        self._items = [changed if i is item else i for i in self._items]
+        self._save()
+        return dict(changed)
+
+    # ---- what became of them (2.9.7: the Recordings page lists the problems) -------------------
+
+    def dismiss(self, at: float) -> None:
+        """The outcome noted at `at` is listed no more (kept, marked seen: an older QiTV
+        ignores the mark)."""
+        changed = False
+        for outcome in self._outcomes:
+            if float(outcome.get("at") or 0) == at and not outcome.get("seen"):
+                outcome["seen"] = True
+                changed = True
+        if changed:
+            self._save()
+
+    def dismiss_all(self) -> None:
+        """Every missed or failed recording is listed no more."""
+        changed = False
+        for outcome in self._outcomes:
+            if outcome.get("state") in (MISSED, FAILED) and not outcome.get("seen"):
+                outcome["seen"] = True
+                changed = True
+        if changed:
+            self._save()
+
     def _once_of(self, channel: dict, programme: Programme) -> Optional[dict]:
         start = programme.start.timestamp()
         for item in self._items:

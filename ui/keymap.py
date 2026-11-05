@@ -412,6 +412,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+2", N_("Movies")),
         ("Ctrl+3", N_("Series")),
         ("Ctrl+4", N_("Multiview")),
+        ("Ctrl+5", N_("Recordings")),  # i18n: what a key does: the Library's Recordings page
         ("Ctrl+O", N_("Open a file")),
         ("Ctrl+,", N_("Settings")),
         ("Ctrl+R", N_("Refresh channels and guide")),

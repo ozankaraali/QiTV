@@ -22,16 +22,19 @@ from typing import Any, Callable, Iterator, Optional
 from PySide6.QtCore import QObject, QPoint, QThread
 from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QWidget
 
-from services import system_open
+from services import recording_desk as desk, system_open
 from services.exporter import ExportKind
 from services.failure_reasons import shown_message
-from services.i18n import tr
+from services.i18n import tr, translate
 from services.library import LibraryModel
+from services.recording_desk import COMING, NOW, RECORDED
 from services.recordings_list import RecordingsList
 from ui.keymap import Action
 from ui.library_controller import LibraryController
+from ui.overlays.rec_sign import MANAGE_TEXT
 from ui.page_stack import PageStack
 from ui.pointer import SecondClickGuard
+from ui.recordings_desk import RecordingsDesk
 from ui.tmdb_fill import TmdbFill
 from ui.tv_controller import ERROR_MS, INFO_MS, scrub
 
@@ -120,6 +123,18 @@ class TVPages(QObject):
         )
         window.library_catalog.providerFailed.connect(self._on_provider_failed)
         window.overlays.drawer.libraryRequested.connect(self.open_from_list)
+        # 2.9.7: the Library's Recordings page, its tab's dot, and the REC signs' way to it.
+        self.recordings_desk = RecordingsDesk(
+            window, window.library_page.recordings, self.recordings, parent=self
+        )
+        self.recordings_desk.markChanged.connect(
+            lambda mark: window.library_page.nav.set_mark("recordings", mark)
+        )
+        self.library_controller.set_recordings_desk(self.recordings_desk)
+        window.library_page.recordings.avoid(window.player_page)  # the corner player
+        for sign in (window.overlays.rec_sign, getattr(window.overlays, "library_rec_sign", None)):
+            if sign is not None:
+                sign.manageRequested.connect(lambda: self.open_recordings(NOW))
 
     # ---- pages --------------------------------------------------------------------------------
 
@@ -139,6 +154,7 @@ class TVPages(QObject):
             return
         if self.library_shown() and not library:
             self.library_controller.leave()  # a play waiting for its provider is dropped
+        self.recordings_desk.track_mark(library)  # 2.9.7: the Recordings tab's dot
         self._second_click.disarm()  # it kept a click off the page shown before
         if library:
             stack.show_library(corner=corner)
@@ -211,6 +227,25 @@ class TVPages(QObject):
         self._enter_library()
         self.library_controller.open(section)
         self._guard_second_click()
+
+    def open_recordings(self, section: Optional[str] = None) -> None:
+        """2.9.7: the Library's Recordings page (View → Recordings, the channel list's row, the
+        REC sign's Manage Recordings…), on `section`'s chip when one is given."""
+        if self._window.closing():
+            return
+        self._enter_library()
+        self.library_controller.open_recordings(section)
+        self._guard_second_click()
+
+    def watch_recording(self, name: str) -> None:
+        """2.9.7: the Recordings page's Watch: the recording's channel plays large, as the REC
+        sign's Go back."""
+        window = self._window
+        if window.closing():
+            return
+        self._show_page(window.player_page)
+        self._set_return_to_library(False)
+        window.controller.go_back_to_recording(name)
 
     def open_from_list(self, section: str) -> None:
         """The channel list's Movies or Series row: the Library of the provider the list shows
@@ -370,6 +405,11 @@ class TVPages(QObject):
             item_id = str(item.get("_item_id") or "")
             # i18n: a scheduled recording's right-click menu entry: it will not be recorded
             menu.addAction(tr("Cancel Recording"), lambda: window.cancel_scheduled(item_id))
+            scheduled = window.recording_schedule.item(item_id) or {}
+            if scheduled.get("kind") in ("once", "timer"):  # 2.9.7: its time, days or name
+                edit = translate(desk.BUTTON_TEXTS[desk.EDIT])
+                menu.addAction(edit, lambda: self.recordings_desk.edit(item_id))
+            self._manage_entry(menu, COMING)
             menu.popup(global_pos)
             return
         window.controller.show_library_menu(item, section, global_pos, window.library_page)
@@ -383,14 +423,21 @@ class TVPages(QObject):
         # i18n: a recording's right-click menu entry: opens the folder that holds its file
         menu.addAction(tr("Show in Folder"), lambda: self._show_in_folder(path))
         # i18n: a recording's right-click menu entry: deletes its file (asks first)
-        delete = menu.addAction(tr("Delete Recording…"), lambda: self._delete_recording(item))
+        delete = menu.addAction(tr("Delete Recording…"), lambda: self.delete_recording(item))
         delete.setEnabled(not self.recordings.is_writing(path))  # one still written stays
+        self._manage_entry(menu, RECORDED)
         menu.popup(global_pos)
+
+    def _manage_entry(self, menu: QMenu, section: str) -> None:
+        """2.9.7: a recording's right-click ends with the Recordings page, on its section."""
+        menu.addSeparator()
+        menu.addAction(translate(MANAGE_TEXT), lambda: self.open_recordings(section))
 
     def _show_in_folder(self, path: str) -> None:
         system_open.open_folder(os.path.dirname(path))
 
-    def _delete_recording(self, item: dict) -> None:
+    def delete_recording(self, item: dict) -> None:
+        """A recording's file deleted, asked first (its right-click's, the Recordings page's)."""
         window = self._window
         name = os.path.basename(str(item.get("path") or ""))
         answer = QMessageBox.question(

@@ -488,6 +488,66 @@ class SchedulerTests(unittest.TestCase):
         self.scheduler.shutdown()
         self.assertEqual(self.engine.stops, [sid])
 
+    # ---- 2.9.7: the Recordings page ----------------------------------------------------------
+
+    def test_a_recording_waiting_for_a_stream_is_listed_and_tried_now_when_asked(self):
+        held = self.budget.request("P", 1, purpose="main")
+        self.schedule.add_once(CHANNEL, programme("The News", 30))
+        self.scheduler.tick()
+        ((job, why),) = self.scheduler.waiting()
+        self.assertEqual((job.title, why), ("The News", "stream"))
+        self.budget.release(held)
+        self.scheduler.try_now(job.key)  # no minute's wait
+        self.assertEqual(self.scheduler.waiting(), [])
+        self.assertEqual(self.catalogs.asked, [("News One", "live")])
+
+    def test_skip_drops_this_airing_a_once_one_leaves_the_schedule(self):
+        held = self.budget.request("P", 1, purpose="main")
+        self.schedule.add_once(CHANNEL, programme("The News", 30))
+        self.scheduler.tick()
+        ((job, _why),) = self.scheduler.waiting()
+        self.scheduler.skip(job.key)
+        self.assertEqual((self.scheduler.waiting(), self.schedule.items()), ([], []))
+        self.at(63, 1)
+        self.assertEqual(self.schedule.outcomes(), [])  # the user's choice: nothing noted
+        self.budget.release(held)
+
+    def test_skip_of_a_timer_s_airing_keeps_the_timer_for_its_next(self):
+        held = self.budget.request("P", 1, purpose="main")
+        when = datetime.fromtimestamp(self.now).astimezone()
+        begin = when.hour * 60 + when.minute
+        item = self.schedule.add_timer(CHANNEL, begin=begin, minutes=30, days=range(7))
+        self.scheduler.tick()
+        ((job, _why),) = self.scheduler.waiting()
+        self.scheduler.skip(job.key)
+        self.assertEqual(self.schedule.item(item["id"])["kind"], rs.TIMER)
+        self.scheduler.tick()
+        self.assertEqual(self.scheduler.waiting(), [])  # this airing is never due again
+        self.budget.release(held)
+
+    def test_an_edit_drops_a_try_and_is_due_at_its_new_time(self):
+        held = self.budget.request("P", 1, purpose="main")
+        item = self.schedule.add_once(CHANNEL, programme("The News", 30))
+        self.scheduler.tick()
+        later = programme("The News", 120)
+        edited = self.scheduler.edit(
+            item["id"], title="Later", start=later.start.timestamp(), stop=later.stop.timestamp()
+        )
+        self.assertEqual(edited["title"], "Later")
+        self.assertEqual(self.scheduler.waiting(), [])
+        self.budget.release(held)
+
+    def test_what_records_is_detailed_for_the_page(self):
+        self.scheduled_now()
+        sid = self.engine.opened[0][0]
+        self.engine.sessionReady.emit(sid)
+        ((name, title, channel, _since, until, item_id),) = self.scheduler.recording_details()
+        self.assertEqual((title, channel), ("The News", "News One"))
+        self.assertTrue(name.startswith("sched:"))
+        self.assertEqual(until, (T0 + timedelta(minutes=60)).timestamp() + rs.POST_S)
+        self.assertEqual(item_id, self.schedule.items()[0]["id"])
+        self.scheduler.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()
