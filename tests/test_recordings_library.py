@@ -239,6 +239,14 @@ class DeskTileTests(unittest.TestCase):  # 2.9.7: Coming up, Series & timers and
         self.assertEqual(self.library.picture(late), ("https://logos.invalid/harbor.png", True))
         self.assertEqual(self.library.picture(rec), ("", False))  # no logo: its tinted card
 
+    def test_a_recording_without_its_frame_yet_shows_its_channels_logo(self):
+        library = rl.RecordingsLibrary(
+            lambda: list(FILES), lambda: {}, FakeWatch(), SimpleNamespace(), picture=lambda item: ""
+        )
+        with_logo = dict(FILES[0], _logo="https://logos.invalid/harbor.png")
+        self.assertEqual(library.picture(with_logo), ("https://logos.invalid/harbor.png", True))
+        self.assertEqual(library.picture(FILES[1]), ("", False))  # no logo either: its card
+
     def test_recordings_show_their_thumbnail_and_caption(self):
         night = FILES[0]
         self.assertEqual(self.library.picture(night), ("thumb:c.ts.jpg", False))

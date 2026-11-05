@@ -89,6 +89,18 @@ class RecordingsIndex:
         self._entries[path] = entry
         self._save()
 
+    def ended(self, path: str, at: float) -> None:
+        """The recording at `path` ended at `at` (unix): its length is what the file holds,
+        not its programme's slot (stopped, broken, cut short; one started with R had none).
+        The earliest word stands; one before its start is not believed."""
+        entry = self._entries.get(_key(path)) if path else None
+        if entry is None or at <= float(entry.get("start") or 0):
+            return
+        stop = entry.get("stop")
+        if stop is None or at < float(stop):
+            entry["stop"] = float(at)
+            self._save()
+
     def moved(self, old: str, new: str) -> None:
         """The recording meant for `old` was saved as `new` (the helper's " (2)")."""
         entry = self._entries.pop(_key(old), None)

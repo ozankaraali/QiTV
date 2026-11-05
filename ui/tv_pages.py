@@ -202,11 +202,16 @@ class TVPages(QObject):
         self.recordings_desk.refreshed.connect(self._refresh_home)
         # the rail's find: the home guide's channels first, then every channel
         controller = self.library_controller
-        controller.find_sources = lambda: [guide.channels(), window.nav.all_live_items()]
+        controller.find_sources = lambda: [
+            guide.channels(),
+            window.nav.all_live_items(),
+            self._every_provider(),  # two providers or more: theirs too, walked as it goes
+        ]
         controller.find_programmes = lambda channel, now, limit: catalog.programmes(
             channel, now, limit=limit
         )
         controller.record_found = self._schedule_from_home
+        window.controller.view_guides = self._home_guides  # its rows' guides are loaded
         self._guide_source = ""
         self._guide_chosen = False  # the viewer chose the guide's channels (else: the default)
         self._guide_version: Any = None  # the lists' version its channels were built from
@@ -273,6 +278,8 @@ class TVPages(QObject):
             ):
                 self._set_guide_source(key)  # lists loaded meanwhile, or another default
             self._guide_version = version
+        home.guide.set_reach(window.config_manager.epg_list_window_hours)  # Settings' window
+        window.controller.update_guides()  # its rows' providers' guides, as they show
         home.guide.follow_now()
         home.guide.update()
 
@@ -292,7 +299,37 @@ class TVPages(QObject):
             gid = str(getattr(group, "id", "") or "")
             if gid and gid not in (ALL_GROUP_ID, FAVORITES_GROUP, RECENT_GROUP):
                 sources.append((str(getattr(group, "title", gid)), gid))
+        for name in self._mixed_providers():  # two providers or more: each one's channels
+            sources.append((name, PROVIDER_SOURCE + name))
         return sources
+
+    def _mixed_providers(self) -> list[str]:
+        """The providers, when there are two or more (one: none named, as in 2.0)."""
+        names = [str(n) for n in self._window.library_catalog.provider_names()]
+        return names if len(names) > 1 else []
+
+    def _provider_channels(self, name: str) -> Iterator[dict]:
+        """A ready provider's live channels, walked as they are asked for."""
+        catalogs = self._window.catalogs
+        if not catalogs.is_ready(name):
+            return
+        catalog = catalogs.catalog(name)
+        for group in catalog.groups("live") or []:
+            if getattr(group, "header", False):
+                continue
+            yield from catalog.items("live", group.id) or []
+
+    def _every_provider(self) -> Iterator[dict]:
+        """The rail's find's widest reach: every provider's channels (with two or more)."""
+        for name in self._mixed_providers():
+            yield from self._provider_channels(name)
+
+    def _home_guides(self) -> set[str]:
+        """The providers whose guides the Recordings home's rows show, while it shows."""
+        if not self.recordings_desk.shown():
+            return set()
+        guide = self._window.library_page.home.guide
+        return {provider_of(c) for c in guide.shown_channels()} - {""}
 
     def _default_guide_source(self) -> str:
         nav = self._window.nav
@@ -310,6 +347,8 @@ class TVPages(QObject):
             return list(nav.recent_items())
         if key == ALL_GROUP_ID:
             return list(nav.all_live_items())
+        if key.startswith(PROVIDER_SOURCE):
+            return list(self._provider_channels(key[len(PROVIDER_SOURCE) :]))
         return list(self._window.catalog.items("live", key) or [])
 
     def _set_guide_source(self, key: str) -> None:
@@ -725,6 +764,9 @@ class TVPages(QObject):
             if name:
                 message = tr("{name}: {message}", name=name, message=message)
             self._window.library_toast.show_message(scrub(message), "error", ERROR_MS)
+
+
+PROVIDER_SOURCE = "@provider:"  # 2.9.7: the home guide's channels: one provider's, all
 
 
 def _channel_keys(channels: list[dict]) -> list[tuple[str, str]]:

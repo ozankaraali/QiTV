@@ -796,6 +796,7 @@ class TVWindow(QMainWindow):
             )
         controller.parental = self.parental  # what it protects never enters the history
         controller.note_recording = self.note_recording  # 2.9.7: the recordings index
+        controller.note_recording_end = self.note_recording_end
         controller.hidden_groups = self.hidden_groups
         self.overlays.guide.recordRequested.connect(self.schedule_programme)
         self.overlays.guide.recordCancelled.connect(self.cancel_programme)
@@ -1080,6 +1081,10 @@ class TVWindow(QMainWindow):
             start=start,
             stop=None,
         )
+
+    def note_recording_end(self, path: str) -> None:
+        """2.9.7: a player's recording ended now: its file holds until here."""
+        self.recordings_index.ended(path, time.time())
 
     def attach_scheduler(self, scheduler: Any) -> None:
         """The scheduled recordings (2.8): the Library and the guides follow them; what records

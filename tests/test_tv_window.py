@@ -1197,6 +1197,8 @@ class RecordingsIndexWindowTests(WindowCase):  # 2.9.7
             (entry["logo"], entry["start"], entry["stop"]), (channel["logo"], 1_000.0, None)
         )
         self.assertIs(self.window.screens.recordings._index, self.window.recordings_index)
+        self.window.controller.note_recording_end("/r/x.ts")  # R again: it stops now
+        self.assertGreater(self.window.recordings_index.get("/r/x.ts")["stop"], 1_000.0)
 
 
 class SkipAiringWindowTests(WindowCase):  # 2.9.7
@@ -1356,6 +1358,15 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
         self.assertTrue(home._name_providers)
         self.assertIs(home._avoid, self.window.player_page)
 
+    def test_the_homes_guide_reaches_as_far_as_the_guide_list(self):  # final review 2
+        self.window.config_manager.epg_list_window_hours = 24
+        self.window.screens.recordings_desk.refresh()
+        guide = self.window.library_page.home.guide
+        self.assertEqual(guide._reach, 24.0)
+        self.window.config_manager.epg_list_window_hours = 0
+        self.window.screens.recordings_desk.refresh()
+        self.assertEqual(guide._reach, 0.0)
+
     def test_the_rails_find_reads_the_guides_channels_first_then_every_channel(self):
         pages = self.window.screens
         ctl = pages.library_controller
@@ -1363,10 +1374,44 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
         wide = [{"id": "1", "name": "Northwind News"}, {"id": "2", "name": "Harbor Sports"}]
         self.window.library_page.home.guide.set_channels(near)
         self.window.nav.all_live_items = lambda: wide
-        self.assertEqual(ctl.find_sources(), [near, wide])
+        self.assertEqual(ctl.find_sources()[:2], [near, wide])
+        self.assertEqual(list(ctl.find_sources()[2]), [])  # one provider: no wider reach
         channel, airing = self.channel_and_airing()
         ctl.record_found(channel, airing, False)
         self.assertEqual([i["kind"] for i in self.window.recording_schedule.items()], ["once"])
+
+    def two_providers(self):
+        """A second provider, ready, with one live channel."""
+        from types import SimpleNamespace
+
+        other = {"id": "9", "name": "Southgate One", "_provider": "Harbor IPTV"}
+        group = SimpleNamespace(id="g", title="News", header=False)
+        catalog = SimpleNamespace(
+            groups=lambda section: [group], items=lambda section, gid: [other]
+        )
+        catalogs = self.window.catalogs
+        names = [self.window.library_catalog.provider_names()[0], "Harbor IPTV"]
+        self.window.library_catalog.provider_names = lambda: names
+        catalogs.names = lambda: names
+        catalogs.is_ready = lambda name: name == "Harbor IPTV"
+        real = catalogs.catalog
+        catalogs.catalog = lambda name: catalog if name == "Harbor IPTV" else real(name)
+        return other
+
+    def test_with_two_providers_the_find_reaches_every_providers_channels(self):  # review 4
+        other = self.two_providers()
+        sources = self.window.screens.library_controller.find_sources()
+        self.assertIn(other, [c for source in sources for c in source])
+
+    def test_with_two_providers_the_guide_can_show_another_providers_channels(self):
+        other = self.two_providers()
+        pages = self.window.screens
+        labels = dict(pages.guide_sources())
+        self.assertIn("Harbor IPTV", labels)
+        pages._choose_guide_source(labels["Harbor IPTV"])
+        self.assertEqual(self.window.library_page.home.guide.channels(), [other])
+        pages.recordings_desk._shown = True  # the tab shows: its guide's providers are read
+        self.assertIn("Harbor IPTV", self.window.controller.guides_in_use())
 
     def test_the_guides_source_menu_lists_favorites_recent_and_all(self):
         labels = [label for label, _key in self.window.screens.guide_sources()]

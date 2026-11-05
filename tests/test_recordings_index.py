@@ -71,6 +71,21 @@ class RecordingsIndexTests(unittest.TestCase):
         self.index().note("/r/b.ts", **dict(NEWS, stop=None))
         self.assertIsNone(self.index().get("/r/b.ts")["stop"])
 
+    def test_where_a_recording_really_ended_is_kept(self):  # final review 5
+        index = self.index()
+        index.note("/r/a.ts", **NEWS)  # its programme: 1000–4600
+        index.ended("/r/a.ts", 1_240.0)  # its stream broke four minutes in
+        self.assertEqual(self.index().get("/r/a.ts")["stop"], 1_240.0)
+        index.ended("/r/a.ts", 9_000.0)  # a later word (the player's own) moves it no further
+        self.assertEqual(self.index().get("/r/a.ts")["stop"], 1_240.0)
+        index.note("/r/b.ts", **dict(NEWS, stop=None))  # R: no end known
+        index.ended("/r/b.ts", 2_000.0)
+        self.assertEqual(self.index().get("/r/b.ts")["stop"], 2_000.0)
+        index.ended("/r/c.ts", 2_000.0)  # not noted: nothing
+        index.ended("/r/a.ts", 500.0)  # before it began: not believed
+        self.assertIsNone(self.index().get("/r/c.ts"))
+        self.assertEqual(self.index().get("/r/a.ts")["stop"], 1_240.0)
+
 
 if __name__ == "__main__":
     unittest.main()

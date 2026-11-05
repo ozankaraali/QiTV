@@ -21,8 +21,8 @@ import logging
 import os
 import queue
 import threading
-import unicodedata
 from typing import Any, Callable, Optional
+import unicodedata
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage

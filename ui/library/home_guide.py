@@ -68,7 +68,10 @@ SKIP_TEXT = N_("Skip")
 CANCEL_SERIES_TEXT = N_("Cancel series")
 # i18n: the Recordings home's guide card: a one-time recording is cancelled
 CANCEL_TEXT = N_("Cancel recording")
+# i18n: the Recordings home's button: the recording's channel plays
+WATCH_TEXT = N_("▶ Watch")
 _BUTTON_TEXTS = {
+    "watch": WATCH_TEXT,
     "record": RECORD_TEXT,
     "series": SERIES_TEXT,
     "skip": SKIP_TEXT,
@@ -110,6 +113,7 @@ class HomeGuide(TooltipWidget):
         self._source = ""
         self._focused = False
         self._shifted = False  # the viewer moved the window (else it follows now)
+        self._reach = 0.0  # hours of guide from now the lists hold (0: all of it)
         self._bar = ""  # the keys' chip in the bar ("": the rows have them)
         self._card_button = 0  # the keys' button in the card
         self._row_wheel = PointerInput(self)  # a trackpad's scroll counts its distance
@@ -161,15 +165,39 @@ class HomeGuide(TooltipWidget):
     def _home_start(self) -> datetime:
         return slot_start(self._now()) - timedelta(minutes=30)
 
+    def set_reach(self, hours: float) -> None:
+        """How far from now the guide's lists reach (the guide list window of Settings; 0: all
+        of it): the days and the window go no further."""
+        hours = max(0.0, float(hours or 0))
+        if hours != self._reach:
+            self._reach = hours
+            if self._start > self._latest_start():
+                self._start = self._latest_start()
+            self.update()
+
+    def _latest_start(self) -> datetime:
+        earliest = self._home_start()
+        latest = earliest + timedelta(days=DAYS) - WINDOW
+        if self._reach > 0:
+            reach = self._now() + timedelta(hours=self._reach)
+            latest = min(latest, max(earliest, reach - WINDOW))
+        return latest
+
     def day_choices(self) -> list[tuple[str, int]]:
+        """Today, Tomorrow, then weekdays, as far as the guide reaches."""
         now = self._now()
-        return [(day_label(now + timedelta(days=k), now), k) for k in range(DAYS)]
+        days = DAYS
+        if self._reach > 0:
+            reach = now + timedelta(hours=self._reach)
+            midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            days = min(DAYS, sum(1 for k in range(DAYS) if midnight + timedelta(days=k) < reach))
+        return [(day_label(now + timedelta(days=k), now), k) for k in range(max(1, days))]
 
     def set_day(self, day: int) -> None:
         """The window on day `day` (0: today, from half an hour before now; later days at the
-        same time of day)."""
-        self._day = max(0, min(DAYS - 1, day))
-        self._start = self._home_start() + timedelta(days=self._day)
+        same time of day, or as late as the guide reaches)."""
+        self._day = max(0, min(len(self.day_choices()) - 1, day))
+        self._start = min(self._home_start() + timedelta(days=self._day), self._latest_start())
         self._shifted = False
         self._card = None
         self._current = self._on_now(self._row) or self._first(self._row)
@@ -177,9 +205,8 @@ class HomeGuide(TooltipWidget):
 
     def shift(self, half_hours: int) -> None:
         earliest = self._home_start()
-        latest = earliest + timedelta(days=DAYS) - WINDOW
         moved = self._start + timedelta(minutes=30 * half_hours)
-        self._start = max(earliest, min(latest, moved))
+        self._start = max(earliest, min(self._latest_start(), moved))
         self._shifted = self._start != earliest
         # the day the window shows most of (just after midnight, earliest is yesterday's)
         middle = self._start + WINDOW / 2
@@ -382,10 +409,14 @@ class HomeGuide(TooltipWidget):
         row, programme = self._card
         mark = self._mark(self._channels[row], programme)
         if mark == "series":
-            return ["skip", "cancel_series"]
-        if mark in ("once", "recording"):
-            return ["cancel"]
-        return ["record", "series"]
+            buttons = ["skip", "cancel_series"]
+        elif mark in ("once", "recording"):
+            buttons = ["cancel"]
+        else:
+            buttons = ["record", "series"]
+        if programme.start <= self._now() < programme.stop:
+            buttons.append("watch")  # on now: its channel plays (the keys' way to tune it)
+        return buttons
 
     def _card_rect(self) -> QRectF:
         if self._card is None:
@@ -394,7 +425,11 @@ class HomeGuide(TooltipWidget):
         row, programme = self._card
         box = self._box_of(row, programme)
         height = 3.0 * u + BUTTON_H_U * u + 1.6 * u
-        width = CARD_W_U * u
+        fm = QFontMetricsF(self._units().font(0.95, QFont.Weight.DemiBold))
+        buttons = sum(
+            fm.horizontalAdvance(translate(_BUTTON_TEXTS[b])) + 2.6 * u for b in self.card_buttons()
+        )
+        width = min(self.width() - 1.0 * u, max(CARD_W_U * u, buttons + 1.4 * u))  # its buttons
         x = min(max(self.time_area().left(), box.left()), self.width() - width - 0.5 * u)
         y = box.bottom() + 0.4 * u
         if y + height > self.height():
@@ -441,12 +476,18 @@ class HomeGuide(TooltipWidget):
             self.cancelSeriesRequested.emit(channel, programme)
         elif name == "cancel":
             self.cancelRequested.emit(channel, programme)
+        elif name == "watch":
+            self.tuneRequested.emit(channel)
         self.update()
 
     # ---- keys -------------------------------------------------------------------------------
 
     def channels(self) -> list[dict]:
         return list(self._channels)
+
+    def shown_channels(self) -> list[dict]:
+        """The channels whose rows show now."""
+        return self._channels[self._top : self._top + self._rows_fit() + 1]
 
     def has_rows(self) -> bool:
         """Rows to show: channels, and programmes for those that show."""

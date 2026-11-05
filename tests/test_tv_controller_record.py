@@ -81,6 +81,18 @@ class RecordingNotedTests(_RecordCase):  # 2.9.7: the recordings index
         self.assertGreater(start, 0)
 
 
+class RecordingEndNotedTests(_RecordCase):  # final review 5: its length is the file's
+    def test_an_r_recordings_end_is_noted(self):
+        self.start_large(0)
+        ended = []
+        self.controller.note_recording_end = ended.append
+        self.controller.handle(Action.RECORD)
+        live = self.controller.live
+        (path,) = [call[1] for call in live.calls if call[0] == "start_recording"]
+        live.recordingEnded.emit("stopped", path, 1_000)
+        self.assertEqual(ended, [path])
+
+
 class RecordingAsideTests(_RecordCase):
     def test_a_zap_away_from_a_recording_keeps_it(self):
         recording = self.record_large(0)

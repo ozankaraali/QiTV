@@ -2342,6 +2342,16 @@ class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings 
         self.ctl.leave()
         self.assertFalse(self.ctl._guide_search.running())
 
+    def test_moving_along_the_rail_stops_the_find(self):  # final review (minor)
+        many = [{"id": str(n), "name": f"Channel {n}"} for n in range(400)]
+        self.find_setup()
+        self.ctl.find_sources = lambda: [many]
+        self.ctl.handle(Action.NAV_TEXT, "n")
+        QCoreApplication.processEvents()
+        self.assertTrue(self.ctl._guide_search.running())
+        self.screen.rec_rail.genreSelected.emit(rl.COMING)
+        self.assertFalse(self.ctl._guide_search.running())
+
     def test_page_keys_reach_the_homes_guide_and_shelf(self):  # Stage 3–4 review 8
         self.ctl.open_recordings(rl.TONIGHT)
         self.ctl.handle(Action.NAV_RIGHT)
@@ -2349,6 +2359,19 @@ class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings 
         self.assertEqual(home.focus_region(), "hero")
         self.ctl.handle(Action.NAV_PAGE_DOWN)
         self.assertEqual(home.focus_region(), "guide")
+
+    def test_up_from_the_rails_first_row_reaches_its_find(self):  # final review 1
+        self.ctl.open_recordings(rl.TONIGHT)
+        self.ctl.handle(Action.ESCAPE)  # the rail, on Tonight
+        self.assertEqual(self.ctl.zone, "rec_rail")
+        self.ctl.handle(Action.NAV_UP)
+        self.assertEqual(self.ctl.zone, "rec_rail")
+        for letter in "ev":
+            self.ctl.handle(Action.NAV_TEXT, letter)
+        self.assertEqual(self.screen.rec_rail.filter_text, "ev")
+        self.assertEqual(self.screen.recordings_content, "find")
+        self.ctl.handle(Action.NAV_UP)  # above the find: the top bar
+        self.assertEqual(self.ctl.zone, "nav")
 
     def test_typing_searches_and_esc_comes_back_to_the_tab(self):
         self.ctl.open("recordings")

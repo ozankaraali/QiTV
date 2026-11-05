@@ -479,6 +479,7 @@ class RecordingScheduler(QObject):
         if item is not None and item.get("kind") == rs.ONCE:
             self.schedule.cancel(job.item_id)
         else:
+            self.schedule.skip(job.item_id, job.start)  # skipped, as the guide's Skip says
             self.schedule.started(job)  # this airing is never due again
         self.changed.emit()
 
@@ -866,6 +867,8 @@ class RecordingScheduler(QObject):
         run.ended = True
         if self._index is not None and path and run.path and path != run.path:
             self._index.moved(run.path, path)  # 2.9.7: the helper saved it under another name
+        if self._index is not None and (path or run.path):
+            self._index.ended(path or run.path, self._clock())  # 2.9.7: what the file holds
         if run.host is not None and not (run.stopping or run.user_stopped or run.cut):
             # 2.9.7: a player's recording that ended unasked. One whose player still plays its
             # buffer was stopped there (R): this airing is done. Else its stream broke (it

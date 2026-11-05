@@ -187,6 +187,15 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(self.index.get(saved)["title"], "The News")
         self.assertIsNone(self.index.get(path))
 
+    def test_a_recording_cut_short_keeps_where_its_file_ends(self):  # final review 5
+        self.scheduled_now()
+        sid = self.engine.opened[0][0]
+        self.engine.sessionReady.emit(sid)
+        rid, _sid, path, *_ = self.engine.recordings[0]
+        self.now = (T0 + timedelta(minutes=34)).timestamp()  # four minutes into it
+        self.engine.recordingEnded.emit(rid, ENDED, path, 1_000)
+        self.assertEqual(self.index.get(path)["stop"], self.now)
+
     def test_a_portal_that_answered_only_over_http_records_over_http(self):  # 2.8.1
         memory = mock.patch.object(provider_api, "_http_only", set())
         memory.start()
@@ -550,6 +559,8 @@ class SchedulerTests(unittest.TestCase):
         ((job, _why),) = self.scheduler.waiting()
         self.scheduler.skip(job.key)
         self.assertEqual(self.schedule.item(item["id"])["kind"], rs.TIMER)
+        # final review: skipped as the guide's Skip skips it (its mark and its row go)
+        self.assertTrue(self.schedule.is_skipped(item["id"], job.start))
         self.scheduler.tick()
         self.assertEqual(self.scheduler.waiting(), [])  # this airing is never due again
         self.budget.release(held)

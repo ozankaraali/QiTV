@@ -435,6 +435,7 @@ class LibraryController(QObject):
         library = self._rec_library
         self._rec_row = row
         screen = self._screen
+        self._guide_search.cancel()  # a row's view: the find's walk stops
         if library is not None and rebuild:
             rail = screen.rec_rail
             rail.set_genres(library.rail(rail.filter_text))
@@ -1011,7 +1012,7 @@ class LibraryController(QObject):
 
     def _handle_rec_rail(self, action: Action, payload: str) -> bool:
         """2.9.7: the Recordings tab's rail, as the genre column: ↑↓ choose a row (its view
-        shows), → or Enter go to it, Esc back to the TV."""
+        shows; ↑ on the first, its find), → or Enter go to it, Esc back to the TV."""
         rail = self._screen.rec_rail
         if self._rec_field:
             if rail.field_key(action, payload):
@@ -1023,7 +1024,7 @@ class LibraryController(QObject):
                 self._focus("nav")
                 return True
         if action is Action.NAV_UP and rail.current_id() == rl.TONIGHT:
-            self._focus("nav")
+            self._focus("rec_rail", field=True)  # ↑ on the first row: its find, as Movies'
         elif action in (Action.NAV_UP, Action.NAV_DOWN):
             rail.move_by(-1 if action is Action.NAV_UP else 1)
             if rail.current_id():

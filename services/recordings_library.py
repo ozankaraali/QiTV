@@ -202,12 +202,17 @@ class RecordingsLibrary:
         return sections
 
     def picture(self, item: dict) -> tuple[str, bool]:
-        """A tile's picture: (its url, whether it is a channel's logo); a recording's frame,
-        a row's channel logo, ("", False) for its tinted card."""
+        """A tile's picture: (its url, whether it is a channel's logo); a recording's frame
+        (its channel's logo until there is one), a row's channel logo, ("", False) for its
+        tinted card."""
         entry = item.get("_desk")
         if isinstance(entry, desk.Entry):
             return (entry.logo, True) if entry.logo else ("", False)
-        return self._picture(item), False
+        frame = self._picture(item)
+        if frame:
+            return frame, False
+        logo = str(item.get("_logo") or "")  # until its frame is made (or if none comes)
+        return (logo, True) if logo else ("", False)
 
     def caption(self, item: dict) -> tuple[str, str]:
         """A tile's title and the line under it: its channel and when it was recorded (one

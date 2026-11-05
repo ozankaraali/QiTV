@@ -346,6 +346,40 @@ class HomeGuideReviewTests(unittest.TestCase):
         self.assertLessEqual(last, self.clock[0].replace(hour=0, minute=0) + timedelta(days=4))
         self.assertEqual(self.guide.shown_day(), 3)
 
+    def test_the_days_and_the_window_end_where_the_guide_reaches(self):  # final review 2
+        self.guide.set_reach(24)  # the guide list's window (Settings), from now
+        self.assertEqual([label for label, _day in self.guide.day_choices()], ["Today", "Tomorrow"])
+        for _ in range(200):
+            self.guide.shift(1)
+        self.assertLessEqual(
+            self.guide.window_start() + timedelta(hours=4), NOW + timedelta(hours=24)
+        )
+        self.guide.set_day(0)
+        self.guide.set_day(1)
+        self.assertEqual(self.guide.window_start().date(), (NOW + timedelta(days=1)).date())
+        self.assertLessEqual(
+            self.guide.window_start() + timedelta(hours=4), NOW + timedelta(hours=24)
+        )
+        self.guide.set_reach(0)  # all of the guide
+        self.assertEqual(len(self.guide.day_choices()), 4)
+
+    def test_a_programme_on_now_offers_watch_and_the_keys_reach_it(self):  # final review
+        tuned = []
+        self.guide.tuneRequested.connect(lambda channel: tuned.append(channel["id"]))
+        self.assertEqual(self.guide.current_title(), "Channel 0 19:30")  # on now
+        self.guide.activate()
+        self.assertEqual(self.guide.card_buttons(), ["record", "series", "watch"])
+        card = self.guide.card_rect()
+        for name in self.guide.card_buttons():
+            self.assertTrue(card.contains(self.guide.card_button_rect(name)), name)
+        self.guide.move_by(1, 0)
+        self.guide.move_by(1, 0)
+        self.guide.activate()
+        self.assertEqual(tuned, ["0"])
+        self.guide.move_by(1, 0)  # still to come: no Watch
+        self.guide.activate()
+        self.assertEqual(self.guide.card_buttons(), ["record", "series"])
+
     def test_a_long_source_name_leaves_the_days_alone(self):
         self.guide.resize(700, 420)
         self.guide.set_source_label("★ " + "A very long group name " * 4)

@@ -507,6 +507,8 @@ class TVController(QObject):
         self._media = media_reporter
         # 2.8: the providers scheduled recordings record from (their guides stay loaded).
         self.extra_guides: Callable[[], set[str]] = set
+        # 2.9.7: the guides a page beside the TV shows (the Recordings home's rows)
+        self.view_guides: Callable[[], set[str]] = set
         # 2.8: what records on schedule now (RecordingScheduler.recording_now) and its Stop.
         self.scheduled_now: Callable[[], list[tuple[str, str, float, dict]]] = list
         self.stop_scheduled: Callable[[str], None] = lambda name: None
@@ -516,6 +518,8 @@ class TVController(QObject):
         # 2.9.7: a recording started with R, for the recordings index: (its file, the
         # channel, the programme on now, its start, unix); the window's
         self.note_recording: Callable[[str, dict, str, float], None] = lambda *_args: None
+        # 2.9.7: a recording ended (R, its stream, its limit): the index keeps where
+        self.note_recording_end: Callable[[str], None] = lambda _path: None
         self.lendable_scheduled: Callable[[dict, str], bool] = lambda item, provider: False
         # 2.8: "Record at a time…" for a channel (the window's, once QiTV records)
         self.record_at: Optional[Callable[[dict], None]] = None
@@ -3062,6 +3066,8 @@ class TVController(QObject):
     def _on_recording_ended(self, reason: str, path: str, written: int) -> None:
         if self._closed:
             return
+        if path:
+            self.note_recording_end(path)  # 2.9.7: its tile's length is what the file holds
         text, kind = recording.ended_text(reason, path, written)
         self._toast(text, kind, ERROR_MS if kind == "error" else RECORDING_MS)
 
@@ -3255,6 +3261,7 @@ class TVController(QObject):
         names.update(provider_of(item) for item in items if item)
         names.update(self._phone_guides)  # the channels the phone remote lists
         names.update(self.extra_guides())  # 2.8: a scheduled series follows its channel's guide
+        names.update(self.view_guides())  # 2.9.7: the Recordings home's rows
         source = self.catalog.current_provider_name()
         if source != ALL_PROVIDERS:
             names.add(source)
