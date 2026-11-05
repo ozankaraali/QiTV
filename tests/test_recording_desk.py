@@ -100,12 +100,19 @@ class ClashTests(unittest.TestCase):
             "days": [1],
         }
         entries = desk.coming_entries([b, timer, a], local(26, 12), limits={"P": 1})
-        self.assertEqual(keys(entries), ["item:a", "item:b", "item:t", "add:coming"])
+        self.assertEqual(
+            keys(entries),
+            [
+                f"airing:a@{int(local(26, 20))}",
+                f"airing:b@{int(local(26, 20, 30))}",
+                f"airing:t@{int(local(27, 9))}",
+                "add:coming",
+            ],
+        )  # 2.9.7: one row per airing, soonest first
         self.assertIn("Clashes at", entries[0].note)
         self.assertIn("P allows 1 at once", entries[0].note)
         self.assertEqual(entries[0].tone, desk.WARN)
         self.assertEqual(entries[2].title, "09:00–10:00")  # a timer without a name: its time
-        self.assertTrue(entries[2].note.startswith("Next: "))
         self.assertEqual(entries[2].tone, desk.OK)
         self.assertEqual([b.name for b in entries[3].buttons], [desk.ADD_TIMER, desk.OPEN_GUIDE])
 
@@ -115,6 +122,84 @@ class ClashTests(unittest.TestCase):
         edit = next(b for b in entry.buttons if b.name == desk.EDIT)
         self.assertFalse(edit.enabled)
         self.assertTrue(entry.note.startswith("Recording now, until"))
+
+
+class AiringRowTests(unittest.TestCase):  # 2.9.7: Coming up, one row per airing
+    TIMER = {
+        "id": "t",
+        "kind": rs.TIMER,
+        "provider": "P",
+        "channel": FILMS,
+        "title": "Late film",
+        "begin": 21 * 60,
+        "minutes": 60,
+        "days": [0, 2],
+    }
+
+    def test_a_series_lists_each_airing_with_skip(self):
+        series = {"id": "s", "kind": rs.SERIES, "provider": "P", "channel": NEWS, "title": "News"}
+        shows = [
+            Programme(
+                "News",
+                datetime(2026, 10, 26, 20).astimezone(),
+                datetime(2026, 10, 26, 21).astimezone(),
+                "",
+                None,
+            ),
+            Programme(
+                "News",
+                datetime(2026, 10, 27, 20).astimezone(),
+                datetime(2026, 10, 27, 21).astimezone(),
+                "",
+                None,
+            ),
+        ]
+        entries = desk.coming_entries(
+            [series], local(26, 12), limits={}, guide=lambda channel, since: shows
+        )
+        rows = [e for e in entries if e.key.startswith("airing:")]
+        self.assertEqual(
+            [e.key for e in rows],
+            [f"airing:s@{int(local(26, 20))}", f"airing:s@{int(local(27, 20))}"],
+        )
+        self.assertEqual([[b.name for b in e.buttons] for e in rows], [[desk.SKIP], [desk.SKIP]])
+        self.assertEqual(rows[0].status, desk.status("series"))
+
+    def test_a_timer_lists_each_day_with_edit_and_skip(self):
+        entries = desk.coming_entries([self.TIMER], local(26, 12), limits={})
+        rows = [e for e in entries if e.key.startswith("airing:")]
+        self.assertEqual([e.sort for e in rows], [local(26, 21), local(28, 21)])
+        self.assertEqual([b.name for b in rows[0].buttons], [desk.EDIT, desk.SKIP])
+        self.assertEqual(rows[0].title, "Late film")
+
+    def test_a_once_lists_edit_and_cancel(self):
+        a = once("a", NEWS, local(26, 20), local(26, 21))
+        row, _add = desk.coming_entries([a], local(26, 12), limits={})
+        self.assertEqual([b.name for b in row.buttons], [desk.EDIT, desk.CANCEL])
+
+    def test_a_skipped_airing_is_not_listed(self):
+        skipped = {("t", int(local(26, 21)))}
+        entries = desk.coming_entries(
+            [self.TIMER],
+            local(26, 12),
+            limits={},
+            skipped=lambda item_id, start: (item_id, int(start)) in skipped,
+        )
+        rows = [e for e in entries if e.key.startswith("airing:")]
+        self.assertEqual([e.sort for e in rows], [local(28, 21)])
+
+    def test_rules_list_series_and_timers_with_their_next_airing(self):
+        series = {"id": "s", "kind": rs.SERIES, "provider": "P", "channel": NEWS, "title": "News"}
+        a = once("a", NEWS, local(26, 20), local(26, 21))
+        rules = desk.rule_entries([series, self.TIMER, a], local(26, 12), guide=lambda c, s: [])
+        rows = [e for e in rules if e.key.startswith("rule:")]
+        # the soonest next airing first, one with none in the guide last; not the one-time
+        self.assertEqual([e.key for e in rows], ["rule:t", "rule:s"])
+        self.assertEqual([e.section for e in rows], [desk.RULES, desk.RULES])
+        self.assertEqual([b.name for b in rows[0].buttons], [desk.EDIT, desk.REMOVE_RULE])
+        self.assertEqual([b.name for b in rows[1].buttons], [desk.REMOVE_RULE])
+        self.assertTrue(rows[0].note.startswith("Next: "))
+        self.assertEqual(rows[1].note, "No airing in the guide yet")
 
 
 class SectionTests(unittest.TestCase):

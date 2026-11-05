@@ -34,7 +34,9 @@ from services.i18n import N_, number, tr_n, translate
 from services.recordings_list import short_when, size_text, timer_text
 
 NOW, COMING, ATTENTION, RECORDED, PLACES = "now", "coming", "attention", "recorded", "places"
-SECTIONS = (NOW, COMING, ATTENTION, RECORDED, PLACES)
+RULES = "rules"  # 2.9.7: the series and the timers, each once
+SETTINGS = PLACES  # 2.9.7: the folders and the streams (the places' entries)
+SECTIONS = (NOW, COMING, RULES, ATTENTION, RECORDED, PLACES)
 ALL = "all"  # the page's first chip: every section
 DAYS = 7  # how far ahead airings are looked for (clashes, a timer's next)
 LOW_SPACE = 4 * 1024**3  # less free on a place's disk: said (the recorder stops under 2 GiB)
@@ -43,12 +45,14 @@ SECTION_TITLES = {
     NOW: N_("Recording now"),
     # i18n: a section of the Recordings page: the scheduled recordings, soonest first
     COMING: N_("Coming up"),
+    # i18n: a Recordings tab row: the repeating recordings (every airing, timers on days)
+    RULES: N_("Series & timers"),
     # i18n: a section of the Recordings page: recordings that were missed or failed
     ATTENTION: N_("Needs attention"),
     # i18n: a section of the Recordings page: the recordings' files
     RECORDED: N_("Recorded"),
     # i18n: a section of the Recordings page: the folders recordings are kept in
-    PLACES: N_("Places"),
+    PLACES: N_("Folders & streams"),
 }
 # i18n: the Recordings page's first chip: every section at once
 ALL_TEXT = N_("All")
@@ -60,6 +64,7 @@ DISMISS, DISMISS_ALL = "dismiss", "dismiss_all"
 PLAY, FOLDER, DELETE = "play", "folder", "delete"
 OPEN, DEFAULT, REMOVE = "open", "default", "remove"
 ADD_TIMER, OPEN_GUIDE, ADD_PLACE = "add_timer", "open_guide", "add_place"
+REMOVE_RULE = "remove_rule"  # 2.9.7: a series or a timer goes off the schedule
 ACCENT, RAISED, DANGER = "accent", "raised", "danger"  # a button's look
 # A status pill's (and a note's) tone.
 REC, OK, WARN, ERROR, QUIET = "rec", "ok", "warn", "error", "quiet"
@@ -99,6 +104,8 @@ BUTTON_TEXTS = {
     OPEN_GUIDE: N_("Record from the guide"),
     # i18n: a Recordings page button: another folder recordings are listed from (a picker)
     ADD_PLACE: N_("Add a place…"),
+    # i18n: a Recordings tab button: a series or a timer is taken off the schedule (verb)
+    REMOVE_RULE: N_("Remove"),
 }
 STATUS_TEXTS = {
     # i18n: a Recordings page status pill: it records now (as the REC sign)
@@ -275,6 +282,62 @@ class Streams:
     uses: tuple[Use, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class Next:
+    """2.9.7: the next scheduled airing (the Recordings home's "Next" card)."""
+
+    item_id: str
+    title: str
+    channel: str
+    provider: str
+    start: float
+    stop: float
+    kind: str
+
+
+@dataclass(frozen=True)
+class Hero:
+    """2.9.7: the Recordings home's top row: what records now, what is next, the streams of the
+    providers with a limit or a stream in use."""
+
+    now: tuple[Recording, ...]
+    next: Optional[Next]
+    streams: tuple[Streams, ...]
+
+
+def next_airing(
+    items: Iterable[Mapping],
+    now: float,
+    *,
+    zone: Optional[tzinfo] = None,
+    guide: Optional[Callable[[dict, float], Sequence[Programme]]] = None,
+    skipped: Callable[[str, float], bool] = lambda item_id, start: False,
+    recording_ids: Iterable[str] = (),
+) -> Optional[Next]:
+    """The soonest airing still to start (not skipped, not one recording now)."""
+    recording = set(recording_ids)
+    best: Optional[Next] = None
+    for item in items:
+        item_id = str(item.get("id") or "")
+        for start, stop in airings(item, now, zone=zone, guide=guide):
+            if start - rs.PRE_S <= now or skipped(item_id, start):
+                continue
+            if item_id in recording and start <= now:
+                continue
+            if best is None or start < best.start:
+                best = Next(
+                    item_id,
+                    _title(item),
+                    str((item.get("channel") or {}).get("name") or ""),
+                    str(item.get("provider") or ""),
+                    start,
+                    stop,
+                    str(item.get("kind") or ""),
+                )
+            break
+    return best
+
+
 def button(name: str, style: str = RAISED, enabled: bool = True) -> Button:
     return Button(name, translate(BUTTON_TEXTS[name]), style, enabled)
 
@@ -447,20 +510,29 @@ def coming_entries(
     zone: Optional[tzinfo] = None,
     guide: Optional[Callable[[dict, float], Sequence[Programme]]] = None,
     days: int = DAYS,
+    skipped: Callable[[str, float], bool] = lambda item_id, start: False,
 ) -> list[Entry]:
-    """The schedule, by next airing (a series with none in the guide last), with clashes; the
-    last row adds one (Record at a time, the guide)."""
+    """2.9.7: one row per airing in the next `days` (a series' as its guide says, a timer's on
+    its days), soonest first, skipped ones (`skipped(item_id, start)`) left out, with clashes;
+    the last row adds one (Record at a time, the guide)."""
     recording = set(recording_ids)
     timed: list[tuple[Mapping, list[tuple[float, float]]]] = []
     windows: list[Plan] = []
     for item in items:
-        times = airings(item, now, days=days, zone=zone, guide=guide)
+        item_id = str(item.get("id") or "")
+        times = [
+            (start, stop)
+            for start, stop in airings(item, now, days=days, zone=zone, guide=guide)
+            if not skipped(item_id, start)
+        ]
         timed.append((item, times))
         windows += plans(item, times)
     found = clashes(windows, limits)
     entries = []
     for item, times in timed:
-        entries.append(_coming_entry(item, times, now, found, str(item.get("id")) in recording))
+        records_now = str(item.get("id")) in recording
+        for start, stop in times:
+            entries.append(_airing_entry(item, start, stop, now, found, records_now))
     entries.sort(key=lambda e: e.sort)
     entries.append(
         Entry(
@@ -474,43 +546,38 @@ def coming_entries(
     return entries
 
 
-def _coming_entry(
+def _airing_entry(
     item: Mapping,
-    times: list[tuple[float, float]],
+    start: float,
+    stop: float,
     now: float,
     found: Mapping[str, Clash],
     records_now: bool,
 ) -> Entry:
     kind = item.get("kind")
+    item_id = str(item.get("id") or "")
     channel = str((item.get("channel") or {}).get("name") or "")
     provider = str(item.get("provider") or "")
-    title = str(item.get("title") or "")
-    upcoming = [(start, stop) for start, stop in times if start - rs.PRE_S > now]
-    first = times[0] if times else None
-    notes: list[str] = []
+    title = _title(item)
+    on_now = records_now and start - rs.PRE_S <= now < stop + rs.POST_S
     # One that records now is not changed under its recording (Stop it in Recording now).
-    edit = button(EDIT, enabled=not records_now)
+    edit = button(EDIT, enabled=not on_now)
     buttons: tuple[Button, ...]
     if kind == rs.ONCE:
-        start, stop = float(item.get("start") or 0), float(item.get("stop") or 0)
-        detail = f"{short_when(start)}–{clock(stop)} · {channel}"
         pill, buttons = "once", (edit, button(CANCEL, DANGER))
     elif kind == rs.TIMER:
-        title = title or rs.slot_text(int(item.get("begin") or 0), int(item.get("minutes") or 0))
-        detail = timer_text(dict(item))
-        pill, buttons = "repeats", (edit, button(CANCEL, DANGER))
+        pill, buttons = "repeats", (edit, button(SKIP, enabled=not on_now))
     else:
-        detail = translate(EVERY_AIRING_TEXT, channel=channel)
-        pill, buttons = "series", (button(CANCEL, DANGER),)
-    if records_now and first is not None:
-        notes.append(translate(ON_NOW_TEXT, until=clock(first[1])))
-    elif kind != rs.ONCE and upcoming:
-        notes.append(translate(NEXT_TEXT, when=short_when(upcoming[0][0])))
-    elif kind == rs.SERIES:
-        notes.append(translate(NO_AIRING_TEXT))
-    clash = found.get(str(item.get("id") or ""))
+        pill, buttons = "series", (button(SKIP, enabled=not on_now),)
+    detail = f"{short_when(start)}–{clock(stop)} · {channel}"
+    if provider and provider not in detail:
+        detail = f"{detail} · {provider}"
+    notes: list[str] = []
+    if on_now:
+        notes.append(translate(ON_NOW_TEXT, until=clock(stop)))
+    clash = found.get(item_id)
     tone = OK
-    if clash is not None:
+    if clash is not None and start - rs.PRE_S <= clash.at < stop + rs.POST_S:
         tone = WARN
         notes.append(
             translate(
@@ -521,11 +588,8 @@ def _coming_entry(
                 limit=number(clash.limit),
             )
         )
-    if provider and provider not in detail:
-        detail = f"{detail} · {provider}"
-    sort = first[0] if first is not None else now + 365 * 86400
     return Entry(
-        key=f"item:{item.get('id')}",
+        key=f"airing:{item_id}@{int(start)}",
         section=COMING,
         title=title,
         detail=detail,
@@ -533,8 +597,75 @@ def _coming_entry(
         tone=tone,
         status=status(pill),
         buttons=buttons,
-        sort=sort,
+        sort=start,
     )
+
+
+def _title(item: Mapping) -> str:
+    title = str(item.get("title") or "")
+    if item.get("kind") == rs.TIMER and not title:
+        return rs.slot_text(int(item.get("begin") or 0), int(item.get("minutes") or 0))
+    return title
+
+
+def rule_entries(
+    items: Iterable[Mapping],
+    now: float,
+    *,
+    zone: Optional[tzinfo] = None,
+    guide: Optional[Callable[[dict, float], Sequence[Programme]]] = None,
+    days: int = DAYS,
+) -> list[Entry]:
+    """2.9.7: Series & timers: each series and each timer once, with its next airing, Edit… (a
+    timer) and Remove; the last row adds a timer."""
+    entries = []
+    for item in items:
+        kind = item.get("kind")
+        if kind not in (rs.SERIES, rs.TIMER):
+            continue
+        channel = str((item.get("channel") or {}).get("name") or "")
+        provider = str(item.get("provider") or "")
+        upcoming = [
+            start
+            for start, _stop in airings(item, now, days=days, zone=zone, guide=guide)
+            if start - rs.PRE_S > now
+        ]
+        buttons: tuple[Button, ...]
+        if kind == rs.SERIES:
+            detail = translate(EVERY_AIRING_TEXT, channel=channel)
+            pill, buttons = "series", (button(REMOVE_RULE, DANGER),)
+        else:
+            detail = timer_text(dict(item))
+            pill, buttons = "repeats", (button(EDIT), button(REMOVE_RULE, DANGER))
+        if provider and provider not in detail:
+            detail = f"{detail} · {provider}"
+        if upcoming:
+            note = translate(NEXT_TEXT, when=short_when(upcoming[0]))
+        else:
+            note = translate(NO_AIRING_TEXT)
+        entries.append(
+            Entry(
+                key=f"rule:{item.get('id')}",
+                section=RULES,
+                title=_title(item),
+                detail=detail,
+                note=note,
+                status=status(pill),
+                buttons=buttons,
+                sort=upcoming[0] if upcoming else now + 365 * 86400,
+            )
+        )
+    entries.sort(key=lambda e: e.sort)
+    entries.append(
+        Entry(
+            key=f"add:{RULES}",
+            section=RULES,
+            title="",
+            buttons=(button(ADD_TIMER, ACCENT), button(OPEN_GUIDE)),
+            sort=float("inf"),
+        )
+    )
+    return entries
 
 
 def problem_reason(outcome: Mapping, failure: Callable[[str], str]) -> str:

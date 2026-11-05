@@ -114,11 +114,12 @@ class RecordingsDeskTests(unittest.TestCase):
         self.schedule.add_once(FILMS, self.programme("Film", 150))  # clashes: P allows 1
         self.budget.request("P", 1, purpose="probe")
         self.show()
-        self.assertIn(f"item:{item['id']}", self.keys())
+        airing = f"airing:{item['id']}@{int(item['start'])}"  # 2.9.7: one row per airing
+        self.assertIn(airing, self.keys())
         path = str(self.folder / "rec" / "News One 2026-10-26 20.00.ts")
         self.assertIn(f"file:{path}", self.keys())
         self.assertIn(f"place:{self.config.recordings_dir}", self.keys())
-        coming = [e for e in self.view.entries() if e.key == f"item:{item['id']}"][0]
+        coming = [e for e in self.view.entries() if e.key == airing][0]
         self.assertIn("Clashes at", coming.note)
         ((streams, _rect),) = zip(self.view._streams, self.view.stream_rects())
         self.assertEqual((streams.provider, streams.limit), ("P", 1))
@@ -148,7 +149,7 @@ class RecordingsDeskTests(unittest.TestCase):
         )
         self.show()
         self.assertEqual(self.marks, ["warn"])  # the tab's dot: a problem
-        self.view.buttonClicked.emit(f"item:{item['id']}", desk.CANCEL)
+        self.view.buttonClicked.emit(f"airing:{item['id']}@{int(item['start'])}", desk.CANCEL)
         self.assertEqual(self.cancelled, [item["id"]])
         (outcome,) = self.schedule.outcomes()
         self.view.buttonClicked.emit(desk.outcome_key(outcome), desk.DISMISS)
@@ -159,6 +160,41 @@ class RecordingsDeskTests(unittest.TestCase):
         self.view.buttonClicked.emit(f"file:{path}", desk.DELETE)
         self.assertEqual(self.screens.played, [(path, "recording")])
         self.assertEqual(self.screens.deleted, [path])
+
+    def test_skip_on_an_airing_skips_only_it(self):  # 2.9.7
+        item = self.schedule.add_timer(NEWS, begin=21 * 60, minutes=60, days=range(7))
+        self.show()
+        first = next(e for e in self.view.entries() if e.key.startswith(f"airing:{item['id']}@"))
+        start = float(first.key.rpartition("@")[2])
+        self.view.buttonClicked.emit(first.key, desk.SKIP)
+        self.assertTrue(self.schedule.is_skipped(item["id"], start))
+        self.assertEqual([i["id"] for i in self.schedule.items()], [item["id"]])
+        self.assertNotIn(first.key, self.keys())
+
+    def test_remove_on_a_rule_cancels_it(self):  # 2.9.7
+        item = self.schedule.add_series(NEWS, "Late news")
+        self.show()
+        self.assertIn(f"rule:{item['id']}", [e.key for e in self.desk.entries_of(desk.RULES)])
+        self.view.buttonClicked.emit(f"rule:{item['id']}", desk.REMOVE_RULE)
+        self.assertEqual(self.cancelled, [item["id"]])
+
+    def test_entries_of_lists_one_section(self):  # 2.9.7
+        self.schedule.add_once(NEWS, self.programme("Late news", 120))
+        self.show()
+        self.assertEqual({e.section for e in self.desk.entries_of(desk.COMING)}, {desk.COMING})
+
+    def test_hero_holds_what_records_the_soonest_next_and_the_streams(self):  # 2.9.7
+        later = self.schedule.add_once(FILMS, self.programme("Film", 240))
+        soon = self.schedule.add_once(NEWS, self.programme("Late news", 120))
+        self.budget.request("P", 1, purpose="probe")
+        self.show()
+        hero = self.desk.hero()
+        self.assertEqual(hero.now, ())
+        self.assertEqual((hero.next.item_id, hero.next.title), (soon["id"], "Late news"))
+        self.assertEqual(hero.next.kind, rs.ONCE)
+        self.assertEqual(hero.next.start, soon["start"])
+        self.assertEqual([s.provider for s in hero.streams], ["P"])
+        self.assertNotEqual(later["id"], hero.next.item_id)
 
     def test_a_place_becomes_where_new_recordings_go_and_the_old_stays(self):
         other = str(self.folder / "other")

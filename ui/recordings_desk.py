@@ -318,14 +318,41 @@ class RecordingsDesk(QObject):
         files = self._recordings.files()
         places = self._recordings.places()
         entries = desk.now_entries(recording_now, self._waiting())
+        skipped = self._schedule().is_skipped
         entries += desk.coming_entries(
-            items, now, limits=limits, recording_ids=scheduled_ids, guide=self._guide
+            items,
+            now,
+            limits=limits,
+            recording_ids=scheduled_ids,
+            guide=self._guide,
+            skipped=skipped,
         )
+        entries += desk.rule_entries(items, now, guide=self._guide)  # 2.9.7
         outcomes = self._schedule().outcomes()
         entries += desk.attention_entries(outcomes, failure_reason, self._listed_file)
         entries += desk.recorded_entries(files, many_places=len(places) > 1)
         entries += desk.place_entries(self._places(files, places), os.path.expanduser("~"))
         return entries
+
+    def entries_of(self, section: str) -> list[desk.Entry]:
+        """2.9.7: one section's entries (a row of the Recordings tab's rail)."""
+        return [entry for entry in self.entries() if entry.section == section]
+
+    def hero(self) -> desk.Hero:
+        """2.9.7: the Recordings home's top row: what records now (players and scheduled), the
+        next airing, and the streams of the providers with a limit or a stream in use."""
+        scheduler = self._scheduler()
+        recording_ids = [d[5] for d in scheduler.recording_details()] if scheduler else []
+        items = self._schedule().items()
+        upcoming = desk.next_airing(
+            items,
+            time.time(),
+            guide=self._guide,
+            skipped=self._schedule().is_skipped,
+            recording_ids=recording_ids,
+        )
+        scheduled = {str(item.get("provider") or "") for item in items}
+        return desk.Hero(tuple(self._recording_now()), upcoming, tuple(self._streams(scheduled)))
 
     def _listed_file(self, path: str) -> bool:
         """A part of a failed recording plays while the list has its file (no disk read)."""
@@ -381,6 +408,8 @@ class RecordingsDesk(QObject):
             "rec": self._recording_button,
             "wait": self._waiting_button,
             "item": self._item_button,
+            "airing": self._airing_button,  # 2.9.7
+            "rule": self._item_button,  # 2.9.7
             "out": self._outcome_button,
             "file": self._file_button,
             "place": self._place_button,
@@ -414,10 +443,25 @@ class RecordingsDesk(QObject):
             scheduler.skip(job_key)
 
     def _item_button(self, item_id: str, name: str) -> None:
-        if name == desk.CANCEL:
+        if name in (desk.CANCEL, desk.REMOVE_RULE):
             self._window.cancel_scheduled(item_id)
         elif name == desk.EDIT:
             self.edit(item_id)
+
+    def _airing_button(self, airing: str, name: str) -> None:
+        """2.9.7: an airing's row: "<item id>@<start>"."""
+        item_id, _, at = airing.rpartition("@")
+        if name == desk.SKIP:
+            try:
+                start = float(at)
+            except ValueError:
+                return
+            self._schedule().skip(item_id, start)
+            changed = getattr(self._window, "schedule_changed", None)
+            if callable(changed):
+                changed()  # the guides and the scheduler follow
+        else:
+            self._item_button(item_id, name)
 
     def _outcome_button(self, at: str, name: str) -> None:
         try:
