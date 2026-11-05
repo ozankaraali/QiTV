@@ -35,6 +35,7 @@ from services.recordings_list import short_when, size_text, timer_text
 
 NOW, COMING, ATTENTION, RECORDED, PLACES = "now", "coming", "attention", "recorded", "places"
 RULES = "rules"  # 2.9.7: the series and the timers, each once
+FOUND = "found"  # 2.9.7: the find's programmes in the guide, to record
 SETTINGS = PLACES  # 2.9.7: the folders and the streams (the places' entries)
 SECTIONS = (NOW, COMING, RULES, ATTENTION, RECORDED, PLACES)
 ALL = "all"  # the page's first chip: every section
@@ -47,6 +48,8 @@ SECTION_TITLES = {
     COMING: N_("Coming up"),
     # i18n: a Recordings tab row: the repeating recordings (every airing, timers on days)
     RULES: N_("Series & timers"),
+    # i18n: the Recordings tab's find: the programmes in the guide whose title matches
+    FOUND: N_("In the guide"),
     # i18n: a section of the Recordings page: recordings that were missed or failed
     ATTENTION: N_("Needs attention"),
     # i18n: a section of the Recordings page: the recordings' files
@@ -65,6 +68,7 @@ PLAY, FOLDER, DELETE = "play", "folder", "delete"
 OPEN, DEFAULT, REMOVE = "open", "default", "remove"
 ADD_TIMER, OPEN_GUIDE, ADD_PLACE = "add_timer", "open_guide", "add_place"
 REMOVE_RULE = "remove_rule"  # 2.9.7: a series or a timer goes off the schedule
+RECORD, RECORD_SERIES = "record", "series"  # 2.9.7: a programme the find found
 ACCENT, RAISED, DANGER = "accent", "raised", "danger"  # a button's look
 # A status pill's (and a note's) tone.
 REC, OK, WARN, ERROR, QUIET = "rec", "ok", "warn", "error", "quiet"
@@ -106,6 +110,10 @@ BUTTON_TEXTS = {
     ADD_PLACE: N_("Add a place…"),
     # i18n: a Recordings tab button: a series or a timer is taken off the schedule (verb)
     REMOVE_RULE: N_("Remove"),
+    # i18n: a Recordings tab button: the programme found records (verb)
+    RECORD: N_("● Record"),
+    # i18n: a Recordings tab button: every airing of the programme found records
+    RECORD_SERIES: N_("↻ Every airing"),
 }
 STATUS_TEXTS = {
     # i18n: a Recordings page status pill: it records now (as the REC sign)

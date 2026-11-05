@@ -244,7 +244,7 @@ class RecordingsView(TooltipWidget):
         chips, a header naming the last, the streams only on Folders & streams; the keys
         start on its first row, ↑ from it goes to the top bar, Esc to the rail."""
         sections = (section,) if isinstance(section, str) else tuple(section)
-        if not sections or any(s not in desk.SECTIONS for s in sections):
+        if not sections or any(s not in desk.SECTIONS + (desk.FOUND,) for s in sections):
             raise ValueError(f"Unknown section: {section!r}")
         self._section_alone = True
         self._together = sections
@@ -259,7 +259,7 @@ class RecordingsView(TooltipWidget):
 
     def header_text(self) -> str:
         """2.9.7: the section's name and its count, as the header of the section alone."""
-        name = translate(desk.SECTION_TITLES[self._filter]) if self._filter in desk.SECTIONS else ""
+        name = translate(desk.SECTION_TITLES.get(self._filter, "")) if self._filter else ""
         counts = self.counts()
         count = sum(counts.get(s, 0) for s in (self._together or (self._filter,)))
         return f"{name}  ·  {number(count)}" if count and self._filter != desk.PLACES else name
@@ -287,10 +287,10 @@ class RecordingsView(TooltipWidget):
     def counts(self) -> dict[str, int]:
         """Each section's entries (rows of buttons alone not counted)."""
         if self._counted is None:
-            found = {section: 0 for section in desk.SECTIONS}
+            found = {section: 0 for section in desk.SECTIONS + (desk.FOUND,)}
             for entry in self._entries:
                 if entry.title:
-                    found[entry.section] += 1
+                    found[entry.section] = found.get(entry.section, 0) + 1
             self._counted = found
         return dict(self._counted)
 

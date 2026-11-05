@@ -31,7 +31,7 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 logger = logging.getLogger(__name__)
 
 MODES = ("browse", "series", "search", "recordings")
-RECORDINGS_CONTENTS = ("home", "grid", "list")  # 2.9.7: what the Recordings tab shows
+RECORDINGS_CONTENTS = ("home", "grid", "list", "find")  # 2.9.7: what the Recordings tab shows
 REC_TILE_ASPECT = 9 / 16  # 2.9.7: its recordings' tiles
 REC_TILE_TARGET_U = 16.0
 DEFAULT_HOST_WIDTH = 1280
@@ -263,6 +263,7 @@ class LibraryScreen(QWidget):
         self.rec_grid.set_shape(REC_TILE_ASPECT, REC_TILE_TARGET_U)
         # the recorder's home: its guide reads the page's programmes once it has them
         self.home = RecorderHome(lambda channel, start, limit: [], _now, self)
+        self.rec_found = RecordingsView(self)  # what the rail's find found
         self.recordings_content = "home"
         self.search_field = SearchField(self.nav)
         self.nav.attach_search(self.search_field)  # the top bar places it on its search
@@ -296,6 +297,7 @@ class LibraryScreen(QWidget):
         self.home.setVisible(on and self.recordings_content == "home")
         self.rec_grid.setVisible(on and self.recordings_content == "grid")
         self.recordings.setVisible(on and self.recordings_content == "list")
+        self.rec_found.setVisible(on and self.recordings_content == "find")
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -318,6 +320,7 @@ class LibraryScreen(QWidget):
         self.recordings.setGeometry(*content)
         self.rec_grid.setGeometry(*content)
         self.home.setGeometry(*content)
+        self.rec_found.setGeometry(*content)
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)

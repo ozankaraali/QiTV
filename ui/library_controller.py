@@ -34,6 +34,7 @@ any title during a provider switch, has no menu; nor has a series or a channel.
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 from typing import Any, Callable, Optional
 
@@ -43,6 +44,7 @@ from PySide6.QtWidgets import QMenu
 from services import i18n, recording_desk, recordings_library as rl
 from services.catalog import PROVIDER_LOADING_MESSAGE
 from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE, shown_message
+from services.guide_search import GuideSearch
 from services.i18n import N_, tr, tr_n, translate
 from services.library import (
     PINNED_TITLES,
@@ -172,6 +174,18 @@ class LibraryController(QObject):
         self._rec_library: Optional[Any] = None
         self._rec_row = rl.TONIGHT
         self.delete_recording: Callable[[dict], None] = lambda item: None
+        # 2.9.7: the rail's find in the guide: its channels (nearest first), the programmes,
+        # and what records one found (the pages')
+        self.find_sources: Callable[[], list[list[dict]]] = lambda: []
+        self.find_programmes: Callable[[dict, Any, int], list] = lambda c, now, n: []
+        self.record_found: Callable[[dict, Any, bool], None] = lambda c, p, series: None
+        self._found: list[tuple[dict, Any]] = []
+        self._guide_search = GuideSearch(
+            lambda channel, now, limit: self.find_programmes(channel, now, limit),
+            lambda: datetime.now().astimezone(),
+            self,
+        )
+        self._guide_search.found.connect(self._on_found)
         self.show_recording_folder: Callable[[dict], object] = lambda item: None
         self._search_from = ""  # 2.9.7: "recordings" while the search was opened from that page
         self._config = config
@@ -270,7 +284,7 @@ class LibraryController(QObject):
         rec_rail.genreSelected.connect(self._show_rec_row)
         rec_rail.fieldClicked.connect(lambda: self._focus("rec_rail", field=True))
         rec_rail.genreActivated.connect(lambda _id: self._focus("rec_content"))
-        rec_rail.filterChanged.connect(lambda _text: self._refresh_recordings())
+        rec_rail.filterChanged.connect(self._on_rec_find)
         rec_grid.activated.connect(lambda i: self._play_recording(i, start_over=False))
         rec_grid.startOverRequested.connect(lambda i: self._play_recording(i, start_over=True))
         rec_grid.deleteRequested.connect(lambda i: self._recording_action(i, self.delete_recording))
@@ -280,6 +294,8 @@ class LibraryController(QObject):
         rec_grid.leftEdge.connect(lambda: self._focus("rec_rail"))
         rec_grid.upEdge.connect(lambda: self._focus("nav"))
         rec_grid.contextRequested.connect(self._on_recording_context)
+        screen.rec_found.buttonClicked.connect(self._on_found_button)
+        screen.rec_found.upEdge.connect(lambda: self._focus("nav"))
         home = screen.home  # 2.9.7: the Recordings tab's home
         home.upEdge.connect(lambda: self._focus("nav"))
         home.leftEdge.connect(lambda: self._focus("rec_rail"))
@@ -427,6 +443,74 @@ class LibraryController(QObject):
             screen.set_recordings_content("list")
             screen.recordings.set_section(rl.SECTIONS.get(row, recording_desk.COMING))
 
+    # ---- 2.9.7: the rail's find ------------------------------------------------------------
+
+    def _on_rec_find(self, text: str) -> None:
+        """The rail's find: its rows narrow; from two letters on, the recordings and the
+        programmes still to come whose title holds it (the guide's channels, then wider)."""
+        self._refresh_recordings()
+        query = text.strip()
+        if len(query) < 2:
+            self._guide_search.cancel()
+            if self._screen.recordings_content == "find":
+                self._show_rec_row(self._rec_row)
+            return
+        self._found = []
+        self._screen.set_recordings_content("find")
+        self._fill_found()
+        self._guide_search.start(query, self.find_sources())
+
+    def _on_found(self, hits: list) -> None:
+        if self._screen.recordings_content == "find":
+            self._found += hits
+            self._fill_found()
+
+    def _fill_found(self) -> None:
+        library = self._rec_library
+        text = self._screen.rec_rail.filter_text
+        recorded = library.items(rl.ALL, text) if library is not None else []
+        entries = [
+            recording_desk.Entry(
+                key=f"file:{item.get('path')}",
+                section=recording_desk.RECORDED,
+                title=str(item.get("_title") or item.get("name") or ""),
+                detail=str(item.get("_channel") or ""),
+                buttons=(recording_desk.button(recording_desk.PLAY, recording_desk.ACCENT),),
+            )
+            for item in recorded
+        ]
+        for k, (channel, programme) in enumerate(self._found):
+            start, stop = programme.start.timestamp(), programme.stop.timestamp()
+            entries.append(
+                recording_desk.Entry(
+                    key=f"found:{k}",
+                    section=recording_desk.FOUND,
+                    title=programme.title,
+                    detail=f"{recording_desk.short_when(start)}–{recording_desk.clock(stop)} · "
+                    f"{channel.get('name') or ''}",
+                    buttons=(
+                        recording_desk.button(recording_desk.RECORD, recording_desk.ACCENT),
+                        recording_desk.button(recording_desk.RECORD_SERIES),
+                    ),
+                    sort=start,
+                )
+            )
+        view = self._screen.rec_found
+        view.set_content(entries, [], "")
+        view.set_section((recording_desk.RECORDED, recording_desk.FOUND))
+
+    def _on_found_button(self, key: str, name: str) -> None:
+        kind, _, value = key.partition(":")
+        if kind == "file" and self._rec_library is not None:
+            item = next(
+                (f for f in self._rec_library.items(rl.ALL) if f.get("path") == value), None
+            )
+            if item is not None:
+                self._play(item, "recording", _context(start_over=False))
+        elif kind == "found" and value.isdigit() and int(value) < len(self._found):
+            channel, programme = self._found[int(value)]
+            self.record_found(channel, programme, name == recording_desk.RECORD_SERIES)
+
     def _open_all_recordings(self) -> None:
         self._show_rec_row(rl.ALL)
         self._focus("rec_content")
@@ -501,6 +585,7 @@ class LibraryController(QObject):
         self._screen.recordings.set_focused(zone == "rec_content")
         self._screen.rec_rail.set_focused(zone == "rec_rail", field=self._rec_field)  # 2.9.7
         self._screen.rec_grid.set_focused(zone == "rec_content")
+        self._screen.rec_found.set_focused(zone == "rec_content")
         self._screen.home.set_focused(zone == "rec_content")
         self._sync_search_focus()
 
@@ -919,11 +1004,13 @@ class LibraryController(QObject):
             else:
                 return False
             return True
+        if kind == "find":
+            return self._handle_recordings(action, payload, self._screen.rec_found)
         return self._handle_recordings(action, payload)
 
-    def _handle_recordings(self, action: Action, payload: str) -> bool:
+    def _handle_recordings(self, action: Action, payload: str, page: Any = None) -> bool:
         """2.9.7: a list of the Recordings tab: its entries' buttons; Esc goes to the rail."""
-        page = self._screen.recordings
+        page = page if page is not None else self._screen.recordings
         if action is Action.NAV_LEFT and page.at_left_edge():
             self._focus("rec_rail")
             return True

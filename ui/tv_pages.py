@@ -186,6 +186,13 @@ class TVPages(QObject):
         home.editRequested.connect(self.recordings_desk.edit)
         home.addRequested.connect(self.recordings_desk.record_at)
         self.recordings_desk.refreshed.connect(self._refresh_home)
+        # the rail's find: the home guide's channels first, then every channel
+        controller = self.library_controller
+        controller.find_sources = lambda: [guide.channels(), list(window.nav.all_live_items())]
+        controller.find_programmes = lambda channel, now, limit: catalog.programmes(
+            channel, now, limit=limit
+        )
+        controller.record_found = self._schedule_from_home
         self._guide_source = ""
         self._guide_chosen = False  # the viewer chose the guide's channels (else: the default)
         self._set_guide_source(self._default_guide_source())

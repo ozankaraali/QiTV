@@ -1315,6 +1315,18 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
         pages.recordings_desk.refresh()
         self.assertEqual(guide.channels(), [])  # the viewer's choice stays
 
+    def test_the_rails_find_reads_the_guides_channels_first_then_every_channel(self):
+        pages = self.window.screens
+        ctl = pages.library_controller
+        near = [{"id": "1", "name": "Northwind News"}]
+        wide = [{"id": "1", "name": "Northwind News"}, {"id": "2", "name": "Harbor Sports"}]
+        self.window.library_page.home.guide.set_channels(near)
+        self.window.nav.all_live_items = lambda: wide
+        self.assertEqual(ctl.find_sources(), [near, wide])
+        channel, airing = self.channel_and_airing()
+        ctl.record_found(channel, airing, False)
+        self.assertEqual([i["kind"] for i in self.window.recording_schedule.items()], ["once"])
+
     def test_the_guides_source_menu_lists_favorites_recent_and_all(self):
         labels = [label for label, _key in self.window.screens.guide_sources()]
         self.assertEqual(labels[:3], ["★ Favorites", "Recent", "All channels"])

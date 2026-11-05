@@ -6,7 +6,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, QPoint, QRectF, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QObject, QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -2191,6 +2191,45 @@ class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings 
         asked.clear()
         self.ctl.handle(Action.NAV_DOWN)
         self.assertLessEqual(len(asked), 1)
+
+    def find_setup(self):
+        from datetime import datetime, timedelta
+
+        from services.epg_view import Programme
+
+        start = datetime.now().astimezone() + timedelta(hours=2)
+        self.special = Programme(
+            "Evening News Special", start, start + timedelta(hours=1), "", None
+        )
+        self.ctl.find_sources = lambda: [[{"id": "1", "name": "Northwind News"}]]
+        self.ctl.find_programmes = lambda channel, now, limit: [self.special]
+        self.recorded = []
+        self.ctl.record_found = lambda channel, programme, series: self.recorded.append(
+            (channel["name"], programme.title, series)
+        )
+        self.ctl.open("recordings")
+        self.screen.rec_rail.fieldClicked.emit()
+        for letter in "eve":
+            self.ctl.handle(Action.NAV_TEXT, letter)
+        for _ in range(20):
+            QCoreApplication.processEvents()
+
+    def test_typing_in_the_rails_find_lists_recordings_and_programmes(self):  # Task 12
+        self.find_setup()
+        self.assertEqual(self.screen.recordings_content, "find")
+        keys = [e.key for e in self.screen.rec_found.entries()]
+        self.assertIn("file:/r/b.ts", keys)  # "Evening News", recorded
+        self.assertIn("found:0", keys)  # "Evening News Special", to record
+        self.ctl.handle(Action.ESCAPE)  # the find's text goes: the row as it was
+        self.ctl.handle(Action.ESCAPE)
+        self.assertNotEqual(self.screen.recordings_content, "find")
+
+    def test_a_found_programme_can_be_recorded_and_a_found_recording_plays(self):  # Task 12
+        self.find_setup()
+        self.screen.rec_found.buttonClicked.emit("found:0", "series")
+        self.assertEqual(self.recorded, [("Northwind News", "Evening News Special", True)])
+        self.screen.rec_found.buttonClicked.emit("file:/r/b.ts", "play")
+        self.assertEqual(self.played[-1][0]["path"], "/r/b.ts")
 
     def test_typing_searches_and_esc_comes_back_to_the_tab(self):
         self.ctl.open("recordings")
