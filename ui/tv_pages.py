@@ -79,6 +79,7 @@ class TVPages(QObject):
             titles=schedule.title_of if schedule is not None else None,
             # one still written can't be deleted (2.8)
             writing=(lambda: set(writing())) if writing is not None else None,
+            index=getattr(window, "recordings_index", None),  # 2.9.7
         )
         # A recording's file another program holds (Windows) stays: the user is told why.
         self.recordings.delete_failed.connect(lambda text: self.notify(text, "error", ERROR_MS))

@@ -44,7 +44,17 @@ DONE = 400  # the series airings already taken, kept to never record one twice
 ONCE, SERIES, TIMER = "once", "series", "timer"
 DAY_MINUTES = 24 * 60  # a timer's longest, and its start's bound (minutes after midnight)
 RECORDED, MISSED, FAILED = "recorded", "missed", "failed"
-_CHANNEL_KEYS = ("id", "name", "number", "cmd", "xmltv_id", "_provider", "user_agent", "referrer")
+_CHANNEL_KEYS = (
+    "id",
+    "name",
+    "number",
+    "cmd",
+    "xmltv_id",
+    "_provider",
+    "user_agent",
+    "referrer",
+    "logo",  # 2.9.7: the Recordings tab shows it (older builds ignore it)
+)
 
 
 @dataclass(frozen=True)

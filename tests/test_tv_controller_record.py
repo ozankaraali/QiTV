@@ -65,6 +65,22 @@ class _RecordCase(PipCase):
         return live.calls[live.calls.index(("start_recording", "/tmp/x.ts")) :]
 
 
+class RecordingNotedTests(_RecordCase):  # 2.9.7: the recordings index
+    def test_r_notes_what_the_recording_holds(self):
+        self.start_large(0)
+        noted = []
+        self.controller.note_recording = lambda path, item, title, start: noted.append(
+            (path, item["name"], title, start)
+        )
+        self.controller.handle(Action.RECORD)
+        live = self.controller.live
+        (path,) = [call[1] for call in live.calls if call[0] == "start_recording"]
+        ((noted_path, channel, title, start),) = noted
+        self.assertEqual((noted_path, channel), (path, CHANNELS[0]["name"]))
+        self.assertIsInstance(title, str)
+        self.assertGreater(start, 0)
+
+
 class RecordingAsideTests(_RecordCase):
     def test_a_zap_away_from_a_recording_keeps_it(self):
         recording = self.record_large(0)

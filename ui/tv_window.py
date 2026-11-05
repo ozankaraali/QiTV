@@ -102,6 +102,7 @@ from services.recording_schedule import (
     flush_writes as recording_schedule_flush,
     slot_text,
 )
+from services.recordings_index import FILE_NAME as RECORDINGS_INDEX_FILE, RecordingsIndex
 from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
@@ -112,7 +113,7 @@ from services.track_memory import FILE_NAME as TRACKS_FILE, TrackMemory
 from services.update_checker import call_before_update, set_quit_note
 from services.watch_state import WatchState
 from services.zapping import ZapController
-from ui import macos_window, provider_drop, quit_reason
+from ui import item_provider, macos_window, provider_drop, quit_reason
 from ui.bottom_band import BottomBand
 from ui.captions_controller import CaptionsController
 from ui.desktop_pip import DesktopPip, corner_rect
@@ -574,6 +575,10 @@ class TVWindow(QMainWindow):
         self.recording_schedule = Schedule(
             os.path.join(config_manager.get_config_dir(), SCHEDULE_FILE)
         )
+        # 2.9.7: what each recording holds (its programme, channel and logo), by its file
+        self.recordings_index = RecordingsIndex(
+            os.path.join(config_manager.get_config_dir(), RECORDINGS_INDEX_FILE)
+        )
         self.scheduler: Optional[RecordingScheduler] = None
         self._timer_dialog: Optional[RecordTimerDialog] = None  # "Record at a time", last open
         self.overlays = Overlays(
@@ -785,9 +790,11 @@ class TVWindow(QMainWindow):
                     config=config_manager,
                     toast=lambda text, kind="info", ms=INFO_MS: self.screens.notify(text, kind, ms),
                     parent=self,
+                    index=self.recordings_index,
                 )
             )
         controller.parental = self.parental  # what it protects never enters the history
+        controller.note_recording = self.note_recording  # 2.9.7: the recordings index
         controller.hidden_groups = self.hidden_groups
         self.overlays.guide.recordRequested.connect(self.schedule_programme)
         self.overlays.guide.recordCancelled.connect(self.cancel_programme)
@@ -1026,6 +1033,19 @@ class TVWindow(QMainWindow):
             self._relock.start(int(remaining * 1000) + 250)
         else:
             self._relock.stop()
+
+    def note_recording(self, path: str, channel: dict, title: str, start: float) -> None:
+        """2.9.7: a recording started with R: what its file holds, in the recordings index."""
+        self.recordings_index.note(
+            path,
+            title=title,
+            channel=str(channel.get("name") or ""),
+            provider=item_provider.provider_name(self.catalog, channel),
+            channel_id=str(channel.get("id") or ""),
+            logo=str(channel.get("logo") or ""),
+            start=start,
+            stop=None,
+        )
 
     def attach_scheduler(self, scheduler: Any) -> None:
         """The scheduled recordings (2.8): the Library and the guides follow them; what records

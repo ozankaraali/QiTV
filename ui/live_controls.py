@@ -181,6 +181,7 @@ class LiveControls(QObject):
         closed: Callable[[], bool],
         programmes: Callable[[dict, datetime, int], list[Programme]],
         now_title: Callable[[dict], Optional[tuple[str, float]]],
+        noted: Optional[Callable[[str, dict, str, float], None]] = None,
         toast: Callable[..., None],
         error: Callable[[str], None],
         request: Callable[[Target], None],
@@ -239,6 +240,8 @@ class LiveControls(QObject):
         self._closed = closed
         self._programmes = programmes
         self._now_title = now_title
+        # 2.9.7: a recording started with R: (its file, the channel, the programme on now, when)
+        self._noted = noted
         self._toast = toast
         self._error = error
         self._request = request
@@ -830,7 +833,11 @@ class LiveControls(QObject):
                 self._toast(translate(NO_RECORDING))
             return
         when = self._now().astimezone()
-        if live.start_recording(recording.path_for(self.config, current.title, when)):
+        path = recording.path_for(self.config, current.title, when)
+        if live.start_recording(path):
+            if self._noted is not None:
+                on_now = self._now_title(current.item)
+                self._noted(path, current.item, on_now[0] if on_now else "", when.timestamp())
             self._show_transport()
 
     def _nothing_plays(self) -> bool:

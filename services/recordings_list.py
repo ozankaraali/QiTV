@@ -240,7 +240,7 @@ class RecordingsList(QObject):
     delete_failed = Signal(str)  # why a recording's file stayed, in the active language
     # (signature, (items, places)), from the reading thread
     _scanned = Signal(object, object)
-    # (name, why it stayed: "" when it went), from the deleting thread
+    # (its path, why it stayed: None when it went), from the deleting thread
     _deleted = Signal(str, object)
 
     def __init__(
@@ -249,12 +249,16 @@ class RecordingsList(QObject):
         writing: Optional[Callable[[], set[str]]] = None,
         parent: Optional[QObject] = None,
         titles: Optional[Callable[[str], str]] = None,
+        index: Any = None,
     ) -> None:
-        """`titles(path)` (2.8): the programme a scheduled recording's file holds ("": none)."""
+        """`titles(path)` (2.8): the programme a scheduled recording's file holds ("": none).
+        `index` (2.9.7, services.recordings_index): what each file holds, its programme,
+        channel, provider, logo and times first."""
         super().__init__(parent)
         self._config = config
         self._writing = writing or (lambda: set())
         self._titles = titles or (lambda path: "")
+        self._index = index
         self._scheduled: list[dict[str, Any]] = []  # 2.8: still to come, listed first
         self._items: list[dict[str, Any]] = []
         self._places: list[PlaceState] = []  # 2.9.7: as last read
@@ -312,11 +316,14 @@ class RecordingsList(QObject):
         except OSError as e:
             logger.warning("A recording could not be deleted: %s", type(e).__name__)
             failure = e
-        self._deleted.emit(os.path.basename(path), failure)
+        self._deleted.emit(path, failure)
 
-    def _on_deleted(self, name: str, failure: Optional[OSError]) -> None:
+    def _on_deleted(self, path: str, failure: Optional[OSError]) -> None:
         """A file went, or could not (the user is told why); either way the folder is read
         again."""
+        name = os.path.basename(path)
+        if failure is None and self._index is not None:  # 2.9.7: its entry goes with it
+            self._index.forget(path)
         if failure is not None:
             if getattr(failure, "winerror", None) in _IN_USE_WINERRORS:
                 self.delete_failed.emit(translate(DELETE_IN_USE, name=name))
@@ -324,6 +331,21 @@ class RecordingsList(QObject):
                 reason = failure.strerror or type(failure).__name__
                 self.delete_failed.emit(translate(DELETE_FAILED, name=name, error=reason))
         self.refresh()
+
+    def _noted(self, item: dict[str, Any]) -> dict[str, Any]:
+        """2.9.7: what the index says of `item`'s file, set on the item (`_channel`,
+        `_provider`, `_logo`, `_start`, `_stop`; the name's channel and start without one)."""
+        entry = self._index.get(item.get("path", "")) if self._index is not None else None
+        entry = entry or {}
+        if entry.get("channel"):
+            item["_channel"] = str(entry["channel"])
+        item["_provider"] = str(entry.get("provider") or "")
+        item["_logo"] = str(entry.get("logo") or "")
+        start = entry.get("start")
+        item["_start"] = float(start) if isinstance(start, (int, float)) else float(item["added"])
+        stop = entry.get("stop")
+        item["_stop"] = float(stop) if isinstance(stop, (int, float)) else None
+        return entry
 
     def refresh(self) -> None:
         """Read the folder again (once more after a reading under way, when asked meanwhile)."""
@@ -367,7 +389,9 @@ class RecordingsList(QObject):
         if items is not None and signature != self._signature:
             self._signature = signature
             for item in items:  # 2.8: a scheduled recording is named by its programme
-                title = self._titles(item.get("path", ""))
+                entry = self._noted(item)
+                title = str(entry.get("title") or "") or self._titles(item.get("path", ""))
+                item["_title"] = title
                 if title and title != item["name"]:
                     item["description"] = f"{item['name']} · {item['description']}"
                     item["name"] = title

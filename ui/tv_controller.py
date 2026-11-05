@@ -329,6 +329,7 @@ class TVController(QObject):
             closed=lambda: self._closed,
             programmes=self._programmes,
             now_title=self.now_title,
+            noted=lambda path, item, title, start: self.note_recording(path, item, title, start),
             toast=self._toast,
             error=self._error,
             request=self._request,
@@ -512,6 +513,9 @@ class TVController(QObject):
         # 2.9.7: a scheduled recording's session to watch with no stream of its own
         # (RecordingScheduler.lend and lendable; none while QiTV records nothing on schedule).
         self.lend_scheduled: Callable[[dict, str, str], Any] = lambda item, provider, use: None
+        # 2.9.7: a recording started with R, for the recordings index: (its file, the
+        # channel, the programme on now, its start, unix); the window's
+        self.note_recording: Callable[[str, dict, str, float], None] = lambda *_args: None
         self.lendable_scheduled: Callable[[dict, str], bool] = lambda item, provider: False
         # 2.8: "Record at a time…" for a channel (the window's, once QiTV records)
         self.record_at: Optional[Callable[[dict], None]] = None

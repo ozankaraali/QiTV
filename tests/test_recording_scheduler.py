@@ -20,6 +20,7 @@ from services import provider_api, recording_schedule as rs
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.live.recorder import ENDED, LIMIT
+from services.recordings_index import RecordingsIndex
 from ui.recording_scheduler import RecordingScheduler
 
 app = QApplication.instance() or QApplication([])
@@ -123,6 +124,7 @@ class SchedulerTests(unittest.TestCase):
         self.engine, self.catalogs = FakeEngine(), FakeCatalogs()
         self.budget = ConnectionBudget()
         self.toasts = []
+        self.index = RecordingsIndex(str(self.folder / "index.json"), write=rs.write_now)
         config = SimpleNamespace(recordings_dir=str(self.folder), ssl_verify=True)
         self.scheduler = RecordingScheduler(
             schedule=self.schedule,
@@ -133,6 +135,7 @@ class SchedulerTests(unittest.TestCase):
             toast=lambda text, kind="info", ms=0: self.toasts.append((text, kind)),
             clock=lambda: self.now,
             parent=None,
+            index=self.index,
         )
 
     def pump(self):
@@ -159,6 +162,30 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(os.path.basename(path).startswith("News One "))
         self.assertEqual(max_s, 24 * 3600)  # the scheduler stops it at its window's end
         self.assertTrue(any("The News" in text for text, _ in self.toasts))
+
+    def test_a_scheduled_recording_notes_its_title(self):  # 2.9.7
+        self.scheduled_now()
+        sid = self.engine.opened[0][0]
+        self.engine.sessionReady.emit(sid)
+        _rid, _sid, path, *_ = self.engine.recordings[0]
+        entry = self.index.get(path)
+        self.assertEqual(entry["title"], "The News")
+        self.assertEqual((entry["channel"], entry["provider"]), ("News One", "P"))
+        self.assertEqual(entry["channel_id"], "7")
+        self.assertEqual(entry["start"], (T0 + timedelta(minutes=30)).timestamp())
+        self.assertEqual(entry["stop"], (T0 + timedelta(minutes=60)).timestamp())
+
+    def test_a_recording_saved_under_another_name_moves_its_entry(self):  # 2.9.7
+        self.scheduled_now()
+        sid = self.engine.opened[0][0]
+        self.engine.sessionReady.emit(sid)
+        rid, _sid, path, *_ = self.engine.recordings[0]
+        saved = path[: -len(".ts")] + " (2).ts"
+        self.now = (T0 + timedelta(minutes=63)).timestamp()
+        self.scheduler.tick()
+        self.engine.recordingEnded.emit(rid, ENDED, saved, 1_000)
+        self.assertEqual(self.index.get(saved)["title"], "The News")
+        self.assertIsNone(self.index.get(path))
 
     def test_a_portal_that_answered_only_over_http_records_over_http(self):  # 2.8.1
         memory = mock.patch.object(provider_api, "_http_only", set())

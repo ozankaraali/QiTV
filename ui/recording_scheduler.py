@@ -207,9 +207,13 @@ class RecordingScheduler(QObject):
         toast: Callable[..., None],
         clock: Callable[[], float] = time.time,
         parent: Optional[QObject] = None,
+        index: Any = None,
     ) -> None:
+        """`index` (2.9.7, services.recordings_index): each recording's programme, channel and
+        logo are noted there as it starts."""
         super().__init__(parent)
         self.schedule = schedule
+        self._index = index
         self._engine: Any = None
         self._catalogs = catalogs
         self._budget = budget
@@ -700,6 +704,7 @@ class RecordingScheduler(QObject):
         if not rid:
             return False
         run.host, run.host_name, run.rid, run.path = live, host_name, rid, path
+        self._note(run)
         self.schedule.started(job)
         self._tries.pop(job.key, None)
         self._said_busy.discard(job.key)
@@ -807,14 +812,33 @@ class RecordingScheduler(QObject):
         self._tries.pop(run.job.key, None)
         self._said_busy.discard(run.job.key)
         run.since = time.monotonic()
+        self._note(run)
         self._toast(translate(STARTED_TEXT, title=run.job.title, channel=name), "info")
         self.changed.emit()
+
+    def _note(self, run: _Run) -> None:
+        """2.9.7: what `run`'s file holds, in the recordings index."""
+        if self._index is None or not run.path:
+            return
+        job, channel = run.job, run.job.channel
+        self._index.note(
+            run.path,
+            title=job.title,
+            channel=str(channel.get("name") or ""),
+            provider=job.provider,
+            channel_id=str(channel.get("id") or ""),
+            logo=str(channel.get("logo") or ""),
+            start=job.start,
+            stop=job.stop,
+        )
 
     def _on_recorded(self, rid: str, reason: str, path: str, written: int) -> None:
         run = self._run_by(rid=rid)
         if run is None or run.ended:
             return
         run.ended = True
+        if self._index is not None and path and run.path and path != run.path:
+            self._index.moved(run.path, path)  # 2.9.7: the helper saved it under another name
         if run.host is not None and not (run.stopping or run.user_stopped or run.cut):
             # 2.9.7: a player's recording that ended unasked. One whose player still plays its
             # buffer was stopped there (R): this airing is done. Else its stream broke (it

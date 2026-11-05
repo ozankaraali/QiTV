@@ -14,7 +14,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from services import recordings_list
+from services import recording_schedule as rs, recordings_list
+from services.recordings_index import RecordingsIndex
 from services.recordings_list import RECORDING_PREFIX, RecordingsList, parse_name
 
 app = QApplication.instance() or QApplication([])
@@ -175,6 +176,62 @@ class RecordingsListTests(unittest.TestCase):
         (item,) = shelf.items()
         self.assertEqual(item["name"], "The Evening News")
         self.assertIn("News", item["description"])  # its channel stays in the details
+
+    def test_a_recording_the_index_knows_shows_its_programme(self):  # 2.9.7
+        path = touch(self.folder, "Northwind News 2026-11-05 19.00.ts")
+        index = RecordingsIndex(str(self.folder.parent / "idx.json"), write=rs.write_now)
+        self.addCleanup(lambda: Path(self.folder.parent / "idx.json").unlink(missing_ok=True))
+        index.note(
+            str(path),
+            title="Evening News",
+            channel="Northwind News",
+            provider="Demo TV",
+            channel_id="7",
+            logo="http://logos.test/7.png",
+            start=1_000.0,
+            stop=4_600.0,
+        )
+        shelf = RecordingsList(self.config, index=index)
+        shelf.refresh()
+        self.wait_for(shelf, 0)
+        (item,) = shelf.files()
+        self.assertEqual(item["name"], "Evening News")
+        self.assertEqual(item["_title"], "Evening News")
+        self.assertEqual(item["_channel"], "Northwind News")
+        self.assertEqual(item["_provider"], "Demo TV")
+        self.assertEqual(item["_logo"], "http://logos.test/7.png")
+        self.assertEqual((item["_start"], item["_stop"]), (1_000.0, 4_600.0))
+
+    def test_a_recording_it_does_not_know_shows_its_channel(self):  # 2.9.7
+        touch(self.folder, "Northwind News 2026-11-05 19.00.ts")
+        index = RecordingsIndex(str(self.folder / "none.json"), write=rs.write_now)
+        shelf = RecordingsList(self.config, index=index)
+        shelf.refresh()
+        self.wait_for(shelf, 0)
+        (item,) = shelf.files()
+        self.assertEqual((item["name"], item["_title"]), ("Northwind News", ""))
+        self.assertIsNone(item["_stop"])
+
+    def test_deleting_a_recording_forgets_its_index_entry(self):  # 2.9.7
+        path = touch(self.folder, "News 2026-10-19 21.30.ts")
+        index = RecordingsIndex(str(self.folder.parent / "idx2.json"), write=rs.write_now)
+        self.addCleanup(lambda: Path(self.folder.parent / "idx2.json").unlink(missing_ok=True))
+        index.note(
+            str(path),
+            title="T",
+            channel="News",
+            provider="",
+            channel_id="",
+            logo="",
+            start=1.0,
+            stop=None,
+        )
+        shelf = RecordingsList(self.config, index=index)
+        shelf.refresh()
+        self.wait_for(shelf, 0)
+        shelf.delete(str(path))
+        self.wait_for(shelf, 1)
+        self.assertIsNone(index.get(str(path)))
 
     def test_scheduled_ones_come_first_and_change_the_list(self):
         touch(self.folder, "News 2026-10-19 21.30.ts")

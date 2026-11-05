@@ -1187,6 +1187,18 @@ class StuckWorkerExitTests(unittest.TestCase):
 FAR_LIST = 11_000  # one provider's live channels, numbered 1 to 11,000
 
 
+class RecordingsIndexWindowTests(WindowCase):  # 2.9.7
+    def test_a_recording_started_with_r_is_noted_in_the_index(self):
+        channel = {"name": "Northwind News", "id": "7", "logo": "http://logos.test/7.png"}
+        self.window.controller.note_recording("/r/x.ts", channel, "Evening News", 1_000.0)
+        entry = self.window.recordings_index.get("/r/x.ts")
+        self.assertEqual((entry["title"], entry["channel"]), ("Evening News", "Northwind News"))
+        self.assertEqual(
+            (entry["logo"], entry["start"], entry["stop"]), (channel["logo"], 1_000.0, None)
+        )
+        self.assertIs(self.window.screens.recordings._index, self.window.recordings_index)
+
+
 class FarChannelWindowTests(WindowCase):
     """Channel 9594 of a provider's 11,000, typed while another plays: the channel list and
     the fast-zap column rest on it through the guide's and the logos' updates (reported on
