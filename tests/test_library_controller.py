@@ -2231,6 +2231,35 @@ class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings 
         self.screen.rec_found.buttonClicked.emit("file:/r/b.ts", "play")
         self.assertEqual(self.played[-1][0]["path"], "/r/b.ts")
 
+    def test_more_found_keeps_the_row_the_keys_are_on(self):  # Stage 3–4 review 5
+        self.find_setup()
+        view = self.screen.rec_found
+        self.assertTrue(view.focus_entry("found:0"))
+        from services.epg_view import Programme
+
+        later = Programme("Evening Talk", self.special.start, self.special.stop, "", None)
+        self.ctl._guide_search.found.emit([({"id": "2", "name": "Harbor News"}, later)])
+        self.assertEqual(view.current_key(), "found:0")
+
+    def test_leaving_the_library_stops_the_find(self):  # Stage 3–4 review (minor)
+        many = [{"id": str(n), "name": f"Channel {n}"} for n in range(400)]
+        self.find_setup()
+        self.ctl.handle(Action.NAV_TEXT, "n")
+        self.ctl.find_sources = lambda: [many]
+        self.ctl.handle(Action.NAV_BACKSPACE)
+        QCoreApplication.processEvents()
+        self.assertTrue(self.ctl._guide_search.running())
+        self.ctl.leave()
+        self.assertFalse(self.ctl._guide_search.running())
+
+    def test_page_keys_reach_the_homes_guide_and_shelf(self):  # Stage 3–4 review 8
+        self.ctl.open_recordings(rl.TONIGHT)
+        self.ctl.handle(Action.NAV_RIGHT)
+        home = self.screen.home
+        self.assertEqual(home.focus_region(), "hero")
+        self.ctl.handle(Action.NAV_PAGE_DOWN)
+        self.assertEqual(home.focus_region(), "guide")
+
     def test_typing_searches_and_esc_comes_back_to_the_tab(self):
         self.ctl.open("recordings")
         self.ctl.handle(Action.NAV_TEXT, "s")

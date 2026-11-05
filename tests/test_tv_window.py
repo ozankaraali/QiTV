@@ -1309,11 +1309,53 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
         self.window.nav.all_live_items = lambda: loaded
         self.window.nav.favorite_items = lambda: []
         self.window.nav.recent_items = lambda: []
+        self.window.nav.live_version = lambda: ("loaded",)  # the lists loaded
         pages.recordings_desk.refresh()
         self.assertEqual([c["name"] for c in guide.channels()], ["Northwind News"])
         pages._choose_guide_source("@favorites")
         pages.recordings_desk.refresh()
         self.assertEqual(guide.channels(), [])  # the viewer's choice stays
+
+    def test_the_guides_channels_are_rebuilt_only_when_the_lists_change(self):  # review 7
+        pages = self.window.screens
+        nav = self.window.nav
+        walks, version = [], ["one"]
+        nav.favorite_items = lambda: []
+        nav.recent_items = lambda: []
+        nav.all_live_items = lambda: walks.append(True) or [{"id": "1", "name": "One"}]
+        nav.live_version = lambda: tuple(version)
+        pages.recordings_desk.refresh()
+        walks.clear()
+        for _ in range(3):  # the desk's two-second refreshes
+            pages.recordings_desk.refresh()
+        self.assertEqual(walks, [])
+        version[0] = "two"  # a list loaded
+        pages.recordings_desk.refresh()
+        self.assertEqual(len(walks), 1)
+
+    def test_the_homes_guide_reads_a_guide_that_loads_and_follows_the_clock(self):
+        pages = self.window.screens
+        guide = self.window.library_page.home.guide
+        guide._cache[("P", "7", 0.0)] = ["stale"]
+        self.window.catalog.epgReady.emit()
+        self.assertEqual(guide._cache, {})
+        followed = []
+        guide.follow_now = lambda: followed.append(True)
+        pages.recordings_desk.refresh()
+        self.assertTrue(followed)
+
+    def test_the_home_names_providers_only_with_two_and_avoids_the_corner_player(self):
+        pages = self.window.screens
+        home = self.window.library_page.home
+        catalog = self.window.library_catalog
+        catalog.provider_names = lambda: ["Demo TV"]
+        pages.recordings_desk.refresh()
+        self.assertFalse(home._name_providers)
+        catalog.provider_names = lambda: ["Demo TV", "Harbor IPTV"]
+        pages.recordings_desk.refresh()
+        self.assertTrue(home._name_providers)
+        self.assertIs(home._avoid, self.window.player_page)
+        self.assertIs(self.window.library_page.rec_found._avoid, self.window.player_page)
 
     def test_the_rails_find_reads_the_guides_channels_first_then_every_channel(self):
         pages = self.window.screens

@@ -64,6 +64,26 @@ class GuideSearchTests(unittest.TestCase):
         self.assertEqual(self.found, [])
         self.assertEqual(self.done, [True])
 
+    def test_start_walks_no_channel_until_its_slices(self):  # Stage 3–4 review 7
+        walked = []
+
+        def every_channel():
+            for n in range(100_000):
+                walked.append(n)
+                yield {"id": str(n), "name": f"Channel {n}"}
+
+        self.search.start("news", [every_channel()])
+        self.assertEqual(walked, [])  # typing a letter costs no walk of the list
+        QCoreApplication.processEvents()
+        self.assertLessEqual(len(walked), SLICE + 1)
+        self.search.cancel()
+
+    def test_a_channel_twice_is_looked_at_once_even_lazily(self):
+        one = {"id": "1", "name": "Northwind News"}
+        self.search.start("news", [iter([one]), iter([dict(one), {"id": "2", "name": "Two"}])])
+        self.run_out()
+        self.assertEqual(sorted(self.asked), ["1", "2"])
+
     def test_it_walks_in_slices_and_can_be_cancelled(self):
         many = [{"id": str(n), "name": f"C{n}"} for n in range(SLICE * 3)]
         self.search.start("news", [many])

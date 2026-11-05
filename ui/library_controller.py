@@ -376,6 +376,7 @@ class LibraryController(QObject):
     def leave(self) -> None:
         """The window left the Library: nothing waiting for a provider plays any more."""
         self._pending.cancel()
+        self._guide_search.cancel()  # 2.9.7: the rail's find stops looking
         if self._desk is not None:
             self._desk.hide()
 
@@ -458,6 +459,8 @@ class LibraryController(QObject):
         self._found = []
         self._screen.set_recordings_content("find")
         self._fill_found()
+        # its first row once per query: what a slice finds later keeps the row the keys are on
+        self._screen.rec_found.set_section((recording_desk.RECORDED, recording_desk.FOUND))
         self._guide_search.start(query, self.find_sources())
 
     def _on_found(self, hits: list) -> None:
@@ -495,9 +498,7 @@ class LibraryController(QObject):
                     sort=start,
                 )
             )
-        view = self._screen.rec_found
-        view.set_content(entries, [], "")
-        view.set_section((recording_desk.RECORDED, recording_desk.FOUND))
+        self._screen.rec_found.set_content(entries, [], "")
 
     def _on_found_button(self, key: str, name: str) -> None:
         kind, _, value = key.partition(":")
@@ -599,8 +600,10 @@ class LibraryController(QObject):
     def _set_mode(self, mode: str) -> None:
         self._mode = mode
         self._screen.set_mode(mode)
-        if mode != "recordings" and self._desk is not None:
-            self._desk.hide()  # 2.9.7: the page stops looking while it is hidden
+        if mode != "recordings":
+            self._guide_search.cancel()  # 2.9.7: the rail's find stops looking
+            if self._desk is not None:
+                self._desk.hide()  # 2.9.7: the page stops looking while it is hidden
 
     def _tabs(self) -> list[str]:
         """The provider's sections (2.9.7: recordings have their own tab, not Movies);
@@ -994,6 +997,8 @@ class LibraryController(QObject):
                 home.move_by(*_MOVES[action])  # its edges: upEdge, leftEdge
             elif action is Action.NAV_ACTIVATE:
                 home.activate()
+            elif action in (Action.NAV_PAGE_UP, Action.NAV_PAGE_DOWN):
+                home.page(-1 if action is Action.NAV_PAGE_UP else 1)
             elif action is Action.RECORD:
                 return home.record_key()
             elif action is Action.ESCAPE:

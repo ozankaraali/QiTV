@@ -12,6 +12,12 @@ or Cancel (a one-time recording). R records the current programme. Above the row
 days the window can show (Today, Tomorrow, then weekdays) and the channels' source chip (★
 Favorites ▾), which asks the page for its menu (`sourceRequested`). A click on a channel's
 name tunes it.
+
+The window follows now (`follow_now`, and whenever the guide shows) until the viewer moves it
+or picks another day. The keys reach everything the mouse does: ↑ from the first row goes to
+the bar's chips (← → along them, Enter presses one), ← → move between an open card's buttons,
+PgUp/PgDn move a screen of rows. A row with no programmes yet is asked again (a guide loading),
+and a channel's programmes are its provider's (two providers' lists may share an id).
 """
 
 from __future__ import annotations
@@ -26,9 +32,11 @@ from PySide6.QtWidgets import QWidget
 
 from services.epg_view import Programme
 from services.i18n import N_, translate
+from services.provider_ids import provider_of
 from ui.overlays.base import TooltipWidget
 from ui.overlays.guide import day_label, programme_spans, slot_start
 from ui.overlays.painting import Units, elided, fill_round, fmt_clock, ui_units
+from ui.pointer import PointerInput
 from ui.theme import PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
@@ -96,11 +104,18 @@ class HomeGuide(TooltipWidget):
         self._row = 0
         self._current: Optional[Programme] = None  # the keys' programme in `_row`
         self._card: Optional[tuple[int, Programme]] = None
-        self._cache: dict[tuple[str, float], list[Programme]] = {}
+        self._cache: dict[tuple[str, str, float], list[Programme]] = {}
         self._mark: Callable[[dict, Programme], str] = lambda channel, programme: ""
         self._bands: Callable[[dict], list[tuple[float, float, str]]] = lambda channel: []
         self._source = ""
         self._focused = False
+        self._shifted = False  # the viewer moved the window (else it follows now)
+        self._bar = ""  # the keys' chip in the bar ("": the rows have them)
+        self._card_button = 0  # the keys' button in the card
+        self._row_wheel = PointerInput(self)  # a trackpad's scroll counts its distance
+        self._row_wheel.wheelSteps.connect(self._on_row_wheel)
+        self._time_wheel = PointerInput(self)
+        self._time_wheel.wheelSteps.connect(self._on_time_wheel)
 
     # ---- what it shows ----------------------------------------------------------------------
 
@@ -108,6 +123,7 @@ class HomeGuide(TooltipWidget):
         self._channels = list(channels)
         self._top = self._row = 0
         self._card = None
+        self._bar = ""
         self._cache.clear()
         self._current = self._on_now(0)
         self.update()
@@ -138,6 +154,10 @@ class HomeGuide(TooltipWidget):
     def window_start(self) -> datetime:
         return self._start
 
+    def shown_day(self) -> int:
+        """The day chip lit: 0 today, 1 tomorrow…."""
+        return self._day
+
     def _home_start(self) -> datetime:
         return slot_start(self._now()) - timedelta(minutes=30)
 
@@ -150,16 +170,43 @@ class HomeGuide(TooltipWidget):
         same time of day)."""
         self._day = max(0, min(DAYS - 1, day))
         self._start = self._home_start() + timedelta(days=self._day)
+        self._shifted = False
         self._card = None
         self._current = self._on_now(self._row) or self._first(self._row)
         self.update()
 
     def shift(self, half_hours: int) -> None:
         earliest = self._home_start()
-        self._start = max(earliest, self._start + timedelta(minutes=30 * half_hours))
-        self._day = (self._start.date() - earliest.date()).days
+        latest = earliest + timedelta(days=DAYS) - WINDOW
+        moved = self._start + timedelta(minutes=30 * half_hours)
+        self._start = max(earliest, min(latest, moved))
+        self._shifted = self._start != earliest
+        # the day the window shows most of (just after midnight, earliest is yesterday's)
+        middle = self._start + WINDOW / 2
+        self._day = max(0, min(DAYS - 1, (middle.date() - self._now().date()).days))
         self._card = None
+        shown = [span.programme for span in self._spans(self._row)]
+        if self._current not in shown:
+            self._current = shown[0] if shown else None
         self.update()
+
+    def follow_now(self) -> None:
+        """Today's window from half an hour before now, as time goes on; one the viewer moved
+        (or another day) stays where they put it."""
+        if self._shifted or self._day != 0:
+            return
+        start = self._home_start()
+        if start == self._start:
+            return
+        self._start = start
+        self._card = None
+        self._cache.clear()
+        self._current = self._on_now(self._row) or self._first(self._row)
+        self.update()
+
+    def showEvent(self, event) -> None:
+        self.follow_now()
+        super().showEvent(event)
 
     def empty_text(self) -> str:
         """The one line said instead of rows ("" when the rows have programmes)."""
@@ -197,6 +244,12 @@ class HomeGuide(TooltipWidget):
     def _rows_fit(self) -> int:
         return max(1, int(self.time_area().height() // max(1.0, self._row_h())))
 
+    def rows_fit(self) -> int:
+        return self._rows_fit()
+
+    def top_row(self) -> int:
+        return self._top
+
     def _row_top(self, row: int) -> float:
         return self.time_area().top() + (row - self._top) * self._row_h()
 
@@ -220,6 +273,12 @@ class HomeGuide(TooltipWidget):
         """Where `title` is drawn in `row` (empty when it isn't)."""
         for span in self._spans(row):
             if span.programme.title == title:
+                return self._box(row, span)
+        return QRectF()
+
+    def _box_of(self, row: int, programme: Programme) -> QRectF:
+        for span in self._spans(row):
+            if span.programme == programme:
                 return self._box(row, span)
         return QRectF()
 
@@ -251,7 +310,8 @@ class HomeGuide(TooltipWidget):
         return self._mark(self._channels[row], programme) if programme is not None else ""
 
     def _chips(self) -> dict[str, QRectF]:
-        """The bar's chips: ‹, each day, ›, and the source at the right end."""
+        """The bar's chips: ‹, each day, ›, and the source at the right end (its name shortened
+        to the room the others leave)."""
         units = self._units()
         u = units.u
         bar = self._bar_rect()
@@ -268,10 +328,18 @@ class HomeGuide(TooltipWidget):
             width = fm.horizontalAdvance(text) + 2.0 * u
             chips[name] = QRectF(x, top, width, height)
             x += width + 0.6 * u
-        source = self._source or "★"
-        width = fm.horizontalAdvance(source + " ▾") + 2.0 * u
+        width = fm.horizontalAdvance(self._source_text(fm, bar.right() - x)) + 2.0 * u
         chips["source"] = QRectF(bar.right() - width, top, width, height)
         return chips
+
+    def _source_text(self, fm: QFontMetricsF, room: float) -> str:
+        """The source chip's text in `room` px (with its padding): "★ Favorites ▾"."""
+        source = self._source or "★"
+        room = max(0.0, room - 2.0 * self._units().u - fm.horizontalAdvance(" ▾"))
+        return fm.elidedText(source, Qt.ElideRight, room) + " ▾"
+
+    def chip_rects(self) -> dict[str, QRectF]:
+        return self._chips()
 
     def source_rect(self) -> QRectF:
         return self._chips()["source"]
@@ -282,7 +350,8 @@ class HomeGuide(TooltipWidget):
         if not 0 <= row < len(self._channels):
             return []
         channel = self._channels[row]
-        key = (str(channel.get("id") or channel.get("name") or row), self._start.timestamp())
+        name = str(channel.get("id") or channel.get("name") or row)
+        key = (provider_of(channel), name, self._start.timestamp())
         found = self._cache.get(key)
         if found is None:
             try:
@@ -290,7 +359,8 @@ class HomeGuide(TooltipWidget):
             except Exception as e:  # a guide that fails shows nothing for the row
                 logger.debug("A channel's programmes could not be read: %s", type(e).__name__)
                 found = []
-            self._cache[key] = found
+            if found:  # none yet (a guide still loading): asked again
+                self._cache[key] = found
         return found
 
     def _on_now(self, row: int) -> Optional[Programme]:
@@ -322,7 +392,7 @@ class HomeGuide(TooltipWidget):
             return QRectF()
         u = self._units().u
         row, programme = self._card
-        box = self.box_rect(row, programme.title)
+        box = self._box_of(row, programme)
         height = 3.0 * u + BUTTON_H_U * u + 1.6 * u
         width = CARD_W_U * u
         x = min(max(self.time_area().left(), box.left()), self.width() - width - 0.5 * u)
@@ -330,6 +400,16 @@ class HomeGuide(TooltipWidget):
         if y + height > self.height():
             y = box.top() - height - 0.4 * u
         return QRectF(x, max(0.0, y), width, height)
+
+    def card_rect(self) -> QRectF:
+        return self._card_rect()
+
+    def card_focus(self) -> str:
+        buttons = self.card_buttons()
+        return buttons[min(self._card_button, len(buttons) - 1)] if buttons else ""
+
+    def bar_focus(self) -> str:
+        return self._bar
 
     def card_button_rect(self, name: str) -> QRectF:
         units = self._units()
@@ -369,10 +449,20 @@ class HomeGuide(TooltipWidget):
         return list(self._channels)
 
     def has_rows(self) -> bool:
-        return bool(self._channels)
+        """Rows to show: channels, and programmes for those that show."""
+        return bool(self._channels) and not self.empty_text()
 
     def at_last_row(self) -> bool:
         return self._row >= len(self._channels) - 1
+
+    def at_bottom(self) -> bool:
+        """↓ leaves the guide: no rows (the bar has the keys), or the last row."""
+        return not self.has_rows() or (not self._bar and self.at_last_row())
+
+    def enter(self) -> None:
+        """The keys come to the guide: its rows, or its bar when it has none."""
+        self._bar = "" if self.has_rows() else f"day{self._day}"
+        self.update()
 
     def set_programmes(self, programmes: Callable[[dict, datetime, int], list[Programme]]) -> None:
         """The guide's programmes (the window's catalog), once the page has them."""
@@ -383,22 +473,21 @@ class HomeGuide(TooltipWidget):
         return self._current.title if self._current is not None else ""
 
     def move_by(self, dx: int, dy: int) -> None:
-        if not self._channels:
-            if dy < 0:
-                self.upEdge.emit()
+        if self._bar or not self.has_rows():
+            self._move_in_bar(dx, dy)
+            return
+        if self._card is not None and dx and not dy:  # along the card's buttons
+            last = max(0, len(self.card_buttons()) - 1)
+            self._card_button = max(0, min(last, self._card_button + dx))
+            self.update()
             return
         self._card = None
         if dy:
             if self._row + dy < 0:
-                self.upEdge.emit()
+                self._bar = f"day{self._day}"  # above the rows: the bar
+                self.update()
                 return
-            at = self._current.start if self._current is not None else self._now()
-            self._row = max(0, min(len(self._channels) - 1, self._row + dy))
-            self._reveal()
-            programmes = self._row_programmes(self._row)
-            self._current = next((p for p in programmes if p.start <= at < p.stop), None) or (
-                programmes[0] if programmes else None
-            )
+            self._go_row(self._row + dy)
         elif dx:
             spans = [s.programme for s in self._spans(self._row)]
             if self._current in spans:
@@ -413,6 +502,44 @@ class HomeGuide(TooltipWidget):
                 self._current = spans[0]
         self.update()
 
+    def _move_in_bar(self, dx: int, dy: int) -> None:
+        if dy < 0:
+            self._bar = ""
+            self.update()
+            self.upEdge.emit()
+            return
+        if dy > 0:
+            if self.has_rows():
+                self._bar = ""
+                self.update()
+            return  # without rows the page goes on below (`at_bottom`)
+        order = list(self._chips())
+        if not self._bar:
+            self._bar = f"day{self._day}"
+        else:
+            k = order.index(self._bar) if self._bar in order else 0
+            self._bar = order[max(0, min(len(order) - 1, k + dx))]
+        self.update()
+
+    def _go_row(self, row: int) -> None:
+        """The keys to `row`, on its programme at the time the current one starts."""
+        at = self._current.start if self._current is not None else self._now()
+        self._row = max(0, min(len(self._channels) - 1, row))
+        self._reveal()
+        programmes = self._row_programmes(self._row)
+        self._current = next((p for p in programmes if p.start <= at < p.stop), None) or (
+            programmes[0] if programmes else None
+        )
+
+    def page(self, pages: int) -> None:
+        """PgUp/PgDn: a screen of rows up or down."""
+        if not self.has_rows():
+            return
+        self._bar = ""
+        self._card = None
+        self._go_row(self._row + pages * self._rows_fit())
+        self.update()
+
     def _reveal(self) -> None:
         fit = self._rows_fit()
         if self._row < self._top:
@@ -421,14 +548,21 @@ class HomeGuide(TooltipWidget):
             self._top = self._row - fit + 1
 
     def activate(self) -> None:
-        """Enter: the card of the current programme opens (its accented button: a second Enter)."""
+        """Enter: the bar's chip presses; the card of the current programme opens (its
+        accented button first: a second Enter presses the button the keys are on)."""
+        if self._bar:
+            chips = self._chips()
+            if self._bar in chips:
+                self._press_chip(self._bar, chips[self._bar])
+            return
         if self._card is not None:
-            buttons = self.card_buttons()
-            if buttons:
-                self._press_card(buttons[0])
+            focused = self.card_focus()
+            if focused:
+                self._press_card(focused)
             return
         if self._current is not None and self._recordable(self._current):
             self._card = (self._row, self._current)
+            self._card_button = 0
             self.update()
 
     def record_key(self) -> bool:
@@ -471,7 +605,7 @@ class HomeGuide(TooltipWidget):
                 self._press_chip(name, rect)
                 return
         row = self._row_at(pos.y())
-        if row < 0:
+        if row < 0 or self.empty_text():  # no rows drawn: nothing to click
             self.update()
             return
         if pos.x() < self.time_area().left():
@@ -480,8 +614,10 @@ class HomeGuide(TooltipWidget):
         for span in self._spans(row):
             if self._box(row, span).contains(pos):
                 self._row, self._current = row, span.programme
+                self._bar = ""
                 if self._recordable(span.programme):
                     self._card = (row, span.programme)
+                    self._card_button = 0
                 break
         self.update()
 
@@ -498,10 +634,23 @@ class HomeGuide(TooltipWidget):
             self.set_day(int(name[3:]))
 
     def wheelEvent(self, event) -> None:
-        steps = -1 if event.angleDelta().y() > 0 else 1
-        self._top = max(0, min(max(0, len(self._channels) - self._rows_fit()), self._top + steps))
+        """The rows scroll by the distance moved (a trackpad's small steps add up, its glide
+        and a gesture's start or end move nothing); sideways, the window moves in time."""
+        delta = event.angleDelta()
+        if abs(delta.x()) > abs(delta.y()):
+            self._time_wheel.wheel(delta.x(), event.modifiers())
+        else:
+            self._row_wheel.wheel_event(event)
+        event.accept()
+
+    def _on_row_wheel(self, steps: int, _modifiers: Any) -> None:
+        last = max(0, len(self._channels) - self._rows_fit())
+        self._top = max(0, min(last, self._top + steps))
         self._card = None
         self.update()
+
+    def _on_time_wheel(self, steps: int, _modifiers: Any) -> None:
+        self.shift(steps)
 
     def tooltip_at(self, pos: QPointF) -> Optional[str]:
         row = self._row_at(pos.y())
@@ -546,13 +695,18 @@ class HomeGuide(TooltipWidget):
 
     def _paint_bar(self, p: QPainter, units: Units) -> None:
         p.setFont(units.font(1.0, QFont.Weight.DemiBold))
-        for name, rect in self._chips().items():
+        chips = self._chips()
+        fm = QFontMetricsF(units.font(1.0, QFont.Weight.DemiBold))
+        room = chips["source"].right() - chips["forward"].right() - 0.6 * units.u
+        for name, rect in chips.items():
             on = name == f"day{self._day}"
             fill_round(p, rect, qcolor(PALETTE.text, 0.16 if on else 0.06), rect.height() / 2)
+            if self._focused and name == self._bar:
+                self._outline(p, rect, qcolor(PALETTE.text), rect.height() / 2)
             p.setPen(qcolor(PALETTE.text, 1.0 if on else 0.8))
             text = {"back": "‹", "forward": "›"}.get(name)
             if text is None and name == "source":
-                text = (self._source or "★") + " ▾"
+                text = self._source_text(fm, room)
             elif text is None:
                 text = self.day_choices()[int(name[3:])][0]
             p.drawText(rect, Qt.AlignCenter, text)
@@ -601,7 +755,7 @@ class HomeGuide(TooltipWidget):
                 self._outline(p, box, qcolor(PALETTE.live), RADIUS_U * u)
             elif mark in ("once", "series"):
                 self._outline(p, box, qcolor(PALETTE.accent), RADIUS_U * u)
-            if self._focused and row == self._row and programme == self._current:
+            if self._focused and not self._bar and row == self._row and programme == self._current:
                 self._outline(p, box.adjusted(-1, -1, 1, 1), qcolor(PALETTE.text), RADIUS_U * u)
             text = programme.title
             if mark in ("recording", "once", "series"):
@@ -679,4 +833,6 @@ class HomeGuide(TooltipWidget):
                 p.setPen(
                     qcolor(PALETTE.live) if name.startswith("cancel") else qcolor(PALETTE.text)
                 )
+            if self._focused and name == self.card_focus():
+                self._outline(p, rect.adjusted(-2, -2, 2, 2), qcolor(PALETTE.text), 0.9 * u)
             p.drawText(rect, Qt.AlignCenter, translate(_BUTTON_TEXTS[name]))

@@ -9,9 +9,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from services import recording_desk as desk, recording_schedule as rs
+from services.epg_view import Programme
 from ui.library.recorder_home import RecorderHome
 
 app = QApplication.instance() or QApplication([])
@@ -92,6 +93,7 @@ class RecorderHomeTests(unittest.TestCase):
 
     def test_add_opens_record_at_a_time_and_says_the_streams(self):
         self.home.set_hero(desk.Hero((), None, STREAMS))
+        self.home.set_name_providers(True)
         self.assertEqual(self.home.stream_lines(), ["Demo TV · 1 of 2 streams"])
         self.click(self.home.hero_rects()["add"])
         self.assertEqual(self.events, [("addRequested", None)])
@@ -159,6 +161,132 @@ class RecorderHomeTests(unittest.TestCase):
         self.home.move_by(0, -1)
         self.home.move_by(0, -1)
         self.assertEqual(ups, [True])
+
+
+def recording(name, title):
+    return desk.Recording(
+        name,
+        "Northwind News",
+        MONO - 600,
+        "scheduled",
+        title,
+        (NOW + timedelta(hours=1)).timestamp(),
+    )
+
+
+def hourly(channel, start, limit):
+    first = start.replace(minute=0, second=0, microsecond=0)
+    return [
+        Programme(
+            f"{channel['name']} {k}",
+            first + timedelta(hours=k),
+            first + timedelta(hours=k + 1),
+            "",
+            None,
+        )
+        for k in range(8)
+    ]
+
+
+class RecorderHomeReviewTests(unittest.TestCase):
+    """What the Stage 3–4 review found: focus kept by name, the shelf past many channels, the
+    guide's bar on the way, several recordings apart, one provider unnamed, the corner player."""
+
+    def setUp(self):
+        self.page = QWidget()
+        self.addCleanup(self.page.deleteLater)
+        self.page.resize(1280, 760)
+        self.home = RecorderHome(hourly, lambda: NOW, clock=lambda: MONO, parent=self.page)
+        self.home.setGeometry(0, 0, 1280, 760)
+        self.events = []
+        self.home.stopRequested.connect(lambda name: self.events.append(("stop", name)))
+        self.home.addRequested.connect(lambda: self.events.append(("add", None)))
+
+    def test_the_focus_stays_on_its_button_when_a_recording_starts(self):
+        self.home.set_hero(desk.Hero((), upcoming(48), STREAMS))
+        self.home.move_by(1, 0)
+        self.assertEqual(self.home.focused_button(), "add")
+        self.home.set_hero(desk.Hero((NEWS,), upcoming(48), STREAMS))  # one starts
+        self.assertEqual(self.home.focused_button(), "add")
+        self.home.activate()
+        self.assertEqual(self.events, [("add", None)])
+
+    def test_the_shelf_focus_stays_on_its_recording(self):
+        a, b = tile("/r/a.ts", "Night Match"), tile("/r/b.ts", "Kitchen Stories")
+        self.home.set_shelf([a, b])
+        self.home.move_by(0, 1)  # the guide
+        self.home.page(1)
+        self.home.page(1)  # past its rows: the shelf
+        self.assertEqual(self.home.focus_region(), "shelf")
+        self.home.move_by(1, 0)
+        self.assertEqual(self.home.focused_tile(), "/r/b.ts")
+        self.home.set_shelf([tile("/r/c.ts", "New One"), a, b])  # a new recording first
+        self.assertEqual(self.home.focused_tile(), "/r/b.ts")
+
+    def test_page_down_reaches_the_shelf_past_many_channels(self):
+        channels = [{"id": str(n), "name": f"Channel {n}"} for n in range(500)]
+        self.home.guide.set_channels(channels)
+        self.home.set_shelf([tile("/r/a.ts", "Night Match")])
+        self.home.move_by(0, 1)
+        self.assertEqual(self.home.focus_region(), "guide")
+        for _ in range(500):
+            if self.home.focus_region() == "shelf":
+                break
+            self.home.page(1)
+        self.assertEqual(self.home.focus_region(), "shelf")
+        self.home.page(-1)
+        self.assertEqual(self.home.focus_region(), "guide")
+
+    def test_up_from_the_guide_passes_its_bar(self):
+        self.home.guide.set_channels([{"id": "1", "name": "One"}, {"id": "2", "name": "Two"}])
+        self.home.move_by(0, 1)
+        self.assertEqual(self.home.focus_region(), "guide")
+        self.assertEqual(self.home.guide.bar_focus(), "")  # its rows first
+        self.home.move_by(0, -1)
+        self.assertEqual(self.home.guide.bar_focus(), "day0")
+        self.home.move_by(0, -1)
+        self.assertEqual(self.home.focus_region(), "hero")
+
+    def test_several_recordings_now_keep_apart(self):
+        for count in (2, 3, 4):
+            now = tuple(recording(f"r{k}", f"Programme {k}") for k in range(count))
+            self.home.set_hero(desk.Hero(now, None, STREAMS))
+            rows = self.home.now_layout()
+            self.assertEqual(len(rows), count)
+            card = self.home.hero_cards()[0]
+            for k, row in enumerate(rows):
+                for part in ("title", "text", "bar", "stop", "watch"):
+                    self.assertTrue(card.contains(row[part]), (count, k, part))
+                for text in ("title", "text"):
+                    for button in ("stop", "watch"):
+                        self.assertFalse(row[text].intersects(row[button]), (count, k, text))
+                self.assertFalse(row["bar"].intersects(row["title"]), (count, k))
+                if k:
+                    self.assertGreaterEqual(row["title"].top(), rows[k - 1]["bar"].bottom())
+            self.assertFalse(self.home.grab().isNull())
+
+    def test_one_provider_is_not_named(self):
+        self.home.set_hero(desk.Hero((), None, STREAMS))
+        self.home.set_name_providers(False)
+        self.assertEqual(self.home.stream_lines(), ["1 of 2 streams"])
+
+    def test_the_corner_player_keeps_clear_of_the_controls(self):
+        self.home.set_hero(desk.Hero((NEWS,), upcoming(48), STREAMS))
+        self.home.set_shelf([tile(f"/r/{k}.ts", f"Title {k}") for k in range(8)])
+        player = QWidget(self.page)
+        self.addCleanup(player.deleteLater)
+        for corner in ((1280 - 420, 760 - 240), (1280 - 420, 10)):
+            player.setGeometry(*corner, 400, 225)
+            self.page.show()
+            player.show()
+            self.home.avoid(player)
+            covered = self.home.mapFromParent(player.geometry().topLeft())
+            area = player.geometry().translated(covered - player.geometry().topLeft())
+            rects = list(self.home.hero_rects().values()) + [self.home.all_rect()]
+            rects += [rect for _item, rect in self.home.shelf_rects()]
+            for rect in rects:
+                self.assertFalse(rect.toRect().intersects(area), (corner, rect))
+            self.page.hide()
 
 
 if __name__ == "__main__":

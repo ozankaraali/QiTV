@@ -31,6 +31,7 @@ from services.failure_reasons import shown_message
 from services.i18n import tr, translate
 from services.library import LibraryModel
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP
+from services.provider_ids import provider_of
 from services.recording_desk import COMING, NOW, RECORDED
 from services.recordings_library import RecordingsLibrary
 from services.recordings_list import RecordingsList
@@ -153,6 +154,8 @@ class TVPages(QObject):
         self.recordings.changed.connect(self.library_controller.recordings_changed)
         self._wire_home()  # 2.9.7: the Recordings tab's home
         window.library_page.recordings.avoid(window.player_page)  # the corner player
+        window.library_page.home.avoid(window.player_page)
+        window.library_page.rec_found.avoid(window.player_page)
         for sign in (window.overlays.rec_sign, getattr(window.overlays, "library_rec_sign", None)):
             if sign is not None:
                 sign.manageRequested.connect(lambda: self.open_recordings(NOW))
@@ -167,6 +170,7 @@ class TVPages(QObject):
         guide.set_programmes(
             lambda channel, start, limit: catalog.programmes(channel, start, limit=limit)
         )
+        catalog.epgReady.connect(guide.refresh)  # a guide loaded: its rows read it again
         guide.set_mark_provider(self._home_mark)
         guide.set_band_provider(self._home_bands)
         guide.recordRequested.connect(
@@ -188,13 +192,14 @@ class TVPages(QObject):
         self.recordings_desk.refreshed.connect(self._refresh_home)
         # the rail's find: the home guide's channels first, then every channel
         controller = self.library_controller
-        controller.find_sources = lambda: [guide.channels(), list(window.nav.all_live_items())]
+        controller.find_sources = lambda: [guide.channels(), window.nav.all_live_items()]
         controller.find_programmes = lambda channel, now, limit: catalog.programmes(
             channel, now, limit=limit
         )
         controller.record_found = self._schedule_from_home
         self._guide_source = ""
         self._guide_chosen = False  # the viewer chose the guide's channels (else: the default)
+        self._guide_version: Any = None  # the lists' version its channels were built from
         self._set_guide_source(self._default_guide_source())
 
     def _schedule_from_home(self, channel: dict, programme: Any, series: bool) -> None:
@@ -243,15 +248,22 @@ class TVPages(QObject):
         return bands
 
     def _refresh_home(self) -> None:
-        home = self._window.library_page.home
+        window = self._window
+        home = window.library_page.home
+        home.set_name_providers(len(window.library_catalog.provider_names()) > 1)
         home.set_hero(self.recordings_desk.hero())
         library = self.recordings_library
         home.set_shelf(library.items(rl.ALL)[:8], library.badges)
-        key = self._guide_source if self._guide_chosen else self._default_guide_source()
-        channels = self._guide_channels(key)
-        shown = [(c.get("id"), c.get("name")) for c in home.guide.channels()]
-        if key != self._guide_source or shown != [(c.get("id"), c.get("name")) for c in channels]:
-            self._set_guide_source(key)  # lists loaded meanwhile, or another default
+        version = window.nav.live_version()
+        if version != self._guide_version:  # a list loaded or changed: the guide's channels
+            key = self._guide_source if self._guide_chosen else self._default_guide_source()
+            channels = self._guide_channels(key)
+            if key != self._guide_source or _channel_keys(home.guide.channels()) != _channel_keys(
+                channels
+            ):
+                self._set_guide_source(key)  # lists loaded meanwhile, or another default
+            self._guide_version = version
+        home.guide.follow_now()
         home.guide.update()
 
     def guide_sources(self) -> list[tuple[str, str]]:
@@ -292,6 +304,7 @@ class TVPages(QObject):
 
     def _set_guide_source(self, key: str) -> None:
         self._guide_source = key
+        self._guide_version = self._window.nav.live_version()
         guide = self._window.library_page.home.guide
         label = next((label for label, k in self.guide_sources() if k == key), "")
         guide.set_source_label(label)
@@ -683,3 +696,8 @@ class TVPages(QObject):
             if name:
                 message = tr("{name}: {message}", name=name, message=message)
             self._window.library_toast.show_message(scrub(message), "error", ERROR_MS)
+
+
+def _channel_keys(channels: list[dict]) -> list[tuple[str, str]]:
+    """2.9.7: a channel list as the Recordings home's guide tells two apart."""
+    return [(provider_of(c), str(c.get("id") or c.get("name") or "")) for c in channels]

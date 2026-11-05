@@ -588,7 +588,29 @@ class NavModel(QObject):
         self.changed.emit()
 
     def all_live_items(self) -> list[dict]:
-        """Every live channel once; the same id at two providers is two channels."""
+        """Every live channel once; the same id at two providers is two channels. Walked once
+        while the lists stay (2.9.7: the Recordings home and its find ask often): a copy, its
+        `token` the same while the walk is."""
+        deps = (self._data_version(),)
+        return cast(list[dict], self._cached(("@all_live",), deps, self._walk_live))
+
+    def live_version(self) -> tuple:
+        """2.9.7: changes when a list of live channels may have: the lists, the favorites, the
+        history (Recent) or parental controls' state; the Recordings home rebuilds its guide's
+        channels only then."""
+        from services import parental  # parental reads navigation's item keys
+
+        guard = parental.installed()
+        state = guard.state_version() if guard is not None else 0
+        return (
+            self._data_version(),
+            self._favorites_fingerprint(),
+            self._history_fingerprint(),
+            tuple(self.catalog.provider_names()),
+            state,
+        )
+
+    def _walk_live(self) -> list[dict]:
         seen, result = set(), []
         for group in self.catalog.groups("live"):
             if group.header:

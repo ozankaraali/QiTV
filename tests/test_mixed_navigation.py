@@ -276,6 +276,21 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertIn(("Demo TV", "1"), keys)
         self.assertIn(("Harbor IPTV", "1"), keys)
 
+    def test_every_live_channel_is_walked_once_until_the_lists_change(self):
+        """2.9.7 (Stage 3–4 review 7): the Recordings home and its find ask for every channel
+        every two seconds and every letter; the walk is kept while the lists stay."""
+        first = self.nav.all_live_items()
+        walked = []
+        groups = self.view.groups
+        self.view.groups = lambda section: walked.append(section) or groups(section)
+        again = self.nav.all_live_items()
+        self.assertEqual(walked, [])
+        self.assertEqual(again, first)
+        self.assertEqual(again.token, first.token)  # equal lists, told apart without rows
+        again.clear()  # a caller's copy: the kept walk stays whole
+        self.assertEqual(self.nav.all_live_items(), first)
+        self.assertIsNotNone(self.nav.live_version())
+
     def test_numbers_in_the_mixed_all_find_the_first_provider(self):
         channels = [n.payload for n in self.items_of(ALL_GROUP_ID)]
         context = ZapContext(ALL_GROUP_ID, channels, fallback=channels)
