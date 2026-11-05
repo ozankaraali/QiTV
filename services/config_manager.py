@@ -145,8 +145,11 @@ class ConfigManager:
     LIVE_LATENCY_CHOICES = ("auto", "low", "normal", "stable")
     # Bumped by each one-time change of the latency default (`update_patcher`).
     LATENCY_DEFAULTS_VERSION = 1
-    DEFAULT_OPTION_MOUSE_WHEEL = "channel"
+    # 2.9.7: the wheel over the picture changes the volume (over the channel list, channels);
+    # every saved choice is moved to it once (`update_patcher`), a choice made later stays.
+    DEFAULT_OPTION_MOUSE_WHEEL = "volume"
     MOUSE_WHEEL_CHOICES = ("channel", "volume")
+    WHEEL_DEFAULTS_VERSION = 1
     DEFAULT_OPTION_START_WITH_LAST_CHANNEL = True
     DEFAULT_OPTION_TIMESHIFT_ENABLED = False
     # 2.1: hardware again (a frozen picture falls back to software: services.picture_watch);
@@ -340,6 +343,17 @@ class ConfigManager:
             self.config["live_latency"] = "auto"
         if latency_defaults < ConfigManager.LATENCY_DEFAULTS_VERSION:
             self.config["latency_defaults_version"] = ConfigManager.LATENCY_DEFAULTS_VERSION
+            need_update = True
+
+        # 2.9.7: the wheel over the picture changes the volume. Every config saved "channel"
+        # as the default, so a choice and the old default look alike: everyone is moved
+        # once, and a choice made afterwards stays. Older 2.x builds ignore the key and read
+        # "volume" as one of their choices.
+        wheel_defaults = self._defaults_version("wheel_defaults_version")
+        if wheel_defaults < 1:
+            self.config["mouse_wheel_action"] = "volume"
+        if wheel_defaults < ConfigManager.WHEEL_DEFAULTS_VERSION:
+            self.config["wheel_defaults_version"] = ConfigManager.WHEEL_DEFAULTS_VERSION
             need_update = True
 
         if need_update:
