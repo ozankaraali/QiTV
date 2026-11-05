@@ -130,6 +130,24 @@ class RecorderHomeTests(unittest.TestCase):
         self.assertFalse(self.home.grab().isNull())
         self.assertEqual(asked, ["/r/a.ts"])
 
+    def test_shelf_tiles_show_their_recordings_picture(self):  # 2.9.7: thumbnails
+        from PySide6.QtGui import QColor, QPixmap
+
+        frame = QPixmap(384, 216)
+        frame.fill(QColor("#3060a0"))
+        asked = []
+        items = [tile("/r/a.ts", "Night Match"), tile("/r/b.ts", "Kitchen Stories")]
+        self.home.set_shelf(
+            items,
+            picture=lambda item: asked.append(item["path"])
+            or (frame if "a" in item["path"] else None),
+        )
+        image = self.home.grab().toImage()
+        self.assertEqual(asked, ["/r/a.ts", "/r/b.ts"])
+        (first, rect), _second = self.home.shelf_rects()
+        middle = image.pixelColor(int(rect.center().x()), int(rect.top() + rect.height() * 0.3))
+        self.assertEqual(middle.name(), "#3060a0")  # its frame, not a tinted card
+
     def test_nothing_recording_or_scheduled_says_so_and_still_offers_add(self):
         self.home.set_hero(desk.Hero((), None, ()))
         self.assertEqual(self.home.now_cards(), [])

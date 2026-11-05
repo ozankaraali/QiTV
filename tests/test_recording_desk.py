@@ -213,6 +213,35 @@ class AiringRowTests(unittest.TestCase):  # 2.9.7: Coming up, one row per airing
         self.assertEqual(rows[1].note, "No airing in the guide yet")
 
 
+class TileFactsTests(unittest.TestCase):  # 2.9.7: a row as a tile needs its time and channel
+    def test_airings_rules_and_problems_carry_their_start_channel_and_logo(self):
+        channel = dict(NEWS, logo="https://logos.invalid/news.png")
+        a = once("a", channel, local(26, 20), local(26, 21))
+        series = {"id": "s", "kind": rs.SERIES, "provider": "P", "channel": channel, "title": "N"}
+        programme = Programme(
+            "N",
+            datetime.fromtimestamp(local(27, 19)).astimezone(),
+            datetime.fromtimestamp(local(27, 20)).astimezone(),
+        )
+        guide = lambda c, s: [programme]  # noqa: E731
+        (airing,) = [e for e in desk.coming_entries([a], local(26, 12), limits={}) if e.title]
+        self.assertEqual((airing.start, airing.channel), (local(26, 20), "News One"))
+        self.assertEqual(airing.logo, "https://logos.invalid/news.png")
+        (rule,) = [e for e in desk.rule_entries([series], local(26, 12), guide=guide) if e.title]
+        self.assertEqual(
+            (rule.start, rule.channel, rule.logo), (local(27, 19), "News One", channel["logo"])
+        )
+        problem = {
+            "state": rs.MISSED,
+            "start": local(25, 20),
+            "channel": "News One",
+            "title": "N",
+            "at": 1.0,
+        }
+        (missed,) = desk.attention_entries([problem], lambda why: "", lambda path: False)
+        self.assertEqual((missed.start, missed.channel), (local(25, 20), "News One"))
+
+
 class SectionTests(unittest.TestCase):
     def test_what_records_now_the_big_picture_s_only_stops(self):
         entries = desk.now_entries(

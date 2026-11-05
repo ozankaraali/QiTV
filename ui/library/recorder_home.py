@@ -27,7 +27,16 @@ import time
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QEvent, QLocale, QPoint, QPointF, QRectF, QSizeF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QFontMetricsF,
+    QLinearGradient,
+    QPainter,
+    QPixmap,
+    QTransform,
+)
 from PySide6.QtWidgets import QWidget
 
 from services import i18n, recording_desk as desk, recording_schedule as rs
@@ -111,6 +120,7 @@ class RecorderHome(TooltipWidget):
         self._hero = desk.Hero((), None, ())
         self._shelf: list[dict] = []
         self._badges: Optional[Callable[[dict], tuple[str, str]]] = None
+        self._picture: Optional[Callable[[dict], Optional[QPixmap]]] = None
         self._region = "hero"
         self._button = 0
         self._tile = 0
@@ -147,12 +157,17 @@ class RecorderHome(TooltipWidget):
         self.update()
 
     def set_shelf(
-        self, items: list[dict], badges: Optional[Callable[[dict], tuple[str, str]]] = None
+        self,
+        items: list[dict],
+        badges: Optional[Callable[[dict], tuple[str, str]]] = None,
+        picture: Optional[Callable[[dict], Optional[QPixmap]]] = None,
     ) -> None:
-        """The recordings made last; `badges(item)`: its length and NEW, as the tiles'."""
+        """The recordings made last; `badges(item)`: its length and NEW, as the tiles';
+        `picture(item)`: a frame of it (None: its channel's coloured card)."""
         focused = self.focused_tile()
         self._shelf = list(items)
         self._badges = badges
+        self._picture = picture
         keys = [_tile_key(choice) for choice in self._shelf_order()]
         if self._tile_chosen and focused in keys:  # the keys stay on their recording
             self._tile = keys.index(focused)
@@ -783,8 +798,21 @@ class RecorderHome(TooltipWidget):
         p.drawText(all_rect, Qt.AlignRight | Qt.AlignVCenter, translate(ALL_TEXT))
         order = self._shelf_order()
         for item, rect in self.shelf_rects():
-            hue = card_hue(str(item.get("_channel") or ""))  # a channel keeps its colour
-            fill_round(p, rect, _card_color(hue), RADIUS_CARD)
+            frame = self._picture(item) if self._picture is not None else None
+            if frame is not None and not frame.isNull():
+                _paint_cover(p, rect, frame)
+                shade = QLinearGradient(rect.left(), rect.top() + rect.height() * 0.45, 0, 0)
+                shade.setFinalStop(rect.left(), rect.bottom())
+                shade.setColorAt(0.0, qcolor(PALETTE.canvas, 0.0))
+                shade.setColorAt(1.0, qcolor(PALETTE.canvas, 0.88))
+                p.save()
+                p.setPen(Qt.NoPen)
+                p.setBrush(QBrush(shade))
+                p.drawRoundedRect(rect, RADIUS_CARD, RADIUS_CARD)
+                p.restore()
+            else:
+                hue = card_hue(str(item.get("_channel") or ""))  # a channel keeps its colour
+                fill_round(p, rect, _card_color(hue), RADIUS_CARD)
             if self._focused and self._region == "shelf" and order[self._tile] is item:
                 p.setPen(qcolor(PALETTE.accent))
                 p.setBrush(Qt.NoBrush)
@@ -828,3 +856,17 @@ def _card_color(hue: float) -> QColor:
 def _tile_key(choice: Any) -> str:
     """A shelf choice's key: its recording's path, or "all"."""
     return choice if isinstance(choice, str) else str(choice.get("path") or "")
+
+
+def _paint_cover(p: QPainter, rect: QRectF, pixmap: QPixmap) -> None:
+    """A picture covering `rect` (centre crop), its corners rounded, as the grid's."""
+    scale = max(rect.width() / pixmap.width(), rect.height() / pixmap.height())
+    dx = rect.x() + (rect.width() - pixmap.width() * scale) / 2
+    dy = rect.y() + (rect.height() - pixmap.height() * scale) / 2
+    brush = QBrush(pixmap)
+    brush.setTransform(QTransform(scale, 0, 0, scale, dx, dy))
+    p.save()
+    p.setPen(Qt.NoPen)
+    p.setBrush(brush)
+    p.drawRoundedRect(rect, RADIUS_CARD, RADIUS_CARD)
+    p.restore()

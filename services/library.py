@@ -105,6 +105,9 @@ class Details:
     kind: str  # "movie" | "series" | "episode"
     provider: str = ""  # the title's provider, named in the strip while providers are mixed
     cast: str = ""  # its leading actors, as one line ("Ana, Bo")
+    # 2.9.7: a "desk" tile's own buttons (the Recordings tab's): (name, label, style), style
+    # "accent", "raised", "danger" or "off" (shown, not pressed)
+    buttons: tuple = ()
 
 
 # --- field parsing ------------------------------------------------------------------------

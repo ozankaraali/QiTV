@@ -35,10 +35,11 @@ any title during a provider switch, has no menu; nor has a series or a channel.
 from __future__ import annotations
 
 from datetime import datetime
+from functools import partial
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, QPoint, Signal
+from PySide6.QtCore import QObject, QPoint, Qt, Signal
 from PySide6.QtWidgets import QMenu
 
 from services import i18n, recording_desk, recordings_library as rl
@@ -75,6 +76,7 @@ from ui.library.library_screen import LibraryScreen
 from ui.library.poster_grid import poster_url
 from ui.library.search_session import DEBOUNCE_MS, SearchSession
 from ui.library.top_nav import REFRESH_TEXT
+from ui.overlays.guide import day_label
 from ui.text_edit import edit_key
 from ui.tick_menu import TickMenu
 
@@ -285,7 +287,8 @@ class LibraryController(QObject):
         rec_rail.fieldClicked.connect(lambda: self._focus("rec_rail", field=True))
         rec_rail.genreActivated.connect(lambda _id: self._focus("rec_content"))
         rec_rail.filterChanged.connect(self._on_rec_find)
-        rec_grid.activated.connect(lambda i: self._play_recording(i, start_over=False))
+        rec_grid.activated.connect(self._on_tile_activated)
+        rec_grid.buttonRequested.connect(self._on_tile_button)
         rec_grid.startOverRequested.connect(lambda i: self._play_recording(i, start_over=True))
         rec_grid.deleteRequested.connect(lambda i: self._recording_action(i, self.delete_recording))
         rec_grid.folderRequested.connect(
@@ -294,8 +297,6 @@ class LibraryController(QObject):
         rec_grid.leftEdge.connect(lambda: self._focus("rec_rail"))
         rec_grid.upEdge.connect(lambda: self._focus("nav"))
         rec_grid.contextRequested.connect(self._on_recording_context)
-        screen.rec_found.buttonClicked.connect(self._on_found_button)
-        screen.rec_found.upEdge.connect(lambda: self._focus("nav"))
         home = screen.home  # 2.9.7: the Recordings tab's home
         home.upEdge.connect(lambda: self._focus("nav"))
         home.leftEdge.connect(lambda: self._focus("rec_rail"))
@@ -386,6 +387,9 @@ class LibraryController(QObject):
         """The Recordings page's controller (`ui.recordings_desk`): its tab shows from now on."""
         self._desk = desk
         self._screen.nav.set_tabs(self._tabs())
+        refreshed = getattr(desk, "refreshed", None)
+        if refreshed is not None:  # 2.9.7: the recorder's tiles follow the page
+            refreshed.connect(self._on_desk_refreshed)
 
     def set_recordings_library(self, library: Any) -> None:
         """2.9.7: the Recordings tab's rail and tiles (services.recordings_library)."""
@@ -437,12 +441,19 @@ class LibraryController(QObject):
             rail.set_current(row)
         if row == rl.TONIGHT:
             screen.set_recordings_content("home")
-        elif row == rl.ALL or row.startswith(rl.CHANNEL_PREFIX):
-            screen.set_recordings_content("grid")
-            self._fill_rec_grid()
-        else:
+        elif row == rl.SETTINGS:  # its folders and streams: a list
             screen.set_recordings_content("list")
-            screen.recordings.set_section(rl.SECTIONS.get(row, recording_desk.COMING))
+            screen.recordings.set_section(rl.SECTIONS[row])
+        else:  # the recordings, or the recorder's lists, as tiles
+            screen.set_recordings_content("grid")
+            self._fill_rec_grid(keep=False)
+
+    def _on_desk_refreshed(self) -> None:
+        """The recorder's page was worked out again: its tiles shown follow."""
+        screen = self._screen
+        if self._mode == "recordings" and screen.recordings_content == "grid":
+            if self._rec_row in rl.SECTIONS and self._rec_row != rl.SETTINGS:
+                self._fill_rec_grid()
 
     # ---- 2.9.7: the rail's find ------------------------------------------------------------
 
@@ -458,59 +469,49 @@ class LibraryController(QObject):
             return
         self._found = []
         self._screen.set_recordings_content("find")
-        self._fill_found()
-        # its first row once per query: what a slice finds later keeps the row the keys are on
-        self._screen.rec_found.set_section(
-            (recording_desk.RECORDED, recording_desk.FOUND), headed=True
-        )
+        # its first tile once per query: what a slice finds later keeps the tile the keys are on
+        self._fill_rec_grid(keep=False)
         self._guide_search.start(query, self.find_sources())
 
     def _on_found(self, hits: list) -> None:
         if self._screen.recordings_content == "find":
             self._found += hits
-            self._fill_found()
+            self._fill_rec_grid()
 
-    def _fill_found(self) -> None:
-        library = self._rec_library
+    def _found_sections(self, library: Any) -> list[tuple[str, list[dict]]]:
+        """The rail's find as tiles: the recordings whose title or channel holds it, then
+        the programmes still to come (each its own airing to record)."""
         text = self._screen.rec_rail.filter_text
-        recorded = library.items(rl.ALL, text) if library is not None else []
-        entries = [
-            recording_desk.Entry(
-                key=f"file:{item.get('path')}",
-                section=recording_desk.RECORDED,
-                title=str(item.get("_title") or item.get("name") or ""),
-                detail=str(item.get("_channel") or ""),
-                buttons=(recording_desk.button(recording_desk.PLAY, recording_desk.ACCENT),),
-            )
-            for item in recorded
-        ]
+        recorded = library.items(rl.ALL, text)
+        found = []
         for k, (channel, programme) in enumerate(self._found):
             start, stop = programme.start.timestamp(), programme.stop.timestamp()
-            entries.append(
-                recording_desk.Entry(
-                    key=f"found:{k}",
-                    section=recording_desk.FOUND,
-                    title=programme.title,
-                    detail=f"{recording_desk.short_when(start)}–{recording_desk.clock(stop)} · "
-                    f"{channel.get('name') or ''}",
-                    buttons=(
-                        recording_desk.button(recording_desk.RECORD, recording_desk.ACCENT),
-                        recording_desk.button(recording_desk.RECORD_SERIES),
-                    ),
-                    sort=start,
-                )
+            entry = recording_desk.Entry(
+                key=f"found:{k}",
+                section=recording_desk.FOUND,
+                title=programme.title,
+                detail=f"{recording_desk.short_when(start)}–{recording_desk.clock(stop)} · "
+                f"{channel.get('name') or ''}",
+                buttons=(
+                    recording_desk.button(recording_desk.RECORD, recording_desk.ACCENT),
+                    recording_desk.button(recording_desk.RECORD_SERIES),
+                ),
+                sort=start,
+                start=start,
+                channel=str(channel.get("name") or ""),
+                logo=str(channel.get("logo") or ""),
             )
-        self._screen.rec_found.set_content(entries, [], "")
+            found.append(rl.desk_tile(entry))
+        recorded_title = translate(recording_desk.SECTION_TITLES[recording_desk.RECORDED])
+        found_title = translate(recording_desk.SECTION_TITLES[recording_desk.FOUND])
+        return [
+            (f"{recorded_title}  ·  {i18n.number(len(recorded))}", recorded),
+            (f"{found_title}  ·  {i18n.number(len(found))}", found),
+        ]
 
     def _on_found_button(self, key: str, name: str) -> None:
         kind, _, value = key.partition(":")
-        if kind == "file" and self._rec_library is not None:
-            item = next(
-                (f for f in self._rec_library.items(rl.ALL) if f.get("path") == value), None
-            )
-            if item is not None:
-                self._play(item, "recording", _context(start_over=False))
-        elif kind == "found" and value.isdigit() and int(value) < len(self._found):
+        if kind == "found" and value.isdigit() and int(value) < len(self._found):
             channel, programme = self._found[int(value)]
             self.record_found(channel, programme, name == recording_desk.RECORD_SERIES)
 
@@ -518,7 +519,10 @@ class LibraryController(QObject):
         self._show_rec_row(rl.ALL)
         self._focus("rec_content")
 
-    def _fill_rec_grid(self) -> None:
+    def _fill_rec_grid(self, keep: bool = True) -> None:
+        """The tiles of the rail's row: its recordings (All, a channel's), the recorder's
+        list (Coming up by day, Series & timers, Needs attention) or what the find found;
+        `keep`: the tile the keys are on stays (a refresh), else the first."""
         library = self._rec_library
         if library is None:
             return
@@ -527,14 +531,89 @@ class LibraryController(QObject):
         grid.set_progress_provider(library.progress)
         grid.set_key_provider(library.identity)
         grid.set_badge_provider(library.badges)
-        grid.set_poster_url_provider(lambda item: "")  # its title's card (no art of its own)
-        items = library.items(self._rec_row, self._screen.rec_rail.filter_text)
-        if self._rec_row.startswith(rl.CHANNEL_PREFIX):  # its channel, without asking the rail
-            title = self._rec_row[len(rl.CHANNEL_PREFIX) :]
+        grid.set_caption_provider(library.caption)
+        grid.set_poster_url_provider(self._tile_picture)
+        grid.set_tile_provider(lambda item: library.picture(item)[1])  # a channel's logo
+        row = self._rec_row
+        if self._screen.recordings_content == "find":
+            sections = self._found_sections(library)
+            title = f"“{self._screen.rec_rail.filter_text.strip()}”"
+        elif row in rl.SECTIONS:  # the recorder's lists
+            wanted = rl.SECTIONS[row]
+            wanted = wanted if isinstance(wanted, tuple) else (wanted,)
+            entries = [e for e in self._desk_entries() if e.section in wanted]
+            sections = library.desk_sections(entries, _day_of)
+            title = translate(recording_desk.SECTION_TITLES[wanted[-1]])
         else:
-            title = translate(recording_desk.ALL_TEXT)
-        grid.set_header(title, i18n.number(len(items)), [], "")
-        grid.set_sections([("", items)], keep_current=True)
+            items = library.items(row, self._screen.rec_rail.filter_text)
+            sections = [("", items)]
+            if row.startswith(rl.CHANNEL_PREFIX):  # its channel, without asking the rail
+                title = row[len(rl.CHANNEL_PREFIX) :]
+            else:
+                title = translate(recording_desk.ALL_TEXT)
+        count = sum(
+            1
+            for _title, items in sections
+            for item in items
+            if not (isinstance(item.get("_desk"), recording_desk.Entry) and not item["_desk"].title)
+        )
+        grid.set_header(title, i18n.number(count), [], "")
+        grid.set_sections(sections, keep_current=keep)
+
+    def _desk_entries(self) -> list[Any]:
+        last = getattr(self._desk, "last_entries", None)
+        return list(last()) if callable(last) else []
+
+    def _tile_picture(self, item: dict) -> str:
+        """A tile's picture url as the grid's cache asks for it (a logo through its cache)."""
+        library = self._rec_library
+        if library is None:
+            return ""
+        url, logo = library.picture(item)
+        return self._screen.grid_posters.logo_key(url) if url and logo else url
+
+    # ---- 2.9.7: the recorder's tiles ------------------------------------------------------
+
+    def _on_tile_activated(self, index: int) -> None:
+        """Enter or a click on the current tile: a recording plays; a row's tile offers its
+        buttons as a menu (the keys reach each)."""
+        item = self._rec_item(index)
+        if item is None or self._closed:
+            return
+        if isinstance(item.get("_desk"), recording_desk.Entry):
+            self._show_tile_menu(index, None)
+        else:
+            self._play(item, "recording", _context(start_over=False))
+
+    def _on_tile_button(self, index: int, name: str) -> None:
+        item = self._rec_item(index)
+        entry = item.get("_desk") if item is not None else None
+        if not isinstance(entry, recording_desk.Entry) or self._closed:
+            return
+        if entry.key.startswith("found:"):
+            self._on_found_button(entry.key, name)
+        elif self._desk is not None:
+            self._desk.press(entry.key, name)
+
+    def _show_tile_menu(self, index: int, at: Any) -> None:
+        library = self._rec_library
+        item = self._rec_item(index)
+        if library is None or item is None:
+            return
+        grid = self._screen.rec_grid
+        menu = QMenu(grid)
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        for name, label, style in library.details(item).buttons:
+            action = menu.addAction(label, partial(self._on_tile_button, index, name))
+            action.setEnabled(style != "off")
+        self._tile_menu = menu
+        if at is None:  # the keys: beside the tile
+            at = grid.viewport().mapToGlobal(grid.item_rect(index).center())
+        menu.popup(at)
+
+    def tile_menu(self) -> Optional[QMenu]:
+        """The last tile menu shown (tests)."""
+        return getattr(self, "_tile_menu", None)
 
     def _rec_item(self, index: int) -> Optional[dict]:
         item = self._screen.rec_grid.item(index)
@@ -542,17 +621,19 @@ class LibraryController(QObject):
 
     def _play_recording(self, index: int, *, start_over: bool) -> None:
         item = self._rec_item(index)
-        if item is not None and not self._closed:
+        if item is not None and not self._closed and "_desk" not in item:
             self._play(item, "recording", _context(start_over=start_over))
 
     def _recording_action(self, index: int, action: Callable[[dict], object]) -> None:
         item = self._rec_item(index)
-        if item is not None and not self._closed:
+        if item is not None and not self._closed and "_desk" not in item:  # a recording's
             action(item)
 
     def _on_recording_context(self, index: int, pos: Any) -> None:
         item = self._rec_item(index)
-        if item is not None and self._context_menu is not None:
+        if item is not None and "_desk" in item:  # a row's tile: its buttons
+            self._show_tile_menu(index, pos)
+        elif item is not None and self._context_menu is not None:
             self._context_menu(item, "recording", pos)
 
     # ---- state --------------------------------------------------------------------------------
@@ -588,7 +669,6 @@ class LibraryController(QObject):
         self._screen.recordings.set_focused(zone == "rec_content")
         self._screen.rec_rail.set_focused(zone == "rec_rail", field=self._rec_field)  # 2.9.7
         self._screen.rec_grid.set_focused(zone == "rec_content")
-        self._screen.rec_found.set_focused(zone == "rec_content")
         self._screen.home.set_focused(zone == "rec_content")
         self._sync_search_focus()
 
@@ -965,7 +1045,7 @@ class LibraryController(QObject):
         """2.9.7: the Recordings tab's view: its tiles as the Library's grid, a list as the
         2.9.7 page; Esc goes to the rail."""
         kind = self._screen.recordings_content
-        if kind == "grid":
+        if kind in ("grid", "find"):  # tiles: the recordings, the lists, what was found
             if action is Action.ESCAPE:
                 self._focus("rec_rail")
                 return True
@@ -1011,8 +1091,6 @@ class LibraryController(QObject):
             else:
                 return False
             return True
-        if kind == "find":
-            return self._handle_recordings(action, payload, self._screen.rec_found)
         return self._handle_recordings(action, payload)
 
     def _handle_recordings(self, action: Action, payload: str, page: Any = None) -> bool:
@@ -1715,3 +1793,8 @@ class LibraryController(QObject):
         # genre's says its titles.
         query = self._search.query.strip()
         grid.set_header(f"“{query}”" if query else "", self._search.count_text(), [], "")
+
+
+def _day_of(moment: float) -> str:
+    """2.9.7: an airing's day as the guide names it (Today, Tomorrow, a weekday)."""
+    return day_label(datetime.fromtimestamp(moment).astimezone(), datetime.now().astimezone())

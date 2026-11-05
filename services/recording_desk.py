@@ -215,6 +215,10 @@ class Entry:
     buttons: tuple[Button, ...] = ()
     since: Optional[float] = None  # a recording's start (time.monotonic): the page counts on
     sort: float = 0.0
+    # 2.9.7: what a tile shows: its airing's (or next airing's) start, its channel and logo
+    start: float = 0.0
+    channel: str = ""
+    logo: str = ""
 
 
 @dataclass(frozen=True)
@@ -485,6 +489,7 @@ def now_entries(recordings: Iterable[Recording], waiting: Iterable[Waiting]) -> 
                 buttons=buttons,
                 since=rec.since,
                 sort=rec.since,
+                channel=rec.channel,
             )
         )
     for wait in waiting:
@@ -504,6 +509,7 @@ def now_entries(recordings: Iterable[Recording], waiting: Iterable[Waiting]) -> 
                 status=status("waiting"),
                 buttons=(button(TRY_NOW, ACCENT), button(SKIP)),
                 sort=wait.until,
+                channel=wait.channel,
             )
         )
     return entries
@@ -569,6 +575,7 @@ def _airing_entry(
     kind = item.get("kind")
     item_id = str(item.get("id") or "")
     channel = str((item.get("channel") or {}).get("name") or "")
+    logo = str((item.get("channel") or {}).get("logo") or "")
     provider = str(item.get("provider") or "")
     title = _title(item)
     on_now = records_now and start - rs.PRE_S <= now < stop + rs.POST_S
@@ -610,6 +617,9 @@ def _airing_entry(
         status=status(pill),
         buttons=buttons,
         sort=start,
+        start=start,
+        channel=channel,
+        logo=logo,
     )
 
 
@@ -668,6 +678,9 @@ def rule_entries(
                 status=status(pill),
                 buttons=buttons,
                 sort=upcoming[0] if upcoming else now + 365 * 86400,
+                start=upcoming[0] if upcoming else 0.0,
+                channel=channel,
+                logo=str((item.get("channel") or {}).get("logo") or ""),
             )
         )
     entries.sort(key=lambda e: e.sort)
@@ -733,6 +746,8 @@ def attention_entries(
                 status=status("failed" if state == rs.FAILED else "missed"),
                 buttons=tuple(buttons),
                 sort=-float(outcome.get("at") or 0),
+                start=start,
+                channel=channel,
             )
         )
     if len(entries) >= 2:

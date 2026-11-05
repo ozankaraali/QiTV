@@ -33,6 +33,7 @@ from services.library import LibraryModel
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP
 from services.provider_ids import provider_of
 from services.recording_desk import COMING, NOW, RECORDED
+from services.recording_thumbs import FOLDER as THUMBS_FOLDER, Thumbnails
 from services.recordings_library import RecordingsLibrary
 from services.recordings_list import RecordingsList
 from ui.keymap import Action
@@ -138,13 +139,23 @@ class TVPages(QObject):
             lambda mark: window.library_page.nav.set_mark("recordings", mark)
         )
         self.library_controller.set_recordings_desk(self.recordings_desk)
-        # 2.9.7: the Recordings tab's rail and tiles, and what its strip's buttons do
+        # 2.9.7: the Recordings tab's rail and tiles, and what its strip's buttons do; a
+        # frame of each recording as its tile's picture (read once, on a worker)
+        self.thumbnails = Thumbnails(
+            os.path.join(window.config_manager.get_config_dir(), "cache", THUMBS_FOLDER),
+            parent=self,
+        )
         self.recordings_library = RecordingsLibrary(
             self.recordings.files,
             self._recordings_counts,
             window.watch,
             window.config_manager,
             mixed=lambda: len(window.library_catalog.provider_names()) > 1,
+            picture=self.thumbnails.url,
+        )
+        self.thumbnails.ready.connect(self._on_thumbnail)
+        window.library_page.grid_posters.logoReady.connect(
+            lambda _url: window.library_page.home.update()  # a frame loaded: the shelf shows it
         )
         self.library_controller.set_recordings_library(self.recordings_library)
         self.library_controller.delete_recording = self.delete_recording
@@ -155,7 +166,6 @@ class TVPages(QObject):
         self._wire_home()  # 2.9.7: the Recordings tab's home
         window.library_page.recordings.avoid(window.player_page)  # the corner player
         window.library_page.home.avoid(window.player_page)
-        window.library_page.rec_found.avoid(window.player_page)
         for sign in (window.overlays.rec_sign, getattr(window.overlays, "library_rec_sign", None)):
             if sign is not None:
                 sign.manageRequested.connect(lambda: self.open_recordings(NOW))
@@ -253,7 +263,7 @@ class TVPages(QObject):
         home.set_name_providers(len(window.library_catalog.provider_names()) > 1)
         home.set_hero(self.recordings_desk.hero())
         library = self.recordings_library
-        home.set_shelf(library.items(rl.ALL)[:8], library.badges)
+        home.set_shelf(library.items(rl.ALL)[:8], library.badges, self._shelf_picture)
         version = window.nav.live_version()
         if version != self._guide_version:  # a list loaded or changed: the guide's channels
             key = self._guide_source if self._guide_chosen else self._default_guide_source()
@@ -386,6 +396,25 @@ class TVPages(QObject):
         """The window closes: the guard, which filters the whole application, lets go now
         (another window's next click is not this one's second click)."""
         self._second_click.disarm()
+        self.thumbnails.shutdown()  # 2.9.7: no recording's frame read any more
+
+    def _shelf_picture(self, item: dict) -> Any:
+        """2.9.7: a recording's frame for the home's shelf, from the Library's poster cache
+        (asked for once it exists; None meanwhile)."""
+        url = self.thumbnails.url(item)
+        if not url:
+            return None
+        posters = self._window.library_page.grid_posters
+        pixmap = posters.pixmap(url)
+        if pixmap is None:
+            posters.request([url])
+        return pixmap
+
+    def _on_thumbnail(self, _url: str) -> None:
+        """2.9.7: a recording's picture was made: the tiles shown ask for it."""
+        page = self._window.library_page
+        page.rec_grid.viewport().update()
+        page.home.update()
 
     def back_to_player(self) -> None:
         """⤢, a click on the corner player: the player page again, what plays as it was.

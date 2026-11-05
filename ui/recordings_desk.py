@@ -420,6 +420,10 @@ class RecordingsDesk(QObject):
 
     # ---- the buttons --------------------------------------------------------------------------
 
+    def press(self, key: str, name: str) -> None:
+        """2.9.7: a button of the row `key` (a tile's, as the list's)."""
+        self._on_button(key, name)
+
     def _on_button(self, key: str, name: str) -> None:
         if self._window.closing():
             return

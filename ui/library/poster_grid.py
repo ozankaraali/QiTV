@@ -132,6 +132,8 @@ PLAY, START_OVER, FAVORITE = "play", "start_over", "favorite"
 CANCEL, WHEN = "cancel", "when"
 DELETE, FOLDER = "delete", "folder"  # 2.9.7: a recording's file: deleted (asked), shown
 _ACCENT, _RAISED, _SQUARE, _LABEL = "accent", "raised", "square", "label"
+_DANGER, _OFF = "danger", "off"  # 2.9.7: a desk tile's: in the live colour; shown, not pressed
+CAPTION_SHARE = 0.46  # 2.9.7: the share of a tile its caption's shade covers, from the bottom
 
 
 def card_hue(title: str) -> float:
@@ -196,6 +198,8 @@ def _button_specs(details: Details | None, when: str = "") -> list[tuple[str, st
     play = tr("Play")  # i18n: button (verb) on the Library's detail strip
     if details is None:
         return [(PLAY, play, _ACCENT)]
+    if details.kind == "desk":  # 2.9.7: the Recordings tab's tile: its own buttons
+        return [tuple(spec) for spec in details.buttons]
     if details.kind == "scheduled":
         # i18n: a scheduled recording's right-click menu entry: it will not be recorded
         cancel = (CANCEL, tr("Cancel Recording"), _RAISED)
@@ -276,6 +280,7 @@ class PosterGrid(QAbstractScrollArea):
     cancelRequested = Signal(int)  # 2.8.12: a scheduled recording's Cancel (flat index)
     deleteRequested = Signal(int)  # 2.9.7: a recording's Delete… (flat index)
     folderRequested = Signal(int)  # 2.9.7: a recording's Show in Folder (flat index)
+    buttonRequested = Signal(int, str)  # 2.9.7: a desk tile's button (flat index, its name)
     focusChanged = Signal(int)
     sortRequested = Signal(str)  # a Sort value
     leftEdge = Signal()  # ← in the first column
@@ -317,6 +322,8 @@ class PosterGrid(QAbstractScrollArea):
         self._letters: dict[str, int] = {}
         self._details_provider: Callable[[dict], Details | None] | None = None
         self._poster_url: Callable[[dict], str] = poster_url
+        # 2.9.7: a tile's own caption over its picture: (title, line under it), or None
+        self._caption: Callable[[dict], tuple[str, str] | None] | None = None
         self._progress_provider: Callable[[dict], float | None] | None = None
         self._tile_provider: Callable[[dict], bool] | None = None
         self._badge_provider: Callable[[dict], tuple[str, str]] | None = None  # 2.9.7
@@ -470,6 +477,12 @@ class PosterGrid(QAbstractScrollArea):
     def set_progress_provider(self, fn: Callable[[dict], float | None]) -> None:
         self._progress_provider = fn
         self._progress_cache.clear()
+        self.viewport().update()
+
+    def set_caption_provider(self, fn: Callable[[dict], tuple[str, str] | None] | None) -> None:
+        """2.9.7: tiles named on themselves: `fn(item)` gives (title, line under it), drawn
+        over a shade at the picture's foot (the card's own title is then not drawn)."""
+        self._caption = fn
         self.viewport().update()
 
     def set_badge_provider(self, fn: Callable[[dict], tuple[str, str]] | None) -> None:
@@ -1007,6 +1020,12 @@ class PosterGrid(QAbstractScrollArea):
             self.jump_to_letter(letter)
             return
         button = self.button_at(pos)
+        details = self._details() if button is not None else None
+        if details is not None and details.kind == "desk":  # 2.9.7: its own buttons
+            style = next((spec[2] for spec in self._specs() if spec[0] == button), "")
+            if style != _OFF:
+                self.buttonRequested.emit(self._cur, button)
+            return
         if button == FAVORITE:
             self.favoriteToggled.emit(self._cur)
             return
@@ -1230,13 +1249,22 @@ class PosterGrid(QAbstractScrollArea):
             if self._posters is not None:
                 pixmap = self._posters.pixmap(url)
         progress = self._progress(i)
+        caption = self._caption(item) if self._caption is not None else None
         if pixmap is not None and not pixmap.isNull():
             if self._tile_provider is not None and self._tile_provider(item):
-                self._paint_tile(p, rect, pixmap)
+                above = rect.adjusted(0, 0, 0, -rect.height() * CAPTION_SHARE * 0.6)
+                self._paint_tile(p, rect, pixmap, above if caption else None)
             else:
                 self._paint_cover(p, rect, pixmap)
+        elif caption and item.get("_action"):  # 2.9.7: a tile that is a button (Record at…)
+            self._paint_action(p, rect)
+        elif caption:  # 2.9.7: named by its caption, in its channel's colour
+            hue_key = str(item.get("_channel") or title_of(item))
+            self._paint_card(p, rect, "", card_font, progress is not None, hue_key=hue_key)
         else:
             self._paint_card(p, rect, title_of(item), card_font, progress is not None)
+        if caption:
+            self._paint_caption(p, rect, caption, progress is not None)
         if progress is not None:
             u = self._units.u
             inset = PROGRESS_INSET_U * u
@@ -1248,8 +1276,46 @@ class PosterGrid(QAbstractScrollArea):
         if self._badge_provider is not None:
             self._paint_badges(p, rect, *self._badge_provider(item))
 
-    def _paint_badges(self, p: QPainter, rect: QRectF, left: str, right: str) -> None:
-        """2.9.7: a dark label at the card's top left, an accent one at its top right."""
+    def _paint_caption(
+        self, p: QPainter, rect: QRectF, caption: tuple[str, str], has_progress: bool
+    ) -> None:
+        """2.9.7: a tile's title and the line under it, on a shade at its foot."""
+        title, under = caption
+        u = self._units.u
+        shade = QLinearGradient(rect.left(), rect.bottom() - rect.height() * CAPTION_SHARE, 0, 0)
+        shade.setFinalStop(rect.left(), rect.bottom())
+        shade.setColorAt(0.0, qcolor(PALETTE.canvas, 0.0))
+        shade.setColorAt(1.0, qcolor(PALETTE.canvas, 0.88))
+        p.save()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(shade))
+        p.drawRoundedRect(rect, RADIUS_CARD, RADIUS_CARD)
+        margin = CARD_MARGIN_U * u
+        bottom = rect.bottom() - margin
+        if has_progress:
+            bottom -= (PROGRESS_H_U + CARD_BAR_CLEARANCE_U) * u
+        width = rect.width() - 2 * margin
+        under_font = self._units.font(0.8)
+        title_font = self._units.font(1.0, QFont.Weight.Bold)
+        if under:
+            height = QFontMetricsF(under_font).height()
+            p.setFont(under_font)
+            p.setPen(qcolor(PALETTE.text, 0.72))
+            box = QRectF(rect.left() + margin, bottom - height, width, height)
+            p.drawText(box, Qt.AlignLeft | Qt.AlignVCenter, elided(p, under, width))
+            bottom -= height
+        height = QFontMetricsF(title_font).height()
+        p.setFont(title_font)
+        p.setPen(qcolor(PALETTE.text))
+        box = QRectF(rect.left() + margin, bottom - height, width, height)
+        p.drawText(box, Qt.AlignLeft | Qt.AlignVCenter, elided(p, title, width))
+        p.restore()
+
+    def _paint_badges(
+        self, p: QPainter, rect: QRectF, left: str, right: str, tone: str = "accent"
+    ) -> None:
+        """2.9.7: a dark label at the card's top left, one at its top right in `tone`
+        ("accent", "live", "warn" or "quiet")."""
         u = self._units.u
         font = self._units.font(BADGE_FONT_U, QFont.Weight.Bold)
         fm = QFontMetricsF(font)
@@ -1263,9 +1329,12 @@ class PosterGrid(QAbstractScrollArea):
             width = fm.horizontalAdvance(text) + 1.0 * u
             x = rect.left() + 0.6 * u if at_left else rect.right() - 0.6 * u - width
             box = QRectF(x, top, width, height)
-            fill = qcolor(PALETTE.canvas, 0.72) if at_left else qcolor(PALETTE.accent)
+            color = {"live": PALETTE.live, "warn": PALETTE.warn}.get(tone, PALETTE.accent)
+            quiet = at_left or tone == "quiet"
+            fill = qcolor(PALETTE.canvas, 0.72) if quiet else qcolor(color)
             fill_round(p, box, fill, 0.4 * u)
-            p.setPen(qcolor(PALETTE.text) if at_left else qcolor(PALETTE.canvas))
+            ink = PALETTE.text if quiet or tone == "live" else PALETTE.canvas
+            p.setPen(qcolor(ink))
             p.drawText(box, Qt.AlignCenter, text)
         p.restore()
 
@@ -1282,24 +1351,53 @@ class PosterGrid(QAbstractScrollArea):
         p.drawRoundedRect(rect, RADIUS_CARD, RADIUS_CARD)
         p.restore()
 
-    def _paint_tile(self, p: QPainter, rect: QRectF, pixmap: QPixmap) -> None:
-        """A channel logo centred on a raised tile, scaled at paint time."""
+    def _paint_tile(
+        self, p: QPainter, rect: QRectF, pixmap: QPixmap, area: QRectF | None = None
+    ) -> None:
+        """A channel logo centred on a raised tile, scaled at paint time (2.9.7: in `area`,
+        above a caption)."""
         fill_round(p, rect, qcolor(PALETTE.panel_raised), RADIUS_CARD)
+        area = rect if area is None else area
         scale = min(
-            rect.width() * TILE_LOGO_W / pixmap.width(),
-            rect.height() * TILE_LOGO_H / pixmap.height(),
+            area.width() * TILE_LOGO_W / pixmap.width(),
+            area.height() * TILE_LOGO_H / pixmap.height(),
         )
         width, height = pixmap.width() * scale, pixmap.height() * scale
         target = QRectF(
-            rect.center().x() - width / 2, rect.center().y() - height / 2, width, height
+            area.center().x() - width / 2, area.center().y() - height / 2, width, height
         )
         p.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
 
+    def _paint_action(self, p: QPainter, rect: QRectF) -> None:
+        """2.9.7: a tile that does something (its caption says what): a dashed outline in
+        the accent round a quiet tile, a ＋ above the caption."""
+        u = self._units.u
+        fill_round(p, rect, qcolor(PALETTE.panel_raised, 0.6), RADIUS_CARD)
+        p.save()
+        pen = QPen(qcolor(PALETTE.accent, 0.8), max(1.0, 0.12 * u))
+        pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        inset = pen.widthF()
+        p.drawRoundedRect(rect.adjusted(inset, inset, -inset, -inset), RADIUS_CARD, RADIUS_CARD)
+        p.setPen(qcolor(PALETTE.accent))
+        p.setFont(self._units.font(3.0))
+        above = QRectF(rect.left(), rect.top(), rect.width(), rect.height() * 0.6)
+        p.drawText(above, Qt.AlignCenter, "＋")
+        p.restore()
+
     def _paint_card(
-        self, p: QPainter, rect: QRectF, title: str, font: QFont, has_progress: bool
+        self,
+        p: QPainter,
+        rect: QRectF,
+        title: str,
+        font: QFont,
+        has_progress: bool,
+        hue_key: str | None = None,
     ) -> None:
-        """A generated title card: a vertical gradient in the title's hue, title bottom-left."""
-        hue = card_hue(title)
+        """A generated title card: a vertical gradient in the title's hue (2.9.7: or
+        `hue_key`'s, a channel's), title bottom-left."""
+        hue = card_hue(title if hue_key is None else hue_key)
         gradient = QLinearGradient(rect.topLeft(), rect.bottomLeft())
         gradient.setColorAt(0.0, QColor.fromHsvF(hue, CARD_SATURATION, CARD_VALUE_TOP))
         gradient.setColorAt(1.0, QColor.fromHsvF(hue, CARD_SATURATION, CARD_VALUE_BOTTOM))
@@ -1505,10 +1603,15 @@ class PosterGrid(QAbstractScrollArea):
             p.drawRoundedRect(rect.adjusted(inset, inset, -inset, -inset), radius, radius)
             p.restore()
             color = qcolor(PALETTE.accent)
+        elif style == _OFF:  # 2.9.7: shown, not pressed
+            fill_round(p, rect, qcolor(PALETTE.text, BUTTON_RAISED_ALPHA * 0.5), radius)
+            color = qcolor(PALETTE.text, 0.35)
         else:
             fill_round(p, rect, qcolor(PALETTE.text, BUTTON_RAISED_ALPHA), radius)
             favorite = name == FAVORITE and details is not None and details.favorite
             color = qcolor(PALETTE.accent) if favorite else qcolor(PALETTE.text)
+            if style == _DANGER:  # 2.9.7: it takes something away
+                color = qcolor(PALETTE.live)
         if style == _SQUARE:
             size = STAR_ICON_U * u
             icon = QRectF(rect.center().x() - size / 2, rect.center().y() - size / 2, size, size)

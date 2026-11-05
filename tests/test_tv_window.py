@@ -1355,7 +1355,6 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
         pages.recordings_desk.refresh()
         self.assertTrue(home._name_providers)
         self.assertIs(home._avoid, self.window.player_page)
-        self.assertIs(self.window.library_page.rec_found._avoid, self.window.player_page)
 
     def test_the_rails_find_reads_the_guides_channels_first_then_every_channel(self):
         pages = self.window.screens

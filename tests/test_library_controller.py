@@ -2011,17 +2011,28 @@ class GridPostersTests(unittest.TestCase):
         self.assertEqual(ready, ["http://p/1"])
 
 
-class FakeDesk:
+class FakeDesk(QObject):
     """The Recordings page's controller, as the Library sees it (2.9.7)."""
 
+    refreshed = Signal()
+
     def __init__(self):
+        super().__init__()
         self.calls = []
+        self.entries = []
+        self.pressed = []
 
     def show(self):
         self.calls.append("show")
 
     def hide(self):
         self.calls.append("hide")
+
+    def last_entries(self):
+        return list(self.entries)
+
+    def press(self, key, name):
+        self.pressed.append((key, name))
 
 
 def rec_file(path, channel, title, start):
@@ -2087,11 +2098,83 @@ class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings 
         self.screen.rec_rail.genreSelected.emit(rl.ALL)
         self.assertEqual([grid.item(i)["path"] for i in range(2)], ["/r/b.ts", "/r/a.ts"])
 
-    def test_coming_up_shows_the_list_view_on_that_section(self):
+    def desk_entries(self):
+        import time
+
+        from services import recording_desk as desk
+
+        soon = time.time() + 3600
+        return [
+            desk.Entry(
+                "rec:sched:x",
+                desk.NOW,
+                "Evening News",
+                tone=desk.REC,
+                status="REC",
+                buttons=(desk.button(desk.WATCH), desk.button(desk.STOP, desk.DANGER)),
+                channel="Northwind News",
+            ),
+            desk.Entry(
+                "airing:t@1",
+                desk.COMING,
+                "Late film",
+                status="Repeats",
+                buttons=(desk.button(desk.EDIT), desk.button(desk.SKIP, enabled=False)),
+                start=soon,
+                channel="Harbor News 24",
+            ),
+            desk.Entry(
+                "add:coming",
+                desk.COMING,
+                "",
+                buttons=(desk.button(desk.ADD_TIMER, desk.ACCENT), desk.button(desk.OPEN_GUIDE)),
+            ),
+            desk.Entry("rule:s", desk.RULES, "Kitchen Stories", channel="Northwind News"),
+        ]
+
+    def test_coming_up_shows_its_airings_as_tiles(self):  # 2.9.7: the owner's "thumbnails"
+        self.desk.entries = self.desk_entries()
         self.ctl.open_recordings(rl.COMING)
+        self.assertEqual(self.screen.recordings_content, "grid")
+        grid = self.screen.rec_grid
+        self.assertTrue(grid.isVisible())
+        names = [grid.item(i)["name"] for i in range(3)]
+        self.assertEqual(names, ["Evening News", "Late film", "Record at a time…"])
+        self.assertIsNone(grid.item(3))  # Series & timers' own are not here
+
+    def test_a_tiles_buttons_and_its_menu_reach_the_desk(self):
+        self.desk.entries = self.desk_entries()
+        self.ctl.open_recordings(rl.COMING)
+        grid = self.screen.rec_grid
+        grid.buttonRequested.emit(0, "stop")
+        self.assertEqual(self.desk.pressed, [("rec:sched:x", "stop")])
+        grid.set_current_index(1)
+        self.ctl.handle(Action.NAV_ACTIVATE)  # Enter: its buttons as a menu
+        menu = self.ctl.tile_menu()
+        self.assertEqual(
+            [(a.text(), a.isEnabled()) for a in menu.actions()], [("Edit…", True), ("Skip", False)]
+        )
+        menu.actions()[0].trigger()
+        self.assertEqual(self.desk.pressed[-1], ("airing:t@1", "edit"))
+        menu.close()
+        self.ctl.handle(Action.NAV_DELETE)  # not a recording: nothing to delete
+        self.assertEqual(self.deleted, [])
+
+    def test_the_tiles_follow_the_desk(self):
+        self.desk.entries = self.desk_entries()
+        self.ctl.open_recordings(rl.RULES)
+        grid = self.screen.rec_grid
+        self.assertEqual(grid.item(0)["name"], "Kitchen Stories")
+        from services import recording_desk as desk
+
+        self.desk.entries = [desk.Entry("rule:n", desk.RULES, "Night Match")]
+        self.desk.refreshed.emit()
+        self.assertEqual(grid.item(0)["name"], "Night Match")
+
+    def test_folders_and_streams_stay_a_list(self):
+        self.ctl.open_recordings(rl.SETTINGS)
         self.assertEqual(self.screen.recordings_content, "list")
         self.assertTrue(self.screen.recordings.isVisible())
-        self.assertEqual(self.screen.recordings.section_filter(), "coming")
 
     def test_the_rec_signs_manage_and_hels_sections_open_their_rows(self):
         for section, row in (
@@ -2214,32 +2297,39 @@ class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings 
         for _ in range(20):
             QCoreApplication.processEvents()
 
+    def found_names(self):
+        grid = self.screen.rec_grid
+        return [grid.item(i)["name"] for i in range(20) if grid.item(i) is not None]
+
     def test_typing_in_the_rails_find_lists_recordings_and_programmes(self):  # Task 12
         self.find_setup()
         self.assertEqual(self.screen.recordings_content, "find")
-        keys = [e.key for e in self.screen.rec_found.entries()]
-        self.assertIn("file:/r/b.ts", keys)  # "Evening News", recorded
-        self.assertIn("found:0", keys)  # "Evening News Special", to record
+        self.assertTrue(self.screen.rec_grid.isVisible())  # as tiles
+        names = self.found_names()
+        self.assertIn("Evening News", names)  # recorded
+        self.assertIn("Evening News Special", names)  # to record
         self.ctl.handle(Action.ESCAPE)  # the find's text goes: the row as it was
         self.ctl.handle(Action.ESCAPE)
         self.assertNotEqual(self.screen.recordings_content, "find")
 
     def test_a_found_programme_can_be_recorded_and_a_found_recording_plays(self):  # Task 12
         self.find_setup()
-        self.screen.rec_found.buttonClicked.emit("found:0", "series")
+        grid = self.screen.rec_grid
+        names = self.found_names()
+        grid.buttonRequested.emit(names.index("Evening News Special"), "series")
         self.assertEqual(self.recorded, [("Northwind News", "Evening News Special", True)])
-        self.screen.rec_found.buttonClicked.emit("file:/r/b.ts", "play")
+        grid.activated.emit(names.index("Evening News"))
         self.assertEqual(self.played[-1][0]["path"], "/r/b.ts")
 
-    def test_more_found_keeps_the_row_the_keys_are_on(self):  # Stage 3–4 review 5
+    def test_more_found_keeps_the_tile_the_keys_are_on(self):  # Stage 3–4 review 5
         self.find_setup()
-        view = self.screen.rec_found
-        self.assertTrue(view.focus_entry("found:0"))
+        grid = self.screen.rec_grid
+        grid.set_current_index(self.found_names().index("Evening News Special"))
         from services.epg_view import Programme
 
         later = Programme("Evening Talk", self.special.start, self.special.stop, "", None)
         self.ctl._guide_search.found.emit([({"id": "2", "name": "Harbor News"}, later)])
-        self.assertEqual(view.current_key(), "found:0")
+        self.assertEqual(grid.item(grid.current_index())["name"], "Evening News Special")
 
     def test_leaving_the_library_stops_the_find(self):  # Stage 3–4 review (minor)
         many = [{"id": str(n), "name": f"Channel {n}"} for n in range(400)]

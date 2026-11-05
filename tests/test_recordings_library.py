@@ -144,3 +144,107 @@ class ParentalTests(unittest.TestCase):  # a hidden channel's recordings stay hi
         rail = {g.id: g.count for g in library.rail()}
         self.assertNotIn(rl.CHANNEL_PREFIX + "Harbor Sports", rail)
         self.assertEqual(rail[rl.ALL], 3)
+
+
+class DeskTileTests(unittest.TestCase):  # 2.9.7: Coming up, Series & timers and problems as tiles
+    TODAY, TOMORROW = 100_000.0, 190_000.0
+
+    def setUp(self):
+        from services import recording_desk as desk
+
+        self.desk = desk
+        self.library = rl.RecordingsLibrary(
+            lambda: list(FILES),
+            lambda: {},
+            FakeWatch(),
+            SimpleNamespace(playback_positions={}),
+            picture=lambda item: f"thumb:{item['path'].rsplit('/', 1)[-1]}.jpg",
+        )
+        self.rec = desk.Entry(
+            "rec:sched:x",
+            desk.NOW,
+            "Evening News",
+            detail="Northwind News · until 21:58",
+            tone=desk.REC,
+            status="REC",
+            buttons=(desk.button(desk.WATCH), desk.button(desk.STOP, desk.DANGER)),
+            channel="Northwind News",
+        )
+        self.late = desk.Entry(
+            "airing:t@100000",
+            desk.COMING,
+            "Late film",
+            detail="Thu 01:00–02:30 · Harbor News 24",
+            note="Two would need 3 of Demo TV's 2 streams",
+            tone=desk.WARN,
+            status="Repeats",
+            buttons=(desk.button(desk.EDIT), desk.button(desk.SKIP, enabled=False)),
+            start=self.TODAY,
+            channel="Harbor News 24",
+            logo="https://logos.invalid/harbor.png",
+        )
+        self.kitchen = desk.Entry(
+            "airing:s@190000",
+            desk.COMING,
+            "Kitchen Stories",
+            status="Series",
+            buttons=(desk.button(desk.SKIP),),
+            start=self.TOMORROW,
+            channel="Northwind News",
+        )
+        self.add = desk.Entry(
+            "add:coming",
+            desk.COMING,
+            "",
+            buttons=(desk.button(desk.ADD_TIMER, desk.ACCENT), desk.button(desk.OPEN_GUIDE)),
+        )
+
+    def day(self, moment):
+        return "Today" if moment < 150_000 else "Tomorrow"
+
+    def test_coming_up_goes_by_day_after_what_records_now(self):
+        sections = self.library.desk_sections(
+            [self.rec, self.late, self.kitchen, self.add], self.day
+        )
+        shown = [(title, [item["name"] for item in items]) for title, items in sections]
+        self.assertEqual(
+            shown,
+            [
+                ("Recording now", ["Evening News"]),
+                ("Today", ["Late film"]),
+                ("Tomorrow", ["Kitchen Stories"]),
+                ("Add a recording", ["Record at a time…"]),
+            ],
+        )
+
+    def test_a_tiles_strip_has_its_rows_buttons_and_says_its_note(self):
+        ((_title, (tile,)),) = self.library.desk_sections([self.late], self.day)
+        details = self.library.details(tile)
+        self.assertEqual(details.kind, "desk")
+        self.assertEqual(details.buttons, (("edit", "Edit…", "raised"), ("skip", "Skip", "off")))
+        self.assertEqual(details.plot, "Two would need 3 of Demo TV's 2 streams")
+        self.assertEqual(details.provider, "Thu 01:00–02:30 · Harbor News 24")
+        rec = self.library.desk_sections([self.rec], self.day)[0][1][0]
+        self.assertEqual(
+            self.library.details(rec).buttons,
+            (("watch", "Watch", "raised"), ("stop", "Stop", "danger")),
+        )
+
+    def test_tiles_show_their_time_status_caption_and_picture(self):
+        sections = self.library.desk_sections([self.rec, self.late], self.day)
+        rec, late = sections[0][1][0], sections[1][1][0]
+        self.assertEqual(self.library.badges(late)[1:], ("REPEATS", "warn"))
+        self.assertEqual(self.library.badges(rec)[1:], ("REC", "live"))
+        self.assertEqual(self.library.caption(late), ("Late film", "Harbor News 24"))
+        self.assertEqual(self.library.picture(late), ("https://logos.invalid/harbor.png", True))
+        self.assertEqual(self.library.picture(rec), ("", False))  # no logo: its tinted card
+
+    def test_recordings_show_their_thumbnail_and_caption(self):
+        night = FILES[0]
+        self.assertEqual(self.library.picture(night), ("thumb:c.ts.jpg", False))
+        when = self.desk.short_when(3_000.0)
+        self.assertEqual(self.library.caption(night), ("Night Match", f"Harbor Sports · {when}"))
+        untitled = FILES[2]  # known by its channel alone: the line under says when
+        self.assertEqual(
+            self.library.caption(untitled), ("Northwind News", self.desk.short_when(1_000.0))
+        )

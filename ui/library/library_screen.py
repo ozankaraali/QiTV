@@ -264,7 +264,6 @@ class LibraryScreen(QWidget):
         self.rec_grid.set_shape(REC_TILE_ASPECT, REC_TILE_TARGET_U)
         # the recorder's home: its guide reads the page's programmes once it has them
         self.home = RecorderHome(lambda channel, start, limit: [], _now, self)
-        self.rec_found = RecordingsView(self)  # what the rail's find found
         self.recordings_content = "home"
         self.search_field = SearchField(self.nav)
         self.nav.attach_search(self.search_field)  # the top bar places it on its search
@@ -296,9 +295,9 @@ class LibraryScreen(QWidget):
         on = self._mode == "recordings"
         self.rec_rail.setVisible(on)
         self.home.setVisible(on and self.recordings_content == "home")
-        self.rec_grid.setVisible(on and self.recordings_content == "grid")
+        # the tiles: the recordings, the recorder's lists, what the rail's find found
+        self.rec_grid.setVisible(on and self.recordings_content in ("grid", "find"))
         self.recordings.setVisible(on and self.recordings_content == "list")
-        self.rec_found.setVisible(on and self.recordings_content == "find")
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -321,7 +320,6 @@ class LibraryScreen(QWidget):
         self.recordings.setGeometry(*content)
         self.rec_grid.setGeometry(*content)
         self.home.setGeometry(*content)
-        self.rec_found.setGeometry(*content)
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)

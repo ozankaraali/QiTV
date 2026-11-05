@@ -100,6 +100,19 @@ class ImageLoader(QThread):
             return self._result(image_rank, cache_path)
         return None
 
+    async def read_thumbnail(self, image_rank, url):
+        """2.9.7: a recording's thumbnail, already on disk in its own folder (never
+        discarded here: services.recording_thumbs keeps it)."""
+        from services import recording_thumbs
+
+        path = recording_thumbs.file_of(url)
+        if not path:
+            return None
+        result = {"rank": image_rank, "cache_path": path, "iconified": self.iconified}
+        if self.decode_side:
+            result["image"] = read_scaled(path, self.decode_side)  # on this thread
+        return result
+
     def _result(self, image_rank, cache_path) -> dict:
         result = {"rank": image_rank, "cache_path": cache_path, "iconified": self.iconified}
         if self.decode_side:
@@ -135,6 +148,8 @@ class ImageLoader(QThread):
                             coroutine = self.fetch_image(session, image_rank, url)
                         elif url.startswith("data:image"):
                             coroutine = self.decode_base64_image(image_rank, url)
+                        elif url.startswith("thumb:"):
+                            coroutine = self.read_thumbnail(image_rank, url)
                         else:
                             continue
                         tasks.append(asyncio.create_task(coroutine))
