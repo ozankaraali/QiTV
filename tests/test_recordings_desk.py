@@ -124,6 +124,12 @@ class RecordingsDeskTests(unittest.TestCase):
         self.assertEqual((streams.provider, streams.limit), ("P", 1))
         self.assertEqual([u.kind for u in streams.uses], ["probe"])
 
+    def test_a_provider_without_a_limit_and_nothing_in_use_has_no_card(self):
+        self.schedule.add_once(NEWS, self.programme("Late news", 120))  # P allows 1
+        self.schedule.add_once(dict(NEWS, _provider="Q"), self.programme("Other", 120))
+        self.show()
+        self.assertEqual([s.provider for s in self.view._streams], ["P"])  # not "Q: 0, free"
+
     def test_edit_waits_while_the_item_records(self):
         item = self.schedule.add_once(NEWS, self.programme("Late news", -10))
         details = [("sched:x", "Late news", "News One", 0.0, 0.0, item["id"])]

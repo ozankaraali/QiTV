@@ -259,6 +259,9 @@ class RecordingsDesk(QObject):
             holders = budget.holders(provider)
             if not holders and provider not in scheduled:
                 continue
+            limit = self._limit(provider)
+            if not holders and not limit:
+                continue  # nothing in use and no limit: no card says "0 in use, free"
             uses = []
             for purpose in holders:
                 role, channel, since = players.get(purpose, (None, {}, None))
@@ -267,7 +270,7 @@ class RecordingsDesk(QObject):
                     title, name = titles[purpose]
                     label = f"{title} ({name})" if title and title != name else name
                 uses.append(desk.use_of(purpose, role, label, since is not None))
-            found.append(desk.Streams(provider, self._limit(provider), tuple(uses)))
+            found.append(desk.Streams(provider, limit, tuple(uses)))
         return found
 
     def _summary(self, entries: list[desk.Entry]) -> str:
