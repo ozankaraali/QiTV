@@ -422,9 +422,13 @@ class RecordingsView(TooltipWidget):
 
     def stream_rects(self) -> list[QRectF]:
         """Each provider's card (or the one that says none is in use), wrapped in rows."""
-        u = self._units().u
+        units = self._units()
+        u = units.u
         top = self._summary_rect().bottom() + GAP_U * u
-        count = max(1, len(self._streams))
+        if not self._streams:  # a line, not an empty card: nothing holds a stream
+            height = QFontMetricsF(units.font(STREAM_TEXT_U)).height()
+            return [QRectF(self._left(), top, self._width(), height)]
+        count = len(self._streams)
         width = STREAM_W_U * u
         per_row = max(1, int((self._width() + STREAM_GAP_U * u) // (width + STREAM_GAP_U * u)))
         rects = []
@@ -727,11 +731,9 @@ class RecordingsView(TooltipWidget):
         u = units.u
         rects = self.stream_rects()
         if not self._streams:
-            rect = rects[0]
-            fill_round(p, rect, qcolor(PALETTE.panel_raised), RADIUS_CARD)
+            inner = rects[0]
             p.setFont(units.font(STREAM_TEXT_U))
             p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
-            inner = rect.adjusted(CARD_PAD_U * u, 0, -CARD_PAD_U * u, 0)
             p.drawText(
                 inner,
                 Qt.AlignLeft | Qt.AlignVCenter,
