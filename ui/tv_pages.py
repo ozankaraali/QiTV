@@ -302,17 +302,16 @@ class TVPages(QObject):
         menu.popup(at)
 
     def _recordings_counts(self) -> dict[str, int]:
-        """2.9.7: the Recordings tab's rail counts: the desk's rows of each list (rows of
-        buttons alone not counted)."""
-        counts = {}
+        """2.9.7: the Recordings tab's rail counts: the rows of each list (rows of buttons
+        alone not counted), from the page's entries as last worked out."""
+        counts: dict[str, int] = {}
+        entries = self.recordings_desk.last_entries()
         for row, section in rl.SECTIONS.items():
             if section == desk.SETTINGS:
                 continue
-            entries = self.recordings_desk.entries_of(section)
-            counts[row] = sum(1 for entry in entries if entry.title)
+            wanted = section if isinstance(section, tuple) else (section,)
+            counts[row] = sum(1 for e in entries if e.title and e.section in wanted)
         return counts
-
-    # ---- pages --------------------------------------------------------------------------------
 
     def library_shown(self) -> bool:
         """The Library is the page in front (also while the player sits in its corner)."""

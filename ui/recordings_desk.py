@@ -346,6 +346,12 @@ class RecordingsDesk(QObject):
         except Exception:  # a catalog being made: none named
             return False
 
+    def last_entries(self) -> list[desk.Entry]:
+        """2.9.7: the entries as the page last worked them out (worked out now if never)."""
+        if getattr(self, "_last_entries", None) is None:
+            self._last_entries = self.entries()
+        return list(self._last_entries)
+
     def entries_of(self, section: str) -> list[desk.Entry]:
         """2.9.7: one section's entries (a row of the Recordings tab's rail)."""
         return [entry for entry in self.entries() if entry.section == section]
@@ -406,6 +412,7 @@ class RecordingsDesk(QObject):
         if self._window.closing():
             return
         entries = self.entries()
+        self._last_entries = entries  # 2.9.7: the rail's counts read these
         scheduled = {str(item.get("provider") or "") for item in self._schedule().items()}
         self._view.set_content(entries, self._streams(scheduled), self._summary(entries))
         self.update_mark()

@@ -63,20 +63,23 @@ class ParentalWindowTests(WindowCase):
         self.assertIsNone(flow._last_channel(PROVIDER_NAME))
 
     def test_recordings_of_a_hidden_channel_are_not_listed_while_locked(self):  # review M9
-        from services.library import RECORDINGS
+        from services import recordings_library as rl
 
-        model = self.window.screens.library_model
-        recordings = [
-            {"id": "r1", "name": "Evening news", "_channel": "Channel 2"},  # named by programme
-            {"id": "r2", "name": "Channel 3", "_channel": "Channel 3"},
+        pages = self.window.screens
+        files = [
+            {"id": "r1", "name": "Evening news", "path": "/r/1.ts", "_channel": "Channel 2"},
+            {"id": "r2", "name": "Channel 3", "path": "/r/2.ts", "_channel": "Channel 3"},
         ]
-        model._recordings = type("R", (), {"items": lambda self: recordings})()
-        model._section = "movies"
+        pages.recordings_library._files = lambda: files
         guard = self.guard()
         guard.hide_item("live", stamped(1))  # Channel 2
-        self.assertEqual([r["id"] for r in model._pinned_items(RECORDINGS)], ["r2"])
+        self.assertEqual([r["id"] for r in pages.recordings_library.items(rl.ALL)], ["r2"])
+        refreshed = []
+        pages.library_controller.recordings_changed = lambda: refreshed.append(True)
         guard.unlock("1234")
-        self.assertEqual([r["id"] for r in model._pinned_items(RECORDINGS)], ["r1", "r2"])
+        self.window.parental_changed()  # 2.9.7 review: the tab follows the lock
+        self.assertEqual(refreshed, [True])
+        self.assertEqual([r["id"] for r in pages.recordings_library.items(rl.ALL)], ["r1", "r2"])
 
     def test_locking_stops_a_hidden_channel_and_zapping_leaves_the_hidden_out(self):
         self.open_first_channel()

@@ -172,6 +172,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>/</kbd> | Search, or type it in the search |
 | <kbd>Ctrl/⌘+D</kbd> | Add to or remove from My list |
+| <kbd>Delete (fn+⌫ on a Mac)</kbd> | Delete the recording (it asks first) |
 | <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Esc</kbd> | Back; from the genres, back to live TV |
 

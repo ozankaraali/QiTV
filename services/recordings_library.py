@@ -23,7 +23,11 @@ ALL, CHANNEL_PREFIX, SETTINGS = "rec:all", "rec:ch:", "rec:settings"
 RAIL_ICONS = {TONIGHT: "record", COMING: "clock", RULES: "recent", ATTENTION: "live_dot"}
 RAIL_ICONS[SETTINGS] = "gear"
 # The desk's sections each rail row shows (the home is TONIGHT, the grid ALL and the channels).
-SECTIONS = {COMING: desk.COMING, RULES: desk.RULES, ATTENTION: desk.ATTENTION}
+SECTIONS: dict[str, Any] = {
+    COMING: (desk.NOW, desk.COMING),  # what records or waits now, then the airings
+    RULES: desk.RULES,
+    ATTENTION: desk.ATTENTION,
+}
 SECTIONS[SETTINGS] = desk.SETTINGS
 # i18n: the Recordings tab's first row: its home (what records now, next, tonight's guide)
 TONIGHT_TEXT = N_("Tonight")

@@ -44,13 +44,12 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 CONTINUE, NEW, MY_LIST = "@continue", "@new", "@mylist"
-RECORDINGS = "@recordings"  # 2.8: the Recordings folder's files, in Movies whatever the provider
+RECORDINGS = "@recordings"  # 2.8's Movies shelf of recordings (2.9.7: the Recordings tab has them)
 # The shelves' names, shown with translate() (the genres carry them translated).
 PINNED_TITLES = {
     CONTINUE: N_("Continue"),  # i18n: Library shelf (genre column): titles to continue watching
     NEW: N_("New"),  # i18n: Library shelf (genre column): the newest titles
     MY_LIST: N_("My list"),  # i18n: Library shelf (genre column): the titles starred with ★
-    RECORDINGS: N_("Recordings"),  # i18n: Library shelf (genre column): what QiTV recorded
 }
 # Provider groups that are no genre: every title ("All"), and the loaders' group for titles
 # without a category ("Unknown Category").

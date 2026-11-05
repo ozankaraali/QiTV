@@ -157,6 +157,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("library", "Ctrl+F"): (("library", "search"),),
     ("library", "/"): (("library", "search"),),
     ("library", "Ctrl+D"): (("library", "favorite"),),
+    ("library", "Delete"): (("library", "delete"),),  # 2.9.7: a recording's strip
     ("library", "F11, Ctrl+Meta+F"): (("library", "fullscreen"),),
     # Back to the grid (from a series or the search): its tab, or the series' ‹ (2.9.3); to
     # live TV: Live TV.
@@ -432,6 +433,12 @@ def _library(host: QWidget) -> set[str]:
     found.update(name for name, _label in grid.button_labels())
     if grid._rail_visible():
         found.add("rail")
+    # 2.9.7: the Recordings tab's tiles: a recording's strip (Delete…, Show in Folder)
+    recordings = PosterGrid(FakePosters(), host)
+    recordings.setGeometry(0, nav.height(), 1280, 720 - nav.height())
+    recordings.set_sections([("", titles(3))])
+    recordings.set_details_provider(lambda item: details("recording", None))
+    found.update(name for name, _label in recordings.button_labels())
     return found
 
 

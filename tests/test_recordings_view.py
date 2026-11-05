@@ -234,3 +234,19 @@ class SectionViewTests(unittest.TestCase):  # 2.9.7: one section, as a row of th
         self.view.move_by(0, -1)
         self.assertEqual(self.ups, [True])
         self.assertFalse(self.view.escape())  # Esc: the tab's rail
+
+
+class ComingUpWithNowTests(unittest.TestCase):  # 2.9.7 review: what records or waits shows too
+    def test_coming_up_lists_what_records_or_waits_first(self):
+        view = RecordingsView()
+        self.addCleanup(view.deleteLater)
+        view.resize(1280, 720)
+        now = entry("rec:sched:x", desk.NOW, "Evening News", b("watch"), b("stop"))
+        waiting = entry("wait:k", desk.NOW, "Late film", b("try_now"), b("skip"))
+        view.set_content([now, waiting] + ENTRIES, [], "")
+        view.set_section((desk.NOW, desk.COMING))
+        keys = [e.key for e in view.entries()]
+        self.assertEqual(keys[:2], ["rec:sched:x", "wait:k"])
+        self.assertIn("item:a", keys)
+        self.assertEqual(view.header_text(), "Coming up  ·  4")
+        view.grab()

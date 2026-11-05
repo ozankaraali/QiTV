@@ -122,6 +122,7 @@ _REC_ROWS = {
     recording_desk.ATTENTION: rl.ATTENTION,
     recording_desk.PLACES: rl.SETTINGS,
     recording_desk.RULES: rl.RULES,
+    recording_desk.RECORDED: rl.ALL,  # a tile's right-click Manage Recordings…
 }
 
 
@@ -191,6 +192,7 @@ class LibraryController(QObject):
         self._mode = "browse"
         self._zone = "grid"
         self._genre_field = False  # 2.9.3: the keys type in the genre filter (it was chosen)
+        self._rec_field = False  # 2.9.7: the keys type in the Recordings rail's find
         self._nav_return = "grid"  # the zone ↓ returns to from the top nav
         self._section: Optional[str] = None  # the Movies/Series section last opened
         self._opened: Optional[tuple[str, str]] = None  # (provider, section) the model shows
@@ -266,6 +268,7 @@ class LibraryController(QObject):
         screen.recordings.upEdge.connect(lambda: self._focus("nav"))  # 2.9.7
         rec_rail, rec_grid = screen.rec_rail, screen.rec_grid  # 2.9.7: the Recordings tab
         rec_rail.genreSelected.connect(self._show_rec_row)
+        rec_rail.fieldClicked.connect(lambda: self._focus("rec_rail", field=True))
         rec_rail.genreActivated.connect(lambda _id: self._focus("rec_content"))
         rec_rail.filterChanged.connect(lambda _text: self._refresh_recordings())
         rec_grid.activated.connect(lambda i: self._play_recording(i, start_over=False))
@@ -394,17 +397,24 @@ class LibraryController(QObject):
         if library is None:
             return
         rail = self._screen.rec_rail
-        rail.set_genres(library.rail(rail.filter_text))
+        rows = library.rail(rail.filter_text)
+        rail.set_genres(rows)
+        if self._rec_row.startswith(rl.CHANNEL_PREFIX) and self._rec_row not in {
+            g.id for g in rows
+        }:
+            self._show_rec_row(rl.ALL)  # its last recording went: All
+            return
         rail.set_current(self._rec_row)
         if self._screen.recordings_content == "grid":
             self._fill_rec_grid()
 
-    def _show_rec_row(self, row: str) -> None:
-        """The view of the rail's `row`: the home, the tiles of All or a channel, or a list."""
+    def _show_rec_row(self, row: str, *, rebuild: bool = True) -> None:
+        """The view of the rail's `row`: the home, the tiles of All or a channel, or a list;
+        `rebuild`: the rail's rows worked out again (not for a plain move along them)."""
         library = self._rec_library
         self._rec_row = row
         screen = self._screen
-        if library is not None:
+        if library is not None and rebuild:
             rail = screen.rec_rail
             rail.set_genres(library.rail(rail.filter_text))
             rail.set_current(row)
@@ -432,10 +442,10 @@ class LibraryController(QObject):
         grid.set_badge_provider(library.badges)
         grid.set_poster_url_provider(lambda item: "")  # its title's card (no art of its own)
         items = library.items(self._rec_row, self._screen.rec_rail.filter_text)
-        title = next(
-            (g.title for g in library.rail() if g.id == self._rec_row),
-            translate(recording_desk.ALL_TEXT),
-        )
+        if self._rec_row.startswith(rl.CHANNEL_PREFIX):  # its channel, without asking the rail
+            title = self._rec_row[len(rl.CHANNEL_PREFIX) :]
+        else:
+            title = translate(recording_desk.ALL_TEXT)
         grid.set_header(title, i18n.number(len(items)), [], "")
         grid.set_sections([("", items)], keep_current=True)
 
@@ -484,11 +494,12 @@ class LibraryController(QObject):
             self._nav_return = self._zone
         self._zone = zone
         self._genre_field = field and zone == "genres"
+        self._rec_field = field and zone == "rec_rail"  # 2.9.7: the Recordings rail's find
         self._screen.genres.set_focused(zone == "genres", field=self._genre_field)
         self._screen.nav.set_focused(zone == "nav")
         self._screen.grid.set_focused(zone == "grid")
         self._screen.recordings.set_focused(zone == "rec_content")
-        self._screen.rec_rail.set_focused(zone == "rec_rail")  # 2.9.7
+        self._screen.rec_rail.set_focused(zone == "rec_rail", field=self._rec_field)  # 2.9.7
         self._screen.rec_grid.set_focused(zone == "rec_content")
         self._screen.home.set_focused(zone == "rec_content")
         self._sync_search_focus()
@@ -832,14 +843,21 @@ class LibraryController(QObject):
         """2.9.7: the Recordings tab's rail, as the genre column: ↑↓ choose a row (its view
         shows), → or Enter go to it, Esc back to the TV."""
         rail = self._screen.rec_rail
-        if rail.field_key(action, payload):
-            return True
+        if self._rec_field:
+            if rail.field_key(action, payload):
+                return True  # its caret, selection and clipboard
+            if action in (Action.NAV_DOWN, Action.NAV_ACTIVATE):
+                self._focus("rec_rail")  # its rows, the find kept
+                return True
+            if action is Action.NAV_UP:
+                self._focus("nav")
+                return True
         if action is Action.NAV_UP and rail.current_id() == rl.TONIGHT:
             self._focus("nav")
         elif action in (Action.NAV_UP, Action.NAV_DOWN):
             rail.move_by(-1 if action is Action.NAV_UP else 1)
             if rail.current_id():
-                self._show_rec_row(str(rail.current_id()))
+                self._show_rec_row(str(rail.current_id()), rebuild=False)
         elif action in (Action.NAV_PAGE_UP, Action.NAV_PAGE_DOWN):
             rail.page(-1 if action is Action.NAV_PAGE_UP else 1)
         elif action in (Action.NAV_RIGHT, Action.NAV_ACTIVATE):
@@ -878,6 +896,8 @@ class LibraryController(QObject):
                 grid.end()
             elif action is Action.NAV_ACTIVATE:
                 grid.activate()
+            elif action is Action.NAV_DELETE:  # its strip's Delete… (asks first)
+                self._recording_action(grid.current_index(), self.delete_recording)
             elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
                 return self._type_in_search(action, payload)
             else:
@@ -1409,7 +1429,8 @@ class LibraryController(QObject):
             and not (ran and self._series_provider == name)
         ):
             self._leave_series()
-        self._sync_nav("search" if self._mode == "search" else self._model.section)
+        active = {"search": "search", "recordings": "recordings"}.get(self._mode)
+        self._sync_nav(active or self._model.section)  # 2.9.7: Recordings stays as it is
         if self._grid_content == "search":
             self._search.rerun()
 

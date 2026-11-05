@@ -152,6 +152,7 @@ class RecordingsView(TooltipWidget):
         self._summary = ""
         self._filter = desk.ALL
         self._section_alone = False  # 2.9.7: one section as a row of the tab's rail
+        self._together: tuple[str, ...] = ()  # ... with those shown before it
         self._shown: list[desk.Entry] = []
         self._blocks: list[_Block] = []
         self._entry_blocks: dict[int, _Block] = {}  # each shown entry's block, by its index
@@ -237,14 +238,17 @@ class RecordingsView(TooltipWidget):
     def section_filter(self) -> str:
         return self._filter
 
-    def set_section(self, section: str) -> None:
-        """2.9.7: one section alone (a row of the Recordings tab's rail): no title, summary or
-        chips, a header naming it, the streams only on Folders & streams; the keys start on
-        its first row, ↑ from it goes to the top bar, Esc to the rail."""
-        if section not in desk.SECTIONS:
+    def set_section(self, section: "str | tuple[str, ...]") -> None:
+        """2.9.7: one section alone (a row of the Recordings tab's rail), or a few in order
+        (Coming up: what records or waits now, then the airings): no title, summary or
+        chips, a header naming the last, the streams only on Folders & streams; the keys
+        start on its first row, ↑ from it goes to the top bar, Esc to the rail."""
+        sections = (section,) if isinstance(section, str) else tuple(section)
+        if not sections or any(s not in desk.SECTIONS for s in sections):
             raise ValueError(f"Unknown section: {section!r}")
         self._section_alone = True
-        self._filter = section
+        self._together = sections
+        self._filter = sections[-1]
         self._scroll = 0.0
         self._chips_at = None
         self._relayout()
@@ -256,7 +260,8 @@ class RecordingsView(TooltipWidget):
     def header_text(self) -> str:
         """2.9.7: the section's name and its count, as the header of the section alone."""
         name = translate(desk.SECTION_TITLES[self._filter]) if self._filter in desk.SECTIONS else ""
-        count = self.counts().get(self._filter, 0)
+        counts = self.counts()
+        count = sum(counts.get(s, 0) for s in (self._together or (self._filter,)))
         return f"{name}  ·  {number(count)}" if count and self._filter != desk.PLACES else name
 
     def button_radius(self) -> float:
@@ -528,7 +533,10 @@ class RecordingsView(TooltipWidget):
     def _relayout(self) -> None:
         """The entries shown (the filter's) and their blocks, from the list's top (0)."""
         u = self._units().u
-        wanted = desk.SECTIONS if self._filter == desk.ALL else (self._filter,)
+        if self._section_alone and self._together:
+            wanted = self._together
+        else:
+            wanted = desk.SECTIONS if self._filter == desk.ALL else (self._filter,)
         self._shown = []
         self._blocks = []
         self._entry_blocks = {}
@@ -789,6 +797,8 @@ class RecordingsView(TooltipWidget):
     def _paint_streams(self, p: QPainter, units: Units) -> None:
         u = units.u
         rects = self.stream_rects()
+        if not rects:
+            return  # 2.9.7: a section alone without them
         if not self._streams:
             inner = rects[0]
             p.setFont(units.font(STREAM_TEXT_U))

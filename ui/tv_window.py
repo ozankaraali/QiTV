@@ -1065,6 +1065,8 @@ class TVWindow(QMainWindow):
             self._relock.start(int(remaining * 1000) + 250)
         else:
             self._relock.stop()
+        # 2.9.7: the Recordings tab hides a hidden channel's recordings while locked
+        self.screens.library_controller.recordings_changed()
 
     def note_recording(self, path: str, channel: dict, title: str, start: float) -> None:
         """2.9.7: a recording started with R: what its file holds, in the recordings index."""

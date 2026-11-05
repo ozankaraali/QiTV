@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QW
 
 from services import i18n
 from services.i18n import tr
-from services.library import CONTINUE, MY_LIST, NEW, RECORDINGS, Genre
+from services.library import CONTINUE, MY_LIST, NEW, Genre
 from ui.overlays.channel_rows import ChannelListView, CutTexts, paint_hover
 from ui.overlays.painting import Units, draw_field_icon, draw_icon, elided, fill_round, ui_units
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
@@ -35,7 +35,7 @@ CountRole = Qt.UserRole + 21
 IdRole = Qt.UserRole + 22
 IconRole = Qt.UserRole + 23  # 2.9.7: a row's icon (draw_icon's name), else None
 DEFAULT_CAPTION = object()  # the Library's own caption ("PINNED", "GENRES · n")
-PINNED_ICONS = {CONTINUE: "clock", NEW: "sparkle", MY_LIST: "star", RECORDINGS: "record"}
+PINNED_ICONS = {CONTINUE: "clock", NEW: "sparkle", MY_LIST: "star"}
 ICON_SCALE = 1.2  # icon box / cap height: the glyphs sit inside a padded unit box
 ICON_GAP_U = 0.7
 HEADER = "header"

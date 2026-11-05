@@ -2151,6 +2151,47 @@ class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings 
         self.assertEqual(self.screen.rec_rail.current_id(), rl.ALL)
         self.assertEqual(self.screen.recordings_content, "grid")
 
+    def test_a_provider_getting_ready_keeps_the_tab_as_it_is(self):  # review 1
+        self.ctl.open("recordings")
+        self.catalog.providerReady.emit(self.catalog.current_provider_name())
+        self.assertNotIn("source", self.screen.nav._order())
+        self.assertEqual(self.screen.nav._active, "recordings")
+
+    def test_a_channel_row_that_goes_shows_all(self):  # review 2
+        self.ctl.open_recordings(rl.CHANNEL_PREFIX + "Harbor Sports")
+        self.files = [REC_FILES[0]]  # its only recording deleted
+        self.ctl.recordings_changed()
+        self.assertEqual(self.screen.rec_rail.current_id(), rl.ALL)
+        self.assertEqual(self.screen.rec_grid.item(0)["path"], "/r/b.ts")
+
+    def test_manage_from_a_tiles_menu_opens_all(self):  # review 3
+        self.ctl.open_recordings("recorded")
+        self.assertEqual(self.screen.rec_rail.current_id(), rl.ALL)
+
+    def test_a_click_on_the_rails_find_types_there(self):  # review 5
+        self.ctl.open("recordings")
+        self.screen.rec_rail.fieldClicked.emit()
+        self.assertEqual(self.ctl.zone, "rec_rail")
+        self.ctl.handle(Action.NAV_TEXT, "n")
+        self.assertEqual(self.ctl.mode, "recordings")  # not the Library's search
+        self.assertEqual(self.screen.rec_rail.filter_text, "n")
+
+    def test_delete_deletes_the_current_recording_after_asking(self):  # review 8
+        self.ctl.open_recordings(rl.ALL)
+        self.screen.rec_grid.set_current_index(1)
+        self.ctl.handle(Action.NAV_DELETE)
+        self.assertEqual(self.deleted, ["/r/a.ts"])
+
+    def test_a_plain_move_on_the_rail_asks_the_counts_once(self):  # review 7
+        asked = []
+        counts = self.library._counts
+        self.library._counts = lambda: asked.append(True) or counts()
+        self.ctl.open_recordings(rl.TONIGHT)
+        self.ctl.handle(Action.ESCAPE)  # the rail
+        asked.clear()
+        self.ctl.handle(Action.NAV_DOWN)
+        self.assertLessEqual(len(asked), 1)
+
     def test_typing_searches_and_esc_comes_back_to_the_tab(self):
         self.ctl.open("recordings")
         self.ctl.handle(Action.NAV_TEXT, "s")
