@@ -7,7 +7,7 @@ from PySide6.QtGui import QFontMetricsF
 from PySide6.QtWidgets import QApplication, QWidget
 
 from services.library import CONTINUE, MY_LIST, NEW, PINNED_TITLES, RECORDINGS, Genre
-from ui.library.genre_list import ICON_GAP_U, ICON_SCALE, GenreList
+from ui.library.genre_list import ICON_GAP_U, ICON_SCALE, GenreList, IconRole
 from ui.overlays.painting import Units
 
 
@@ -78,3 +78,59 @@ class PinnedRowIconTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RailCaptionTests(unittest.TestCase):  # 2.9.7: the Recordings tab's rail
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def rail(self):
+        host = QWidget()
+        host.resize(1280, 720)
+        host.show()
+        self.addCleanup(host.close)
+        rail = GenreList(host)
+        rail.setGeometry(0, 0, rail.width(), 720)
+        rail.set_captions(None, None)
+        rail.set_genres(
+            [
+                Genre("rec:tonight", "Tonight", None, pinned=True),
+                Genre("rec:coming", "Coming up", 4, pinned=True),
+                Genre("", "RECORDED · 12", None, header=True),
+                Genre("rec:all", "All", 12),
+                Genre("", "SETTINGS", None, header=True),
+                Genre("rec:settings", "Folders & streams", None),
+            ]
+        )
+        return rail
+
+    def test_a_rail_without_captions_paints_its_pinned_rows_first(self):
+        rail = self.rail()
+        self.assertEqual(
+            rail.rows(),
+            ["Tonight", "Coming up", "RECORDED · 12", "All", "SETTINGS", "Folders & streams"],
+        )
+
+    def test_header_rows_are_captions_and_never_selected(self):
+        rail = self.rail()
+        rail.set_current("rec:coming")
+        rail.move_by(1)
+        self.assertEqual(rail.current_id(), "rec:all")  # over "RECORDED · 12"
+        rail.move_by(1)
+        self.assertEqual(rail.current_id(), "rec:settings")
+
+    def test_icons_given_for_rows_are_painted(self):
+        rail = self.rail()
+        rail.set_icons({"rec:tonight": "record", "rec:settings": "gear"})
+        model = rail._view.model()
+        icons = [model.data(model.index(row, 0), IconRole) for row in range(model.rowCount())]
+        self.assertEqual(icons, ["record", None, None, None, None, "gear"])
+        rail._view.viewport().grab()  # paints
+
+    def test_the_default_captions_stay_for_movies(self):
+        host = QWidget()
+        self.addCleanup(host.close)
+        movies = GenreList(host)
+        movies.set_genres([Genre(CONTINUE, "Continue", 1, pinned=True), Genre("1", "Drama", 3)])
+        self.assertEqual(movies.rows(), ["PINNED", "Continue", "GENRES · 1", "Drama"])
