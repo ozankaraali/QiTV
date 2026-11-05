@@ -2128,6 +2128,29 @@ class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings 
         self.ctl.handle(Action.ESCAPE)  # from the rail: back to TV
         self.assertEqual(self.backs, [True])
 
+    def test_tonight_shows_the_recorder_home_and_its_keys_lead_out(self):
+        from ui.library.recorder_home import RecorderHome
+
+        self.ctl.open("recordings")
+        home = self.screen.home
+        self.assertIsInstance(home, RecorderHome)
+        self.assertTrue(home.isVisible())
+        self.assertEqual(home.focus_region(), "hero")
+        self.ctl.handle(Action.NAV_LEFT)  # from its first button: the rail
+        self.assertEqual(self.ctl.zone, "rec_rail")
+        self.ctl.handle(Action.NAV_RIGHT)
+        self.ctl.handle(Action.NAV_UP)  # from its top row: the top bar
+        self.assertEqual(self.ctl.zone, "nav")
+
+    def test_the_homes_shelf_plays_and_all_recordings_opens_its_row(self):
+        self.ctl.open("recordings")
+        home = self.screen.home
+        home.playRequested.emit(REC_FILES[0])
+        self.assertEqual(self.played[-1][:2], (REC_FILES[0], "recording"))
+        home.allRequested.emit()
+        self.assertEqual(self.screen.rec_rail.current_id(), rl.ALL)
+        self.assertEqual(self.screen.recordings_content, "grid")
+
     def test_typing_searches_and_esc_comes_back_to_the_tab(self):
         self.ctl.open("recordings")
         self.ctl.handle(Action.NAV_TEXT, "s")

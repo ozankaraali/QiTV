@@ -600,6 +600,14 @@ class NavModel(QObject):
                     result.append(item)
         return result
 
+    def favorite_items(self) -> list[dict]:
+        """2.9.7: ★ Favorites' channels (the Recordings home's guide lists them)."""
+        return self._favorite_items()
+
+    def recent_items(self) -> list[dict]:
+        """2.9.7: Recent's channels (the Recordings home's guide lists them)."""
+        return self._recent_items()
+
     def _favorite_items(self) -> list[dict]:
         """★ Favorites' channels in its order: the shown provider's, then the others'."""
         own, others = self._favorite_parts()

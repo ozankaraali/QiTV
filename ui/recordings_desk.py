@@ -65,6 +65,7 @@ EDIT_FAILED = N_("That time has passed: nothing was changed.")
 class RecordingsDesk(QObject):
     # The Library's Recordings tab's dot: "rec" (something records), "warn" (a problem), "".
     markChanged = Signal(str)
+    refreshed = Signal()  # 2.9.7: the page was worked out again (the Recordings home follows)
 
     def __init__(self, window: Any, view: RecordingsView, recordings: Any, parent=None) -> None:
         """`window`: the TVWindow (its schedule, scheduler, budget, catalogs, controller,
@@ -408,6 +409,7 @@ class RecordingsDesk(QObject):
         scheduled = {str(item.get("provider") or "") for item in self._schedule().items()}
         self._view.set_content(entries, self._streams(scheduled), self._summary(entries))
         self.update_mark()
+        self.refreshed.emit()
 
     # ---- the buttons --------------------------------------------------------------------------
 
@@ -429,6 +431,11 @@ class RecordingsDesk(QObject):
         handler = handlers.get(kind)
         if handler is not None:
             handler(rest, name)
+        self.refresh()
+
+    def stop(self, name: str) -> None:
+        """2.9.7: the recording named `name` stops (the Recordings home's ■ Stop)."""
+        self._recording_button(name, desk.STOP)
         self.refresh()
 
     def _recording_button(self, slot: str, name: str) -> None:

@@ -7,6 +7,7 @@ and to its right one of its views: the home, its recordings' tiles, or a list (c
 and timers, problems, folders and streams).
 """
 
+from datetime import datetime
 import logging
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
@@ -18,6 +19,7 @@ from services.recordings_library import RAIL_ICONS
 from ui.keymap import key_hint
 from ui.library.genre_list import GenreList
 from ui.library.poster_grid import PosterGrid
+from ui.library.recorder_home import RecorderHome
 from ui.library.recordings_view import RecordingsView
 from ui.library.series_view import SeriesView
 from ui.library.top_nav import TopNav
@@ -36,6 +38,10 @@ DEFAULT_HOST_WIDTH = 1280
 LIVE_TILE = "live-tile:"  # routes a grid URL to the channel logo cache
 FIELD_FONT_U = 1.15
 FOCUS_RING_PX = 1.5
+
+
+def _now() -> datetime:
+    return datetime.now().astimezone()
 
 
 class GridPosters(QObject):
@@ -255,7 +261,8 @@ class LibraryScreen(QWidget):
         self.rec_rail.set_icons(RAIL_ICONS)
         self.rec_grid = PosterGrid(self.grid_posters, self)
         self.rec_grid.set_shape(REC_TILE_ASPECT, REC_TILE_TARGET_U)
-        self.home = QWidget(self)  # the recorder's home (RecorderHome)
+        # the recorder's home: its guide reads the page's programmes once it has them
+        self.home = RecorderHome(lambda channel, start, limit: [], _now, self)
         self.recordings_content = "home"
         self.search_field = SearchField(self.nav)
         self.nav.attach_search(self.search_field)  # the top bar places it on its search

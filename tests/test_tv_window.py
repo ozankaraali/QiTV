@@ -1264,6 +1264,62 @@ class SkipAiringWindowTests(WindowCase):  # 2.9.7
         self.assertEqual(schedule.items(), [])
 
 
+class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, wired
+    def channel_and_airing(self, hours=2):
+        from datetime import datetime, timedelta
+
+        from services.epg_view import Programme
+
+        channel = {"name": "Northwind News", "id": "7", "_provider": "P"}
+        start = datetime.now().astimezone() + timedelta(hours=hours)
+        return channel, Programme("Evening News", start, start + timedelta(hours=1), "", None)
+
+    def test_the_homes_guide_records_and_cancels_through_the_window(self):
+        guide = self.window.library_page.home.guide
+        channel, airing = self.channel_and_airing()
+        guide.recordRequested.emit(channel, airing, True)
+        schedule = self.window.recording_schedule
+        (item,) = schedule.items()
+        self.assertEqual(item["kind"], "series")
+        self.assertEqual(guide._mark(channel, airing), "series")
+        guide.skipRequested.emit(channel, airing)
+        self.assertTrue(schedule.is_skipped(item["id"], airing.start.timestamp()))
+        guide.cancelSeriesRequested.emit(channel, airing)
+        self.assertEqual(schedule.items(), [])
+
+    def test_a_timer_shows_as_a_band_on_its_channel(self):
+        channel, _airing = self.channel_and_airing()
+        self.window.recording_schedule.add_timer(channel, begin=21 * 60, minutes=90, days=range(7))
+        bands = self.window.library_page.home.guide._bands(channel)
+        self.assertTrue(bands)
+        start, stop, _name = bands[0]
+        self.assertEqual(stop - start, 90 * 60)
+
+    def test_the_home_follows_the_desk(self):
+        home = self.window.library_page.home
+        channel, airing = self.channel_and_airing(hours=1)
+        self.window.recording_schedule.add_once(channel, airing)
+        self.window.screens.recordings_desk.refresh()
+        self.assertEqual(home._hero.next.title, "Evening News")
+
+    def test_the_guide_follows_lists_that_load_later_unless_a_source_was_chosen(self):
+        pages = self.window.screens
+        guide = self.window.library_page.home.guide
+        loaded = [{"id": "1", "name": "Northwind News"}]
+        self.window.nav.all_live_items = lambda: loaded
+        self.window.nav.favorite_items = lambda: []
+        self.window.nav.recent_items = lambda: []
+        pages.recordings_desk.refresh()
+        self.assertEqual([c["name"] for c in guide.channels()], ["Northwind News"])
+        pages._choose_guide_source("@favorites")
+        pages.recordings_desk.refresh()
+        self.assertEqual(guide.channels(), [])  # the viewer's choice stays
+
+    def test_the_guides_source_menu_lists_favorites_recent_and_all(self):
+        labels = [label for label, _key in self.window.screens.guide_sources()]
+        self.assertEqual(labels[:3], ["★ Favorites", "Recent", "All channels"])
+
+
 class FarChannelWindowTests(WindowCase):
     """Channel 9594 of a provider's 11,000, typed while another plays: the channel list and
     the fast-zap column rest on it through the guide's and the logos' updates (reported on

@@ -365,6 +365,20 @@ class HomeGuide(TooltipWidget):
 
     # ---- keys -------------------------------------------------------------------------------
 
+    def channels(self) -> list[dict]:
+        return list(self._channels)
+
+    def has_rows(self) -> bool:
+        return bool(self._channels)
+
+    def at_last_row(self) -> bool:
+        return self._row >= len(self._channels) - 1
+
+    def set_programmes(self, programmes: Callable[[dict, datetime, int], list[Programme]]) -> None:
+        """The guide's programmes (the window's catalog), once the page has them."""
+        self._programmes = programmes
+        self.refresh()
+
     def current_title(self) -> str:
         return self._current.title if self._current is not None else ""
 

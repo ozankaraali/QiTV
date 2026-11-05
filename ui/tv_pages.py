@@ -15,18 +15,22 @@ overlay host, and its toast, hide with the player page.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from functools import partial
 import logging
 import os
+import time
 from typing import Any, Callable, Iterator, Optional
 
 from PySide6.QtCore import QObject, QPoint, QThread
 from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QWidget
 
 from services import recording_desk as desk, recordings_library as rl, system_open
+from services.catalog import ALL_GROUP_ID
 from services.exporter import ExportKind
 from services.failure_reasons import shown_message
 from services.i18n import tr, translate
 from services.library import LibraryModel
+from services.navigation import FAVORITES_GROUP, RECENT_GROUP
 from services.recording_desk import COMING, NOW, RECORDED
 from services.recordings_library import RecordingsLibrary
 from services.recordings_list import RecordingsList
@@ -147,10 +151,155 @@ class TVPages(QObject):
             os.path.dirname(str(item.get("path") or ""))
         )
         self.recordings.changed.connect(self.library_controller.recordings_changed)
+        self._wire_home()  # 2.9.7: the Recordings tab's home
         window.library_page.recordings.avoid(window.player_page)  # the corner player
         for sign in (window.overlays.rec_sign, getattr(window.overlays, "library_rec_sign", None)):
             if sign is not None:
                 sign.manageRequested.connect(lambda: self.open_recordings(NOW))
+
+    # ---- 2.9.7: the Recordings tab's home ------------------------------------------------------
+
+    def _wire_home(self) -> None:
+        window = self._window
+        home = window.library_page.home
+        guide = home.guide
+        catalog = window.catalog
+        guide.set_programmes(
+            lambda channel, start, limit: catalog.programmes(channel, start, limit=limit)
+        )
+        guide.set_mark_provider(self._home_mark)
+        guide.set_band_provider(self._home_bands)
+        guide.recordRequested.connect(
+            lambda channel, programme, series: self._schedule_from_home(channel, programme, series)
+        )
+        guide.skipRequested.connect(
+            lambda channel, programme: window.cancel_programme(channel, programme)
+        )
+        guide.cancelRequested.connect(
+            lambda channel, programme: window.cancel_programme(channel, programme)
+        )
+        guide.cancelSeriesRequested.connect(self._cancel_series_from_home)
+        guide.tuneRequested.connect(lambda channel: self.tune_live(channel))
+        guide.sourceRequested.connect(self._guide_source_menu)
+        home.watchRequested.connect(self.watch_recording)
+        home.stopRequested.connect(self.recordings_desk.stop)
+        home.editRequested.connect(self.recordings_desk.edit)
+        home.addRequested.connect(self.recordings_desk.record_at)
+        self.recordings_desk.refreshed.connect(self._refresh_home)
+        self._guide_source = ""
+        self._guide_chosen = False  # the viewer chose the guide's channels (else: the default)
+        self._set_guide_source(self._default_guide_source())
+
+    def _schedule_from_home(self, channel: dict, programme: Any, series: bool) -> None:
+        self._window.schedule_programme(channel, programme, series)
+        self.recordings_desk.refresh()
+
+    def _cancel_series_from_home(self, channel: dict, programme: Any) -> None:
+        window = self._window
+        item = window.recording_schedule.scheduled_item(channel, programme)
+        if item is not None:
+            window.cancel_scheduled(str(item.get("id") or ""))
+        self.recordings_desk.refresh()
+
+    def _home_mark(self, channel: dict, programme: Any) -> str:
+        """The home guide's mark of `programme`: "recording", "once", "series" or ""."""
+        schedule = self._window.recording_schedule
+        item = schedule.scheduled_item(channel, programme)
+        if item is None or schedule.is_skipped(str(item.get("id")), programme.start.timestamp()):
+            return ""
+        scheduler = self._window.scheduler
+        recording = (
+            {d[5] for d in scheduler.recording_details()} if scheduler is not None else set()
+        )
+        now = time.time()
+        if (
+            item.get("id") in recording
+            and programme.start.timestamp() <= now < programme.stop.timestamp()
+        ):
+            return "recording"
+        return "once" if item.get("kind") == "once" else "series"
+
+    def _home_bands(self, channel: dict) -> list[tuple[float, float, str]]:
+        """The clock timers of `channel` this week: (start, stop, name)."""
+        from services import recording_schedule as rs
+
+        bands = []
+        now = time.time()
+        for item in self._window.recording_schedule.items():
+            if item.get("kind") != rs.TIMER or not rs.is_listed(item.get("channel") or {}, channel):
+                continue
+            title = str(item.get("title") or "") or rs.slot_text(
+                int(item.get("begin") or 0), int(item.get("minutes") or 0)
+            )
+            for start, stop in desk.airings(item, now):
+                bands.append((start, stop, title))
+        return bands
+
+    def _refresh_home(self) -> None:
+        home = self._window.library_page.home
+        home.set_hero(self.recordings_desk.hero())
+        home.set_shelf(self.recordings_library.items(rl.ALL)[:8])
+        key = self._guide_source if self._guide_chosen else self._default_guide_source()
+        channels = self._guide_channels(key)
+        shown = [(c.get("id"), c.get("name")) for c in home.guide.channels()]
+        if key != self._guide_source or shown != [(c.get("id"), c.get("name")) for c in channels]:
+            self._set_guide_source(key)  # lists loaded meanwhile, or another default
+        home.guide.update()
+
+    def guide_sources(self) -> list[tuple[str, str]]:
+        """The home guide's channel sources: (its label, its key)."""
+        # i18n: the Recordings home guide's channels: the favourites
+        sources = [(tr("★ Favorites"), FAVORITES_GROUP)]
+        # i18n: the Recordings home guide's channels: those watched last
+        sources.append((tr("Recent"), RECENT_GROUP))
+        # i18n: the Recordings home guide's channels: every live channel
+        sources.append((tr("All channels"), ALL_GROUP_ID))
+        try:
+            groups = list(self._window.catalog.groups("live") or [])
+        except Exception:  # a catalog loading: the three above
+            groups = []
+        for group in groups[:60]:
+            gid = str(getattr(group, "id", "") or "")
+            if gid and gid not in (ALL_GROUP_ID, FAVORITES_GROUP, RECENT_GROUP):
+                sources.append((str(getattr(group, "title", gid)), gid))
+        return sources
+
+    def _default_guide_source(self) -> str:
+        nav = self._window.nav
+        if nav.favorite_items():
+            return FAVORITES_GROUP
+        if nav.recent_items():
+            return RECENT_GROUP
+        return ALL_GROUP_ID
+
+    def _guide_channels(self, key: str) -> list[dict]:
+        nav = self._window.nav
+        if key == FAVORITES_GROUP:
+            return list(nav.favorite_items())
+        if key == RECENT_GROUP:
+            return list(nav.recent_items())
+        if key == ALL_GROUP_ID:
+            return list(nav.all_live_items())
+        return list(self._window.catalog.items("live", key) or [])
+
+    def _set_guide_source(self, key: str) -> None:
+        self._guide_source = key
+        guide = self._window.library_page.home.guide
+        label = next((label for label, k in self.guide_sources() if k == key), "")
+        guide.set_source_label(label)
+        guide.set_channels(self._guide_channels(key))
+
+    def _choose_guide_source(self, key: str) -> None:
+        self._guide_chosen = True
+        self._set_guide_source(key)
+
+    def _guide_source_menu(self, at: Any) -> None:
+        menu = QMenu(self._window.library_page)
+        for label, key in self.guide_sources():
+            action = menu.addAction(label, partial(self._choose_guide_source, key))
+            action.setCheckable(True)
+            action.setChecked(key == self._guide_source)
+        menu.popup(at)
 
     def _recordings_counts(self) -> dict[str, int]:
         """2.9.7: the Recordings tab's rail counts: the desk's rows of each list (rows of

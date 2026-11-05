@@ -277,6 +277,13 @@ class LibraryController(QObject):
         rec_grid.leftEdge.connect(lambda: self._focus("rec_rail"))
         rec_grid.upEdge.connect(lambda: self._focus("nav"))
         rec_grid.contextRequested.connect(self._on_recording_context)
+        home = screen.home  # 2.9.7: the Recordings tab's home
+        home.upEdge.connect(lambda: self._focus("nav"))
+        home.leftEdge.connect(lambda: self._focus("rec_rail"))
+        home.allRequested.connect(self._open_all_recordings)
+        home.playRequested.connect(
+            lambda item: self._play(item, "recording", _context(start_over=False))
+        )
         nav.searchRequested.connect(self.open_search)
         nav.sourceRequested.connect(self._show_source_menu)
         genres.genreMenuRequested.connect(self._show_genre_menu)
@@ -410,6 +417,10 @@ class LibraryController(QObject):
             screen.set_recordings_content("list")
             screen.recordings.set_section(rl.SECTIONS.get(row, recording_desk.COMING))
 
+    def _open_all_recordings(self) -> None:
+        self._show_rec_row(rl.ALL)
+        self._focus("rec_content")
+
     def _fill_rec_grid(self) -> None:
         library = self._rec_library
         if library is None:
@@ -479,6 +490,7 @@ class LibraryController(QObject):
         self._screen.recordings.set_focused(zone == "rec_content")
         self._screen.rec_rail.set_focused(zone == "rec_rail")  # 2.9.7
         self._screen.rec_grid.set_focused(zone == "rec_content")
+        self._screen.home.set_focused(zone == "rec_content")
         self._sync_search_focus()
 
     def _sync_search_focus(self) -> None:
@@ -872,10 +884,16 @@ class LibraryController(QObject):
                 return False
             return True
         if kind == "home":
-            if action is Action.ESCAPE or action is Action.NAV_LEFT:
-                self._focus("rec_rail")
-            elif action is Action.NAV_UP:
-                self._focus("nav")
+            home = self._screen.home
+            if action in _MOVES:
+                home.move_by(*_MOVES[action])  # its edges: upEdge, leftEdge
+            elif action is Action.NAV_ACTIVATE:
+                home.activate()
+            elif action is Action.RECORD:
+                return home.record_key()
+            elif action is Action.ESCAPE:
+                if not home.escape():
+                    self._focus("rec_rail")
             elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
                 return self._type_in_search(action, payload)
             else:
