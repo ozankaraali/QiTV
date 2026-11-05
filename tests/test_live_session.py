@@ -7455,3 +7455,80 @@ class HttpsFirstTests(LiveSessionCase):
                 said = [line for line in logs.output if "stream comes" in line]
                 self.assertEqual(len(said), 1)
                 self.assertTrue(said[0].endswith(words + "."), said[0])
+
+
+class BorrowedTests(LiveSessionCase):
+    """2.9.7: a scheduled recording's session played as it is: no second stream."""
+
+    LENT = "lent1"
+
+    def borrow(self, **kwargs):
+        self.given = []
+        self.records = True
+        self.engine.buffer(self.LENT, segments(0, 15), open_seq=15, live_edge=30.0)
+        borrowed = live_session.Borrowed(
+            self.LENT, lambda: self.given.append(True), recording=lambda: self.records
+        )
+        self.live.start(
+            URL,
+            headers={"User-Agent": "QiTV-Test"},
+            verify_ssl=True,
+            latency="normal",
+            user_agent="QiTV-Test",
+            disk=False,
+            max_bytes=128 * MiB,
+            borrowed=borrowed,
+            **kwargs,
+        )
+        for _ in range(5):  # the start policy may hold a moment for the edge to move
+            if self.playback.plays:
+                break
+            self.engine.buffer(self.LENT, segments(0, 16), open_seq=16, live_edge=32.0)
+            self.step(1.0)
+
+    def test_it_plays_the_session_and_opens_none(self):
+        self.borrow()
+        self.assertEqual(self.engine.opened, [])
+        self.assertTrue(self.playback.plays)
+        self.assertIn(f"/{self.LENT}/", self.playback.plays[-1][0])
+        self.assertTrue(self.live.borrowed())
+        self.assertTrue(self.live.lender_records())
+        self.records = False
+        self.assertFalse(self.live.lender_records())
+
+    def test_a_stop_gives_it_back_closes_nothing_and_releases_at_once(self):
+        self.borrow()
+        self.live.stop()
+        self.assertEqual(self.given, [True])
+        self.assertEqual((self.engine.closed, self.engine.parks), ([], []))
+        self.assertEqual(self.releases, [True])  # nothing upstream of its own to wait for
+        self.assertFalse(self.live.borrowed())
+
+    def test_its_failure_never_plays_the_channel_directly(self):
+        self.borrow()
+        plays = len(self.playback.plays)
+        self.engine.sessionFailed.emit(self.LENT, "network", "x")
+        self.assertEqual(self.failures, [live_session.LENT_ENDED])
+        self.assertNotIn(DIRECT, self.playback.plays[plays:])
+        self.assertEqual((self.given, self.engine.closed), ([True], []))
+
+    def test_its_owner_closing_it_ends_the_picture(self):
+        self.borrow()
+        self.engine.sessionClosed.emit(self.LENT)
+        self.assertEqual(self.failures, [live_session.LENT_ENDED])
+        self.assertEqual(self.given, [True])
+
+    def test_it_is_never_recorded_parked_resized_or_kept(self):
+        self.borrow()
+        self.assertFalse(self.live.recordable())
+        self.assertFalse(self.live.keepable())
+        self.live.resize(8 * MiB)
+        self.assertEqual(self.engine.resizes, [])
+        self.assertIsNone(self.live.park())  # it stops, given back, nothing parked
+        self.assertEqual((self.engine.parks, self.given), ([], [True]))
+
+    def test_a_new_start_gives_the_last_one_back(self):
+        self.borrow()
+        self.start()  # another channel, opened as usual
+        self.assertEqual(self.given, [True])
+        self.assertEqual(len(self.engine.opened), 1)

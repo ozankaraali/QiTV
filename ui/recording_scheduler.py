@@ -27,6 +27,13 @@ its window's end (the helper's own limit is only a day's). What records shows on
 question before a recording is stopped for a stream counts it (`ui.stream_question`).
 
 QiTV keeps the computer awake while it runs; a sleeping computer or a closed lid misses them.
+
+Watching what records (2.9.7): a player that tunes a channel recording on schedule (the small
+picture, the big one, the REC sign's Go back to, the Recordings page's Watch) borrows the
+recording's session (`lend`, `services.live.live_session.Borrowed`): it plays that buffer, and
+the provider sees no second stream. A recording that ends while it is watched keeps its session
+(and its stream's budget slot, under the viewer's name) open for the viewer, until it is given
+back; the next programme recording on that channel meanwhile records on it.
 """
 
 from __future__ import annotations
@@ -43,6 +50,7 @@ from services import recording, recording_schedule as rs
 from services.catalog import EMPTY_LINK_MESSAGE, NO_STREAM_MESSAGE, PROVIDER_LOADING_MESSAGE
 from services.connection_budget import DENIED
 from services.i18n import N_, translate
+from services.live.live_session import Borrowed
 from services.live.recorder import FAILED, LIMIT, MAX_SECONDS, MIN_FREE_BYTES, STOPPED
 from services.live.refusals import STREAM_LIMIT, STREAM_REFUSED
 from services.provider_api import known_http_only, portal_http_only
@@ -153,6 +161,7 @@ class _Run:
     waiting_for: Optional[_Run] = None  # the earlier programme on its channel, to hand over
     handing: Optional[_Run] = None  # the next programme it hands its session to
     covers: list[rs.Job] = field(default_factory=list)  # the jobs within it, in its file
+    serving: bool = False  # 2.9.7: its recording ended; its session stays for a viewer
 
 
 @dataclass
@@ -188,6 +197,8 @@ class RecordingScheduler(QObject):
         self._clock = clock
         self._runs: list[_Run] = []
         self._tries: dict[str, _Try] = {}
+        self._lent: dict[str, int] = {}  # 2.9.7: a session's players watching it (`lend`)
+        self._lent_to: dict[str, str] = {}  # ... and the latest one's budget purpose
         self._said_busy: set[str] = set()  # jobs told once that no stream was free
         self._closed = False
         self._timer = QTimer(self)
@@ -233,6 +244,8 @@ class RecordingScheduler(QObject):
                 self._tries[run.job.key] = _Try(run.job, now, rs.FAILED, translate(NO_HELPER))
             run.sid = ""
             self._release(run)
+        self._lent.clear()  # the players' sessions went with the helper too
+        self._lent_to.clear()
         self.changed.emit()
 
     # ---- the clock --------------------------------------------------------------------------
@@ -445,6 +458,71 @@ class RecordingScheduler(QObject):
         self.tick()  # one on now starts at once
         return item
 
+    # ---- 2.9.7: watching what records ----------------------------------------------------------
+
+    def lendable(self, channel: dict, provider: str) -> bool:
+        """A recording (or a session kept for a viewer) reads `channel` of `provider` now: a
+        player can borrow it (`lend`) instead of opening a stream of its own."""
+        return self._lendable_run(channel, provider) is not None
+
+    def lend(self, channel: dict, provider: str, purpose: str) -> Optional[Borrowed]:
+        """The session that reads `channel` of `provider`, for the player whose budget
+        purpose is `purpose` to watch; None when none does. It stays open until given back."""
+        run = self._lendable_run(channel, provider)
+        if run is None or self._closed:
+            return None
+        sid = run.sid
+        self._lent[sid] = self._lent.get(sid, 0) + 1
+        self._lent_to[sid] = purpose
+        if run.serving and run.ticket != DENIED:
+            self._budget.relabel(run.ticket, purpose)  # its stream is the viewer's alone now
+        given = [False]
+
+        def give_back() -> None:
+            if not given[0]:
+                given[0] = True
+                self._give_back(sid)
+
+        return Borrowed(sid, give_back, recording=lambda: self._records_on(sid))
+
+    def _lendable_run(self, channel: dict, provider: str) -> Optional[_Run]:
+        for run in self._runs:
+            recording = bool(run.rid) and not run.ended and not run.stopping
+            if (
+                run.sid
+                and (recording or run.serving)
+                and run.job.provider == provider
+                and _same_channel(run.job.channel, channel)
+            ):
+                return run
+        return None
+
+    def _records_on(self, sid: str) -> bool:
+        return any(run.sid == sid and run.rid and not run.ended for run in self._runs)
+
+    def _give_back(self, sid: str) -> None:
+        """A player let go of `sid`: once none watches it, a session kept for them closes
+        (its stream goes back with its close)."""
+        left = self._lent.get(sid, 0) - 1
+        if left > 0:
+            self._lent[sid] = left
+            return
+        self._lent.pop(sid, None)
+        self._lent_to.pop(sid, None)
+        for run in self._runs:
+            if run.serving and run.sid == sid:
+                self._engine.close_session(sid)  # `_on_closed` releases it
+                return
+
+    def _serve(self, run: _Run) -> None:
+        """`run`'s recording ended while a player watches its session: it stays open for
+        them, its stream under their name."""
+        run.serving = run.stopping = True
+        purpose = self._lent_to.get(run.sid)
+        if purpose and run.ticket != DENIED:
+            self._budget.relabel(run.ticket, purpose)
+        self.changed.emit()
+
     def cancel(self, item_id: str) -> None:
         """A scheduled recording is no longer wanted: off the schedule, and stopped (what it
         recorded is kept) when it records now."""
@@ -466,6 +544,9 @@ class RecordingScheduler(QObject):
         stays to record the rest should QiTV open again while it airs."""
         self._timer.stop()
         for run in list(self._runs):
+            if run.serving and run.sid:
+                self._engine.close_session(run.sid)  # 2.9.7: kept for a viewer: it goes too
+                continue
             run.user_stopped = True
             recording = bool(run.rid and run.path and not run.ended)
             self._settle(run, 1 if recording else 0, run.path)  # the rest of each, on reopening
@@ -481,6 +562,27 @@ class RecordingScheduler(QObject):
 
     def _begin(self, job: rs.Job) -> None:
         run = _Run(job)
+        served = next(
+            (
+                r
+                for r in self._runs
+                if r.serving
+                and r.sid
+                and r.job.provider == job.provider
+                and rs.same_channel(r.job.channel, job.channel)
+            ),
+            None,
+        )
+        if served is not None:  # 2.9.7: a session kept for a viewer: it records on that
+            run.sid, run.ticket = served.sid, served.ticket
+            if run.ticket != DENIED:
+                self._budget.relabel(run.ticket, _purpose(job))
+            served.sid, served.ticket = "", DENIED
+            self._runs.remove(served)
+            self._runs.append(run)
+            self._record(run, rs.window(job)[0])
+            self.changed.emit()
+            return
         same = next(
             (
                 r
@@ -657,6 +759,9 @@ class RecordingScheduler(QObject):
             following.waiting_for = None
             if following in self._runs:
                 self._attempt(following)
+        if run.sid and self._lent.get(run.sid):
+            self._serve(run)  # 2.9.7: a player watches it: it stays open for them
+            return
         self._engine.close_session(run.sid)
 
     def _on_failed(self, sid: str, kind: str, message: str) -> None:
@@ -725,6 +830,16 @@ class RecordingScheduler(QObject):
         if run in self._runs:
             self._runs.remove(run)
             self.changed.emit()
+
+
+def _same_channel(recorded: dict, channel: dict) -> bool:
+    """2.9.7: a recording's channel (as the schedule keeps it: its address without the
+    account) is `channel` (a list's): by id when both have one, else by name."""
+    a, b = recorded.get("id"), channel.get("id")
+    if a not in (None, "") and b not in (None, ""):
+        return str(a) == str(b)
+    name = str(recorded.get("name") or "")
+    return bool(name) and name == str(channel.get("name") or "")
 
 
 def _purpose(job: rs.Job) -> str:

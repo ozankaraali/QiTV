@@ -342,6 +342,7 @@ class TVController(QObject):
             back_notice=lambda: self.overlays.back_notice,
             archive_allowed=self._archive_allowed,
             beside_recording=self._archive_beside_recording,
+            borrow=lambda item, provider, purpose: self.lend_scheduled(item, provider, purpose),
             gave_up=self._fail_focused_tile,
             on_sizes=self._offer_live_quality,
             parent=self,
@@ -508,6 +509,10 @@ class TVController(QObject):
         # 2.8: what records on schedule now (RecordingScheduler.recording_now) and its Stop.
         self.scheduled_now: Callable[[], list[tuple[str, str, float, dict]]] = list
         self.stop_scheduled: Callable[[str], None] = lambda name: None
+        # 2.9.7: a scheduled recording's session to watch with no stream of its own
+        # (RecordingScheduler.lend and lendable; none while QiTV records nothing on schedule).
+        self.lend_scheduled: Callable[[dict, str, str], Any] = lambda item, provider, use: None
+        self.lendable_scheduled: Callable[[dict, str], bool] = lambda item, provider: False
         # 2.8: "Record at a time…" for a channel (the window's, once QiTV records)
         self.record_at: Optional[Callable[[dict], None]] = None
         # 2.8: parental controls (services.parental.Parental; None: none): what they hide never
@@ -576,6 +581,7 @@ class TVController(QObject):
                 sound=self._prepare_small,
                 explain=self._explain_item,
                 needs_stream=self._ask_for_stream,
+                borrow=lambda item, provider, purpose: self.lend_scheduled(item, provider, purpose),
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
@@ -1738,6 +1744,21 @@ class TVController(QObject):
     def _all_live(self) -> list[dict]:
         return list(self.catalog.items("live", ALL_GROUP_ID) or [])
 
+    def _listed(self, kept: dict) -> dict:
+        """The live list's channel that `kept` (a scheduled recording's copy) is: by its
+        provider and id, else its name; `kept` itself when the list has none."""
+        provider = str(kept.get("_provider") or "")
+        for channel in self._all_live():
+            if provider and item_provider.provider_name(self.catalog, channel) != provider:
+                continue
+            a, b = kept.get("id"), channel.get("id")
+            if a not in (None, "") and b not in (None, ""):
+                if str(a) == str(b):
+                    return channel
+            elif kept.get("name") and kept.get("name") == channel.get("name"):
+                return channel
+        return kept
+
     def _request(self, target: Target) -> None:
         self._forget_stopped()  # 2.6: a newer choice than what Stop stopped
         self._give_back_later = False  # the large picture has a newer choice
@@ -2326,7 +2347,9 @@ class TVController(QObject):
         scheduled = next((s for s in self.scheduled_now() if s[0] == name), None)
         if scheduled is not None:  # 2.8: a scheduled recording's channel, live
             self.leave_multiview()
-            self.tune_live(scheduled[3], ALL_GROUP_ID, self._all_live())
+            # 2.9.7: the list's own channel (the schedule keeps its address without the
+            # account); it plays the recording's session, with no stream of its own.
+            self.tune_live(self._listed(scheduled[3]), ALL_GROUP_ID, self._all_live())
             return
         if sessions is None:
             return
@@ -2427,6 +2450,9 @@ class TVController(QObject):
             if self._question.confirm(sessions.large(), again):
                 return True  # a tile has no background to record on in
         gives_way = self._external_launcher() is not None
+        provider = item_provider.provider_name(self.catalog, channel)
+        if not gives_way and self.lendable_scheduled(channel, provider):
+            return False  # 2.9.7: its recording's session plays it: no stream to free
         return self._ask_for_stream(channel, self._tuner.purpose, again, gives_way=gives_way)
 
     def _confirm_tile(self, name: str, then: Callable[[], None]) -> bool:

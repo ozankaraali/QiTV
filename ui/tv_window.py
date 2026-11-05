@@ -1038,6 +1038,8 @@ class TVWindow(QMainWindow):
         controller.extra_guides = scheduler.providers
         controller.scheduled_now = scheduler.recording_now
         controller.stop_scheduled = scheduler.stop_now
+        controller.lend_scheduled = scheduler.lend  # 2.9.7: watched with no second stream
+        controller.lendable_scheduled = scheduler.lendable
         controller.record_at = self.record_at  # a channel's right-click: Record at a time
 
     def _stop_scheduler(self) -> None:

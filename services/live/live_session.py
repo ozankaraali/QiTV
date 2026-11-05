@@ -236,12 +236,20 @@ the channel's stream does not open again (or its disk fails), what was kept play
 (`KEPT_ONLY`, at its end `KEPT_END`), nothing falls back to direct play, and Go live tries the
 channel again. `timelineChanged` carries the parts and `behind`, the seconds between the
 position's time of day and now (the time away included).
+
+Borrowed sessions (2.9.7): `start(borrowed=...)` plays a session another opened (a scheduled
+recording's, `ui.recording_scheduler`) instead of opening one: the channel's provider sees no
+second stream. It starts as at a ready, seeks, pauses and goes live in that buffer, but never
+closes, parks, resizes, reopens or records on it, and asks its restarts nothing; a stop gives
+it back (`Borrowed.give_back`) with nothing to wait for. Should it fail or close, the picture
+fails (`LENT_ENDED`): played directly it would be the second stream it avoids.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
+from dataclasses import dataclass, field
 from enum import Enum
 import logging
 import math
@@ -294,6 +302,8 @@ LIVE_DELAY = {"low": 3.0, "normal": 6.0, "stable": 12.0, AUTO: 6.0}
 # The notices (`notice`, `no_rewind_reason`) stay English: the shell compares them, and
 # shows them with services.i18n.translate.
 UNAVAILABLE = N_("Time-shift isn't available for this channel")  # i18n: toast
+# i18n: a picture's failure: the recording it showed (on schedule) stopped its stream
+LENT_ENDED = N_("The recording's stream ended")
 LOST = N_("Lost the time-shift buffer; playing live")  # i18n: toast
 BUFFERED = N_("Lost the connection; playing what's buffered")  # i18n: toast
 # i18n: toast: the time-shift buffer could not be kept on disk; it is kept in memory
@@ -512,6 +522,17 @@ def _locate(spans: Sequence[Span], t: float) -> Optional[Span]:
     return spans[-1]
 
 
+@dataclass(frozen=True)
+class Borrowed:
+    """2.9.7: a helper session another opened (a scheduled recording's), played with no
+    upstream of its own: the player never closes, parks, resizes or reopens it, and calls
+    `give_back()` once it lets go of it. `recording()`: its owner still records on it."""
+
+    sid: str
+    give_back: Callable[[], None]
+    recording: Callable[[], bool] = field(default=lambda: False)
+
+
 class LiveSession(QObject):
     modeChanged = Signal(str)  # "pipeline" or "direct"; "" once a refusal stopped it
     timelineChanged = Signal(dict)
@@ -667,6 +688,7 @@ class LiveSession(QObject):
         # its resume on its way, what was kept playing without its stream (the resume
         # failed), Go live waiting for a resume, and this tune took a kept buffer back.
         self._kept: Optional[KeptRing] = None
+        self._borrowed: Optional[Borrowed] = None  # 2.9.7: a session another opened (`start`)
         self._resuming = False
         self._kept_only = False
         self._live_after_resume = False
@@ -803,6 +825,7 @@ class LiveSession(QObject):
         one_stream: bool = False,
         https_first: bool = False,
         max_height: Optional[int] = None,
+        borrowed: Optional[Borrowed] = None,
     ) -> None:
         """`ram_bytes`: the memory a disk buffer that fails goes on in (the helper's default
         when None). `channel`: the channel's key in the tuning store ("": nothing kept).
@@ -815,10 +838,14 @@ class LiveSession(QObject):
         and a resume's too, is asked over HTTPS first (a direct play stays as given).
         `max_height` (2.8, the live ⚙): every stream the helper opens for it plays an HLS
         master's best variant of at most that many lines, and the channel keeps it (0: the
-        best again); None: the cap the channel kept, if any."""
+        best again); None: the cap the channel kept, if any. `borrowed` (2.9.7): another's
+        session that already reads the channel (a scheduled recording's) plays instead of a
+        new one: no upstream opens; should it fail, the picture fails (`LENT_ENDED`), never
+        plays the channel directly (that would be a second stream)."""
         self.stop()
         self._kept = kept
-        self._one_stream = one_stream
+        self._borrowed = borrowed
+        self._one_stream = one_stream and borrowed is None  # never parks another's upstream
         self._resuming = self._kept_only = self._live_after_resume = self._from_kept = False
         # 2.8.12: an earlier channel's part resuming (a refusal of this tune was taken for its)
         # and its dry runs at the edge (this one's first gap was held) are not this one's.
@@ -910,6 +937,7 @@ class LiveSession(QObject):
             and self._sid is not None
             and bool(self._channel)
             and self._recording is None
+            and self._borrowed is None  # 2.9.7: another's goes back, never kept
             and bool(self._engine.spans(self._sid))
         )
 
@@ -951,6 +979,7 @@ class LiveSession(QObject):
         if pending is not None:
             self._engine.close_session(pending.sid)  # never taken back: it goes
         if self._phase is _Phase.IDLE:
+            self._give_back()  # 2.9.7: one still to play goes back too
             return
         if self._learned is not None:
             self._learn(learned_only=True)  # what the tune learned, for the next one
@@ -962,7 +991,9 @@ class LiveSession(QObject):
         self._resuming = self._kept_only = self._live_after_resume = False
         self._late = None
         self._playback.stop()
-        if sid is not None:
+        if self._borrowed is not None:
+            self._give_back()  # 2.9.7: another's session: it stays open, nothing to wait for
+        elif sid is not None:
             if park:
                 self._engine.park_session(sid)
                 self._await_close(sid)  # "parked" answers as "closed" does
@@ -1228,7 +1259,7 @@ class LiveSession(QObject):
                 return
         self._shrink_to = None
         self._open_args["max_bytes"] = size
-        if self._sid is not None:
+        if self._sid is not None and self._borrowed is None:  # 2.9.7: never another's
             self._engine.resize_session(self._sid, size)
 
     def _away_from_live(self) -> bool:
@@ -1438,8 +1469,9 @@ class LiveSession(QObject):
 
     # ---- recording (2.2) ---------------------------------------------------------------
     def recordable(self) -> bool:
-        """It plays from the time-shift buffer: a recording can start."""
-        return self._phase is _Phase.PIPELINE and self._sid is not None
+        """It plays from the time-shift buffer: a recording can start (2.9.7: not on a
+        borrowed session: its owner records it)."""
+        return self._phase is _Phase.PIPELINE and self._sid is not None and self._borrowed is None
 
     def reopen_player(self) -> bool:
         """VLC opens the channel again from the buffer where it played (2.8: a cast begins or
@@ -1522,7 +1554,11 @@ class LiveSession(QObject):
     def _begin(self) -> None:
         """Open the pipeline session for the channel `start()` stored; play directly at once
         without the helper, or a channel that crawled through the pipeline (`CRAWLING`). A
-        kept buffer with something left is taken back instead (2.6)."""
+        kept buffer with something left is taken back instead (2.6); a borrowed session plays
+        as it is (2.9.7)."""
+        if self._borrowed is not None:
+            self._join(self._borrowed)
+            return
         kept, self._kept = self._kept, None
         if kept is not None:
             holds = getattr(self._engine, "holds", None)  # spans on their way (a take-back)
@@ -1569,6 +1605,55 @@ class LiveSession(QObject):
         self._not_live_said = 0
         self._edges = []
         self._ready_timer.start(self._ready_timeout_ms)
+
+    def _join(self, borrowed: Borrowed) -> None:
+        """2.9.7: play another's open session: it is ready and buffered, so the start is
+        picked as at a ready (`_play_first`)."""
+        if self._dead:
+            self._lose_borrowed(UNAVAILABLE)
+            return
+        self._sid = borrowed.sid
+        self._phase = _Phase.WAITING
+        self._ready_seen = self._loading = self._held_said = False
+        self._not_live_said = 0
+        self._edges = []
+        self._ready_timer.start(self._ready_timeout_ms)
+        self._on_ready(borrowed.sid)
+
+    def borrowed(self) -> bool:
+        """2.9.7: it plays another's session (`start(borrowed=...)`)."""
+        return self._borrowed is not None
+
+    def lender_records(self) -> bool:
+        """2.9.7: the session it borrowed is still recorded by its owner."""
+        borrowed = self._borrowed
+        return borrowed is not None and self._sid == borrowed.sid and borrowed.recording()
+
+    def _give_back(self) -> None:
+        borrowed, self._borrowed = self._borrowed, None
+        if borrowed is not None:
+            try:
+                borrowed.give_back()
+            except Exception as e:  # its owner's bookkeeping never stops this player
+                _LOG.warning("A borrowed session could not be given back: %s", type(e).__name__)
+
+    def _lose_borrowed(self, message: str) -> None:
+        """2.9.7: the borrowed session failed or went: nothing plays, and the picture says so
+        (its owner's recording, if any, is its own to end)."""
+        self._close_part(resume=False)
+        self._live_parked = False
+        self._stop_timers()
+        self._sid = None
+        self._give_back()
+        self._phase = _Phase.REFUSED
+        played, self._mode = self._mode, ""
+        self._paused = self._source_lost = False
+        self._deferred = None
+        self._after_update = self._retry = self._failing_since = None
+        self._playback.stop()
+        if played:
+            self.modeChanged.emit(self._mode)
+        self.failed.emit(message)
 
     def set_aside(self) -> None:
         """2.6: its channel was left while it records: the player pauses (the helper records
@@ -1657,6 +1742,9 @@ class LiveSession(QObject):
 
     def _start_afresh(self) -> None:
         """Let the kept buffer go and open the channel anew, once it closed (2.6)."""
+        if self._borrowed is not None:
+            self._lose_borrowed(LENT_ENDED)  # 2.9.7: another's is never opened anew
+            return
         sid, self._sid = self._sid, None
         self._stop_timers()
         self._playback.stop()
@@ -1679,6 +1767,9 @@ class LiveSession(QObject):
 
     def _let_go(self, sid: str, keep: bool) -> None:
         """Close the session, or (`keep`) park it and hand its buffer to the keeper."""
+        if self._borrowed is not None and sid == self._borrowed.sid:
+            self._give_back()  # 2.9.7: another's: it stays open
+            return
         if not keep or self._keeper is None:
             self._close(sid)
             return
@@ -1745,6 +1836,9 @@ class LiveSession(QObject):
 
     def _fall_back(self, message: str) -> None:
         """Close the session, then play directly once its upstream is closed (spec §9)."""
+        if self._borrowed is not None:
+            self._lose_borrowed(LENT_ENDED)  # 2.9.7: never a second stream of the channel
+            return
         if self._limited:
             self._refuse()
             return
@@ -1771,6 +1865,9 @@ class LiveSession(QObject):
 
     def _refuse(self) -> None:
         """The provider refused for its connection limit: close it all, play nothing."""
+        if self._borrowed is not None:
+            self._lose_borrowed(LENT_ENDED)  # 2.9.7: its owner's stream was refused
+            return
         phase = self._phase
         self._end_recording()
         self._close_part(resume=False)
@@ -2231,6 +2328,9 @@ class LiveSession(QObject):
         elif sid == self._sid and self._part_pending is not None and self._live_parked:
             self._open_pending_part()  # 2.7: its upstream closed: the part's may open
             return
+        if self._borrowed is not None and sid == self._borrowed.sid and sid == self._sid:
+            self._lose_borrowed(LENT_ENDED)  # 2.9.7: its owner closed it (QiTV closing)
+            return
         if sid not in self._unclosed:
             return
         self._unclosed.discard(sid)
@@ -2542,7 +2642,7 @@ class LiveSession(QObject):
         if steered > self._steered_cuts:
             self._filter.reset()
             self._stay.absorb()
-            if self._sid is not None:  # an ask that came while it was held is withdrawn too
+            if self._sid is not None and self._borrowed is None:  # withdrawn too (not another's)
                 self._engine.set_junction(self._sid, 0.0)
             self._junction_asked = 0.0
         self._restarts, self._steered_cuts = restarts, steered
@@ -2564,8 +2664,8 @@ class LiveSession(QObject):
             return
         seconds = math.floor(max(0.0, seconds) / _JUNCTION_STEP_S) * _JUNCTION_STEP_S
         sid = self._sid
-        if sid is None or abs(seconds - self._junction_asked) < 1e-9:
-            return
+        if sid is None or self._borrowed is not None or abs(seconds - self._junction_asked) < 1e-9:
+            return  # 2.9.7: another's session's restarts are its owner's
         if seconds and abs(seconds - self._junction_asked) < _JUNCTION_CHANGE_S - 1e-9:
             return
         self._junction_asked = seconds

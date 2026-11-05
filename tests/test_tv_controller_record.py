@@ -19,6 +19,7 @@ from test_tv_pip import MOVIE, PipCase
 from timer_fixtures import wait_until
 
 from services.connection_budget import DENIED
+from services.live.live_session import Borrowed
 from services.sessions import Slot
 from services.vlc_profile import PlayKind
 from ui.keymap import Action
@@ -581,6 +582,20 @@ class ScheduledRecordingQuestionTests(_RecordCase):
         self.controller.handle(Action.OK)
         self.scheduler_lets_go()
         self.assertEqual(self.requested()[-1], "Three")
+
+    def test_go_back_to_it_watches_its_recordings_session_asking_nothing(self):  # 2.9.7
+        lent = []
+        self.controller.lendable_scheduled = lambda channel, provider: True
+        self.controller.lend_scheduled = lambda channel, provider, purpose: lent.append(
+            purpose
+        ) or Borrowed("lent1", lambda: None)
+        self.controller.go_back_to_recording(SCHEDULED)
+        self.assertFalse(self.question.isVisibleTo(self.host))
+        self.assertEqual(self.stopped, [])
+        self.assertEqual(self.requested()[-1], "Three")
+        self.assertEqual(self.catalog.links[-1][1], CHANNELS[2])  # the list's, not the kept copy
+        self.ready("http://stream/3")
+        self.assertEqual(lent, ["main"])
 
     def test_quit_asks_and_leaves_it_to_the_scheduler(self):
         quits = []

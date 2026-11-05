@@ -548,6 +548,66 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(item_id, self.schedule.items()[0]["id"])
         self.scheduler.shutdown()
 
+    # ---- 2.9.7: watching what records, with no second stream ------------------------------------
+
+    LISTED = {"id": "7", "name": "News One", "cmd": "http://panel.test/live/u/p/7.ts"}
+
+    def lent(self):
+        self.scheduled_now()
+        sid = self.engine.opened[0][0]
+        self.engine.sessionReady.emit(sid)
+        rid, _sid, path, *_ = self.engine.recordings[0]
+        return sid, rid, path
+
+    def test_a_recording_lends_its_session_to_a_player_of_its_channel(self):
+        self.assertIsNone(self.scheduler.lend(self.LISTED, "P", "pip"))  # nothing records
+        sid, _rid, _path = self.lent()
+        self.assertTrue(self.scheduler.lendable(self.LISTED, "P"))
+        self.assertFalse(self.scheduler.lendable(self.LISTED, "Q"))  # another provider's
+        self.assertFalse(self.scheduler.lendable(dict(self.LISTED, id="8"), "P"))
+        borrowed = self.scheduler.lend(self.LISTED, "P", "pip")
+        self.assertEqual(borrowed.sid, sid)
+        self.assertTrue(borrowed.recording())
+        self.assertEqual(len(self.engine.opened), 1)  # no second session, no second stream
+        self.assertEqual(len(self.budget.holders("P")), 1)
+        borrowed.give_back()
+        borrowed.give_back()  # once is all it counts
+        self.assertEqual(self.engine.closed, [])  # it records on
+
+    def test_a_recording_that_ends_while_watched_keeps_its_session_for_the_viewer(self):
+        sid, rid, path = self.lent()
+        borrowed = self.scheduler.lend(self.LISTED, "P", "main")
+        self.at(63, 1)  # its window ends
+        self.engine.recordingEnded.emit(rid, "stopped", path, 1_000_000)
+        self.pump()
+        self.assertEqual(self.engine.closed, [])  # the viewer still watches it
+        self.assertEqual(self.budget.holders("P"), ["main"])  # the viewer's stream now
+        self.assertFalse(borrowed.recording())
+        self.assertEqual(self.scheduler.recording_details(), [])  # nothing records
+        self.assertTrue(self.scheduler.lendable(self.LISTED, "P"))  # still watchable
+        borrowed.give_back()
+        self.assertEqual(self.engine.closed, [sid])
+        self.engine.sessionClosed.emit(sid)
+        self.assertEqual(self.budget.holders("P"), [])
+
+    def test_the_next_programme_records_on_a_session_kept_for_a_viewer(self):
+        sid, rid, path = self.lent()
+        borrowed = self.scheduler.lend(self.LISTED, "P", "main")
+        self.at(63, 1)
+        self.engine.recordingEnded.emit(rid, "stopped", path, 1_000_000)
+        self.pump()
+        self.schedule.add_once(CHANNEL, programme("Late News", 66))
+        self.at(65, 30)  # its minute early
+        self.assertEqual(len(self.engine.opened), 1)  # no new session: the kept one records
+        self.assertEqual(len(self.catalogs.asked), 1)
+        rid2, sid2, *_ = self.engine.recordings[1]
+        self.assertEqual(sid2, sid)
+        self.assertEqual(self.budget.holders("P"), [rs_name(self.scheduler, "Late News")])
+        self.assertTrue(borrowed.recording())
+        borrowed.give_back()
+        self.assertEqual(self.engine.closed, [])  # the recording keeps it
+        self.scheduler.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()

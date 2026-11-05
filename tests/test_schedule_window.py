@@ -36,6 +36,18 @@ class StandInScheduler(QObject):
     def providers(self):
         return set()
 
+    def lend(self, channel, provider, purpose):  # 2.9.7: nothing records to watch
+        return None
+
+    def lendable(self, channel, provider):
+        return False
+
+    def recording_details(self):  # 2.9.7: the Recordings page's
+        return []
+
+    def waiting(self):
+        return []
+
     def engine_gone(self):
         self.gone += 1
 
