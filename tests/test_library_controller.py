@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 from timer_fixtures import elapse
 
+from services import recordings_library as rl
 from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE
 from services.library import RECORDINGS, LibraryModel
 from services.provider_ids import (
@@ -21,6 +22,7 @@ from services.provider_ids import (
     provider_of,
     with_provider,
 )
+from services.recordings_library import RecordingsLibrary
 from services.thread_cleanup import has_pending_threads
 from services.watch_state import WatchState
 from ui.keymap import Action, key_hint
@@ -399,48 +401,10 @@ class LibraryControllerTests(unittest.TestCase):
         self.recordings = FakeRecordings([RECORDING])
         self.model = LibraryModel(self.catalog, self.config, self.watch, recordings=self.recordings)
 
-    def test_a_recording_plays_from_its_shelf_without_asking_a_provider(self):
+    def test_movies_no_longer_has_a_recordings_shelf(self):  # 2.9.7: a tab of their own
         self.with_recordings()
         self.open_movies()
-        self.model.select_genre(RECORDINGS)
-        self.assertEqual(self.grid_names(), ["News"])
-        self.screen.grid.activated.emit(0)
-        item, kind, context = self.played[-1]
-        self.assertEqual((item["id"], kind), (RECORDING["id"], "recording"))
-        self.assertFalse(context["start_over"])
-        self.assertEqual(self.catalog.selected, [])
-
-    def test_a_scheduled_recordings_cancel_on_the_strip_cancels_it(self):
-        scheduled = {
-            "id": "scheduled:a1",
-            "name": "Late Show",
-            "_scheduled": True,
-            "_item_id": "a1",
-            "_when": "Sun 1 Nov 21:30",
-        }
-        self.recordings = FakeRecordings([scheduled, RECORDING])
-        self.model = LibraryModel(self.catalog, self.config, self.watch, recordings=self.recordings)
-        self.open_movies()
-        self.model.select_genre(RECORDINGS)
-        self.screen.grid.cancelRequested.emit(1)  # a recording: nothing to cancel
-        self.screen.grid.cancelRequested.emit(0)
-        self.assertEqual(self.cancelled, ["a1"])
-
-    def test_a_recordings_right_click_is_its_own(self):
-        self.with_recordings()
-        self.open_movies()
-        self.model.select_genre(RECORDINGS)
-        self.screen.grid.contextRequested.emit(0, QPoint(3, 4))
-        item, section, _pos = self.menus[-1]
-        self.assertEqual((item["id"], section), (RECORDING["id"], "recording"))
-
-    def test_a_provider_without_films_gets_movies_for_its_recordings(self):
-        self.catalog.section_list = ["live"]
-        self.with_recordings()
-        self.build().open("movies")
-        self.assertIn("movies", self.screen.nav._tabs)
-        self.assertEqual(self.grid_names(), ["News"])
-        self.assertNotIn(("section", "movies"), self.catalog.requests)
+        self.assertNotIn(RECORDINGS, [g.id for g in self.model.genres()])
 
     # 1 -----------------------------------------------------------------------------------
     def test_open_shows_genres_and_grid_and_moves_between_them(self):
@@ -2060,34 +2024,111 @@ class FakeDesk:
         self.calls.append("hide")
 
 
-class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings page
+def rec_file(path, channel, title, start):
+    return {
+        "id": f"recording:{path.rsplit('/', 1)[-1]}",
+        "name": title,
+        "path": path,
+        "added": str(int(start)),
+        "_recording": True,
+        "_title": title,
+        "_channel": channel,
+        "_provider": "P",
+        "_logo": "",
+        "_start": start,
+        "_stop": start + 2700,
+        "_size": 10,
+    }
+
+
+REC_FILES = [
+    rec_file("/r/b.ts", "Northwind News", "Evening News", 2_000.0),
+    rec_file("/r/a.ts", "Harbor Sports", "Night Match", 1_000.0),
+]
+
+
+class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings tab
     def setUp(self):
         LibraryControllerTests.setUp(self)  # its fakes, not its tests
         self.ctl = LibraryControllerTests.build(self)
         self.desk = FakeDesk()
         self.ctl.set_recordings_desk(self.desk)
+        self.files = list(REC_FILES)
+        self.library = RecordingsLibrary(
+            lambda: self.files, lambda: {rl.COMING: 3}, self.watch, self.config
+        )
+        self.ctl.set_recordings_library(self.library)
+        self.deleted, self.folders = [], []
+        self.ctl.delete_recording = lambda item: self.deleted.append(item["path"])
+        self.ctl.show_recording_folder = lambda item: self.folders.append(item["path"])
 
-    def test_the_tab_shows_once_the_library_has_the_page(self):
+    def rail_ids(self):
+        return [g.id for g in self.library.rail()]
+
+    def test_recordings_opens_on_tonight_with_its_rail(self):
         self.assertIn("recordings", self.screen.nav._tabs)
         self.ctl.open("recordings")
-        self.assertEqual((self.ctl.mode, self.ctl.zone), ("recordings", "recordings"))
-        self.assertTrue(self.screen.recordings.isVisible())
-        self.assertFalse(self.screen.grid.isVisible())
+        self.assertEqual((self.ctl.mode, self.ctl.zone), ("recordings", "rec_content"))
+        self.assertTrue(self.screen.rec_rail.isVisible())
+        self.assertFalse(self.screen.genres.isVisible())
+        self.assertEqual(self.screen.rec_rail.current_id(), rl.TONIGHT)
+        self.assertEqual(self.screen.recordings_content, "home")
+        self.assertNotIn("source", self.screen.nav._order())  # every provider's
         self.assertEqual(self.desk.calls, ["show"])
         self.screen.nav.tabRequested.emit("movies")
         self.assertEqual(self.desk.calls[-1], "hide")  # it stops looking while hidden
+        self.assertIn("source", self.screen.nav._order())
 
-    def test_its_keys_up_to_the_top_bar_and_esc_back_to_tv(self):
-        self.ctl.open_recordings("places")
-        self.assertEqual(self.screen.recordings.section_filter(), "places")
-        self.assertTrue(self.ctl.handle(Action.NAV_UP))  # from the chips
+    def test_a_channel_row_shows_its_recordings_in_the_grid(self):
+        self.ctl.open_recordings(rl.CHANNEL_PREFIX + "Harbor Sports")
+        self.assertEqual(self.screen.recordings_content, "grid")
+        grid = self.screen.rec_grid
+        self.assertEqual([grid.item(i)["path"] for i in range(1)], ["/r/a.ts"])
+        self.screen.rec_rail.genreSelected.emit(rl.ALL)
+        self.assertEqual([grid.item(i)["path"] for i in range(2)], ["/r/b.ts", "/r/a.ts"])
+
+    def test_coming_up_shows_the_list_view_on_that_section(self):
+        self.ctl.open_recordings(rl.COMING)
+        self.assertEqual(self.screen.recordings_content, "list")
+        self.assertTrue(self.screen.recordings.isVisible())
+        self.assertEqual(self.screen.recordings.section_filter(), "coming")
+
+    def test_the_rec_signs_manage_and_hels_sections_open_their_rows(self):
+        for section, row in (
+            ("now", rl.COMING),
+            ("attention", rl.ATTENTION),
+            ("places", rl.SETTINGS),
+        ):
+            with self.subTest(section=section):
+                self.ctl.open_recordings(section)
+                self.assertEqual(self.screen.rec_rail.current_id(), row)
+
+    def test_the_strips_delete_folder_and_play_reach_the_recording(self):
+        self.ctl.open_recordings(rl.ALL)
+        grid = self.screen.rec_grid
+        grid.deleteRequested.emit(0)
+        grid.folderRequested.emit(1)
+        grid.activated.emit(0)
+        self.assertEqual((self.deleted, self.folders), (["/r/b.ts"], ["/r/a.ts"]))
+        self.assertEqual(self.played[-1][1], "recording")
+
+    def test_keys_move_between_the_rail_and_the_content(self):
+        self.ctl.open_recordings(rl.ALL)
+        self.assertEqual(self.ctl.zone, "rec_content")
+        self.ctl.handle(Action.ESCAPE)
+        self.assertEqual(self.ctl.zone, "rec_rail")
+        self.ctl.handle(Action.NAV_DOWN)
+        self.ctl.handle(Action.NAV_RIGHT)
+        self.assertEqual(self.ctl.zone, "rec_content")
+        self.ctl.handle(Action.NAV_UP)  # from the grid's first row
         self.assertEqual(self.ctl.zone, "nav")
         self.ctl.handle(Action.NAV_DOWN)
-        self.assertEqual(self.ctl.zone, "recordings")
+        self.assertEqual(self.ctl.zone, "rec_content")
         self.ctl.handle(Action.ESCAPE)
+        self.ctl.handle(Action.ESCAPE)  # from the rail: back to TV
         self.assertEqual(self.backs, [True])
 
-    def test_typing_searches_and_esc_comes_back_to_the_page(self):
+    def test_typing_searches_and_esc_comes_back_to_the_tab(self):
         self.ctl.open("recordings")
         self.ctl.handle(Action.NAV_TEXT, "s")
         self.assertEqual(self.ctl.mode, "search")

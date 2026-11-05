@@ -2,7 +2,9 @@
 
 Mockup 05, option 1. 1 u = 1% of this screen's width. The screen only lays its parts out and
 paints the search field; the LibraryController decides what they show and routes the keys.
-2.9.7: the Recordings tab's page (`recordings`) fills it under the top nav, no genre column.
+2.9.7: the Recordings tab (`recordings`): a rail of its own on the left, like the genre column,
+and to its right one of its views: the home, its recordings' tiles, or a list (coming up, series
+and timers, problems, folders and streams).
 """
 
 import logging
@@ -12,6 +14,7 @@ from PySide6.QtGui import QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from services.i18n import tr
+from services.recordings_library import RAIL_ICONS
 from ui.keymap import key_hint
 from ui.library.genre_list import GenreList
 from ui.library.poster_grid import PosterGrid
@@ -26,6 +29,9 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 logger = logging.getLogger(__name__)
 
 MODES = ("browse", "series", "search", "recordings")
+RECORDINGS_CONTENTS = ("home", "grid", "list")  # 2.9.7: what the Recordings tab shows
+REC_TILE_ASPECT = 9 / 16  # 2.9.7: its recordings' tiles
+REC_TILE_TARGET_U = 16.0
 DEFAULT_HOST_WIDTH = 1280
 LIVE_TILE = "live-tile:"  # routes a grid URL to the channel logo cache
 FIELD_FONT_U = 1.15
@@ -242,7 +248,15 @@ class LibraryScreen(QWidget):
         self.genres = GenreList(self)
         self.grid = PosterGrid(self.grid_posters, self)
         self.series = SeriesView(posters, self)
-        self.recordings = RecordingsView(self)  # 2.9.7
+        self.recordings = RecordingsView(self)  # 2.9.7: the Recordings tab's lists
+        # 2.9.7: the Recordings tab's rail, its recordings' tiles and its home
+        self.rec_rail = GenreList(self)
+        self.rec_rail.set_captions(None, None)
+        self.rec_rail.set_icons(RAIL_ICONS)
+        self.rec_grid = PosterGrid(self.grid_posters, self)
+        self.rec_grid.set_shape(REC_TILE_ASPECT, REC_TILE_TARGET_U)
+        self.home = QWidget(self)  # the recorder's home (RecorderHome)
+        self.recordings_content = "home"
         self.search_field = SearchField(self.nav)
         self.nav.attach_search(self.search_field)  # the top bar places it on its search
         self.set_mode("browse")
@@ -258,9 +272,23 @@ class LibraryScreen(QWidget):
         self.genres.setVisible(mode == "browse")
         self.grid.setVisible(mode in ("browse", "search"))
         self.series.setVisible(mode == "series")
-        self.recordings.setVisible(mode == "recordings")
+        self._show_recordings()
         self.search_field.setVisible(mode == "search")
         self._layout()
+
+    def set_recordings_content(self, kind: str) -> None:
+        """2.9.7: the Recordings tab shows its home, its tiles or a list."""
+        if kind not in RECORDINGS_CONTENTS:
+            raise ValueError(f"Unknown recordings content: {kind!r}")
+        self.recordings_content = kind
+        self._show_recordings()
+
+    def _show_recordings(self) -> None:
+        on = self._mode == "recordings"
+        self.rec_rail.setVisible(on)
+        self.home.setVisible(on and self.recordings_content == "home")
+        self.rec_grid.setVisible(on and self.recordings_content == "grid")
+        self.recordings.setVisible(on and self.recordings_content == "list")
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -274,10 +302,15 @@ class LibraryScreen(QWidget):
         if self._mode == "browse":
             self.genres.setGeometry(0, top, self.genres.width(), max(0, height - top))
             left = self.genres.width()
+        elif self._mode == "recordings":
+            self.rec_rail.setGeometry(0, top, self.rec_rail.width(), max(0, height - top))
+            left = self.rec_rail.width()
         content = (left, top, max(0, width - left), max(0, height - top))
         self.grid.setGeometry(*content)
         self.series.setGeometry(*content)
         self.recordings.setGeometry(*content)
+        self.rec_grid.setGeometry(*content)
+        self.home.setGeometry(*content)
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)

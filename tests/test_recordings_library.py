@@ -126,3 +126,21 @@ class RecordingsLibraryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParentalTests(unittest.TestCase):  # a hidden channel's recordings stay hidden (2.8's rule)
+    def test_a_hidden_channels_recordings_are_not_listed_while_locked(self):
+        from services import parental
+
+        guard = parental.Parental(SimpleNamespace(parental=None, save_config=lambda: None))
+        guard.set_pin("1234")
+        guard.hide_item("live", {"id": "9", "name": "Harbor Sports", "_provider": "Demo TV"})
+        parental.install(guard)
+        self.addCleanup(parental.install, None)
+        library = rl.RecordingsLibrary(
+            lambda: list(FILES), lambda: {}, FakeWatch(), SimpleNamespace(playback_positions={})
+        )
+        self.assertNotIn("/r/c.ts", [i["path"] for i in library.items(rl.ALL)])
+        rail = {g.id: g.count for g in library.rail()}
+        self.assertNotIn(rl.CHANNEL_PREFIX + "Harbor Sports", rail)
+        self.assertEqual(rail[rl.ALL], 3)

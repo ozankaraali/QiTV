@@ -22,12 +22,13 @@ from typing import Any, Callable, Iterator, Optional
 from PySide6.QtCore import QObject, QPoint, QThread
 from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QWidget
 
-from services import recording_desk as desk, system_open
+from services import recording_desk as desk, recordings_library as rl, system_open
 from services.exporter import ExportKind
 from services.failure_reasons import shown_message
 from services.i18n import tr, translate
 from services.library import LibraryModel
 from services.recording_desk import COMING, NOW, RECORDED
+from services.recordings_library import RecordingsLibrary
 from services.recordings_list import RecordingsList
 from ui.keymap import Action
 from ui.library_controller import LibraryController
@@ -132,10 +133,35 @@ class TVPages(QObject):
             lambda mark: window.library_page.nav.set_mark("recordings", mark)
         )
         self.library_controller.set_recordings_desk(self.recordings_desk)
+        # 2.9.7: the Recordings tab's rail and tiles, and what its strip's buttons do
+        self.recordings_library = RecordingsLibrary(
+            self.recordings.files,
+            self._recordings_counts,
+            window.watch,
+            window.config_manager,
+            mixed=lambda: len(window.library_catalog.provider_names()) > 1,
+        )
+        self.library_controller.set_recordings_library(self.recordings_library)
+        self.library_controller.delete_recording = self.delete_recording
+        self.library_controller.show_recording_folder = lambda item: system_open.open_folder(
+            os.path.dirname(str(item.get("path") or ""))
+        )
+        self.recordings.changed.connect(self.library_controller.recordings_changed)
         window.library_page.recordings.avoid(window.player_page)  # the corner player
         for sign in (window.overlays.rec_sign, getattr(window.overlays, "library_rec_sign", None)):
             if sign is not None:
                 sign.manageRequested.connect(lambda: self.open_recordings(NOW))
+
+    def _recordings_counts(self) -> dict[str, int]:
+        """2.9.7: the Recordings tab's rail counts: the desk's rows of each list (rows of
+        buttons alone not counted)."""
+        counts = {}
+        for row, section in rl.SECTIONS.items():
+            if section == desk.SETTINGS:
+                continue
+            entries = self.recordings_desk.entries_of(section)
+            counts[row] = sum(1 for entry in entries if entry.title)
+        return counts
 
     # ---- pages --------------------------------------------------------------------------------
 

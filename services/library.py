@@ -544,8 +544,6 @@ class LibraryModel(QObject):
         catalog.groupReady.connect(self._on_group_ready)
         catalog.groupFailed.connect(self._on_group_failed)
         catalog.providerReady.connect(self._on_provider_ready)
-        if recordings is not None:
-            recordings.changed.connect(self._on_recordings_changed)
 
     # --- state ------------------------------------------------------------------------
     @property
@@ -592,12 +590,10 @@ class LibraryModel(QObject):
         # The cache stays: its entries name their provider, section and content version.
         # A section the provider lacks (an M3U playlist's movies) is ready and empty.
         offered = section in self._catalog.sections()
-        self._available = offered or self._has_recordings(section)
+        self._available = offered  # 2.9.7: recordings are the Recordings tab's
         self._ready = not offered
         if offered:
             self._catalog.request_section(section)
-        elif self._available:
-            self._genre = RECORDINGS  # only recordings: nothing to wait for
         self.changed.emit()
 
     def _current(self, section: str) -> bool:
@@ -651,26 +647,6 @@ class LibraryModel(QObject):
         else:
             self._genre = None
         self._pinned_sig = self._pinned_signature()
-        self.changed.emit()
-
-    def lists_recordings(self) -> bool:
-        """Whether the Recordings folder has titles (Movies then shows whatever the provider)."""
-        return bool(self._recording_items())
-
-    def _has_recordings(self, section: str) -> bool:
-        return section == "movies" and bool(self._recording_items())
-
-    def _on_recordings_changed(self) -> None:
-        """The Recordings folder changed: its shelf follows (and, on a provider without films,
-        whether Movies has anything at all)."""
-        if not self._requested:
-            return
-        if self._section not in self._catalog.sections():
-            self._available = self._has_recordings(self._section)
-            self._ready = True
-            self._genre = RECORDINGS if self._available else None
-        else:
-            self._ensure_selection()
         self.changed.emit()
 
     def _on_section_failed(self, section: str, message: str) -> None:
@@ -1016,18 +992,7 @@ class LibraryModel(QObject):
             return []
         return [i for i in self._loaded_items() if is_kept(i)]
 
-    def _recording_items(self) -> list[dict]:
-        return self._recordings.items() if self._recordings is not None else []
-
     def _pinned_items(self, genre_id: str) -> list[dict]:
-        if genre_id == RECORDINGS:
-            if self._section != "movies":
-                return []
-            guard = parental.installed()  # 2.8: a hidden channel's recordings, while locked
-            items = self._recording_items()
-            if guard is None or not guard.active():
-                return items
-            return [i for i in items if not guard.hides_recording(str(i.get("_channel") or ""))]
         fp = self._fingerprint()
         return self._memoized(
             ("pinned", self._section, genre_id, fp),
@@ -1040,7 +1005,7 @@ class LibraryModel(QObject):
 
     def _pinned_genres(self) -> list[Genre]:
         out = []
-        for gid in (CONTINUE, NEW, MY_LIST, RECORDINGS):
+        for gid in (CONTINUE, NEW, MY_LIST):  # 2.9.7: recordings have a tab of their own
             items = self._pinned_items(gid)
             if items:
                 out.append(Genre(gid, translate(PINNED_TITLES[gid]), len(items), True))

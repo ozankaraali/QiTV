@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable, Mapping, Optional
 
-from services import i18n, recording_desk as desk
+from services import i18n, parental, recording_desk as desk
 from services.i18n import N_, tr, tr_n, translate
 from services.library import Details, Genre
 from services.recordings_list import size_text
@@ -86,7 +86,7 @@ class RecordingsLibrary:
                 True,
             ),
         ]
-        files = self._files()
+        files = self._shown()
         by_channel: dict[str, int] = {}
         for item in files:
             channel = _channel(item)
@@ -111,7 +111,7 @@ class RecordingsLibrary:
     def items(self, rail_id: str, filter_text: str = "") -> list[dict]:
         """The recordings `rail_id` lists (All, a channel's), newest first, those matching
         `filter_text` (their title or channel) when given."""
-        files = list(self._files())
+        files = self._shown()
         if rail_id.startswith(CHANNEL_PREFIX):
             channel = rail_id[len(CHANNEL_PREFIX) :]
             files = [f for f in files if _channel(f) == channel]
@@ -123,6 +123,15 @@ class RecordingsLibrary:
         return sorted(
             files, key=lambda f: float(f.get("_start") or f.get("added") or 0), reverse=True
         )
+
+    def _shown(self) -> list[dict]:
+        """The recordings, but those of a channel parental controls hide while they are locked
+        (2.8's rule: a recording knows its channel by name)."""
+        files = list(self._files())
+        guard = parental.installed()
+        if guard is None or not guard.active():
+            return files
+        return [f for f in files if not guard.hides_recording(_channel(f))]
 
     def identity(self, item: dict) -> str:
         return str(item.get("path") or item.get("id") or "")

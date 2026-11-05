@@ -288,6 +288,10 @@ class RecordingsView(TooltipWidget):
             return None
         return entry.buttons[min(self._button, len(entry.buttons) - 1)].name
 
+    def at_left_edge(self) -> bool:
+        """2.9.7: the keys are on a row's first button (← goes to the tab's rail)."""
+        return self._row < 0 or self._button <= 0
+
     def on_chips(self) -> bool:
         return self._row < 0
 
