@@ -103,7 +103,7 @@ class RecordingsLibraryTests(unittest.TestCase):
 
     def test_a_recording_never_played_is_new_and_shows_its_length(self):
         night, news, plain, rivers = FILES
-        self.assertEqual(self.library.badges(night), ("1 h 52", "NEW"))
+        self.assertEqual(self.library.badges(night), ("1h 52m", "NEW"))
         self.assertEqual(self.library.badges(news), ("45 min", "NEW"))
         self.assertEqual(self.library.badges(plain), ("", "NEW"))  # no end known
         self.config.playback_positions = {news["id"]: {"position": 1000, "duration": 2_700_000}}

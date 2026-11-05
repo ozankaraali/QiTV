@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any, Callable, Mapping, Optional
 
 from services import i18n, parental, recording_desk as desk
-from services.i18n import N_, tr, tr_n, translate
+from services.i18n import N_, tr, translate
 from services.library import Details, Genre
 from services.recordings_list import size_text
 
@@ -46,14 +46,13 @@ def fold(text: str) -> str:
 
 
 def length_text(seconds: float) -> str:
-    """A recording's length as its card says it: "45 min", "1 h 52"."""
+    """A recording's length as its card says it, as an episode's running time: "45 min",
+    "1h 52m"."""
     minutes = max(1, round(seconds / 60))
     if minutes < 60:
-        # i18n: a recording's length under an hour, on its card
-        return tr_n("{n} min", "{n} min", minutes, n=i18n.number(minutes))
-    hours, rest = divmod(minutes, 60)
-    # i18n: a recording's length of an hour or more, on its card ("1 h 52")
-    return tr("{h} h {mm}", h=i18n.number(hours), mm=f"{rest:02d}")
+        return tr("{n} min", n=minutes)  # i18n: an episode's running time in minutes, abbreviated
+    # i18n: a running time, abbreviated (1h 5m)
+    return tr("{h}h {m}m", h=minutes // 60, m=f"{minutes % 60:02d}")
 
 
 class RecordingsLibrary:
