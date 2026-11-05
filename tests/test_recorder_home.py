@@ -119,6 +119,15 @@ class RecorderHomeTests(unittest.TestCase):
         self.click(rect)
         self.assertEqual(self.events, [("allRequested", None), ("playRequested", first)])
 
+    def test_shelf_tiles_carry_their_badges(self):
+        items = [tile("/r/a.ts", "Night Match")]
+        asked = []
+        self.home.set_shelf(
+            items, badges=lambda item: asked.append(item["path"]) or ("1 h 52", "NEW")
+        )
+        self.assertFalse(self.home.grab().isNull())
+        self.assertEqual(asked, ["/r/a.ts"])
+
     def test_nothing_recording_or_scheduled_says_so_and_still_offers_add(self):
         self.home.set_hero(desk.Hero((), None, ()))
         self.assertEqual(self.home.now_cards(), [])

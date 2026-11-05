@@ -202,6 +202,7 @@ class GenreList(QWidget):
         self._current: str | None = None
         self._ids: list[str] = []
         self._genres: list[Genre] | None = None  # what set_genres last showed
+        self._placeholder = ""  # 2.9.7: the find's own words ("": the genre filter's)
         self._rows_by_id: dict[str, int] = {}
         self._model = _GenreModel(self)
         self._view = ChannelListView(self)
@@ -234,6 +235,15 @@ class GenreList(QWidget):
 
     def current_id(self) -> str | None:
         return self._current
+
+    def placeholder(self) -> str:
+        """What the find says while empty: "Find a genre…", or the rail's own (2.9.7)."""
+        # i18n: placeholder of the Library's genre filter
+        return self._placeholder or tr("Find a genre…")
+
+    def set_placeholder(self, text: str) -> None:
+        self._placeholder = text
+        self.update()
 
     def set_captions(
         self, pinned: object = DEFAULT_CAPTION, others: object = DEFAULT_CAPTION
@@ -483,7 +493,7 @@ class GenreList(QWidget):
                 p.drawText(below, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, nothing)
         else:
             tone = qcolor(PALETTE.text, PALETTE.text_muted_alpha)
-            text = tr("Find a genre…")  # i18n: placeholder of the Library's genre filter
+            text = self.placeholder()
             inner = draw_field_icon(p, inner, tone)
             p.setPen(tone)
             p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))

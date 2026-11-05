@@ -35,6 +35,8 @@ TONIGHT_TEXT = N_("Tonight")
 RECORDED_TEXT = N_("Recorded · {n}")
 # i18n: the Recordings tab's caption over its settings; in capitals
 SETTINGS_TEXT = N_("Settings")
+# i18n: placeholder of the Recordings tab's find (its recordings and the guide's programmes)
+FIND_TEXT = N_("Find a recording or programme…")
 # i18n: a card's label: a recording never played
 NEW_TEXT = N_("NEW")
 

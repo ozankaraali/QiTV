@@ -245,7 +245,8 @@ class TVPages(QObject):
     def _refresh_home(self) -> None:
         home = self._window.library_page.home
         home.set_hero(self.recordings_desk.hero())
-        home.set_shelf(self.recordings_library.items(rl.ALL)[:8])
+        library = self.recordings_library
+        home.set_shelf(library.items(rl.ALL)[:8], library.badges)
         key = self._guide_source if self._guide_chosen else self._default_guide_source()
         channels = self._guide_channels(key)
         shown = [(c.get("id"), c.get("name")) for c in home.guide.channels()]

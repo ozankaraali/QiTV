@@ -14,8 +14,8 @@ from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
-from services.i18n import tr
-from services.recordings_library import RAIL_ICONS
+from services.i18n import tr, translate
+from services.recordings_library import FIND_TEXT, RAIL_ICONS
 from ui.keymap import key_hint
 from ui.library.genre_list import GenreList
 from ui.library.poster_grid import PosterGrid
@@ -259,6 +259,7 @@ class LibraryScreen(QWidget):
         self.rec_rail = GenreList(self)
         self.rec_rail.set_captions(None, None)
         self.rec_rail.set_icons(RAIL_ICONS)
+        self.rec_rail.set_placeholder(translate(FIND_TEXT))
         self.rec_grid = PosterGrid(self.grid_posters, self)
         self.rec_grid.set_shape(REC_TILE_ASPECT, REC_TILE_TARGET_U)
         # the recorder's home: its guide reads the page's programmes once it has them

@@ -134,3 +134,17 @@ class RailCaptionTests(unittest.TestCase):  # 2.9.7: the Recordings tab's rail
         movies = GenreList(host)
         movies.set_genres([Genre(CONTINUE, "Continue", 1, pinned=True), Genre("1", "Drama", 3)])
         self.assertEqual(movies.rows(), ["PINNED", "Continue", "GENRES · 1", "Drama"])
+
+
+class RailPlaceholderTests(unittest.TestCase):  # 2.9.7: the Recordings rail's find
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_a_rail_names_what_its_find_finds(self):
+        host = QWidget()
+        self.addCleanup(host.close)
+        rail = GenreList(host)
+        self.assertEqual(rail.placeholder(), "Find a genre…")
+        rail.set_placeholder("Find a recording or programme…")
+        self.assertEqual(rail.placeholder(), "Find a recording or programme…")

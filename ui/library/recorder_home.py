@@ -104,6 +104,7 @@ class RecorderHome(TooltipWidget):
         self._clock = clock
         self._hero = desk.Hero((), None, ())
         self._shelf: list[dict] = []
+        self._badges: Optional[Callable[[dict], tuple[str, str]]] = None
         self._region = "hero"
         self._button = 0
         self._tile = 0
@@ -122,8 +123,12 @@ class RecorderHome(TooltipWidget):
         self._sync_tick()
         self.update()
 
-    def set_shelf(self, items: list[dict]) -> None:
+    def set_shelf(
+        self, items: list[dict], badges: Optional[Callable[[dict], tuple[str, str]]] = None
+    ) -> None:
+        """The recordings made last; `badges(item)`: its length and NEW, as the tiles'."""
         self._shelf = list(items)
+        self._badges = badges
         self._tile = min(self._tile, max(0, len(self._shelf_order()) - 1))
         self.update()
 
@@ -615,6 +620,25 @@ class RecorderHome(TooltipWidget):
             p.drawText(
                 text_rect, Qt.AlignLeft | Qt.AlignBottom, elided(p, title, text_rect.width())
             )
+            if self._badges is not None:
+                self._paint_badges(p, units, rect, *self._badges(item))
+
+    def _paint_badges(self, p: QPainter, units: Units, rect: QRectF, left: str, right: str) -> None:
+        """A tile's length (dark, top left) and NEW (accented, top right), as the grid's."""
+        u = units.u
+        font = units.font(0.8, QFont.Weight.Bold)
+        fm = QFontMetricsF(font)
+        p.setFont(font)
+        for text, at_left in ((left, True), (right, False)):
+            if not text:
+                continue
+            width = fm.horizontalAdvance(text) + 1.0 * u
+            x = rect.left() + 0.6 * u if at_left else rect.right() - 0.6 * u - width
+            box = QRectF(x, rect.top() + 0.6 * u, width, fm.height() + 0.3 * u)
+            ground = qcolor(PALETTE.canvas, 0.72) if at_left else qcolor(PALETTE.accent)
+            fill_round(p, box, ground, 0.4 * u)
+            p.setPen(qcolor(PALETTE.text) if at_left else qcolor(PALETTE.canvas))
+            p.drawText(box, Qt.AlignCenter, text)
 
 
 def desk_edit() -> str:

@@ -552,7 +552,8 @@ class RecordingsView(TooltipWidget):
                 name = translate(desk.SECTION_TITLES[section])
                 self._blocks.append(_Block("header", y, HEADER_ROW_U * u, section, name))
                 y += HEADER_ROW_U * u
-            if not listed and EMPTY_TEXTS.get(section):
+            quiet = section == desk.NOW and len(wanted) > 1  # Coming up: the airings say it
+            if not listed and EMPTY_TEXTS.get(section) and not quiet:
                 text = translate(EMPTY_TEXTS[section])
                 self._blocks.append(_Block("empty", y, EMPTY_H_U * u, section, text))
                 y += EMPTY_H_U * u

@@ -250,3 +250,13 @@ class ComingUpWithNowTests(unittest.TestCase):  # 2.9.7 review: what records or 
         self.assertIn("item:a", keys)
         self.assertEqual(view.header_text(), "Coming up  ·  4")
         view.grab()
+
+
+class ComingUpQuietTests(unittest.TestCase):
+    def test_nothing_recording_is_not_said_above_the_airings(self):
+        view = RecordingsView()
+        self.addCleanup(view.deleteLater)
+        view.resize(1280, 720)
+        view.set_content(ENTRIES, [], "")
+        view.set_section((desk.NOW, desk.COMING))
+        self.assertNotIn("empty", [b.kind for b in view._blocks if b.section == desk.NOW])
